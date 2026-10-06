@@ -70,6 +70,10 @@ monorepo use independent Semantic Versions.
   its title; query/selection corners and the list scrollbar thin with the
   card; minimized-window previews cap below 320×240 on a nested output.
   REC/MIC dots shrink with a short chip instead of keeping a 9px disc.
+  Layout and tags overview round and stroke with the painted cell rather
+  than 22/6/2.5px desktop radii; toast action chips tighten their
+  horizontal padding; the wallpaper side preview and a narrow tab cell
+  follow the same rule.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

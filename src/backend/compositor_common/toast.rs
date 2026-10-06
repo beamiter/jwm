@@ -588,11 +588,16 @@ pub(crate) fn action_row_layout(
     } else {
         ACTION_BUTTON_GAP
     };
+    let pad_x = if max_width.is_finite() && max_width > 0.0 && max_width < 8.0 * ACTION_BUTTON_PAD_X {
+        ACTION_BUTTON_PAD_X.min(max_width * 0.08).max(3.0)
+    } else {
+        ACTION_BUTTON_PAD_X
+    };
     let mut rects = Vec::with_capacity(label_widths.len());
     let mut row_x = 0.0;
     let mut row_y = y;
     for (i, width) in label_widths.iter().enumerate() {
-        let chip_w = (width + 2.0 * ACTION_BUTTON_PAD_X).min(max_width).max(0.0);
+        let chip_w = (width + 2.0 * pad_x).min(max_width).max(0.0);
         if i > 0 && row_x + chip_w > max_width + 0.5 {
             row_x = 0.0;
             row_y += btn_h + gap;
@@ -1731,5 +1736,9 @@ mod tests {
         assert!(action_row_top_gap(70.0) >= 2.0);
         assert_eq!(body_gap(f32::NAN), BODY_GAP);
         assert_eq!(action_row_top_gap(f32::INFINITY), ACTION_ROW_TOP_GAP);
+        let wide = action_row_layout(&[20.0], 0.0, 0.0, 400.0);
+        let tight = action_row_layout(&[20.0], 0.0, 0.0, 50.0);
+        assert!(tight[0][2] < wide[0][2]);
+        assert!(tight[0][2] < 20.0 + 2.0 * ACTION_BUTTON_PAD_X);
     }
 }

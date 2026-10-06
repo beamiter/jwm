@@ -194,7 +194,12 @@ pub fn cell_rect(bar: Rect, count: usize, index: usize) -> Option<Rect> {
 
     // Outer edges follow the track; inner edges share a gap with the
     // neighbour they face.
-    let outer = inset_x + CELL_INSET_X;
+    let cell_ix = if slot_w.is_finite() && slot_w > 0.0 && slot_w < 24.0 * CELL_INSET_X {
+        CELL_INSET_X.min(slot_w * 0.04).max(1.0)
+    } else {
+        CELL_INSET_X
+    };
+    let outer = inset_x + cell_ix;
     let gap = cell_gap(bar);
     let left = if index == 0 { outer } else { gap * 0.5 };
     let right = if index + 1 == count {
@@ -1419,5 +1424,11 @@ mod tests {
         let ta = cell_rect(tall, 2, 0).unwrap();
         let tb = cell_rect(tall, 2, 1).unwrap();
         assert!((tb[0] - (ta[0] + ta[2]) - CELL_GAP).abs() < 0.01);
+        let cramped = [0.0, 0.0, 80.0, 28.0];
+        let ca = cell_rect(cramped, 2, 0).unwrap();
+        let cb = cell_rect(cramped, 2, 1).unwrap();
+        assert!(ca[0] >= cramped[0]);
+        assert!(cb[0] + cb[2] <= cramped[0] + cramped[2] + 0.01);
+        assert!(ca[0] + ca[2] <= cb[0] + 0.01);
     }
 }

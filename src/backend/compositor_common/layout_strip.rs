@@ -49,6 +49,58 @@ pub const CELL_RADIUS: f32 = 6.0;
 pub const WINDOW_RADIUS: f32 = 2.5;
 /// Stroke width of the thumbnail outlines.
 pub const LINE_WIDTH: f32 = 1.25;
+
+/// Panel corner radius: shrinks on a nested overview so 22px cannot eat the card.
+#[must_use]
+pub fn panel_radius(w: f32, h: f32) -> f32 {
+    let m = w.min(h);
+    if m.is_finite() && m > 0.0 && m < 4.0 * PANEL_RADIUS {
+        PANEL_RADIUS.min(m * 0.08).max(4.0).min(m * 0.5)
+    } else if m.is_finite() && m > 0.0 {
+        PANEL_RADIUS.min(m * 0.5)
+    } else {
+        PANEL_RADIUS
+    }
+}
+
+/// Film-cell corner radius, following the painted cell rather than the desktop constant.
+#[must_use]
+pub fn cell_radius(w: f32, h: f32) -> f32 {
+    let m = w.min(h);
+    if m.is_finite() && m > 0.0 && m < 8.0 * CELL_RADIUS {
+        CELL_RADIUS.min(m * 0.12).max(1.5).min(m * 0.5)
+    } else if m.is_finite() && m > 0.0 {
+        CELL_RADIUS.min(m * 0.5)
+    } else {
+        CELL_RADIUS
+    }
+}
+
+/// Window-outline corner radius inside a thumbnail frame.
+#[must_use]
+pub fn window_radius(w: f32, h: f32) -> f32 {
+    let m = w.min(h);
+    if m.is_finite() && m > 0.0 && m < 8.0 * WINDOW_RADIUS {
+        WINDOW_RADIUS.min(m * 0.12).max(0.5).min(m * 0.5)
+    } else if m.is_finite() && m > 0.0 {
+        WINDOW_RADIUS.min(m * 0.5)
+    } else {
+        WINDOW_RADIUS
+    }
+}
+
+/// Outline stroke that stays thinner than a tiny thumbnail.
+#[must_use]
+pub fn line_width(w: f32, h: f32) -> f32 {
+    let m = w.min(h);
+    if m.is_finite() && m > 0.0 && m < 40.0 {
+        LINE_WIDTH.min(m * 0.04).max(0.6).min(m * 0.25)
+    } else if m.is_finite() && m > 0.0 {
+        LINE_WIDTH.min(m * 0.25)
+    } else {
+        LINE_WIDTH
+    }
+}
 /// How much larger the selected cell is drawn. Both renderers lift that cell's
 /// film and exposed frame about the cell's own centre by this factor, and
 /// [`cell_at`] hit-tests the very same rectangles ([`presented_cell`]), so a
@@ -319,11 +371,12 @@ pub fn cell_at(geometry: &StripGeometry, selected: Option<usize>, x: f32, y: f32
 /// [`crate::core::layout::preview_frames`].
 pub fn window_rect(frame: Rect, window: [f32; 4]) -> Rect {
     let [fx, fy, fw, fh] = frame;
+    let stroke = line_width(fw, fh);
     let w = (window[2] * fw)
-        .max(LINE_WIDTH * 2.0)
+        .max(stroke * 2.0)
         .min(fw.max(0.0));
     let h = (window[3] * fh)
-        .max(LINE_WIDTH * 2.0)
+        .max(stroke * 2.0)
         .min(fh.max(0.0));
     let x = (fx + window[0] * fw).clamp(fx, (fx + fw - w).max(fx));
     let y = (fy + window[1] * fh).clamp(fy, (fy + fh - h).max(fy));
@@ -634,6 +687,11 @@ mod tests {
         let tiny = window_rect([0.0, 0.0, 3.0, 2.0], [0.5, 0.5, 0.5, 0.5]);
         assert!(tiny[0] >= 0.0 && tiny[0] + tiny[2] <= 3.0 + 0.01);
         assert!(tiny[1] >= 0.0 && tiny[1] + tiny[3] <= 2.0 + 0.01);
+        assert_eq!(panel_radius(800.0, 400.0), PANEL_RADIUS);
+        assert!(panel_radius(80.0, 70.0) < PANEL_RADIUS);
+        assert!(cell_radius(30.0, 30.0) < CELL_RADIUS);
+        assert!(line_width(20.0, 16.0) < LINE_WIDTH);
+        assert!(window_radius(12.0, 10.0) < WINDOW_RADIUS);
     }
 
     #[test]

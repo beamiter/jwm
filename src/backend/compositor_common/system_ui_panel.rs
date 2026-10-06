@@ -133,6 +133,17 @@ const PREVIEW_EDGE: f32 = 32.0;
 /// Corner radius of the preview's backing and of the image drawn over it.
 /// Smaller than the panel's own radius, the way the query field's is.
 pub(crate) const PREVIEW_RADIUS: f32 = 12.0;
+#[must_use]
+pub(crate) fn preview_radius(w: f32, h: f32) -> f32 {
+    let m = w.min(h);
+    if m.is_finite() && m > 0.0 && m < 4.0 * PREVIEW_RADIUS {
+        PREVIEW_RADIUS.min(m * 0.12).max(2.0).min(m * 0.5)
+    } else if m.is_finite() && m > 0.0 {
+        PREVIEW_RADIUS.min(m * 0.5)
+    } else {
+        PREVIEW_RADIUS
+    }
+}
 
 /// Edge of the square a row icon draws in. The bar's app icons are 24 px and
 /// the resolver is asked for that size, so the launcher and the switcher agree
@@ -1049,6 +1060,9 @@ mod tests {
         assert!(selection_radius(10.0) < SELECTION_RADIUS);
         assert_eq!(scrollbar_w(30.0), SCROLLBAR_W);
         assert!(scrollbar_w(8.0) < SCROLLBAR_W);
+        assert_eq!(preview_radius(200.0, 160.0), PREVIEW_RADIUS);
+        assert!(preview_radius(24.0, 24.0) < PREVIEW_RADIUS);
+        assert!(preview_radius(24.0, 24.0) >= 2.0);
     }
 
     #[test]

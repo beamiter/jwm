@@ -6495,7 +6495,7 @@ impl WaylandCompositor {
                 ui.shadow[2],
                 ui.shadow[3],
             );
-            gl.Uniform1f(self.shadow_uniforms.radius, film::PANEL_RADIUS);
+            gl.Uniform1f(self.shadow_uniforms.radius, film::panel_radius(panel_w, panel_h));
             gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
             self.set_rect_uniform(
                 gl,
@@ -6515,7 +6515,7 @@ impl WaylandCompositor {
                 panel_y,
                 panel_w,
                 panel_h,
-                film::PANEL_RADIUS,
+                film::panel_radius(panel_w, panel_h),
                 ui.panel,
                 1.0,
                 scene_linear,
@@ -6541,6 +6541,9 @@ impl WaylandCompositor {
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
+                let cr = film::cell_radius(cell_rect[2], cell_rect[3]);
+                let wr = film::window_radius(frame[2], frame[3]);
+                let lw = film::line_width(frame[2], frame[3]);
 
                 self.sysui_fill_rounded(
                     gl,
@@ -6548,7 +6551,7 @@ impl WaylandCompositor {
                     cell_rect[1],
                     cell_rect[2],
                     cell_rect[3],
-                    film::CELL_RADIUS,
+                    cr,
                     if selected {
                         UiPalette::faded(ui.chip, 1.0)
                     } else {
@@ -6562,8 +6565,8 @@ impl WaylandCompositor {
                     frame[1],
                     frame[2],
                     frame[3],
-                    film::WINDOW_RADIUS,
-                    film::LINE_WIDTH * scale,
+                    wr,
+                    lw * scale,
                     UiPalette::faded(ink, 0.6),
                 );
 
@@ -6579,7 +6582,7 @@ impl WaylandCompositor {
                         frame[0],
                         frame[1] + bar_h,
                         frame[2],
-                        film::LINE_WIDTH,
+                        lw,
                         0.0,
                         if selected { ink } else { bar_line },
                     );
@@ -6592,8 +6595,8 @@ impl WaylandCompositor {
                         rect[1],
                         rect[2],
                         rect[3],
-                        film::WINDOW_RADIUS,
-                        film::LINE_WIDTH * scale,
+                        film::window_radius(rect[2], rect[3]),
+                        film::line_width(rect[2], rect[3]) * scale,
                         ink,
                     );
                 }
@@ -6606,7 +6609,7 @@ impl WaylandCompositor {
                         cell_rect[1] - 2.0,
                         cell_rect[2] + 4.0,
                         cell_rect[3] + 4.0,
-                        film::CELL_RADIUS + 2.0,
+                        cr + lw.min(2.0),
                         1.8,
                         [accent[0], accent[1], accent[2], 0.95],
                     );
@@ -6782,7 +6785,7 @@ impl WaylandCompositor {
                 ui.shadow[2],
                 ui.shadow[3],
             );
-            gl.Uniform1f(self.shadow_uniforms.radius, film::PANEL_RADIUS);
+            gl.Uniform1f(self.shadow_uniforms.radius, film::panel_radius(panel_w, panel_h));
             gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
             self.set_rect_uniform(
                 gl,
@@ -6802,7 +6805,7 @@ impl WaylandCompositor {
                 panel_y,
                 panel_w,
                 panel_h,
-                film::PANEL_RADIUS,
+                film::panel_radius(panel_w, panel_h),
                 ui.panel,
                 1.0,
                 scene_linear,
@@ -6817,6 +6820,9 @@ impl WaylandCompositor {
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
+                let cr = film::cell_radius(cell_rect[2], cell_rect[3]);
+                let wr = film::window_radius(frame[2], frame[3]);
+                let lw = film::line_width(frame[2], frame[3]);
 
                 self.sysui_fill_rounded(
                     gl,
@@ -6824,7 +6830,7 @@ impl WaylandCompositor {
                     cell_rect[1],
                     cell_rect[2],
                     cell_rect[3],
-                    film::CELL_RADIUS,
+                    cr,
                     if selected {
                         UiPalette::faded(ui.chip, 1.0)
                     } else {
@@ -6860,8 +6866,8 @@ impl WaylandCompositor {
                     frame[1],
                     frame[2],
                     frame[3],
-                    film::WINDOW_RADIUS,
-                    film::LINE_WIDTH * scale,
+                    wr,
+                    lw * scale,
                     UiPalette::faded(ink, 0.6),
                 );
                 if live.is_none() {
@@ -6873,8 +6879,8 @@ impl WaylandCompositor {
                             rect[1],
                             rect[2],
                             rect[3],
-                            film::WINDOW_RADIUS,
-                            film::LINE_WIDTH * scale,
+                            film::window_radius(rect[2], rect[3]),
+                            film::line_width(rect[2], rect[3]) * scale,
                             ink,
                         );
                     }
@@ -6905,7 +6911,7 @@ impl WaylandCompositor {
                         cell_rect[1] + 2.0,
                         cell_rect[2] - 4.0,
                         cell_rect[3] - 4.0,
-                        film::CELL_RADIUS,
+                        cr,
                         1.6,
                         [accent[0], accent[1], accent[2], 0.75],
                     );
@@ -6918,7 +6924,7 @@ impl WaylandCompositor {
                         cell_rect[1] - 2.0,
                         cell_rect[2] + 4.0,
                         cell_rect[3] + 4.0,
-                        film::CELL_RADIUS + 2.0,
+                        cr + lw.min(2.0),
                         1.8,
                         [accent[0], accent[1], accent[2], 0.95],
                     );
@@ -7178,8 +7184,8 @@ impl WaylandCompositor {
                     rect[1],
                     rect[2],
                     rect[3],
-                    film::WINDOW_RADIUS,
-                    film::LINE_WIDTH * scale,
+                    film::window_radius(rect[2], rect[3]),
+                    film::line_width(rect[2], rect[3]) * scale,
                     ink,
                 );
             }
@@ -7223,8 +7229,8 @@ impl WaylandCompositor {
                 frame[1],
                 frame[2],
                 frame[3],
-                panel::PREVIEW_RADIUS,
-                panel::PREVIEW_RADIUS,
+                panel::preview_radius(frame[2], frame[3]),
+                panel::preview_radius(frame[2], frame[3]),
                 ui.panel,
                 content_a,
                 scene_linear,
@@ -7241,7 +7247,7 @@ impl WaylandCompositor {
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
             gl.Uniform1f(self.win_uniforms.opacity, content_a);
-            gl.Uniform1f(self.win_uniforms.radius, panel::PREVIEW_RADIUS);
+            gl.Uniform1f(self.win_uniforms.radius, panel::preview_radius(iw, ih));
             gl.Uniform2f(self.win_uniforms.size, iw, ih);
             self.set_rect_uniform(gl, self.win_uniforms.rect, ix, iy, iw, ih);
             // A decoded sRGB image on the display-encoded overlay target: no

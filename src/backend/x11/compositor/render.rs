@@ -2048,7 +2048,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 ui.shadow[3],
             );
             self.gl
-                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::PANEL_RADIUS);
+                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::panel_radius(panel_w, panel_h));
             self.gl
                 .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
             self.gl.uniform_4_f32(
@@ -2067,7 +2067,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 panel_y,
                 panel_w,
                 panel_h,
-                film::PANEL_RADIUS,
+                film::panel_radius(panel_w, panel_h),
                 ui.panel,
                 1.0,
             );
@@ -2092,6 +2092,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
+                let cr = film::cell_radius(cell_rect[2], cell_rect[3]);
+                let wr = film::window_radius(frame[2], frame[3]);
+                let lw = film::line_width(frame[2], frame[3]);
 
                 // The exposed frame: the selected one is lit, the rest sit
                 // back in the emulsion.
@@ -2100,7 +2103,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     cell_rect[1],
                     cell_rect[2],
                     cell_rect[3],
-                    film::CELL_RADIUS,
+                    cr,
                     if selected {
                         UiPalette::faded(ui.chip, 1.0)
                     } else {
@@ -2113,8 +2116,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     frame[1],
                     frame[2],
                     frame[3],
-                    film::WINDOW_RADIUS,
-                    film::LINE_WIDTH * scale,
+                    wr,
+                    lw * scale,
                     UiPalette::faded(ink, 0.6),
                 );
 
@@ -2129,7 +2132,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         frame[0],
                         frame[1] + bar_h,
                         frame[2],
-                        film::LINE_WIDTH,
+                        lw,
                         0.0,
                         if selected { ink } else { bar_line },
                     );
@@ -2141,8 +2144,8 @@ impl<C: CompositorConnection> Compositor<C> {
                         rect[1],
                         rect[2],
                         rect[3],
-                        film::WINDOW_RADIUS,
-                        film::LINE_WIDTH * scale,
+                        film::window_radius(rect[2], rect[3]),
+                        film::line_width(rect[2], rect[3]) * scale,
                         ink,
                     );
                 }
@@ -2154,7 +2157,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         cell_rect[1] - 2.0,
                         cell_rect[2] + 4.0,
                         cell_rect[3] + 4.0,
-                        film::CELL_RADIUS + 2.0,
+                        cr + lw.min(2.0),
                         1.8,
                         [accent[0], accent[1], accent[2], 0.95],
                     );
@@ -2303,7 +2306,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 ui.shadow[3],
             );
             self.gl
-                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::PANEL_RADIUS);
+                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::panel_radius(panel_w, panel_h));
             self.gl
                 .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
             self.gl.uniform_4_f32(
@@ -2322,7 +2325,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 panel_y,
                 panel_w,
                 panel_h,
-                film::PANEL_RADIUS,
+                film::panel_radius(panel_w, panel_h),
                 ui.panel,
                 1.0,
             );
@@ -2336,13 +2339,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
+                let cr = film::cell_radius(cell_rect[2], cell_rect[3]);
+                let wr = film::window_radius(frame[2], frame[3]);
+                let lw = film::line_width(frame[2], frame[3]);
 
                 self.sysui_fill_rounded(
                     cell_rect[0],
                     cell_rect[1],
                     cell_rect[2],
                     cell_rect[3],
-                    film::CELL_RADIUS,
+                    cr,
                     if selected {
                         UiPalette::faded(ui.chip, 1.0)
                     } else {
@@ -2369,8 +2375,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     frame[1],
                     frame[2],
                     frame[3],
-                    film::WINDOW_RADIUS,
-                    film::LINE_WIDTH * scale,
+                    wr,
+                    lw * scale,
                     UiPalette::faded(ink, 0.6),
                 );
                 if live.is_none() {
@@ -2381,8 +2387,8 @@ impl<C: CompositorConnection> Compositor<C> {
                             rect[1],
                             rect[2],
                             rect[3],
-                            film::WINDOW_RADIUS,
-                            film::LINE_WIDTH * scale,
+                            film::window_radius(rect[2], rect[3]),
+                            film::line_width(rect[2], rect[3]) * scale,
                             ink,
                         );
                     }
@@ -2411,7 +2417,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         cell_rect[1] + 2.0,
                         cell_rect[2] - 4.0,
                         cell_rect[3] - 4.0,
-                        film::CELL_RADIUS,
+                        cr,
                         1.6,
                         [accent[0], accent[1], accent[2], 0.75],
                     );
@@ -2423,7 +2429,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         cell_rect[1] - 2.0,
                         cell_rect[2] + 4.0,
                         cell_rect[3] + 4.0,
-                        film::CELL_RADIUS + 2.0,
+                        film::cell_radius(cell_rect[2], cell_rect[3]) + lw.min(2.0),
                         1.8,
                         [accent[0], accent[1], accent[2], 0.95],
                     );
@@ -2674,8 +2680,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 frame[1],
                 frame[2],
                 frame[3],
-                panel::PREVIEW_RADIUS,
-                panel::PREVIEW_RADIUS,
+                panel::preview_radius(frame[2], frame[3]),
+                panel::preview_radius(frame[2], frame[3]),
                 ui.panel,
                 content_a,
             );
@@ -2697,7 +2703,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(self.win_uniforms.opacity.as_ref(), content_a);
             self.gl
-                .uniform_1_f32(self.win_uniforms.radius.as_ref(), panel::PREVIEW_RADIUS);
+                .uniform_1_f32(self.win_uniforms.radius.as_ref(), panel::preview_radius(iw, ih));
             self.gl
                 .uniform_2_f32(self.win_uniforms.size.as_ref(), iw, ih);
             self.gl
@@ -2797,8 +2803,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     rect[1],
                     rect[2],
                     rect[3],
-                    film::WINDOW_RADIUS,
-                    film::LINE_WIDTH * scale,
+                    film::window_radius(rect[2], rect[3]),
+                    film::line_width(rect[2], rect[3]) * scale,
                     ink,
                 );
             }
