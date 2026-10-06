@@ -87,6 +87,8 @@
 | 108 | 小选区圆角与描边随洞缩小 | `hole_radius` / `outline_width` |
 | 109 | 三行仍放不下时工具条按钮低于 15px | `fit_button_size` |
 | 110 | 标签 tooltip gap/pad 随矮窄屏缩小 | `tooltip_gap` |
+| 111 | REC/MIC 叠放间距随矮屏缩小 | `CHIP_STACK_GAP` |
+| 112 | 窄 toast 操作钮高度随卡宽缩小 | `action_row_layout` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

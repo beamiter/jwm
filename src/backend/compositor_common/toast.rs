@@ -558,6 +558,16 @@ pub(crate) fn action_row_layout(
     } else {
         f32::MAX
     };
+    let btn_h = if max_width.is_finite() && max_width > 0.0 && max_width < 4.0 * ACTION_BUTTON_H {
+        ACTION_BUTTON_H.min(max_width * 0.35).max(14.0)
+    } else {
+        ACTION_BUTTON_H
+    };
+    let gap = if max_width.is_finite() && max_width > 0.0 && max_width < 8.0 * ACTION_BUTTON_GAP {
+        ACTION_BUTTON_GAP.min(max_width * 0.04).max(3.0)
+    } else {
+        ACTION_BUTTON_GAP
+    };
     let mut rects = Vec::with_capacity(label_widths.len());
     let mut row_x = 0.0;
     let mut row_y = y;
@@ -565,10 +575,10 @@ pub(crate) fn action_row_layout(
         let chip_w = (width + 2.0 * ACTION_BUTTON_PAD_X).min(max_width).max(0.0);
         if i > 0 && row_x + chip_w > max_width + 0.5 {
             row_x = 0.0;
-            row_y += ACTION_BUTTON_H + ACTION_BUTTON_GAP;
+            row_y += btn_h + gap;
         }
-        rects.push([x + row_x, row_y, chip_w, ACTION_BUTTON_H]);
-        row_x += chip_w + ACTION_BUTTON_GAP;
+        rects.push([x + row_x, row_y, chip_w, btn_h]);
+        row_x += chip_w + gap;
     }
     rects
 }
@@ -1341,6 +1351,9 @@ mod tests {
             action_row_extra_h(&widths, f32::MAX),
             ACTIONS_ROW_EXTRA_H
         );
+        let cramped = action_row_layout(&widths, 0.0, 0.0, 50.0);
+        assert!(cramped.iter().all(|r| r[3] < ACTION_BUTTON_H));
+        assert!(cramped.iter().all(|r| r[3] >= 14.0));
     }
 
     #[test]

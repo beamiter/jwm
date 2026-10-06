@@ -58,7 +58,8 @@ monorepo use independent Semantic Versions.
   their 18/30 padding and stack gaps on a nested output; a tiny capture
   pick uses a smaller hole radius and outline; the screenshot toolbar may
   drop below 15px buttons when three rows still overflow; tab tooltips
-  tighten their gap on a short screen.
+  tighten their gap on a short screen. REC and MIC pills stack with a
+  shorter gap on a short output; toast action chips shrink on a narrow card.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

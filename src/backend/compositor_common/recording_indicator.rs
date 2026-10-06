@@ -209,7 +209,12 @@ pub(crate) fn mic_indicator_layout(
         // edge rather than pushing it off-screen: the cue staying visible
         // matters more than the degenerate-case overlap, the same honesty
         // as the REC chip's origin clamp.
-        let lift = (rec_chip_h + CHIP_STACK_GAP).min(layout.chip[1]);
+        let gap = if screen_h.is_finite() && screen_h > 0.0 && screen_h < 8.0 * CHIP_STACK_GAP {
+            CHIP_STACK_GAP.min(screen_h * 0.04).max(2.0)
+        } else {
+            CHIP_STACK_GAP
+        };
+        let lift = (rec_chip_h + gap).min(layout.chip[1]);
         layout.chip[1] -= lift;
         layout.dot[1] -= lift;
         layout.text[1] -= lift;
@@ -382,6 +387,11 @@ mod tests {
         // top edge (fully visible) instead of sliding off-screen.
         assert_eq!(mic.chip[1], 0.0);
         assert_eq!(mic.dot[1], (mic.chip[3] - CHIP_DOT) / 2.0);
+        let rec = recording_indicator_layout(1920.0, 64.0, 60.0, 19.0);
+        let mic = mic_indicator_layout(1920.0, 64.0, 48.0, 19.0, Some(rec.chip[3]));
+        let gap = rec.chip[1] - (mic.chip[1] + mic.chip[3]);
+        assert!(gap < CHIP_STACK_GAP);
+        assert!(gap > 0.0 || mic.chip[1] == 0.0);
     }
 
     #[test]
