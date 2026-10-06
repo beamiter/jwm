@@ -64,6 +64,11 @@
 | 85 | toast 栈超出输出不再画 | `stack_room` / `IslandDock::stack_limit` |
 | 86 | 贴边 capture 把手夹进屏幕 | `handle_rects_on_output` |
 | 87 | 截图工具条两行仍放不下时折三行 | `wrap_row_count` |
+| 88 | 注释标签夹进输出，拒绝非有限纹理尺寸 | `origin_on_output` |
+| 89 | 空查询框 caret 宽高为 0 | `query_caret_rect` |
+| 90 | 滚动条拇指夹进轨道 | `scroll_thumb_at` |
+| 91 | 窄 OSD 内边距随卡宽缩小 | `card_pad` |
+| 92 | 行图标不再画到 x<0 | `row_icon_frame` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

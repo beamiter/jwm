@@ -73,11 +73,34 @@ impl AnnotationLabel {
     /// Where a rasterised `(w, h)` texture goes for this label.
     #[must_use]
     pub fn origin(&self, w: f32, h: f32) -> (f32, f32) {
+        let w = if w.is_finite() { w } else { 0.0 };
+        let h = if h.is_finite() { h } else { 0.0 };
         if self.anchor_center {
             ((self.x - w * 0.5).round(), (self.y - h * 0.5).round())
         } else {
             (self.x.round(), self.y.round())
         }
+    }
+
+    /// As [`Self::origin`], then clipped so the glyph stays on `screen`.
+    #[must_use]
+    pub fn origin_on_output(
+        &self,
+        w: f32,
+        h: f32,
+        screen_w: f32,
+        screen_h: f32,
+    ) -> (f32, f32) {
+        let (x, y) = self.origin(w, h);
+        if !(screen_w.is_finite() && screen_h.is_finite()) {
+            return (x, y);
+        }
+        let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+        let h = if h.is_finite() { h.max(0.0) } else { 0.0 };
+        (
+            x.clamp(0.0, (screen_w - w).max(0.0)),
+            y.clamp(0.0, (screen_h - h).max(0.0)),
+        )
     }
 
     #[must_use]
@@ -178,8 +201,15 @@ mod tests {
 
         let corner = AnnotationLabel {
             anchor_center: false,
-            ..centred
+            ..centred.clone()
         };
         assert_eq!(corner.origin(9.0, 13.0), (100.0, 50.0));
+        assert_eq!(centred.origin(f32::NAN, 13.0), (100.0, 44.0));
+        let edge = AnnotationLabel {
+            x: -4.0,
+            y: -4.0,
+            ..centred
+        };
+        assert_eq!(edge.origin_on_output(9.0, 13.0, 80.0, 40.0), (0.0, 0.0));
     }
 }

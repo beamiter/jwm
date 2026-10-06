@@ -222,8 +222,11 @@ impl PanelContents {
 #[must_use]
 pub(crate) fn scroll_thumb_at(track: Rect, thumb: Rect, t: f32) -> Rect {
     let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
-    let travel = (track[3] - thumb[3]).max(0.0);
-    [track[0], track[1] + t * travel, thumb[2], thumb[3]]
+    let tw = thumb[2].min(track[2]).max(0.0);
+    let th = thumb[3].min(track[3]).max(0.0);
+    let travel = (track[3] - th).max(0.0);
+    let x = track[0] + (track[2] - tw) * 0.5;
+    [x, track[1] + t * travel, tw, th]
 }
 
 /// Half-period of the query caret blink, in milliseconds.
@@ -245,7 +248,7 @@ pub(crate) fn query_caret_rect(
     text_h: f32,
 ) -> Rect {
     let w = 2.0_f32.min(field[2].max(0.0));
-    let h = text_h.max(1.0).min(field[3].max(1.0));
+    let h = text_h.max(0.0).min(field[3].max(0.0));
     let max_x = (field[0] + field[2] - w).max(field[0]);
     let x = (text_origin[0] + text_w.max(0.0)).clamp(field[0], max_x);
     let max_y = (field[1] + field[3] - h).max(field[1]);
@@ -569,10 +572,11 @@ pub(crate) fn side_preview_frame(panel: Rect, viewport: [f32; 4]) -> Option<Rect
 #[must_use]
 pub(crate) fn row_icon_frame(items: [f32; 2], row_height: f32, row: usize) -> Rect {
     let edge = ROW_ICON_PX.min((row_height - 2.0 * ROW_ICON_PAD_Y).max(1.0));
+    let slot = ROW_ICON_SLOT.min(items[0].max(0.0));
     [
-        items[0] - ROW_ICON_SLOT,
+        (items[0] - slot).max(0.0),
         items[1] + row as f32 * row_height + (row_height - edge) * 0.5,
-        edge,
+        edge.min(slot.max(1.0)),
         edge,
     ]
 }
@@ -1182,6 +1186,9 @@ mod tests {
         let tiny = row_icon_frame(items, 12.0, 0);
         assert_eq!(tiny[2], 12.0 - 2.0 * ROW_ICON_PAD_Y);
         assert_eq!(tiny[1], 200.0 + ROW_ICON_PAD_Y);
+        let flush = row_icon_frame([10.0, 0.0], 28.0, 0);
+        assert!(flush[0] >= 0.0);
+        assert!(flush[0] + flush[2] <= 10.0 + ROW_ICON_PX);
     }
 
     #[test]
@@ -1235,5 +1242,8 @@ mod tests {
         assert_eq!(caret[0], 60.0);
         assert_eq!(caret[2], 2.0);
         assert!(caret[0] + caret[2] <= field[0] + field[2]);
+        let empty = query_caret_rect([10.0, 20.0, 0.0, 0.0], [20.0, 24.0], 40.0, 16.0);
+        assert_eq!(empty[2], 0.0);
+        assert_eq!(empty[3], 0.0);
     }
 }

@@ -96,7 +96,12 @@ impl WaylandCompositor {
                         continue;
                     };
                     let (w, h) = (*w as f32, *h as f32);
-                    let (x, y) = label.origin(w, h);
+                    let (x, y) = label.origin_on_output(
+                        w,
+                        h,
+                        self.screen_w as f32,
+                        self.screen_h as f32,
+                    );
                     self.set_rect_uniform(gl, text_rect, x, y, w, h);
                     gl.BindTexture(ffi::TEXTURE_2D, *texture);
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);

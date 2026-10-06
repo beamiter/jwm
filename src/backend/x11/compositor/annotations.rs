@@ -124,7 +124,12 @@ impl<C: CompositorConnection> Compositor<C> {
                         continue;
                     };
                     let (w, h) = (*w as f32, *h as f32);
-                    let (x, y) = label.origin(w, h);
+                    let (x, y) = label.origin_on_output(
+                        w,
+                        h,
+                        self.screen_w as f32,
+                        self.screen_h as f32,
+                    );
                     self.gl
                         .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), x, y, w, h);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));

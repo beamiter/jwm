@@ -29,6 +29,16 @@ const OSD_FADE_IN: f32 = 0.12;
 pub(crate) const OSD_CARD_HEIGHT: f32 = 64.0;
 /// Horizontal padding inside a slider card.
 pub(crate) const OSD_PAD: f32 = 24.0;
+fn card_pad(w: f32) -> f32 {
+    if !(w.is_finite() && w > 0.0) {
+        return 0.0;
+    }
+    if w < 2.0 * OSD_PAD {
+        OSD_PAD.min(w * 0.2).max(0.0)
+    } else {
+        OSD_PAD
+    }
+}
 /// Nominal width reserved for the icon+percent label on a slider card.
 pub(crate) const OSD_LABEL_ZONE: f32 = 118.0;
 /// Slider track height.
@@ -213,8 +223,8 @@ pub(crate) fn slider_bar(card: [f32; 4], fill: f32) -> Option<([f32; 4], [f32; 4
     if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
         return None;
     }
-    let label_zone = OSD_LABEL_ZONE.min(w * 0.45).max(OSD_PAD);
-    let bar_w = w - label_zone - OSD_PAD;
+    let label_zone = OSD_LABEL_ZONE.min(w * 0.45).max(card_pad(w));
+    let bar_w = w - label_zone - card_pad(w);
     if bar_w < OSD_BAR_MIN_W {
         return None;
     }
@@ -249,10 +259,11 @@ pub(crate) fn label_rect(
     reserve_bar: bool,
 ) -> [f32; 4] {
     let [x, y, w, h] = card;
-    let inner = (w - 2.0 * OSD_PAD).max(0.0);
+    let pad = card_pad(w);
+    let inner = (w - 2.0 * pad).max(0.0);
     let max_w = if reserve_bar && slider_bar(card, 1.0).is_some() {
-        let label_zone = OSD_LABEL_ZONE.min(w * 0.45).max(OSD_PAD);
-        (label_zone - OSD_PAD).max(0.0).min(inner)
+        let label_zone = OSD_LABEL_ZONE.min(w * 0.45).max(pad);
+        (label_zone - pad).max(0.0).min(inner)
     } else {
         inner
     };
@@ -266,7 +277,7 @@ pub(crate) fn label_rect(
     } else {
         0.0
     };
-    [x + OSD_PAD, y + (h - th) * 0.5, tw, th]
+    [x + pad, y + (h - th) * 0.5, tw, th]
 }
 
 /// Icon for a power-profile OSD card. Kept byte-identical to the Hub row's
@@ -784,11 +795,11 @@ mod tests {
         assert!((fill[2] - track[2] * 0.5).abs() < 0.01);
         assert!(track[0] >= 10.0 + OSD_PAD);
         assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - OSD_PAD + 0.01);
-        assert!(slider_bar([0.0, 0.0, 50.0, OSD_CARD_HEIGHT], 1.0).is_none());
+        assert!(slider_bar([0.0, 0.0, 32.0, OSD_CARD_HEIGHT], 1.0).is_none());
         assert!(slider_bar([0.0, 0.0, 200.0, OSD_CARD_HEIGHT], 0.0).is_some());
-        let [lx, _, lw, _] = label_rect([0.0, 0.0, 120.0, OSD_CARD_HEIGHT], 400.0, 20.0, false);
-        assert_eq!(lx, OSD_PAD);
-        assert!(lw <= 120.0 - 2.0 * OSD_PAD + 0.01);
+        let [lx, _, lw, _] = label_rect([0.0, 0.0, 40.0, OSD_CARD_HEIGHT], 400.0, 20.0, false);
+        assert!(lx < OSD_PAD);
+        assert!(lw <= 40.0 - 2.0 * lx + 0.01);
         let slider = [0.0, 0.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT];
         let [lx, _, lw, _] = label_rect(slider, 400.0, 20.0, true);
         let (track, _) = slider_bar(slider, 0.5).unwrap();
