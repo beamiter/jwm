@@ -90,11 +90,17 @@ pub(crate) fn urgency_accent(urgency: u8) -> [f32; 4] {
 /// hold the 13 px inset on both ends.
 #[must_use]
 pub(crate) fn stripe_rect(card: [f32; 4]) -> Option<[f32; 4]> {
-    let [x, y, _, h] = card;
-    if !(h.is_finite() && h > 26.0) {
+    let [x, y, w, h] = card;
+    if !(h.is_finite() && w.is_finite() && h > 26.0 && w > 32.0) {
         return None;
     }
-    Some([x + 13.0, y + 13.0, 3.0, h - 26.0])
+    let inset = 13.0_f32.min(w * 0.08).min(h * 0.2);
+    let sw = 3.0_f32.min((w - 2.0 * inset).max(0.0));
+    let sh = (h - 2.0 * inset).max(0.0);
+    if sw < 1.0 || sh < 1.0 {
+        return None;
+    }
+    Some([x + inset, y + inset, sw, sh])
 }
 
 /// Offset of the card below one whose target height is `target_h`. The target
@@ -1576,6 +1582,10 @@ mod tests {
         assert_eq!(stripe, [113.0, 53.0, 3.0, 54.0]);
         assert!(stripe[0] > card[0] && stripe[0] + stripe[2] < card[0] + card[2]);
         assert!(stripe_rect([100.0, 40.0, 300.0, 20.0]).is_none());
+        assert!(
+            stripe_rect([100.0, 40.0, 20.0, 80.0]).is_none(),
+            "a card too narrow for the inset must drop the stripe"
+        );
         assert_ne!(urgency_accent(2), urgency_accent(1));
         assert_ne!(urgency_accent(0), urgency_accent(1));
         assert_ne!(urgency_accent(2), urgency_accent(0));

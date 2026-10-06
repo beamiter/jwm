@@ -48,6 +48,14 @@
 | 69 | 窄 OSD 丢掉滑条，避免负宽 | `slider_bar` |
 | 70 | layout 胶片条夹进视口，不再 320 地板撑破窄屏 | `strip_geometry` outer |
 | 71 | OSD 标签裁进 painted 卡 | `label_rect` |
+| 72 | tags overview 不再用 96px 地板撑破窄视口 | `grid_geometry` panel_w |
+| 73 | 紧急点夹进格子 | `urgent_badge_rect` |
+| 74 | REC/MIC 芯片夹进输出并裁切点/字 | `recording_indicator_layout` |
+| 75 | capture hint 高度夹进输出 | `capture_hint_layout` |
+| 76 | 窄 toast 丢掉紧急条，避免画出卡 | `stripe_rect` |
+| 77 | OSD 滑条卡标签停在 label zone | `label_rect(..., reserve_bar)` |
+| 78 | 胶片齿孔与缩略图窗不再溢出缩小的格子 | `sprockets` / `window_rect` |
+| 79 | 截图工具条 extent 夹进屏幕 | `place_avoiding` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

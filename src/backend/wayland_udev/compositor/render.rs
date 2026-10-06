@@ -8321,6 +8321,7 @@ impl WaylandCompositor {
                 [x, y, cw, ch],
                 text_w as f32,
                 text_h as f32,
+                fill.is_some(),
             );
             gl.Uniform4f(text_rect, lx, ly, lw, lh);
             gl.BindTexture(ffi::TEXTURE_2D, tex);

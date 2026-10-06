@@ -28,7 +28,12 @@ monorepo use independent Semantic Versions.
   slider instead of inverting it. The layout-picker film strip stays inside
   a nested or tiny output instead of honouring a 320px floor, and OSD labels
   clip to the painted card. Tags-overview numbers clip before the urgency
-  badge.
+  badge. Tags overview cells shrink instead of honouring a 96px floor that
+  overflowed a nested output; the REC/MIC pill and capture hint clip to the
+  pixels that exist; toast urgency stripes drop on a card too narrow for
+  the inset; OSD slider labels stay in the label zone; film sprockets and
+  wireframe windows stay inside a shrunk cell; a screenshot toolbar taller
+  than the output is clamped into it.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

@@ -3914,6 +3914,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 [x, y, cw, ch],
                 text_w as f32,
                 text_h as f32,
+                fill.is_some(),
             );
             self.gl.uniform_4_f32(
                 self.hud_text_uniforms.rect.as_ref(),

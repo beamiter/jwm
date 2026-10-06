@@ -239,11 +239,23 @@ pub(crate) fn slider_bar(card: [f32; 4], fill: f32) -> Option<([f32; 4], [f32; 4
 
 /// Where the icon+label texture sits inside a painted OSD card. The texture
 /// is clipped to the card's inner width so a media title cannot run off a
-/// contained island.
+/// contained island. When a slider occupies the right side, the label stays
+/// in the label zone instead of painting over the bar.
 #[must_use]
-pub(crate) fn label_rect(card: [f32; 4], text_w: f32, text_h: f32) -> [f32; 4] {
+pub(crate) fn label_rect(
+    card: [f32; 4],
+    text_w: f32,
+    text_h: f32,
+    reserve_bar: bool,
+) -> [f32; 4] {
     let [x, y, w, h] = card;
-    let max_w = (w - 2.0 * OSD_PAD).max(0.0);
+    let inner = (w - 2.0 * OSD_PAD).max(0.0);
+    let max_w = if reserve_bar && slider_bar(card, 1.0).is_some() {
+        let label_zone = OSD_LABEL_ZONE.min(w * 0.45).max(OSD_PAD);
+        (label_zone - OSD_PAD).max(0.0).min(inner)
+    } else {
+        inner
+    };
     let tw = if text_w.is_finite() {
         text_w.min(max_w).max(0.0)
     } else {
@@ -774,8 +786,12 @@ mod tests {
         assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - OSD_PAD + 0.01);
         assert!(slider_bar([0.0, 0.0, 50.0, OSD_CARD_HEIGHT], 1.0).is_none());
         assert!(slider_bar([0.0, 0.0, 200.0, OSD_CARD_HEIGHT], 0.0).is_some());
-        let [lx, _, lw, _] = label_rect([0.0, 0.0, 120.0, OSD_CARD_HEIGHT], 400.0, 20.0);
+        let [lx, _, lw, _] = label_rect([0.0, 0.0, 120.0, OSD_CARD_HEIGHT], 400.0, 20.0, false);
         assert_eq!(lx, OSD_PAD);
         assert!(lw <= 120.0 - 2.0 * OSD_PAD + 0.01);
+        let slider = [0.0, 0.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT];
+        let [lx, _, lw, _] = label_rect(slider, 400.0, 20.0, true);
+        let (track, _) = slider_bar(slider, 0.5).unwrap();
+        assert!(lx + lw <= track[0] + 0.01, "label must not cover the bar");
     }
 }

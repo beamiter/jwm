@@ -101,23 +101,42 @@ pub(crate) fn recording_indicator_layout(
     text_w: f32,
     text_h: f32,
 ) -> RecordingIndicatorLayout {
-    let chip_w = CHIP_PAD_X + CHIP_DOT + CHIP_DOT_GAP + text_w + CHIP_PAD_X;
-    let chip_h = (text_h + 2.0 * CHIP_PAD_Y).max(CHIP_DOT + 2.0 * CHIP_PAD_Y);
+    let screen_w = screen_w.max(0.0);
+    let screen_h = screen_h.max(0.0);
+    let text_w = if text_w.is_finite() { text_w.max(0.0) } else { 0.0 };
+    let text_h = if text_h.is_finite() { text_h.max(0.0) } else { 0.0 };
+    let natural_w = CHIP_PAD_X + CHIP_DOT + CHIP_DOT_GAP + text_w + CHIP_PAD_X;
+    let natural_h = (text_h + 2.0 * CHIP_PAD_Y).max(CHIP_DOT + 2.0 * CHIP_PAD_Y);
+    let chip_w = natural_w.min(screen_w);
+    let chip_h = natural_h.min(screen_h);
     let x = (screen_w - CHIP_MARGIN - chip_w).max(0.0);
     let y = (screen_h - CHIP_MARGIN - chip_h).max(0.0);
+    let inner_w = (chip_w - 2.0 * CHIP_PAD_X).max(0.0);
+    let (dot_w, text_draw_w, text_x_off) = if inner_w >= CHIP_DOT + CHIP_DOT_GAP {
+        (
+            CHIP_DOT.min(chip_h),
+            (inner_w - CHIP_DOT - CHIP_DOT_GAP).min(text_w),
+            CHIP_PAD_X + CHIP_DOT + CHIP_DOT_GAP,
+        )
+    } else if inner_w >= CHIP_DOT * 0.5 {
+        (inner_w.min(chip_h).min(CHIP_DOT), 0.0, CHIP_PAD_X)
+    } else {
+        (0.0, inner_w.min(text_w), CHIP_PAD_X)
+    };
+    let text_draw_h = text_h.min((chip_h - 2.0 * CHIP_PAD_Y).max(0.0)).min(chip_h);
     RecordingIndicatorLayout {
         chip: [x, y, chip_w, chip_h],
         dot: [
             x + CHIP_PAD_X,
-            y + (chip_h - CHIP_DOT) / 2.0,
-            CHIP_DOT,
-            CHIP_DOT,
+            y + (chip_h - dot_w) / 2.0,
+            dot_w,
+            dot_w,
         ],
         text: [
-            x + CHIP_PAD_X + CHIP_DOT + CHIP_DOT_GAP,
-            y + (chip_h - text_h) / 2.0,
-            text_w,
-            text_h,
+            x + text_x_off,
+            y + (chip_h - text_draw_h) / 2.0,
+            text_draw_w,
+            text_draw_h,
         ],
     }
 }
@@ -269,10 +288,15 @@ mod tests {
         assert!(long.chip[2] > short.chip[2]);
         assert_eq!(short.chip[3], long.chip[3]);
 
-        // A screen smaller than the chip still shows it, pinned to the origin.
+        // A screen smaller than the chip still shows it, pinned to the origin
+        // and clipped to the pixels that exist.
         let tiny = recording_indicator_layout(10.0, 8.0, 60.0, 19.0);
         assert_eq!(tiny.chip[0], 0.0);
         assert_eq!(tiny.chip[1], 0.0);
+        assert!(tiny.chip[2] <= 10.0);
+        assert!(tiny.chip[3] <= 8.0);
+        assert!(tiny.text[2] <= tiny.chip[2]);
+        assert!(tiny.dot[2] <= tiny.chip[2]);
     }
 
     #[test]

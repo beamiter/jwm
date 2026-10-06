@@ -72,7 +72,9 @@ const CELL_GAP: f32 = 10.0;
 /// holes live. Proportional to the cell so the perforation keeps its look
 /// from a crowded 1024px screen up to a 4K one.
 fn film_margin(cell_w: f32) -> f32 {
-    (cell_w * 0.13).clamp(6.0, 12.0)
+    // No 6px floor: a nested viewport can produce cells narrower than that,
+    // and a floor larger than the cell used to shove sprockets off the film.
+    (cell_w * 0.13).clamp(0.0, 12.0)
 }
 /// Height of the countdown track.
 const COUNTDOWN_H: f32 = 3.0;
@@ -192,10 +194,16 @@ pub fn countdown_fill(track: Rect, t: f32) -> Rect {
 /// film margins. They run the length of the strip rather than per cell, so the
 /// perforation stays continuous across the cell gaps like real film.
 fn sprockets(x: f32, y: f32, w: f32, h: f32, margin: f32) -> Vec<Rect> {
-    let hole_h = (margin * 0.46).max(3.0);
+    if margin < 2.0 || h < 2.0 * margin || w <= 0.0 {
+        return Vec::new();
+    }
+    let hole_h = (margin * 0.46).min(margin - 0.5).max(1.0);
     let hole_w = hole_h * 1.7;
     let pitch = hole_w * 2.1;
     let inset = (margin - hole_h) * 0.5;
+    if hole_w > w || hole_h + inset > margin {
+        return Vec::new();
+    }
     let count = ((w - hole_w) / pitch).floor().max(0.0) as usize;
     // Centre the run so the strip does not end on a half-cut hole.
     let run = count as f32 * pitch;
@@ -204,6 +212,9 @@ fn sprockets(x: f32, y: f32, w: f32, h: f32, margin: f32) -> Vec<Rect> {
     let mut holes = Vec::with_capacity((count + 1) * 2);
     for i in 0..=count {
         let hx = start + i as f32 * pitch;
+        if hx + hole_w > x + w + 0.5 {
+            continue;
+        }
         holes.push([hx, y + inset, hole_w, hole_h]);
         holes.push([hx, y + h - inset - hole_h, hole_w, hole_h]);
     }
@@ -265,12 +276,15 @@ pub fn cell_at(geometry: &StripGeometry, selected: Option<usize>, x: f32, y: f32
 /// [`crate::core::layout::preview_frames`].
 pub fn window_rect(frame: Rect, window: [f32; 4]) -> Rect {
     let [fx, fy, fw, fh] = frame;
-    [
-        fx + window[0] * fw,
-        fy + window[1] * fh,
-        (window[2] * fw).max(LINE_WIDTH * 2.0),
-        (window[3] * fh).max(LINE_WIDTH * 2.0),
-    ]
+    let w = (window[2] * fw)
+        .max(LINE_WIDTH * 2.0)
+        .min(fw.max(0.0));
+    let h = (window[3] * fh)
+        .max(LINE_WIDTH * 2.0)
+        .min(fh.max(0.0));
+    let x = (fx + window[0] * fw).clamp(fx, (fx + fw - w).max(fx));
+    let y = (fy + window[1] * fh).clamp(fy, (fy + fh - h).max(fy));
+    [x, y, w, h]
 }
 
 /// Scale a cell's rectangles about the cell centre, for the selected cell's
@@ -574,6 +588,9 @@ mod tests {
         let quarter = window_rect(frame, [0.5, 0.5, 0.5, 0.5]);
         assert!(quarter[0] >= frame[0] && quarter[0] + quarter[2] <= frame[0] + frame[2] + 0.01);
         assert!(quarter[1] >= frame[1] && quarter[1] + quarter[3] <= frame[1] + frame[3] + 0.01);
+        let tiny = window_rect([0.0, 0.0, 3.0, 2.0], [0.5, 0.5, 0.5, 0.5]);
+        assert!(tiny[0] >= 0.0 && tiny[0] + tiny[2] <= 3.0 + 0.01);
+        assert!(tiny[1] >= 0.0 && tiny[1] + tiny[3] <= 2.0 + 0.01);
     }
 
     #[test]

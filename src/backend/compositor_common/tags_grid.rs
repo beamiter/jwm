@@ -62,9 +62,11 @@ const LABEL_H: f32 = 20.0;
 /// Inset between a cell's edge and its wireframe frame.
 const FRAME_PAD: f32 = 7.0;
 
-/// Cell width bounds. The lower bound keeps a wireframe readable on a small
-/// screen with many tags; the upper one keeps a handful of tags on a large
-/// screen from turning into posters.
+/// Cell width bounds. The lower bound is unused: cells shrink to fit a nested
+/// viewport rather than honouring a readability floor that would overflow.
+/// The upper one keeps a handful of tags on a large screen from turning into
+/// posters.
+#[allow(dead_code)]
 const CELL_W_MIN: f32 = 96.0;
 const CELL_W_MAX: f32 = 260.0;
 
@@ -102,12 +104,12 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     // should; extreme (or degenerate) viewports are pinned to a sane band.
     let aspect = (screen_w / screen_h).clamp(0.4, 3.0);
 
+    // Never honour a 320px / CELL_W_MIN floor on a narrower nested output —
+    // padding plus a min cell used to push the panel off the right edge.
     let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
-    let min_cell = ((screen_w - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(48.0)
-        / cols as f32)
-        .min(CELL_W_MIN);
-    let available_w = (outer - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(min_cell);
-    let mut cell_w = (available_w / cols as f32).clamp(min_cell, CELL_W_MAX);
+    let inner = (outer - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
+    let fitted = (inner / cols as f32).max(1.0);
+    let mut cell_w = fitted.min(CELL_W_MAX);
     let mut cell_h = cell_w / aspect;
 
     // The grid must also leave room for the text bands; on short screens the
@@ -117,13 +119,18 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     let max_cell_h = (available_h / rows as f32).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
-        cell_w = cell_h * aspect;
+        cell_w = (cell_h * aspect).min(cell_w).max(1.0);
     }
 
     let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * CELL_GAP;
-    let grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
-    let panel_w = grid_w + 2.0 * PAD;
+    let mut grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
+    let panel_w = (grid_w + 2.0 * PAD).min(screen_w);
     let panel_h = (bands_h + grid_h + GAP_Y).min(screen_h);
+    let inner_w = (panel_w - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
+    cell_w = (inner_w / cols as f32).max(1.0).min(cell_w);
+    let inner_h = (panel_h - bands_h - GAP_Y - CELL_GAP * (rows as f32 - 1.0)).max(1.0);
+    cell_h = (inner_h / rows as f32).max(1.0).min(cell_h);
+    grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
 
     let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
     // Slightly above centre, same reading as the film strip. Clamp so a
@@ -142,15 +149,19 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
         let row = (i / cols) as f32;
         let x = grid_x + col * (cell_w + CELL_GAP);
         let y = grid_y + row * (cell_h + CELL_GAP);
+        let label_h = LABEL_H.min(cell_h * 0.4).max(1.0).min(cell_h);
+        let frame_pad = FRAME_PAD
+            .min(cell_w * 0.2)
+            .min(((cell_h - label_h).max(0.0)) * 0.45);
         cells.push(GridCell {
             cell: [x, y, cell_w, cell_h],
             frame: [
-                x + FRAME_PAD,
-                y + LABEL_H,
-                (cell_w - 2.0 * FRAME_PAD).max(1.0),
-                (cell_h - LABEL_H - FRAME_PAD).max(1.0),
+                x + frame_pad,
+                y + label_h,
+                (cell_w - 2.0 * frame_pad).max(0.0),
+                (cell_h - label_h - frame_pad).max(0.0),
             ],
-            label_offset: [FRAME_PAD, (LABEL_H - 14.0).max(2.0) * 0.5],
+            label_offset: [frame_pad.max(1.0), (label_h - 14.0).max(1.0) * 0.5],
         });
     }
 
@@ -261,8 +272,11 @@ const BADGE_D: f32 = 8.0;
 #[must_use]
 pub fn label_max_width(scaled_cell: Rect, scale: f32) -> f32 {
     let badge = urgent_badge_rect(scaled_cell, scale);
-    let left = scaled_cell[0] + FRAME_PAD * scale;
-    (badge[0] - FRAME_PAD * scale - left).max(TITLE_MIN_WIDTH)
+    let pad = (FRAME_PAD * scale).min(scaled_cell[2] * 0.2);
+    let left = scaled_cell[0] + pad;
+    let room = (badge[0] - pad - left).max(0.0);
+    let floor = TITLE_MIN_WIDTH.min(scaled_cell[2] * 0.35).max(1.0);
+    room.max(floor).min((scaled_cell[2] - pad).max(0.0))
 }
 
 const TITLE_MIN_WIDTH: f32 = 12.0;
@@ -272,12 +286,13 @@ const TITLE_MIN_WIDTH: f32 = 12.0;
 /// and never covers a wireframe. Like the label it is placed from the scaled
 /// cell, so the selected cell's presentation lift carries it along.
 pub fn urgent_badge_rect(scaled_cell: Rect, scale: f32) -> Rect {
-    [
-        scaled_cell[0] + scaled_cell[2] - (FRAME_PAD + BADGE_D) * scale,
-        scaled_cell[1] + (LABEL_H - BADGE_D) * 0.5 * scale,
-        BADGE_D * scale,
-        BADGE_D * scale,
-    ]
+    let [x, y, w, h] = scaled_cell;
+    let d = (BADGE_D * scale).min(w).min(h).max(0.0);
+    let pad = (FRAME_PAD * scale).min((w - d).max(0.0) * 0.5);
+    let bx = (x + w - pad - d).clamp(x, (x + w - d).max(x));
+    let band = (LABEL_H * scale).min(h);
+    let by = (y + (band - d) * 0.5).clamp(y, (y + h - d).max(y));
+    [bx, by, d, d]
 }
 
 #[cfg(test)]
@@ -333,6 +348,7 @@ mod tests {
             (3840.0, 2160.0),
             (800.0, 480.0),
             (320.0, 200.0),
+            (180.0, 120.0),
         ] {
             let g = grid_geometry([0.0, 0.0, w, h], 31, 7);
             assert!(g.panel[0] >= 0.0, "{w}x{h}: panel starts off-screen");

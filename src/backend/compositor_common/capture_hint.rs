@@ -91,14 +91,17 @@ pub(crate) fn capture_hint_layout(
     bottom_lift: f32,
 ) -> CaptureHintLayout {
     let chip_w = (text_w + 2.0 * HINT_PAD_X).min(screen_w.max(0.0));
-    let chip_h = text_h + 2.0 * HINT_PAD_Y;
+    let chip_h = (text_h + 2.0 * HINT_PAD_Y).min(screen_h.max(0.0));
     let x = ((screen_w - chip_w) * 0.5).clamp(0.0, (screen_w - chip_w).max(0.0));
-    let y = (screen_h - HINT_MARGIN - bottom_lift.max(0.0) - chip_h).max(0.0);
+    let y = (screen_h - HINT_MARGIN - bottom_lift.max(0.0) - chip_h)
+        .clamp(0.0, (screen_h - chip_h).max(0.0));
     let text_w = text_w.min((chip_w - 2.0 * HINT_PAD_X).max(0.0));
-    let text_x = x + HINT_PAD_X;
+    let text_h = text_h.min((chip_h - 2.0 * HINT_PAD_Y).max(0.0));
+    let text_x = x + HINT_PAD_X.min(chip_w);
+    let text_y = y + HINT_PAD_Y.min(chip_h);
     CaptureHintLayout {
         chip: [x, y, chip_w, chip_h],
-        text: [text_x, y + HINT_PAD_Y, text_w, text_h],
+        text: [text_x, text_y, text_w, text_h],
     }
 }
 
@@ -163,5 +166,10 @@ mod tests {
         assert!(layout.chip[0] >= 0.0);
         assert!(layout.chip[0] + layout.chip[2] <= 100.0 + f32::EPSILON);
         assert!(layout.text[2] <= layout.chip[2]);
+        let tall = capture_hint_layout(80.0, 20.0, 40.0, 40.0, 0.0);
+        assert!(tall.chip[3] <= 20.0);
+        assert!(tall.chip[1] >= 0.0);
+        assert!(tall.chip[1] + tall.chip[3] <= 20.0 + f32::EPSILON);
+        assert!(tall.text[3] <= tall.chip[3]);
     }
 }

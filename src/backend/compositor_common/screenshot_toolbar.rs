@@ -448,6 +448,16 @@ pub fn place_avoiding(
     let (w, h) = extent;
     let [sx, sy, sw, sh] = selection;
     let [scx, scy, scw, sch] = screen;
+    let w = if w.is_finite() {
+        w.min((scw - 2.0 * SCREEN_MARGIN).max(0.0)).max(0.0)
+    } else {
+        0.0
+    };
+    let h = if h.is_finite() {
+        h.min((sch - 2.0 * SCREEN_MARGIN).max(0.0)).max(0.0)
+    } else {
+        0.0
+    };
 
     let min_x = scx + SCREEN_MARGIN;
     let max_x = (scx + scw - SCREEN_MARGIN - w).max(min_x);
@@ -1570,6 +1580,20 @@ mod tests {
             ),
             Some(split)
         );
+    }
+
+    #[test]
+    fn a_track_taller_than_the_output_is_clamped_into_it() {
+        let bar = place(
+            [10.0, 10.0, 20.0, 20.0],
+            [0.0, 0.0, 80.0, 50.0],
+            (200.0, 90.0),
+        );
+        assert!(bar[2] <= 80.0 - 2.0 * SCREEN_MARGIN + 1e-3);
+        assert!(bar[3] <= 50.0 - 2.0 * SCREEN_MARGIN + 1e-3);
+        assert!(bar[0] >= 0.0 && bar[1] >= 0.0);
+        assert!(bar[0] + bar[2] <= 80.0 + 1e-3);
+        assert!(bar[1] + bar[3] <= 50.0 + 1e-3);
     }
 
     #[test]
