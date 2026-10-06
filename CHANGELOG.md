@@ -73,7 +73,9 @@ monorepo use independent Semantic Versions.
   Layout and tags overview round and stroke with the painted cell rather
   than 22/6/2.5px desktop radii; toast action chips tighten their
   horizontal padding; the wallpaper side preview and a narrow tab cell
-  follow the same rule.
+  follow the same rule. A selected layout/tags cell on a nested overview
+  lifts by less than 12% so it cannot swallow a neighbour; tag number
+  insets follow the label band; a short query field draws a thinner caret.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

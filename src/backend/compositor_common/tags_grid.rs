@@ -188,6 +188,7 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
         let frame_pad = FRAME_PAD
             .min(cell_w * 0.2)
             .min(((cell_h - label_h).max(0.0)) * 0.45);
+        let label_text = 14.0_f32.min(label_h * 0.7).max(1.0).min(label_h);
         cells.push(GridCell {
             cell: [x, y, cell_w, cell_h],
             frame: [
@@ -196,7 +197,7 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
                 (cell_w - 2.0 * frame_pad).max(0.0),
                 (cell_h - label_h - frame_pad).max(0.0),
             ],
-            label_offset: [frame_pad.max(1.0), (label_h - 14.0).max(1.0) * 0.5],
+            label_offset: [frame_pad.max(1.0), (label_h - label_text).max(0.0) * 0.5],
         });
     }
 
@@ -226,9 +227,10 @@ pub fn presented_cell(cell: &GridCell, selected: bool) -> (Rect, Rect) {
         return (cell.cell, cell.frame);
     }
     let pivot = layout_strip::center(cell.cell);
+    let scale = layout_strip::selected_scale(cell.cell);
     (
-        layout_strip::scaled_about(cell.cell, pivot, layout_strip::SELECTED_SCALE),
-        layout_strip::scaled_about(cell.frame, pivot, layout_strip::SELECTED_SCALE),
+        layout_strip::scaled_about(cell.cell, pivot, scale),
+        layout_strip::scaled_about(cell.frame, pivot, scale),
     )
 }
 
@@ -438,7 +440,7 @@ mod tests {
 
     #[test]
     fn the_selected_cell_is_hit_where_its_lift_draws_it() {
-        use crate::backend::compositor_common::layout_strip::{SELECTED_SCALE, scaled_about};
+        use crate::backend::compositor_common::layout_strip::{selected_scale, scaled_about};
 
         let g = geom(9, 4);
         let index = 5;
@@ -446,8 +448,8 @@ mod tests {
         let (card, frame) = presented_cell(cell, true);
         // The presented rectangles are the renderers' own transform.
         let pivot = center(cell.cell);
-        assert_eq!(card, scaled_about(cell.cell, pivot, SELECTED_SCALE));
-        assert_eq!(frame, scaled_about(cell.frame, pivot, SELECTED_SCALE));
+        assert_eq!(card, scaled_about(cell.cell, pivot, selected_scale(cell.cell)));
+        assert_eq!(frame, scaled_about(cell.frame, pivot, selected_scale(cell.cell)));
         assert_eq!(presented_cell(cell, false), (cell.cell, cell.frame));
         // The lift grows the card past its unscaled edges on every side.
         assert!(card[0] < cell.cell[0] && card[1] < cell.cell[1]);
@@ -708,6 +710,12 @@ mod tests {
         for cell in &g.cells {
             assert!(cell.cell[0] + cell.cell[2] <= 200.0 + 0.01);
             assert!(cell.cell[1] + cell.cell[3] <= 160.0 + 0.01);
+        }
+        let lift = layout_strip::selected_scale(g.cells[0].cell);
+        assert!(lift < layout_strip::SELECTED_SCALE);
+        for cell in &g.cells {
+            let (card, _) = presented_cell(cell, true);
+            assert!(card[0] + card[2] <= 200.0 + (card[2] - cell.cell[2]) + 0.01);
         }
     }
 }

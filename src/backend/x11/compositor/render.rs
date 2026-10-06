@@ -2088,7 +2088,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             for (index, cell) in geometry.cells.iter().enumerate() {
                 let selected = index == strip.selected;
-                let scale = if selected { film::SELECTED_SCALE } else { 1.0 };
+                let scale = if selected { film::selected_scale(cell.cell) } else { 1.0 };
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
@@ -2335,7 +2335,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             for (index, cell) in geometry.cells.iter().enumerate() {
                 let selected = index == grid.selected;
-                let scale = if selected { film::SELECTED_SCALE } else { 1.0 };
+                let scale = if selected { film::selected_scale(cell.cell) } else { 1.0 };
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
@@ -2457,7 +2457,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     continue;
                 };
                 let scale = if index == grid.selected {
-                    film::SELECTED_SCALE
+                    film::selected_scale(cell.cell)
                 } else {
                     1.0
                 };

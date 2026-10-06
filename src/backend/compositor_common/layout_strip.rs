@@ -108,6 +108,21 @@ pub fn line_width(w: f32, h: f32) -> f32 {
 /// place underneath it.
 pub const SELECTED_SCALE: f32 = 1.12;
 
+/// How far the selected cell lifts. A nested overview's cells can be smaller
+/// than the 12% overhang [`SELECTED_SCALE`] was tuned for; the lift then
+/// follows the cell so it cannot swallow a neighbour whose gap already shrank.
+#[must_use]
+pub fn selected_scale(cell: Rect) -> f32 {
+    let m = cell[2].min(cell[3]);
+    if !m.is_finite() || m <= 0.0 {
+        1.0
+    } else if m < 80.0 {
+        1.0 + (SELECTED_SCALE - 1.0) * (m / 80.0)
+    } else {
+        SELECTED_SCALE
+    }
+}
+
 /// Padding between the panel edge and its contents.
 const PAD: f32 = 26.0;
 fn panel_pad(screen_w: f32, screen_h: f32) -> f32 {
@@ -333,9 +348,10 @@ pub fn presented_cell(cell: &Cell, selected: bool) -> (Rect, Rect) {
         return (cell.cell, cell.frame);
     }
     let pivot = center(cell.cell);
+    let scale = selected_scale(cell.cell);
     (
-        scaled_about(cell.cell, pivot, SELECTED_SCALE),
-        scaled_about(cell.frame, pivot, SELECTED_SCALE),
+        scaled_about(cell.cell, pivot, scale),
+        scaled_about(cell.frame, pivot, scale),
     )
 }
 
@@ -489,8 +505,8 @@ mod tests {
         let (film, frame) = presented_cell(cell, true);
         // The presented rectangles are the renderers' own transform.
         let pivot = center(cell.cell);
-        assert_eq!(film, scaled_about(cell.cell, pivot, SELECTED_SCALE));
-        assert_eq!(frame, scaled_about(cell.frame, pivot, SELECTED_SCALE));
+        assert_eq!(film, scaled_about(cell.cell, pivot, selected_scale(cell.cell)));
+        assert_eq!(frame, scaled_about(cell.frame, pivot, selected_scale(cell.cell)));
         assert_eq!(presented_cell(cell, false), (cell.cell, cell.frame));
         // The lift grows the film past its resting edges on every side.
         assert!(film[0] < cell.cell[0] && film[1] < cell.cell[1]);
@@ -717,5 +733,11 @@ mod tests {
         let squat = strip_geometry([0.0, 0.0, 200.0, 60.0], 2);
         assert!(squat.countdown[3] < COUNTDOWN_H);
         assert!(squat.countdown[3] >= 1.0);
+        assert_eq!(selected_scale([0.0, 0.0, 120.0, 90.0]), SELECTED_SCALE);
+        assert!(selected_scale([0.0, 0.0, 40.0, 30.0]) < SELECTED_SCALE);
+        assert!(selected_scale([0.0, 0.0, 40.0, 30.0]) > 1.0);
+        let nested = strip_geometry([0.0, 0.0, 200.0, 160.0], 7);
+        let lift = selected_scale(nested.cells[0].cell);
+        assert!(lift < SELECTED_SCALE);
     }
 }

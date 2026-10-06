@@ -316,7 +316,11 @@ pub(crate) fn query_caret_rect(
     text_w: f32,
     text_h: f32,
 ) -> Rect {
-    let w = 2.0_f32.min(field[2].max(0.0));
+    let w = if field[3].is_finite() && field[3] > 0.0 && field[3] < 16.0 {
+        2.0_f32.min(field[2].max(0.0)).min(field[3] * 0.12).max(1.0)
+    } else {
+        2.0_f32.min(field[2].max(0.0))
+    };
     let h = text_h.max(0.0).min(field[3].max(0.0));
     let max_x = (field[0] + field[2] - w).max(field[0]);
     let x = (text_origin[0] + text_w.max(0.0)).clamp(field[0], max_x);
@@ -1433,6 +1437,10 @@ mod tests {
         let empty = query_caret_rect([10.0, 20.0, 0.0, 0.0], [20.0, 24.0], 40.0, 16.0);
         assert_eq!(empty[2], 0.0);
         assert_eq!(empty[3], 0.0);
+        let short = query_caret_rect([10.0, 20.0, 80.0, 10.0], [20.0, 22.0], 20.0, 8.0);
+        assert!(short[2] < 2.0);
+        assert!(short[2] >= 1.0);
+        assert!(short[0] + short[2] <= 90.0);
     }
 
     #[test]

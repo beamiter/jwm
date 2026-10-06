@@ -109,6 +109,9 @@
 | 130 | 窄 toast 操作钮水平内边距缩小 | `action_row_layout` pad_x |
 | 131 | 壁纸侧预览圆角随框缩小 | `preview_radius` |
 | 132 | 窄 tab 格 CELL_INSET 随槽宽缩小 | `cell_rect` |
+| 133 | 小格子选中抬升小于 12% | `selected_scale`；hit 与绘制共用 |
+| 134 | tags 标签垂直 inset 随 label 带缩小 | `label_offset` |
+| 135 | 矮查询框 caret 变细 | `query_caret_rect` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 
