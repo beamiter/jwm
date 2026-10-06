@@ -63,6 +63,7 @@
 | 84 | 窄 tab 标题预算/字号跟格子走 | `title_budget` / `title_font_size` |
 | 85 | toast 栈超出输出不再画 | `stack_room` / `IslandDock::stack_limit` |
 | 86 | 贴边 capture 把手夹进屏幕 | `handle_rects_on_output` |
+| 87 | 截图工具条两行仍放不下时折三行 | `wrap_row_count` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

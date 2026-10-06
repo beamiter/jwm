@@ -377,6 +377,51 @@ pub fn wrap_at(buttons: &[ToolbarButton], max_width: f32) -> Option<usize> {
     Some(best_i)
 }
 
+/// How many rows the strip uses at `max_width`. Two when a single row at
+/// [`MIN_BUTTON_SIZE`] still overflows; three when two rows at that floor
+/// still overflow and there are enough buttons to split.
+#[must_use]
+pub fn wrap_row_count(buttons: &[ToolbarButton], max_width: f32) -> usize {
+    let Some(i) = wrap_at(buttons, max_width) else {
+        return 1;
+    };
+    if buttons.len() >= 6 && max_row_units(buttons, Some(i)) * MIN_BUTTON_SIZE > max_width {
+        3
+    } else {
+        2
+    }
+}
+
+fn row_starts(buttons: &[ToolbarButton], max_width: f32) -> Vec<usize> {
+    match wrap_row_count(buttons, max_width) {
+        3 if buttons.len() >= 3 => vec![0, buttons.len() / 3, 2 * buttons.len() / 3],
+        2 => vec![0, wrap_at(buttons, max_width).unwrap_or(buttons.len() / 2)],
+        _ => vec![0],
+    }
+}
+
+fn row_of(starts: &[usize], len: usize, index: usize) -> Option<(usize, usize, usize)> {
+    for (row, &start) in starts.iter().enumerate() {
+        let end = starts.get(row + 1).copied().unwrap_or(len);
+        if index >= start && index < end {
+            return Some((start, end, row));
+        }
+    }
+    None
+}
+
+fn max_units_for_starts(buttons: &[ToolbarButton], starts: &[usize]) -> f32 {
+    if starts.is_empty() {
+        return row_units(buttons);
+    }
+    let mut best = 0.0_f32;
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(buttons.len());
+        best = best.max(row_units(&buttons[start..end]));
+    }
+    best
+}
+
 fn max_row_units(buttons: &[ToolbarButton], split: Option<usize>) -> f32 {
     match split {
         Some(i) if i > 0 && i < buttons.len() => {
@@ -392,7 +437,7 @@ fn max_row_units(buttons: &[ToolbarButton], split: Option<usize>) -> f32 {
 /// keeps the floor and is clamped into the screen by [`place`].
 #[must_use]
 pub fn fit_button_size(buttons: &[ToolbarButton], max_width: f32) -> f32 {
-    let units = max_row_units(buttons, wrap_at(buttons, max_width));
+    let units = max_units_for_starts(buttons, &row_starts(buttons, max_width));
     if !max_width.is_finite() || max_width <= 0.0 || units <= 0.0 {
         return BUTTON_SIZE;
     }
@@ -408,21 +453,23 @@ pub fn track_extent(buttons: &[ToolbarButton], button_size: f32) -> (f32, f32) {
     )
 }
 
-/// As [`track_extent`], wrapping to two rows when a single row at the
-/// legibility floor would still overflow `max_width`.
+/// As [`track_extent`], wrapping to two or three rows when a single row at
+/// the legibility floor would still overflow `max_width`.
 #[must_use]
 pub fn track_extent_for(
     buttons: &[ToolbarButton],
     button_size: f32,
     max_width: f32,
 ) -> (f32, f32) {
-    match wrap_at(buttons, max_width) {
-        Some(i) => (
-            max_row_units(buttons, Some(i)) * button_size,
-            track_height_units_n(2) * button_size,
-        ),
-        None => track_extent(buttons, button_size),
+    let starts = row_starts(buttons, max_width);
+    let n = starts.len().max(1);
+    if n == 1 {
+        return track_extent(buttons, button_size);
     }
+    (
+        max_units_for_starts(buttons, &starts) * button_size,
+        track_height_units_n(n) * button_size,
+    )
 }
 
 /// Where the track goes: centred on the selection, below it by preference,
@@ -485,14 +532,23 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
 }
 
-/// First index of the second row when `bar` is tall enough to hold two rows
-/// and `bar`'s width still cannot take a single row at the size floor.
-fn split_for_bar(bar: Rect, buttons: &[ToolbarButton], button_size: f32) -> Option<usize> {
-    let one_h = track_height_units() * button_size;
-    if bar[3] + 0.5 < one_h + button_size {
-        return None;
+fn bar_row_starts(bar: Rect, buttons: &[ToolbarButton], button_size: f32) -> Vec<usize> {
+    let mut starts = row_starts(buttons, bar[2]);
+    while starts.len() > 1 {
+        let need = track_height_units_n(starts.len()) * button_size;
+        if bar[3] + 0.5 >= need {
+            break;
+        }
+        if starts.len() >= 3 {
+            starts = vec![
+                0,
+                wrap_at(buttons, bar[2]).unwrap_or(buttons.len() / 2),
+            ];
+        } else {
+            starts = vec![0];
+        }
     }
-    wrap_at(buttons, bar[2])
+    starts
 }
 
 /// The *slot* for `index`: its share of the track, split with its neighbours
@@ -508,12 +564,11 @@ pub fn slot_rect(
     if index >= buttons.len() || !is_drawable(bar) || !is_positive(button_size) {
         return None;
     }
-    let split = split_for_bar(bar, buttons, button_size);
-    let (start, end, row_y, row_h) = match split {
-        Some(s) if index >= s => (s, buttons.len(), bar[1] + bar[3] * 0.5, bar[3] * 0.5),
-        Some(s) => (0, s, bar[1], bar[3] * 0.5),
-        None => (0, buttons.len(), bar[1], bar[3]),
-    };
+    let starts = bar_row_starts(bar, buttons, button_size);
+    let n = starts.len().max(1) as f32;
+    let (start, end, row_i) = row_of(&starts, buttons.len(), index)?;
+    let row_y = bar[1] + row_i as f32 * (bar[3] / n);
+    let row_h = bar[3] / n;
     let row = &buttons[start..end];
     let index_in_row = index - start;
     let [bx, _, bw, _] = bar;
@@ -554,12 +609,8 @@ pub fn button_rect(
     let [_, sy, sw, sh] = slot;
     let gap = BUTTON_GAP / BUTTON_SIZE * button_size;
     let pad = PAD_X / BUTTON_SIZE * button_size;
-    let split = split_for_bar(bar, buttons, button_size);
-    let (start, end) = match split {
-        Some(s) if index >= s => (s, buttons.len()),
-        Some(s) => (0, s),
-        None => (0, buttons.len()),
-    };
+    let starts = bar_row_starts(bar, buttons, button_size);
+    let (start, end, _) = row_of(&starts, buttons.len(), index)?;
     let row = &buttons[start..end];
     let index_in_row = index - start;
     let width = face_units(&row[index_in_row].face) * button_size;
@@ -1579,6 +1630,26 @@ mod tests {
                 bottom[1] + bottom[3] * 0.5
             ),
             Some(split)
+        );
+    }
+
+    #[test]
+    fn a_very_narrow_strip_wraps_to_three_rows() {
+        let buttons = row(18);
+        let max_w = 90.0;
+        assert_eq!(wrap_row_count(&buttons, max_w), 3);
+        let size = fit_button_size(&buttons, max_w);
+        let extent = track_extent_for(&buttons, size, max_w);
+        assert!(extent.1 > track_height_units_n(2) * size);
+        let bar = place([10.0, 10.0, 40.0, 40.0], [0.0, 0.0, 200.0, 400.0], extent);
+        let top = button_rect(bar, &buttons, size, 0).unwrap();
+        let mid = button_rect(bar, &buttons, size, 6).unwrap();
+        let bot = button_rect(bar, &buttons, size, 12).unwrap();
+        assert!(mid[1] > top[1] + top[3] * 0.4);
+        assert!(bot[1] > mid[1] + mid[3] * 0.4);
+        assert_eq!(
+            button_at(bar, &buttons, size, bot[0] + bot[2] * 0.5, bot[1] + bot[3] * 0.5),
+            Some(12)
         );
     }
 
