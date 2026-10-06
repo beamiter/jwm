@@ -74,6 +74,20 @@ const CAPTION_H: f32 = 30.0;
 const HINT_H: f32 = 24.0;
 /// Vertical breathing room between bands.
 const GAP_Y: f32 = 14.0;
+fn text_band(natural: f32, screen_h: f32) -> f32 {
+    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * natural {
+        natural.min(screen_h * 0.1).max(8.0)
+    } else {
+        natural
+    }
+}
+fn gap_y(screen_h: f32) -> f32 {
+    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * GAP_Y {
+        GAP_Y.min(screen_h * 0.05).max(2.0)
+    } else {
+        GAP_Y
+    }
+}
 /// Gap between two cells.
 const CELL_GAP: f32 = 10.0;
 /// Film margin above and below a cell's exposed frame, where the sprocket
@@ -138,8 +152,12 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     let mut frame_h = (frame_w * FRAME_ASPECT).round().max(1.0);
     let mut cell_h = frame_h + 2.0 * margin;
 
+    let title_h = text_band(TITLE_H, screen_h);
+    let caption_h = text_band(CAPTION_H, screen_h);
+    let hint_h = text_band(HINT_H, screen_h);
+    let gap_y = gap_y(screen_h);
     let bands_h =
-        2.0 * pad + TITLE_H + GAP_Y + GAP_Y + CAPTION_H + COUNTDOWN_H + GAP_Y + HINT_H;
+        2.0 * pad + title_h + gap_y + gap_y + caption_h + COUNTDOWN_H + gap_y + hint_h;
     let max_cell_h = (screen_h - bands_h).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
@@ -161,7 +179,7 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
             .clamp(0.0, (screen_h - panel_h).max(0.0));
 
     let strip_x = panel_x + pad;
-    let strip_y = panel_y + pad + TITLE_H + GAP_Y;
+    let strip_y = panel_y + pad + title_h + gap_y;
 
     let mut cells = Vec::with_capacity(count);
     for i in 0..count {
@@ -172,14 +190,14 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
         });
     }
 
-    let caption_y = strip_y + cell_h + GAP_Y;
-    let countdown_y = caption_y + CAPTION_H;
+    let caption_y = strip_y + cell_h + gap_y;
+    let countdown_y = caption_y + caption_h;
 
     StripGeometry {
         panel: [panel_x, panel_y, panel_w, panel_h],
         title: [panel_x + pad, panel_y + pad],
-        caption_center: [panel_x + panel_w * 0.5, caption_y + CAPTION_H * 0.5],
-        hint: [panel_x + pad, countdown_y + COUNTDOWN_H + GAP_Y],
+        caption_center: [panel_x + panel_w * 0.5, caption_y + caption_h * 0.5],
+        hint: [panel_x + pad, countdown_y + COUNTDOWN_H + gap_y],
         strip: [strip_x, strip_y, strip_w, cell_h],
         sprockets: sprockets(strip_x, strip_y, strip_w, cell_h, margin),
         cells,
