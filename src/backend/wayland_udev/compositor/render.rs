@@ -7601,7 +7601,7 @@ impl WaylandCompositor {
                     fy,
                     fw,
                     fh,
-                    panel::QUERY_RADIUS,
+                    panel::query_radius(fh),
                     UiPalette::faded(
                         panel::query_field_fill(
                             ui.field,
@@ -7634,7 +7634,7 @@ impl WaylandCompositor {
                     hover[1],
                     hover[2],
                     hover[3],
-                    panel::SELECTION_RADIUS,
+                    panel::selection_radius(hover[3]),
                     [
                         accent[0],
                         accent[1],
@@ -7661,7 +7661,7 @@ impl WaylandCompositor {
                     pill[1],
                     pill[2],
                     pill[3],
-                    panel::SELECTION_RADIUS,
+                    panel::selection_radius(pill[3]),
                     [
                         accent[0],
                         accent[1],

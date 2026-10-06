@@ -65,7 +65,10 @@ monorepo use independent Semantic Versions.
   slider; layout/tags cell gaps and the film countdown shrink on a nested
   viewport; a short system-UI list keeps a thumb that fits its track and a
   tiny query field tightens its lead; tab cells close their gap on a short
-  strip; the screenshot toolbar sits closer to a tiny selection.
+  strip; the screenshot toolbar sits closer to a tiny selection. Exposé
+  titles sit closer to a short thumbnail; a narrow tab cell keeps more of
+  its title; query/selection corners and the list scrollbar thin with the
+  card; minimized-window previews cap below 320×240 on a nested output.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

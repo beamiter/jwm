@@ -66,8 +66,24 @@ const QUERY_LEAD: f32 = 16.0;
 const QUERY_TEXT_LEAD: f32 = 8.0;
 /// Corner radius of the query field.
 pub(crate) const QUERY_RADIUS: f32 = 10.0;
+#[must_use]
+pub(crate) fn query_radius(field_h: f32) -> f32 {
+    if field_h.is_finite() && field_h > 0.0 && field_h < 2.0 * QUERY_RADIUS {
+        QUERY_RADIUS.min(field_h * 0.4).max(2.0).min(field_h * 0.5)
+    } else {
+        QUERY_RADIUS
+    }
+}
 /// Corner radius of the selection pill.
 pub(crate) const SELECTION_RADIUS: f32 = 8.0;
+#[must_use]
+pub(crate) fn selection_radius(row_h: f32) -> f32 {
+    if row_h.is_finite() && row_h > 0.0 && row_h < 2.0 * SELECTION_RADIUS {
+        SELECTION_RADIUS.min(row_h * 0.35).max(2.0).min(row_h * 0.5)
+    } else {
+        SELECTION_RADIUS
+    }
+}
 /// How far the selection pill bleeds into the padding on each side, so the
 /// highlight reads as a row of the card rather than a box around the text.
 const SELECTION_BLEED: f32 = 8.0;
@@ -88,6 +104,13 @@ const WIDTH_STEP: f32 = 40.0;
 pub(crate) const DIVIDER_H: f32 = 1.0;
 /// Width of the scroll indicator.
 const SCROLLBAR_W: f32 = 3.0;
+fn scrollbar_w(pad: f32) -> f32 {
+    if pad.is_finite() && pad > 0.0 && pad < 6.0 * SCROLLBAR_W {
+        SCROLLBAR_W.min(pad * 0.2).max(1.5)
+    } else {
+        SCROLLBAR_W
+    }
+}
 /// Shortest the scroll thumb may be drawn, so a long list still shows one.
 const SCROLLBAR_MIN_THUMB: f32 = 20.0;
 /// Corner radius of the scroll track and thumb: a capsule.
@@ -550,8 +573,9 @@ pub(crate) fn contents(
         if let Some(scroll) = scroll.filter(Scroll::overflows) {
             // Centred in the right-hand padding, clear of the selection pill's
             // bleed, so the list itself keeps its full width.
-            let track_x = x + panel_w - pad * 0.5 - SCROLLBAR_W * 0.5;
-            let track = [track_x, items_y, SCROLLBAR_W, items_h];
+            let sbw = scrollbar_w(pad);
+            let track_x = x + panel_w - pad * 0.5 - sbw * 0.5;
+            let track = [track_x, items_y, sbw, items_h];
             let span = (scroll.visible as f32 / scroll.total as f32) * items_h;
             let min_thumb = if items_h < 2.0 * SCROLLBAR_MIN_THUMB {
                 SCROLLBAR_MIN_THUMB.min(items_h * 0.4).max(6.0).min(items_h)
@@ -565,7 +589,7 @@ pub(crate) fn contents(
             out.scroll_thumb = Some([
                 track_x,
                 items_y + progress * (items_h - thumb_h),
-                SCROLLBAR_W,
+                sbw,
                 thumb_h,
             ]);
         }
@@ -1014,6 +1038,17 @@ mod tests {
         assert!(text[1] > field[1]);
         assert!(text[1] < field[1] + field[3]);
         assert!(text[1] - field[1] < QUERY_TEXT_LEAD);
+    }
+
+    #[test]
+    fn query_and_selection_radii_shrink_on_short_rows() {
+        assert_eq!(query_radius(38.0), QUERY_RADIUS);
+        assert!(query_radius(12.0) < QUERY_RADIUS);
+        assert!(query_radius(12.0) >= 2.0);
+        assert_eq!(selection_radius(28.0), SELECTION_RADIUS);
+        assert!(selection_radius(10.0) < SELECTION_RADIUS);
+        assert_eq!(scrollbar_w(30.0), SCROLLBAR_W);
+        assert!(scrollbar_w(8.0) < SCROLLBAR_W);
     }
 
     #[test]

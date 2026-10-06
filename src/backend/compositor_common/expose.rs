@@ -132,7 +132,11 @@ pub(crate) fn expose_label_rect(
     if !finite || thumb_w <= 0.0 || thumb_h <= 0.0 {
         return None;
     }
-    let inset = EXPOSE_LABEL_TOP_INSET.min(thumb_h.max(0.0));
+    let inset = if thumb_h.is_finite() && thumb_h > 0.0 && thumb_h < 8.0 * EXPOSE_LABEL_TOP_INSET {
+        EXPOSE_LABEL_TOP_INSET.min(thumb_h * 0.12).max(1.0).min(thumb_h)
+    } else {
+        EXPOSE_LABEL_TOP_INSET.min(thumb_h.max(0.0))
+    };
     let w = text_w.max(0.0).min(thumb_w);
     let x = if text_w > thumb_w {
         thumb_x
@@ -406,7 +410,7 @@ mod tests {
         let [lx, ly, lw, lh] =
             expose_label_rect(10.0, 20.0, 40.0, 8.0, 200.0, 20.0).expect("clipped");
         assert_eq!(lx, 10.0);
-        assert_eq!(ly, 20.0 + EXPOSE_LABEL_TOP_INSET.min(8.0));
+        assert_eq!(ly, 20.0 + EXPOSE_LABEL_TOP_INSET.min(8.0 * 0.12).max(1.0));
         assert!(lw <= 40.0);
         assert!(lh <= 8.0);
         assert!(ly + lh <= 20.0 + 8.0 + 0.01);

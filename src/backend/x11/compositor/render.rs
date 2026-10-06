@@ -3127,7 +3127,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     fy,
                     fw,
                     fh,
-                    panel::QUERY_RADIUS,
+                    panel::query_radius(fh),
                     UiPalette::faded(
                         panel::query_field_fill(
                             ui.field,
@@ -3159,7 +3159,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     hover[1],
                     hover[2],
                     hover[3],
-                    panel::SELECTION_RADIUS,
+                    panel::selection_radius(hover[3]),
                     [
                         accent[0],
                         accent[1],
@@ -3185,7 +3185,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     pill[1],
                     pill[2],
                     pill[3],
-                    panel::SELECTION_RADIUS,
+                    panel::selection_radius(pill[3]),
                     [
                         accent[0],
                         accent[1],

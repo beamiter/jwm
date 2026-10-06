@@ -256,7 +256,12 @@ pub fn title_budget(cell_width: f32) -> u32 {
     if !cell_width.is_finite() {
         return TITLE_MIN_WIDTH as u32;
     }
-    let inner = (cell_width - TITLE_PADDING).max(0.0);
+    let pad = if cell_width.is_finite() && cell_width > TITLE_PADDING && cell_width < 4.0 * TITLE_PADDING {
+        TITLE_PADDING.min(cell_width * 0.1).max(4.0)
+    } else {
+        TITLE_PADDING
+    };
+    let inner = (cell_width - pad).max(0.0);
     if inner <= 0.0 {
         return cell_width.max(1.0) as u32;
     }
@@ -801,6 +806,8 @@ mod tests {
     #[test]
     fn a_title_never_gets_a_negative_budget() {
         assert_eq!(title_budget(200.0), 188);
+        assert!(title_budget(40.0) > title_budget(10.0));
+        assert!(title_budget(40.0) as f32 > 40.0 - TITLE_PADDING);
         assert_eq!(title_budget(10.0), 10);
         assert_eq!(title_budget(0.0), 1);
         assert_eq!(title_budget(f32::NAN), TITLE_MIN_WIDTH as u32);

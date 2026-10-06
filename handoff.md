@@ -100,6 +100,10 @@
 | 121 | 矮查询框收紧 lead / 文字 inset | `query_field_h` / `QUERY_TEXT_LEAD` |
 | 122 | 矮标签条相邻格间距缩小 | `window_tabs::cell_gap` |
 | 123 | 小选区截图工具条贴得更近 | `SELECTION_GAP` |
+| 124 | 矮 Exposé 标题 inset 随缩略图高度缩小 | `expose_label_rect` |
+| 125 | 窄 tab 标题 padding 随格子缩小 | `title_budget` |
+| 126 | 矮查询/选中圆角与窄 pad 滚动条变细 | `query_radius` / `scrollbar_w` |
+| 127 | 嵌套输出最小化预览低于 320×240 上限 | `preview_rect` cap |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

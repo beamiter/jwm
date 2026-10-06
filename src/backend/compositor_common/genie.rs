@@ -284,8 +284,24 @@ pub(crate) fn preview_rect(
     {
         return None;
     }
-    let fit = (PREVIEW_MAX_WIDTH / source_width)
-        .min(PREVIEW_MAX_HEIGHT / source_height)
+    let cap_w = if output_bounds.width.is_finite()
+        && output_bounds.width > 0.0
+        && output_bounds.width < 2.0 * PREVIEW_MAX_WIDTH
+    {
+        PREVIEW_MAX_WIDTH.min(output_bounds.width * 0.35).max(24.0)
+    } else {
+        PREVIEW_MAX_WIDTH
+    };
+    let cap_h = if output_bounds.height.is_finite()
+        && output_bounds.height > 0.0
+        && output_bounds.height < 2.0 * PREVIEW_MAX_HEIGHT
+    {
+        PREVIEW_MAX_HEIGHT.min(output_bounds.height * 0.4).max(16.0)
+    } else {
+        PREVIEW_MAX_HEIGHT
+    };
+    let fit = (cap_w / source_width)
+        .min(cap_h / source_height)
         .min(output_bounds.width / source_width)
         .min(output_bounds.height / source_height)
         .min(1.0);
@@ -610,5 +626,21 @@ mod tests {
             MAX_MINIMIZED_VISUAL_BYTES
         ));
         assert_eq!(estimated_visual_bytes(3840.0, 2160.0), 33_177_600);
+    }
+
+    #[test]
+    fn a_nested_output_caps_the_preview_below_the_desktop_max() {
+        let nested = preview_rect(
+            CompositorRect::new(10.0, 10.0, 40.0, 24.0),
+            1600.0,
+            900.0,
+            CompositorRect::new(0.0, 0.0, 400.0, 300.0),
+            1.0,
+        )
+        .unwrap();
+        assert!(nested.width < PREVIEW_MAX_WIDTH);
+        assert!(nested.height < PREVIEW_MAX_HEIGHT);
+        assert!(nested.x + nested.width <= 400.0 + 0.01);
+        assert!(nested.y + nested.height <= 300.0 + 0.01);
     }
 }
