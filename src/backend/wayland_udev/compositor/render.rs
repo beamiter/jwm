@@ -8449,7 +8449,7 @@ impl WaylandCompositor {
                 layout.dot[1],
                 layout.dot[2],
                 layout.dot[3],
-                indicator::CHIP_DOT / 2.0,
+                layout.dot[2].min(layout.dot[3]) * 0.5,
                 rec_dot,
             );
 
@@ -8589,7 +8589,7 @@ impl WaylandCompositor {
                 layout.dot[1],
                 layout.dot[2],
                 layout.dot[3],
-                indicator::CHIP_DOT / 2.0,
+                layout.dot[2].min(layout.dot[3]) * 0.5,
                 indicator::DOT_COLOR,
             );
 

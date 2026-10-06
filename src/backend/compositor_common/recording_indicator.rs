@@ -75,6 +75,22 @@ pub(crate) const DOT_COLOR: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
 const DOT_PULSE_HZ: f32 = 1.0;
 const DOT_ALPHA_FLOOR: f32 = 0.45;
 
+fn rec_dot(chip_h: f32) -> f32 {
+    if chip_h.is_finite() && chip_h > 0.0 && chip_h < 4.0 * CHIP_DOT {
+        CHIP_DOT.min(chip_h * 0.35).max(3.0).min(chip_h)
+    } else {
+        CHIP_DOT
+    }
+}
+
+fn rec_dot_gap(chip_w: f32) -> f32 {
+    if chip_w.is_finite() && chip_w > 0.0 && chip_w < 8.0 * CHIP_DOT_GAP {
+        CHIP_DOT_GAP.min(chip_w * 0.04).max(2.0)
+    } else {
+        CHIP_DOT_GAP
+    }
+}
+
 /// Opacity of the recording / mic dot at `elapsed`. Layout is independent of
 /// this — only the fill alpha moves.
 #[must_use]
@@ -149,14 +165,16 @@ pub(crate) fn recording_indicator_layout(
     let x = (screen_w - margin_x - chip_w).max(0.0);
     let y = (screen_h - margin_y - chip_h).max(0.0);
     let inner_w = (chip_w - 2.0 * pad_x).max(0.0);
-    let (dot_w, text_draw_w, text_x_off) = if inner_w >= CHIP_DOT + CHIP_DOT_GAP {
+    let dot = rec_dot(chip_h);
+    let gap = rec_dot_gap(chip_w);
+    let (dot_w, text_draw_w, text_x_off) = if inner_w >= dot + gap {
         (
-            CHIP_DOT.min(chip_h),
-            (inner_w - CHIP_DOT - CHIP_DOT_GAP).min(text_w),
-            pad_x + CHIP_DOT + CHIP_DOT_GAP,
+            dot.min(chip_h),
+            (inner_w - dot - gap).min(text_w),
+            pad_x + dot + gap,
         )
-    } else if inner_w >= CHIP_DOT * 0.5 {
-        (inner_w.min(chip_h).min(CHIP_DOT), 0.0, pad_x)
+    } else if inner_w >= dot * 0.5 {
+        (inner_w.min(chip_h).min(dot), 0.0, pad_x)
     } else {
         (0.0, inner_w.min(text_w), pad_x)
     };
@@ -386,7 +404,11 @@ mod tests {
         // Too short for both pills plus the gap: the MIC chip pins to the
         // top edge (fully visible) instead of sliding off-screen.
         assert_eq!(mic.chip[1], 0.0);
-        assert_eq!(mic.dot[1], (mic.chip[3] - CHIP_DOT) / 2.0);
+        assert_eq!(mic.dot[1], (mic.chip[3] - mic.dot[3]) / 2.0);
+        let squat = recording_indicator_layout(80.0, 16.0, 40.0, 8.0);
+        assert!(squat.dot[2] < CHIP_DOT);
+        assert!(squat.dot[2] >= 3.0);
+        assert!(squat.dot[2] <= squat.chip[3] + 0.01);
         let rec = recording_indicator_layout(1920.0, 64.0, 60.0, 19.0);
         let mic = mic_indicator_layout(1920.0, 64.0, 48.0, 19.0, Some(rec.chip[3]));
         let gap = rec.chip[1] - (mic.chip[1] + mic.chip[3]);

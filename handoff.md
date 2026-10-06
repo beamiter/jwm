@@ -104,6 +104,7 @@
 | 125 | 窄 tab 标题 padding 随格子缩小 | `title_budget` |
 | 126 | 矮查询/选中圆角与窄 pad 滚动条变细 | `query_radius` / `scrollbar_w` |
 | 127 | 嵌套输出最小化预览低于 320×240 上限 | `preview_rect` cap |
+| 128 | REC/MIC 红点随矮芯片缩小 | `rec_dot`；两边用 `layout.dot` 半径 |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 
