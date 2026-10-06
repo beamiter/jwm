@@ -7883,17 +7883,20 @@ impl WaylandCompositor {
         // Title in the brightest ink, body one step down. A known sender is
         // baked into the title texture as a dimmer line above it, so the draw
         // pass — and every card without a sender — needs no sender case.
-        let title = fit(&toast.title, toast_layout::MAX_TEXT_WIDTH_PX);
+        let title = fit(&toast.title, toast_layout::max_text_width(self.screen_w as f32));
         set.text[0] = if toast.app.is_empty() {
             unsafe { rasterize_toast_text(gl, &title, description, size, ui.value_ink) }
         } else {
-            let sender = fit(&toast.app, toast_layout::MAX_TEXT_WIDTH_PX);
+            let sender = fit(&toast.app, toast_layout::max_text_width(self.screen_w as f32));
             unsafe { rasterize_toast_title_with_sender(gl, &sender, &title, description, size, ui) }
         };
-        let body = fit(&toast.body, toast_layout::MAX_TEXT_WIDTH_PX);
+        let body = fit(&toast.body, toast_layout::max_text_width(self.screen_w as f32));
         set.text[1] = unsafe { rasterize_toast_text(gl, &body, description, size, ui.label_ink) };
         for action in &toast.actions {
-            let text = fit(&action.label, toast_layout::MAX_ACTION_LABEL_WIDTH_PX);
+            let text = fit(
+                &action.label,
+                toast_layout::max_action_label_width(self.screen_w as f32),
+            );
             set.buttons
                 .push(unsafe { rasterize_toast_text(gl, &text, description, size, ui.chip_ink) });
         }
@@ -8017,7 +8020,7 @@ impl WaylandCompositor {
                     .max(toast::action_row_width(button_widths))
                     .clamp(
                         toast::min_text_width(self.screen_w as f32),
-                        crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX as f32,
+                        toast::max_text_width(self.screen_w as f32) as f32,
                     );
                 let target_w = content_w + pad_left + pad;
                 let mut target_h = 2.0 * pad + title_h;

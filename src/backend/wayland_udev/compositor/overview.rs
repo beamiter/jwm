@@ -93,7 +93,7 @@ fn max_title_texture_width(monitor_width: u32) -> u32 {
     let available = monitor_width
         .saturating_sub((TITLE_MARGIN * 2.0) as u32)
         .max(1);
-    (monitor_width / 3).max(120).min(available)
+    (monitor_width / 3).max(1).min(available)
 }
 
 /// Rotation that brings the selected prism face squarely toward the camera.
@@ -295,11 +295,24 @@ impl WaylandCompositor {
         let (mon_x, mon_y, mon_w, mon_h) = self.overview_monitor;
         let mw = mon_w.max(1) as f32;
         let mh = mon_h.max(1) as f32;
-        let margin = (mw * 0.055).clamp(24.0, 72.0);
+        let margin = if mw < 8.0 * 24.0 {
+            (mw * 0.055).clamp(1.0, (mw * 0.12).max(1.0))
+        } else {
+            (mw * 0.055).clamp(24.0, 72.0)
+        };
         let strip_x = mon_x as f32 + margin;
-        let strip_w = (mw - margin * 2.0).max(24.0);
-        let strip_h = 12.0f32;
-        let strip_y = mon_y as f32 + (mh - 34.0).max(12.0);
+        let strip_w = (mw - margin * 2.0).max(1.0);
+        let strip_h = if mh < 8.0 * 12.0 {
+            12.0_f32.min(mh * 0.08).max(2.0)
+        } else {
+            12.0
+        };
+        let strip_y = mon_y as f32
+            + if mh < 34.0 + strip_h {
+                (mh - strip_h - margin).max(0.0)
+            } else {
+                (mh - 34.0).max(0.0)
+            };
         let opacity = self.overview_opacity.clamp(0.0, 1.0);
 
         unsafe {
@@ -1244,7 +1257,7 @@ mod tests {
 
     #[test]
     fn title_atlas_cap_reserves_monitor_margins() {
-        for width in [200, 256, 1920, 7680] {
+        for width in [64, 80, 200, 256, 1920, 7680] {
             let atlas_width = max_title_texture_width(width);
             assert!(
                 atlas_width as f32 + TITLE_MARGIN * 2.0 <= width as f32,

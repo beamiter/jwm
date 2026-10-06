@@ -82,7 +82,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let textures: Vec<Option<(glow::Texture, u32, u32)>> = entries
             .iter()
             .map(|(title, target_w)| {
-                let max_w = (*target_w as u32).max(120);
+                let max_w = (*target_w as u32).max(1);
                 let text = compositor_font::fit_ui_text(title, font, size, max_w);
                 if text.is_empty() {
                     return None;

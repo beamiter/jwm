@@ -81,7 +81,11 @@ monorepo use independent Semantic Versions.
   toolbar keeps a smaller screen margin on a cramped output. Minimize
   previews no longer honour a 16/24px floor that overflowed a 40×24 nested
   viewport; the REC/MIC occupancy union and the system-UI icon column shrink
-  with the output; a narrow toast draws a thinner urgency stripe.
+  with the output; a narrow toast draws a thinner urgency stripe. Nested
+  toasts wrap to the output instead of baking a 440px line; layout/tags
+  title bands drop their 8px floor; the wallpaper side preview and tab
+  tooltips drop 24/20px floors; Wayland overview titles and the scroll
+  strip no longer honour 120/24px floors that overflowed a nested monitor.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

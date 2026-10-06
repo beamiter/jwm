@@ -119,6 +119,11 @@
 | 140 | REC/MIC union 在窄屏按实际像素估宽 | `recording_chrome_union` |
 | 141 | 窄系统 UI 图标列随面板缩小 | `row_icon_slot` |
 | 142 | 窄 toast 紧急色条变细 | `stripe_rect` |
+| 143 | 窄屏 toast 提前折行 | `max_text_width` / `max_action_label_width` |
+| 144 | 壁纸侧预览 24px 地板改为 8px | `preview_min_w` |
+| 145 | layout/tags 标题带 8px 地板改为 1px | `text_band` |
+| 146 | 极窄屏 tab tooltip 不再 20px 地板 | `tooltip_text_budget` |
+| 147 | Wayland 概览滚动条/标题不再 24/120px 地板 | `overview` strip + `max_title_texture_width` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

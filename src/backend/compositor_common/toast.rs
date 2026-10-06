@@ -41,6 +41,19 @@ pub(crate) fn min_text_width(screen_w: f32) -> f32 {
     MIN_TEXT_WIDTH_PX.min((screen_w - 48.0).max(40.0))
 }
 
+/// Inner text width ceiling for this output. Desktop 440 px; a nested
+/// viewport wraps earlier so the raster matches the painted card.
+#[must_use]
+pub(crate) fn max_text_width(screen_w: f32) -> u32 {
+    let floor = min_text_width(screen_w);
+    let cap = MAX_TEXT_WIDTH_PX as f32;
+    if screen_w.is_finite() && screen_w > 0.0 && screen_w < cap + 80.0 {
+        cap.min((screen_w - 48.0).max(floor)).max(floor) as u32
+    } else {
+        MAX_TEXT_WIDTH_PX
+    }
+}
+
 /// Action buttons a card shows at most: one row of chips must stay readable.
 pub(crate) const MAX_TOAST_ACTIONS: usize = 3;
 /// Longest button label kept after sanitation.
@@ -48,6 +61,19 @@ const MAX_ACTION_LABEL_CHARS: usize = 20;
 /// Widest rasterized button label. Three chips at this width plus their
 /// padding and gaps still fit the card's [`MAX_TEXT_WIDTH_PX`] ceiling.
 pub(crate) const MAX_ACTION_LABEL_WIDTH_PX: u32 = 120;
+
+/// Action-chip label ceiling: 120 px on a desktop, a share of the toast
+/// column on a nested output.
+#[must_use]
+pub(crate) fn max_action_label_width(screen_w: f32) -> u32 {
+    let cap = MAX_ACTION_LABEL_WIDTH_PX as f32;
+    let column = max_text_width(screen_w) as f32;
+    if screen_w.is_finite() && screen_w > 0.0 && screen_w < 8.0 * cap {
+        cap.min(column * 0.45).max(24.0).min(column.max(24.0)) as u32
+    } else {
+        MAX_ACTION_LABEL_WIDTH_PX
+    }
+}
 /// Chip height in the action row.
 pub(crate) const ACTION_BUTTON_H: f32 = 24.0;
 /// Horizontal padding inside a chip, per side.
@@ -1455,6 +1481,11 @@ mod tests {
         assert_eq!(min_text_width(1920.0), MIN_TEXT_WIDTH_PX);
         assert!(min_text_width(200.0) < MIN_TEXT_WIDTH_PX);
         assert_eq!(min_text_width(20.0), 40.0);
+        assert_eq!(max_text_width(1920.0), MAX_TEXT_WIDTH_PX);
+        assert!(max_text_width(200.0) < MAX_TEXT_WIDTH_PX);
+        assert!(max_text_width(200.0) as f32 >= min_text_width(200.0));
+        assert_eq!(max_action_label_width(1920.0), MAX_ACTION_LABEL_WIDTH_PX);
+        assert!(max_action_label_width(200.0) < MAX_ACTION_LABEL_WIDTH_PX);
         assert_eq!(card_pad(1920.0), (CARD_PAD, CARD_PAD_LEFT));
         let (p, pl) = card_pad(48.0);
         assert!(p < CARD_PAD && pl < CARD_PAD_LEFT);

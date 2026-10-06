@@ -578,7 +578,7 @@ fn sync_appear<K: Copy + PartialEq>(
 /// screen, so an output narrower than [`TOOLTIP_MAX_TEXT_WIDTH`] plus the
 /// pads shrinks the line's share: the text ellipsizes harder and the texture
 /// and chip genuinely fit. Widths too small for even a couple of characters
-/// floor at [`TITLE_MIN_WIDTH`]; a non-finite width keeps the full budget —
+/// still keep a 1 px budget so the chip can exist; a non-finite width keeps the full budget —
 /// [`tooltip_rect`] already refuses to place a chip on a screen it cannot
 /// measure.
 #[must_use]
@@ -589,7 +589,7 @@ pub fn tooltip_text_budget(screen_w: f32) -> u32 {
     TOOLTIP_MAX_TEXT_WIDTH.min(
         (screen_w - 2.0 * tooltip_pad_x(screen_w))
             .floor()
-            .max(TITLE_MIN_WIDTH) as u32,
+            .max(1.0) as u32,
     )
 }
 
@@ -1066,9 +1066,9 @@ mod tests {
         // Narrower: the pads come out of the screen first.
         assert_eq!(tooltip_text_budget(400.0), 380);
         assert_eq!(tooltip_text_budget(100.0), 80);
-        // Degenerate widths still fit a couple of characters.
-        assert_eq!(tooltip_text_budget(10.0), TITLE_MIN_WIDTH as u32);
-        assert_eq!(tooltip_text_budget(-50.0), TITLE_MIN_WIDTH as u32);
+        // Degenerate widths still keep a 1 px budget instead of a 20 px floor.
+        assert_eq!(tooltip_text_budget(10.0), 6);
+        assert_eq!(tooltip_text_budget(-50.0), 1);
         // An unmeasurable screen keeps the full budget: `tooltip_rect`
         // refuses to place a chip on it anyway.
         assert_eq!(tooltip_text_budget(f32::NAN), TOOLTIP_MAX_TEXT_WIDTH);

@@ -671,7 +671,7 @@ fn preview_gap(remain: f32) -> f32 {
 
 fn preview_min_w(vw: f32) -> f32 {
     if vw.is_finite() && vw > 0.0 && vw < 4.0 * PREVIEW_MIN_W {
-        PREVIEW_MIN_W.min(vw * 0.25).max(24.0)
+        PREVIEW_MIN_W.min(vw * 0.25).max(8.0)
     } else {
         PREVIEW_MIN_W
     }
@@ -679,7 +679,7 @@ fn preview_min_w(vw: f32) -> f32 {
 
 fn preview_min_h(vh: f32) -> f32 {
     if vh.is_finite() && vh > 0.0 && vh < 4.0 * PREVIEW_MIN_H {
-        PREVIEW_MIN_H.min(vh * 0.25).max(24.0)
+        PREVIEW_MIN_H.min(vh * 0.25).max(8.0)
     } else {
         PREVIEW_MIN_H
     }
@@ -1259,7 +1259,7 @@ mod tests {
         assert_eq!(tight[2], 1920.0 - PREVIEW_EDGE - 1472.0 - PREVIEW_GAP);
         assert!(side_preview_frame([0.0, 100.0, 1800.0, 400.0], viewport).is_none());
         // A very short viewport vetoes the frame on height instead.
-        assert!(side_preview_frame([0.0, 10.0, 400.0, 100.0], [0.0, 0.0, 1920.0, 20.0]).is_none());
+        assert!(side_preview_frame([0.0, 10.0, 400.0, 100.0], [0.0, 0.0, 1920.0, 12.0]).is_none());
         // A nested output still keeps a preview if the remaining strip is
         // usable; desktop 96px / 32px floors used to drop it entirely.
         let nested = side_preview_frame([8.0, 8.0, 160.0, 200.0], [0.0, 0.0, 320.0, 240.0]);

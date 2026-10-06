@@ -65,7 +65,7 @@ const HINT_H: f32 = 24.0;
 const GAP_Y: f32 = 14.0;
 fn text_band(natural: f32, screen_h: f32) -> f32 {
     if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * natural {
-        natural.min(screen_h * 0.1).max(8.0)
+        natural.min(screen_h * 0.1).max(1.0)
     } else {
         natural
     }
