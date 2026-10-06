@@ -310,6 +310,17 @@ pub const PAD_Y: f32 = 6.0;
 pub const SELECTION_GAP: f32 = 11.0;
 /// Air the track keeps from the edge of the screen.
 pub const SCREEN_MARGIN: f32 = 6.0;
+#[must_use]
+pub fn screen_margin(screen_w: f32, screen_h: f32) -> f32 {
+    let m = screen_w.min(screen_h);
+    if m.is_finite() && m > 0.0 && m < 12.0 * SCREEN_MARGIN {
+        SCREEN_MARGIN.min(m * 0.08).max(1.0)
+    } else if m.is_finite() && m > 0.0 {
+        SCREEN_MARGIN
+    } else {
+        SCREEN_MARGIN
+    }
+}
 /// How many buttons wide a text cell is.
 pub const LABEL_UNITS: f32 = 2.1;
 /// Fraction of a button the icon inside it occupies.
@@ -502,23 +513,24 @@ pub fn place_avoiding(
     let (w, h) = extent;
     let [sx, sy, sw, sh] = selection;
     let [scx, scy, scw, sch] = screen;
+    let margin = screen_margin(scw, sch);
     let w = if w.is_finite() {
-        w.min((scw - 2.0 * SCREEN_MARGIN).max(0.0)).max(0.0)
+        w.min((scw - 2.0 * margin).max(0.0)).max(0.0)
     } else {
         0.0
     };
     let h = if h.is_finite() {
-        h.min((sch - 2.0 * SCREEN_MARGIN).max(0.0)).max(0.0)
+        h.min((sch - 2.0 * margin).max(0.0)).max(0.0)
     } else {
         0.0
     };
 
-    let min_x = scx + SCREEN_MARGIN;
-    let max_x = (scx + scw - SCREEN_MARGIN - w).max(min_x);
+    let min_x = scx + margin;
+    let max_x = (scx + scw - margin - w).max(min_x);
     let x = (sx + sw * 0.5 - w * 0.5).clamp(min_x, max_x);
 
-    let min_y = scy + SCREEN_MARGIN;
-    let max_y = (scy + sch - SCREEN_MARGIN - h).max(min_y);
+    let min_y = scy + margin;
+    let max_y = (scy + sch - margin - h).max(min_y);
     let sel_gap = if sh.is_finite() && sh > 0.0 && sh < 8.0 * SELECTION_GAP {
         SELECTION_GAP.min(sh * 0.2).max(2.0)
     } else {
@@ -1675,8 +1687,8 @@ mod tests {
             [0.0, 0.0, 80.0, 50.0],
             (200.0, 90.0),
         );
-        assert!(bar[2] <= 80.0 - 2.0 * SCREEN_MARGIN + 1e-3);
-        assert!(bar[3] <= 50.0 - 2.0 * SCREEN_MARGIN + 1e-3);
+        assert!(bar[2] <= 80.0 - 2.0 * screen_margin(80.0, 50.0) + 1e-3);
+        assert!(bar[3] <= 50.0 - 2.0 * screen_margin(80.0, 50.0) + 1e-3);
         assert!(bar[0] >= 0.0 && bar[1] >= 0.0);
         assert!(bar[0] + bar[2] <= 80.0 + 1e-3);
         assert!(bar[1] + bar[3] <= 50.0 + 1e-3);
@@ -1865,6 +1877,9 @@ mod tests {
         assert!(label_font_size(MIN_BUTTON_SIZE) >= 7.0);
         assert_eq!(pill_radius(30.0), 15.0);
         assert_eq!(pill_radius(f32::NAN), 0.0);
+        assert_eq!(screen_margin(1920.0, 1080.0), SCREEN_MARGIN);
+        assert!(screen_margin(80.0, 50.0) < SCREEN_MARGIN);
+        assert!(screen_margin(80.0, 50.0) >= 1.0);
     }
 
     #[test]

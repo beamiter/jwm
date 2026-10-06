@@ -358,6 +358,13 @@ impl UiPalette {
         radius.max(0.0)
     }
 
+    /// Chip corner radius that cannot exceed half the painted pill's height.
+    #[must_use]
+    pub(crate) fn chip_radius_for(&self, height: f32) -> f32 {
+        let h = if height.is_finite() { height.max(0.0) } else { 0.0 };
+        self.chip_radius.min(h * 0.5)
+    }
+
     /// One of the palette's text colors as a fill color, so a surface drawn
     /// with the ink of the labels beside it stays in step with the theme.
     pub(crate) fn ink(color: [u8; 4], alpha: f32) -> [f32; 4] {
@@ -1171,6 +1178,15 @@ mod tests {
             assert!((short - 30.0 * STATUS_BAR_SHEET_RADIUS_HEIGHT_FRACTION).abs() < 1e-6);
             assert!(short < palette.toast_radius);
         }
+    }
+
+    #[test]
+    fn a_short_chip_cannot_round_past_a_stadium() {
+        let glass = UiTheme::Glass.palette();
+        assert_eq!(glass.chip_radius_for(40.0), glass.chip_radius);
+        assert!(glass.chip_radius_for(8.0) < glass.chip_radius);
+        assert_eq!(glass.chip_radius_for(8.0), 4.0);
+        assert_eq!(glass.chip_radius_for(0.0), 0.0);
     }
 
     /// A bar the user already asked to be square, or one whose height the

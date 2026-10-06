@@ -329,6 +329,22 @@ pub(crate) fn query_caret_rect(
     [x, y, w, h]
 }
 
+/// Origin of a lock card of `panel_w`×`panel_h` inside `viewport`.
+///
+/// Centred when there is room. A desktop 16px floor used to un-centre the
+/// card and, on a nested output whose leftover slack was under 32px, shove
+/// it off the right or bottom edge.
+#[must_use]
+pub(crate) fn lock_card_origin(viewport: Rect, panel_w: f32, panel_h: f32) -> [f32; 2] {
+    let [vx, vy, vw, vh] = viewport;
+    let pw = if panel_w.is_finite() { panel_w.max(0.0) } else { 0.0 };
+    let ph = if panel_h.is_finite() { panel_h.max(0.0) } else { 0.0 };
+    [
+        vx + (vw - pw).max(0.0) * 0.5,
+        vy + (vh - ph).max(0.0) * 0.5,
+    ]
+}
+
 /// The input geometry paired with one painted card frame.
 ///
 /// This is cached by each compositor after layout. Pointer handling then asks
@@ -1441,6 +1457,20 @@ mod tests {
         assert!(short[2] < 2.0);
         assert!(short[2] >= 1.0);
         assert!(short[0] + short[2] <= 90.0);
+    }
+
+    #[test]
+    fn a_lock_card_stays_inside_a_nested_output() {
+        let [x, y] = lock_card_origin([0.0, 0.0, 1920.0, 1080.0], 400.0, 300.0);
+        assert!((x - (1920.0 - 400.0) * 0.5).abs() < 0.01);
+        assert!((y - (1080.0 - 300.0) * 0.5).abs() < 0.01);
+        let [x, y] = lock_card_origin([10.0, 20.0, 80.0, 60.0], 70.0, 50.0);
+        assert_eq!(x, 10.0 + 5.0);
+        assert_eq!(y, 20.0 + 5.0);
+        assert!(x + 70.0 <= 10.0 + 80.0 + 0.01);
+        assert!(y + 50.0 <= 20.0 + 60.0 + 0.01);
+        let [x, y] = lock_card_origin([0.0, 0.0, 64.0, 48.0], 80.0, 60.0);
+        assert_eq!((x, y), (0.0, 0.0));
     }
 
     #[test]

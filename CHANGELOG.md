@@ -76,6 +76,9 @@ monorepo use independent Semantic Versions.
   follow the same rule. A selected layout/tags cell on a nested overview
   lifts by less than 12% so it cannot swallow a neighbour; tag number
   insets follow the label band; a short query field draws a thinner caret.
+  The lock card centres without a 16px floor that shoved it off a nested
+  output; HUD and toast chips cannot round past a stadium; the screenshot
+  toolbar keeps a smaller screen margin on a cramped output.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

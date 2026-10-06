@@ -112,6 +112,9 @@
 | 133 | 小格子选中抬升小于 12% | `selected_scale`；hit 与绘制共用 |
 | 134 | tags 标签垂直 inset 随 label 带缩小 | `label_offset` |
 | 135 | 矮查询框 caret 变细 | `query_caret_rect` |
+| 136 | 锁屏卡不再 16px 地板挤出嵌套输出 | `lock_card_origin` |
+| 137 | HUD/toast chip 圆角随高度不超过半高 | `chip_radius_for` |
+| 138 | 窄屏截图工具条 screen_margin 缩小 | `screen_margin` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

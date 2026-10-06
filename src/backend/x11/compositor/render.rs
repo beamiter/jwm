@@ -1371,7 +1371,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     py,
                     pw,
                     ph,
-                    ui.chip_radius,
+                    ui.chip_radius_for(ph),
                     UiPalette::faded(ui.chip, content_a),
                 );
             }
@@ -2948,10 +2948,8 @@ impl<C: CompositorConnection> Compositor<C> {
             (w, h, r_top, r, opened * opened)
         };
         let (x, y) = if overlay.locked {
-            (
-                viewport_x + ((viewport_w - panel_w) * 0.5).max(16.0),
-                viewport_y + ((viewport_h - panel_h) * 0.5).max(16.0),
-            )
+            let [ox, oy] = panel::lock_card_origin(viewport, panel_w, panel_h);
+            (ox, oy)
         } else {
             let [x, y, ..] = dock.contained_rect(panel_w, panel_h, 0.0);
             (x, y)
@@ -3660,7 +3658,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         rect[1],
                         rect[2],
                         rect[3],
-                        ui.chip_radius,
+                        ui.chip_radius_for(rect[3]),
                         fill,
                     );
                     self.sysui_stroke_rounded(
@@ -3668,7 +3666,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         rect[1],
                         rect[2],
                         rect[3],
-                        ui.chip_radius,
+                        ui.chip_radius_for(rect[3]),
                         1.0,
                         [accent[0], accent[1], accent[2], 0.8 * content_a],
                     );
