@@ -41,6 +41,13 @@ fn card_pad(w: f32) -> f32 {
 }
 /// Vertical breathing room between bands.
 const GAP: f32 = 16.0;
+fn stack_gap(panel_h: f32) -> f32 {
+    if panel_h.is_finite() && panel_h > 0.0 && panel_h < 12.0 * GAP {
+        GAP.min(panel_h * 0.05).max(4.0)
+    } else {
+        GAP
+    }
+}
 /// Inset of the query text inside its field.
 const QUERY_PAD: f32 = 12.0;
 fn query_inset(inner_w: f32) -> f32 {
@@ -488,8 +495,9 @@ pub(crate) fn contents(
     selected: Option<usize>,
     scroll: Option<Scroll>,
 ) -> PanelContents {
-    let [x, y, panel_w, _] = panel;
+    let [x, y, panel_w, panel_h] = panel;
     let pad = card_pad(panel_w);
+    let gap = stack_gap(panel_h);
     let bleed = SELECTION_BLEED.min(pad);
     let inner_w = (panel_w - 2.0 * pad).max(0.0);
     let qpad = query_inset(inner_w);
@@ -502,7 +510,7 @@ pub(crate) fn contents(
 
     let query_field_h = sizes.query_field_h();
     if query_field_h > 0.0 {
-        cy += GAP;
+        cy += gap;
         out.query_field = Some([x + pad, cy, inner_w, query_field_h]);
         out.query_text = Some([x + pad + qpad, cy + QUERY_TEXT_LEAD]);
         cy += query_field_h;
@@ -510,7 +518,7 @@ pub(crate) fn contents(
 
     let items_h = sizes.items.1;
     if items_h > 0.0 {
-        cy += GAP;
+        cy += gap;
         let items_y = cy;
         // The icon column sits between the card's padding and the text; the
         // whole block moves right by the reserved slot, so a panel without
@@ -552,12 +560,12 @@ pub(crate) fn contents(
     }
 
     if sizes.hint.1 > 0.0 {
-        cy += GAP;
+        cy += gap;
         out.hint = Some([x + pad, cy]);
         // A rule only where there is a list to separate the footer *from*.
         // On a card that is title-and-hint alone it would just be a line.
         if items_h > 0.0 {
-            out.divider = Some([x + pad, cy - GAP * 0.5, inner_w, DIVIDER_H]);
+            out.divider = Some([x + pad, cy - gap * 0.5, inner_w, DIVIDER_H]);
         }
     }
 
@@ -1337,5 +1345,16 @@ mod tests {
         }
         let field_w = max_content_width(80.0) as f32;
         assert!(query_inset(field_w) * 2.0 < field_w);
+    }
+
+    #[test]
+    fn a_short_card_tightens_the_stack_gap() {
+        let s = sizes((40.0, 24.0), (200.0, 22.0), (300.0, 80.0), (80.0, 16.0));
+        let squat = contents([0.0, 0.0, 400.0, 120.0], &s, 4, Some(0), None);
+        let tall = contents([0.0, 0.0, 400.0, 600.0], &s, 4, Some(0), None);
+        let squat_items = squat.items.unwrap()[1];
+        let tall_items = tall.items.unwrap()[1];
+        assert!(squat_items < tall_items, "bands should pack on a short card");
+        assert!(squat.query_field.unwrap()[1] < tall.query_field.unwrap()[1]);
     }
 }

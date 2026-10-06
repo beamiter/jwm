@@ -82,6 +82,7 @@
 | 103 | 最小化预览 gap 随矮输出缩小 | `genie::preview_rect` |
 | 104 | layout 胶片条标题带随矮屏缩小 | `text_band` / `gap_y` |
 | 105 | tags overview 标题带随矮屏缩小 | 同 |
+| 106 | 矮系统面板收紧 band 间距 | `stack_gap` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 
