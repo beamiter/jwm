@@ -36,6 +36,10 @@ monorepo use independent Semantic Versions.
   than the output is clamped into it. Exposé titles clip to the in-flight
   thumbnail; a short debug HUD drops the meter instead of painting past the
   island; wallpaper side-preview letterboxes stay inside a sub-pixel frame.
+  A dropped HUD chip no longer reprints its label at the origin; tab titles
+  shrink with a tiny cell instead of honouring a 20px/8pt floor; toasts that
+  would leave the output are not painted; capture handles on a flush pick
+  stay on screen.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

@@ -101,6 +101,31 @@ pub(crate) fn handle_rects(hole: (f32, f32, f32, f32)) -> Vec<(f32, f32, f32, f3
         .collect()
 }
 
+/// As [`handle_rects`], then clipped to the output so a pick flush with the
+/// edge does not paint grips off-screen. Handles that shrink below 2px drop.
+#[must_use]
+pub(crate) fn handle_rects_on_output(
+    hole: (f32, f32, f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    if !(screen_w.is_finite() && screen_h.is_finite()) || screen_w <= 0.0 || screen_h <= 0.0 {
+        return handle_rects(hole);
+    }
+    handle_rects(hole)
+        .into_iter()
+        .filter_map(|(x, y, w, h)| {
+            let x0 = x.max(0.0);
+            let y0 = y.max(0.0);
+            let x1 = (x + w).min(screen_w);
+            let y1 = (y + h).min(screen_h);
+            let nw = x1 - x0;
+            let nh = y1 - y0;
+            (nw >= 2.0 && nh >= 2.0).then_some((x0, y0, nw, nh))
+        })
+        .collect()
+}
+
 #[must_use]
 fn handle_size(w: f32, h: f32) -> f32 {
     let fitted = CAPTURE_HANDLE_SIZE.min(w / 3.0).min(h / 3.0);
@@ -191,5 +216,20 @@ mod tests {
             }
         }
         assert!(handle_rects((0.0, 0.0, 2.0, 2.0)).is_empty());
+    }
+
+    #[test]
+    fn handles_on_the_output_edge_stay_on_screen() {
+        let hole = (0.0, 0.0, 40.0, 30.0);
+        let raw = handle_rects(hole);
+        assert!(raw.iter().any(|(x, y, ..)| *x < 0.0 || *y < 0.0));
+        let clipped = handle_rects_on_output(hole, 100.0, 80.0);
+        assert!(!clipped.is_empty());
+        for (x, y, w, h) in clipped {
+            assert!(x >= 0.0 && y >= 0.0);
+            assert!(x + w <= 100.0 + 1e-3);
+            assert!(y + h <= 80.0 + 1e-3);
+            assert!(w >= 2.0 && h >= 2.0);
+        }
     }
 }

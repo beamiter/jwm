@@ -111,6 +111,16 @@ pub(crate) fn stack_next(top: f32, target_h: f32) -> f32 {
     top + target_h.max(0.0) + STACK_GAP
 }
 
+/// Whether a card of `card_h` starting at stack offset `top` still fits
+/// inside `limit` (the remaining travel from the dock to the output edge).
+#[must_use]
+pub(crate) fn stack_room(top: f32, card_h: f32, limit: f32) -> bool {
+    if ![top, card_h, limit].into_iter().all(f32::is_finite) {
+        return false;
+    }
+    top.max(0.0) + card_h.max(0.0) <= limit.max(0.0) + 0.5
+}
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(4000);
 const MIN_TIMEOUT: Duration = Duration::from_millis(800);
 const MAX_TIMEOUT: Duration = Duration::from_millis(30_000);
@@ -1327,6 +1337,9 @@ mod tests {
         assert!(stack_next(0.0, 0.0) > 0.0);
         // A bogus negative height cannot drag the cursor upward.
         assert_eq!(stack_next(10.0, -5.0), 10.0 + STACK_GAP);
+        assert!(stack_room(0.0, 80.0, 200.0));
+        assert!(!stack_room(150.0, 80.0, 200.0));
+        assert!(!stack_room(0.0, 80.0, f32::NAN));
     }
 
     #[test]

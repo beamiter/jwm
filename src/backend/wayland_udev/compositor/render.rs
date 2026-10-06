@@ -5632,11 +5632,14 @@ impl WaylandCompositor {
         gl.Uniform1f(text_opacity, 1.0);
         gl.ActiveTexture(ffi::TEXTURE0);
         let positions = [layout.title, layout.chip_text, layout.labels, layout.values];
-        for (slot, (px, py)) in positions.into_iter().enumerate() {
+        for (slot, (_px, _py)) in positions.into_iter().enumerate() {
             let Some((tex, w, h)) = self.hud_textures[slot] else {
                 continue;
             };
-            gl.Uniform4f(text_rect, px, py, w as f32, h as f32);
+            let Some([px, py, tw, th]) = layout.text_quad(slot, w as f32, h as f32) else {
+                continue;
+            };
+            gl.Uniform4f(text_rect, px, py, tw, th);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
@@ -7969,6 +7972,7 @@ impl WaylandCompositor {
             0.0
         };
         let mut top = toast::stack_start(self.osd_slot.get().is_some(), hud_h);
+        let stack_limit = dock.stack_limit();
 
         unsafe {
             gl.BindVertexArray(self.quad_vao);
@@ -8019,6 +8023,9 @@ impl WaylandCompositor {
                 }
                 if button_count > 0 {
                     target_h += toast::action_row_extra_h(button_widths, content_w);
+                }
+                if !toast::stack_room(top, target_h, stack_limit) {
+                    break;
                 }
 
                 let (card_w, card_h) =

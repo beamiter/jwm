@@ -59,6 +59,10 @@
 | 80 | Exposé 标题裁进飞行中的缩略图 | `expose_label_rect` |
 | 81 | 矮 HUD 丢掉 meter，文字不画出卡 | `HudLayout::placed` |
 | 82 | 壁纸预览 letterbox 不再用 1px 地板撑破细框 | `letterbox` |
+| 83 | 丢掉的 HUD chip 不再把标签画在 (9,4) | `HudLayout::text_quad` |
+| 84 | 窄 tab 标题预算/字号跟格子走 | `title_budget` / `title_font_size` |
+| 85 | toast 栈超出输出不再画 | `stack_room` / `IslandDock::stack_limit` |
+| 86 | 贴边 capture 把手夹进屏幕 | `handle_rects_on_output` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

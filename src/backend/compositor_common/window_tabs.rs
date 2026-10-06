@@ -217,8 +217,8 @@ pub fn pill_radius(height: f32) -> f32 {
 /// centres it.
 #[must_use]
 pub fn title_font_size(cell_height: f32) -> f32 {
-    if cell_height.is_finite() {
-        (cell_height * 0.58).clamp(8.0, 22.0)
+    if cell_height.is_finite() && cell_height > 0.0 {
+        (cell_height * 0.58).min(22.0).min(cell_height.max(1.0)).max(1.0)
     } else {
         DEFAULT_TITLE_FONT_SIZE
     }
@@ -233,7 +233,11 @@ pub fn title_budget(cell_width: f32) -> u32 {
     if !cell_width.is_finite() {
         return TITLE_MIN_WIDTH as u32;
     }
-    (cell_width - TITLE_PADDING).max(TITLE_MIN_WIDTH) as u32
+    let inner = (cell_width - TITLE_PADDING).max(0.0);
+    if inner <= 0.0 {
+        return cell_width.max(1.0) as u32;
+    }
+    inner.min(cell_width.max(0.0)).max(1.0) as u32
 }
 
 fn bar_is_drawable(bar: Rect) -> bool {
@@ -771,8 +775,8 @@ mod tests {
     #[test]
     fn a_title_never_gets_a_negative_budget() {
         assert_eq!(title_budget(200.0), 188);
-        assert_eq!(title_budget(10.0), TITLE_MIN_WIDTH as u32);
-        assert_eq!(title_budget(0.0), TITLE_MIN_WIDTH as u32);
+        assert_eq!(title_budget(10.0), 10);
+        assert_eq!(title_budget(0.0), 1);
         assert_eq!(title_budget(f32::NAN), TITLE_MIN_WIDTH as u32);
     }
 

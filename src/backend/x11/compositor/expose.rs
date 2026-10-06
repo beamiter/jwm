@@ -621,8 +621,12 @@ impl<C: CompositorConnection> Compositor<C> {
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             if interactive {
-                use crate::backend::compositor_common::capture_veil::handle_rects;
-                for (hx, hy, hw, hh) in handle_rects((x, y, width, height)) {
+                use crate::backend::compositor_common::capture_veil::handle_rects_on_output;
+                for (hx, hy, hw, hh) in handle_rects_on_output(
+                    (x, y, width, height),
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                ) {
                     self.gl
                         .uniform_2_f32(self.border_uniforms.size.as_ref(), hw, hh);
                     self.gl

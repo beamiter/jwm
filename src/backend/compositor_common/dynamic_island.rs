@@ -160,6 +160,18 @@ impl IslandDock {
         [x.clamp(viewport_x, max_x), y.clamp(viewport_y, max_y), w, h]
     }
 
+    /// How far a hanging stack may travel from the dock before it leaves
+    /// this output. Toasts that would start past this are not painted.
+    #[must_use]
+    pub(crate) fn stack_limit(&self) -> f32 {
+        let [_, viewport_y, _, viewport_h] = self.viewport;
+        if self.grows_up {
+            (self.top_y - viewport_y).max(0.0)
+        } else {
+            (viewport_y + viewport_h - self.top_y).max(0.0)
+        }
+    }
+
     /// Corner radii for a panel of `height` hanging at `y_offset` below the
     /// dock: `(top, bottom)`.
     ///
@@ -591,6 +603,7 @@ mod tests {
         assert_eq!(rect[1] + rect[3], 864.0);
         assert!(rect[1] < 864.0);
         assert_eq!(dock.radii(64.0, 24.0, 0.0), (24.0, 0.0));
+        assert_eq!(dock.stack_limit(), 864.0);
         let stacked = dock.rect(360.0, 64.0, 80.0);
         assert_eq!(stacked[1] + stacked[3] + 80.0, 864.0);
     }
@@ -603,6 +616,7 @@ mod tests {
         assert_eq!(rect[2], 320.0);
         assert!(rect[1] >= 0.0);
         assert!(rect[1] + rect[3] <= 200.0);
+        assert_eq!(dock.stack_limit(), 172.0);
     }
 
     #[test]

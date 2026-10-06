@@ -233,7 +233,11 @@ impl HudLayout {
         } else {
             (0.0, 0.0, 0.0, 0.0)
         };
-        let chip_text = (chip_pill.0 + 9.0, chip_pill.1 + 4.0);
+        let chip_text = if chip_pill.2 > 0.0 {
+            (chip_pill.0 + 9.0, chip_pill.1 + 4.0)
+        } else {
+            (0.0, 0.0)
+        };
         let meter_y = y + pad + header_h + gap;
         let remain = (y + h - meter_y).max(0.0);
         let meter_track = (
@@ -293,6 +297,38 @@ impl HudLayout {
         let [x, y, ..] = dock.contained_rect(measured.card.2, measured.card.3, 0.0);
         Self::new(ui, (x, y), title, chip, labels, values, meter)
     }
+
+    /// Painted quad for HUD text slot `0..=3` (title, chip, labels, values),
+    /// clipped to the island. `None` when that section is absent or would
+    /// land entirely off the card — so a dropped chip cannot reprint at (9, 4).
+    #[must_use]
+    pub(crate) fn text_quad(&self, slot: usize, tex_w: f32, tex_h: f32) -> Option<[f32; 4]> {
+        if slot == 1 && self.chip_pill.2 <= 0.0 {
+            return None;
+        }
+        let (px, py) = match slot {
+            0 => self.title,
+            1 => self.chip_text,
+            2 => self.labels,
+            3 => self.values,
+            _ => return None,
+        };
+        if !tex_w.is_finite() || !tex_h.is_finite() || tex_w <= 0.0 || tex_h <= 0.0 {
+            return None;
+        }
+        clip_quad([px, py, tex_w, tex_h], self.card)
+    }
+}
+
+fn clip_quad(quad: [f32; 4], into: Rect) -> Option<[f32; 4]> {
+    let (ix, iy, iw, ih) = into;
+    let x0 = quad[0].max(ix);
+    let y0 = quad[1].max(iy);
+    let x1 = (quad[0] + quad[2]).min(ix + iw);
+    let y1 = (quad[1] + quad[3]).min(iy + ih);
+    let w = x1 - x0;
+    let h = y1 - y0;
+    (w > 0.5 && h > 0.5).then_some([x0, y0, w, h])
 }
 
 #[cfg(test)]
@@ -487,5 +523,14 @@ mod tests {
         );
         assert!(squat.meter_track.3 <= 18.0);
         assert!(squat.labels.1 <= 18.0);
+        assert!(
+            squat.text_quad(1, 40.0, 16.0).is_none(),
+            "a dropped chip must not paint its label"
+        );
+        if let Some(title) = squat.text_quad(0, 80.0, 22.0) {
+            assert!(title[0] >= 0.0 && title[1] >= 0.0);
+            assert!(title[0] + title[2] <= 200.0 + 0.01);
+            assert!(title[1] + title[3] <= 18.0 + 0.01);
+        }
     }
 }

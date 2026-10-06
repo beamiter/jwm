@@ -825,8 +825,9 @@ impl WaylandCompositor {
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             if interactive {
-                use crate::backend::compositor_common::capture_veil::handle_rects;
-                for (hx, hy, hw, hh) in handle_rects((x, y, width, height)) {
+                use crate::backend::compositor_common::capture_veil::handle_rects_on_output;
+                for (hx, hy, hw, hh) in handle_rects_on_output((x, y, width, height), screen_w, screen_h)
+                {
                     gl.Uniform2f(self.border_uniforms.size, hw, hh);
                     gl.Uniform4f(self.border_uniforms.rect, hx, hy, hw, hh);
                     gl.Uniform1f(self.border_uniforms.border_width, hw.max(hh));

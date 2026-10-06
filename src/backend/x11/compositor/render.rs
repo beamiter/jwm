@@ -1454,16 +1454,19 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), content_a);
             self.gl.active_texture(glow::TEXTURE0);
             let positions = [layout.title, layout.chip_text, layout.labels, layout.values];
-            for (slot, (px, py)) in positions.into_iter().enumerate() {
+            for (slot, (_px, _py)) in positions.into_iter().enumerate() {
                 let Some((tex, w, h)) = self.hud_textures[slot] else {
+                    continue;
+                };
+                let Some([px, py, tw, th]) = layout.text_quad(slot, w as f32, h as f32) else {
                     continue;
                 };
                 self.gl.uniform_4_f32(
                     self.hud_text_uniforms.rect.as_ref(),
                     px,
                     py,
-                    w as f32,
-                    h as f32,
+                    tw,
+                    th,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -3552,6 +3555,7 @@ impl<C: CompositorConnection> Compositor<C> {
             0.0
         };
         let mut top = toast::stack_start(self.osd_slot.get().is_some(), hud_h);
+        let stack_limit = dock.stack_limit();
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -3588,6 +3592,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 if !button_widths.is_empty() {
                     target_h += toast::action_row_extra_h(&button_widths, content_w);
+                }
+                if !toast::stack_room(top, target_h, stack_limit) {
+                    break;
                 }
 
                 let (card_w, card_h) =
