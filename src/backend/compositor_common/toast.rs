@@ -605,7 +605,7 @@ pub(crate) fn action_row_layout(
         f32::MAX
     };
     let btn_h = if max_width.is_finite() && max_width > 0.0 && max_width < 4.0 * ACTION_BUTTON_H {
-        ACTION_BUTTON_H.min(max_width * 0.35).max(14.0)
+        ACTION_BUTTON_H.min(max_width * 0.35).max(8.0)
     } else {
         ACTION_BUTTON_H
     };
@@ -1405,6 +1405,9 @@ mod tests {
         let cramped = action_row_layout(&widths, 0.0, 0.0, 50.0);
         assert!(cramped.iter().all(|r| r[3] < ACTION_BUTTON_H));
         assert!(cramped.iter().all(|r| r[3] >= 14.0));
+        let tiny = action_row_layout(&widths, 0.0, 0.0, 30.0);
+        assert!(tiny.iter().all(|r| r[3] < 14.0));
+        assert!(tiny.iter().all(|r| r[3] >= 8.0));
     }
 
     #[test]

@@ -86,6 +86,8 @@ monorepo use independent Semantic Versions.
   title bands drop their 8px floor; the wallpaper side preview and tab
   tooltips drop 24/20px floors; Wayland overview titles and the scroll
   strip no longer honour 120/24px floors that overflowed a nested monitor.
+  Toast action chips on a 30px card can drop below 14px; film sprocket holes
+  still perforate a cell whose margin is under 2px.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

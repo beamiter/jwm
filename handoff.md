@@ -124,6 +124,8 @@
 | 145 | layout/tags 标题带 8px 地板改为 1px | `text_band` |
 | 146 | 极窄屏 tab tooltip 不再 20px 地板 | `tooltip_text_budget` |
 | 147 | Wayland 概览滚动条/标题不再 24/120px 地板 | `overview` strip + `max_title_texture_width` |
+| 148 | 极窄 toast 操作钮可低于 14px | `action_row_layout` |
+| 149 | 矮胶片格仍可打 sprocket 孔 | `sprockets` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

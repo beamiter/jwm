@@ -304,10 +304,10 @@ pub fn countdown_fill(track: Rect, t: f32) -> Rect {
 /// film margins. They run the length of the strip rather than per cell, so the
 /// perforation stays continuous across the cell gaps like real film.
 fn sprockets(x: f32, y: f32, w: f32, h: f32, margin: f32) -> Vec<Rect> {
-    if margin < 2.0 || h < 2.0 * margin || w <= 0.0 {
+    if margin < 1.0 || h < 2.0 * margin || w <= 0.0 {
         return Vec::new();
     }
-    let hole_h = (margin * 0.46).min(margin - 0.5).max(1.0);
+    let hole_h = (margin * 0.46).min(margin * 0.7).max(0.4);
     let hole_w = hole_h * 1.7;
     let pitch = hole_w * 2.1;
     let inset = (margin - hole_h) * 0.5;
@@ -686,6 +686,12 @@ mod tests {
         let bottom = g.sprockets.len() - top;
         assert_eq!(top, bottom, "perforation is symmetric");
         for hole in &g.sprockets {
+            assert!(hole[0] >= sx - 0.5 && hole[0] + hole[2] <= sx + sw + 0.5);
+            assert!(hole[1] >= sy && hole[1] + hole[3] <= sy + sh);
+        }
+        let squat = strip_geometry([0.0, 0.0, 120.0, 80.0], 4);
+        for hole in &squat.sprockets {
+            let [sx, sy, sw, sh] = squat.strip;
             assert!(hole[0] >= sx - 0.5 && hole[0] + hole[2] <= sx + sw + 0.5);
             assert!(hole[1] >= sy && hole[1] + hole[3] <= sy + sh);
         }
