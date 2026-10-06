@@ -112,20 +112,36 @@ pub(crate) fn expose_label_origin(
     thumb_w: f32,
     text_w: f32,
 ) -> Option<(f32, f32)> {
-    let finite =
-        thumb_x.is_finite() && thumb_y.is_finite() && thumb_w.is_finite() && text_w.is_finite();
-    if !finite {
+    expose_label_rect(thumb_x, thumb_y, thumb_w, f32::MAX, text_w, 1.0).map(|r| (r[0], r[1]))
+}
+
+/// As [`expose_label_origin`], plus a clip to the thumbnail's pixels so a
+/// flying-in cell cannot paint the name off its tile.
+#[must_use]
+pub(crate) fn expose_label_rect(
+    thumb_x: f32,
+    thumb_y: f32,
+    thumb_w: f32,
+    thumb_h: f32,
+    text_w: f32,
+    text_h: f32,
+) -> Option<[f32; 4]> {
+    let finite = [thumb_x, thumb_y, thumb_w, thumb_h, text_w, text_h]
+        .into_iter()
+        .all(f32::is_finite);
+    if !finite || thumb_w <= 0.0 || thumb_h <= 0.0 {
         return None;
     }
-    if text_w > thumb_w {
-        // Still flying in, or a thumbnail too narrow for the settled
-        // raster: keep the name visible, clipped to the pixels that exist.
-        return Some((thumb_x, thumb_y + EXPOSE_LABEL_TOP_INSET));
-    }
-    Some((
-        thumb_x + (thumb_w - text_w) * 0.5,
-        thumb_y + EXPOSE_LABEL_TOP_INSET,
-    ))
+    let inset = EXPOSE_LABEL_TOP_INSET.min(thumb_h.max(0.0));
+    let w = text_w.max(0.0).min(thumb_w);
+    let x = if text_w > thumb_w {
+        thumb_x
+    } else {
+        thumb_x + (thumb_w - w) * 0.5
+    };
+    let y = thumb_y + inset;
+    let h = text_h.max(0.0).min((thumb_y + thumb_h - y).max(0.0));
+    Some([x, y, w, h])
 }
 
 /// How far the exposé hover-brightened title ink mixes toward white.
@@ -387,6 +403,13 @@ mod tests {
         assert_eq!(x, 10.0);
         assert_eq!(y, 20.0 + EXPOSE_LABEL_TOP_INSET);
         assert!(expose_label_origin(0.0, 0.0, 61.0, 60.0).is_some());
+        let [lx, ly, lw, lh] =
+            expose_label_rect(10.0, 20.0, 40.0, 8.0, 200.0, 20.0).expect("clipped");
+        assert_eq!(lx, 10.0);
+        assert_eq!(ly, 20.0 + EXPOSE_LABEL_TOP_INSET.min(8.0));
+        assert!(lw <= 40.0);
+        assert!(lh <= 8.0);
+        assert!(ly + lh <= 20.0 + 8.0 + 0.01);
     }
 
     #[test]

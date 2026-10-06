@@ -33,7 +33,9 @@ monorepo use independent Semantic Versions.
   pixels that exist; toast urgency stripes drop on a card too narrow for
   the inset; OSD slider labels stay in the label zone; film sprockets and
   wireframe windows stay inside a shrunk cell; a screenshot toolbar taller
-  than the output is clamped into it.
+  than the output is clamped into it. Exposé titles clip to the in-flight
+  thumbnail; a short debug HUD drops the meter instead of painting past the
+  island; wallpaper side-preview letterboxes stay inside a sub-pixel frame.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

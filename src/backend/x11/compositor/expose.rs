@@ -1,6 +1,6 @@
 use super::{Compositor, SnapPreview, class_matches_exclude};
 use crate::backend::api::ExposeNavDirection;
-use crate::backend::compositor_common::expose::expose_label_origin;
+use crate::backend::compositor_common::expose::expose_label_rect;
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs::{self, TabGroup};
 use crate::backend::compositor_font;
@@ -250,17 +250,22 @@ impl<C: CompositorConnection> Compositor<C> {
                     let (tw, th) = (*tw as f32, *th as f32);
                     // Cells whose in-flight thumbnail is still narrower than
                     // the rasterised label draw nothing until they settle.
-                    let Some((lx, ly)) =
-                        expose_label_origin(entry.current_x, entry.current_y, entry.current_w, tw)
-                    else {
+                    let Some([lx, ly, lw, lh]) = expose_label_rect(
+                        entry.current_x,
+                        entry.current_y,
+                        entry.current_w,
+                        entry.current_h,
+                        tw,
+                        th,
+                    ) else {
                         continue;
                     };
                     self.gl.uniform_4_f32(
                         self.hud_text_uniforms.rect.as_ref(),
                         lx.round(),
                         ly.round(),
-                        tw,
-                        th,
+                        lw,
+                        lh,
                     );
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
                     self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

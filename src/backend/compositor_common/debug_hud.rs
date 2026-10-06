@@ -235,14 +235,24 @@ impl HudLayout {
         };
         let chip_text = (chip_pill.0 + 9.0, chip_pill.1 + 4.0);
         let meter_y = y + pad + header_h + gap;
-        let meter_track = (x + pad, meter_y, content_w, meter_h.min((h - (meter_y - y)).max(0.0)));
-        let fill_w = if meter <= 0.0 || meter_track.2 <= 0.0 {
+        let remain = (y + h - meter_y).max(0.0);
+        let meter_track = (
+            x + pad,
+            meter_y.min(y + h),
+            content_w,
+            if remain <= 0.0 {
+                0.0
+            } else {
+                meter_h.min(remain)
+            },
+        );
+        let fill_w = if meter <= 0.0 || meter_track.2 <= 0.0 || meter_track.3 <= 0.0 {
             0.0
         } else {
             (meter_track.2 * meter.clamp(0.0, 1.0)).max(meter_h.min(meter_track.2))
         };
         let meter_fill = (meter_track.0, meter_track.1, fill_w, meter_track.3);
-        let body_y = meter_y + meter_track.3 + gap;
+        let body_y = (meter_y + meter_track.3 + gap).min(y + h);
         Self {
             card,
             title: title_pos,
@@ -464,5 +474,18 @@ mod tests {
         assert!(layout.meter_track.0 >= box_.0);
         assert!(layout.meter_track.0 + layout.meter_track.2 <= box_.0 + box_.2 + 0.01);
         assert!(layout.meter_fill.2 <= layout.meter_track.2 + 0.01);
+        assert!(layout.meter_track.1 + layout.meter_track.3 <= box_.1 + box_.3 + 0.01);
+        assert!(layout.labels.1 <= box_.1 + box_.3 + 0.01);
+        let squat = HudLayout::placed(
+            ui,
+            (0.0, 0.0, 200.0, 18.0),
+            (80.0, 22.0),
+            (40.0, 16.0),
+            (80.0, 40.0),
+            (40.0, 40.0),
+            1.0,
+        );
+        assert!(squat.meter_track.3 <= 18.0);
+        assert!(squat.labels.1 <= 18.0);
     }
 }

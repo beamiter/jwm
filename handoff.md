@@ -56,6 +56,9 @@
 | 77 | OSD 滑条卡标签停在 label zone | `label_rect(..., reserve_bar)` |
 | 78 | 胶片齿孔与缩略图窗不再溢出缩小的格子 | `sprockets` / `window_rect` |
 | 79 | 截图工具条 extent 夹进屏幕 | `place_avoiding` |
+| 80 | Exposé 标题裁进飞行中的缩略图 | `expose_label_rect` |
+| 81 | 矮 HUD 丢掉 meter，文字不画出卡 | `HudLayout::placed` |
+| 82 | 壁纸预览 letterbox 不再用 1px 地板撑破细框 | `letterbox` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

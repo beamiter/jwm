@@ -2,7 +2,7 @@ use super::render::transform_for_encoded_srgb;
 use super::*;
 use crate::backend::api::ExposeNavDirection;
 use crate::backend::compositor_common::expose::{
-    brightened_title_ink, expose_grid_cols, expose_label_origin, move_expose_selection,
+    brightened_title_ink, expose_grid_cols, expose_label_rect, move_expose_selection,
 };
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs;
@@ -372,7 +372,7 @@ impl WaylandCompositor {
     /// hit-testing is untouched — the click path still sees only the entry
     /// geometry. Cells whose in-flight thumbnail is still narrower than the
     /// rasterised label draw nothing until they settle
-    /// ([`expose_label_origin`]).
+    /// ([`expose_label_rect`]).
     ///
     /// The hovered cell's label draws twice: the normal ink first, then its
     /// brighter copy (rasterised lazily by [`Self::ensure_expose_bright_title`]
@@ -417,11 +417,13 @@ impl WaylandCompositor {
                 if texture == 0 {
                     continue;
                 }
-                let (x, y, w, _) = expose_thumb_rect(entry, hover_scale);
-                let Some((lx, ly)) = expose_label_origin(x, y, w, tw as f32) else {
+                let (x, y, w, h) = expose_thumb_rect(entry, hover_scale);
+                let Some([lx, ly, lw, lh]) =
+                    expose_label_rect(x, y, w, h, tw as f32, th as f32)
+                else {
                     continue;
                 };
-                self.set_rect_uniform(gl, text_rect, lx.round(), ly.round(), tw as f32, th as f32);
+                self.set_rect_uniform(gl, text_rect, lx.round(), ly.round(), lw, lh);
                 gl.BindTexture(ffi::TEXTURE_2D, texture);
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
@@ -431,7 +433,7 @@ impl WaylandCompositor {
                 // as one label brightening rather than two texts.
                 if entry.is_hovered
                     && hover_p > 0.0
-                    && let Some(&Some((bright, bw, bh))) =
+                    && let Some(&Some((bright, _, _))) =
                         self.expose_title_bright_textures.get(index)
                     && bright != 0
                 {
@@ -441,8 +443,8 @@ impl WaylandCompositor {
                         text_rect,
                         lx.round(),
                         ly.round(),
-                        bw as f32,
-                        bh as f32,
+                        lw,
+                        lh,
                     );
                     gl.BindTexture(ffi::TEXTURE_2D, bright);
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);

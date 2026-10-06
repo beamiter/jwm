@@ -583,12 +583,15 @@ pub(crate) fn row_icon_frame(items: [f32; 2], row_height: f32, row: usize) -> Re
 /// draws nothing.
 #[must_use]
 pub(crate) fn letterbox(frame: Rect, img_w: f32, img_h: f32) -> Option<Rect> {
-    if frame[2] <= 0.0 || frame[3] <= 0.0 || img_w <= 0.0 || img_h <= 0.0 {
+    if ![frame[2], frame[3], img_w, img_h]
+        .into_iter()
+        .all(|v| v.is_finite() && v > 0.0)
+    {
         return None;
     }
     let scale = (frame[2] / img_w).min(frame[3] / img_h).min(1.0);
-    let w = (img_w * scale).max(1.0);
-    let h = (img_h * scale).max(1.0);
+    let w = (img_w * scale).min(frame[2]).max(0.0);
+    let h = (img_h * scale).min(frame[3]).max(0.0);
     Some([
         frame[0] + (frame[2] - w) * 0.5,
         frame[1] + (frame[3] - h) * 0.5,
@@ -1070,6 +1073,9 @@ mod tests {
         // Degenerate inputs draw nothing.
         assert_eq!(letterbox(frame, 0.0, 80.0), None);
         assert_eq!(letterbox([100.0, 50.0, 0.0, 360.0], 100.0, 80.0), None);
+        assert_eq!(letterbox(frame, f32::NAN, 80.0), None);
+        let tiny = letterbox([0.0, 0.0, 0.5, 0.5], 100.0, 80.0).unwrap();
+        assert!(tiny[2] <= 0.5 + 1e-6 && tiny[3] <= 0.5 + 1e-6);
     }
 
     #[test]
