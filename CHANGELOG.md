@@ -78,7 +78,10 @@ monorepo use independent Semantic Versions.
   insets follow the label band; a short query field draws a thinner caret.
   The lock card centres without a 16px floor that shoved it off a nested
   output; HUD and toast chips cannot round past a stadium; the screenshot
-  toolbar keeps a smaller screen margin on a cramped output.
+  toolbar keeps a smaller screen margin on a cramped output. Minimize
+  previews no longer honour a 16/24px floor that overflowed a 40×24 nested
+  viewport; the REC/MIC occupancy union and the system-UI icon column shrink
+  with the output; a narrow toast draws a thinner urgency stripe.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

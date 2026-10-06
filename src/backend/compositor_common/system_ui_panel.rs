@@ -155,6 +155,18 @@ pub(crate) const ROW_ICON_GAP: f32 = 8.0;
 /// payload carries row icons. Text-only panels pass 0.0 and keep exactly the
 /// geometry they had.
 pub(crate) const ROW_ICON_SLOT: f32 = ROW_ICON_PX + ROW_ICON_GAP;
+
+/// Icon column reserved on a panel this wide. Desktop 32px ate a nested card.
+#[must_use]
+pub(crate) fn row_icon_slot(panel_w: f32) -> f32 {
+    if panel_w.is_finite() && panel_w > 0.0 && panel_w < 8.0 * ROW_ICON_SLOT {
+        ROW_ICON_SLOT.min(panel_w * 0.12).max(0.0)
+    } else if panel_w.is_finite() && panel_w > 0.0 {
+        ROW_ICON_SLOT
+    } else {
+        0.0
+    }
+}
 /// Vertical margin inside a row before the icon is clamped smaller than
 /// [`ROW_ICON_PX`]; a very small font keeps the icon inside its own row.
 const ROW_ICON_PAD_Y: f32 = 2.0;
@@ -1397,6 +1409,9 @@ mod tests {
         let flush = row_icon_frame([10.0, 0.0], 28.0, 0);
         assert!(flush[0] >= 0.0);
         assert!(flush[0] + flush[2] <= 10.0 + ROW_ICON_PX);
+        assert_eq!(row_icon_slot(1920.0), ROW_ICON_SLOT);
+        assert!(row_icon_slot(80.0) < ROW_ICON_SLOT);
+        assert!(row_icon_slot(80.0) >= 0.0);
     }
 
     #[test]

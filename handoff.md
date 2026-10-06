@@ -115,6 +115,10 @@
 | 136 | 锁屏卡不再 16px 地板挤出嵌套输出 | `lock_card_origin` |
 | 137 | HUD/toast chip 圆角随高度不超过半高 | `chip_radius_for` |
 | 138 | 窄屏截图工具条 screen_margin 缩小 | `screen_margin` |
+| 139 | 极矮输出不再 16/24px 地板撑大 genie 预览 | `preview_rect` |
+| 140 | REC/MIC union 在窄屏按实际像素估宽 | `recording_chrome_union` |
+| 141 | 窄系统 UI 图标列随面板缩小 | `row_icon_slot` |
+| 142 | 窄 toast 紧急色条变细 | `stripe_rect` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

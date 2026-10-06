@@ -288,7 +288,7 @@ pub(crate) fn preview_rect(
         && output_bounds.width > 0.0
         && output_bounds.width < 2.0 * PREVIEW_MAX_WIDTH
     {
-        PREVIEW_MAX_WIDTH.min(output_bounds.width * 0.35).max(24.0)
+        PREVIEW_MAX_WIDTH.min(output_bounds.width * 0.35).max(1.0)
     } else {
         PREVIEW_MAX_WIDTH
     };
@@ -296,7 +296,7 @@ pub(crate) fn preview_rect(
         && output_bounds.height > 0.0
         && output_bounds.height < 2.0 * PREVIEW_MAX_HEIGHT
     {
-        PREVIEW_MAX_HEIGHT.min(output_bounds.height * 0.4).max(16.0)
+        PREVIEW_MAX_HEIGHT.min(output_bounds.height * 0.4).max(1.0)
     } else {
         PREVIEW_MAX_HEIGHT
     };
@@ -642,5 +642,21 @@ mod tests {
         assert!(nested.height < PREVIEW_MAX_HEIGHT);
         assert!(nested.x + nested.width <= 400.0 + 0.01);
         assert!(nested.y + nested.height <= 300.0 + 0.01);
+    }
+
+    #[test]
+    fn a_tiny_output_does_not_floor_the_preview_past_its_edge() {
+        let tiny = preview_rect(
+            CompositorRect::new(2.0, 2.0, 8.0, 6.0),
+            1600.0,
+            900.0,
+            CompositorRect::new(0.0, 0.0, 40.0, 24.0),
+            1.0,
+        )
+        .unwrap();
+        assert!(tiny.width <= 40.0 + 0.01);
+        assert!(tiny.height <= 24.0 + 0.01);
+        assert!(tiny.x >= 0.0 && tiny.x + tiny.width <= 40.0 + 0.01);
+        assert!(tiny.y >= 0.0 && tiny.y + tiny.height <= 24.0 + 0.01);
     }
 }

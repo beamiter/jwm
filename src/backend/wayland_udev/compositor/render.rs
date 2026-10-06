@@ -7388,7 +7388,7 @@ impl WaylandCompositor {
             // The column is reserved from the payload's first frame, so an
             // icon arriving later never moves the text.
             row_icons: if self.system_ui_row_icons.is_some() {
-                panel::ROW_ICON_SLOT
+                panel::row_icon_slot(viewport_w)
             } else {
                 0.0
             },

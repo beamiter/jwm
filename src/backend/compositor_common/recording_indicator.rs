@@ -254,11 +254,26 @@ pub(crate) fn recording_chrome_union(
     const TEXT_H: f32 = 14.0;
     const REC_TEXT_W: f32 = 88.0;
     const MIC_TEXT_W: f32 = 28.0;
+    let text_h = if screen_h.is_finite() && screen_h > 0.0 && screen_h < 8.0 * TEXT_H {
+        TEXT_H.min(screen_h * 0.12).max(6.0)
+    } else {
+        TEXT_H
+    };
+    let rec_w = if screen_w.is_finite() && screen_w > 0.0 && screen_w < 4.0 * REC_TEXT_W {
+        REC_TEXT_W.min(screen_w * 0.35).max(MIC_TEXT_W)
+    } else {
+        REC_TEXT_W
+    };
+    let mic_w = if screen_w.is_finite() && screen_w > 0.0 && screen_w < 8.0 * MIC_TEXT_W {
+        MIC_TEXT_W.min(screen_w * 0.2).max(8.0)
+    } else {
+        MIC_TEXT_W
+    };
     let rec_chip =
-        rec.then(|| recording_indicator_layout(screen_w, screen_h, REC_TEXT_W, TEXT_H).chip);
+        rec.then(|| recording_indicator_layout(screen_w, screen_h, rec_w, text_h).chip);
     let rec_h = rec_chip.map(|chip| chip[3]);
     let mic_chip =
-        mic.then(|| mic_indicator_layout(screen_w, screen_h, MIC_TEXT_W, TEXT_H, rec_h).chip);
+        mic.then(|| mic_indicator_layout(screen_w, screen_h, mic_w, text_h, rec_h).chip);
     match (rec_chip, mic_chip) {
         (None, None) => None,
         (Some(a), None) => Some(a),
@@ -442,5 +457,10 @@ mod tests {
             (rec[0] + rec[2] - 1920.0 + CHIP_MARGIN).abs() < 1e-3,
             "union stays in the bottom-right slot"
         );
+        let cramped = recording_chrome_union(80.0, 50.0, true, true).unwrap();
+        assert!(cramped[0] >= 0.0 && cramped[1] >= 0.0);
+        assert!(cramped[0] + cramped[2] <= 80.0 + 0.01);
+        assert!(cramped[1] + cramped[3] <= 50.0 + 0.01);
+        assert!(cramped[2] < rec[2] || cramped[3] < rec[3]);
     }
 }

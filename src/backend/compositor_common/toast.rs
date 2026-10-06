@@ -184,7 +184,7 @@ pub(crate) fn stripe_rect(card: [f32; 4]) -> Option<[f32; 4]> {
         return None;
     }
     let inset = 13.0_f32.min(w * 0.08).min(h * 0.2);
-    let sw = 3.0_f32.min((w - 2.0 * inset).max(0.0));
+    let sw = 3.0_f32.min(w * 0.06).min((w - 2.0 * inset).max(0.0));
     let sh = (h - 2.0 * inset).max(0.0);
     if sw < 1.0 || sh < 1.0 {
         return None;
@@ -1716,6 +1716,9 @@ mod tests {
         let stripe = stripe_rect(card).expect("tall enough");
         assert_eq!(stripe, [113.0, 53.0, 3.0, 54.0]);
         assert!(stripe[0] > card[0] && stripe[0] + stripe[2] < card[0] + card[2]);
+        let slim = stripe_rect([100.0, 40.0, 40.0, 80.0]).expect("wide enough for a thin stripe");
+        assert!(slim[2] < 3.0);
+        assert!(slim[2] >= 1.0);
         assert!(stripe_rect([100.0, 40.0, 300.0, 20.0]).is_none());
         assert!(
             stripe_rect([100.0, 40.0, 20.0, 80.0]).is_none(),
