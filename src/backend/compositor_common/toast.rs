@@ -63,6 +63,44 @@ pub(crate) const ACTIONS_ROW_EXTRA_H: f32 = ACTION_ROW_TOP_GAP + ACTION_BUTTON_H
 /// first card.
 pub(crate) const STACK_GAP: f32 = 12.0;
 
+/// Horizontal padding inside a toast card (right and bottom/top).
+pub(crate) const CARD_PAD: f32 = 18.0;
+/// Extra left padding so the urgency stripe and title do not collide.
+pub(crate) const CARD_PAD_LEFT: f32 = 30.0;
+
+/// Card insets for a painted (or available) width. Desktop sizes stay at
+/// [`CARD_PAD`] / [`CARD_PAD_LEFT`]; a nested output shrinks them so the
+/// text column is not eaten by 18+30 px of chrome.
+#[must_use]
+pub(crate) fn card_pad(width: f32) -> (f32, f32) {
+    if !(width.is_finite() && width > 0.0) {
+        return (0.0, 0.0);
+    }
+    let pad = if width < 4.0 * CARD_PAD {
+        CARD_PAD.min(width * 0.12).max(4.0)
+    } else {
+        CARD_PAD
+    };
+    let pad_left = if width < 2.0 * (CARD_PAD_LEFT + CARD_PAD) {
+        CARD_PAD_LEFT.min(width * 0.18).max(pad)
+    } else {
+        CARD_PAD_LEFT
+    };
+    (pad, pad_left)
+}
+
+/// Gap between stacked island cards. Shrinks when the remaining travel from
+/// the dock to the output edge would otherwise spend more on air than on
+/// cards.
+#[must_use]
+pub(crate) fn stack_gap(limit: f32) -> f32 {
+    if limit.is_finite() && limit > 0.0 && limit < 16.0 * STACK_GAP {
+        STACK_GAP.min(limit * 0.06).max(4.0)
+    } else {
+        STACK_GAP
+    }
+}
+
 /// Offset away from the dock where the first card starts.
 ///
 /// `reserved_above` is a settled slot already hanging from the bar — the
@@ -70,13 +108,21 @@ pub(crate) const STACK_GAP: f32 = 12.0;
 /// while that card's spring is still travelling. A visible OSD then owns the
 /// next slot, again at its reserved height rather than its sprung one.
 pub(crate) fn stack_start(osd_visible: bool, reserved_above: f32) -> f32 {
+    stack_start_in(osd_visible, reserved_above, f32::INFINITY)
+}
+
+/// As [`stack_start`], with the remaining dock travel so a short output
+/// tightens the reserved gaps.
+#[must_use]
+pub(crate) fn stack_start_in(osd_visible: bool, reserved_above: f32, limit: f32) -> f32 {
+    let gap = stack_gap(limit);
     let reserved_above = reserved_above.max(0.0);
     let mut top = reserved_above;
     if reserved_above > 0.0 {
-        top += STACK_GAP;
+        top += gap;
     }
     if osd_visible {
-        top += super::osd::OSD_CARD_HEIGHT + STACK_GAP;
+        top += super::osd::OSD_CARD_HEIGHT + gap;
     }
     top
 }
@@ -85,8 +131,17 @@ pub(crate) fn stack_start(osd_visible: bool, reserved_above: f32) -> f32 {
 /// occupying the flush slot. Zero when there is no HUD.
 #[must_use]
 pub(crate) fn osd_offset(hud_h: f32) -> f32 {
+    osd_offset_in(hud_h, f32::INFINITY)
+}
+
+#[must_use]
+pub(crate) fn osd_offset_in(hud_h: f32, limit: f32) -> f32 {
     let hud_h = hud_h.max(0.0);
-    if hud_h > 0.0 { hud_h + STACK_GAP } else { 0.0 }
+    if hud_h > 0.0 {
+        hud_h + stack_gap(limit)
+    } else {
+        0.0
+    }
 }
 
 /// Urgency accent drawn as a hairline on the card's left. Critical is red,
@@ -122,7 +177,12 @@ pub(crate) fn stripe_rect(card: [f32; 4]) -> Option<[f32; 4]> {
 /// already claims its full slot and the cards beneath it never shift while
 /// its spring runs.
 pub(crate) fn stack_next(top: f32, target_h: f32) -> f32 {
-    top + target_h.max(0.0) + STACK_GAP
+    stack_next_in(top, target_h, f32::INFINITY)
+}
+
+#[must_use]
+pub(crate) fn stack_next_in(top: f32, target_h: f32, limit: f32) -> f32 {
+    top + target_h.max(0.0) + stack_gap(limit)
 }
 
 /// Whether a card of `card_h` starting at stack offset `top` still fits
@@ -1357,6 +1417,13 @@ mod tests {
         assert_eq!(min_text_width(1920.0), MIN_TEXT_WIDTH_PX);
         assert!(min_text_width(200.0) < MIN_TEXT_WIDTH_PX);
         assert_eq!(min_text_width(20.0), 40.0);
+        assert_eq!(card_pad(1920.0), (CARD_PAD, CARD_PAD_LEFT));
+        let (p, pl) = card_pad(48.0);
+        assert!(p < CARD_PAD && pl < CARD_PAD_LEFT);
+        assert!(p >= 4.0 && pl >= p);
+        assert_eq!(stack_gap(1080.0), STACK_GAP);
+        assert!(stack_gap(80.0) < STACK_GAP);
+        assert!(stack_start_in(true, 0.0, 80.0) < stack_start(true, 0.0));
     }
 
     #[test]

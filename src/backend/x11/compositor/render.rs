@@ -3540,10 +3540,8 @@ impl<C: CompositorConnection> Compositor<C> {
         self.ensure_glass_backdrop(ui);
         let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let button_hover = self.toast_button_hover;
-        let pad = 18.0;
-        let pad_left = 30.0;
-
         use crate::backend::compositor_common::toast;
+        let (pad, pad_left) = toast::card_pad(self.screen_w as f32);
 
         // The stack hangs off the bar; the shared geometry owns the OSD slot
         // reservation and the per-card offsets so both backends place the
@@ -3554,8 +3552,8 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             0.0
         };
-        let mut top = toast::stack_start(self.osd_slot.get().is_some(), hud_h);
         let stack_limit = dock.stack_limit();
+        let mut top = toast::stack_start_in(self.osd_slot.get().is_some(), hud_h, stack_limit);
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -3722,7 +3720,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     buttons: button_rects,
                 });
 
-                top = toast::stack_next(top, target_h);
+                top = toast::stack_next_in(top, target_h, stack_limit);
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -3860,7 +3858,7 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             0.0
         };
-        let y_off = crate::backend::compositor_common::toast::osd_offset(hud_h);
+        let y_off = crate::backend::compositor_common::toast::osd_offset_in(hud_h, dock.stack_limit());
         let [x, y, cw, ch] = dock.contained_rect(card_w, card_h, y_off);
         let (radius_top, radius) = dock.radii(ch, ui.osd_radius, y_off);
         // Contents appear as the card makes room for them, rather than

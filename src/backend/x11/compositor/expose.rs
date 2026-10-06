@@ -588,7 +588,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
 
             // Soft wash inside the pick so it still reads as selected.
-            self.set_border_radii(self.corner_radius, self.corner_radius);
+            let hole_r = crate::backend::compositor_common::capture_veil::hole_radius(width, height);
+            self.set_border_radii(hole_r, hole_r);
             self.gl
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), width, height);
             self.gl
@@ -609,7 +610,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // Brighter outline.
             self.gl.uniform_1_f32(
                 self.border_uniforms.border_width.as_ref(),
-                crate::backend::compositor_common::capture_veil::CAPTURE_OUTLINE_WIDTH,
+                crate::backend::compositor_common::capture_veil::outline_width(width, height),
             );
             self.gl.uniform_4_f32(
                 self.border_uniforms.border_color.as_ref(),

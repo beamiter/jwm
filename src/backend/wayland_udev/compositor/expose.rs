@@ -799,11 +799,11 @@ impl WaylandCompositor {
 
             gl.Uniform1f(
                 self.border_uniforms.radius,
-                crate::backend::compositor_common::capture_veil::CAPTURE_HOLE_RADIUS,
+                crate::backend::compositor_common::capture_veil::hole_radius(width, height),
             );
             gl.Uniform1f(
                 self.border_uniforms.radius_top,
-                crate::backend::compositor_common::capture_veil::CAPTURE_HOLE_RADIUS,
+                crate::backend::compositor_common::capture_veil::hole_radius(width, height),
             );
             gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
             gl.Uniform2f(self.border_uniforms.size, width, height);
@@ -820,7 +820,7 @@ impl WaylandCompositor {
             );
             gl.Uniform1f(
                 self.border_uniforms.border_width,
-                crate::backend::compositor_common::capture_veil::CAPTURE_OUTLINE_WIDTH,
+                crate::backend::compositor_common::capture_veil::outline_width(width, height),
             );
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 

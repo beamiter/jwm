@@ -83,6 +83,10 @@
 | 104 | layout 胶片条标题带随矮屏缩小 | `text_band` / `gap_y` |
 | 105 | tags overview 标题带随矮屏缩小 | 同 |
 | 106 | 矮系统面板收紧 band 间距 | `stack_gap` |
+| 107 | toast 内边距与栈间距随窄/矮输出缩小 | `card_pad` / `stack_gap` / `stack_start_in` |
+| 108 | 小选区圆角与描边随洞缩小 | `hole_radius` / `outline_width` |
+| 109 | 三行仍放不下时工具条按钮低于 15px | `fit_button_size` |
+| 110 | 标签 tooltip gap/pad 随矮窄屏缩小 | `tooltip_gap` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

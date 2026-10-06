@@ -7959,8 +7959,7 @@ impl WaylandCompositor {
         self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let button_hover = self.toast_button_hover;
-        let pad = 18.0;
-        let pad_left = 30.0;
+        let (pad, pad_left) = toast::card_pad(self.screen_w as f32);
 
         // The stack hangs off the bar; the shared geometry owns the OSD slot
         // reservation and the per-card offsets so both backends place the
@@ -7971,8 +7970,8 @@ impl WaylandCompositor {
         } else {
             0.0
         };
-        let mut top = toast::stack_start(self.osd_slot.get().is_some(), hud_h);
         let stack_limit = dock.stack_limit();
+        let mut top = toast::stack_start_in(self.osd_slot.get().is_some(), hud_h, stack_limit);
 
         unsafe {
             gl.BindVertexArray(self.quad_vao);
@@ -8155,7 +8154,7 @@ impl WaylandCompositor {
                     buttons: button_rects,
                 });
 
-                top = toast::stack_next(top, target_h);
+                top = toast::stack_next_in(top, target_h, stack_limit);
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -8254,7 +8253,7 @@ impl WaylandCompositor {
         } else {
             0.0
         };
-        let y_off = crate::backend::compositor_common::toast::osd_offset(hud_h);
+        let y_off = crate::backend::compositor_common::toast::osd_offset_in(hud_h, dock.stack_limit());
         let [x, y, cw, ch] = dock.contained_rect(card_w, card_h, y_off);
         let (radius_top, radius) = dock.radii(ch, ui.osd_radius, y_off);
         // Contents appear as the card makes room for them, rather than

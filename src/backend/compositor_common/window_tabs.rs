@@ -121,6 +121,20 @@ pub const TOOLTIP_PAD_X: f32 = 10.0;
 pub const TOOLTIP_PAD_Y: f32 = 5.0;
 /// What keeps the chip floating off the strip rather than on it.
 pub const TOOLTIP_GAP: f32 = 6.0;
+fn tooltip_pad_x(screen_w: f32) -> f32 {
+    if screen_w.is_finite() && screen_w > 0.0 && screen_w < 8.0 * TOOLTIP_PAD_X {
+        TOOLTIP_PAD_X.min(screen_w * 0.08).max(2.0)
+    } else {
+        TOOLTIP_PAD_X
+    }
+}
+fn tooltip_gap(screen_h: f32) -> f32 {
+    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 8.0 * TOOLTIP_GAP {
+        TOOLTIP_GAP.min(screen_h * 0.04).max(1.0)
+    } else {
+        TOOLTIP_GAP
+    }
+}
 /// Pixel budget for the chip's line: a title longer than this is ellipsized
 /// again, this time against the screen instead of against the cell.
 pub const TOOLTIP_MAX_TEXT_WIDTH: u32 = 480;
@@ -554,7 +568,7 @@ pub fn tooltip_text_budget(screen_w: f32) -> u32 {
         return TOOLTIP_MAX_TEXT_WIDTH;
     }
     TOOLTIP_MAX_TEXT_WIDTH.min(
-        (screen_w - 2.0 * TOOLTIP_PAD_X)
+        (screen_w - 2.0 * tooltip_pad_x(screen_w))
             .floor()
             .max(TITLE_MIN_WIDTH) as u32,
     )
@@ -595,14 +609,15 @@ pub fn tooltip_rect(
     // the left edge.
     let chip_w = chip_w.min(screen_w);
     let chip_h = chip_h.min(screen_h);
+    let gap = tooltip_gap(screen_h);
     let x = (cx + cw * 0.5 - chip_w * 0.5).clamp(0.0, (screen_w - chip_w).max(0.0));
-    let above = by - TOOLTIP_GAP - chip_h;
+    let above = by - gap - chip_h;
     let y = if above >= 0.0 {
         above
     } else {
         // A strip on the screen's top edge has no room overhead; the chip
         // hangs below the band instead of clipping.
-        by + bh + TOOLTIP_GAP
+        by + bh + gap
     };
     // Last resort for a screen shorter than the chip: keep it on the screen
     // even where that means covering the strip.
@@ -630,8 +645,9 @@ pub fn tooltip_rect_avoiding(
         return Some(preferred);
     }
     let [_, by, _, bh] = bar;
-    let above = by - TOOLTIP_GAP - preferred[3];
-    let below = by + bh + TOOLTIP_GAP;
+    let gap = tooltip_gap(screen_h);
+    let above = by - gap - preferred[3];
+    let below = by + bh + gap;
     let alt_y = if (preferred[1] - above).abs() < 0.5 {
         below
     } else {

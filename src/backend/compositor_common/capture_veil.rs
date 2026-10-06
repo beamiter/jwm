@@ -20,6 +20,27 @@ pub(crate) const CAPTURE_OUTLINE_WIDTH: f32 = 2.5;
 /// Edge of a resize handle drawn on the hole.
 pub(crate) const CAPTURE_HANDLE_SIZE: f32 = 10.0;
 
+/// Corner radius that still fits `hole`. An 8px radius on a 12px pick used
+/// to invert the rounded-rect shader.
+#[must_use]
+pub(crate) fn hole_radius(w: f32, h: f32) -> f32 {
+    let cap = w.min(h);
+    if !(cap.is_finite() && cap > 0.0) {
+        return 0.0;
+    }
+    CAPTURE_HOLE_RADIUS.min(cap * 0.25)
+}
+
+/// Outline stroke that stays thinner than the pick.
+#[must_use]
+pub(crate) fn outline_width(w: f32, h: f32) -> f32 {
+    let cap = w.min(h);
+    if !(cap.is_finite() && cap > 0.0) {
+        return 0.0;
+    }
+    CAPTURE_OUTLINE_WIDTH.min(cap * 0.12).max(1.0).min(cap * 0.5)
+}
+
 /// Four screen-space rects `(x, y, w, h)` covering everything except `hole`.
 /// Degenerate / off-screen holes yield a single full-screen scrim.
 #[must_use]
@@ -216,6 +237,19 @@ mod tests {
             }
         }
         assert!(handle_rects((0.0, 0.0, 2.0, 2.0)).is_empty());
+    }
+
+    #[test]
+    fn tiny_holes_shrink_radius_and_outline() {
+        assert_eq!(hole_radius(200.0, 120.0), CAPTURE_HOLE_RADIUS);
+        assert_eq!(outline_width(200.0, 120.0), CAPTURE_OUTLINE_WIDTH);
+        let r = hole_radius(12.0, 10.0);
+        assert!(r < CAPTURE_HOLE_RADIUS);
+        assert!(r <= 10.0 * 0.25);
+        let o = outline_width(12.0, 10.0);
+        assert!(o <= 10.0 * 0.5);
+        assert!(o >= 1.0);
+        assert_eq!(hole_radius(0.0, 10.0), 0.0);
     }
 
     #[test]

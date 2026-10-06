@@ -441,7 +441,14 @@ pub fn fit_button_size(buttons: &[ToolbarButton], max_width: f32) -> f32 {
     if !max_width.is_finite() || max_width <= 0.0 || units <= 0.0 {
         return BUTTON_SIZE;
     }
-    (max_width / units).clamp(MIN_BUTTON_SIZE, BUTTON_SIZE)
+    let fitted = max_width / units;
+    if fitted < MIN_BUTTON_SIZE {
+        // Three rows at the floor still overflow: drop below the desktop
+        // 15px floor rather than painting off the pick.
+        fitted.max(8.0).min(BUTTON_SIZE)
+    } else {
+        fitted.clamp(MIN_BUTTON_SIZE, BUTTON_SIZE)
+    }
 }
 
 /// The track's pixel size for a given button size, as a single row.
@@ -1604,6 +1611,9 @@ mod tests {
         assert!(middling > MIN_BUTTON_SIZE && middling < BUTTON_SIZE);
         assert!(wrap_at(&buttons, 600.0).is_none());
         assert!(track_extent(&buttons, middling).0 <= 600.0 + 1e-3);
+        let cramped = fit_button_size(&buttons, 80.0);
+        assert!(cramped < MIN_BUTTON_SIZE);
+        assert!(cramped >= 8.0);
     }
 
     #[test]
