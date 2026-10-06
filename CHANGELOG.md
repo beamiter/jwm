@@ -47,7 +47,9 @@ monorepo use independent Semantic Versions.
   overview shrink their panel padding with the viewport. Capture-hint and
   REC/MIC pills shrink their padding on a cramped chip; the system-UI card
   and a short HUD drop desktop padding instead of leaving a zero-width
-  column; a tab tooltip taller than the output is clipped to it.
+  column; a tab tooltip taller than the output is clipped to it. The
+  wallpaper picker's side preview shrinks its gap and 96px floor on a nested
+  output instead of disappearing.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

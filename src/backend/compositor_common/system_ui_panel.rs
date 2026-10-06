@@ -564,6 +564,39 @@ pub(crate) fn contents(
     out
 }
 
+fn preview_edge(vw: f32, vh: f32) -> f32 {
+    let cap = vw.min(vh);
+    if cap.is_finite() && cap > 0.0 && cap < 8.0 * PREVIEW_EDGE {
+        PREVIEW_EDGE.min(cap * 0.04).max(4.0)
+    } else {
+        PREVIEW_EDGE
+    }
+}
+
+fn preview_gap(remain: f32) -> f32 {
+    if remain.is_finite() && remain > 0.0 && remain < PREVIEW_GAP + PREVIEW_MIN_W + PREVIEW_EDGE {
+        PREVIEW_GAP.min(remain * 0.08).max(4.0)
+    } else {
+        PREVIEW_GAP
+    }
+}
+
+fn preview_min_w(vw: f32) -> f32 {
+    if vw.is_finite() && vw > 0.0 && vw < 4.0 * PREVIEW_MIN_W {
+        PREVIEW_MIN_W.min(vw * 0.25).max(24.0)
+    } else {
+        PREVIEW_MIN_W
+    }
+}
+
+fn preview_min_h(vh: f32) -> f32 {
+    if vh.is_finite() && vh > 0.0 && vh < 4.0 * PREVIEW_MIN_H {
+        PREVIEW_MIN_H.min(vh * 0.25).max(24.0)
+    } else {
+        PREVIEW_MIN_H
+    }
+}
+
 /// The frame the wallpaper picker's side preview occupies, if it fits.
 ///
 /// The card is content-sized and docked under the bar, so the open desktop
@@ -582,15 +615,19 @@ pub(crate) fn contents(
 #[must_use]
 pub(crate) fn side_preview_frame(panel: Rect, viewport: [f32; 4]) -> Option<Rect> {
     let [vx, vy, vw, vh] = viewport;
-    let x = panel[0] + panel[2] + PREVIEW_GAP;
-    let w = (vx + vw - PREVIEW_EDGE - x).min(PREVIEW_MAX_W);
-    let h = (vh - 2.0 * PREVIEW_EDGE).min(PREVIEW_MAX_H);
-    if w < PREVIEW_MIN_W || h < PREVIEW_MIN_H {
+    let remain = (vx + vw - (panel[0] + panel[2])).max(0.0);
+    let gap = preview_gap(remain);
+    let edge = preview_edge(vw, vh);
+    let x = panel[0] + panel[2] + gap;
+    let w = (vx + vw - edge - x).min(PREVIEW_MAX_W);
+    let h = (vh - 2.0 * edge).min(PREVIEW_MAX_H);
+    if w < preview_min_w(vw) || h < preview_min_h(vh) {
         return None;
     }
     let centered_y = panel[1] + (panel[3] - h) * 0.5;
-    // The clamp bounds are ordered by construction: h ≤ vh - 2·edge.
-    let y = centered_y.clamp(vy + PREVIEW_EDGE, vy + vh - PREVIEW_EDGE - h);
+    let lo = vy + edge;
+    let hi = (vy + vh - edge - h).max(lo);
+    let y = centered_y.clamp(lo, hi);
     Some([x, y, w, h])
 }
 
@@ -1081,7 +1118,13 @@ mod tests {
         assert_eq!(tight[2], 1920.0 - PREVIEW_EDGE - 1472.0 - PREVIEW_GAP);
         assert!(side_preview_frame([0.0, 100.0, 1800.0, 400.0], viewport).is_none());
         // A very short viewport vetoes the frame on height instead.
-        assert!(side_preview_frame([0.0, 10.0, 400.0, 100.0], [0.0, 0.0, 1920.0, 150.0]).is_none());
+        assert!(side_preview_frame([0.0, 10.0, 400.0, 100.0], [0.0, 0.0, 1920.0, 20.0]).is_none());
+        // A nested output still keeps a preview if the remaining strip is
+        // usable; desktop 96px / 32px floors used to drop it entirely.
+        let nested = side_preview_frame([8.0, 8.0, 160.0, 200.0], [0.0, 0.0, 320.0, 240.0]);
+        let nested = nested.expect("nested wallpaper picker keeps a preview");
+        assert!(nested[2] >= 24.0);
+        assert!(nested[0] + nested[2] <= 320.0);
     }
 
     #[test]

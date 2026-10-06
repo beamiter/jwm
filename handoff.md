@@ -76,6 +76,7 @@
 | 97 | 系统面板 padding / 查询 inset / 屏边距随窄输出缩小 | `card_pad` / `query_inset` |
 | 98 | 标签条 tooltip 高度夹进屏幕 | `tooltip_rect` |
 | 99 | 矮 HUD 内边距随绘制卡缩小 | `HudLayout::placed` |
+| 100 | 壁纸侧预览 gap/边距/最小尺寸随窄视口缩小 | `side_preview_frame` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 
