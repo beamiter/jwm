@@ -11,7 +11,7 @@
 //! Tones and metrics come from the active [`UiPalette`], so the same layout
 //! serves both the Material and the frosted-glass theme.
 
-use crate::backend::compositor_common::ui_theme::UiPalette;
+use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 
 /// `(x, y, w, h)` in surface pixels, top-left origin.
 pub(crate) type Rect = (f32, f32, f32, f32);
@@ -93,16 +93,17 @@ impl HudRows {
 pub(crate) fn fps_meter(fps: f32, target: f32) -> (f32, [f32; 4]) {
     let target = if target > 1.0 { target } else { 60.0 };
     let ratio = if target > 0.0 { fps / target } else { 0.0 };
+    let ui = ui_theme::palette();
     let tone = if !fps.is_finite() || fps < 0.0 {
-        TONE_BAD
+        ui.meter_bad()
     } else if ratio > 1.0 + f32::EPSILON {
-        TONE_OVER
+        ui.meter_over()
     } else if ratio >= METER_GOOD {
-        TONE_GOOD
+        ui.meter_good()
     } else if ratio >= METER_WARN {
-        TONE_WARN
+        ui.meter_warn()
     } else {
-        TONE_BAD
+        ui.meter_bad()
     };
     (ratio.clamp(0.0, 1.0), tone)
 }

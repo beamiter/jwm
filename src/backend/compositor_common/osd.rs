@@ -10,6 +10,7 @@
 
 use crate::backend::api::OsdKind;
 use crate::backend::compositor_common::dynamic_island::IslandMotion;
+use crate::backend::compositor_common::ui_theme;
 use std::time::{Duration, Instant};
 
 /// Time the card stays fully visible after the most recent event.
@@ -28,15 +29,18 @@ const OSD_FADE_IN: f32 = 0.12;
 /// an OSD without waiting for its spring to arrive at a height.
 pub(crate) const OSD_CARD_HEIGHT: f32 = 64.0;
 /// Horizontal padding inside a slider card.
-pub(crate) const OSD_PAD: f32 = 24.0;
+fn osd_pad() -> f32 {
+    ui_theme::palette().pad
+}
 fn card_pad(w: f32) -> f32 {
+    let pad = osd_pad();
     if !(w.is_finite() && w > 0.0) {
         return 0.0;
     }
-    if w < 2.0 * OSD_PAD {
-        OSD_PAD.min(w * 0.2).max(0.0)
+    if w < 2.0 * pad {
+        pad.min(w * 0.2).max(0.0)
     } else {
-        OSD_PAD
+        pad
     }
 }
 /// Nominal width reserved for the icon+percent label on a slider card.
@@ -52,9 +56,6 @@ const SLIDER_CARD_WIDTH: f32 = 360.0;
 const MEDIA_CARD_WIDTH: f32 = 520.0;
 /// Longest track label drawn; the renderer does not wrap.
 const MAX_MEDIA_LABEL_CHARS: usize = 48;
-/// Slider fill past 100% (volume boost / over-bright): cooler than accent so
-/// a full bar is not mistaken for a capped 100%.
-pub(crate) const FILL_OVER: [f32; 4] = [0.35, 0.78, 0.95, 0.95];
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveOsd {
@@ -199,7 +200,7 @@ impl ActiveOsd {
     }
 
     /// Volume/brightness past 100% still fills the bar, but the fill uses
-    /// [`FILL_OVER`] so a boosted level does not look like a perfect 100%.
+    /// [`ui_theme::UiPalette::meter_over`] so a boosted level does not look like a perfect 100%.
     #[must_use]
     pub(crate) fn fill_over_limit(&self) -> bool {
         matches!(self.kind, OsdKind::Volume | OsdKind::Brightness) && self.percent > 100
@@ -792,12 +793,12 @@ mod tests {
         let wide = slider_bar([10.0, 20.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT], 0.5);
         let (track, fill) = wide.expect("room for a bar");
         assert!((fill[2] - track[2] * 0.5).abs() < 0.01);
-        assert!(track[0] >= 10.0 + OSD_PAD);
-        assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - OSD_PAD + 0.01);
+        assert!(track[0] >= 10.0 + osd_pad());
+        assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - osd_pad() + 0.01);
         assert!(slider_bar([0.0, 0.0, 32.0, OSD_CARD_HEIGHT], 1.0).is_none());
         assert!(slider_bar([0.0, 0.0, 200.0, OSD_CARD_HEIGHT], 0.0).is_some());
         let [lx, _, lw, _] = label_rect([0.0, 0.0, 40.0, OSD_CARD_HEIGHT], 400.0, 20.0, false);
-        assert!(lx < OSD_PAD);
+        assert!(lx < osd_pad());
         assert!(lw <= 40.0 - 2.0 * lx + 0.01);
         let slider = [0.0, 0.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT];
         let [lx, _, lw, _] = label_rect(slider, 400.0, 20.0, true);

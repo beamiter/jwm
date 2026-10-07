@@ -1130,6 +1130,8 @@ pub enum UserAction {
     RefreshBattery,
     Screenshot,
     OpenAudioControl,
+    /// Toggle the active MPRIS player's play/pause state through jwm.
+    MediaPlayPause,
     /// Restore and focus one window from the minimized-window shelf.
     RestoreWindow {
         window: WindowToken,
@@ -1219,6 +1221,7 @@ pub enum BarEffect {
     RefreshBattery,
     Screenshot,
     OpenAudioControl,
+    MediaPlayPause,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1896,6 +1899,7 @@ impl BarModel {
             UserAction::RefreshBattery => update.effects.push(BarEffect::RefreshBattery),
             UserAction::Screenshot => update.effects.push(BarEffect::Screenshot),
             UserAction::OpenAudioControl => update.effects.push(BarEffect::OpenAudioControl),
+            UserAction::MediaPlayPause => update.effects.push(BarEffect::MediaPlayPause),
             UserAction::RestoreWindow {
                 window,
                 wm_session_id,

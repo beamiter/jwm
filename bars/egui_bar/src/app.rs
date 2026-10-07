@@ -325,7 +325,7 @@ impl EguiBarApp {
                 BarEffect::ClearMonitorGeometry => {
                     self.active_monitor_geometry = None;
                 }
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("could not run platform effect: {error}");
                     }

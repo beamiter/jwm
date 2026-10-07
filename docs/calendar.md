@@ -39,3 +39,7 @@ clicked grid cell to its month flip are unit tested against fixed dates
 rather than whatever "today" happens to be.
 
 `jwm-tool health` prints compact `system_ui` for calendar operators.
+
+The status bar clock opens this card: left-click asks JWM for Calendar
+(the same `parameter=4` route as `Alt+F9` from the bar's shell command);
+right-click still toggles seconds on the pill itself.

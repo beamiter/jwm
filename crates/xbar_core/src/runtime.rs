@@ -1135,7 +1135,8 @@ impl BarRuntime {
             BarEffect::ApplyMonitorGeometry(_)
             | BarEffect::ClearMonitorGeometry
             | BarEffect::Screenshot
-            | BarEffect::OpenAudioControl => RuntimeUpdate::platform(effect),
+            | BarEffect::OpenAudioControl
+            | BarEffect::MediaPlayPause => RuntimeUpdate::platform(effect),
         }
     }
 

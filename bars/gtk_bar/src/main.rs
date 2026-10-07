@@ -201,7 +201,7 @@ impl BarApp {
                 self.window
                     .set_default_size(self.default_width, self.theme.metrics.bar_height);
             }
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
                 if let Err(error) = self.process_actions.borrow_mut().handle(effect) {
                     warn!("Failed to handle platform effect: {error}");
                 }

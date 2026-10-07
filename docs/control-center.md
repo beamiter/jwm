@@ -201,6 +201,17 @@ entry points behave identically:
 The bars gray their entry out while the transport is closed, so the button
 looks unavailable rather than swallowing clicks when JWM is not running.
 
+Status pills on `tao_glow_bar` also open these pages: left-click the clock
+for Calendar, the battery / network / CPU / memory pills for Hub home, and
+right-click the theme pill for the Theme page (left-click still toggles only
+the bar's own dark/light palette). Right-click the clock still toggles
+seconds. The media pill play/pauses; right-click opens the Hub. The
+monitor index and window title stay display-only. `~/.config/xbar/config.toml`
+can hide pills (`[presentation.visibility]`) and add extra shell entries
+(`presentation.shell_routes = ["hub", "notifications"]`). The monitor pill
+is off by default. Bar height defaults to 42 logical pixels, matching
+`appearance.status_bar_height`.
+
 ## Network and Bluetooth
 
 `nmcli` is preferred and falls back to `rfkill`; whichever answers first is

@@ -4,6 +4,10 @@ The shell shows what is playing and drives it: a transport row at the top of
 the control center, media keys bound out of the box, and an OSD card when the
 track changes.
 
+A click on the status bar's media pill sends `media_play_pause` over the
+same control socket screenshots use; right-click opens the Shell Hub so
+skip and player switching stay on that row.
+
 JWM itself never talks to MPRIS. `jwm-bridge` watches the session bus and
 pushes the active player's state in over IPC; JWM broadcasts control requests
 back out and the bridge turns them into method calls. The compositor keeps no

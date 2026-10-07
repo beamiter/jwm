@@ -398,7 +398,8 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             None,
             ControlState::default(),
             InputBindings {
-                primary: Some(UserAction::ToggleSeconds),
+                primary: Some(UserAction::OpenShellHub(ShellRoute::Calendar)),
+                secondary: Some(UserAction::ToggleSeconds),
                 ..InputBindings::default()
             },
         ));
@@ -433,6 +434,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             ControlState::default(),
             InputBindings {
                 primary: Some(UserAction::ToggleTheme),
+                secondary: Some(UserAction::OpenShellHub(ShellRoute::Theme)),
                 ..InputBindings::default()
             },
         ));
@@ -454,7 +456,8 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             view.battery.percent,
             ControlState::default(),
             InputBindings {
-                primary: Some(UserAction::RefreshBattery),
+                primary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
+                secondary: Some(UserAction::RefreshBattery),
                 ..InputBindings::default()
             },
         ));
@@ -519,32 +522,38 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
                 None,
                 None,
                 ControlState::default(),
-                InputBindings::default(),
+                hub_bindings(),
             )
-            .with_availability(view.network.connected),
+            .with_enabled(view.wm_available),
         );
     }
     if visibility.system {
-        status.push(control(
-            NodeId::Memory,
-            bounded_borrowed_control_text(&labels.memory),
-            percent_value(view.system.memory_percent),
-            Some(config.usage_thresholds.tone(view.system.memory_percent)),
-            None,
-            view.system.memory_percent,
-            ControlState::default(),
-            InputBindings::default(),
-        ));
-        status.push(control(
-            NodeId::Cpu,
-            bounded_borrowed_control_text(&labels.cpu),
-            percent_value(view.system.cpu_percent),
-            Some(config.usage_thresholds.tone(view.system.cpu_percent)),
-            None,
-            view.system.cpu_percent,
-            ControlState::default(),
-            InputBindings::default(),
-        ));
+        status.push(
+            control(
+                NodeId::Memory,
+                bounded_borrowed_control_text(&labels.memory),
+                percent_value(view.system.memory_percent),
+                Some(config.usage_thresholds.tone(view.system.memory_percent)),
+                None,
+                view.system.memory_percent,
+                ControlState::default(),
+                hub_bindings(),
+            )
+            .with_enabled(view.wm_available),
+        );
+        status.push(
+            control(
+                NodeId::Cpu,
+                bounded_borrowed_control_text(&labels.cpu),
+                percent_value(view.system.cpu_percent),
+                Some(config.usage_thresholds.tone(view.system.cpu_percent)),
+                None,
+                view.system.cpu_percent,
+                ControlState::default(),
+                hub_bindings(),
+            )
+            .with_enabled(view.wm_available),
+        );
     }
     if visibility.media && view.media.is_active() {
         let icon = match view.media.playback {
@@ -559,7 +568,11 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             None,
             None,
             ControlState::default(),
-            InputBindings::default(),
+            InputBindings {
+                primary: Some(UserAction::MediaPlayPause),
+                secondary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
+                ..InputBindings::default()
+            },
         ));
     }
     if visibility.monitor {
@@ -620,6 +633,13 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     }
 
     status
+}
+
+fn hub_bindings() -> InputBindings {
+    InputBindings {
+        primary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
+        ..InputBindings::default()
+    }
 }
 
 /// Primary opens the route. Secondary is "up": a page returns to the hub, and
@@ -779,6 +799,11 @@ mod tests {
             .expect("status control exists")
     }
 
+    fn showing_monitor(mut config: PresentationConfig) -> PresentationConfig {
+        config.visibility.monitor = true;
+        config
+    }
+
     #[test]
     fn text_joins_empty_parts_without_stray_whitespace() {
         let mut control = super::control(
@@ -826,7 +851,7 @@ mod tests {
                 ..crate::presentation::PresentationLabels::default()
             },
             icon_set: Some(icons),
-            ..PresentationConfig::default()
+            ..showing_monitor(PresentationConfig::default())
         };
         let mut snapshot = snapshot();
         snapshot.layout_selector_open = true;
@@ -1122,7 +1147,7 @@ mod tests {
                 monitor_labels,
                 ..crate::IconSet::default()
             }),
-            ..PresentationConfig::default()
+            ..showing_monitor(PresentationConfig::default())
         };
         let mut snapshot = snapshot();
         snapshot.layout_selector_open = true;
@@ -1283,6 +1308,63 @@ mod tests {
             .unwrap();
         assert_eq!(media.value, "track \u{2014} artist");
         assert_eq!(media.icon, config.labels.media_paused);
+        assert_eq!(
+            media.bindings.primary,
+            Some(UserAction::MediaPlayPause)
+        );
+        assert_eq!(
+            media.bindings.secondary,
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+        let disconnected = PresentationProjector::project(snapshot().view(), &config);
+        let network = by_id(&disconnected, NodeId::Network);
+        assert!(!network.available);
+        assert!(network.state.enabled);
+        assert_eq!(
+            network.bindings.primary,
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+    }
+
+    #[test]
+    fn clock_battery_and_theme_bindings_open_shell_pages() {
+        let projected =
+            PresentationProjector::project(snapshot().view(), &PresentationConfig::default());
+        assert_eq!(
+            by_id(&projected, NodeId::Clock).bindings,
+            InputBindings {
+                primary: Some(UserAction::OpenShellHub(ShellRoute::Calendar)),
+                secondary: Some(UserAction::ToggleSeconds),
+                ..InputBindings::default()
+            }
+        );
+        assert_eq!(
+            by_id(&projected, NodeId::Battery).bindings,
+            InputBindings {
+                primary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
+                secondary: Some(UserAction::RefreshBattery),
+                ..InputBindings::default()
+            }
+        );
+        assert_eq!(
+            by_id(&projected, NodeId::Theme).bindings,
+            InputBindings {
+                primary: Some(UserAction::ToggleTheme),
+                secondary: Some(UserAction::OpenShellHub(ShellRoute::Theme)),
+                ..InputBindings::default()
+            }
+        );
+        assert!(by_id(&projected, NodeId::Cpu).state.enabled);
+        assert!(by_id(&projected, NodeId::Memory).state.enabled);
+        let with_monitor = showing_monitor_projected();
+        assert!(!by_id(&with_monitor, NodeId::Monitor).state.enabled);
+    }
+
+    fn showing_monitor_projected() -> BarPresentation {
+        PresentationProjector::project(
+            snapshot().view(),
+            &showing_monitor(PresentationConfig::default()),
+        )
     }
 
     #[test]
@@ -1296,7 +1378,7 @@ mod tests {
             artist: Some("artist".to_owned()),
             player: Some("test".to_owned()),
         };
-        let mut config = PresentationConfig::default();
+        let mut config = showing_monitor(PresentationConfig::default());
         let all = PresentationProjector::project(snapshot.view(), &config);
         assert_eq!(
             // Shell entries are appended after the fixed cluster and are
@@ -1586,7 +1668,7 @@ mod tests {
                 scroll_down: Some(UserAction::VolumeDown),
             }
         );
-        assert!(!by_id(&projected, NodeId::Cpu).state.enabled);
+        assert!(by_id(&projected, NodeId::Cpu).state.enabled);
         assert!(by_id(&projected, NodeId::Audio).state.enabled);
     }
 
@@ -1595,7 +1677,7 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.wm_available = false;
         snapshot.system = SystemState::new(Some(percent(25.0)), None);
-        let config = PresentationConfig {
+        let config = showing_monitor(PresentationConfig {
             usage_thresholds: crate::UsageThresholds::new(
                 percent(10.0),
                 percent(20.0),
@@ -1603,7 +1685,7 @@ mod tests {
             )
             .unwrap(),
             ..PresentationConfig::default()
-        };
+        });
 
         let projected = PresentationProjector::project(snapshot.view(), &config);
 
@@ -1620,7 +1702,7 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.audio = AudioState::new(Some(percent(50.0)), false);
         let icons = crate::IconSet::nerd_font();
-        let config = PresentationConfig::default().with_icon_set(&icons);
+        let config = showing_monitor(PresentationConfig::default().with_icon_set(&icons));
 
         let projected = PresentationProjector::project(snapshot.view(), &config);
 

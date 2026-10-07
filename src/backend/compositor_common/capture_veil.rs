@@ -5,14 +5,19 @@
 //! itself clear (or lightly tinted), and draw a blue outline. The four
 //! outside rectangles are computed here so X11 and Wayland cannot drift.
 
-/// Outside scrim colour — dark enough to isolate the pick on a busy desktop
-/// without turning the dim into a solid blackout.
-pub(crate) const CAPTURE_SCRIM: [f32; 4] = [0.02, 0.04, 0.08, 0.52];
+use crate::backend::compositor_common::ui_theme;
 
-/// Soft blue wash drawn *inside* the pick so it still reads as selected even
-/// when the desktop behind it is bright. Kept lighter than the pre-veil fill
-/// so the content of the window stays readable.
-pub(crate) const CAPTURE_HOLE_WASH: [f32; 4] = [0.30, 0.55, 1.0, 0.12];
+/// Outside scrim colour — the theme scrim's hue at a pick-isolation alpha.
+#[must_use]
+pub(crate) fn capture_scrim() -> [f32; 4] {
+    ui_theme::palette().capture_scrim()
+}
+
+/// Soft wash inside the pick so it still reads as selected.
+#[must_use]
+pub(crate) fn capture_hole_wash() -> [f32; 4] {
+    ui_theme::palette().capture_accent()
+}
 /// Corner radius of the clear hole and of the outline that names it.
 pub(crate) const CAPTURE_HOLE_RADIUS: f32 = 8.0;
 /// Stroke of the hole's outline, in pixels.

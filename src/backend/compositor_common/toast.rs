@@ -8,6 +8,7 @@
 
 use crate::backend::api::{NotificationAction, ToastClick, ToastNotification};
 use crate::backend::compositor_common::dynamic_island::IslandMotion;
+use crate::backend::compositor_common::ui_theme;
 use std::time::{Duration, Instant};
 
 /// Visible cards are capped; older toasts are evicted first.
@@ -98,18 +99,18 @@ pub(crate) const CARD_PAD_LEFT: f32 = 30.0;
 /// text column is not eaten by 18+30 px of chrome.
 #[must_use]
 pub(crate) fn card_pad(width: f32) -> (f32, f32) {
-    if !(width.is_finite() && width > 0.0) {
-        return (0.0, 0.0);
-    }
-    let pad = if width < 4.0 * CARD_PAD {
-        CARD_PAD.min(width * 0.12).max(4.0)
+    let theme_pad = ui_theme::palette().pad;
+    let theme_pad_left = (theme_pad + 12.0).max(theme_pad * 1.5);
+    let width = if width.is_finite() { width.max(0.0) } else { 0.0 };
+    let pad = if width < 4.0 * theme_pad {
+        theme_pad.min(width * 0.12).max(4.0)
     } else {
-        CARD_PAD
+        theme_pad
     };
-    let pad_left = if width < 2.0 * (CARD_PAD_LEFT + CARD_PAD) {
-        CARD_PAD_LEFT.min(width * 0.18).max(pad)
+    let pad_left = if width < 2.0 * (theme_pad_left + theme_pad) {
+        theme_pad_left.min(width * 0.18).max(pad)
     } else {
-        CARD_PAD_LEFT
+        theme_pad_left
     };
     (pad, pad_left)
 }
@@ -181,10 +182,11 @@ pub(crate) fn osd_offset_in(hud_h: f32, limit: f32) -> f32 {
 /// low is a quiet slate, normal rides the focused-window border.
 #[must_use]
 pub(crate) fn urgency_accent(urgency: u8) -> [f32; 4] {
+    let ui = ui_theme::palette();
     match urgency {
-        2 => [0.95, 0.30, 0.30, 1.0],
-        0 => [0.45, 0.50, 0.62, 1.0],
-        _ => [0.55, 0.62, 0.90, 1.0],
+        2 => ui.urgency_critical(),
+        0 => ui.urgency_low(),
+        _ => ui.urgency_normal(),
     }
 }
 
@@ -1473,7 +1475,11 @@ mod tests {
         assert!(max_text_width(200.0) as f32 >= min_text_width(200.0));
         assert_eq!(max_action_label_width(1920.0), MAX_ACTION_LABEL_WIDTH_PX);
         assert!(max_action_label_width(200.0) < MAX_ACTION_LABEL_WIDTH_PX);
-        assert_eq!(card_pad(1920.0), (CARD_PAD, CARD_PAD_LEFT));
+        assert_eq!(card_pad(1920.0), {
+            let ui = ui_theme::palette();
+            let left = (ui.pad + 12.0).max(ui.pad * 1.5);
+            (ui.pad, left)
+        });
         let (p, pl) = card_pad(48.0);
         assert!(p < CARD_PAD && pl < CARD_PAD_LEFT);
         assert!(p >= 4.0 && pl >= p);

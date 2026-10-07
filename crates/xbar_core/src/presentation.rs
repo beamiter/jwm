@@ -814,7 +814,7 @@ impl Default for PresentationVisibility {
             client_name: true,
             client_icon: true,
             minimized_windows: true,
-            monitor: true,
+            monitor: false,
             system: true,
             audio: true,
             brightness: true,
@@ -914,7 +914,7 @@ pub struct PresentationConfig {
 impl Default for PresentationConfig {
     fn default() -> Self {
         Self {
-            bar_height: 38.0,
+            bar_height: 42.0,
             horizontal_padding: 10.0,
             vertical_padding: 6.0,
             item_gap: 6.0,

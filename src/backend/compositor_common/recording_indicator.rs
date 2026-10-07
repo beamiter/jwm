@@ -68,7 +68,8 @@ fn rec_margin(screen: f32) -> f32 {
 
 /// The recording red used by the REC / MIC chips. The interactive crop cue
 /// shares the screenshot snap-preview blue instead — these chips stay red so
-/// "recording is live" remains distinct from "selecting a source".
+/// "recording is live" remains distinct from "selecting a source". Matches
+/// [`crate::backend::compositor_common::ui_theme::UiPalette::recording_live`].
 pub(crate) const DOT_COLOR: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
 /// Slow pulse on the live dot so a static red pill is harder to miss against
 /// a matching wallpaper. The trough never goes fully out.

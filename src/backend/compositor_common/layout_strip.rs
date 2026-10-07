@@ -8,6 +8,8 @@
 //! is what lets the two compositors draw the same strip and the window manager
 //! hit-test clicks against it without any of them exchanging coordinates.
 
+use crate::backend::compositor_common::ui_theme;
+
 /// A rectangle in screen pixels: `[x, y, w, h]`.
 pub type Rect = [f32; 4];
 
@@ -41,7 +43,7 @@ pub struct StripGeometry {
     pub countdown: Rect,
 }
 
-/// Corner radius of the panel.
+/// Corner radius of the panel (theme default; shrinks on a tiny viewport).
 pub const PANEL_RADIUS: f32 = 22.0;
 /// Corner radius of one film cell.
 pub const CELL_RADIUS: f32 = 6.0;
@@ -50,17 +52,10 @@ pub const WINDOW_RADIUS: f32 = 2.5;
 /// Stroke width of the thumbnail outlines.
 pub const LINE_WIDTH: f32 = 1.25;
 
-/// Panel corner radius: shrinks on a nested overview so 22px cannot eat the card.
+/// Panel corner radius: shrinks on a nested overview so the theme radius cannot eat the card.
 #[must_use]
 pub fn panel_radius(w: f32, h: f32) -> f32 {
-    let m = w.min(h);
-    if m.is_finite() && m > 0.0 && m < 4.0 * PANEL_RADIUS {
-        PANEL_RADIUS.min(m * 0.08).max(4.0).min(m * 0.5)
-    } else if m.is_finite() && m > 0.0 {
-        PANEL_RADIUS.min(m * 0.5)
-    } else {
-        PANEL_RADIUS
-    }
+    ui_theme::palette().shrink_panel_radius(w, h)
 }
 
 /// Film-cell corner radius, following the painted cell rather than the desktop constant.
@@ -124,13 +119,13 @@ pub fn selected_scale(cell: Rect) -> f32 {
 }
 
 /// Padding between the panel edge and its contents.
-const PAD: f32 = 26.0;
 fn panel_pad(screen_w: f32, screen_h: f32) -> f32 {
+    let pad = ui_theme::palette().pad;
     let cap = screen_w.min(screen_h);
     if cap.is_finite() && cap > 0.0 {
-        PAD.min(cap * 0.08).max(4.0)
+        pad.min(cap * 0.08).max(4.0)
     } else {
-        PAD
+        pad
     }
 }
 /// Band reserved for the title line.
@@ -139,8 +134,6 @@ const TITLE_H: f32 = 30.0;
 const CAPTION_H: f32 = 30.0;
 /// Band reserved for the footer hint.
 const HINT_H: f32 = 24.0;
-/// Vertical breathing room between bands.
-const GAP_Y: f32 = 14.0;
 fn text_band(natural: f32, screen_h: f32) -> f32 {
     if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * natural {
         natural.min(screen_h * 0.1).max(1.0)
@@ -148,11 +141,13 @@ fn text_band(natural: f32, screen_h: f32) -> f32 {
         natural
     }
 }
+/// Vertical breathing room between bands.
 fn gap_y(screen_h: f32) -> f32 {
-    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * GAP_Y {
-        GAP_Y.min(screen_h * 0.05).max(2.0)
+    let gap = ui_theme::palette().gap;
+    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * gap {
+        gap.min(screen_h * 0.05).max(2.0)
     } else {
-        GAP_Y
+        gap
     }
 }
 /// Gap between two cells.
@@ -710,8 +705,8 @@ mod tests {
         let tiny = window_rect([0.0, 0.0, 3.0, 2.0], [0.5, 0.5, 0.5, 0.5]);
         assert!(tiny[0] >= 0.0 && tiny[0] + tiny[2] <= 3.0 + 0.01);
         assert!(tiny[1] >= 0.0 && tiny[1] + tiny[3] <= 2.0 + 0.01);
-        assert_eq!(panel_radius(800.0, 400.0), PANEL_RADIUS);
-        assert!(panel_radius(80.0, 70.0) < PANEL_RADIUS);
+        assert_eq!(panel_radius(800.0, 400.0), ui_theme::palette().panel_radius);
+        assert!(panel_radius(80.0, 70.0) < ui_theme::palette().panel_radius);
         assert!(cell_radius(30.0, 30.0) < CELL_RADIUS);
         assert!(line_width(20.0, 16.0) < LINE_WIDTH);
         assert!(window_radius(12.0, 10.0) < WINDOW_RADIUS);

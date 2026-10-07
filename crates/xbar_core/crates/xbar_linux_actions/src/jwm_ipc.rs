@@ -217,6 +217,11 @@ impl JwmIpc {
     pub fn take_screenshot(&self) -> Result<(), JwmIpcError> {
         self.command(TAKE_SCREENSHOT, Value::Null)
     }
+
+    /// Ask jwm to toggle the active player's play/pause state.
+    pub fn media_play_pause(&self) -> Result<(), JwmIpcError> {
+        self.command(MEDIA_PLAY_PAUSE, Value::Null)
+    }
 }
 
 struct RequestBuffer {
@@ -353,6 +358,8 @@ fn wait_for_io(deadline: Instant) -> std::io::Result<()> {
 pub const TAKE_SCREENSHOT: &str = "take_screenshot";
 /// …and for the immediate whole-screen one.
 pub const TAKE_SCREENSHOT_FULLSCREEN: &str = "take_screenshot_fullscreen";
+/// Toggle the compositor's active media player.
+pub const MEDIA_PLAY_PAUSE: &str = "media_play_pause";
 
 fn effective_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail. Filesystem

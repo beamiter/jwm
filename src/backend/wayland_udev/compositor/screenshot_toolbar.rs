@@ -18,7 +18,7 @@ use crate::backend::compositor_font;
 /// How much of the selected button's accent a merely-hovered one gets. Enough
 /// to read as "this is what you would click", far enough from 1.0 that it never
 /// reads as "this is the current tool".
-const HOVER_WASH: f32 = 0.4;
+const HOVER_WASH: f32 = ui_theme::TOOLBAR_HOVER_ALPHA_SCALE;
 
 impl WaylandCompositor {
     /// Rasterise and upload every annotation label, once per change.

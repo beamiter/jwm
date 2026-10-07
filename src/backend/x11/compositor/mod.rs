@@ -789,6 +789,8 @@ where
     /// `Compositor::refresh_expose_title_textures`, the same bargain
     /// `tab_title_textures` strikes.
     expose_title_textures: Vec<Option<(glow::Texture, u32, u32)>>,
+    /// Brighter title copies for the hovered expose cell, lazily rasterised.
+    expose_title_bright_textures: Vec<Option<(glow::Texture, u32, u32)>>,
     /// Fade-in of the hovered cell's ring, keyed by the hovered window id.
     /// Hit-testing never sees it: only the drawn overlay eases.
     expose_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<u32>,
@@ -1235,6 +1237,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(tex);
             }
             for (tex, _, _) in self.expose_title_textures.drain(..).flatten() {
+                self.gl.delete_texture(tex);
+            }
+            for (tex, _, _) in self.expose_title_bright_textures.drain(..).flatten() {
                 self.gl.delete_texture(tex);
             }
             for (_, tex, _, _) in self.tags_grid_label_textures.drain(..) {

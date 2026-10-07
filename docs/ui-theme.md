@@ -1,10 +1,12 @@
 # UI theme
 
 JWM draws these surfaces itself: the [debug HUD](debug-hud.md), the modal
-system-UI card (launcher, keybinding viewer, lock screen), the
-[notification toasts](notifications.md), the volume/brightness OSD, and the
-[window tab strip](window-tabs.md); the overview's window labels take the
-same palette as a pill chip under the title. They share one palette, chosen
+system-UI card (launcher, keybinding viewer, lock screen, Shell Hub, calendar,
+clipboard, Wi-Fi, session menu), the [notification toasts](notifications.md),
+the volume/brightness OSD, the [window tab strip](window-tabs.md),
+[exposé](expose.md) window labels, the [layout picker](layout-picker.md),
+the [tags overview](tags-overview.md), the screenshot toolbar, and the
+recording / capture chips. They share one palette, chosen
 by `appearance.ui_theme`, and their text all goes through one font stack
 with CJK and emoji fallback:
 
@@ -79,7 +81,10 @@ different numbers, because it is ~28–40px tall and never dismissed rather than
 a card the user summoned: `GlassParams::for_status_bar` shortens the bevel and
 its refraction so two of them cannot meet in the middle and turn the strip into
 one long lens, and raises the rim and specular, which on something this thin
-are nearly all the material there is to see. Its corners come from the theme
+are nearly all the material there is to see. JWM reserves 42 logical pixels
+for the bar (`appearance.status_bar_height`); `xbar_core`'s default
+`bar_height` is the same 42 so the first frame is not a 38px strip inside a
+42px strut. Its corners come from the theme
 too, not from `behavior.corner_radius` — on a bar that thin that is a stadium,
 and the squircle needs a flat edge to ease its curvature out into. The tint is
 lighter for a different reason: the bar is the one frosted surface whose
@@ -130,7 +135,7 @@ Four things it does that are worth knowing as a user:
 | --- | --- |
 | **The card never narrows while a panel is up** | The launcher re-measures its match list on every keystroke. A card that tracked that width would breathe in and out under your typing, so the width only grows, and it grows in fixed steps rather than by single pixels. Closing the panel — or replacing it with another one — starts the width over |
 | **The selection slides between rows** | The highlight springs from the row it was on to the row it is going to, so a list reads as one object you move through. It is *placed*, not slid, on the first row of a freshly opened panel and after a panel swap: sliding in from a row of a different list would be motion describing nothing |
-| **Pointer hover eases in** | The quiet row preview on panels, the exposé cell lift, and the tab-strip hover fade in over ~120 ms with an ease-out curve — the same motion family as the sliding selection, so mouse and keyboard read alike. Hover-leave still clears in the same frame: nothing in the shell fades out. Exposé hit-testing keeps using the base geometry while only the drawn scale eases |
+| **Pointer hover eases in** | The quiet row preview on panels, the exposé cell lift, and the tab-strip hover fade in over ~120 ms with an ease-out curve — the same motion family as the sliding selection, so mouse and keyboard read alike. Hover-leave still clears in the same frame. Opening docks with a spring; **closing a modal card is instant** — the compositor does not keep a ghost of the dismissed panel to fade, unlike toasts and the OSD which own their own hold+fade timers. Exposé hit-testing keeps using the base geometry while only the drawn scale eases |
 | **The global animation switch is respected** | With `[animation] enabled = false`, `speed = "instant"`, or a zero duration, the shell card, selection, OSD, toasts and HUD snap to their target geometry and request no hidden spring frames |
 | **A windowed list shows a scroll indicator** | The launcher, the notification centre, the pickers and the Hub all send the compositor a slice of a longer list. A slim capsule in the right-hand margin shows how much of the list you are looking at and where |
 | **A hairline separates the list from the footer** | The footer hint names the keys that work on the panel. It is drawn one step quieter than the rows, and the rule is what keeps it from reading as one more row |

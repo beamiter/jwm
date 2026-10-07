@@ -1596,27 +1596,13 @@ impl XcbBackend {
     }
 
     fn init_systray(&mut self, screen_num: usize) {
-        match XcbSystemTray::new(self.conn.clone(), self.atoms, self.root, screen_num) {
-            Ok(mut tray) => match tray.acquire_selection() {
-                Ok(true) => {
-                    log::info!("[systray] Acquired system tray selection");
-                    // Tray clients address `_NET_SYSTEM_TRAY_OPCODE` to this
-                    // window; ClientMessage translation only resolves ids
-                    // already known, so make it known before any can arrive.
-                    self.ids.intern(tray.tray_window);
-                    self.systray = Some(tray);
-                }
-                Ok(false) => {
-                    log::info!("[systray] Another tray owner exists, skipping");
-                }
-                Err(e) => {
-                    log::warn!("[systray] Failed to acquire selection: {e}");
-                }
-            },
-            Err(e) => {
-                log::warn!("[systray] Failed to create system tray: {e}");
-            }
-        }
+        // The tray window is off-screen and never shown in the bar. Claiming
+        // `_NET_SYSTEM_TRAY` here would only steal the selection from a tray
+        // the user can actually see.
+        let _ = screen_num;
+        log::info!(
+            "[systray] Not claiming _NET_SYSTEM_TRAY until tray icons are drawn in the status bar"
+        );
     }
 
     fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {

@@ -1215,6 +1215,7 @@ impl<C: CompositorConnection> Compositor<C> {
             expose_opacity: 0.0,
             expose_start: None,
             expose_title_textures: Vec::new(),
+            expose_title_bright_textures: Vec::new(),
             expose_hover_ease: Default::default(),
             // Phase 5: Smart Snap Preview
             snap_preview_enabled: behavior.snap_preview,

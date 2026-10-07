@@ -380,7 +380,7 @@ fn handle_runtime_update(update: RuntimeUpdate, window: &DesktopContext, baselin
                 apply_monitor_geometry(geometry, window);
             }
             BarEffect::ClearMonitorGeometry => restore_window_baseline(baseline, window),
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
                 static ACTIONS: OnceLock<Mutex<ProcessActionHandler>> = OnceLock::new();
                 let actions = ACTIONS.get_or_init(|| Mutex::new(ProcessActionHandler::default()));
                 match actions.lock() {

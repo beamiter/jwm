@@ -461,7 +461,7 @@ fn execute_effect<R: Runtime>(
     effect: BarEffect,
 ) -> Result<(), String> {
     match effect {
-        BarEffect::Screenshot | BarEffect::OpenAudioControl => inner
+        BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause => inner
             .process_actions
             .lock()
             .map_err(|error| format!("process action lock poisoned: {error}"))?

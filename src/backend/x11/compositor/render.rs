@@ -3914,7 +3914,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 if fill_r[2] > 0.0 {
                     let fill_rgb = if fill_over {
-                        crate::backend::compositor_common::osd::FILL_OVER
+                        ui_theme::palette().meter_over()
                     } else {
                         accent
                     };

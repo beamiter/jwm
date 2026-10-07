@@ -2,8 +2,8 @@
 
 ## Session menu
 
-`Alt+Shift+Escape` (`session_menu`) opens the power actions as a material
-card: lock, suspend, hibernate, log out, restart, shut down. `Up`/`Down` move,
+`Alt+Shift+Escape` (`session_menu`) opens the power actions as the same themed
+system-UI card as the launcher and Shell Hub: lock, suspend, hibernate, log out, restart, shut down. `Up`/`Down` move,
 `Enter` / left-click / middle click selects, `Esc` — or `Alt+Shift+Escape`
 again — closes. The control center's `Session…` row opens the same panel.
 

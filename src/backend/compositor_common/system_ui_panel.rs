@@ -31,21 +31,28 @@ pub(crate) type Rect = [f32; 4];
 /// section is absent.
 pub(crate) type Size = (f32, f32);
 
+use crate::backend::compositor_common::ui_theme;
+
 /// Padding between the card edge and its contents.
-const PAD: f32 = 30.0;
+fn pad() -> f32 {
+    ui_theme::palette().pad
+}
 fn card_pad(w: f32) -> f32 {
     if !(w.is_finite() && w > 0.0) {
         return 0.0;
     }
-    PAD.min(w * 0.08).max(4.0).min(w * 0.2)
+    pad().min(w * 0.08).max(4.0).min(w * 0.2)
 }
 /// Vertical breathing room between bands.
-const GAP: f32 = 16.0;
+fn gap() -> f32 {
+    ui_theme::palette().gap
+}
 fn stack_gap(panel_h: f32) -> f32 {
-    if panel_h.is_finite() && panel_h > 0.0 && panel_h < 12.0 * GAP {
-        GAP.min(panel_h * 0.05).max(4.0)
+    let gap = gap();
+    if panel_h.is_finite() && panel_h > 0.0 && panel_h < 12.0 * gap {
+        gap.min(panel_h * 0.05).max(4.0)
     } else {
-        GAP
+        gap
     }
 }
 /// Inset of the query text inside its field.
@@ -549,13 +556,13 @@ pub(crate) fn target_size(sizes: &SectionSizes, screen_w: f32, width_floor: f32)
     let mut height = 2.0 * pad + sizes.title.1;
     let query_field_h = sizes.query_field_h();
     if query_field_h > 0.0 {
-        height += GAP + query_field_h;
+        height += gap() + query_field_h;
     }
     if sizes.items.1 > 0.0 {
-        height += GAP + sizes.items.1;
+        height += gap() + sizes.items.1;
     }
     if sizes.hint.1 > 0.0 {
-        height += GAP + sizes.hint.1;
+        height += gap() + sizes.hint.1;
     }
     (width, height)
 }
@@ -789,7 +796,7 @@ mod tests {
             SCREEN_W,
             0.0,
         );
-        assert_eq!(w, MIN_CONTENT_W + 2.0 * PAD);
+        assert_eq!(w, MIN_CONTENT_W + 2.0 * pad());
     }
 
     #[test]
@@ -823,7 +830,7 @@ mod tests {
             })
             .collect();
         for w in &widths {
-            assert_eq!((w - 2.0 * PAD) % WIDTH_STEP, 0.0, "{w} is not a whole step");
+            assert_eq!((w - 2.0 * pad()) % WIDTH_STEP, 0.0, "{w} is not a whole step");
         }
         let changes = widths.windows(2).filter(|pair| pair[0] != pair[1]).count();
         assert!(
@@ -879,10 +886,10 @@ mod tests {
         let bare = sizes((40.0, 24.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
         let (_, short) = target_size(&bare, SCREEN_W, 0.0);
 
-        assert_eq!(short, 2.0 * PAD + 24.0);
+        assert_eq!(short, 2.0 * pad() + 24.0);
         assert_eq!(
             tall,
-            short + GAP + (22.0 + QUERY_LEAD) + GAP + 260.0 + GAP + 20.0
+            short + gap() + (22.0 + QUERY_LEAD) + gap() + 260.0 + gap() + 20.0
         );
     }
 
@@ -893,7 +900,7 @@ mod tests {
         let panel = [100.0, 50.0, w, h];
         let c = contents(panel, &s, 10, Some(3), None);
 
-        assert_eq!(c.title, [130.0, 80.0]);
+        assert_eq!(c.title, [100.0 + pad(), 50.0 + pad()]);
         let field = c.query_field.unwrap();
         let items = c.items.unwrap();
         let hint = c.hint.unwrap();
@@ -906,9 +913,9 @@ mod tests {
 
         // Everything is inset by the same padding.
         for left in [c.title[0], field[0], items[0], hint[0]] {
-            assert_eq!(left, 130.0);
+            assert_eq!(left, 100.0 + pad());
         }
-        assert_eq!(field[2], w - 2.0 * PAD);
+        assert_eq!(field[2], w - 2.0 * pad());
     }
 
     #[test]
@@ -930,8 +937,8 @@ mod tests {
             assert!((pill[3] - (row_h + 2.0 * TEXT_PAD)).abs() < 0.001);
             // Wider than the text block on both sides, so the highlight reads
             // as a row of the card.
-            assert_eq!(pill[0], PAD - SELECTION_BLEED);
-            assert_eq!(pill[2], 600.0 - 2.0 * PAD + 2.0 * SELECTION_BLEED);
+            assert_eq!(pill[0], pad() - SELECTION_BLEED);
+            assert_eq!(pill[2], 600.0 - 2.0 * pad() + 2.0 * SELECTION_BLEED);
         }
     }
 
@@ -950,8 +957,8 @@ mod tests {
         let both = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (300.0, 20.0));
         let rule = contents(panel, &both, 8, None, None).divider.unwrap();
         let hint = contents(panel, &both, 8, None, None).hint.unwrap();
-        assert!(rule[1] < hint[1] && rule[1] > hint[1] - GAP);
-        assert_eq!(rule[2], 600.0 - 2.0 * PAD);
+        assert!(rule[1] < hint[1] && rule[1] > hint[1] - gap());
+        assert_eq!(rule[2], 600.0 - 2.0 * pad());
         assert_eq!(rule[3], DIVIDER_H);
 
         let hint_only = sizes((40.0, 24.0), (0.0, 0.0), (0.0, 0.0), (300.0, 20.0));
@@ -1008,7 +1015,7 @@ mod tests {
         let track = at(0).scroll_track.unwrap();
         assert_eq!(track[2], SCROLLBAR_W);
         // In the right-hand padding, clear of the pill that bleeds into it.
-        assert!(track[0] > 600.0 - PAD + SELECTION_BLEED);
+        assert!(track[0] > 600.0 - pad() + SELECTION_BLEED);
         assert!(track[0] + SCROLLBAR_W < 600.0);
 
         let top = at(0).scroll_thumb.unwrap();
@@ -1080,7 +1087,7 @@ mod tests {
         let natural = sizes((40.0, 24.0), (80.0, 22.0), (0.0, 0.0), (0.0, 0.0));
         let (_, natural_h) = target_size(&natural, SCREEN_W, 0.0);
         assert!(h < natural_h);
-        assert!(h > 2.0 * PAD + 24.0);
+        assert!(h > 2.0 * pad() + 24.0);
         let (w, _) = target_size(&tight, SCREEN_W, 0.0);
         let c = contents([0.0, 0.0, w, h], &tight, 0, None, None);
         let field = c.query_field.unwrap();
@@ -1147,9 +1154,9 @@ mod tests {
         let hit = HitGeometry::new(panel, &contents, 10);
         let items_y = contents.items.unwrap()[1];
 
-        assert_eq!(hit.hit_test(130.0, items_y as f64 + 1.0), Hit::Item(0, 0.0));
+        assert_eq!(hit.hit_test((100.0 + pad()) as f64, items_y as f64 + 1.0), Hit::Item(0, 0.0));
         assert_eq!(
-            hit.hit_test(130.0, items_y as f64 + contents.row_height as f64 * 6.5),
+            hit.hit_test((100.0 + pad()) as f64, items_y as f64 + contents.row_height as f64 * 6.5),
             Hit::Item(6, 0.0)
         );
         assert_eq!(hit.hit_test(101.0, items_y as f64), Hit::Panel);
@@ -1330,7 +1337,7 @@ mod tests {
 
         // Every existing region is byte-identical with the zone attached.
         for (x, y) in [
-            (130.0, items_y as f64 + 1.0),
+            ((100.0 + pad()) as f64, items_y as f64 + 1.0),
             (101.0, items_y as f64),
             (99.0, 100.0),
             (10.0, 10.0),
@@ -1351,7 +1358,7 @@ mod tests {
         let panel = [100.0, 50.0, 600.0, 400.0];
         let contents = contents(panel, &s, 10, Some(3), None);
         assert_eq!(contents.row_icons, 0.0);
-        assert_eq!(contents.items.unwrap()[0], 100.0 + PAD);
+        assert_eq!(contents.items.unwrap()[0], 100.0 + pad());
         let hit = HitGeometry::new(panel, &contents, 10);
         let items_y = contents.items.unwrap()[1];
         assert_eq!(
@@ -1372,26 +1379,26 @@ mod tests {
         assert_eq!(h, h_icons, "the column never changes the card's height");
         // The width is quantized to WIDTH_STEP; here the slot tips the content
         // (400 vs 432) across exactly one step boundary.
-        assert_eq!(w_bare, 400.0 + 2.0 * PAD);
-        assert_eq!(w_icons, 440.0 + 2.0 * PAD);
+        assert_eq!(w_bare, 400.0 + 2.0 * pad());
+        assert_eq!(w_icons, 440.0 + 2.0 * pad());
 
         let panel = [100.0, 50.0, w_icons, h_icons];
         let rows = 10;
         let c = contents(panel, &with_icons, rows, Some(3), None);
         let items = c.items.unwrap();
-        assert_eq!(items[0], 100.0 + PAD + ROW_ICON_SLOT);
+        assert_eq!(items[0], 100.0 + pad() + ROW_ICON_SLOT);
         assert_eq!(c.row_icons, ROW_ICON_SLOT);
         // Title, pill and row metrics are untouched by the column.
-        assert_eq!(c.title, [130.0, 80.0]);
+        assert_eq!(c.title, [100.0 + pad(), 50.0 + pad()]);
         let row_h = (204.0 - 2.0 * TEXT_PAD) / rows as f32;
         assert_eq!(c.row_height, row_h);
         let pill = c.selection.unwrap();
-        assert_eq!(pill[0], 100.0 + PAD - SELECTION_BLEED);
+        assert_eq!(pill[0], 100.0 + pad() - SELECTION_BLEED);
 
         // The hit test hands out offsets into the text texture, so the column
         // comes back out of the x it reports.
         let hit = HitGeometry::new(panel, &c, rows);
-        let text_x = f64::from(100.0 + PAD + ROW_ICON_SLOT + 42.0);
+        let text_x = f64::from(100.0 + pad() + ROW_ICON_SLOT + 42.0);
         assert_eq!(
             hit.hit_test(text_x, items[1] as f64 + 1.0),
             Hit::Item(0, 42.0)

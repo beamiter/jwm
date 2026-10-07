@@ -500,6 +500,7 @@ pub enum ActionRequest {
     RefreshBattery,
     Screenshot,
     OpenAudioControl,
+    MediaPlayPause,
     RestoreWindow {
         window_id: u64,
         wm_session_id: u64,
@@ -619,6 +620,7 @@ impl TryFrom<ActionRequest> for UserAction {
             ActionRequest::RefreshBattery => Self::RefreshBattery,
             ActionRequest::Screenshot => Self::Screenshot,
             ActionRequest::OpenAudioControl => Self::OpenAudioControl,
+            ActionRequest::MediaPlayPause => Self::MediaPlayPause,
             ActionRequest::RestoreWindow {
                 window_id,
                 wm_session_id,
@@ -730,6 +732,7 @@ mod tests {
             ActionRequest::RefreshBattery,
             ActionRequest::Screenshot,
             ActionRequest::OpenAudioControl,
+            ActionRequest::MediaPlayPause,
             ActionRequest::RestoreWindow {
                 window_id: 0x1234_5678_9abc_def0,
                 wm_session_id: 91,
@@ -1301,6 +1304,7 @@ mod tests {
                 ActionRequest::OpenAudioControl,
                 UserAction::OpenAudioControl,
             ),
+            (ActionRequest::MediaPlayPause, UserAction::MediaPlayPause),
             (
                 ActionRequest::RestoreWindow {
                     window_id: 17,

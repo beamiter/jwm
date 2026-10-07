@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::ThemeMode;
-use crate::model::MAX_MODEL_TAGS;
-use crate::presentation::PresentationConfig;
+use crate::model::{MAX_MODEL_TAGS, ShellRoute};
+use crate::presentation::{PresentationConfig, PresentationVisibility};
 
 /// Default font when neither the config file nor `XBAR_FONT` specifies one.
 pub const DEFAULT_FONT: &str = "monospace 11";
@@ -252,6 +252,28 @@ struct FilePresentation {
     left_fraction: Option<f32>,
     tag_labels: Option<Vec<String>>,
     icon_font: Option<String>,
+    shell_routes: Option<Vec<String>>,
+    #[serde(default)]
+    visibility: FileVisibility,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileVisibility {
+    client_name: Option<bool>,
+    client_icon: Option<bool>,
+    minimized_windows: Option<bool>,
+    monitor: Option<bool>,
+    system: Option<bool>,
+    audio: Option<bool>,
+    brightness: Option<bool>,
+    battery: Option<bool>,
+    network: Option<bool>,
+    media: Option<bool>,
+    theme: Option<bool>,
+    screenshot: Option<bool>,
+    clock: Option<bool>,
+    shell_hub: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -495,6 +517,10 @@ impl BarConfig {
             validate_text_bytes("presentation.icon_font", &icon_font, MAX_ICON_FONT_BYTES)?;
             presentation.icon_font = Some(icon_font);
         }
+        if let Some(routes) = file.presentation.shell_routes {
+            presentation.shell_routes = parse_shell_routes(routes)?;
+        }
+        apply_visibility(&mut presentation.visibility, file.presentation.visibility);
 
         config.glass = glass_from_file(file.glass)?;
         Ok(config)
@@ -547,6 +573,85 @@ fn validate_config_text_size(text: &str) -> Result<(), ConfigError> {
         });
     }
     Ok(())
+}
+
+/// Validate the `[glass]` section.
+///
+/// Only the values that would be *meaningless* rather than merely extreme are
+/// rejected here; ranges are the recipe's business and it clamps them.
+fn apply_visibility(target: &mut PresentationVisibility, file: FileVisibility) {
+    let FileVisibility {
+        client_name,
+        client_icon,
+        minimized_windows,
+        monitor,
+        system,
+        audio,
+        brightness,
+        battery,
+        network,
+        media,
+        theme,
+        screenshot,
+        clock,
+        shell_hub,
+    } = file;
+    if let Some(value) = client_name {
+        target.client_name = value;
+    }
+    if let Some(value) = client_icon {
+        target.client_icon = value;
+    }
+    if let Some(value) = minimized_windows {
+        target.minimized_windows = value;
+    }
+    if let Some(value) = monitor {
+        target.monitor = value;
+    }
+    if let Some(value) = system {
+        target.system = value;
+    }
+    if let Some(value) = audio {
+        target.audio = value;
+    }
+    if let Some(value) = brightness {
+        target.brightness = value;
+    }
+    if let Some(value) = battery {
+        target.battery = value;
+    }
+    if let Some(value) = network {
+        target.network = value;
+    }
+    if let Some(value) = media {
+        target.media = value;
+    }
+    if let Some(value) = theme {
+        target.theme = value;
+    }
+    if let Some(value) = screenshot {
+        target.screenshot = value;
+    }
+    if let Some(value) = clock {
+        target.clock = value;
+    }
+    if let Some(value) = shell_hub {
+        target.shell_hub = value;
+    }
+}
+
+fn parse_shell_routes(routes: Vec<String>) -> Result<Vec<ShellRoute>, ConfigError> {
+    let mut parsed = Vec::with_capacity(routes.len());
+    for key in routes {
+        let Some(route) = ShellRoute::from_key(&key) else {
+            return Err(ConfigError::InvalidValue {
+                field: "presentation.shell_routes",
+                reason: "must name a known shell page",
+            });
+        };
+        parsed.push(route);
+    }
+    Ok(parsed)
 }
 
 /// Validate the `[glass]` section.
@@ -708,6 +813,47 @@ tag_labels = ["a", "b", "c"]
             config.presentation.item_gap,
             PresentationConfig::default().item_gap
         );
+        assert!(!config.presentation.visibility.monitor);
+        assert_eq!(
+            config.presentation.shell_routes,
+            vec![crate::model::ShellRoute::Hub]
+        );
+    }
+
+    #[test]
+    fn visibility_and_shell_routes_override_defaults() {
+        let config = BarConfig::from_toml(
+            r#"
+[presentation]
+shell_routes = ["hub", "notifications"]
+
+[presentation.visibility]
+monitor = true
+system = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.presentation.shell_routes,
+            vec![
+                crate::model::ShellRoute::Hub,
+                crate::model::ShellRoute::Notifications
+            ]
+        );
+        assert!(config.presentation.visibility.monitor);
+        assert!(!config.presentation.visibility.system);
+        assert!(config.presentation.visibility.clock);
+    }
+
+    #[test]
+    fn unknown_shell_routes_are_rejected() {
+        assert!(matches!(
+            BarConfig::from_toml("[presentation]\nshell_routes = [\"nope\"]"),
+            Err(ConfigError::InvalidValue {
+                field: "presentation.shell_routes",
+                ..
+            })
+        ));
     }
 
     #[test]

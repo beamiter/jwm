@@ -613,7 +613,7 @@ impl IcedBar {
                         }
                     }
                 }
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("failed to handle platform effect: {error}");
                     }

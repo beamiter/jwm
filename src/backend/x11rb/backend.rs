@@ -704,34 +704,13 @@ impl X11rbBackend {
             Err(error) => log::warn!("clipboard: history unavailable: {error}"),
         }
 
-        // Initialize system tray
-        let screen_num = backend.screen_num;
-        match super::systray::SystemTray::new(
-            Arc::clone(&backend.conn),
-            backend.atoms,
-            backend.root_x11,
-            screen_num,
-        ) {
-            Ok(mut tray) => match tray.acquire_selection() {
-                Ok(true) => {
-                    log::info!("[systray] Acquired system tray selection");
-                    // Tray clients address `_NET_SYSTEM_TRAY_OPCODE` to this
-                    // window; ClientMessage translation only resolves ids
-                    // already known, so make it known before any can arrive.
-                    backend.ids.intern(tray.tray_window());
-                    backend.systray = Some(tray);
-                }
-                Ok(false) => {
-                    log::info!("[systray] Another tray owner exists, skipping");
-                }
-                Err(e) => {
-                    log::warn!("[systray] Failed to acquire selection: {}", e);
-                }
-            },
-            Err(e) => {
-                log::warn!("[systray] Failed to create system tray: {}", e);
-            }
-        }
+        // Initialize system tray — not yet. The host window lives at (-1,-1)
+        // and never parents icons into the status bar, so claiming
+        // `_NET_SYSTEM_TRAY` only hides other trays. Skip the selection until
+        // icons are laid into the bar.
+        log::info!(
+            "[systray] Not claiming _NET_SYSTEM_TRAY until tray icons are drawn in the status bar"
+        );
 
         backend.compositor_auto_configure_hdr();
         Ok(backend)

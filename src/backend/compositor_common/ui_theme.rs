@@ -116,6 +116,20 @@ pub(crate) fn palette() -> &'static UiPalette {
 /// compositors' bars pixel-identical.
 pub(crate) const TAB_HOVER_ALPHA_SCALE: f32 = 0.5;
 
+/// Screenshot toolbar hover wash; same scale as the tab strip so both chrome
+/// families raise the pointer target identically.
+pub(crate) const TOOLBAR_HOVER_ALPHA_SCALE: f32 = TAB_HOVER_ALPHA_SCALE;
+
+const METER_GOOD: [f32; 4] = [0.31, 0.85, 0.55, 0.95];
+const METER_WARN: [f32; 4] = [0.98, 0.75, 0.29, 0.95];
+const METER_BAD: [f32; 4] = [0.95, 0.42, 0.45, 0.95];
+const METER_OVER: [f32; 4] = [0.35, 0.78, 0.95, 0.95];
+const URGENCY_CRITICAL: [f32; 4] = [0.95, 0.30, 0.30, 1.0];
+const URGENCY_LOW: [f32; 4] = [0.45, 0.50, 0.62, 1.0];
+const URGENCY_NORMAL: [f32; 4] = [0.55, 0.62, 0.90, 1.0];
+const CAPTURE_ACCENT: [f32; 4] = [0.30, 0.55, 1.0, 0.12];
+const RECORDING_LIVE: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
+
 /// How much of the bar's tint covers the solid-glass sheet drawn under the
 /// status bar.
 ///
@@ -367,6 +381,81 @@ impl UiPalette {
             0.0
         };
         self.chip_radius.min(h * 0.5)
+    }
+
+    /// HUD / OSD meter fill when the reading is healthy.
+    #[must_use]
+    pub(crate) fn meter_good(&self) -> [f32; 4] {
+        METER_GOOD
+    }
+
+    /// HUD / OSD meter fill when the reading is elevated.
+    #[must_use]
+    pub(crate) fn meter_warn(&self) -> [f32; 4] {
+        METER_WARN
+    }
+
+    /// HUD / OSD meter fill when the reading is critical.
+    #[must_use]
+    pub(crate) fn meter_bad(&self) -> [f32; 4] {
+        METER_BAD
+    }
+
+    /// HUD / OSD meter fill past the scale (over 100%, over-refresh).
+    #[must_use]
+    pub(crate) fn meter_over(&self) -> [f32; 4] {
+        METER_OVER
+    }
+
+    /// Toast urgency stripe: critical.
+    #[must_use]
+    pub(crate) fn urgency_critical(&self) -> [f32; 4] {
+        URGENCY_CRITICAL
+    }
+
+    /// Toast urgency stripe: low.
+    #[must_use]
+    pub(crate) fn urgency_low(&self) -> [f32; 4] {
+        URGENCY_LOW
+    }
+
+    /// Toast urgency stripe: normal.
+    #[must_use]
+    pub(crate) fn urgency_normal(&self) -> [f32; 4] {
+        URGENCY_NORMAL
+    }
+
+    /// Capture-selection veil: the theme scrim's hue at a pick-isolation alpha.
+    #[must_use]
+    pub(crate) fn capture_scrim(&self) -> [f32; 4] {
+        [self.scrim[0], self.scrim[1], self.scrim[2], 0.52]
+    }
+
+    /// Soft wash inside a capture hole so the pick still reads as selected.
+    #[must_use]
+    pub(crate) fn capture_accent(&self) -> [f32; 4] {
+        CAPTURE_ACCENT
+    }
+
+    /// Live recording / mic chip. Stays red across themes so "recording" never
+    /// retints into the wallpaper.
+    #[must_use]
+    pub(crate) fn recording_live(&self) -> [f32; 4] {
+        RECORDING_LIVE
+    }
+
+    /// Outer card radius that shrinks on a nested/tiny viewport.
+    #[must_use]
+    pub(crate) fn shrink_panel_radius(&self, w: f32, h: f32) -> f32 {
+        let radius = self.panel_radius;
+        let m = w.min(h);
+        if m.is_finite() && m > 0.0 && m < 4.0 * radius {
+            radius.min(m * 0.08).max(4.0).min(m * 0.5)
+        } else if m.is_finite() && m > 0.0 {
+            radius.min(m * 0.5)
+        } else {
+            radius
+        }
     }
 
     /// One of the palette's text colors as a fill color, so a surface drawn

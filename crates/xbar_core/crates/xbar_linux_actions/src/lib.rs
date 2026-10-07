@@ -516,7 +516,10 @@ impl ProcessActionHandler {
 
     #[must_use]
     pub const fn supports(effect: BarEffect) -> bool {
-        matches!(effect, BarEffect::Screenshot | BarEffect::OpenAudioControl)
+        matches!(
+            effect,
+            BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause
+        )
     }
 
     /// The executable this effect would spawn.
@@ -534,6 +537,7 @@ impl ProcessActionHandler {
                 ScreenshotAction::Jwm { .. } => Err(ProcessActionError::NotAProcess(effect)),
                 ScreenshotAction::Disabled => Err(ProcessActionError::DisabledEffect(effect)),
             },
+            BarEffect::MediaPlayPause => Err(ProcessActionError::NotAProcess(effect)),
             BarEffect::OpenAudioControl => self
                 .config
                 .audio_control
@@ -543,13 +547,22 @@ impl ProcessActionHandler {
         }
     }
 
-    /// Ask jwm for its interactive region capture.
-    fn request_jwm_screenshot(socket: Option<&PathBuf>) -> Result<(), ProcessActionError> {
+    fn request_jwm(
+        socket: Option<&PathBuf>,
+        send: impl FnOnce(&JwmIpc) -> Result<(), JwmIpcError>,
+    ) -> Result<(), ProcessActionError> {
         let ipc = match socket {
             Some(socket) => JwmIpc::at(socket.clone()),
             None => JwmIpc::new(),
         };
-        ipc.take_screenshot().map_err(ProcessActionError::Jwm)
+        send(&ipc).map_err(ProcessActionError::Jwm)
+    }
+
+    fn jwm_socket(&self) -> Option<&PathBuf> {
+        match &self.config.screenshot {
+            ScreenshotAction::Jwm { socket } => socket.as_ref(),
+            _ => None,
+        }
     }
 
     /// Launch a configured command and transfer child ownership to a bounded
@@ -591,10 +604,13 @@ impl PlatformEffectHandler for ProcessActionHandler {
     type Error = ProcessActionError;
 
     fn handle(&mut self, effect: BarEffect) -> Result<(), Self::Error> {
+        if effect == BarEffect::MediaPlayPause {
+            return Self::request_jwm(self.jwm_socket(), JwmIpc::media_play_pause);
+        }
         if let (BarEffect::Screenshot, ScreenshotAction::Jwm { socket }) =
             (effect, &self.config.screenshot)
         {
-            return Self::request_jwm_screenshot(socket.as_ref());
+            return Self::request_jwm(socket.as_ref(), JwmIpc::take_screenshot);
         }
         let command = self.command_for_effect(effect)?;
         self.launch(command)
@@ -730,6 +746,7 @@ mod tests {
             &CommandSpec::new("pavucontrol")
         );
         assert!(ProcessActionHandler::supports(BarEffect::Screenshot));
+        assert!(ProcessActionHandler::supports(BarEffect::MediaPlayPause));
         assert!(!ProcessActionHandler::supports(BarEffect::ToggleMute));
         assert!(matches!(
             handler.command_for_effect(BarEffect::ToggleMute),

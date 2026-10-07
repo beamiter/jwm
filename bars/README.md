@@ -27,3 +27,9 @@ Use `-b <name>` only when you intentionally want an example bar.
 
 Whatever bar you run, the Shell Hub entry should open the same built-in control
 center documented in [docs/control-center.md](../docs/control-center.md).
+
+`tao_glow_bar` defaults to 42 logical pixels of height so it matches
+`appearance.status_bar_height`. Hide or restore pills from
+`~/.config/xbar/config.toml` (`[presentation.visibility]`,
+`presentation.shell_routes`). The monitor index pill is off unless you turn
+it on.

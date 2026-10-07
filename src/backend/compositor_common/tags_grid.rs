@@ -13,6 +13,7 @@
 //! coordinates.
 
 use crate::backend::compositor_common::layout_strip::{self, Rect};
+use crate::backend::compositor_common::ui_theme;
 
 /// One grid cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,13 +47,13 @@ pub struct TagsGridGeometry {
 }
 
 /// Padding between the panel edge and its contents.
-const PAD: f32 = 26.0;
 fn panel_pad(screen_w: f32, screen_h: f32) -> f32 {
+    let pad = ui_theme::palette().pad;
     let cap = screen_w.min(screen_h);
     if cap.is_finite() && cap > 0.0 {
-        PAD.min(cap * 0.08).max(4.0)
+        pad.min(cap * 0.08).max(4.0)
     } else {
-        PAD
+        pad
     }
 }
 /// Band reserved for the title line.
@@ -61,8 +62,6 @@ const TITLE_H: f32 = 30.0;
 const CAPTION_H: f32 = 30.0;
 /// Band reserved for the footer hint.
 const HINT_H: f32 = 24.0;
-/// Vertical breathing room between bands.
-const GAP_Y: f32 = 14.0;
 fn text_band(natural: f32, screen_h: f32) -> f32 {
     if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * natural {
         natural.min(screen_h * 0.1).max(1.0)
@@ -70,11 +69,13 @@ fn text_band(natural: f32, screen_h: f32) -> f32 {
         natural
     }
 }
+/// Vertical breathing room between bands.
 fn gap_y(screen_h: f32) -> f32 {
-    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * GAP_Y {
-        GAP_Y.min(screen_h * 0.05).max(2.0)
+    let gap = ui_theme::palette().gap;
+    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 12.0 * gap {
+        gap.min(screen_h * 0.05).max(2.0)
     } else {
-        GAP_Y
+        gap
     }
 }
 /// Gap between two cells.

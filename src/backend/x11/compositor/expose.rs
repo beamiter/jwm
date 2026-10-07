@@ -1,6 +1,8 @@
 use super::{Compositor, SnapPreview, class_matches_exclude};
 use crate::backend::api::ExposeNavDirection;
-use crate::backend::compositor_common::expose::expose_label_rect;
+use crate::backend::compositor_common::expose::{
+    brightened_title_ink, expose_label_rect,
+};
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs::{self, TabGroup};
 use crate::backend::compositor_font;
@@ -100,6 +102,9 @@ impl<C: CompositorConnection> Compositor<C> {
         );
         if self.expose_hover_ease.animating() {
             self.needs_render = true;
+        }
+        if let Some(id) = hovered_id {
+            self.ensure_expose_bright_title(id);
         }
 
         unsafe {
@@ -239,10 +244,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl
                     .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), opacity);
                 self.gl.active_texture(glow::TEXTURE0);
-                for (entry, slot) in self
+                for (index, (entry, slot)) in self
                     .expose_entries
                     .iter()
                     .zip(self.expose_title_textures.iter())
+                    .enumerate()
                 {
                     let Some((texture, tw, th)) = slot else {
                         continue;
@@ -269,6 +275,23 @@ impl<C: CompositorConnection> Compositor<C> {
                     );
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
                     self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                    if entry.is_hovered
+                        && hover_p > 0.0
+                        && let Some(Some((bright, _, _))) =
+                            self.expose_title_bright_textures.get(index)
+                    {
+                        self.gl.uniform_1_f32(
+                            self.hud_text_uniforms.opacity.as_ref(),
+                            opacity * hover_p,
+                        );
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(*bright));
+                        self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        self.gl.uniform_1_f32(
+                            self.hud_text_uniforms.opacity.as_ref(),
+                            opacity,
+                        );
+                    }
                 }
             }
 
@@ -288,8 +311,12 @@ impl<C: CompositorConnection> Compositor<C> {
     /// so an expose label reads as the same text the other overviews draw.
     pub(super) fn refresh_expose_title_textures(&mut self) {
         let stale = std::mem::take(&mut self.expose_title_textures);
+        let stale_bright = std::mem::take(&mut self.expose_title_bright_textures);
         unsafe {
             for (texture, _, _) in stale.into_iter().flatten() {
+                self.gl.delete_texture(texture);
+            }
+            for (texture, _, _) in stale_bright.into_iter().flatten() {
                 self.gl.delete_texture(texture);
             }
         }
@@ -321,6 +348,61 @@ impl<C: CompositorConnection> Compositor<C> {
             cache.push(slot);
         }
         self.expose_title_textures = cache;
+        self.expose_title_bright_textures = vec![None; self.expose_title_textures.len()];
+    }
+
+    /// Rasterise the hovered entry's brighter title copy on first use.
+    fn ensure_expose_bright_title(&mut self, hovered_id: u32) {
+        let Some(index) = self
+            .expose_entries
+            .iter()
+            .position(|entry| entry.id == hovered_id)
+        else {
+            return;
+        };
+        if self
+            .expose_title_bright_textures
+            .get(index)
+            .is_some_and(Option::is_some)
+        {
+            return;
+        }
+        if self
+            .expose_title_textures
+            .get(index)
+            .and_then(|slot| slot.as_ref())
+            .is_none()
+        {
+            if let Some(slot) = self.expose_title_bright_textures.get_mut(index) {
+                *slot = None;
+            }
+            return;
+        }
+        let entry = &self.expose_entries[index];
+        let budget = window_tabs::title_budget(entry.target_w);
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+        let text = compositor_font::fit_ui_text(&entry.title, font, size, budget);
+        let uploaded = if text.is_empty() {
+            None
+        } else {
+            let (pixels, w, h) = compositor_font::render_ui_text_to_rgba(
+                &text,
+                font,
+                size,
+                brightened_title_ink(ui.title_ink),
+            );
+            if w == 0 || h == 0 {
+                None
+            } else {
+                unsafe { self.upload_text_texture(&pixels, w, h) }.map(|texture| (texture, w, h))
+            }
+        };
+        if let Some(slot) = self.expose_title_bright_textures.get_mut(index) {
+            *slot = uploaded;
+        }
     }
 
     /// Handle mouse hover in expose mode.
@@ -538,7 +620,7 @@ impl<C: CompositorConnection> Compositor<C> {
         interactive: bool,
     ) {
         use crate::backend::compositor_common::capture_veil::{
-            CAPTURE_HOLE_WASH, CAPTURE_SCRIM, outside_dim_rects,
+            capture_hole_wash, capture_scrim, outside_dim_rects,
         };
 
         if width <= 0.0 || height <= 0.0 || opacity <= 0.0 {
@@ -547,8 +629,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let screen_w = self.screen_w as f32;
         let screen_h = self.screen_h as f32;
-        let [sr, sg, sb, sa] = CAPTURE_SCRIM;
-        let [wr, wg, wb, wa] = CAPTURE_HOLE_WASH;
+        let [sr, sg, sb, sa] = capture_scrim();
+        let [wr, wg, wb, wa] = capture_hole_wash();
         let [pr, pg, pb, pa] = self.snap_preview_color;
         let outline_r = (pr * 1.5).min(1.0);
         let outline_g = (pg * 1.5).min(1.0);

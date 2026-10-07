@@ -624,7 +624,7 @@ impl XilemBar {
         }
         for effect in update.platform_effects {
             match effect {
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("failed to handle platform effect: {error}");
                     }

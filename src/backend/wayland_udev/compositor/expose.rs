@@ -751,7 +751,7 @@ impl WaylandCompositor {
         interactive: bool,
     ) {
         use crate::backend::compositor_common::capture_veil::{
-            CAPTURE_HOLE_WASH, CAPTURE_SCRIM, outside_dim_rects,
+            capture_hole_wash, capture_scrim, outside_dim_rects,
         };
 
         if width <= 0.0 || height <= 0.0 || opacity <= 0.0 {
@@ -760,8 +760,8 @@ impl WaylandCompositor {
 
         let screen_w = self.screen_w as f32;
         let screen_h = self.screen_h as f32;
-        let [sr, sg, sb, sa] = CAPTURE_SCRIM;
-        let [wr, wg, wb, wa] = CAPTURE_HOLE_WASH;
+        let [sr, sg, sb, sa] = capture_scrim();
+        let [wr, wg, wb, wa] = capture_hole_wash();
         let (_, outline_color) = snap_preview_colors(self.snap_preview_color, opacity);
         let scrim_a = sa * opacity;
         let wash_a = wa * opacity;

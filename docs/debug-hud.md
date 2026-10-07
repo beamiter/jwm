@@ -1,7 +1,8 @@
 # Debug HUD
 
 `Alt+Shift+F12` (`toggle_debug_hud`) draws the compositor's live counters as a
-material card in the top-left corner, on both the X11 and the Wayland backend.
+card docked under the status bar (the same island slot as the OSD and toasts),
+on both the X11 and the Wayland backend.
 The same key turns the extended sections on, so one press gets everything.
 
 ## Reading the card
