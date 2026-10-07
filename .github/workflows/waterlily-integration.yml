@@ -141,6 +141,7 @@ jobs:
 
       - name: Render fine jelly geometry with mandatory headless GL
         env:
+          EGL_PLATFORM: surfaceless
           JWM_REQUIRE_HEADLESS_GL: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: cargo test --locked --lib jelly_geometry
