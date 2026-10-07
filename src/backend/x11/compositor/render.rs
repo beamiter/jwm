@@ -4055,7 +4055,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // whole recording, and a glass backdrop re-blurs the screen on
             // every one of those frames.
             self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
-            let mut rec_dot = indicator::DOT_COLOR;
+            let mut rec_dot = indicator::dot_color();
             rec_dot[3] = indicator::dot_alpha(
                 self.recording_started_at
                     .map(|started| started.elapsed())
@@ -4200,7 +4200,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 layout.dot[2],
                 layout.dot[3],
                 layout.dot[2].min(layout.dot[3]) * 0.5,
-                indicator::DOT_COLOR,
+                indicator::dot_color(),
             );
 
             self.gl.use_program(Some(self.hud_text_program));

@@ -797,9 +797,10 @@ mod tests {
         assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - osd_pad() + 0.01);
         assert!(slider_bar([0.0, 0.0, 32.0, OSD_CARD_HEIGHT], 1.0).is_none());
         assert!(slider_bar([0.0, 0.0, 200.0, OSD_CARD_HEIGHT], 0.0).is_some());
-        let [lx, _, lw, _] = label_rect([0.0, 0.0, 40.0, OSD_CARD_HEIGHT], 400.0, 20.0, false);
+        let narrow_w = osd_pad() * 1.5;
+        let [lx, _, lw, _] = label_rect([0.0, 0.0, narrow_w, OSD_CARD_HEIGHT], 400.0, 20.0, false);
         assert!(lx < osd_pad());
-        assert!(lw <= 40.0 - 2.0 * lx + 0.01);
+        assert!(lw <= narrow_w - 2.0 * lx + 0.01);
         let slider = [0.0, 0.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT];
         let [lx, _, lw, _] = label_rect(slider, 400.0, 20.0, true);
         let (track, _) = slider_bar(slider, 0.5).unwrap();

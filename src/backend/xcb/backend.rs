@@ -2,7 +2,7 @@
 //!
 //! This backend owns a real `xcb::Connection` and implements the full JWM
 //! backend trait surface directly on top of XCB. Window management, EWMH,
-//! input, systray, and primary event dispatch are handled natively. The
+//! input and primary event dispatch are handled natively. The
 //! compositor path reuses the shared X11 compositor layer so both X11
 //! backends expose the same higher-level feature surface.
 
@@ -171,13 +171,6 @@ struct XcbAtoms {
     net_wm_action_above: x::Atom,
     net_wm_action_below: x::Atom,
     net_workarea: x::Atom,
-    net_system_tray_opcode: x::Atom,
-    net_system_tray_orientation: x::Atom,
-    #[allow(dead_code)]
-    net_system_tray_visual: x::Atom,
-    manager: x::Atom,
-    xembed: x::Atom,
-    xembed_info: x::Atom,
     motif_wm_hints: x::Atom,
     gtk_frame_extents: x::Atom,
     #[allow(dead_code)]
@@ -286,12 +279,6 @@ impl XcbAtoms {
             net_wm_action_above: Self::intern(conn, b"_NET_WM_ACTION_ABOVE")?,
             net_wm_action_below: Self::intern(conn, b"_NET_WM_ACTION_BELOW")?,
             net_workarea: Self::intern(conn, b"_NET_WORKAREA")?,
-            net_system_tray_opcode: Self::intern(conn, b"_NET_SYSTEM_TRAY_OPCODE")?,
-            net_system_tray_orientation: Self::intern(conn, b"_NET_SYSTEM_TRAY_ORIENTATION")?,
-            net_system_tray_visual: Self::intern(conn, b"_NET_SYSTEM_TRAY_VISUAL")?,
-            manager: Self::intern(conn, b"MANAGER")?,
-            xembed: Self::intern(conn, b"_XEMBED")?,
-            xembed_info: Self::intern(conn, b"_XEMBED_INFO")?,
             motif_wm_hints: Self::intern(conn, b"_MOTIF_WM_HINTS")?,
             gtk_frame_extents: Self::intern(conn, b"_GTK_FRAME_EXTENTS")?,
             compound_text: Self::intern(conn, b"COMPOUND_TEXT")?,
@@ -526,7 +513,6 @@ pub struct XcbBackend {
     compositor: Option<XcbSharedCompositor>,
     compositor_desired: X11CompositorDesiredState,
     compositor_loop_signal: Option<calloop::LoopSignal>,
-    systray: Option<XcbSystemTray>,
     clipboard: Option<super::clipboard::Clipboard>,
     benchmark_auto_exit: bool,
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
@@ -543,308 +529,6 @@ struct XcbInteraction {
     current_y: i32,
     current_w: u32,
     current_h: u32,
-}
-
-#[derive(Debug, Clone)]
-struct XcbTrayIcon {
-    window: x::Window,
-    mapped: bool,
-}
-
-struct XcbSystemTray {
-    conn: Arc<xcb::Connection>,
-    atoms: XcbAtoms,
-    tray_window: x::Window,
-    selection_atom: x::Atom,
-    root: x::Window,
-    icon_size: u32,
-    icons: Vec<XcbTrayIcon>,
-    active: bool,
-}
-
-impl XcbSystemTray {
-    fn new(
-        conn: Arc<xcb::Connection>,
-        atoms: XcbAtoms,
-        root: x::Window,
-        screen_num: usize,
-    ) -> XcbResult<Self> {
-        let selection_name = format!("_NET_SYSTEM_TRAY_S{screen_num}");
-        let selection_atom = XcbAtoms::intern(&conn, selection_name.as_bytes())?;
-        let tray_window: x::Window = conn.generate_id();
-        conn.send_and_check_request(&x::CreateWindow {
-            depth: x::COPY_FROM_PARENT as u8,
-            wid: tray_window,
-            parent: root,
-            x: -1,
-            y: -1,
-            width: 1,
-            height: 1,
-            border_width: 0,
-            class: x::WindowClass::InputOutput,
-            visual: x::COPY_FROM_PARENT,
-            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-        })
-        .map_err(xcb_err)?;
-
-        Ok(Self {
-            conn,
-            atoms,
-            tray_window,
-            selection_atom,
-            root,
-            icon_size: 24,
-            icons: Vec::new(),
-            active: false,
-        })
-    }
-
-    fn acquire_selection(&mut self) -> XcbResult<bool> {
-        let owner = self
-            .conn
-            .wait_for_reply(self.conn.send_request(&x::GetSelectionOwner {
-                selection: self.selection_atom,
-            }))
-            .map_err(xcb_err)?
-            .owner();
-        if owner != x::WINDOW_NONE {
-            return Ok(false);
-        }
-
-        self.conn
-            .send_and_check_request(&x::SetSelectionOwner {
-                owner: self.tray_window,
-                selection: self.selection_atom,
-                time: x::CURRENT_TIME,
-            })
-            .map_err(xcb_err)?;
-
-        let owner = self
-            .conn
-            .wait_for_reply(self.conn.send_request(&x::GetSelectionOwner {
-                selection: self.selection_atom,
-            }))
-            .map_err(xcb_err)?
-            .owner();
-        if owner != self.tray_window {
-            return Ok(false);
-        }
-
-        let manager_event = x::ClientMessageEvent::new(
-            self.root,
-            self.atoms.manager,
-            x::ClientMessageData::Data32([
-                x::CURRENT_TIME,
-                self.selection_atom.resource_id(),
-                self.tray_window.resource_id(),
-                0,
-                0,
-            ]),
-        );
-        self.conn
-            .send_and_check_request(&x::SendEvent {
-                propagate: false,
-                destination: x::SendEventDest::Window(self.root),
-                event_mask: x::EventMask::STRUCTURE_NOTIFY,
-                event: &manager_event,
-            })
-            .map_err(xcb_err)?;
-
-        change_u32s(
-            &self.conn,
-            self.tray_window,
-            self.atoms.net_system_tray_orientation,
-            self.atoms.cardinal,
-            &[0],
-        )?;
-        self.conn.flush().map_err(xcb_err)?;
-        self.active = true;
-        Ok(true)
-    }
-
-    fn handle_client_message(&mut self, data: &[u32; 5]) -> bool {
-        if !self.active {
-            return false;
-        }
-        if data[1] == 0 && data[2] != 0 {
-            let _ = self.dock_icon(x::Window::new(data[2]));
-            return true;
-        }
-        false
-    }
-
-    fn dock_icon(&mut self, icon_window: x::Window) -> XcbResult<()> {
-        if self.is_tray_icon(icon_window) {
-            return Ok(());
-        }
-
-        self.conn
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: icon_window,
-                value_list: &[x::Cw::EventMask(
-                    x::EventMask::STRUCTURE_NOTIFY | x::EventMask::PROPERTY_CHANGE,
-                )],
-            })
-            .map_err(xcb_err)?;
-        self.conn
-            .send_and_check_request(&x::ReparentWindow {
-                window: icon_window,
-                parent: self.tray_window,
-                x: 0,
-                y: 0,
-            })
-            .map_err(xcb_err)?;
-        self.configure_icon(icon_window, 0)?;
-        self.conn
-            .send_and_check_request(&x::MapWindow {
-                window: icon_window,
-            })
-            .map_err(xcb_err)?;
-
-        let xembed_event = x::ClientMessageEvent::new(
-            icon_window,
-            self.atoms.xembed,
-            x::ClientMessageData::Data32([
-                x::CURRENT_TIME,
-                0,
-                0,
-                self.tray_window.resource_id(),
-                0,
-            ]),
-        );
-        self.conn
-            .send_and_check_request(&x::SendEvent {
-                propagate: false,
-                destination: x::SendEventDest::Window(icon_window),
-                event_mask: x::EventMask::NO_EVENT,
-                event: &xembed_event,
-            })
-            .map_err(xcb_err)?;
-
-        self.icons.push(XcbTrayIcon {
-            window: icon_window,
-            mapped: true,
-        });
-        self.layout_icons()?;
-        self.conn.flush().map_err(xcb_err)
-    }
-
-    fn handle_destroy(&mut self, window: x::Window) {
-        if let Some(pos) = self.icons.iter().position(|i| i.window == window) {
-            self.icons.remove(pos);
-            let _ = self.layout_icons();
-            let _ = self.conn.flush();
-        }
-    }
-
-    fn handle_unmap(&mut self, window: x::Window) {
-        if let Some(icon) = self.icons.iter_mut().find(|i| i.window == window) {
-            icon.mapped = false;
-            let _ = self.layout_icons();
-            let _ = self.conn.flush();
-        }
-    }
-
-    fn handle_map(&mut self, window: x::Window) {
-        if let Some(icon) = self.icons.iter_mut().find(|i| i.window == window) {
-            icon.mapped = true;
-            let _ = self.layout_icons();
-            let _ = self.conn.flush();
-        }
-    }
-
-    fn handle_xembed_info_change(&mut self, window: x::Window) {
-        let mapped = self.read_xembed_mapped(window);
-        if let Some(icon) = self.icons.iter_mut().find(|i| i.window == window) {
-            if mapped && !icon.mapped {
-                icon.mapped = true;
-                let _ = self.conn.send_and_check_request(&x::MapWindow { window });
-            } else if !mapped && icon.mapped {
-                icon.mapped = false;
-                let _ = self.conn.send_and_check_request(&x::UnmapWindow { window });
-            }
-            let _ = self.layout_icons();
-            let _ = self.conn.flush();
-        }
-    }
-
-    fn is_tray_icon(&self, window: x::Window) -> bool {
-        self.icons.iter().any(|i| i.window == window)
-    }
-
-    fn cleanup(&self) {
-        if !self.active {
-            return;
-        }
-        for icon in &self.icons {
-            let _ = self.conn.send_and_check_request(&x::ReparentWindow {
-                window: icon.window,
-                parent: self.root,
-                x: 0,
-                y: 0,
-            });
-            let _ = self.conn.send_and_check_request(&x::UnmapWindow {
-                window: icon.window,
-            });
-        }
-        let _ = self.conn.send_and_check_request(&x::DestroyWindow {
-            window: self.tray_window,
-        });
-        let _ = self.conn.flush();
-    }
-
-    fn layout_icons(&self) -> XcbResult<()> {
-        let mut x_offset: u32 = 0;
-        for icon in &self.icons {
-            if !icon.mapped {
-                continue;
-            }
-            self.configure_icon(icon.window, x_offset)?;
-            x_offset += self.icon_size;
-        }
-        self.conn
-            .send_and_check_request(&x::ConfigureWindow {
-                window: self.tray_window,
-                value_list: &[
-                    x::ConfigWindow::Width(x_offset.max(1)),
-                    x::ConfigWindow::Height(self.icon_size),
-                ],
-            })
-            .map_err(xcb_err)
-    }
-
-    fn configure_icon(&self, window: x::Window, x_offset: u32) -> XcbResult<()> {
-        self.conn
-            .send_and_check_request(&x::ConfigureWindow {
-                window,
-                value_list: &[
-                    x::ConfigWindow::X(x_offset as i32),
-                    x::ConfigWindow::Y(0),
-                    x::ConfigWindow::Width(self.icon_size),
-                    x::ConfigWindow::Height(self.icon_size),
-                ],
-            })
-            .map_err(xcb_err)
-    }
-
-    fn read_xembed_mapped(&self, window: x::Window) -> bool {
-        let cookie = self.conn.send_request(&x::GetProperty {
-            delete: false,
-            window,
-            property: self.atoms.xembed_info,
-            r#type: x::ATOM_ANY,
-            long_offset: 0,
-            long_length: 2,
-        });
-        let Ok(reply) = self.conn.wait_for_reply(cookie) else {
-            return true;
-        };
-        if reply.format() != 32 {
-            return true;
-        }
-        let data = reply.value::<u32>();
-        data.len() < 2 || data[1] & 1 != 0
-    }
 }
 
 struct XcbLoopData<'a> {
@@ -1145,10 +829,6 @@ impl XcbLoopData<'_> {
             BackendEvent::WindowDestroyed(win) => Some(*win),
             _ => None,
         };
-        if self.backend.systray_handle_event(&event) {
-            self.backend.cleanup_destroyed_window(destroyed_window);
-            return;
-        }
         let event = self.backend.enrich_event_with_output(event);
         if let Err(err) = self.handler.handle_event(self.backend, event) {
             log::error!("Error handling {context}: {err:?}");
@@ -1554,7 +1234,6 @@ impl XcbBackend {
             compositor,
             compositor_desired: X11CompositorDesiredState::default(),
             compositor_loop_signal: None,
-            systray: None,
             clipboard: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
@@ -1567,7 +1246,6 @@ impl XcbBackend {
             Err(error) => log::warn!("clipboard: history unavailable: {error}"),
         }
 
-        backend.init_systray(screen_num as usize);
         backend.compositor_auto_configure_hdr();
         Ok(backend)
     }
@@ -1593,66 +1271,6 @@ impl XcbBackend {
         let conn = create_shared_compositor_connection(self.conn.clone())?;
         self.shared_compositor_conn = Some(conn.clone());
         Ok(conn)
-    }
-
-    fn init_systray(&mut self, screen_num: usize) {
-        // The tray window is off-screen and never shown in the bar. Claiming
-        // `_NET_SYSTEM_TRAY` here would only steal the selection from a tray
-        // the user can actually see.
-        let _ = screen_num;
-        log::info!(
-            "[systray] Not claiming _NET_SYSTEM_TRAY until tray icons are drawn in the status bar"
-        );
-    }
-
-    fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {
-        let systray = match self.systray.as_mut() {
-            Some(s) => s,
-            None => return false,
-        };
-        match ev {
-            BackendEvent::ClientMessage { type_, data, .. } => {
-                if *type_ == self.atoms.net_system_tray_opcode.resource_id() {
-                    return systray.handle_client_message(data);
-                }
-                false
-            }
-            BackendEvent::WindowDestroyed(win) => {
-                let x11w = x::Window::new(self.ids.x11(*win).unwrap_or(0));
-                if systray.is_tray_icon(x11w) {
-                    systray.handle_destroy(x11w);
-                    return true;
-                }
-                false
-            }
-            BackendEvent::WindowUnmapped { window, .. } => {
-                let x11w = x::Window::new(self.ids.x11(*window).unwrap_or(0));
-                if systray.is_tray_icon(x11w) {
-                    systray.handle_unmap(x11w);
-                    return true;
-                }
-                false
-            }
-            BackendEvent::WindowMapped(win) => {
-                let x11w = x::Window::new(self.ids.x11(*win).unwrap_or(0));
-                if systray.is_tray_icon(x11w) {
-                    systray.handle_map(x11w);
-                    return true;
-                }
-                false
-            }
-            BackendEvent::PropertyChanged { window, kind } => {
-                if matches!(kind, PropertyKind::Other) {
-                    let x11w = x::Window::new(self.ids.x11(*window).unwrap_or(0));
-                    if systray.is_tray_icon(x11w) {
-                        systray.handle_xembed_info_change(x11w);
-                        return true;
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
     }
 
     fn cleanup_destroyed_window(&mut self, win: Option<WindowId>) {
@@ -2602,10 +2220,6 @@ impl Backend for XcbBackend {
 
     fn cleanup(&mut self) -> XcbResult<()> {
         self.compositor.take();
-        if let Some(ref tray) = self.systray {
-            tray.cleanup();
-        }
-        self.systray.take();
         self.cursor_provider.cleanup()?;
         self.color_allocator.free_all_theme_pixels()?;
         if let Some(ewmh) = self.ewmh.as_ref() {
@@ -6614,7 +6228,7 @@ mod parity_tests {
     #[test]
     fn xcb_backend_construction_blocks_sigchld_before_spawning_worker_threads() {
         // calloop's signalfd only sees SIGCHLD while every other thread keeps
-        // it blocked, and the compositor, clipboard and tray threads start
+        // it blocked, and the compositor and clipboard threads start
         // long before `run` creates the signal source.
         let new = impl_body_after(XCB_BACKEND_SRC, "pub fn new() -> XcbResult<Self>");
         let position = |needle: &str| {
@@ -6625,7 +6239,6 @@ mod parity_tests {
         for spawner in [
             "XcbSharedCompositor::new(",
             "super::clipboard::Clipboard::start(",
-            "backend.init_systray(",
         ] {
             assert!(
                 guard < position(spawner),
@@ -7027,9 +6640,7 @@ mod parity_tests {
         // A ClientMessage carries whatever XID its sender wrote, and a window
         // that never existed never gets the DestroyNotify that evicts it, so
         // interning at translation lets one client grow both id maps without
-        // bound. Both transports must resolve, never allocate — and the tray
-        // selection window, the one jwm-owned target clients legitimately
-        // address, must be interned when the selection is acquired.
+        // bound. Both transports must resolve, never allocate.
         let allocate = format!("ids.{}", "intern");
         let resolve = format!("ids.{}(", "existing_window");
 
@@ -7052,11 +6663,20 @@ mod parity_tests {
             "x11rb ClientMessage translation must only resolve known windows"
         );
 
-        let tray = guarded_production_needle(format!("ids.intern(tray.{}", "tray_window"));
-        for (label, source) in [("x11rb", X11RB_BACKEND_SRC), ("xcb", XCB_BACKEND_SRC)] {
+        // Neither WM backend hosts visible tray icons, so it must leave
+        // ownership to a visible tray rather than swallowing its icons.
+        for (label, source, constructor) in [
+            (
+                "x11rb",
+                X11RB_BACKEND_SRC,
+                "pub fn new() -> Result<Self, BackendError>",
+            ),
+            ("xcb", XCB_BACKEND_SRC, "pub fn new() -> XcbResult<Self>"),
+        ] {
+            let body = impl_body_after(source, constructor);
             assert!(
-                source.contains(&tray),
-                "{label} must intern the tray selection window when it acquires the selection"
+                !body.contains(".acquire_selection("),
+                "{label} must not claim an invisible tray selection"
             );
         }
     }
@@ -7237,10 +6857,24 @@ mod parity_tests {
     }
 
     #[test]
-    fn xcb_atoms_cover_x11rb_atoms() {
+    fn xcb_atoms_cover_x11rb_wm_atoms() {
         let xcb = xcb_atom_fields();
+        // These atoms belong to x11rb's public, reusable tray component.
+        // Tray hosting is disabled in both WM backends; XCB removed its
+        // private implementation instead of keeping unreachable code.
         let missing: Vec<_> = x11rb_atom_names()
             .into_iter()
+            .filter(|atom| {
+                !matches!(
+                    atom.as_str(),
+                    "MANAGER"
+                        | "_NET_SYSTEM_TRAY_OPCODE"
+                        | "_NET_SYSTEM_TRAY_ORIENTATION"
+                        | "_NET_SYSTEM_TRAY_VISUAL"
+                        | "_XEMBED"
+                        | "_XEMBED_INFO"
+                )
+            })
             .filter(|atom| !xcb.contains(&x11rb_atom_to_xcb_field(atom)))
             .collect();
 
@@ -7866,7 +7500,7 @@ mod parity_tests {
             );
             assert!(
                 !destroy_arm.contains("remove_x11") && !destroy_arm.contains("remove_id"),
-                "{label} must retain the XID mapping until compositor/systray/JWM dispatch"
+                "{label} must retain the XID mapping until compositor/JWM dispatch"
             );
         }
     }

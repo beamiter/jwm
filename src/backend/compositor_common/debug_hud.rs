@@ -16,17 +16,6 @@ use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 /// `(x, y, w, h)` in surface pixels, top-left origin.
 pub(crate) type Rect = (f32, f32, f32, f32);
 
-/// Meter fill at or above the refresh target, including overshoot.
-pub(crate) const TONE_GOOD: [f32; 4] = [0.31, 0.85, 0.55, 0.95];
-/// Meter fill between [`METER_WARN`] and [`METER_GOOD`].
-pub(crate) const TONE_WARN: [f32; 4] = [0.98, 0.75, 0.29, 0.95];
-/// Meter fill below [`METER_WARN`]: frames are being missed.
-pub(crate) const TONE_BAD: [f32; 4] = [0.95, 0.42, 0.45, 0.95];
-/// Meter fill when the compositor is producing more frames than the panel
-/// can show — the bar stays full, but the tone is a cooler cyan so 120 fps
-/// on a 60 Hz output does not look identical to a perfect lock.
-pub(crate) const TONE_OVER: [f32; 4] = [0.35, 0.78, 0.95, 0.95];
-
 const METER_GOOD: f32 = 0.90;
 const METER_WARN: f32 = 0.60;
 
@@ -382,17 +371,18 @@ mod tests {
 
     #[test]
     fn meter_tone_tracks_the_refresh_target() {
+        let ui = ui_theme::palette();
         let (full, tone) = fps_meter(60.0, 60.0);
         assert!((full - 1.0).abs() < 1e-6);
-        assert!(same_tone(tone, TONE_GOOD));
-        assert!(same_tone(fps_meter(45.0, 60.0).1, TONE_WARN));
-        assert!(same_tone(fps_meter(20.0, 60.0).1, TONE_BAD));
+        assert!(same_tone(tone, ui.meter_good()));
+        assert!(same_tone(fps_meter(45.0, 60.0).1, ui.meter_warn()));
+        assert!(same_tone(fps_meter(20.0, 60.0).1, ui.meter_bad()));
         // A missing or nonsense target falls back to 60 Hz.
         assert!((fps_meter(60.0, 0.0).0 - 1.0).abs() < 1e-6);
         let (over_fill, over_tone) = fps_meter(120.0, 60.0);
         assert!((over_fill - 1.0).abs() < 1e-6);
-        assert!(same_tone(over_tone, TONE_OVER));
-        assert!(!same_tone(over_tone, TONE_GOOD));
+        assert!(same_tone(over_tone, ui.meter_over()));
+        assert!(!same_tone(over_tone, ui.meter_good()));
     }
 
     #[test]

@@ -1308,10 +1308,7 @@ mod tests {
             .unwrap();
         assert_eq!(media.value, "track \u{2014} artist");
         assert_eq!(media.icon, config.labels.media_paused);
-        assert_eq!(
-            media.bindings.primary,
-            Some(UserAction::MediaPlayPause)
-        );
+        assert_eq!(media.bindings.primary, Some(UserAction::MediaPlayPause));
         assert_eq!(
             media.bindings.secondary,
             Some(UserAction::OpenShellHub(ShellRoute::Hub))

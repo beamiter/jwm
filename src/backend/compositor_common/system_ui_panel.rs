@@ -830,7 +830,11 @@ mod tests {
             })
             .collect();
         for w in &widths {
-            assert_eq!((w - 2.0 * pad()) % WIDTH_STEP, 0.0, "{w} is not a whole step");
+            assert_eq!(
+                (w - 2.0 * pad()) % WIDTH_STEP,
+                0.0,
+                "{w} is not a whole step"
+            );
         }
         let changes = widths.windows(2).filter(|pair| pair[0] != pair[1]).count();
         assert!(
@@ -1154,9 +1158,15 @@ mod tests {
         let hit = HitGeometry::new(panel, &contents, 10);
         let items_y = contents.items.unwrap()[1];
 
-        assert_eq!(hit.hit_test((100.0 + pad()) as f64, items_y as f64 + 1.0), Hit::Item(0, 0.0));
         assert_eq!(
-            hit.hit_test((100.0 + pad()) as f64, items_y as f64 + contents.row_height as f64 * 6.5),
+            hit.hit_test((100.0 + pad()) as f64, items_y as f64 + 1.0),
+            Hit::Item(0, 0.0)
+        );
+        assert_eq!(
+            hit.hit_test(
+                (100.0 + pad()) as f64,
+                items_y as f64 + contents.row_height as f64 * 6.5
+            ),
             Hit::Item(6, 0.0)
         );
         assert_eq!(hit.hit_test(101.0, items_y as f64), Hit::Panel);
@@ -1192,7 +1202,7 @@ mod tests {
         }
         let items_y = contents.items.unwrap()[1];
         assert_eq!(
-            hit.hit_test(172.0, items_y as f64 + 1.0),
+            hit.hit_test((panel[0] + pad() + 42.0) as f64, items_y as f64 + 1.0),
             Hit::Item(0, 42.0)
         );
         assert_eq!(hit.scroll_t_at(track[1] as f64), Some(0.0));
@@ -1218,7 +1228,10 @@ mod tests {
         let items_y = contents.items.unwrap()[1];
 
         assert_eq!(
-            hit.hit_test(300.0, (items_y + s.items.1 - 0.5) as f64),
+            hit.hit_test(
+                (panel[0] + pad() + 270.0) as f64,
+                (items_y + s.items.1 - 0.5) as f64
+            ),
             Hit::Item(9, 270.0)
         );
     }
@@ -1231,16 +1244,16 @@ mod tests {
         let hit = HitGeometry::new(panel, &contents, 10);
         let items_y = contents.items.unwrap()[1];
 
-        // The list texture is drawn at panel_x + PAD; the carried x is the
+        // The list texture is drawn at panel_x + the theme padding; the carried x is the
         // pointer's offset into that texture, so a row can tell its slider
         // bar from its label. A press in the pill's bleed lands at a small
         // negative offset, left of the text.
         assert_eq!(
-            hit.hit_test(172.0, items_y as f64 + 1.0),
+            hit.hit_test((panel[0] + pad() + 42.0) as f64, items_y as f64 + 1.0),
             Hit::Item(0, 42.0)
         );
         assert_eq!(
-            hit.hit_test(122.0, items_y as f64 + 1.0),
+            hit.hit_test((panel[0] + pad() - 8.0) as f64, items_y as f64 + 1.0),
             Hit::Item(0, -8.0)
         );
     }
@@ -1362,7 +1375,7 @@ mod tests {
         let hit = HitGeometry::new(panel, &contents, 10);
         let items_y = contents.items.unwrap()[1];
         assert_eq!(
-            hit.hit_test(172.0, items_y as f64 + 1.0),
+            hit.hit_test((panel[0] + pad() + 42.0) as f64, items_y as f64 + 1.0),
             Hit::Item(0, 42.0)
         );
     }

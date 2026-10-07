@@ -1,8 +1,6 @@
 use super::{Compositor, SnapPreview, class_matches_exclude};
 use crate::backend::api::ExposeNavDirection;
-use crate::backend::compositor_common::expose::{
-    brightened_title_ink, expose_label_rect,
-};
+use crate::backend::compositor_common::expose::{brightened_title_ink, expose_label_rect};
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs::{self, TabGroup};
 use crate::backend::compositor_font;
@@ -287,10 +285,8 @@ impl<C: CompositorConnection> Compositor<C> {
                         );
                         self.gl.bind_texture(glow::TEXTURE_2D, Some(*bright));
                         self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                        self.gl.uniform_1_f32(
-                            self.hud_text_uniforms.opacity.as_ref(),
-                            opacity,
-                        );
+                        self.gl
+                            .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), opacity);
                     }
                 }
             }

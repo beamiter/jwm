@@ -68,9 +68,12 @@ fn rec_margin(screen: f32) -> f32 {
 
 /// The recording red used by the REC / MIC chips. The interactive crop cue
 /// shares the screenshot snap-preview blue instead — these chips stay red so
-/// "recording is live" remains distinct from "selecting a source". Matches
-/// [`crate::backend::compositor_common::ui_theme::UiPalette::recording_live`].
-pub(crate) const DOT_COLOR: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
+/// "recording is live" remains distinct from "selecting a source".
+#[must_use]
+pub(crate) fn dot_color() -> [f32; 4] {
+    super::ui_theme::palette().recording_live()
+}
+
 /// Slow pulse on the live dot so a static red pill is harder to miss against
 /// a matching wallpaper. The trough never goes fully out.
 const DOT_PULSE_HZ: f32 = 1.0;
@@ -98,7 +101,7 @@ fn rec_dot_gap(chip_w: f32) -> f32 {
 pub(crate) fn dot_alpha(elapsed: Duration) -> f32 {
     let t = elapsed.as_secs_f32();
     let pulse = (t * DOT_PULSE_HZ * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-    DOT_COLOR[3] * pulse.max(DOT_ALPHA_FLOOR)
+    dot_color()[3] * pulse.max(DOT_ALPHA_FLOOR)
 }
 
 /// Rects the renderer draws, in screen coordinates (top-left origin).
@@ -443,8 +446,8 @@ mod tests {
             let a = dot_alpha(Duration::from_millis(ms));
             min = min.min(a);
             max = max.max(a);
-            assert!(a >= DOT_COLOR[3] * DOT_ALPHA_FLOOR - 1e-4);
-            assert!(a <= DOT_COLOR[3] + 1e-4);
+            assert!(a >= dot_color()[3] * DOT_ALPHA_FLOOR - 1e-4);
+            assert!(a <= dot_color()[3] + 1e-4);
         }
         assert!(max > min, "the pulse has a range");
     }

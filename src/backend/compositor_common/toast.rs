@@ -89,19 +89,18 @@ pub(crate) const BODY_GAP: f32 = 6.0;
 /// first card.
 pub(crate) const STACK_GAP: f32 = 12.0;
 
-/// Horizontal padding inside a toast card (right and bottom/top).
-pub(crate) const CARD_PAD: f32 = 18.0;
-/// Extra left padding so the urgency stripe and title do not collide.
-pub(crate) const CARD_PAD_LEFT: f32 = 30.0;
-
 /// Card insets for a painted (or available) width. Desktop sizes stay at
-/// [`CARD_PAD`] / [`CARD_PAD_LEFT`]; a nested output shrinks them so the
-/// text column is not eaten by 18+30 px of chrome.
+/// the active palette's padding, with extra room for the urgency stripe on
+/// the left; a nested output shrinks them to preserve the text column.
 #[must_use]
 pub(crate) fn card_pad(width: f32) -> (f32, f32) {
     let theme_pad = ui_theme::palette().pad;
     let theme_pad_left = (theme_pad + 12.0).max(theme_pad * 1.5);
-    let width = if width.is_finite() { width.max(0.0) } else { 0.0 };
+    let width = if width.is_finite() {
+        width.max(0.0)
+    } else {
+        0.0
+    };
     let pad = if width < 4.0 * theme_pad {
         theme_pad.min(width * 0.12).max(4.0)
     } else {
@@ -1475,13 +1474,14 @@ mod tests {
         assert!(max_text_width(200.0) as f32 >= min_text_width(200.0));
         assert_eq!(max_action_label_width(1920.0), MAX_ACTION_LABEL_WIDTH_PX);
         assert!(max_action_label_width(200.0) < MAX_ACTION_LABEL_WIDTH_PX);
-        assert_eq!(card_pad(1920.0), {
+        let desktop_pad = card_pad(1920.0);
+        assert_eq!(desktop_pad, {
             let ui = ui_theme::palette();
             let left = (ui.pad + 12.0).max(ui.pad * 1.5);
             (ui.pad, left)
         });
         let (p, pl) = card_pad(48.0);
-        assert!(p < CARD_PAD && pl < CARD_PAD_LEFT);
+        assert!(p < desktop_pad.0 && pl < desktop_pad.1);
         assert!(p >= 4.0 && pl >= p);
         assert_eq!(stack_gap(1080.0), STACK_GAP);
         assert!(stack_gap(80.0) < STACK_GAP);

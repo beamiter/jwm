@@ -6342,7 +6342,7 @@ mod tests {
     #[test]
     fn backend_construction_blocks_sigchld_before_spawning_worker_threads() {
         // calloop's signalfd only sees SIGCHLD while every other thread keeps
-        // it blocked. The compositor, clipboard and tray threads are started
+        // it blocked. The compositor and clipboard threads are started
         // by the constructor, long before `run` creates the signal source.
         let new = body_after(
             production_source(),
@@ -6356,7 +6356,6 @@ mod tests {
         for spawner in [
             "super::compositor::Compositor::new(",
             "clipboard_x11::Clipboard::start(",
-            "super::systray::SystemTray::new(",
         ] {
             assert!(
                 guard < position(spawner),
