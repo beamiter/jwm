@@ -89,7 +89,7 @@ impl Jwm {
             };
 
             let cfg = CONFIG.load();
-            if cfg.animation_enabled() && !self.suppress_layout_animation {
+            if cfg.motion_enabled() && !self.suppress_layout_animation {
                 let old_rect = Rect::new(
                     client.geometry.old_x,
                     client.geometry.old_y,
@@ -141,6 +141,10 @@ impl Jwm {
                 backend
                     .window_ops()
                     .configure(client.win, x, y, w as u32, h as u32, x11_bw)?;
+                // Immediate placement supersedes any earlier layout/hide
+                // trajectory, including when a workspace transition owns the
+                // motion or live configuration disables animations.
+                self.animations.remove(client_key);
             }
         }
         Ok(())
@@ -191,5 +195,44 @@ impl Jwm {
             }
         }
         self.state.sel_mon
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::animation::Easing;
+    use crate::core::models::WMClient;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+    use std::time::Duration;
+
+    #[test]
+    fn immediate_resize_cancels_a_previous_animation() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = jwm
+            .state
+            .clients
+            .insert(WMClient::new(WindowId::from_raw(42)));
+        for kind in [
+            AnimationKind::Layout,
+            AnimationKind::Hide,
+            AnimationKind::Appear,
+        ] {
+            jwm.animations.start(
+                key,
+                Rect::new(0, 0, 100, 100),
+                Rect::new(200, 0, 100, 100),
+                Duration::from_secs(1),
+                Easing::Linear,
+                kind,
+            );
+            jwm.suppress_layout_animation = true;
+            jwm.resizeclient(&mut backend, key, 400, 300, 500, 400)
+                .unwrap();
+            assert!(!jwm.animations.active.contains_key(&key));
+            let client = &jwm.state.clients[key];
+            assert_eq!(client.rect(), (400, 300, 500, 400));
+        }
     }
 }

@@ -2168,8 +2168,10 @@ mod tests {
             .split_once("pub fn tagmon(")
             .expect("tagmon")
             .0;
+        let compact_move_tag: String = move_tag.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(
-            move_tag.contains(&broadcast) && move_tag.contains("previous == Some(target_tag)"),
+            move_tag.contains(&broadcast)
+                && compact_move_tag.contains("previous.map(|(tags,_,_)|tags)==Some(target_tag)"),
             "move_client_to_tag must broadcast only when tags actually change"
         );
         let sendmon = tags

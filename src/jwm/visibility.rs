@@ -11,6 +11,20 @@ use crate::jwm::Jwm;
 use log::warn;
 use std::time::Instant;
 
+/// Native animation ticks own the real window position; a repeated show must
+/// not jump ahead to logical geometry and then back to the next visual sample.
+fn shown_window_position(
+    composited: bool,
+    logical: (i32, i32),
+    visual: Option<Rect>,
+) -> (i32, i32) {
+    if !composited && let Some(visual) = visual {
+        (visual.x, visual.y)
+    } else {
+        logical
+    }
+}
+
 pub(super) fn hidden_x_left_of_desktop(desktop_left: i32, total_width: i32) -> i32 {
     desktop_left.saturating_sub(total_width.max(1).saturating_mul(2))
 }
@@ -195,7 +209,15 @@ impl Jwm {
                 return;
             };
 
-        if let Err(e) = self.move_window(backend, win, x, y) {
+        let composited = backend.has_compositor();
+        let visual = (!composited)
+            .then(|| {
+                self.animations
+                    .current_visual_rect(client_key, Instant::now())
+            })
+            .flatten();
+        let (show_x, show_y) = shown_window_position(composited, (x, y), visual);
+        if let Err(e) = self.move_window(backend, win, show_x, show_y) {
             warn!("[show_client] Failed to move window {:?}: {:?}", win, e);
         }
 
@@ -215,6 +237,19 @@ impl Jwm {
     /// - 将窗口移动到屏幕左侧外
     /// - 使用滑出动画（如果启用）
     pub(crate) fn hide_client(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
+        let cfg = CONFIG.load();
+        let animation = cfg
+            .motion_enabled()
+            .then(|| (cfg.animation_duration(), cfg.animation_easing()));
+        self.hide_client_with_animation(backend, client_key, animation);
+    }
+
+    fn hide_client_with_animation(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        animation: Option<(std::time::Duration, crate::core::animation::Easing)>,
+    ) {
         let (win, x, y, w, h, width) = if let Some(client) = self.state.clients.get(client_key) {
             (
                 client.win,
@@ -252,8 +287,7 @@ impl Jwm {
             // y, w, h stay unchanged
         }
 
-        let cfg = CONFIG.load();
-        if cfg.animation_enabled() {
+        if let Some((duration, easing)) = animation {
             let now = Instant::now();
             let visual = self
                 .animations
@@ -264,8 +298,8 @@ impl Jwm {
                 client_key,
                 visual,
                 target,
-                cfg.animation_duration(),
-                cfg.animation_easing(),
+                duration,
+                easing,
                 AnimationKind::Hide,
             );
             // When compositor is active, move the actual X11 window to the
@@ -282,6 +316,9 @@ impl Jwm {
                 }
             }
         } else {
+            // A previous layout/appear animation must not move this hidden
+            // client back on screen on the next non-composited render tick.
+            self.animations.remove(client_key);
             if let Err(e) = self.move_window(backend, win, hidden_x, y) {
                 warn!("[hide_client] Failed to hide window {:?}: {:?}", win, e);
             }
@@ -297,6 +334,90 @@ mod tests {
     };
     use crate::core::models::ClientGeometry;
     use crate::core::types::Rect;
+
+    #[test]
+    fn repeated_native_show_uses_visual_position_until_motion_finishes() {
+        use crate::core::animation::{AnimationKind, AnimationManager, Easing};
+        use std::time::{Duration, Instant};
+
+        let key = slotmap::SlotMap::<crate::core::models::ClientKey, ()>::new().insert(());
+        let mut animations = AnimationManager::new();
+        let source = Rect::new(0, 0, 100, 100);
+        let target = Rect::new(200, 100, 100, 100);
+        let logical = (target.x, target.y);
+        animations.start(
+            key,
+            source,
+            target,
+            Duration::from_secs(1),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
+        let halfway = animations.active[&key].started_at + Duration::from_millis(500);
+        animations.remove_if_hide(key);
+        let visual = animations.current_visual_rect(key, halfway);
+        assert_eq!(
+            super::shown_window_position(false, logical, visual),
+            (100, 50)
+        );
+        assert_eq!(super::shown_window_position(true, logical, visual), logical);
+
+        animations.start(
+            key,
+            source,
+            target,
+            Duration::from_secs(1),
+            Easing::Linear,
+            AnimationKind::Hide,
+        );
+        animations.remove_if_hide(key);
+        let visual = animations.current_visual_rect(key, Instant::now());
+        assert_eq!(
+            super::shown_window_position(false, logical, visual),
+            logical
+        );
+    }
+
+    #[test]
+    fn immediate_hide_cancels_old_motion() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::animation::{AnimationKind, Easing};
+        use crate::core::models::WMClient;
+        use crate::jwm::Jwm;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        use std::time::Duration;
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        for kind in [
+            AnimationKind::Layout,
+            AnimationKind::Appear,
+            AnimationKind::Hide,
+        ] {
+            let mut client = WMClient::new(WindowId::from_raw(42));
+            client.geometry.x = 100;
+            client.geometry.y = 200;
+            client.geometry.w = 300;
+            client.geometry.h = 400;
+            let key = jwm.state.clients.insert(client);
+            jwm.animations.start(
+                key,
+                Rect::new(0, 0, 300, 400),
+                Rect::new(100, 200, 300, 400),
+                Duration::from_secs(1),
+                Easing::Linear,
+                kind,
+            );
+            jwm.hide_client_with_animation(&mut backend, key, None);
+            assert!(!jwm.animations.active.contains_key(&key), "{kind:?}");
+            let client = &jwm.state.clients[key];
+            assert!(client.geometry.x < 0, "{kind:?}");
+            assert_eq!(
+                client.geometry.hidden_restore_rect,
+                Some(Rect::new(100, 200, 300, 400))
+            );
+        }
+    }
 
     #[test]
     fn visible_geometry_with_overflowing_right_edge_is_not_restored() {
