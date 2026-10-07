@@ -1,6 +1,9 @@
 mod annotations;
 mod effects;
 mod expose;
+mod jelly_renderer;
+#[cfg(all(test, feature = "wayland-backends"))]
+pub(crate) use jelly_renderer::check_pipeline_for_test as check_jelly_pipeline_for_test;
 mod overview;
 mod pipeline;
 mod platform;
@@ -695,6 +698,8 @@ where
     /// Ray-marching program for volumetric (version-2) frames.
     waterlily_volume_program: glow::Program,
     waterlily_volume_uniforms: WaterlilyVolumeUniforms,
+    /// Negotiated independent fine anatomy, with isolated MSAA and bloom.
+    jelly_renderer: Option<jelly_renderer::JellyRenderer>,
     /// Private scene snapshot used only by the WaterLily frosted backdrop.
     waterlily_scene_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     waterlily_ipc: Option<WaterlilyIpc>,
@@ -1182,6 +1187,9 @@ unsafe impl<C: CompositorConnection> Send for Compositor<C> {}
 impl<C: CompositorConnection> Drop for Compositor<C> {
     fn drop(&mut self) {
         self.clear_overview_snapshots();
+        if let Some(renderer) = self.jelly_renderer.take() {
+            renderer.destroy(&self.gl);
+        }
         unsafe {
             self.gl.delete_program(self.program);
             self.gl.delete_program(self.thumbnail_downsample_program);

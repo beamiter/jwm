@@ -467,9 +467,10 @@ end
     # an accidental width/height swap by itself.
     rectangular_case = build_case("jelly", (128, 64); memory=Array)
     @test rectangular_case.domain == (64, 16, 32)
-    @test JwmWaterLily.frame_geometry(rectangular_case) == (64, 32, 16)
-    @test length(rectangular_case.volume_rgba) == 4 * 64 * 32 * 16
-    @test length(rectangular_case.volume_material) == 4 * 64 * 32 * 16
+    @test JwmWaterLily.frame_geometry(rectangular_case) == (128, 64, 32)
+    @test rectangular_case.display_domain == (128, 32, 64)
+    @test length(rectangular_case.volume_rgba) == 4 * 128 * 64 * 32
+    @test length(rectangular_case.volume_material) == 4 * 128 * 64 * 32
     @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 1, 32) == 1
     @test JwmWaterLily.jelly_volume_offset(64, 32, 64, 1, 32) == 4 * 63 + 1
     @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 1, 1) ==
@@ -539,10 +540,10 @@ end
 
     # Native volume publication: tank-shaped geometry (width, vertical
     # extent, front-to-back slices) and a colorized RGBA volume.
-    @test JwmWaterLily.frame_geometry(case) == (32, 32, 16)
+    @test JwmWaterLily.frame_geometry(case) == (64, 64, 32)
     volume = JwmWaterLily.render_volume!(case)
     @test volume === case.volume_rgba
-    @test length(volume) == 4 * 32 * 32 * 16
+    @test length(volume) == 4 * 64 * 64 * 32
     @test length(case.volume_material) == length(volume)
     @test any(>(0x7f), @view case.volume_material[4:4:end])
     alphas = @view volume[4:4:end]
@@ -653,7 +654,7 @@ end
         crown_z,
         τ,
     ) > 0.5
-    # Five independently curved filaments trail through the depth volume;
+    # Twelve independently curved filaments trail through the depth volume;
     # sampling the center of one strand must produce coherent material.
     tentacle_x, tentacle_y, tentacle_z, _ =
         JwmWaterLily.jelly_tentacle_center(jelly, 0, 0.45f0, τ)
@@ -680,11 +681,12 @@ end
     # Quiescent water stays fully transparent so the compositor's ray-marcher
     # reveals the frosted desktop through the empty tank.
     @test count(==(0x00), alphas) > length(alphas) ÷ 2
-    # Transparent voxels still carry the palette's keyed near-white midpoint.
+    # Transparent display voxels retain a lavender reconstruction guard color.
+    # Alpha, not a white color key, controls visibility in the volume path.
     quiet = findfirst(==(0x00), alphas)
     @test quiet !== nothing
     quiet_base = 4 * (quiet - 1)
-    @test all(>=(0xf0), volume[quiet_base + 1:quiet_base + 3])
+    @test Tuple(volume[quiet_base + 1:quiet_base + 3]) == JwmWaterLily.JELLY_APEX_VIOLET
 end
 
 @testset "publish geometry honors the planar override" begin
@@ -696,7 +698,7 @@ end
         @test !JwmWaterLily.planar_frames_forced()
     end
     case = build_case("jelly", (64, 64); memory=Array)
-    @test JwmWaterLily.publish_geometry(case, false) == (32, 32, 16)
+    @test JwmWaterLily.publish_geometry(case, false) == (64, 64, 32)
     @test JwmWaterLily.publish_geometry(case, true) == (64, 64, 1)
     planar_case = build_case("cylinder", (64, 64); memory=Array)
     @test JwmWaterLily.publish_geometry(planar_case, false) == (64, 64, 1)
@@ -1076,3 +1078,8 @@ end
     @test heavy_lambda < calm_lambda
     @test heavy_rate > calm_rate
 end
+
+include("jelly_detail_options.jl")
+include("jelly_display.jl")
+
+include("jelly_pose_protocol.jl")

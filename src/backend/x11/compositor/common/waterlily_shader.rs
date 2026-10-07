@@ -352,7 +352,8 @@ void main() {
 /// a C2-continuous tricubic B-spline (eight hardware trilinear taps); a broad
 /// six-tap tissue gradient is evaluated only while capturing the first
 /// refracting interface. Low-alpha turbulent wake shades with a normalized
-/// Henyey-Greenstein lobe in its own palette hue. High-alpha anatomy uses
+/// Henyey-Greenstein lobe in its own palette hue. Authored anatomy uses
+/// explicit version-3 material identity (legacy alpha bands on version 2),
 /// smooth height/depth participating-medium illumination instead of exposing
 /// the producer's one-cell shell normal as rings or glitter. The ambient
 /// floor follows voxel albedo, so stacked layers retain their authored hue.
@@ -366,6 +367,9 @@ uniform sampler3D u_occupancy;
 // density-gradient normals exactly as before.
 uniform sampler3D u_material;
 uniform int u_material_available;
+// Negotiated pose frames receive a luminous aquarium rim. Default zero
+// preserves every legacy volume and generic turbulence presentation.
+uniform int u_jelly_geometry;
 uniform sampler2D u_scene_texture;
 uniform int u_scene_available;
 uniform vec2 u_screen_size;
@@ -386,12 +390,14 @@ uniform float u_time;
 in vec2 v_uv;
 out vec4 frag_color;
 
-const int MAX_STEPS = 240;
+// Fine display voxels are independent of the fluid grid. Keep their half-
+// voxel integration spacing through the normal tank chord; the hard cap
+// still bounds unusually oblique rays and externally supplied volumes.
+const int MAX_STEPS = 480;
 const float TAU = 6.28318530717958647692;
-// Producer material bands shared by the volumetric cases: fluid and turbulent
-// wake publish below ~0.115 while jelly bell tissue, oral arms, and gonads
-// publish about 0.28-0.35. The separation keeps wake-only volumes out of the
-// front-interface normal used for tissue refraction.
+// Legacy version-2 producers distinguish tissue from wake using opacity.
+// Version 3 uses its explicit material validity instead: reducing the display
+// voxel size reduces per-voxel opacity without changing what is tissue.
 const float WAKE_ALPHA_CEILING = 0.115;
 // The aquarium is deliberately a little clearer than the full-screen planar
 // frost.  It now has a real projected silhouette, so water need not obscure
@@ -676,6 +682,7 @@ void main() {
     );
 
     vec3 accumulated = vec3(0.0);
+    vec3 tissue_radiance = vec3(0.0);
     float coverage = 0.0;
     vec3 front_normal_sum = vec3(0.0);
     float front_surface_weight = 0.0;
@@ -767,7 +774,21 @@ void main() {
             if (texture(u_occupancy, tex).a <= 1e-6) {
                 continue;
             }
+            vec4 authored = u_material_available == 1
+                ? texture(u_material, clamp(tex, vec3(0.0), vec3(1.0)))
+                : vec4(0.0);
             vec4 voxel = sample_volume_tricubic(tex);
+            // The positive cubic filter is ideal for coarse fluid but its
+            // four-voxel support blurs newly separated display-grid strands.
+            // Authored tissue already has analytic footprint antialiasing;
+            // retain it with trilinear reconstruction, transitioning smoothly
+            // through validity at its boundary. Wake and version 2 keep the
+            // original conservative cubic support and transfer unchanged.
+            float tissue_reconstruction = smoothstep(0.10, 0.80, authored.a);
+            if (tissue_reconstruction > 0.0) {
+                vec4 tissue_voxel = texture(u_volume, clamp(tex, vec3(0.0), vec3(1.0)));
+                voxel = mix(voxel, tissue_voxel, tissue_reconstruction);
+            }
             if (voxel.a <= 1e-6) {
                 continue;
             }
@@ -780,37 +801,38 @@ void main() {
                 segment_length / reference
             );
 
-            // Voxel opacity splits the authored material bands: low-alpha
-            // wake stays a scattering medium, while high-alpha tissue keeps
-            // its authored translucent color. The
-            // ramp starts strictly ABOVE the wake band's ceiling (the
-            // producer publishes wake at 0.112 or less and the B-spline
-            // reconstruction cannot overshoot): letting dense vortex cores
-            // into the tissue branch would also admit them into the
-            // front-interface normal used for refraction.
-            float material = smoothstep(0.12, 0.28, voxel.a);
+            // Authored material identity is independent of optical density.
+            // A thin membrane on a fine display grid can be less opaque per
+            // voxel than a coarse wake cell. The aux validity supplies a
+            // smoothly interpolated tissue weight; turbulence publishes zero
+            // validity, so it never gains a refracting interface or glow.
+            float material = u_material_available == 1
+                ? clamp(authored.a, 0.0, 1.0)
+                : smoothstep(0.12, 0.28, voxel.a);
             vec3 normal = view_direction;
             float boundary = 0.0;
-            float authored_thickness = 0.0;
-            if (u_scene_available == 1
+            float authored_thickness = authored.b;
+            if ((u_scene_available == 1 || u_material_available == 1)
                 && front_surface_weight < 0.10
                 && material > 0.0) {
                 bool used_authored_normal = false;
                 if (u_material_available == 1) {
-                    vec4 authored = texture(u_material, clamp(tex, vec3(0.0), vec3(1.0)));
-                    authored_thickness = authored.b;
-                    if (authored.a > 0.5) {
+                    if (authored.a > 1e-4) {
                         // Producer publishes world-space octahedral normals
                         // (x, vertical, depth) matching the aquarium basis.
                         normal = decode_octahedral(authored.rg);
                         if (dot(normal, view_direction) < 0.0) {
                             normal = -normal;
                         }
-                        boundary = clamp(authored.a, 0.0, 1.0);
+                        // Invalid neighbours encode a neutral normal. Fade
+                        // their interpolated direction out at the edge of
+                        // the material support instead of substituting an
+                        // alpha-gradient normal from the nearby fluid.
+                        boundary = smoothstep(0.05, 0.65, authored.a);
                         used_authored_normal = true;
                     }
                 }
-                if (!used_authored_normal) {
+                if (!used_authored_normal && u_material_available == 0) {
                     vec3 gradient = stable_tissue_gradient(tex);
                     float gradient_length = length(gradient);
                     boundary = smoothstep(0.012, 0.14, gradient_length);
@@ -838,10 +860,13 @@ void main() {
                 clamp(position.y / (2.0 * u_box_half_extents.y) + 0.5, 0.0, 1.0)
             );
             float haze = exp(-0.75 * (t - entry) / diagonal);
-            // Trust the producer's authored color; only a slight lift keeps
-            // dense crossings from going muddy.  The previous 38% white wash
-            // was a large part of the cotton-wool look on screenshots.
-            vec3 albedo = mix(voxel.rgb, vec3(0.93, 0.96, 1.0), 0.12);
+            // Trust the producer's authored color. A very slight tissue
+            // lift retains the lavender hue across separated fine layers;
+            // legacy and wake lighting retain their original ambient lift.
+            float white_lift = u_material_available == 1
+                ? mix(0.12, 0.025, material)
+                : 0.12;
+            vec3 albedo = mix(voxel.rgb, vec3(0.93, 0.96, 1.0), white_lift);
 
             // Wake: forward-scattering medium in its own palette hue, whose
             // shed rings glow when the ray runs with the key light.
@@ -859,8 +884,11 @@ void main() {
             // Beer-wrap SSS lift replaces the former flat tissue fill.
             float tissue_fill = mix(0.88, 1.04, haze);
             if (u_material_available == 1 && authored_thickness > 1e-4) {
-                float sss = exp(-1.8 * authored_thickness)
-                          * mix(0.92, 1.12, haze);
+                // Thickness is optical depth authored in physical anatomy
+                // units, not voxel count. Keep the fill bounded so fine,
+                // overlapping translucent layers retain their lavender hue.
+                float sss = mix(0.82, 1.10, exp(-1.8 * authored_thickness))
+                          * mix(0.94, 1.04, haze);
                 tissue_fill = mix(tissue_fill, sss, material * 0.85);
             }
             vec3 tissue_emission = albedo * depth_light * tissue_fill;
@@ -878,6 +906,7 @@ void main() {
 
             float contribution = (1.0 - coverage) * alpha;
             accumulated += contribution * emission;
+            tissue_radiance += contribution * albedo * material;
             coverage += contribution;
             // Capture the first reliable tissue interface for refraction.
             // First-hit state is the physically correct interface for scene
@@ -925,9 +954,13 @@ void main() {
                     continue;
                 }
                 float shadow_alpha = texture(u_volume, shadow_tex).a;
-                shadow_accum += max(shadow_alpha - WAKE_ALPHA_CEILING, 0.0);
+                float shadow_tissue = texture(u_material, shadow_tex).a;
+                // The material plane, rather than a coarse-grid opacity
+                // threshold, excludes fluid from the tissue shadow.
+                shadow_accum += -log(max(1.0 - shadow_alpha, 1e-5))
+                              * clamp(shadow_tissue, 0.0, 1.0);
             }
-            tissue_shadow = exp(-2.4 * shadow_accum);
+            tissue_shadow = exp(-1.2 * shadow_accum);
         }
     }
 
@@ -958,7 +991,17 @@ void main() {
         );
         float surface_light = mix(0.96, 1.06, surface_key);
         accumulated *= mix(1.0, surface_light, interface_confidence);
-        accumulated *= mix(1.0, tissue_shadow, interface_confidence * 0.55);
+        accumulated *= mix(1.0, tissue_shadow, interface_confidence * 0.35);
+    }
+
+    // A restrained, hue-preserving rim lift belongs only to authored tissue.
+    // It uses the coherent first interface once per ray, avoiding per-step
+    // specular bands or stochastic sparkle on the reconstructed membrane.
+    // This is a local radiance cue, not a bloom of the entire fog or tank.
+    if (u_material_available == 1) {
+        float grazing = 1.0 - clamp(abs(dot(front_normal, -ray)), 0.0, 1.0);
+        float rim_glow = 0.24 * grazing * grazing * interface_confidence;
+        accumulated += tissue_radiance * rim_glow;
     }
 
     // Refract the captured desktop only through the water actually crossed by
@@ -1002,6 +1045,12 @@ void main() {
             float n_dot_v = max(dot(front_normal, -ray), 0.0);
             float bend_px = mix(4.0, 22.0, 1.0 - n_dot_v)
                           * mix(1.0, 0.48, clamp(front_depth, 0.0, 1.0));
+            // Fine membranes need only a few pixels of lensing. Large
+            // legacy offsets magnify tiny normal variations into ink-like
+            // squiggles even when the reconstructed shell is smooth.
+            if (u_material_available == 1) {
+                bend_px *= 0.28;
+            }
             refracted_uv += normal_screen * bend_px * interface_confidence
                           / max(u_screen_size, vec2(1.0));
             float fresnel = WATER_F0
@@ -1152,7 +1201,7 @@ void main() {
     // Back rim lies behind the volume and is naturally occluded by material.
     // The front pane/rim and water surface are then composited over it.  All
     // terms remain premultiplied to match the compositor blend state.
-    float rear_glass_alpha = 0.20 * back_edge;
+    float rear_glass_alpha = (u_jelly_geometry == 1 ? 0.38 : 0.20) * back_edge;
     vec3 rear_glass_tint = mix(
         vec3(0.10, 0.55, 0.62),
         vec3(0.78, 0.98, 1.0),
@@ -1161,6 +1210,10 @@ void main() {
     if (u_scene_available == 1 && rear_glass_alpha > 1e-4) {
         vec3 rear_reflect = frosted_scene_reflect(screen_uv, ray, tank_exit_normal);
         rear_glass_tint = mix(rear_glass_tint, rear_reflect, 0.42 * back_edge);
+    }
+    if (u_jelly_geometry == 1) {
+        rear_glass_tint = mix(rear_glass_tint, vec3(0.60, 0.90, 1.0), 0.65 * back_edge);
+        surface_strength *= 1.25;
     }
     vec3 rear_glass_color = rear_glass_tint;
     vec3 behind = rear_glass_color * rear_glass_alpha
@@ -1176,10 +1229,10 @@ void main() {
         + (1.0 - WATER_F0) * pow(1.0 - glass_n_dot_v, 5.0);
     float front_glass_alpha = clamp(
         0.012 + 0.11 * glass_fresnel
-      + 0.46 * front_edge
+      + (u_jelly_geometry == 1 ? 0.70 : 0.46) * front_edge
       + surface_strength,
         0.0,
-        0.72
+        u_jelly_geometry == 1 ? 0.86 : 0.72
     );
     float glass_highlight = clamp(
         0.18 + 0.82 * max(front_edge, surface_strength * 2.0),
@@ -1206,6 +1259,12 @@ void main() {
                 surface_reflect_weight * 0.65
             );
         }
+    }
+    if (u_jelly_geometry == 1) {
+        front_glass_color = mix(
+            front_glass_color, vec3(0.64, 0.92, 1.0),
+            clamp(0.72 * front_edge + 0.20 * surface_strength, 0.0, 0.85)
+        );
     }
     premultiplied = front_glass_color * front_glass_alpha
                   + premultiplied * (1.0 - front_glass_alpha);

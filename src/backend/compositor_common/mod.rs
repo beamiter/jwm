@@ -41,3 +41,5 @@ pub mod window_animation;
 pub(crate) mod window_glow;
 pub mod window_tabs;
 pub mod wobbly;
+
+pub(crate) mod jelly_geometry;

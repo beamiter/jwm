@@ -9,6 +9,14 @@ const FRAME_VERSION_VOLUMETRIC = UInt32(2)
 # immediately behind the color volume. Older compositors that only speak
 # version 2 continue to work with producers that omit the material plane.
 const FRAME_VERSION_VOLUME_MATERIAL = UInt32(3)
+# Version 4 is negotiated on the wake socket; legacy peers continue to receive
+# version 3. Each slot appends <=5 fixed-size analytic poses behind both planes.
+const FRAME_VERSION_JELLY_POSE = UInt32(4)
+const MAX_JELLY_POSES = 5
+const JELLY_POSE_FLOATS = 8
+const JELLY_POSE_BYTES = 32
+const JELLY_POSE_KIND = UInt32(1)
+const MAX_WAKE_COMMAND_BYTES = 256
 const FRAME_HEADER_BYTES = 64
 const FRAME_VOLUME_HEADER_BYTES = 96
 const PIXEL_FORMAT_RGBA8 = UInt32(1)
@@ -28,9 +36,11 @@ mutable struct FramePublisher
     header_bytes::Int
     # Bytes of one color volume (and of one material plane when present).
     color_bytes::Int
-    # Bytes written per double-buffer slot (color, or color+material).
+    # Bytes per slot: color, optional material, then optional jelly poses.
     slot_bytes::Int
     material_aux::Bool
+    jelly_count::Int
+    jelly_detail::Int
     slot::UInt32
     sequence::UInt64
     device::UInt64
@@ -47,10 +57,15 @@ function frame_header(
     timestamp_ns::Integer;
     depth::Integer=1,
     material_aux::Bool=false,
+    jelly_count::Integer=0,
+    jelly_detail::Integer=0,
 )
+    validate_jelly_layout(depth, material_aux, jelly_count, jelly_detail)
     volumetric = depth > 1
     version = if !volumetric
         FRAME_VERSION
+    elseif jelly_count > 0
+        FRAME_VERSION_JELLY_POSE
     elseif material_aux
         FRAME_VERSION_VOLUME_MATERIAL
     else
@@ -73,14 +88,48 @@ function frame_header(
     write(buffer, htol(UInt64(timestamp_ns)))
     if volumetric
         write(buffer, htol(UInt32(depth)))
-        # Reserved: material_aux flag then padding. Version alone is enough
-        # for parsers; the flag documents the doubled slot for tools.
         write(buffer, htol(UInt32(material_aux ? 1 : 0)))
-        write(buffer, zeros(UInt8, FRAME_VOLUME_HEADER_BYTES - FRAME_HEADER_BYTES - 8))
+        write(buffer, htol(UInt32(jelly_count)))
+        write(buffer, htol(UInt32(jelly_count > 0 ? JELLY_POSE_BYTES : 0)))
+        write(buffer, htol(jelly_count > 0 ? JELLY_POSE_KIND : UInt32(0)))
+        write(buffer, htol(UInt32(jelly_detail)))
+        write(buffer, zeros(UInt8, 8))
     end
     header = take!(buffer)
     length(header) == header_bytes || error("internal frame header size mismatch")
     return header
+end
+
+function validate_jelly_layout(depth, material_aux, jelly_count, jelly_detail)
+    0 <= jelly_count <= MAX_JELLY_POSES ||
+        throw(ArgumentError("jelly pose count must be between 0 and $MAX_JELLY_POSES"))
+    if jelly_count > 0
+        depth > 1 && material_aux ||
+            throw(ArgumentError("jelly poses require a volumetric material frame"))
+        jelly_detail in (1, 2) ||
+            throw(ArgumentError("jelly pose detail must be 1 or 2"))
+    else
+        jelly_detail == 0 || throw(ArgumentError("jelly detail requires jelly poses"))
+    end
+    return nothing
+end
+
+function jelly_pose_bytes(poses::AbstractVector{Float32}, expected_count::Integer)
+    length(poses) == expected_count * JELLY_POSE_FLOATS ||
+        throw(DimensionMismatch("jelly pose count does not match the publisher"))
+    for offset in 0:JELLY_POSE_FLOATS:(length(poses) - 1)
+        values = @view poses[offset + 1:offset + JELLY_POSE_FLOATS]
+        all(isfinite, values) &&
+            all(value -> abs(value) <= 0.5f0, @view(values[1:3])) &&
+            0.0f0 < values[4] <= 0.25f0 &&
+            0.8f0 <= values[5] <= 1.2f0 &&
+            abs(values[6]) <= Float32(2pi) &&
+            abs(values[7]) <= 0.25f0 &&
+            abs(values[8]) <= 0.5f0 ||
+            throw(ArgumentError("jelly pose is non-finite or outside the protocol bounds"))
+    end
+    # Explicit endian conversion keeps the wire independent of host byte order.
+    return reinterpret(UInt8, htol.(reinterpret(UInt32, collect(poses))))
 end
 
 function lock_file(io::Base.Filesystem.File)
@@ -116,8 +165,10 @@ Create a double-buffered frame file. `depth == 1` publishes the classic
 planar version-1 contract; `depth > 1` publishes a volumetric slot. Pass
 `material_aux=true` (the worker default for native volumes) to select
 version 3, whose slots pack an RGBA8 material plane behind the color
-volume. `start_sequence` seeds the publication counter so a worker
-replacing its frame file mid-session (for example on a case switch that
+volume. After negotiating `jelly-pose-v1`, pass `jelly_count=1:5` and
+`jelly_detail=1:2` to append analytic poses using version 4. Defaults preserve
+the existing version-1/2/3 wire format. `start_sequence` seeds the publication
+counter so a worker replacing its frame file mid-session (for example on a case switch that
 changes the frame geometry) keeps the consumer's monotonic-sequence view
 intact.
 """
@@ -128,6 +179,8 @@ function FramePublisher(
     depth::Integer=1,
     start_sequence::Integer=0,
     material_aux::Bool=false,
+    jelly_count::Integer=0,
+    jelly_detail::Integer=0,
 )
     width > 0 || throw(ArgumentError("frame width must be positive"))
     height > 0 || throw(ArgumentError("frame height must be positive"))
@@ -139,6 +192,7 @@ function FramePublisher(
         throw(ArgumentError("start sequence must not be negative"))
     material_aux && depth == 1 &&
         throw(ArgumentError("material aux requires a volumetric frame"))
+    validate_jelly_layout(depth, material_aux, jelly_count, jelly_detail)
     stride = Base.checked_mul(Int(width), 4)
     header_bytes = depth > 1 ? FRAME_VOLUME_HEADER_BYTES : FRAME_HEADER_BYTES
     color_bytes =
@@ -146,6 +200,13 @@ function FramePublisher(
     color_bytes <= 512 * 1024 * 1024 ||
         throw(ArgumentError("frame exceeds protocol size limit"))
     slot_bytes = material_aux ? Base.checked_mul(color_bytes, 2) : color_bytes
+    slot_bytes = Base.checked_add(slot_bytes, Int(jelly_count) * JELLY_POSE_BYTES)
+    if jelly_count > 0
+        slot_bytes <= 512 * 1024 * 1024 ||
+            throw(ArgumentError("frame slot exceeds protocol size limit"))
+        color_bytes <= 64 * 1024 * 1024 ||
+            throw(ArgumentError("volume exceeds compositor size limit"))
+    end
     total_bytes = Base.checked_add(header_bytes, Base.checked_mul(slot_bytes, 2))
 
     final_path = abspath(String(path))
@@ -179,6 +240,8 @@ function FramePublisher(
                     0;
                     depth,
                     material_aux,
+                    jelly_count,
+                    jelly_detail,
                 ),
             )
             flush_file(io)
@@ -203,6 +266,8 @@ function FramePublisher(
         color_bytes,
         slot_bytes,
         material_aux,
+        Int(jelly_count),
+        Int(jelly_detail),
         UInt32(1),
         UInt64(start_sequence),
         UInt64(identity.device),
@@ -223,7 +288,7 @@ function publish!(
             ),
         )
     end
-    return _publish_slot!(publisher, rgba, nothing, timestamp_ns)
+    return _publish_slot!(publisher, rgba, nothing, Float32[], timestamp_ns)
 end
 
 function publish!(
@@ -234,13 +299,28 @@ function publish!(
 )
     publisher.material_aux ||
         throw(ArgumentError("material plane requires a version-3 publisher"))
-    return _publish_slot!(publisher, rgba, material, timestamp_ns)
+    publisher.jelly_count == 0 ||
+        throw(ArgumentError("version-4 publishers require jelly poses"))
+    return _publish_slot!(publisher, rgba, material, Float32[], timestamp_ns)
+end
+
+function publish!(
+    publisher::FramePublisher,
+    rgba::AbstractVector{UInt8},
+    material::AbstractVector{UInt8},
+    poses::AbstractVector{Float32},
+    timestamp_ns::Integer=time_ns(),
+)
+    publisher.jelly_count > 0 ||
+        throw(ArgumentError("jelly poses require a version-4 publisher"))
+    return _publish_slot!(publisher, rgba, material, poses, timestamp_ns)
 end
 
 function _publish_slot!(
     publisher::FramePublisher,
     rgba::AbstractVector{UInt8},
     material::Union{Nothing,AbstractVector{UInt8}},
+    poses::AbstractVector{Float32},
     timestamp_ns::Integer,
 )
     publisher.closed && error("cannot publish through a closed frame file")
@@ -259,6 +339,10 @@ function _publish_slot!(
             )
     end
 
+    pose_bytes = jelly_pose_bytes(poses, publisher.jelly_count)
+    timestamp_ns >= 0 || throw(ArgumentError("timestamp must not be negative"))
+    # Convert before any slot writes, so all input validation is transactional.
+    timestamp = UInt64(timestamp_ns)
     slot = publisher.slot == 0 ? UInt32(1) : UInt32(0)
     sequence = Base.checked_add(publisher.sequence, UInt64(1))
     offset = publisher.header_bytes + Int(slot) * publisher.slot_bytes
@@ -270,6 +354,7 @@ function _publish_slot!(
         if material !== nothing
             write(publisher.io, material)
         end
+        write(publisher.io, pose_bytes)
         flush_file(publisher.io)
 
         seekstart(publisher.io)
@@ -281,9 +366,11 @@ function _publish_slot!(
                 publisher.stride,
                 slot,
                 sequence,
-                timestamp_ns;
+                timestamp;
                 depth=publisher.depth,
                 material_aux=publisher.material_aux,
+                jelly_count=publisher.jelly_count,
+                jelly_detail=publisher.jelly_detail,
             ),
         )
         flush_file(publisher.io)
@@ -318,42 +405,70 @@ mutable struct WakeClient
     path::String
     stream::Union{Nothing,Base.PipeEndpoint}
     commands::Channel{String}
+    jelly_pose_supported::Bool
 end
 
-WakeClient(path::AbstractString) = WakeClient(String(path), nothing, Channel{String}(16))
+WakeClient(path::AbstractString) = WakeClient(String(path), nothing, Channel{String}(16), false)
 
 function disconnect!(client::WakeClient)
-    if client.stream !== nothing
+    stream = client.stream
+    client.stream = nothing
+    client.jelly_pose_supported = false
+    # A reconnect must not replay a capability or command from the old peer.
+    # Replacing and closing the channel also wakes a reader blocked on put!.
+    commands = client.commands
+    client.commands = Channel{String}(16)
+    close(commands)
+    if stream !== nothing
         try
-            close(client.stream)
+            close(stream)
         catch
         end
-        client.stream = nothing
     end
+    return nothing
+end
+
+"""Consume a capability advertisement without exposing it as a case command."""
+function apply_capabilities!(client::WakeClient, command::AbstractString)
+    parts = split(command)
+    (isempty(parts) || parts[1] != "capabilities") && return false
+    client.jelly_pose_supported = "jelly-pose-v1" in @view(parts[2:end])
+    return true
+end
+
+"""Read one bounded command, discarding an incomplete final line at EOF."""
+function read_wake_command(stream::IO)
+    buffer = UInt8[]
+    while !eof(stream)
+        byte = read(stream, UInt8)
+        byte == UInt8('\n') && return String(strip(String(buffer)))
+        length(buffer) < MAX_WAKE_COMMAND_BYTES ||
+            throw(ArgumentError("WaterLily command exceeds size limit"))
+        push!(buffer, byte)
+    end
+    return nothing
 end
 
 """
-The wake socket is bidirectional: the worker writes one-byte frame wakeups
-while the compositor writes newline-terminated control commands (for example
-`case dance`). A background task drains the read side into `commands` so the
-publish loop can poll without blocking.
+The wake socket is bidirectional: one-byte worker wakeups and newline-terminated
+compositor commands. Capability state belongs to this connection only. Bound
+both a command and the channel before accepting externally supplied text.
 """
 function start_command_reader!(client::WakeClient)
     stream = client.stream
     stream === nothing && return nothing
+    commands = client.commands
     @async try
-        while true
-            line = readline(stream)
-            command = strip(line)
-            if isempty(command)
-                eof(stream) && break
-                continue
-            end
-            put!(client.commands, String(command))
+        while (command = read_wake_command(stream)) !== nothing
+            client.stream === stream || break
+            isempty(command) && continue
+            apply_capabilities!(client, command) && continue
+            put!(commands, command)
         end
     catch
-        # A dropped consumer stream simply stops command delivery until the
-        # next reconnect creates a fresh reader.
+        # A dropped consumer or overlong command restarts negotiation.
+    finally
+        client.stream === stream && disconnect!(client)
     end
     return nothing
 end
@@ -363,9 +478,13 @@ function take_command!(client::WakeClient)
     return take!(client.commands)
 end
 
-function notify!(client::WakeClient)
+function notify!(client::WakeClient; allow_reconnect::Bool=true)
     for _attempt in 1:2
         if client.stream === nothing
+            # A v4 frame was prepared for the previous peer. Never notify a
+            # newly connected legacy consumer until a fallback frame exists.
+            allow_reconnect || return false
+            client.jelly_pose_supported = false
             try
                 client.stream = Sockets.connect(client.path)
             catch

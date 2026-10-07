@@ -37,6 +37,7 @@ pub mod shader_cache;
 // Keep the large legacy shader bundle untouched.  The wrapper preserves every
 // public constant while explicitly selecting the separately testable, physically
 // based WaterLily shader over the legacy single-sample implementation.
+mod jelly_shader;
 #[path = "shaders.rs"]
 mod legacy_shaders;
 mod waterlily_shader;
@@ -45,6 +46,12 @@ pub mod shaders {
     pub const WATERLILY_FRAGMENT_SHADER: &str = super::waterlily_shader::WATERLILY_FRAGMENT_SHADER;
     pub const WATERLILY_VOLUME_FRAGMENT_SHADER: &str =
         super::waterlily_shader::WATERLILY_VOLUME_FRAGMENT_SHADER;
+    pub const JELLY_MESH_VERTEX_SHADER: &str = super::jelly_shader::JELLY_MESH_VERTEX_SHADER;
+    pub const JELLY_MESH_FRAGMENT_SHADER: &str = super::jelly_shader::JELLY_MESH_FRAGMENT_SHADER;
+    pub const JELLY_SCREEN_VERTEX_SHADER: &str = super::jelly_shader::JELLY_SCREEN_VERTEX_SHADER;
+    pub const JELLY_BLUR_FRAGMENT_SHADER: &str = super::jelly_shader::JELLY_BLUR_FRAGMENT_SHADER;
+    pub const JELLY_COMPOSITE_FRAGMENT_SHADER: &str =
+        super::jelly_shader::JELLY_COMPOSITE_FRAGMENT_SHADER;
 }
 
 pub mod subpixel_integration;

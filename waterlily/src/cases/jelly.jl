@@ -34,7 +34,7 @@ sizes and pulse phases.
 The display pipeline is natively three-dimensional: the case picks a 3D
 domain from the canvas aspect ratio, materializes the analytic anatomy —
 apex-to-rim shaded bell membranes, the rose gonad crown visible through
-each translucent bell, four thick curling oral arms, and five thin trailing
+each translucent bell, four layered curling oral arms, and twelve thin trailing
 filaments — together with the simulated vorticity wake voxel-by-voxel, and
 publishes the RGBA volume; the compositor ray-marches it through an orbiting
 perspective camera. The magnitude feeds the positive half of the diverging
@@ -50,6 +50,12 @@ struct JellyCase{S} <: AbstractWaterLilyCase
     simulation::S
     dimensions::Tuple{Int,Int}
     domain::NTuple{3,Int}
+    # Display sampling is independent of the hydrodynamic solve.
+    display_domain::NTuple{3,Int}
+    display_scale::Int
+    wake_filtered::Array{Float32,3}
+    wake_rgba::Vector{UInt8}
+    wake_material::Vector{UInt8}
     jellies::Vector{JellySpec}
     # Host-side copy of the solver's scalar field; on GPU backends the
     # projection runs after one bulk download instead of scalar reads.
@@ -58,7 +64,7 @@ struct JellyCase{S} <: AbstractWaterLilyCase
     # (nx, nz). Only used by the planar fallback path.
     projected::Matrix{Float32}
     # Version-2/3 volume scratch: nx * nz * ny RGBA voxels, slices front to
-    # back, reused every frame to keep the publish loop garbage-free. The
+    # back, reused every frame to bound publication allocation. The
     # material plane packs octahedral normals and optical thickness for the
     # compositor's version-3 shading path.
     volume_rgba::Vector{UInt8}
@@ -117,7 +123,7 @@ end
 Pick the 3D tank from the canvas. Vertical resolution sets fidelity and cost,
 width follows the display aspect so jellies stay round after compositor
 projection, and every extent is a multiple of 16 for the multigrid pressure
-solver. CPU publication is capped at 64 vertical cells; accelerated backends
+solver. The CPU solver is capped at 64 vertical cells; accelerated backends
 use a 96-cell ceiling so a 1280x800 canvas rises from a 96x32x64 CPU domain
 to 160x64x96 on CUDA or ROCm.
 """
@@ -145,12 +151,17 @@ function build_jelly_case(
     dimensions::Tuple{Int,Int};
     memory=Array,
     reynolds::Real=JELLY_REYNOLDS,
+    display_scale::Integer=2,
 )
+    display_scale in (1, 2) ||
+        throw(ArgumentError("jelly display_scale must be 1 or 2"))
     T = Float32
     nx, ny, nz = domain = jelly_domain(
         dimensions;
         accelerated=memory !== Array,
     )
+    display_domain = map(n -> n * Int(display_scale), domain)
+    display_voxels = prod(display_domain)
     U = T(1)
     radius = T(JELLY_RADIUS_FRACTION * nz)
     count = JELLY_COUNT
@@ -278,11 +289,16 @@ function build_jelly_case(
         simulation,
         dimensions,
         domain,
+        display_domain,
+        Int(display_scale),
+        Array{Float32,3}(undef, nx, ny, nz),
+        Vector{UInt8}(undef, 4 * nx * ny * nz),
+        zeros(UInt8, 4 * nx * ny * nz),
         specs,
         Array{Float32,3}(undef, nx + 2, ny + 2, nz + 2),
         Matrix{Float32}(undef, nx, nz),
-        Vector{UInt8}(undef, 4 * nx * nz * ny),
-        Vector{UInt8}(undef, 4 * nx * nz * ny),
+        Vector{UInt8}(undef, 4 * display_voxels),
+        Vector{UInt8}(undef, 4 * display_voxels),
     )
 end
 
@@ -295,7 +311,8 @@ body_distance(::JellyCase, ::Real, ::Real, ::Real) = Inf
 # The tank publishes as a native volume: frame width spans the tank, frame
 # height is the vertical extent (top-left rows, like every planar frame),
 # and the ny tank layers become front-to-back depth slices.
-frame_geometry(case::JellyCase) = (case.domain[1], case.domain[3], case.domain[2])
+frame_geometry(case::JellyCase) =
+    (case.display_domain[1], case.display_domain[3], case.display_domain[2])
 
 """
 Byte offset (one-based, pointing at R) of solver cell `(x, depth, vertical)`
@@ -390,7 +407,7 @@ struct JellyPose
     reach_sq::Float32
     z_lo::Float32
     z_hi::Float32
-    strand_dir::NTuple{5,NTuple{2,Float32}}
+    strand_dir::NTuple{12,NTuple{2,Float32}}
     arm_dir::NTuple{4,NTuple{2,Float32}}
     organ_local::NTuple{4,NTuple{3,Float32}}
     organ_radius::Float32
@@ -407,8 +424,8 @@ function jelly_pose(spec::JellySpec, t::Real)
     # The 2.0 margin covers the widened analytic feather (about 0.8 voxels
     # beyond the one-voxel shell) plus the strand radii on every side.
     lateral_reach = max((R + 2.0f0) / 0.9f0, 0.62f0 * R + 2.2f0)
-    strand_dir = ntuple(5) do index
-        angle = Float32(2pi * (index - 1) / 5) + 0.18f0 * sin(θ)
+    strand_dir = ntuple(12) do index
+        angle = Float32(2pi * (index - 1) / 12) + 0.18f0 * sin(θ)
         (cos(angle), sin(angle))
     end
     arm_dir = ntuple(4) do index
@@ -431,7 +448,7 @@ function jelly_pose(spec::JellySpec, t::Real)
         axis_shift,
         mouth_z,
         lateral_reach * lateral_reach,
-        mouth_z - 2.35f0 * R - 2.0f0,
+        mouth_z - 2.55f0 * R - 2.0f0,
         center_z - axis_shift + R + 2.0f0,
         strand_dir,
         arm_dir,
@@ -440,20 +457,27 @@ function jelly_pose(spec::JellySpec, t::Real)
     )
 end
 
+# Finite-volume coverage of a locally planar signed-distance interface. The
+# footprint shrinks with display cell size; physical radii never grow just
+# because the display sampling becomes coarser.
+@inline jelly_coverage(distance::Real, footprint::Float32) =
+    clamp(0.5f0 - Float32(distance) / footprint, 0.0f0, 1.0f0)
+
 function pose_tentacle_center(pose::JellyPose, strand::Integer, q::Real)
     R = pose.spec.radius
     fraction = Float32(q)
     direction = pose.strand_dir[strand + 1]
-    anchor = 0.34f0 * R * (1.0f0 - 0.42f0 * fraction)
+    anchor = (iseven(strand) ? 0.36f0 : 0.66f0) * R *
+             (1.0f0 - 0.42f0 * fraction)
     wave = pose.theta + Float32(1.7pi) * fraction + Float32(1.9 * strand)
     sway = R * (0.035f0 + 0.12f0 * fraction)
     center_x = pose.center_x + anchor * direction[1] + sway * sin(wave)
     center_y = pose.center_y + anchor * direction[2] + sway * cos(0.83f0 * wave)
-    center_z = pose.mouth_z - 2.35f0 * R * fraction
+    center_z = pose.mouth_z - 2.55f0 * R * fraction
     strand_radius = clamp(
-        0.12f0 * R * (1.0f0 - 0.52f0 * fraction),
-        0.30f0,
-        0.78f0,
+        0.037f0 * R * (1.0f0 - 0.60f0 * fraction),
+        0.09f0,
+        0.28f0,
     )
     return (center_x, center_y, center_z, strand_radius)
 end
@@ -465,20 +489,22 @@ the `AutoBody` preserves the upstream propulsion model while giving the
 volumetric renderer the unmistakable silhouette and depth crossings of a
 jellyfish instead of a set of isolated spherical caps.
 """
-function pose_tentacle_coverage(pose::JellyPose, x::Real, y::Real, z::Real)
-    q = (pose.mouth_z - z) / (2.35f0 * pose.spec.radius)
+function pose_tentacle_coverage(
+    pose::JellyPose, x::Real, y::Real, z::Real, footprint::Float32=0.5f0,
+)
+    q = (pose.mouth_z - z) / (2.55f0 * pose.spec.radius)
     (q < 0.0f0 || q > 1.0f0) && return 0.0f0
     # Taper both ends so the filaments join the mouth smoothly and fade
     # before hitting the lower tank boundary.
     end_fade = jelly_smoothstep(0.0f0, 0.08f0, q) *
-               (1.0f0 - jelly_smoothstep(0.78f0, 1.0f0, q))
+               (1.0f0 - jelly_smoothstep(0.92f0, 1.0f0, q))
     end_fade <= 0.0f0 && return 0.0f0
     coverage = 0.0f0
-    for strand in 0:4
+    for strand in 0:11
         center_x, center_y, _, strand_radius =
             pose_tentacle_center(pose, strand, q)
         radial_distance = hypot(x - center_x, y - center_y) - strand_radius
-        strand_coverage = clamp(0.5f0 - radial_distance, 0.0f0, 1.0f0)
+        strand_coverage = jelly_coverage(radial_distance, footprint)
         coverage = max(coverage, strand_coverage * end_fade)
     end
     return coverage
@@ -493,11 +519,11 @@ function pose_arm_center(pose::JellyPose, arm::Integer, q::Real)
     sway = R * (0.06f0 + 0.16f0 * fraction)
     center_x = pose.center_x + anchor * direction[1] + sway * sin(wave)
     center_y = pose.center_y + anchor * direction[2] + sway * cos(0.77f0 * wave)
-    center_z = pose.mouth_z - 1.7f0 * R * fraction
+    center_z = pose.mouth_z - 2.1f0 * R * fraction
     arm_radius = clamp(
-        0.17f0 * R * (1.0f0 - 0.45f0 * fraction),
-        0.55f0,
-        1.35f0,
+        0.075f0 * R * (1.0f0 - 0.55f0 * fraction),
+        0.20f0,
+        0.70f0,
     )
     return (center_x, center_y, center_z, arm_radius)
 end
@@ -508,17 +534,34 @@ and markedly thicker than the filaments, curl on their own wave, and give
 the silhouette the fleshy center real moon jellies have; like the filaments
 they are display material only.
 """
-function pose_arm_coverage(pose::JellyPose, x::Real, y::Real, z::Real)
-    q = (pose.mouth_z - z) / (1.7f0 * pose.spec.radius)
+function pose_arm_coverage(
+    pose::JellyPose, x::Real, y::Real, z::Real, footprint::Float32=0.5f0,
+)
+    q = (pose.mouth_z - z) / (2.1f0 * pose.spec.radius)
     (q < 0.0f0 || q > 1.0f0) && return 0.0f0
     end_fade = jelly_smoothstep(0.0f0, 0.06f0, q) *
-               (1.0f0 - jelly_smoothstep(0.80f0, 1.0f0, q))
+               (1.0f0 - jelly_smoothstep(0.91f0, 1.0f0, q))
     end_fade <= 0.0f0 && return 0.0f0
     coverage = 0.0f0
     for arm in 0:3
         center_x, center_y, _, arm_radius = pose_arm_center(pose, arm, q)
         radial_distance = hypot(x - center_x, y - center_y) - arm_radius
-        arm_coverage = clamp(0.5f0 - 0.8f0 * radial_distance, 0.0f0, 1.0f0)
+        arm_coverage = jelly_coverage(radial_distance, footprint)
+        # Two curling ribbons flank each oral-arm core. Their phase lags
+        # along the arm, so frills travel downward without texture noise or
+        # frame-to-frame random displacement.
+        direction = pose.arm_dir[arm + 1]
+        frill_phase = 18.0f0 * q - 1.2f0 * pose.theta + Float32(arm)
+        spread = pose.spec.radius * (0.085f0 + 0.065f0 * sin(frill_phase)^2) *
+                 (1.0f0 - 0.65f0 * q)
+        curl = 0.07f0 * pose.spec.radius * sin(frill_phase)
+        ribbon_radius = max(0.035f0 * pose.spec.radius * (1.0f0 - q), 0.10f0)
+        for side in (-1.0f0, 1.0f0)
+            ribbon_x = center_x - side * spread * direction[2] + curl * direction[1]
+            ribbon_y = center_y + side * spread * direction[1] + curl * direction[2]
+            distance = hypot(x - ribbon_x, y - ribbon_y) - ribbon_radius
+            arm_coverage = max(arm_coverage, jelly_coverage(distance, footprint))
+        end
         coverage = max(coverage, arm_coverage * end_fade)
     end
     return coverage
@@ -554,7 +597,10 @@ with its apex-to-rim polar coordinate, thin trailing filaments, the four
 oral arms, and the gonad crown.  The bounding test rejects the vast
 majority of voxel/jelly pairs before any per-voxel trigonometry runs.
 """
-function pose_material(pose::JellyPose, x::Float32, y::Float32, z::Float32)
+function pose_material(
+    pose::JellyPose, x::Float32, y::Float32, z::Float32,
+    footprint::Float32=0.5f0,
+)
     dx = x - pose.center_x
     dy = y - pose.center_y
     if dx * dx + dy * dy > pose.reach_sq || z < pose.z_lo || z > pose.z_hi
@@ -564,30 +610,31 @@ function pose_material(pose::JellyPose, x::Float32, y::Float32, z::Float32)
     local_x = pose.squeeze * dx
     local_y = pose.squeeze * dy
     local_z = z - pose.center_z + pose.axis_shift
-    shell = abs(sqrt(local_x^2 + local_y^2 + local_z^2) - R) - 1.0f0
-    mouth = pose.mouth_z - z
-    # Round the shell∩mouth corner of the displayed membrane: the exact
-    # set-difference edge is a sharp circular lip whose voxelized coverage
-    # alternates cell by cell and drew a sawtooth fringe under the old
-    # high-contrast shading. A ~one-voxel polynomial smooth-max recesses
-    # and rounds the lip; the solver keeps the exact AutoBody cut.
-    lip_blend = clamp(0.5f0 + 0.5f0 * (shell - mouth) / 1.2f0, 0.0f0, 1.0f0)
-    lip = mouth + (shell - mouth) * lip_blend +
-          1.2f0 * lip_blend * (1.0f0 - lip_blend)
-    # The coverage feather spans about 1.6 voxels: a one-voxel ramp beat
-    # against the coarse grid along the curved dome and drew concentric
-    # moiré rings once the old high-contrast transfer raised them. The wider
-    # analytic ramp reconstructs smoothly while retaining a crisp silhouette.
-    surface = clamp(0.5f0 - 0.62f0 * lip, 0.0f0, 1.0f0)
     polar = clamp(local_z / max(R, 1.0f-4), -1.0f0, 1.0f0)
+    above_mouth = z - pose.mouth_z
+    rim_band = exp(-max(above_mouth, 0.0f0) / max(0.17f0 * R, 0.25f0))
+    azimuth = atan(local_y, local_x)
+    # Gentle scallops are confined to the lip. The solver's exact spherical
+    # obstacle stays unchanged; only sub-cell display detail is displaced.
+    scallop = 0.020f0 * R * rim_band * cos(24.0f0 * azimuth + 0.3f0 * sin(pose.theta))
+    shell_radius = R + scallop
+    thickness = max(0.035f0 * R, 0.16f0) + 0.025f0 * R * rim_band
+    shell = abs(sqrt(local_x^2 + local_y^2 + local_z^2) - shell_radius) - thickness
+    mouth = -above_mouth
+    surface = jelly_coverage(max(shell, mouth), footprint)
+    # Radial canals are authored in bell coordinates, so they contract with
+    # the same pose rather than sliding over it. Suppress the singular apex.
+    canal = max(cos(16.0f0 * azimuth + 0.12f0 * sin(pose.theta)), 0.0f0)^6
+    canal *= 1.0f0 - jelly_smoothstep(0.65f0, 0.96f0, polar)
+    surface *= 0.68f0 + 0.22f0 * rim_band + 0.10f0 * canal
     organs = 0.0f0
     organ_reach = 0.55f0 * R + pose.organ_radius + 1.0f0
     if local_z > 0.0f0 &&
        local_x^2 + local_y^2 + local_z^2 < organ_reach^2
         organs = pose_organ_coverage(pose, local_x, local_y, local_z)
     end
-    tentacles = pose_tentacle_coverage(pose, x, y, z)
-    arms = pose_arm_coverage(pose, x, y, z)
+    tentacles = pose_tentacle_coverage(pose, x, y, z, footprint)
+    arms = pose_arm_coverage(pose, x, y, z, footprint)
     return (surface, tentacles, arms, organs, polar)
 end
 
@@ -732,6 +779,7 @@ function jelly_sample_materials(
     voxel_x::Float32,
     voxel_y::Float32,
     voxel_z::Float32,
+    footprint::Float32=0.5f0,
 )
     surface = 0.0f0
     polar = 0.0f0
@@ -739,7 +787,7 @@ function jelly_sample_materials(
     arms = 0.0f0
     organs = 0.0f0
     for pose in poses
-        coverage = pose_material(pose, voxel_x, voxel_y, voxel_z)
+        coverage = pose_material(pose, voxel_x, voxel_y, voxel_z, footprint)
         if coverage[1] > surface
             surface = coverage[1]
             polar = coverage[5]
@@ -753,128 +801,152 @@ function jelly_sample_materials(
 end
 
 """
-Materialize the animated analytic anatomy and colorize the filtered vorticity
-magnitude voxel-by-voxel into the version-3 volume and material buffers.
-Wake stays at solver resolution; analytic anatomy is 2× supersampled so
-filaments and membranes antialias before they hit the tricubic marcher.
-Material RG stores an octahedral unit normal, B optical thickness, and A a
-validity flag for the compositor's tissue lighting path. Wake opacity is
-capped below about 0.115, while anatomy feathers continuously from zero to
-its dense interior.
+A coherent outward normal for the bell's ellipsoid, independent of which
+side of the thin membrane a voxel samples. Density derivatives reverse on
+the inner wall and corrupt octahedral interpolation across a sub-cell shell.
+Display scallops remain deliberately below the refraction normal scale.
 """
-function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
+function jelly_bell_normal(poses, x::Float32, y::Float32, z::Float32, footprint::Float32)
+    best = 0.0f0
+    normal = (0.0f0, 1.0f0, 0.0f0)
+    for pose in poses
+        surface = pose_material(pose, x, y, z, footprint)[1]
+        if surface > best
+            best = surface
+            squeeze_squared = pose.squeeze * pose.squeeze
+            normal = (
+                squeeze_squared * (x - pose.center_x),
+                z - pose.center_z + pose.axis_shift,
+                squeeze_squared * (y - pose.center_y),
+            )
+        end
+    end
+    return normal
+end
+
+"""
+Filter the actual simulated wake once at solver resolution. Fine display
+samples interpolate this field; they never resimulate or fabricate fluid.
+"""
+function filter_jelly_wake!(case::JellyCase)
     sigma = download_vorticity_magnitude!(case)
     nx, ny, nz = case.domain
+    Threads.@threads :static for z in 1:nz
+        @inbounds for y in 1:ny, x in 1:nx
+            case.wake_filtered[x, y, z] = jelly_filtered_vorticity(sigma, x, y, z)
+        end
+    end
+    return case.wake_filtered
+end
+
+@inline function jelly_lerp_index(position::Float32, extent::Int)
+    index = clamp(position + 0.5f0, 1.0f0, Float32(extent))
+    lower = min(floor(Int, index), extent - 1)
+    return lower, index - Float32(lower)
+end
+
+"""Trilinear wake reconstruction at a physical solver-space position."""
+@inline function jelly_sample_wake(
+    field::Array{Float32,3}, x::Float32, y::Float32, z::Float32,
+)
+    ix, fx = jelly_lerp_index(x, size(field, 1))
+    iy, fy = jelly_lerp_index(y, size(field, 2))
+    iz, fz = jelly_lerp_index(z, size(field, 3))
+    @inbounds begin
+        a = (1.0f0 - fx) * field[ix, iy, iz] + fx * field[ix + 1, iy, iz]
+        b = (1.0f0 - fx) * field[ix, iy + 1, iz] + fx * field[ix + 1, iy + 1, iz]
+        c = (1.0f0 - fx) * field[ix, iy, iz + 1] + fx * field[ix + 1, iy, iz + 1]
+        d = (1.0f0 - fx) * field[ix, iy + 1, iz + 1] + fx * field[ix + 1, iy + 1, iz + 1]
+    end
+    return (1.0f0 - fz) * ((1.0f0 - fy) * a + fy * b) +
+           fz * ((1.0f0 - fy) * c + fy * d)
+end
+
+"""
+Convert opacity across one solver cell to opacity across one display cell.
+Composing `scale` fine cells therefore preserves Beer-Lambert transmittance.
+"""
+@inline jelly_display_alpha(alpha::Float32, scale::Int) =
+    1.0f0 - (1.0f0 - clamp(alpha, 0.0f0, 1.0f0))^(1.0f0 / scale)
+
+"""
+Evaluate analytic thin membranes, scalloped rims and curved appendages on an
+independent display grid. The simulation, obstacle velocities and wake stay
+at solver resolution. Signed-distance footprint coverage replaces the former
+maximum of eight samples, which dilated every fine strand. RGBA alpha is
+optical depth per display cell, not per solver cell. The version-3 material
+validity plane identifies tissue independently of this resolution-dependent
+alpha; old version-2 consumers should use the planar fallback.
+"""
+function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
+    wake_field = filter_jelly_wake!(case)
+    nx, ny, nz = case.display_domain
     rgba = case.volume_rgba
     material = case.volume_material
     τ = Float32(simulation_time(case))
     poses = [jelly_pose(spec, τ) for spec in case.jellies]
-    half = 0.25f0
+    scale = case.display_scale
+    cell = 1.0f0 / scale
     Threads.@threads :static for y in 1:ny
-        voxel_y = jelly_voxel_center(y)
+        voxel_y = jelly_voxel_center(y) * cell
         @inbounds for row in 1:nz
             z = nz - row + 1
-            voxel_z = jelly_voxel_center(z)
+            voxel_z = jelly_voxel_center(z) * cell
             output = jelly_volume_offset(nx, nz, 1, y, z)
             for x in 1:nx
-                value = jelly_filtered_vorticity(sigma, x, y, z)
+                voxel_x = jelly_voxel_center(x) * cell
+                value = jelly_sample_wake(wake_field, voxel_x, voxel_y, voxel_z)
                 wake = max(value - JELLY_WAKE_FLOOR, 0.0f0)
                 wake_density = wake / (wake + 6.0f0)
-                voxel_x = jelly_voxel_center(x)
-
-                surface = 0.0f0
-                polar = 0.0f0
-                tentacles = 0.0f0
-                arms = 0.0f0
-                organs = 0.0f0
-                tissue = 0.0f0
-                for dz in (-half, half), dy in (-half, half), dx in (-half, half)
-                    sample = jelly_sample_materials(
-                        poses,
-                        voxel_x + dx,
-                        voxel_y + dy,
-                        voxel_z + dz,
-                    )
-                    if sample[1] > surface
-                        surface = sample[1]
-                        polar = sample[5]
-                    end
-                    tentacles = max(tentacles, sample[2])
-                    arms = max(arms, sample[3])
-                    organs = max(organs, sample[4])
-                    tissue = max(tissue, sample[6])
-                end
-
+                surface, tentacles, arms, organs, polar, tissue =
+                    jelly_sample_materials(poses, voxel_x, voxel_y, voxel_z, cell)
                 density = max(
-                    0.15f0 * wake_density,
-                    max(
-                        0.44f0 * surface,
-                        max(
-                            0.40f0 * tentacles,
-                            max(0.42f0 * arms, 0.46f0 * organs),
-                        ),
-                    ),
+                    0.11f0 * wake_density,
+                    max(0.85f0 * surface,
+                        max(0.75f0 * tentacles, max(0.70f0 * arms, 0.55f0 * organs))),
                 )
-                color = palette_color(palette, 0.60f0 * wake_density, 1.0)
-                if tentacles > 0.0f0
-                    color = blend_color(
-                        color,
-                        JELLY_FILAMENT_LAVENDER,
-                        Float64(0.92f0 * tentacles),
-                    )
-                end
-                if arms > 0.0f0
-                    color = blend_color(
-                        color,
-                        JELLY_ARM_BLUSH,
-                        Float64(0.94f0 * arms),
-                    )
-                end
-                if surface > 0.0f0
+                # RGB is unassociated in the wire format. Give even empty
+                # reconstruction neighbours a lavender tint; interpolating
+                # keyed near-white RGB into a thin filament washes it gray.
+                # Zero alpha still contributes exactly zero radiance.
+                color = wake_density > 0.0f0 ?
+                    palette_color(palette, 0.60f0 * wake_density, 1.0) :
+                    JELLY_APEX_VIOLET
+                anatomy = surface + tentacles + arms + organs
+                if anatomy > 1.0f-5
                     membrane = blend_color(
-                        JELLY_RIM_LAVENDER,
-                        JELLY_APEX_VIOLET,
+                        JELLY_RIM_LAVENDER, JELLY_APEX_VIOLET,
                         Float64(jelly_smoothstep(-0.35f0, 0.85f0, polar)),
                     )
-                    color = blend_color(color, membrane, Float64(0.95f0 * surface))
-                end
-                if organs > 0.0f0
-                    color = blend_color(
-                        color,
-                        JELLY_ORGAN_ROSE,
-                        Float64(0.95f0 * organs),
-                    )
+                    color = ntuple(3) do channel
+                        weighted = surface * Float32(membrane[channel]) +
+                                   tentacles * Float32(JELLY_FILAMENT_LAVENDER[channel]) +
+                                   arms * Float32(JELLY_ARM_BLUSH[channel]) +
+                                   organs * Float32(JELLY_ORGAN_ROSE[channel])
+                        round(UInt8, clamp(weighted / anatomy, 0.0f0, 255.0f0))
+                    end
                 end
                 rgba[output] = color[1]
                 rgba[output + 1] = color[2]
                 rgba[output + 2] = color[3]
-                rgba[output + 3] = round(UInt8, 190 * density)
+                reference_alpha = (190.0f0 / 255.0f0) * density
+                rgba[output + 3] = round(UInt8, 255.0f0 * jelly_display_alpha(reference_alpha, scale))
 
                 if tissue > 0.02f0
-                    ε = 0.45f0
-                    t_px = jelly_sample_materials(
-                        poses, voxel_x + ε, voxel_y, voxel_z,
-                    )[6]
-                    t_mx = jelly_sample_materials(
-                        poses, voxel_x - ε, voxel_y, voxel_z,
-                    )[6]
-                    t_pz = jelly_sample_materials(
-                        poses, voxel_x, voxel_y, voxel_z + ε,
-                    )[6]
-                    t_mz = jelly_sample_materials(
-                        poses, voxel_x, voxel_y, voxel_z - ε,
-                    )[6]
-                    t_py = jelly_sample_materials(
-                        poses, voxel_x, voxel_y + ε, voxel_z,
-                    )[6]
-                    t_my = jelly_sample_materials(
-                        poses, voxel_x, voxel_y - ε, voxel_z,
-                    )[6]
-                    gx = t_px - t_mx
-                    gy = t_pz - t_mz
-                    gz = t_py - t_my
-                    packed = encode_octahedral(-gx, -gy, -gz)
-                    thickness = clamp(tissue * 0.85f0, 0.0f0, 1.0f0)
+                    if surface >= max(tentacles, max(arms, organs))
+                        normal = jelly_bell_normal(poses, voxel_x, voxel_y, voxel_z, cell)
+                        packed = encode_octahedral(normal...)
+                    else
+                        ε = 0.45f0 * cell
+                        t_px = jelly_sample_materials(poses, voxel_x + ε, voxel_y, voxel_z, cell)[6]
+                        t_mx = jelly_sample_materials(poses, voxel_x - ε, voxel_y, voxel_z, cell)[6]
+                        t_pz = jelly_sample_materials(poses, voxel_x, voxel_y, voxel_z + ε, cell)[6]
+                        t_mz = jelly_sample_materials(poses, voxel_x, voxel_y, voxel_z - ε, cell)[6]
+                        t_py = jelly_sample_materials(poses, voxel_x, voxel_y + ε, voxel_z, cell)[6]
+                        t_my = jelly_sample_materials(poses, voxel_x, voxel_y - ε, voxel_z, cell)[6]
+                        packed = encode_octahedral(-(t_px - t_mx), -(t_pz - t_mz), -(t_py - t_my))
+                    end
+                    thickness = clamp(tissue * 0.55f0, 0.0f0, 1.0f0)
                     material[output] = packed[1]
                     material[output + 1] = packed[2]
                     material[output + 2] = round(UInt8, thickness * 255.0f0)
@@ -944,4 +1016,62 @@ function compute_vorticity!(scratch::RenderScratch, case::JellyCase)
         end
     end
     return scratch
+end
+
+
+"""Coarse fluid-only geometry when the compositor accepts analytic poses."""
+jelly_wake_geometry(case::JellyCase) =
+    (case.domain[1], case.domain[3], case.domain[2])
+
+"""
+Version-4 pose payload in world X/up/depth coordinates. The tank's longest
+side is one world unit, exactly as in the compositor's volume camera. All
+geometry shares these authoritative simulation poses; no wall-clock phase
+or independently regenerated random seed can desynchronize visible tissue.
+"""
+function jelly_pose_frame(case::JellyCase)
+    nx, ny, nz = case.domain
+    inverse_longest = 1.0f0 / max(nx, ny, nz)
+    time = Float32(simulation_time(case))
+    values = Vector{Float32}(undef, 8 * length(case.jellies))
+    for (index, spec) in enumerate(case.jellies)
+        pose = jelly_pose(spec, time)
+        offset = 8 * (index - 1)
+        values[offset + 1] = (pose.center_x - 0.5f0 * nx) * inverse_longest
+        values[offset + 2] = (pose.center_z - 0.5f0 * nz) * inverse_longest
+        values[offset + 3] = (pose.center_y - 0.5f0 * ny) * inverse_longest
+        values[offset + 4] = spec.radius * inverse_longest
+        values[offset + 5] = pose.squeeze
+        values[offset + 6] = mod(pose.theta + Float32(pi), Float32(2pi)) - Float32(pi)
+        values[offset + 7] = pose.axis_shift * inverse_longest
+        values[offset + 8] = (pose.mouth_z - 0.5f0 * nz) * inverse_longest
+    end
+    return values
+end
+
+"""
+Publish only real filtered vorticity at solver resolution for pose-capable
+compositors. This avoids spending producer time or bandwidth voxelizing any
+anatomy. An all-zero material plane unambiguously identifies wake, and is
+rewritten each frame to keep mode switches and future buffer reuse safe.
+"""
+function render_jelly_wake!(case::JellyCase; palette::Tuple=case_palette(case))
+    field = filter_jelly_wake!(case)
+    nx, ny, nz = case.domain
+    rgba = case.wake_rgba
+    fill!(case.wake_material, 0x00)
+    Threads.@threads :static for y in 1:ny
+        @inbounds for z in 1:nz, x in 1:nx
+            value = field[x, y, z]
+            wake = max(value - JELLY_WAKE_FLOOR, 0.0f0)
+            density = wake / (wake + 6.0f0)
+            color = palette_color(palette, 0.60f0 * density, 1.0)
+            offset = jelly_volume_offset(nx, nz, x, y, z)
+            rgba[offset] = color[1]
+            rgba[offset + 1] = color[2]
+            rgba[offset + 2] = color[3]
+            rgba[offset + 3] = round(UInt8, 190.0f0 * 0.11f0 * density)
+        end
+    end
+    return rgba, case.wake_material
 end

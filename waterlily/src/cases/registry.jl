@@ -21,6 +21,7 @@ function build_case(
     name::AbstractString,
     dimensions::Tuple{Int,Int};
     memory=Array,
+    jelly_detail::Int=2,
 )
     factory = get(CASE_REGISTRY, String(name), nothing)
     factory === nothing &&
@@ -29,5 +30,8 @@ function build_case(
                 "unknown case '$name'; available cases: $(join(available_cases(), ", "))",
             ),
         )
-    return factory(dimensions; memory)
+    # Display detail changes only jelly's sampled volume, never another case's
+    # solver size or constructor contract. Keep it when switching into jelly.
+    return name == "jelly" ? factory(dimensions; memory, display_scale=jelly_detail) :
+           factory(dimensions; memory)
 end

@@ -1,4 +1,6 @@
 use super::{Compositor, CompositorConnection, DirtyRect};
+use crate::backend::compositor_common::jelly_geometry::build_jelly_mesh;
+use crate::backend::compositor_common::waterlily::JellyPose;
 use crate::backend::compositor_common::waterlily::{MAX_WATERLILY_VOLUME_BYTES, WaterlilyFrame};
 use glow::HasContext;
 use std::fs;
@@ -34,15 +36,16 @@ pub(super) struct WaterlilyIpc {
     loop_signal: Arc<Mutex<Option<calloop::LoopSignal>>>,
     stop: Arc<AtomicBool>,
     command_stream: Arc<Mutex<Option<UnixStream>>>,
+    pose_capability: Arc<AtomicBool>,
     receiver: Option<JoinHandle<()>>,
 }
 
 impl WaterlilyIpc {
-    pub(super) fn bind_default() -> io::Result<Self> {
-        Self::bind(default_socket_path())
+    pub(super) fn bind_default(pose_capability: bool) -> io::Result<Self> {
+        Self::bind(default_socket_path(), pose_capability)
     }
 
-    fn bind(path: PathBuf) -> io::Result<Self> {
+    fn bind(path: PathBuf, supports_poses: bool) -> io::Result<Self> {
         prepare_runtime_parent(&path)?;
         remove_stale_socket(&path)?;
 
@@ -58,6 +61,8 @@ impl WaterlilyIpc {
         let loop_signal = Arc::new(Mutex::new(None::<calloop::LoopSignal>));
         let stop = Arc::new(AtomicBool::new(false));
         let command_stream = Arc::new(Mutex::new(None::<UnixStream>));
+        let pose_capability = Arc::new(AtomicBool::new(supports_poses));
+        let thread_pose_capability = pose_capability.clone();
         let thread_pending = pending.clone();
         let thread_new_connection = new_connection.clone();
         let thread_connected = connected.clone();
@@ -99,6 +104,14 @@ impl WaterlilyIpc {
                                         None
                                     }
                                 };
+                                let capability: &[u8] = if thread_pose_capability.load(Ordering::Acquire) {
+                                    b"capabilities jelly-pose-v1\n"
+                                } else {
+                                    b"capabilities jelly-pose-v0\n"
+                                };
+                                // The writable clone already carries the
+                                // strict command timeout; never stall accept.
+                                deliver_command(&mut slot, capability);
                             }
                             thread_connected.store(true, Ordering::Release);
                             thread_new_connection.store(true, Ordering::Release);
@@ -175,6 +188,7 @@ impl WaterlilyIpc {
             loop_signal,
             stop,
             command_stream,
+            pose_capability,
             receiver: Some(receiver),
         })
     }
@@ -187,6 +201,11 @@ impl WaterlilyIpc {
             return false;
         };
         deliver_command(&mut slot, payload.as_bytes())
+    }
+
+    fn disable_pose_capability(&self) {
+        self.pose_capability.store(false, Ordering::Release);
+        self.send_command("capabilities jelly-pose-v0");
     }
 
     pub(super) fn has_pending(&self) -> bool {
@@ -293,6 +312,8 @@ pub(super) struct WaterlilyTexture {
     pub(super) depth: u32,
     pub(super) sequence: u64,
     pub(super) timestamp_ns: u64,
+    jellies: Vec<JellyPose>,
+    jelly_detail: u32,
 }
 
 impl WaterlilyTexture {
@@ -430,13 +451,13 @@ fn fill_volume_occupancy(
 /// frame timestamp so re-rendering the same frame (say, for unrelated damage)
 /// reproduces the exact same image, keeping damage tracking honest, while
 /// every new simulation frame advances the subtle parallax motion.
-struct VolumeCamera {
-    position: [f32; 3],
-    right: [f32; 3],
-    up: [f32; 3],
-    forward: [f32; 3],
-    tan_half_fov: f32,
-    box_half_extents: [f32; 3],
+pub(super) struct VolumeCamera {
+    pub(super) position: [f32; 3],
+    pub(super) right: [f32; 3],
+    pub(super) up: [f32; 3],
+    pub(super) forward: [f32; 3],
+    pub(super) tan_half_fov: f32,
+    pub(super) box_half_extents: [f32; 3],
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -592,7 +613,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.waterlily_ipc.is_some() {
             return true;
         }
-        match WaterlilyIpc::bind_default() {
+        match WaterlilyIpc::bind_default(self.jelly_renderer.is_some()) {
             Ok(ipc) => {
                 if let Some(signal) = self.waterlily_loop_signal.clone() {
                     ipc.set_loop_signal(signal);
@@ -1024,6 +1045,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 uniforms.material_available.as_ref(),
                 i32::from(frame.material_texture.is_some()),
             );
+            self.gl.uniform_1_i32(
+                uniforms.jelly_geometry.as_ref(),
+                i32::from(!frame.jellies.is_empty()),
+            );
             self.gl.uniform_1_i32(uniforms.scene_texture.as_ref(), 1);
             self.gl.uniform_1_i32(
                 uniforms.scene_available.as_ref(),
@@ -1113,6 +1138,50 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_texture(glow::TEXTURE_3D, None);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_3D, None);
+        }
+        self.render_jelly_anatomy(&camera);
+    }
+
+    fn render_jelly_anatomy(&mut self, camera: &VolumeCamera) {
+        let Some(frame) = self.waterlily_texture.as_ref() else {
+            return;
+        };
+        if frame.jellies.is_empty() {
+            return;
+        }
+        let Some(renderer) = self.jelly_renderer.as_mut() else {
+            return;
+        };
+        let key = (
+            frame.sequence,
+            frame.timestamp_ns,
+            self.screen_w,
+            self.screen_h,
+        );
+        let result = (|| {
+            if renderer.frame_key != Some(key) {
+                let vertices =
+                    build_jelly_mesh(&frame.jellies, frame.jelly_detail, camera.position);
+                renderer.upload(&self.gl, &vertices)?;
+                renderer.frame_key = Some(key);
+            }
+            renderer.render(
+                &self.gl,
+                camera,
+                [self.screen_w, self.screen_h],
+                self.waterlily_opacity,
+            )
+        })();
+        if let Err(error) = result {
+            log::warn!(
+                "compositor: fine jelly rendering failed; requesting volume fallback: {error}"
+            );
+            if let Some(renderer) = self.jelly_renderer.take() {
+                renderer.destroy(&self.gl);
+            }
+            if let Some(ipc) = &self.waterlily_ipc {
+                ipc.disable_pose_capability();
+            }
         }
     }
 
@@ -1394,6 +1463,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     depth: frame.depth,
                     sequence: frame.sequence,
                     timestamp_ns: frame.timestamp_ns,
+                    jellies: frame.jellies,
+                    jelly_detail: frame.jelly_detail,
                 };
                 if let Some(previous) = self.waterlily_texture.replace(replacement) {
                     self.gl.delete_texture(previous.texture);
@@ -1545,6 +1616,8 @@ impl<C: CompositorConnection> Compositor<C> {
             let current = self.waterlily_texture.as_mut().unwrap();
             current.sequence = frame.sequence;
             current.timestamp_ns = frame.timestamp_ns;
+            current.jellies = frame.jellies;
+            current.jelly_detail = frame.jelly_detail;
         }
         true
     }
@@ -1840,7 +1913,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("jwm-waterlily-cmd-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let ipc = super::WaterlilyIpc::bind(path.clone()).unwrap();
+        let ipc = super::WaterlilyIpc::bind(path.clone(), true).unwrap();
 
         assert!(
             !ipc.send_command("case dance"),
@@ -1858,9 +1931,17 @@ mod tests {
         worker
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
+        let mut reader = BufReader::new(&worker);
         let mut line = String::new();
-        BufReader::new(&worker).read_line(&mut line).unwrap();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "capabilities jelly-pose-v1\n");
+        line.clear();
+        reader.read_line(&mut line).unwrap();
         assert_eq!(line, "case dance\n");
+        ipc.disable_pose_capability();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line, "capabilities jelly-pose-v0\n");
     }
 
     #[test]

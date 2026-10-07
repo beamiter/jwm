@@ -718,8 +718,32 @@ fn render_waterlily_volume_frame(
     box_half_extents: [f32; 3],
     scene_available: bool,
 ) -> Vec<u8> {
+    render_waterlily_volume_frame_with_material(
+        gl,
+        fragment_shader,
+        (voxels, None),
+        dimensions,
+        output_size,
+        box_half_extents,
+        scene_available,
+    )
+}
+
+/// The same real-shader fixture with an optional version-3 material plane.
+/// Pair the input planes explicitly so legacy callers keep testing version 2.
+#[cfg(feature = "x11-backends")]
+fn render_waterlily_volume_frame_with_material(
+    gl: &glow::Context,
+    fragment_shader: &str,
+    planes: (&[u8], Option<&[u8]>),
+    dimensions: [i32; 3],
+    output_size: [i32; 2],
+    box_half_extents: [f32; 3],
+    scene_available: bool,
+) -> Vec<u8> {
     use crate::backend::x11::compositor::shaders as s;
 
+    let (voxels, material) = planes;
     let [volume_w, volume_h, volume_d] = dimensions;
     let [output_w, output_h] = output_size;
     assert!(volume_w >= 1 && volume_h >= 1 && volume_d >= 1);
@@ -727,6 +751,9 @@ fn render_waterlily_volume_frame(
         voxels.len(),
         volume_w as usize * volume_h as usize * volume_d as usize * 4
     );
+    if let Some(material) = material {
+        assert_eq!(material.len(), voxels.len());
+    }
 
     unsafe {
         let program = link(gl, s::VERTEX_SHADER, fragment_shader)
@@ -748,6 +775,39 @@ fn render_waterlily_volume_frame(
             glow::RGBA,
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(Some(voxels)),
+        );
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, filter, glow::LINEAR as i32);
+        }
+        for wrap in [
+            glow::TEXTURE_WRAP_S,
+            glow::TEXTURE_WRAP_T,
+            glow::TEXTURE_WRAP_R,
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+
+        // Bind a complete fallback even for legacy fixtures. On version-3
+        // fixtures, this uses exactly the production linear aux sampling.
+        let material_texture = gl.create_texture().unwrap();
+        gl.active_texture(glow::TEXTURE3);
+        gl.bind_texture(glow::TEXTURE_3D, Some(material_texture));
+        let material_size = if material.is_some() {
+            [volume_w, volume_h, volume_d]
+        } else {
+            [1; 3]
+        };
+        gl.tex_image_3d(
+            glow::TEXTURE_3D,
+            0,
+            glow::RGBA as i32,
+            material_size[0],
+            material_size[1],
+            material_size[2],
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(material.unwrap_or(&[128, 128, 0, 0]))),
         );
         for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
             gl.tex_parameter_i32(glow::TEXTURE_3D, filter, glow::LINEAR as i32);
@@ -919,7 +979,10 @@ fn render_waterlily_volume_frame(
         gl.uniform_1_i32(uniform("u_volume").as_ref(), 0);
         gl.uniform_1_i32(uniform("u_occupancy").as_ref(), 2);
         gl.uniform_1_i32(uniform("u_material").as_ref(), 3);
-        gl.uniform_1_i32(uniform("u_material_available").as_ref(), 0);
+        gl.uniform_1_i32(
+            uniform("u_material_available").as_ref(),
+            i32::from(material.is_some()),
+        );
         gl.uniform_1_i32(uniform("u_scene_texture").as_ref(), 1);
         gl.uniform_1_i32(
             uniform("u_scene_available").as_ref(),
@@ -948,6 +1011,8 @@ fn render_waterlily_volume_frame(
         gl.bind_texture(glow::TEXTURE_2D, Some(scene));
         gl.active_texture(glow::TEXTURE2);
         gl.bind_texture(glow::TEXTURE_3D, Some(occupancy_texture));
+        gl.active_texture(glow::TEXTURE3);
+        gl.bind_texture(glow::TEXTURE_3D, Some(material_texture));
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_3D, Some(volume));
         let (vao, vbo) = create_quad_vao(gl);
@@ -975,6 +1040,7 @@ fn render_waterlily_volume_frame(
         gl.delete_texture(output);
         gl.delete_texture(scene);
         gl.delete_texture(occupancy_texture);
+        gl.delete_texture(material_texture);
         gl.delete_texture(volume);
         gl.delete_program(program);
         if blend_was_enabled {
@@ -5913,22 +5979,15 @@ fn waterlily_volume_shader_preserves_wake_hue() {
 /// disagreement observable without pinning driver-specific absolute colors.
 #[cfg(feature = "x11-backends")]
 fn waterlily_volume_shader_without_empty_space_skip(source: &str) -> String {
-    let reconstruction_start = source
-        .find("            vec4 voxel = sample_volume_tricubic(tex);")
-        .expect("WaterLily tricubic reconstruction must remain discoverable");
-    let Some(probe_start) = source[..reconstruction_start].rfind("            if (") else {
-        return source.to_owned();
-    };
-    // With no pre-reconstruction empty-space skip, the nearest preceding
-    // branch is the loop's ordinary break guard. In that case the production
-    // shader already is the reference shader.
-    if !source[probe_start..reconstruction_start].contains("continue;") {
-        return source.to_owned();
-    }
-    let mut reference = String::with_capacity(source.len());
-    reference.push_str(&source[..probe_start]);
-    reference.push_str(&source[reconstruction_start..]);
-    reference
+    const PROBE: &str = "            if (texture(u_occupancy, tex).a <= 1e-6) {\n                continue;\n            }\n";
+    assert_eq!(
+        source.matches(PROBE).count(),
+        1,
+        "the volume occupancy guard must remain uniquely discoverable"
+    );
+    // Remove only the guard: version-3 material sampling can precede the
+    // color reconstruction and must remain present in the no-skip oracle.
+    source.replacen(PROBE, "", 1)
 }
 
 /// Build a test-only control which keeps the complete scene/backdrop path but
@@ -5944,6 +6003,116 @@ fn waterlily_volume_shader_without_front_interface(source: &str) -> String {
         "front-interface confidence must remain uniquely discoverable"
     );
     source.replacen(NEEDLE, "float interface_confidence = 0.0 * smoothstep(", 1)
+}
+
+/// Fine-grid optical scaling can put genuine tissue below the complete
+/// legacy wake band. Version-3 validity, not alpha, must retain its interface;
+/// conversely an empty material plane must leave ordinary wake unchanged.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn waterlily_volume_material_identity_is_independent_of_opacity() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!(
+            "headless GL unavailable - skipping \
+             waterlily_volume_material_identity_is_independent_of_opacity"
+        );
+        return;
+    };
+    const N: usize = 16;
+    const OUTPUT: i32 = 64;
+    let mut voxels = vec![0_u8; N * N * N * 4];
+    let mut material = vec![0_u8; voxels.len()];
+    let mut empty_material = vec![0_u8; voxels.len()];
+    for voxel in voxels.chunks_exact_mut(4) {
+        voxel[..3].copy_from_slice(&[180, 150, 240]);
+    }
+    for aux in material.chunks_exact_mut(4) {
+        aux[..2].copy_from_slice(&[128, 128]);
+    }
+    for aux in empty_material.chunks_exact_mut(4) {
+        aux[..2].copy_from_slice(&[128, 128]);
+    }
+    for z in 7..9 {
+        for row in 3..13 {
+            for x in 3..13 {
+                let base = ((z * N + row) * N + x) * 4;
+                voxels[base + 3] = 22; // Below 0.115 even before reconstruction.
+                // A coherent tilted, forward-facing normal and optical depth.
+                material[base..base + 4].copy_from_slice(&[184, 72, 128, 255]);
+            }
+        }
+    }
+    let render = |shader: &str, aux: Option<&[u8]>| {
+        render_waterlily_volume_frame_with_material(
+            &h.gl,
+            shader,
+            (&voxels, aux),
+            [N as i32; 3],
+            [OUTPUT; 2],
+            [0.5; 3],
+            true,
+        )
+    };
+    let legacy_wake = render(s::WATERLILY_VOLUME_FRAGMENT_SHADER, None);
+    let aux_wake = render(s::WATERLILY_VOLUME_FRAGMENT_SHADER, Some(&empty_material));
+    assert_eq!(
+        legacy_wake, aux_wake,
+        "zero-validity material must preserve the legacy wake without tissue glow"
+    );
+
+    let tissue = render(s::WATERLILY_VOLUME_FRAGMENT_SHADER, Some(&material));
+    let repeated = render(s::WATERLILY_VOLUME_FRAGMENT_SHADER, Some(&material));
+    assert_eq!(
+        tissue, repeated,
+        "authored thin tissue must be deterministic"
+    );
+    assert_ne!(
+        tissue, aux_wake,
+        "low-alpha authored tissue must not become wake"
+    );
+    let no_skip_shader =
+        waterlily_volume_shader_without_empty_space_skip(s::WATERLILY_VOLUME_FRAGMENT_SHADER);
+    let without_skip = render(&no_skip_shader, Some(&material));
+    assert_eq!(
+        tissue, without_skip,
+        "the conservative occupancy guard must preserve authored fine tissue"
+    );
+    let no_interface_shader =
+        waterlily_volume_shader_without_front_interface(s::WATERLILY_VOLUME_FRAGMENT_SHADER);
+    let without_interface = render(&no_interface_shader, Some(&material));
+    assert_ne!(
+        tissue, without_interface,
+        "low-alpha authored tissue must receive real front-interface shading"
+    );
+    for pixel in tissue.chunks_exact(4) {
+        assert!(
+            pixel[..3]
+                .iter()
+                .all(|channel| *channel <= pixel[3].saturating_add(1)),
+            "authored material output must stay premultiplied, got {pixel:?}"
+        );
+    }
+}
+
+/// The production renderer, not a reimplementation, must resolve MSAA, blur
+/// only tissue, restore inherited GL state, and resize without leaking errors.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn jelly_geometry_pipeline_preserves_state_and_premultiplication() {
+    for (index, api) in [GlApi::GlCore33, GlApi::Gles3].into_iter().enumerate() {
+        let Some(h) = HeadlessGl::new(api) else {
+            eprintln!("headless GL unavailable - skipping jelly geometry pipeline {api:?}");
+            continue;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "jwm-jelly-shader-test-{}-{index}",
+            std::process::id()
+        ));
+        crate::backend::x11::compositor::check_jelly_pipeline_for_test(&h.gl, path.clone());
+        let _ = std::fs::remove_dir_all(path);
+    }
 }
 
 /// A low-alpha voxel column has a one-voxel-wide trilinear footprint but a

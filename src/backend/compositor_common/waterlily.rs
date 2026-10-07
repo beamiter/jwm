@@ -19,6 +19,12 @@ pub const WATERLILY_PROTOCOL_VERSION_VOLUMETRIC: u32 = 2;
 /// Version 3 keeps the version-2 header layout and doubles each slot so an
 /// RGBA8 material plane (octahedral normal + thickness) sits behind color.
 pub const WATERLILY_PROTOCOL_VERSION_VOLUME_MATERIAL: u32 = 3;
+/// Opt-in version 4 appends bounded analytic jelly poses after the two planes
+/// in each slot. Producers use this only after `capabilities jelly-pose-v1`.
+pub const WATERLILY_PROTOCOL_VERSION_JELLY_POSE: u32 = 4;
+pub const MAX_WATERLILY_JELLIES: u32 = 5;
+pub const WATERLILY_JELLY_POSE_BYTES: u32 = 32;
+const WATERLILY_JELLY_POSE_KIND: u32 = 1;
 pub const WATERLILY_HEADER_BYTES: usize = 64;
 /// The volumetric header keeps the version-1 prefix byte-for-byte and appends
 /// the depth plus reserved space, so both versions parse from one prefix.
@@ -51,6 +57,10 @@ pub struct WaterlilyFrameHeader {
     pub header_len: u32,
     /// Version-3 slots carry a second RGBA plane (material) behind color.
     pub has_material: bool,
+    /// Version-4 records appended to each slot; zero for legacy frames.
+    pub jelly_count: u32,
+    /// Bounded tessellation quality (1 or 2), zero without poses.
+    pub jelly_detail: u32,
 }
 
 impl WaterlilyFrameHeader {
@@ -66,26 +76,54 @@ impl WaterlilyFrameHeader {
         }
         let version = read_u32(bytes, 8);
         let header_len = read_u32(bytes, 12);
-        let (expected_header, depth, has_material) = match version {
-            WATERLILY_PROTOCOL_VERSION => (WATERLILY_HEADER_BYTES, 1, false),
+        let (expected_header, depth, has_material, jelly_count, jelly_detail) = match version {
+            WATERLILY_PROTOCOL_VERSION => (WATERLILY_HEADER_BYTES, 1, false, 0, 0),
             WATERLILY_PROTOCOL_VERSION_VOLUMETRIC => {
                 if bytes.len() < WATERLILY_VOLUME_HEADER_BYTES {
                     return Err(invalid_data("truncated WaterLily volumetric header"));
                 }
-                (WATERLILY_VOLUME_HEADER_BYTES, read_u32(bytes, 64), false)
+                (
+                    WATERLILY_VOLUME_HEADER_BYTES,
+                    read_u32(bytes, 64),
+                    false,
+                    0,
+                    0,
+                )
             }
-            WATERLILY_PROTOCOL_VERSION_VOLUME_MATERIAL => {
+            WATERLILY_PROTOCOL_VERSION_VOLUME_MATERIAL | WATERLILY_PROTOCOL_VERSION_JELLY_POSE => {
                 if bytes.len() < WATERLILY_VOLUME_HEADER_BYTES {
                     return Err(invalid_data("truncated WaterLily volumetric header"));
                 }
                 let depth = read_u32(bytes, 64);
                 let material_flag = read_u32(bytes, 68);
                 if material_flag != 1 {
-                    return Err(invalid_data(
-                        "WaterLily version-3 material flag must be one",
-                    ));
+                    return Err(invalid_data("WaterLily material flag must be one"));
                 }
-                (WATERLILY_VOLUME_HEADER_BYTES, depth, true)
+                let (jelly_count, jelly_detail) =
+                    if version == WATERLILY_PROTOCOL_VERSION_JELLY_POSE {
+                        let count = read_u32(bytes, 72);
+                        let detail = read_u32(bytes, 84);
+                        if depth <= 1
+                            || !(1..=MAX_WATERLILY_JELLIES).contains(&count)
+                            || read_u32(bytes, 76) != WATERLILY_JELLY_POSE_BYTES
+                            || read_u32(bytes, 80) != WATERLILY_JELLY_POSE_KIND
+                            || !(1..=2).contains(&detail)
+                            || read_u32(bytes, 88) != 0
+                            || read_u32(bytes, 92) != 0
+                        {
+                            return Err(invalid_data("invalid WaterLily jelly pose layout"));
+                        }
+                        (count, detail)
+                    } else {
+                        (0, 0)
+                    };
+                (
+                    WATERLILY_VOLUME_HEADER_BYTES,
+                    depth,
+                    true,
+                    jelly_count,
+                    jelly_detail,
+                )
             }
             _ => return Err(invalid_data("unsupported WaterLily protocol version")),
         };
@@ -147,6 +185,9 @@ impl WaterlilyFrameHeader {
         } else {
             color_bytes
         };
+        let slot_bytes = slot_bytes
+            .checked_add(u64::from(jelly_count) * u64::from(WATERLILY_JELLY_POSE_BYTES))
+            .ok_or_else(|| invalid_data("WaterLily pose slot size overflow"))?;
         if slot_bytes > MAX_FRAME_BYTES {
             return Err(invalid_data("WaterLily frame exceeds the transport limit"));
         }
@@ -166,6 +207,8 @@ impl WaterlilyFrameHeader {
             timestamp_ns,
             header_len,
             has_material,
+            jelly_count,
+            jelly_detail,
         })
     }
 
@@ -175,7 +218,8 @@ impl WaterlilyFrameHeader {
 
     fn slot_bytes(self) -> u64 {
         let color = self.color_bytes();
-        if self.has_material { color * 2 } else { color }
+        let planes = if self.has_material { color * 2 } else { color };
+        planes + u64::from(self.jelly_count) * u64::from(WATERLILY_JELLY_POSE_BYTES)
     }
 
     fn slot_offset(self) -> io::Result<u64> {
@@ -199,6 +243,48 @@ impl WaterlilyFrameHeader {
     }
 }
 
+/// Analytic jelly animation in world (right, up, depth) coordinates normalized
+/// by the longest tank side. Angles are wrapped, so malformed frame data cannot
+/// cause unbounded geometry or unstable trigonometry in the renderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JellyPose {
+    pub center: [f32; 3],
+    pub radius: f32,
+    pub squeeze: f32,
+    pub theta: f32,
+    pub axis_shift: f32,
+    pub mouth_y: f32,
+}
+
+impl JellyPose {
+    fn parse(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() != WATERLILY_JELLY_POSE_BYTES as usize {
+            return Err(invalid_data("truncated WaterLily jelly pose"));
+        }
+        let values: [f32; 8] = std::array::from_fn(|i| {
+            f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+        });
+        if values.iter().any(|value| !value.is_finite())
+            || values[..3].iter().any(|value| value.abs() > 0.5)
+            || !(0.0 < values[3] && values[3] <= 0.25)
+            || !(0.8..=1.2).contains(&values[4])
+            || values[5].abs() > std::f32::consts::TAU
+            || values[6].abs() > 0.25
+            || values[7].abs() > 0.5
+        {
+            return Err(invalid_data("WaterLily jelly pose is out of range"));
+        }
+        Ok(Self {
+            center: [values[0], values[1], values[2]],
+            radius: values[3],
+            squeeze: values[4],
+            theta: values[5],
+            axis_shift: values[6],
+            mouth_y: values[7],
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct WaterlilyFrame {
     pub width: u32,
@@ -213,6 +299,9 @@ pub struct WaterlilyFrame {
     /// Version-3 material plane: same tight dimensions as `rgba`. RG =
     /// octahedral normal in [0,1], B = thickness, A = validity (>127 valid).
     pub material: Option<Vec<u8>>,
+    /// Optional version-4 analytic anatomy. Legacy frames leave this empty.
+    pub jellies: Vec<JellyPose>,
+    pub jelly_detail: u32,
 }
 
 pub struct WaterlilyFrameReader {
@@ -248,7 +337,7 @@ impl WaterlilyFrameReader {
         validate_private_regular_file(&file.metadata()?)?;
         let _lock = FileLock::shared(&file)?;
 
-        // Read the longest header both protocol versions allow; version 1
+        // Read the longest header all protocol versions allow; version 1
         // files can legitimately end before the volumetric extension, so a
         // short read only fails once parse() knows which version this is.
         let mut header_bytes = [0u8; WATERLILY_VOLUME_HEADER_BYTES];
@@ -310,6 +399,22 @@ impl WaterlilyFrameReader {
             }
         }
 
+        let mut jellies = Vec::with_capacity(header.jelly_count as usize);
+        if header.jelly_count > 0 {
+            // Keep poses and the color/material pair under the same shared
+            // lock, so a frame never mixes geometry from another publication.
+            let mut poses =
+                [0u8; MAX_WATERLILY_JELLIES as usize * WATERLILY_JELLY_POSE_BYTES as usize];
+            let pose_bytes = header.jelly_count as usize * WATERLILY_JELLY_POSE_BYTES as usize;
+            file.read_exact_at(&mut poses[..pose_bytes], base + header.color_bytes() * 2)?;
+            for bytes in poses[..pose_bytes]
+                .as_chunks::<{ WATERLILY_JELLY_POSE_BYTES as usize }>()
+                .0
+            {
+                jellies.push(JellyPose::parse(bytes)?);
+            }
+        }
+
         self.last_sequence = header.sequence;
         Ok(Some(WaterlilyFrame {
             width: header.width,
@@ -319,6 +424,8 @@ impl WaterlilyFrameReader {
             timestamp_ns: header.timestamp_ns,
             rgba,
             material,
+            jellies,
+            jelly_detail: header.jelly_detail,
         }))
     }
 }
@@ -480,6 +587,192 @@ mod tests {
         bytes
     }
 
+    fn jelly_header(stride: u32, slot: u32, count: u32) -> [u8; 96] {
+        let mut bytes = volume_material_header(1, 1, 2, stride, slot, 7);
+        for (offset, value) in [
+            (8, WATERLILY_PROTOCOL_VERSION_JELLY_POSE),
+            (72, count),
+            (76, WATERLILY_JELLY_POSE_BYTES),
+            (80, WATERLILY_JELLY_POSE_KIND),
+            (84, 2),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn pose_bytes(values: [f32; 8]) -> Vec<u8> {
+        values.into_iter().flat_map(f32::to_le_bytes).collect()
+    }
+
+    fn valid_pose() -> [f32; 8] {
+        [0.1, -0.2, 0.3, 0.08, 1.1, -2.0, 0.01, -0.1]
+    }
+
+    #[test]
+    fn jelly_layout_is_bounded_and_legacy_headers_remain_unchanged() {
+        for count in 1..=MAX_WATERLILY_JELLIES {
+            let parsed = WaterlilyFrameHeader::parse(&jelly_header(4, 1, count)).unwrap();
+            assert_eq!(parsed.jelly_count, count);
+            assert_eq!(parsed.jelly_detail, 2);
+            assert_eq!(parsed.slot_bytes(), 16 + u64::from(count) * 32);
+            assert_eq!(parsed.slot_offset().unwrap(), 96 + parsed.slot_bytes());
+            assert_eq!(
+                parsed.required_file_len().unwrap(),
+                96 + 2 * parsed.slot_bytes()
+            );
+        }
+        for (offset, value) in [
+            (64, 1),
+            (68, 0),
+            (72, 0),
+            (72, 6),
+            (72, u32::MAX),
+            (76, 0),
+            (76, 31),
+            (76, 33),
+            (80, 0),
+            (80, 2),
+            (84, 0),
+            (84, 3),
+            (88, 1),
+            (92, 1),
+        ] {
+            let mut bytes = jelly_header(4, 0, 5);
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(
+                WaterlilyFrameHeader::parse(&bytes).is_err(),
+                "offset {offset}, value {value}"
+            );
+        }
+        for length in [0, 63, 64, 72, 95] {
+            assert!(WaterlilyFrameHeader::parse(&jelly_header(4, 0, 5)[..length]).is_err());
+        }
+        for legacy in [
+            volume_header(1, 1, 2, 4, 0, 1),
+            volume_material_header(1, 1, 2, 4, 0, 1),
+        ] {
+            let parsed = WaterlilyFrameHeader::parse(&legacy).unwrap();
+            assert_eq!(parsed.jelly_count, 0);
+            assert_eq!(parsed.jelly_detail, 0);
+        }
+    }
+
+    #[test]
+    fn jelly_pose_rejects_nonfinite_and_out_of_range_values() {
+        assert!(JellyPose::parse(&pose_bytes(valid_pose())).is_ok());
+        assert!(JellyPose::parse(&[0; 31]).is_err());
+        assert!(JellyPose::parse(&[0; 33]).is_err());
+        for index in 0..8 {
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut values = valid_pose();
+                values[index] = invalid;
+                assert!(JellyPose::parse(&pose_bytes(values)).is_err());
+            }
+        }
+        for (index, invalid) in [
+            (0, 0.51),
+            (1, -0.51),
+            (2, 0.51),
+            (3, 0.0),
+            (3, -0.01),
+            (3, 0.251),
+            (4, 0.79),
+            (4, 1.21),
+            (5, 6.3),
+            (5, -6.3),
+            (6, 0.251),
+            (6, -0.251),
+            (7, 0.501),
+            (7, -0.501),
+        ] {
+            let mut values = valid_pose();
+            values[index] = invalid;
+            assert!(JellyPose::parse(&pose_bytes(values)).is_err());
+        }
+        for values in [
+            [
+                -0.5,
+                0.5,
+                -0.5,
+                0.25,
+                0.8,
+                std::f32::consts::TAU,
+                -0.25,
+                0.5,
+            ],
+            [
+                0.5,
+                -0.5,
+                0.5,
+                f32::MIN_POSITIVE,
+                1.2,
+                -std::f32::consts::TAU,
+                0.25,
+                -0.5,
+            ],
+        ] {
+            assert!(JellyPose::parse(&pose_bytes(values)).is_ok());
+        }
+    }
+
+    #[test]
+    fn reader_keeps_poses_in_the_selected_double_buffer_slot() {
+        for stride in [4, 12] {
+            for count in [1, MAX_WATERLILY_JELLIES] {
+                let path = temp_frame_path();
+                let file = OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&path)
+                    .unwrap();
+                let bytes = jelly_header(stride, 1, count);
+                let header = WaterlilyFrameHeader::parse(&bytes).unwrap();
+                file.set_len(header.required_file_len().unwrap()).unwrap();
+                file.write_all_at(&bytes, 0).unwrap();
+                let base = header.slot_offset().unwrap();
+                for row in 0..2 {
+                    file.write_all_at(&[1, 2, 3, 4], base + row * u64::from(stride))
+                        .unwrap();
+                    file.write_all_at(
+                        &[128, 129, 130, 255],
+                        base + header.color_bytes() + row * u64::from(stride),
+                    )
+                    .unwrap();
+                }
+                let poses = pose_bytes(valid_pose()).repeat(count as usize);
+                let pose_offset = base + 2 * header.color_bytes();
+                file.write_all_at(&poses, pose_offset).unwrap();
+                // An incomplete inactive slot still makes the advertised file
+                // invalid; validate the complete double-buffer allocation.
+                file.set_len(header.required_file_len().unwrap() - 1)
+                    .unwrap();
+                let mut reader = WaterlilyFrameReader::new(path.clone());
+                assert!(reader.read_latest().is_err());
+                file.set_len(header.required_file_len().unwrap()).unwrap();
+                file.write_all_at(&poses, pose_offset).unwrap();
+                file.write_all_at(&f32::NAN.to_le_bytes(), pose_offset)
+                    .unwrap();
+                assert!(reader.read_latest().is_err());
+                // Failure never consumes the publication sequence.
+                file.write_all_at(&poses, pose_offset).unwrap();
+                let frame = reader.read_latest().unwrap().unwrap();
+                assert_eq!(frame.rgba, [1, 2, 3, 4].repeat(2));
+                assert_eq!(frame.material.unwrap(), [128, 129, 130, 255].repeat(2));
+                assert_eq!(
+                    frame.jellies,
+                    vec![JellyPose::parse(&pose_bytes(valid_pose())).unwrap(); count as usize]
+                );
+                assert_eq!(frame.jelly_detail, 2);
+                assert!(reader.read_latest().unwrap().is_none());
+                drop(file);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
     fn temp_frame_path() -> PathBuf {
         let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("jwm-waterlily-{}-{id}.frame", std::process::id()))
@@ -500,6 +793,8 @@ mod tests {
                 timestamp_ns: 1234,
                 header_len: WATERLILY_HEADER_BYTES as u32,
                 has_material: false,
+                jelly_count: 0,
+                jelly_detail: 0,
             }
         );
     }
@@ -519,6 +814,8 @@ mod tests {
                 timestamp_ns: 1234,
                 header_len: WATERLILY_VOLUME_HEADER_BYTES as u32,
                 has_material: false,
+                jelly_count: 0,
+                jelly_detail: 0,
             }
         );
     }
@@ -539,6 +836,8 @@ mod tests {
                 timestamp_ns: 1234,
                 header_len: WATERLILY_VOLUME_HEADER_BYTES as u32,
                 has_material: true,
+                jelly_count: 0,
+                jelly_detail: 0,
             }
         );
         assert_eq!(parsed.slot_bytes(), parsed.color_bytes() * 2);
