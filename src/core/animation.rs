@@ -71,9 +71,10 @@ impl Easing {
                 } else {
                     let p = 0.3;
                     let s = p / 4.0;
-                    let t1 = t - 1.0;
-                    -(2.0_f32.powf(10.0 * t1) * (std::f32::consts::PI * 2.0 * (t1 - s) / p).sin())
-                        + 1.0
+                    // Ease out from the original rectangle, with a decaying
+                    // overshoot. The previous ease-in expression plus 1 jumped
+                    // to the destination on the first frame, then back at t=1.
+                    2.0_f32.powf(-10.0 * t) * (std::f32::consts::TAU * (t - s) / p).sin() + 1.0
                 }
             }
         }
@@ -129,8 +130,10 @@ impl AnimationSpeed {
     /// Effective duration in ms given a base duration.
     pub fn apply_duration(self, base_ms: u64) -> u64 {
         match self {
+            AnimationSpeed::Slow => base_ms.saturating_mul(2),
+            AnimationSpeed::Normal => base_ms,
+            AnimationSpeed::Fast => base_ms.div_ceil(2),
             AnimationSpeed::Instant => 0,
-            _ => (base_ms as f32 * self.duration_multiplier()).round() as u64,
         }
     }
 
@@ -178,15 +181,17 @@ impl ClientAnimation {
         let rect = Rect::new(
             lerp(self.from.x, self.to.x, e),
             lerp(self.from.y, self.to.y, e),
-            lerp(self.from.w, self.to.w, e),
-            lerp(self.from.h, self.to.h, e),
+            // Elastic overshoot is useful for position, but a shrinking
+            // window must never submit a zero/negative size to a backend.
+            lerp(self.from.w, self.to.w, e).max(1),
+            lerp(self.from.h, self.to.h, e).max(1),
         );
         (rect, false)
     }
 }
 
 fn lerp(a: i32, b: i32, t: f32) -> i32 {
-    (a as f32 + (b as f32 - a as f32) * t).round() as i32
+    (f64::from(a) + (f64::from(b) - f64::from(a)) * f64::from(t)).round() as i32
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +226,17 @@ impl AnimationManager {
     ) {
         if current_visual == target {
             self.active.remove(&key);
+            return;
+        }
+        // Repeated arrange/configure events for the same destination must
+        // not restart the clock: otherwise a busy client can prolong a layout
+        // animation indefinitely. A changed timing, easing or kind retargets.
+        if self.active.get(&key).is_some_and(|animation| {
+            animation.to == target
+                && animation.duration == duration
+                && animation.easing == easing
+                && animation.kind == kind
+        }) {
             return;
         }
         let anim = ClientAnimation {
@@ -561,6 +577,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn elastic_easing_starts_and_finishes_without_a_full_distance_jump() {
+        assert!(Easing::Elastic.apply(0.00001).abs() < 0.001);
+        assert!((Easing::Elastic.apply(0.99999) - 1.0).abs() < 0.001);
+        assert!(
+            Easing::Elastic.apply(0.15) > 1.0,
+            "retain the elastic overshoot"
+        );
+    }
+
+    #[test]
+    fn elastic_resize_keeps_positive_dimensions_through_overshoot() {
+        let started_at = Instant::now();
+        let anim = ClientAnimation {
+            from: rect(0, 0, 1000, 1000),
+            to: rect(100, 100, 1, 1),
+            started_at,
+            duration: Duration::from_secs(1),
+            easing: Easing::Elastic,
+            kind: AnimationKind::Layout,
+        };
+        for milliseconds in 0..=1000 {
+            let (sample, _) = anim.sample(started_at + Duration::from_millis(milliseconds));
+            assert!(
+                sample.w > 0 && sample.h > 0,
+                "invalid size at {milliseconds} ms"
+            );
+        }
+        assert_eq!(anim.sample(started_at).0, anim.from);
+        assert_eq!(anim.sample(started_at + anim.duration), (anim.to, true));
+    }
+
+    #[test]
+    fn interpolation_preserves_large_coordinate_endpoints() {
+        assert_eq!(lerp(i32::MAX - 1, i32::MIN + 1, 0.0), i32::MAX - 1);
+        assert_eq!(lerp(i32::MAX - 1, i32::MIN + 1, 1.0), i32::MIN + 1);
+    }
+
+    #[test]
+    fn speed_duration_preserves_integer_precision_and_saturates() {
+        assert_eq!(
+            AnimationSpeed::Normal.apply_duration(16_777_217),
+            16_777_217
+        );
+        assert_eq!(AnimationSpeed::Slow.apply_duration(u64::MAX), u64::MAX);
+        assert_eq!(
+            AnimationSpeed::Fast.apply_duration(u64::MAX),
+            (u64::MAX / 2) + 1
+        );
+        assert_eq!(AnimationSpeed::Fast.apply_duration(3), 2);
+    }
+
     // -----------------------------------------------------------------------
     // AnimationSpeed
     // -----------------------------------------------------------------------
@@ -659,6 +727,52 @@ mod tests {
             AnimationKind::Layout,
         );
         assert!(!mgr.has_active());
+    }
+
+    #[test]
+    fn repeated_target_preserves_the_original_animation_deadline() {
+        let mut manager = AnimationManager::new();
+        let key = make_key();
+        let target = rect(200, 0, 100, 100);
+        let duration = Duration::from_secs(1);
+        manager.start(
+            key,
+            rect(0, 0, 100, 100),
+            target,
+            duration,
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
+        let original = manager.active[&key].clone();
+        let midway = original
+            .sample(original.started_at + Duration::from_millis(500))
+            .0;
+        manager.start(
+            key,
+            midway,
+            target,
+            duration,
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
+        assert_eq!(manager.active[&key].started_at, original.started_at);
+        assert_eq!(manager.active[&key].from, original.from);
+        assert_eq!(
+            manager.active[&key].sample(original.started_at + duration),
+            (target, true)
+        );
+
+        let changed_target = rect(300, 0, 100, 100);
+        manager.start(
+            key,
+            midway,
+            changed_target,
+            duration,
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
+        assert_eq!(manager.active[&key].from, midway);
+        assert_eq!(manager.active[&key].to, changed_target);
     }
 
     #[test]
