@@ -781,6 +781,7 @@ pub(super) struct WaterlilyVolumeUniforms {
     pub(super) occupancy: Option<glow::UniformLocation>,
     pub(super) material: Option<glow::UniformLocation>,
     pub(super) material_available: Option<glow::UniformLocation>,
+    pub(super) jelly_geometry: Option<glow::UniformLocation>,
     pub(super) scene_texture: Option<glow::UniformLocation>,
     pub(super) scene_available: Option<glow::UniformLocation>,
     pub(super) screen_size: Option<glow::UniformLocation>,

@@ -348,6 +348,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 material: gl.get_uniform_location(waterlily_volume_program, "u_material"),
                 material_available: gl
                     .get_uniform_location(waterlily_volume_program, "u_material_available"),
+                jelly_geometry: gl
+                    .get_uniform_location(waterlily_volume_program, "u_jelly_geometry"),
                 scene_texture: gl.get_uniform_location(waterlily_volume_program, "u_scene_texture"),
                 scene_available: gl
                     .get_uniform_location(waterlily_volume_program, "u_scene_available"),
@@ -818,7 +820,17 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // The external simulation worker is optional: compositor startup must
         // not fail when its private wake socket cannot be created.
-        let waterlily_ipc = match WaterlilyIpc::bind_default() {
+        // Advertise independent poses only after all real geometry, MSAA and
+        // bloom resources exist. Failure leaves the negotiated v3 fallback.
+        let jelly_renderer =
+            match jelly_renderer::JellyRenderer::new(&gl, &shader_cache, screen_w, screen_h) {
+                Ok(renderer) => Some(renderer),
+                Err(error) => {
+                    log::warn!("compositor: fine jelly anatomy unavailable: {error}");
+                    None
+                }
+            };
+        let waterlily_ipc = match WaterlilyIpc::bind_default(jelly_renderer.is_some()) {
             Ok(ipc) => Some(ipc),
             Err(err) => {
                 log::warn!("compositor: WaterLily frame IPC disabled: {err}");
@@ -1132,6 +1144,7 @@ impl<C: CompositorConnection> Compositor<C> {
             waterlily_uniforms,
             waterlily_volume_program,
             waterlily_volume_uniforms,
+            jelly_renderer,
             waterlily_scene_fbo: None,
             waterlily_ipc,
             waterlily_loop_signal: None,

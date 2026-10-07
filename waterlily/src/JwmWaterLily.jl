@@ -38,7 +38,21 @@ struct RunnerOptions
     frame_path::String
     requested_size::Tuple{Int,Int}
     simulation_size::Tuple{Int,Int}
+    jelly_detail::Int
 end
+
+# Preserve the original positional constructor for callers embedding the worker.
+RunnerOptions(case_name, device, fps, socket_path, frame_path, requested_size, simulation_size) =
+    RunnerOptions(
+        case_name,
+        device,
+        fps,
+        socket_path,
+        frame_path,
+        requested_size,
+        simulation_size,
+        2,
+    )
 
 struct SelectedBackend
     name::Symbol
@@ -74,6 +88,7 @@ function usage(io::IO=stdout)
           --socket PATH        compositor wakeup Unix socket
           --frame-file PATH    private double-buffer frame file
           --sim-size SIZE      N or WxH; normalized to multiples of 16
+          --jelly-detail N     jelly mesh quality / legacy display detail, 1 or 2 (default: 2)
           --help               show this help
         """,
     )
@@ -151,6 +166,7 @@ function parse_cli(args::AbstractVector{<:AbstractString})
         "--socket" => default_socket_path(),
         "--frame-file" => default_frame_path(),
         "--sim-size" => "$(DEFAULT_SIZE[1])x$(DEFAULT_SIZE[2])",
+        "--jelly-detail" => "2",
     )
     for (key, value) in parsed
         haskey(values, key) || throw(ArgumentError("unknown option: $key"))
@@ -174,6 +190,10 @@ function parse_cli(args::AbstractVector{<:AbstractString})
     (fps === nothing || !isfinite(fps) || !(1.0 <= fps <= 240.0)) &&
         throw(ArgumentError("--fps must be a finite number between 1 and 240"))
 
+    jelly_detail = tryparse(Int, values["--jelly-detail"])
+    jelly_detail in (1, 2) ||
+        throw(ArgumentError("--jelly-detail must be 1 or 2"))
+
     socket_path = values["--socket"]
     frame_path = values["--frame-file"]
     isempty(socket_path) && throw(ArgumentError("--socket must not be empty"))
@@ -191,6 +211,7 @@ function parse_cli(args::AbstractVector{<:AbstractString})
         frame_path,
         requested_size,
         simulation_size,
+        jelly_detail,
     )
 end
 
@@ -396,6 +417,41 @@ honoring the planar override.
 publish_geometry(case, planar::Bool) =
     planar ? (case.dimensions..., 1) : frame_geometry(case)
 
+"""
+Choose the negotiated frame contract. Only the jelly case can publish analytic
+poses, and the planar override takes precedence over consumer capabilities.
+"""
+function publish_layout(case, planar::Bool, pose_supported::Bool, jelly_detail::Integer)
+    poses_enabled = !planar && pose_supported && case isa JellyCase
+    geometry = poses_enabled ? jelly_wake_geometry(case) : publish_geometry(case, planar)
+    jelly_count = poses_enabled ? length(case.jellies) : 0
+    detail = poses_enabled ? Int(jelly_detail) : 0
+    validate_jelly_layout(geometry[3], geometry[3] > 1, jelly_count, detail)
+    return (; geometry, jelly_count, jelly_detail=detail)
+end
+
+"""Atomically replace a changed layout while preserving the publication epoch."""
+function reconfigure_publisher(publisher::FramePublisher, layout)
+    geometry = layout.geometry
+    if (publisher.width, publisher.height, publisher.depth) == geometry &&
+       publisher.jelly_count == layout.jelly_count &&
+       publisher.jelly_detail == layout.jelly_detail
+        return publisher
+    end
+    replacement = FramePublisher(
+        publisher.path,
+        geometry[1],
+        geometry[2];
+        depth=geometry[3],
+        start_sequence=publisher.sequence,
+        material_aux=geometry[3] > 1,
+        jelly_count=layout.jelly_count,
+        jelly_detail=layout.jelly_detail,
+    )
+    close(publisher)
+    return replacement
+end
+
 function run_worker_with_backend(options::RunnerOptions, backend::SelectedBackend)
     options.requested_size != options.simulation_size &&
         @info "normalized simulation size for WaterLily multigrid" requested =
@@ -403,9 +459,15 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
     @info "starting WaterLily worker" case = options.case_name device = backend.name size =
         options.simulation_size fps = options.fps
 
-    simulation_case =
-        build_case(options.case_name, options.simulation_size; memory=backend.memory)
+    simulation_case = build_case(
+        options.case_name,
+        options.simulation_size;
+        memory=backend.memory,
+        jelly_detail=options.jelly_detail,
+    )
     planar = planar_frames_forced()
+    # Begin in the legacy contract. A new compositor advertises support only
+    # after receiving the first complete frame over the wake connection.
     geometry = publish_geometry(simulation_case, planar)
     geometry[3] > 1 && @info "publishing native 3D volume frames" geometry
     publisher = FramePublisher(
@@ -452,33 +514,19 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                             requested,
                             options.simulation_size;
                             memory=backend.memory,
+                            jelly_detail=options.jelly_detail,
                         )
-                        # A geometry change (for example planar dance ->
-                        # volumetric jelly) needs a matching frame file. The
-                        # replacement seeds the old sequence so the consumer's
-                        # monotonic view survives, and the old handle is only
-                        # closed — never removed — because the new file
-                        # already owns the path. Nothing is committed until
-                        # every fallible step has succeeded, so a failed
-                        # switch can never strand the loop between the old
-                        # geometry and the new case.
-                        requested_geometry =
-                            publish_geometry(replacement_case, planar)
-                        if requested_geometry != geometry
-                            previous_publisher = publisher
-                            publisher = FramePublisher(
-                                options.frame_path,
-                                requested_geometry[1],
-                                requested_geometry[2];
-                                depth=requested_geometry[3],
-                                start_sequence=previous_publisher.sequence,
-                                material_aux=requested_geometry[3] > 1,
-                            )
-                            close(previous_publisher)
-                            geometry = requested_geometry
-                            geometry[3] > 1 &&
-                                @info "publishing native 3D volume frames" geometry
-                        end
+                        # Commit the case only after its matching file has
+                        # been installed. Capability and case transitions use
+                        # the same layout check, including equal-size changes.
+                        layout = publish_layout(
+                            replacement_case,
+                            planar,
+                            wakeups.jelly_pose_supported,
+                            options.jelly_detail,
+                        )
+                        publisher = reconfigure_publisher(publisher, layout)
+                        geometry = layout.geometry
                         simulation_case = replacement_case
                         current_case = requested
                         @info "switched WaterLily case" case = requested
@@ -508,13 +556,35 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                 end
             end
 
+            layout = publish_layout(
+                simulation_case,
+                planar,
+                wakeups.jelly_pose_supported,
+                options.jelly_detail,
+            )
+            publisher = reconfigure_publisher(publisher, layout)
+            geometry = layout.geometry
+            poses_enabled = publisher.jelly_count > 0
+
             # Publish first, then advance: the frame reaches the compositor a
             # few milliseconds into the period, and the solver spends the rest
             # of the budget stepping toward the next state. Overlapping the
             # solver in a separate task measured slower — the threaded
             # colorize loop starves the task issuing device kernels.
             frame_palette = something(palette_override, case_palette_name(simulation_case))
-            if geometry[3] > 1
+            if poses_enabled
+                volume, material = render_jelly_wake!(
+                    simulation_case;
+                    palette=PALETTE_REGISTRY[frame_palette],
+                )
+                publish!(
+                    publisher,
+                    volume,
+                    material,
+                    jelly_pose_frame(simulation_case),
+                    time_ns(),
+                )
+            elseif geometry[3] > 1
                 # Native volume: the case colorizes its 3D field directly and
                 # the compositor's ray-marcher owns projection, lighting, and
                 # the shimmer-style view-dependent cues.
@@ -540,7 +610,7 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                 )
                 publish!(publisher, rgba, time_ns())
             end
-            notify!(wakeups)
+            notify!(wakeups; allow_reconnect=!poses_enabled)
             frame_tick!(simulation_case)
             achieved_step = advance_budgeted!(
                 simulation_case,

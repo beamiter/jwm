@@ -17,7 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
-| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes roam smoothly along independently seeded x, depth, and height paths; the rose gonad crown inside each translucent bell, four thick curling oral arms, five thin trailing filaments, and the simulated wakes are published with them as a native RGBA volume inside a near-full-screen perspective glass aquarium | violet purple/green |
+| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes roam smoothly along independently seeded x, depth, and height paths; the rose gonad crown inside each translucent bell, layered curling oral arms and thin trailing filaments are drawn as fine independent geometry from negotiated simulation poses, while real simulated wakes remain a native RGBA volume inside a near-full-screen perspective glass aquarium | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: a drop-scale force balance in SI units — Furmidge pinning, Cox-Voinov drag, Landau-Levich trails and Marshall-Palmer impacts — pins, grows, merges and runs droplets down the pane, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
@@ -61,8 +61,70 @@ advances the parallax smoothly.
 
 The jelly volume includes the animated anatomy — bell membranes shaded from rim
 lavender to apex violet, the rose gonad crown visible through each
-translucent bell, four thick curling oral arms, and five thin trailing
+translucent bell, four layered curling oral arms, and twelve thin trailing
 filaments — together with the vorticity wakes from the 3D solve.
+
+### Fine jelly geometry and negotiated fallback
+
+New producers and compositors keep the actual WaterLily solver and vorticity
+wake at their original grid resolution, but draw the water-jelly anatomy as
+independent curved geometry. Five small pose records (160 bytes total) carry
+the authoritative solver-space motion in normalized tank coordinates. The
+compositor tessellates the contracting thin film, irregular scalloped lip,
+radial canals, four rose horseshoe gonads, four layered frilled oral arms, and
+40 longer peripheral filaments at the default high detail. Curves are never
+voxelized in this path, so their visible detail is independent of fluid cells.
+Every temporal expression is periodic in the wrapped pose phase; a regression
+checks continuity across ±π instead of allowing appendages to jump once per
+contraction cycle.
+
+`--jelly-detail 2` selects the high-quality mesh (about 1.48 million vertices
+for five jellies); `--jelly-detail 1` uses fewer curve and membrane segments.
+The setting survives case switches and affects only jelly display quality.
+The simulation obstacle, force calculation, smooth roaming paths and real
+vorticity field do not change. Mesh topology, pose count, frame sizes, finite
+pose ranges, render-target dimensions and vertex uploads all have fixed bounds.
+
+Transparent triangles are sorted globally back to front, including crossings
+between different swimmers and tissue types. Rendering uses a dedicated
+transparent anatomy target, a separate selected-tissue emission target, real
+4× MSAA where available, and 2× spatial supersampling when it fits the bounded
+16-megapixel internal budget. Quarter-resolution Gaussian bloom only sees
+selected tissue emission; it never blurs or blooms the desktop wallpaper or
+fluid wake. Sharp anatomy is composited over its soft glow with bounded
+premultiplied alpha. This is an artistic translucent surface renderer, not
+path tracing: triangle-centroid sorting approximates transparency at geometric
+intersections, and the anatomy pass follows the coarse wake/tank pass rather
+than ray-interleaving fluid absorption through every triangle layer.
+
+The geometry path is opt-in on each wake-socket connection. A compositor sends
+`capabilities jelly-pose-v1` only after its geometry renderer is ready. The
+worker then switches atomically to version 4: the existing 96-byte header,
+color and material planes, plus at most five fixed 32-byte little-endian pose
+records in each double-buffer slot. The reader validates every record and
+keeps poses coupled to the same locked frame snapshot. Version 1/2/3 input
+remains supported. Legacy consumers never receive version 4 without advertising
+it. GPU setup/draw failure sends `jelly-pose-v0`; disconnects clear capability
+state, and the worker publishes a legacy frame before reconnecting. Case and
+mode changes preserve the monotonic frame sequence even when dimensions match.
+
+The version-3 fallback retains analytic anatomy on a separate display grid:
+detail 2 doubles each solver axis; detail 1 keeps the smaller grid. Thin-film
+footprint coverage replaces the old eight-sample maximum that expanded strands.
+Coherent outward bell normals eliminate the inner/outer membrane gradient
+flips that drew dotted rings. Opacity scales as
+`1 - (1 - alpha)^(1 / detail)` and material validity identifies tissue without
+an opacity cutoff. This fallback stays bounded (42 MiB maximum color plane),
+but carries eight times as many voxels at detail 2 and remains visibly softer
+than direct geometry. The planar override always takes precedence.
+
+At the CPU 1280×800 example, the negotiated path still solves 96×32×64 cells
+and publishes 96×64×32 `(width,height,depth)` wake voxels: 1.5 MiB of color plus
+material, plus 160 pose bytes per frame. It avoids the 12 MiB fine-volume
+fallback payload and producer anatomy sampling. Mesh generation, upload,
+supersampling and bloom have their own significant costs. `--fps` is a requested
+publication cadence, not a guarantee; report measured hardware and stage timings
+rather than treating an image's FPS overlay as a performance result.
 
 The turbulence volume contains no synthetic surface or extruded 2D sheet. Its
 periodic three-dimensional solve starts from randomly positioned and oriented

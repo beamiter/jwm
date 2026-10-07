@@ -5,6 +5,7 @@ on:
     paths:
       - src/backend/api.rs
       - src/backend/compositor_common/waterlily.rs
+      - src/backend/compositor_common/jelly_geometry.rs
       - src/backend/x11/compositor/**
       - src/backend/x11rb/backend.rs
       - src/backend/xcb/backend.rs
@@ -22,6 +23,7 @@ on:
     paths:
       - src/backend/api.rs
       - src/backend/compositor_common/waterlily.rs
+      - src/backend/compositor_common/jelly_geometry.rs
       - src/backend/x11/compositor/**
       - src/backend/x11rb/backend.rs
       - src/backend/xcb/backend.rs
@@ -136,6 +138,12 @@ jobs:
 
       - name: Run WaterLily state tests
         run: cargo test --locked --lib waterlily
+
+      - name: Render fine jelly geometry with mandatory headless GL
+        env:
+          JWM_REQUIRE_HEADLESS_GL: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: cargo test --locked --lib jelly_geometry
 
   julia-1-10-compat:
     name: Julia 1.10 compatibility canary
