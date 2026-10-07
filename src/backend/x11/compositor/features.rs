@@ -1,23 +1,12 @@
 // Feature control methods
-#[allow(unused_imports)]
-use super::math::ortho;
 use super::prism::{MAX_PRISM_SIDES, MIN_PRISM_SIDES};
-#[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::recording_nv12::{
     nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits, recording_canvas_rect,
     recording_output_size,
 };
-#[allow(unused_imports)]
 use glow::HasContext;
-#[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::ffi::CString;
-#[allow(unused_imports)]
 use std::sync::Arc;
-#[allow(unused_imports)]
-use std::sync::mpsc;
 
 /// Toast hover targets for a pointer at `(x, y)` against the card geometry of
 /// the last drawn frame: the hovered card (its timeout pauses) and, when the

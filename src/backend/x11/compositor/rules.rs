@@ -1,19 +1,9 @@
 // Config rule lookups, VRR, monitor, blur quality
-#[allow(unused_imports)]
-use super::math::ortho;
-#[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::rules as common_rules;
-#[allow(unused_imports)]
 use glow::HasContext;
-#[allow(unused_imports)]
 use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::ffi::CString;
-#[allow(unused_imports)]
 use std::sync::Arc;
-#[allow(unused_imports)]
-use std::sync::mpsc;
 
 fn blur_cache_matches(
     valid: bool,

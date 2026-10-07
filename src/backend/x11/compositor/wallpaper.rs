@@ -1,18 +1,7 @@
 // Wallpaper loading and monitor setup
-#[allow(unused_imports)]
-use super::math::ortho;
-#[allow(unused_imports)]
 use super::*;
-#[allow(unused_imports)]
 use glow::HasContext;
-#[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::ffi::CString;
-#[allow(unused_imports)]
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[allow(unused_imports)]
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 

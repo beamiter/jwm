@@ -1,8 +1,6 @@
 // render_frame and rendering helpers
 use super::features::recording_capture_warranted;
-#[allow(unused_imports)]
 use super::math::ortho;
-#[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::attention::{
     attention_border_style, attention_signal_active,
@@ -23,16 +21,7 @@ use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{
     WindowGlowSettings, WindowGlowStyle, WindowGlowTarget,
 };
-#[allow(unused_imports)]
 use glow::HasContext;
-#[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::ffi::CString;
-#[allow(unused_imports)]
-use std::sync::Arc;
-#[allow(unused_imports)]
-use std::sync::mpsc;
 
 type GlScissor = (i32, i32, i32, i32);
 
@@ -1461,13 +1450,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 let Some([px, py, tw, th]) = layout.text_quad(slot, w as f32, h as f32) else {
                     continue;
                 };
-                self.gl.uniform_4_f32(
-                    self.hud_text_uniforms.rect.as_ref(),
-                    px,
-                    py,
-                    tw,
-                    th,
-                );
+                self.gl
+                    .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), px, py, tw, th);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -2047,8 +2031,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 ui.shadow[2],
                 ui.shadow[3],
             );
-            self.gl
-                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::panel_radius(panel_w, panel_h));
+            self.gl.uniform_1_f32(
+                self.shadow_uniforms.radius.as_ref(),
+                film::panel_radius(panel_w, panel_h),
+            );
             self.gl
                 .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
             self.gl.uniform_4_f32(
@@ -2088,7 +2074,11 @@ impl<C: CompositorConnection> Compositor<C> {
 
             for (index, cell) in geometry.cells.iter().enumerate() {
                 let selected = index == strip.selected;
-                let scale = if selected { film::selected_scale(cell.cell) } else { 1.0 };
+                let scale = if selected {
+                    film::selected_scale(cell.cell)
+                } else {
+                    1.0
+                };
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
@@ -2305,8 +2295,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 ui.shadow[2],
                 ui.shadow[3],
             );
-            self.gl
-                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::panel_radius(panel_w, panel_h));
+            self.gl.uniform_1_f32(
+                self.shadow_uniforms.radius.as_ref(),
+                film::panel_radius(panel_w, panel_h),
+            );
             self.gl
                 .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
             self.gl.uniform_4_f32(
@@ -2335,7 +2327,11 @@ impl<C: CompositorConnection> Compositor<C> {
 
             for (index, cell) in geometry.cells.iter().enumerate() {
                 let selected = index == grid.selected;
-                let scale = if selected { film::selected_scale(cell.cell) } else { 1.0 };
+                let scale = if selected {
+                    film::selected_scale(cell.cell)
+                } else {
+                    1.0
+                };
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
@@ -2702,8 +2698,10 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
             self.gl
                 .uniform_1_f32(self.win_uniforms.opacity.as_ref(), content_a);
-            self.gl
-                .uniform_1_f32(self.win_uniforms.radius.as_ref(), panel::preview_radius(iw, ih));
+            self.gl.uniform_1_f32(
+                self.win_uniforms.radius.as_ref(),
+                panel::preview_radius(iw, ih),
+            );
             self.gl
                 .uniform_2_f32(self.win_uniforms.size.as_ref(), iw, ih);
             self.gl
@@ -3361,10 +3359,14 @@ impl<C: CompositorConnection> Compositor<C> {
                     .map(|d| d.as_millis())
                     .unwrap_or(0);
                 if panel::query_caret_visible(now_ms, overlay.query_selected)
-                    && let (Some(field), Some(origin), Some((_, w, h))) =
-                        (layout.query_field, layout.query_text, self.sysui_textures[1])
+                    && let (Some(field), Some(origin), Some((_, w, h))) = (
+                        layout.query_field,
+                        layout.query_text,
+                        self.sysui_textures[1],
+                    )
                 {
-                    let [cx, cy, cw, ch] = panel::query_caret_rect(field, origin, w as f32, h as f32);
+                    let [cx, cy, cw, ch] =
+                        panel::query_caret_rect(field, origin, w as f32, h as f32);
                     self.sysui_fill_rounded(
                         cx,
                         cy,
@@ -3403,14 +3405,23 @@ impl<C: CompositorConnection> Compositor<C> {
         // Title in the brightest ink, body one step down. A known sender is
         // baked into the title texture as a dimmer line above it, so the draw
         // pass — and every card without a sender — needs no sender case.
-        let title = fit(&toast.title, toast_layout::max_text_width(self.screen_w as f32));
+        let title = fit(
+            &toast.title,
+            toast_layout::max_text_width(self.screen_w as f32),
+        );
         set.text[0] = if toast.app.is_empty() {
             self.rasterize_toast_text(&title, description, size, ui.value_ink)
         } else {
-            let sender = fit(&toast.app, toast_layout::max_text_width(self.screen_w as f32));
+            let sender = fit(
+                &toast.app,
+                toast_layout::max_text_width(self.screen_w as f32),
+            );
             self.rasterize_toast_title_with_sender(&sender, &title, description, size, ui)
         };
-        let body = fit(&toast.body, toast_layout::max_text_width(self.screen_w as f32));
+        let body = fit(
+            &toast.body,
+            toast_layout::max_text_width(self.screen_w as f32),
+        );
         set.text[1] = self.rasterize_toast_text(&body, description, size, ui.label_ink);
         for action in &toast.actions {
             let text = fit(
@@ -3871,7 +3882,8 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             0.0
         };
-        let y_off = crate::backend::compositor_common::toast::osd_offset_in(hud_h, dock.stack_limit());
+        let y_off =
+            crate::backend::compositor_common::toast::osd_offset_in(hud_h, dock.stack_limit());
         let [x, y, cw, ch] = dock.contained_rect(card_w, card_h, y_off);
         let (radius_top, radius) = dock.radii(ch, ui.osd_radius, y_off);
         // Contents appear as the card makes room for them, rather than
@@ -3934,13 +3946,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 text_h as f32,
                 fill.is_some(),
             );
-            self.gl.uniform_4_f32(
-                self.hud_text_uniforms.rect.as_ref(),
-                lx,
-                ly,
-                lw,
-                lh,
-            );
+            self.gl
+                .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), lx, ly, lw, lh);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
