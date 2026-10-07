@@ -3870,6 +3870,10 @@ fn wayland_scene_linear_route_preserves_window_scene_position() {
         // transfer, so an unfocused window would legitimately differ.
         compositor.inactive_dim = 1.0;
         compositor.inactive_desaturate = 0.0;
+        // Semi-transparent borders intentionally blend differently in linear
+        // light. Keep this opaque geometry/transfer round-trip probe free of
+        // that separate effect, just as it excludes dim and desaturation.
+        compositor.border_enabled = false;
         let pixels = [40u8, 40, 200, 255].repeat(8 * 6);
         let win_tex = create_element_texture(&gl, 8, 6, &pixels);
         compositor.windows.insert(
@@ -3968,18 +3972,23 @@ fn wayland_scene_linear_route_preserves_window_scene_position() {
         // probe window is opaque with sharp corners, so no intentional
         // linear-domain blend differences are in play.
         let mut worst = 0i32;
+        let mut worst_pixel = None;
         for y in 0..H as usize {
             for x in 0..W as usize {
                 let a = frame_pixel(&legacy, W as usize, H as usize, x, y);
                 let b = frame_pixel(&linear, W as usize, H as usize, x, y);
                 for channel in 0..4 {
-                    worst = worst.max((a[channel] as i32 - b[channel] as i32).abs());
+                    let delta = (a[channel] as i32 - b[channel] as i32).abs();
+                    if delta > worst {
+                        worst = delta;
+                        worst_pixel = Some((x, y, channel, a, b));
+                    }
                 }
             }
         }
         assert!(
             worst <= 2,
-            "scene-linear round trip diverged from the legacy frame by {worst} LSB"
+            "scene-linear round trip diverged from the legacy frame by {worst} LSB at {worst_pixel:?}"
         );
 
         gl.DeleteTextures(1, &win_tex);
@@ -8735,6 +8744,34 @@ fn wayland_debug_hud_rides_the_deferred_linear_route() {
             status.linear_tail_safe(),
             "the debug HUD must not block the linear tail: {:?}",
             status.overlay_blockers
+        );
+        // The first appearance frame intentionally has zero height. Prime the
+        // text measurements, then settle this fixture's spring at its measured
+        // target without sleeping or changing global animation configuration.
+        let _ = render(&mut compositor);
+        let dims = |slot: usize| {
+            compositor.hud_textures[slot]
+                .map(|(_, w, h)| (w as f32, h as f32))
+                .unwrap_or((0.0, 0.0))
+        };
+        let dock = crate::backend::compositor_common::dynamic_island::IslandDock::for_bar(
+            None,
+            [0.0, 0.0, W as f32, H as f32],
+        );
+        let natural = crate::backend::compositor_common::debug_hud::HudLayout::docked(
+            crate::backend::compositor_common::ui_theme::palette(),
+            &dock,
+            dims(0),
+            dims(1),
+            dims(2),
+            dims(3),
+            0.0,
+        );
+        compositor.hud_island.advance_with_motion(
+            std::time::Instant::now(),
+            natural.card.2,
+            natural.card.3,
+            false,
         );
         let with_hud = render(&mut compositor);
         let card_pixels = empty

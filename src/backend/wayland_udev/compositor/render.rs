@@ -6495,7 +6495,10 @@ impl WaylandCompositor {
                 ui.shadow[2],
                 ui.shadow[3],
             );
-            gl.Uniform1f(self.shadow_uniforms.radius, film::panel_radius(panel_w, panel_h));
+            gl.Uniform1f(
+                self.shadow_uniforms.radius,
+                film::panel_radius(panel_w, panel_h),
+            );
             gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
             self.set_rect_uniform(
                 gl,
@@ -6537,7 +6540,11 @@ impl WaylandCompositor {
 
             for (index, cell) in geometry.cells.iter().enumerate() {
                 let selected = index == strip.selected;
-                let scale = if selected { film::selected_scale(cell.cell) } else { 1.0 };
+                let scale = if selected {
+                    film::selected_scale(cell.cell)
+                } else {
+                    1.0
+                };
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
@@ -6785,7 +6792,10 @@ impl WaylandCompositor {
                 ui.shadow[2],
                 ui.shadow[3],
             );
-            gl.Uniform1f(self.shadow_uniforms.radius, film::panel_radius(panel_w, panel_h));
+            gl.Uniform1f(
+                self.shadow_uniforms.radius,
+                film::panel_radius(panel_w, panel_h),
+            );
             gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
             self.set_rect_uniform(
                 gl,
@@ -6816,7 +6826,11 @@ impl WaylandCompositor {
 
             for (index, cell) in geometry.cells.iter().enumerate() {
                 let selected = index == grid.selected;
-                let scale = if selected { film::selected_scale(cell.cell) } else { 1.0 };
+                let scale = if selected {
+                    film::selected_scale(cell.cell)
+                } else {
+                    1.0
+                };
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let frame = film::scaled_about(cell.frame, pivot, scale);
@@ -7834,8 +7848,11 @@ impl WaylandCompositor {
                     .map(|d| d.as_millis())
                     .unwrap_or(0);
                 if panel::query_caret_visible(now_ms, overlay.query_selected)
-                    && let (Some(field), Some(origin), Some((_, w, h))) =
-                        (layout.query_field, layout.query_text, self.sysui_textures[1])
+                    && let (Some(field), Some(origin), Some((_, w, h))) = (
+                        layout.query_field,
+                        layout.query_text,
+                        self.sysui_textures[1],
+                    )
                 {
                     let [cx, cy, cw, ch] =
                         panel::query_caret_rect(field, origin, w as f32, h as f32);
@@ -7883,14 +7900,23 @@ impl WaylandCompositor {
         // Title in the brightest ink, body one step down. A known sender is
         // baked into the title texture as a dimmer line above it, so the draw
         // pass — and every card without a sender — needs no sender case.
-        let title = fit(&toast.title, toast_layout::max_text_width(self.screen_w as f32));
+        let title = fit(
+            &toast.title,
+            toast_layout::max_text_width(self.screen_w as f32),
+        );
         set.text[0] = if toast.app.is_empty() {
             unsafe { rasterize_toast_text(gl, &title, description, size, ui.value_ink) }
         } else {
-            let sender = fit(&toast.app, toast_layout::max_text_width(self.screen_w as f32));
+            let sender = fit(
+                &toast.app,
+                toast_layout::max_text_width(self.screen_w as f32),
+            );
             unsafe { rasterize_toast_title_with_sender(gl, &sender, &title, description, size, ui) }
         };
-        let body = fit(&toast.body, toast_layout::max_text_width(self.screen_w as f32));
+        let body = fit(
+            &toast.body,
+            toast_layout::max_text_width(self.screen_w as f32),
+        );
         set.text[1] = unsafe { rasterize_toast_text(gl, &body, description, size, ui.label_ink) };
         for action in &toast.actions {
             let text = fit(
@@ -8266,7 +8292,8 @@ impl WaylandCompositor {
         } else {
             0.0
         };
-        let y_off = crate::backend::compositor_common::toast::osd_offset_in(hud_h, dock.stack_limit());
+        let y_off =
+            crate::backend::compositor_common::toast::osd_offset_in(hud_h, dock.stack_limit());
         let [x, y, cw, ch] = dock.contained_rect(card_w, card_h, y_off);
         let (radius_top, radius) = dock.radii(ch, ui.osd_radius, y_off);
         // Contents appear as the card makes room for them, rather than

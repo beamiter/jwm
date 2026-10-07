@@ -84,9 +84,6 @@ pub(crate) const ACTION_BUTTON_GAP: f32 = 8.0;
 pub(crate) const ACTION_ROW_TOP_GAP: f32 = 10.0;
 /// Gap between title and body inside a toast card.
 pub(crate) const BODY_GAP: f32 = 6.0;
-/// Extra card height when an action row is present.
-pub(crate) const ACTIONS_ROW_EXTRA_H: f32 = ACTION_ROW_TOP_GAP + ACTION_BUTTON_H;
-
 /// Gap between two stacked cards, and between the reserved OSD slot and the
 /// first card.
 pub(crate) const STACK_GAP: f32 = 12.0;
@@ -153,12 +150,7 @@ pub(crate) fn stack_gap(limit: f32) -> f32 {
 /// debug HUD — measured at its target height so the stack does not jitter
 /// while that card's spring is still travelling. A visible OSD then owns the
 /// next slot, again at its reserved height rather than its sprung one.
-pub(crate) fn stack_start(osd_visible: bool, reserved_above: f32) -> f32 {
-    stack_start_in(osd_visible, reserved_above, f32::INFINITY)
-}
-
-/// As [`stack_start`], with the remaining dock travel so a short output
-/// tightens the reserved gaps.
+/// The remaining dock travel tightens the reserved gaps on a short output.
 #[must_use]
 pub(crate) fn stack_start_in(osd_visible: bool, reserved_above: f32, limit: f32) -> f32 {
     let gap = stack_gap(limit);
@@ -175,11 +167,6 @@ pub(crate) fn stack_start_in(osd_visible: bool, reserved_above: f32, limit: f32)
 
 /// How far from the dock an OSD card sits when a HUD of `hud_h` is already
 /// occupying the flush slot. Zero when there is no HUD.
-#[must_use]
-pub(crate) fn osd_offset(hud_h: f32) -> f32 {
-    osd_offset_in(hud_h, f32::INFINITY)
-}
-
 #[must_use]
 pub(crate) fn osd_offset_in(hud_h: f32, limit: f32) -> f32 {
     let hud_h = hud_h.max(0.0);
@@ -222,10 +209,6 @@ pub(crate) fn stripe_rect(card: [f32; 4]) -> Option<[f32; 4]> {
 /// — not the current sprung height — advances the cursor, so an opening card
 /// already claims its full slot and the cards beneath it never shift while
 /// its spring runs.
-pub(crate) fn stack_next(top: f32, target_h: f32) -> f32 {
-    stack_next_in(top, target_h, f32::INFINITY)
-}
-
 #[must_use]
 pub(crate) fn stack_next_in(top: f32, target_h: f32, limit: f32) -> f32 {
     top + target_h.max(0.0) + stack_gap(limit)
@@ -614,7 +597,8 @@ pub(crate) fn action_row_layout(
     } else {
         ACTION_BUTTON_GAP
     };
-    let pad_x = if max_width.is_finite() && max_width > 0.0 && max_width < 8.0 * ACTION_BUTTON_PAD_X {
+    let pad_x = if max_width.is_finite() && max_width > 0.0 && max_width < 8.0 * ACTION_BUTTON_PAD_X
+    {
         ACTION_BUTTON_PAD_X.min(max_width * 0.08).max(3.0)
     } else {
         ACTION_BUTTON_PAD_X
@@ -641,10 +625,7 @@ pub(crate) fn action_row_extra_h(label_widths: &[f32], max_width: f32) -> f32 {
         return 0.0;
     }
     let rects = action_row_layout(label_widths, 0.0, 0.0, max_width);
-    let bottom = rects
-        .iter()
-        .map(|r| r[1] + r[3])
-        .fold(0.0_f32, f32::max);
+    let bottom = rects.iter().map(|r| r[1] + r[3]).fold(0.0_f32, f32::max);
     action_row_top_gap(max_width) + bottom
 }
 
@@ -1400,7 +1381,7 @@ mod tests {
         assert_eq!(action_row_width(&[]), 0.0);
         assert_eq!(
             action_row_extra_h(&widths, f32::MAX),
-            ACTIONS_ROW_EXTRA_H
+            (ACTION_ROW_TOP_GAP + ACTION_BUTTON_H)
         );
         let cramped = action_row_layout(&widths, 0.0, 0.0, 50.0);
         assert!(cramped.iter().all(|r| r[3] < ACTION_BUTTON_H));
@@ -1421,7 +1402,7 @@ mod tests {
         assert_eq!(rects[1][1], ACTION_BUTTON_H + ACTION_BUTTON_GAP);
         assert_eq!(rects[2][1], 2.0 * (ACTION_BUTTON_H + ACTION_BUTTON_GAP));
         assert!(rects.iter().all(|r| r[0] + r[2] <= max_w + 0.5));
-        assert!(action_row_extra_h(&widths, max_w) > ACTIONS_ROW_EXTRA_H);
+        assert!(action_row_extra_h(&widths, max_w) > (ACTION_ROW_TOP_GAP + ACTION_BUTTON_H));
     }
 
     #[test]
@@ -1437,11 +1418,11 @@ mod tests {
         for heights in height_sets {
             assert!(heights.len() <= MAX_TOASTS);
             for osd_visible in [false, true] {
-                let mut top = stack_start(osd_visible, 0.0);
+                let mut top = stack_start_in(osd_visible, 0.0, f32::INFINITY);
                 let mut spans = Vec::with_capacity(heights.len());
                 for h in &heights {
                     spans.push((top, top + h));
-                    top = stack_next(top, *h);
+                    top = stack_next_in(top, *h, f32::INFINITY);
                 }
                 for pair in spans.windows(2) {
                     let (a_top, a_bottom) = pair[0];
@@ -1461,23 +1442,26 @@ mod tests {
 
     #[test]
     fn stack_start_reserves_the_full_osd_card() {
-        assert_eq!(stack_start(false, 0.0), 0.0);
+        assert_eq!(stack_start_in(false, 0.0, f32::INFINITY), 0.0);
         assert_eq!(
-            stack_start(true, 0.0),
+            stack_start_in(true, 0.0, f32::INFINITY),
             super::super::osd::OSD_CARD_HEIGHT + STACK_GAP
         );
-        assert_eq!(stack_start(false, 200.0), 200.0 + STACK_GAP);
         assert_eq!(
-            stack_start(true, 200.0),
+            stack_start_in(false, 200.0, f32::INFINITY),
+            200.0 + STACK_GAP
+        );
+        assert_eq!(
+            stack_start_in(true, 200.0, f32::INFINITY),
             200.0 + STACK_GAP + super::super::osd::OSD_CARD_HEIGHT + STACK_GAP
         );
-        assert_eq!(osd_offset(0.0), 0.0);
-        assert_eq!(osd_offset(200.0), 200.0 + STACK_GAP);
+        assert_eq!(osd_offset_in(0.0, f32::INFINITY), 0.0);
+        assert_eq!(osd_offset_in(200.0, f32::INFINITY), 200.0 + STACK_GAP);
         // A zero-height card still advances the cursor by the gap, so two
         // cards mid-open can never sit on the same line.
-        assert!(stack_next(0.0, 0.0) > 0.0);
+        assert!(stack_next_in(0.0, 0.0, f32::INFINITY) > 0.0);
         // A bogus negative height cannot drag the cursor upward.
-        assert_eq!(stack_next(10.0, -5.0), 10.0 + STACK_GAP);
+        assert_eq!(stack_next_in(10.0, -5.0, f32::INFINITY), 10.0 + STACK_GAP);
         assert!(stack_room(0.0, 80.0, 200.0));
         assert!(!stack_room(150.0, 80.0, 200.0));
         assert!(!stack_room(0.0, 80.0, f32::NAN));
@@ -1495,7 +1479,7 @@ mod tests {
         assert!(p >= 4.0 && pl >= p);
         assert_eq!(stack_gap(1080.0), STACK_GAP);
         assert!(stack_gap(80.0) < STACK_GAP);
-        assert!(stack_start_in(true, 0.0, 80.0) < stack_start(true, 0.0));
+        assert!(stack_start_in(true, 0.0, 80.0) < stack_start_in(true, 0.0, f32::INFINITY));
     }
 
     #[test]

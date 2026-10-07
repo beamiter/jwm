@@ -38,7 +38,10 @@ pub(crate) fn outline_width(w: f32, h: f32) -> f32 {
     if !(cap.is_finite() && cap > 0.0) {
         return 0.0;
     }
-    CAPTURE_OUTLINE_WIDTH.min(cap * 0.12).max(1.0).min(cap * 0.5)
+    CAPTURE_OUTLINE_WIDTH
+        .min(cap * 0.12)
+        .max(1.0)
+        .min(cap * 0.5)
 }
 
 /// Four screen-space rects `(x, y, w, h)` covering everything except `hole`.
@@ -97,12 +100,7 @@ pub(crate) fn handle_rects(hole: (f32, f32, f32, f32)) -> Vec<(f32, f32, f32, f3
         return Vec::new();
     }
     let half = s * 0.5;
-    let mut pts = vec![
-        (x, y),
-        (x + w, y),
-        (x + w, y + h),
-        (x, y + h),
-    ];
+    let mut pts = vec![(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
     // Mid-edge grips need a clear gap from the corners; otherwise they
     // land on the same pixels as a corner and steal the first hit.
     if w >= 2.5 * s && h >= 2.5 * s {

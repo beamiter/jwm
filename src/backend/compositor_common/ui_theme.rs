@@ -361,7 +361,11 @@ impl UiPalette {
     /// Chip corner radius that cannot exceed half the painted pill's height.
     #[must_use]
     pub(crate) fn chip_radius_for(&self, height: f32) -> f32 {
-        let h = if height.is_finite() { height.max(0.0) } else { 0.0 };
+        let h = if height.is_finite() {
+            height.max(0.0)
+        } else {
+            0.0
+        };
         self.chip_radius.min(h * 0.5)
     }
 

@@ -59,20 +59,29 @@ mod waiter_gate {
             has_data: impl Fn() -> bool,
         ) -> std::io::Result<RegisterOutcome<'a>> {
             let snapshot = self.sequence.load(Ordering::SeqCst);
-            self.waiters
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiters| {
-                    if waiters < 0 {
-                        None
-                    } else {
-                        waiters.checked_add(1)
-                    }
-                })
-                .map_err(|waiters| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("invalid shared waiter count: {waiters}"),
-                    )
-                })?;
+            // CAS keeps the same SeqCst handshake on the MSRV as well as
+            // newer Rust versions that deprecate fetch_update.
+            let mut waiters = self.waiters.load(Ordering::SeqCst);
+            loop {
+                let next = waiters
+                    .checked_add(1)
+                    .filter(|_| waiters >= 0)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid shared waiter count: {waiters}"),
+                        )
+                    })?;
+                match self.waiters.compare_exchange_weak(
+                    waiters,
+                    next,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => waiters = observed,
+                }
+            }
             let registration = WaiterRegistration {
                 waiters: self.waiters,
             };
@@ -107,6 +116,31 @@ mod waiter_gate {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn concurrent_registrations_release_every_waiter() {
+            let sequence = AtomicU32::new(0);
+            let waiters = AtomicI32::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| {
+                        let gate = WaiterGate {
+                            sequence: &sequence,
+                            waiters: &waiters,
+                        };
+                        for _ in 0..1000 {
+                            let outcome = gate.register(|| false).unwrap();
+                            let RegisterOutcome::Registered { registration, .. } = outcome else {
+                                panic!("unchanged empty queue must register a waiter");
+                            };
+                            assert!((1..=8).contains(&waiters.load(Ordering::SeqCst)));
+                            drop(registration);
+                        }
+                    });
+                }
+            });
+            assert_eq!(waiters.load(Ordering::SeqCst), 0);
+        }
 
         #[test]
         fn register_rejects_invalid_waiter_counts_without_wrapping() {

@@ -418,8 +418,7 @@ impl WaylandCompositor {
                     continue;
                 }
                 let (x, y, w, h) = expose_thumb_rect(entry, hover_scale);
-                let Some([lx, ly, lw, lh]) =
-                    expose_label_rect(x, y, w, h, tw as f32, th as f32)
+                let Some([lx, ly, lw, lh]) = expose_label_rect(x, y, w, h, tw as f32, th as f32)
                 else {
                     continue;
                 };
@@ -438,14 +437,7 @@ impl WaylandCompositor {
                     && bright != 0
                 {
                     gl.Uniform1f(text_opacity, opacity * hover_p);
-                    self.set_rect_uniform(
-                        gl,
-                        text_rect,
-                        lx.round(),
-                        ly.round(),
-                        lw,
-                        lh,
-                    );
+                    self.set_rect_uniform(gl, text_rect, lx.round(), ly.round(), lw, lh);
                     gl.BindTexture(ffi::TEXTURE_2D, bright);
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     gl.Uniform1f(text_opacity, opacity);
@@ -826,7 +818,8 @@ impl WaylandCompositor {
 
             if interactive {
                 use crate::backend::compositor_common::capture_veil::handle_rects_on_output;
-                for (hx, hy, hw, hh) in handle_rects_on_output((x, y, width, height), screen_w, screen_h)
+                for (hx, hy, hw, hh) in
+                    handle_rects_on_output((x, y, width, height), screen_w, screen_h)
                 {
                     gl.Uniform2f(self.border_uniforms.size, hw, hh);
                     gl.Uniform4f(self.border_uniforms.rect, hx, hy, hw, hh);

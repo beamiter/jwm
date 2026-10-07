@@ -4502,12 +4502,16 @@ fn try_acquire_clipboard_io_permit(
     active: &AtomicUsize,
     limit: usize,
 ) -> Option<ClipboardIoPermit<'_>> {
-    active
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-            (count < limit).then(|| count + 1)
-        })
-        .ok()?;
-    Some(ClipboardIoPermit(active))
+    // Keep the declared MSRV: try_update replaces deprecated fetch_update
+    // on newer Rust, but compare_exchange_weak works on every supported one.
+    let mut count = active.load(Ordering::Relaxed);
+    while count < limit {
+        match active.compare_exchange_weak(count, count + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(ClipboardIoPermit(active)),
+            Err(observed) => count = observed,
+        }
+    }
+    None
 }
 
 fn acquire_clipboard_io_permit() -> Option<ClipboardIoPermit<'static>> {
@@ -6080,6 +6084,15 @@ mod clipboard_io_tests {
         drop(write_end);
         worker.join().unwrap();
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn clipboard_permits_reject_zero_and_saturated_limits() {
+        let empty = AtomicUsize::new(0);
+        assert!(try_acquire_clipboard_io_permit(&empty, 0).is_none());
+        let full = AtomicUsize::new(usize::MAX);
+        assert!(try_acquire_clipboard_io_permit(&full, usize::MAX).is_none());
+        assert_eq!(full.load(std::sync::atomic::Ordering::Relaxed), usize::MAX);
     }
 
     #[test]

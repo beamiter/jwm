@@ -416,7 +416,8 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
     };
     // Env-aware, like the instance masonry itself will build: a `WGPU_BACKEND`
     // override must steer the probe onto the same backend it steers vello onto.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let capable = instance
         .create_surface(target)
         .ok()

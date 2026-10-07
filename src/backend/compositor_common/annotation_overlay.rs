@@ -84,13 +84,7 @@ impl AnnotationLabel {
 
     /// As [`Self::origin`], then clipped so the glyph stays on `screen`.
     #[must_use]
-    pub fn origin_on_output(
-        &self,
-        w: f32,
-        h: f32,
-        screen_w: f32,
-        screen_h: f32,
-    ) -> (f32, f32) {
+    pub fn origin_on_output(&self, w: f32, h: f32, screen_w: f32, screen_h: f32) -> (f32, f32) {
         let (x, y) = self.origin(w, h);
         if !(screen_w.is_finite() && screen_h.is_finite()) {
             return (x, y);

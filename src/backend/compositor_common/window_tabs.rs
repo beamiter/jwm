@@ -202,11 +202,7 @@ pub fn cell_rect(bar: Rect, count: usize, index: usize) -> Option<Rect> {
     let outer = inset_x + cell_ix;
     let gap = cell_gap(bar);
     let left = if index == 0 { outer } else { gap * 0.5 };
-    let right = if index + 1 == count {
-        outer
-    } else {
-        gap * 0.5
-    };
+    let right = if index + 1 == count { outer } else { gap * 0.5 };
     // A slot too narrow for both margins keeps half its width regardless.
     let margins = left + right;
     let scale = if margins > slot_w * 0.5 {
@@ -246,7 +242,10 @@ pub fn pill_radius(height: f32) -> f32 {
 #[must_use]
 pub fn title_font_size(cell_height: f32) -> f32 {
     if cell_height.is_finite() && cell_height > 0.0 {
-        (cell_height * 0.58).min(22.0).min(cell_height.max(1.0)).max(1.0)
+        (cell_height * 0.58)
+            .min(22.0)
+            .min(cell_height.max(1.0))
+            .max(1.0)
     } else {
         DEFAULT_TITLE_FONT_SIZE
     }
@@ -261,11 +260,13 @@ pub fn title_budget(cell_width: f32) -> u32 {
     if !cell_width.is_finite() {
         return TITLE_MIN_WIDTH as u32;
     }
-    let pad = if cell_width.is_finite() && cell_width > TITLE_PADDING && cell_width < 4.0 * TITLE_PADDING {
-        TITLE_PADDING.min(cell_width * 0.1).max(4.0)
-    } else {
-        TITLE_PADDING
-    };
+    let pad =
+        if cell_width.is_finite() && cell_width > TITLE_PADDING && cell_width < 4.0 * TITLE_PADDING
+        {
+            TITLE_PADDING.min(cell_width * 0.1).max(4.0)
+        } else {
+            TITLE_PADDING
+        };
     let inner = (cell_width - pad).max(0.0);
     if inner <= 0.0 {
         return cell_width.max(1.0) as u32;
@@ -586,11 +587,7 @@ pub fn tooltip_text_budget(screen_w: f32) -> u32 {
     if !screen_w.is_finite() {
         return TOOLTIP_MAX_TEXT_WIDTH;
     }
-    TOOLTIP_MAX_TEXT_WIDTH.min(
-        (screen_w - 2.0 * tooltip_pad_x(screen_w))
-            .floor()
-            .max(1.0) as u32,
-    )
+    TOOLTIP_MAX_TEXT_WIDTH.min((screen_w - 2.0 * tooltip_pad_x(screen_w)).floor().max(1.0) as u32)
 }
 
 /// Where the tooltip chip for `cell` goes: centred on it, clamped onto the

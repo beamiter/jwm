@@ -302,7 +302,11 @@ impl PanelContents {
 /// Thumb origin for a drag at fraction `t` of `track`.
 #[must_use]
 pub(crate) fn scroll_thumb_at(track: Rect, thumb: Rect, t: f32) -> Rect {
-    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let tw = thumb[2].min(track[2]).max(0.0);
     let th = thumb[3].min(track[3]).max(0.0);
     let travel = (track[3] - th).max(0.0);
@@ -349,12 +353,17 @@ pub(crate) fn query_caret_rect(
 #[must_use]
 pub(crate) fn lock_card_origin(viewport: Rect, panel_w: f32, panel_h: f32) -> [f32; 2] {
     let [vx, vy, vw, vh] = viewport;
-    let pw = if panel_w.is_finite() { panel_w.max(0.0) } else { 0.0 };
-    let ph = if panel_h.is_finite() { panel_h.max(0.0) } else { 0.0 };
-    [
-        vx + (vw - pw).max(0.0) * 0.5,
-        vy + (vh - ph).max(0.0) * 0.5,
-    ]
+    let pw = if panel_w.is_finite() {
+        panel_w.max(0.0)
+    } else {
+        0.0
+    };
+    let ph = if panel_h.is_finite() {
+        panel_h.max(0.0)
+    } else {
+        0.0
+    };
+    [vx + (vw - pw).max(0.0) * 0.5, vy + (vh - ph).max(0.0) * 0.5]
 }
 
 /// The input geometry paired with one painted card frame.
@@ -535,9 +544,7 @@ pub(crate) fn target_size(sizes: &SectionSizes, screen_w: f32, width_floor: f32)
     let content = (content / WIDTH_STEP).ceil() * WIDTH_STEP;
     let cap = max_panel_width(screen_w);
     let pad = card_pad(cap);
-    let width = (content + 2.0 * pad)
-        .max(width_floor)
-        .min(cap);
+    let width = (content + 2.0 * pad).max(width_floor).min(cap);
 
     let mut height = 2.0 * pad + sizes.title.1;
     let query_field_h = sizes.query_field_h();
@@ -1508,7 +1515,10 @@ mod tests {
         let tall = contents([0.0, 0.0, 400.0, 600.0], &s, 4, Some(0), None);
         let squat_items = squat.items.unwrap()[1];
         let tall_items = tall.items.unwrap()[1];
-        assert!(squat_items < tall_items, "bands should pack on a short card");
+        assert!(
+            squat_items < tall_items,
+            "bands should pack on a short card"
+        );
         assert!(squat.query_field.unwrap()[1] < tall.query_field.unwrap()[1]);
     }
 }

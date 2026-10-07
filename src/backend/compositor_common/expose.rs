@@ -96,27 +96,9 @@ pub(crate) fn move_expose_selection(
 /// Pixels between a thumbnail's top edge and its title label.
 pub(crate) const EXPOSE_LABEL_TOP_INSET: f32 = 6.0;
 
-/// Where a cell's title label is drawn: centred horizontally on the
-/// thumbnail, just inside its top edge (the GNOME/KDE overview placement).
-///
-/// `thumb_*` is the rect the thumbnail is drawn with this frame — hover
-/// scaling included, so the label rides the exact pixels it names. Returns
-/// `None` when the rasterised label is wider than the thumbnail: the label
-/// texture is fitted to the *settled* cell width, so this only triggers for
-/// cells still flying in (or thumbnails too narrow to carry text at all),
-/// and the label simply waits instead of overflowing the cell. Both
-/// compositors call this so their labels cannot drift apart.
-pub(crate) fn expose_label_origin(
-    thumb_x: f32,
-    thumb_y: f32,
-    thumb_w: f32,
-    text_w: f32,
-) -> Option<(f32, f32)> {
-    expose_label_rect(thumb_x, thumb_y, thumb_w, f32::MAX, text_w, 1.0).map(|r| (r[0], r[1]))
-}
-
-/// As [`expose_label_origin`], plus a clip to the thumbnail's pixels so a
-/// flying-in cell cannot paint the name off its tile.
+/// Title rectangle centred on the thumbnail and inset from its top edge.
+/// The rectangle follows the in-flight thumbnail geometry and is clipped to
+/// its pixels, so a flying-in cell cannot paint its name off the tile.
 #[must_use]
 pub(crate) fn expose_label_rect(
     thumb_x: f32,
@@ -133,7 +115,10 @@ pub(crate) fn expose_label_rect(
         return None;
     }
     let inset = if thumb_h.is_finite() && thumb_h > 0.0 && thumb_h < 8.0 * EXPOSE_LABEL_TOP_INSET {
-        EXPOSE_LABEL_TOP_INSET.min(thumb_h * 0.12).max(1.0).min(thumb_h)
+        EXPOSE_LABEL_TOP_INSET
+            .min(thumb_h * 0.12)
+            .max(1.0)
+            .min(thumb_h)
     } else {
         EXPOSE_LABEL_TOP_INSET.min(thumb_h.max(0.0))
     };
@@ -395,32 +380,43 @@ mod tests {
     }
 
     #[test]
-    fn expose_label_origin_centres_and_insets_inside_the_top_edge() {
-        let (x, y) = expose_label_origin(100.0, 40.0, 300.0, 120.0).expect("label fits");
+    fn expose_label_rect_centres_and_insets_inside_the_top_edge() {
+        let [x, y, _, _] =
+            expose_label_rect(100.0, 40.0, 300.0, 100.0, 120.0, 1.0).expect("label fits");
         assert_eq!(x, 100.0 + (300.0 - 120.0) * 0.5);
         assert_eq!(y, 40.0 + EXPOSE_LABEL_TOP_INSET);
     }
 
     #[test]
-    fn expose_label_origin_clips_while_the_cell_is_still_narrow() {
-        let (x, y) = expose_label_origin(10.0, 20.0, 50.0, 200.0).expect("name stays visible");
+    fn expose_label_rect_clips_while_the_cell_is_still_narrow() {
+        let [x, y, _, _] =
+            expose_label_rect(10.0, 20.0, 50.0, 100.0, 200.0, 1.0).expect("name stays visible");
         assert_eq!(x, 10.0);
         assert_eq!(y, 20.0 + EXPOSE_LABEL_TOP_INSET);
-        assert!(expose_label_origin(0.0, 0.0, 61.0, 60.0).is_some());
+        assert!(expose_label_rect(0.0, 0.0, 61.0, 100.0, 60.0, 1.0).is_some());
         let [lx, ly, lw, lh] =
             expose_label_rect(10.0, 20.0, 40.0, 8.0, 200.0, 20.0).expect("clipped");
         assert_eq!(lx, 10.0);
-        assert_eq!(ly, 20.0 + EXPOSE_LABEL_TOP_INSET.min(8.0 * 0.12).max(1.0));
+        assert_eq!(ly, 21.0);
         assert!(lw <= 40.0);
         assert!(lh <= 8.0);
         assert!(ly + lh <= 20.0 + 8.0 + 0.01);
     }
 
     #[test]
-    fn expose_label_origin_rejects_non_finite_geometry() {
-        assert_eq!(expose_label_origin(f32::NAN, 0.0, 100.0, 50.0), None);
-        assert_eq!(expose_label_origin(0.0, 0.0, f32::INFINITY, 50.0), None);
-        assert_eq!(expose_label_origin(0.0, 0.0, 100.0, f32::NAN), None);
+    fn expose_label_rect_rejects_non_finite_geometry() {
+        assert_eq!(
+            expose_label_rect(f32::NAN, 0.0, 100.0, 100.0, 50.0, 1.0),
+            None
+        );
+        assert_eq!(
+            expose_label_rect(0.0, 0.0, f32::INFINITY, 100.0, 50.0, 1.0),
+            None
+        );
+        assert_eq!(
+            expose_label_rect(0.0, 0.0, 100.0, 100.0, f32::NAN, 1.0),
+            None
+        );
     }
 
     #[test]

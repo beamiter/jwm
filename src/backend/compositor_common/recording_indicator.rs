@@ -152,8 +152,16 @@ pub(crate) fn recording_indicator_layout(
 ) -> RecordingIndicatorLayout {
     let screen_w = screen_w.max(0.0);
     let screen_h = screen_h.max(0.0);
-    let text_w = if text_w.is_finite() { text_w.max(0.0) } else { 0.0 };
-    let text_h = if text_h.is_finite() { text_h.max(0.0) } else { 0.0 };
+    let text_w = if text_w.is_finite() {
+        text_w.max(0.0)
+    } else {
+        0.0
+    };
+    let text_h = if text_h.is_finite() {
+        text_h.max(0.0)
+    } else {
+        0.0
+    };
     let natural_w = CHIP_PAD_X + CHIP_DOT + CHIP_DOT_GAP + text_w + CHIP_PAD_X;
     let natural_h = (text_h + 2.0 * CHIP_PAD_Y).max(CHIP_DOT + 2.0 * CHIP_PAD_Y);
     let chip_w = natural_w.min(screen_w);
@@ -181,12 +189,7 @@ pub(crate) fn recording_indicator_layout(
     let text_draw_h = text_h.min((chip_h - 2.0 * pad_y).max(0.0)).min(chip_h);
     RecordingIndicatorLayout {
         chip: [x, y, chip_w, chip_h],
-        dot: [
-            x + pad_x,
-            y + (chip_h - dot_w) / 2.0,
-            dot_w,
-            dot_w,
-        ],
+        dot: [x + pad_x, y + (chip_h - dot_w) / 2.0, dot_w, dot_w],
         text: [
             x + text_x_off,
             y + (chip_h - text_draw_h) / 2.0,
@@ -269,11 +272,9 @@ pub(crate) fn recording_chrome_union(
     } else {
         MIC_TEXT_W
     };
-    let rec_chip =
-        rec.then(|| recording_indicator_layout(screen_w, screen_h, rec_w, text_h).chip);
+    let rec_chip = rec.then(|| recording_indicator_layout(screen_w, screen_h, rec_w, text_h).chip);
     let rec_h = rec_chip.map(|chip| chip[3]);
-    let mic_chip =
-        mic.then(|| mic_indicator_layout(screen_w, screen_h, mic_w, text_h, rec_h).chip);
+    let mic_chip = mic.then(|| mic_indicator_layout(screen_w, screen_h, mic_w, text_h, rec_h).chip);
     match (rec_chip, mic_chip) {
         (None, None) => None,
         (Some(a), None) => Some(a),

@@ -2404,6 +2404,29 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Current stable Rust deprecation warnings in clipboard worker admission and
+  shared-memory waiter registration are fixed with MSRV-compatible atomic
+  compare/exchange loops. Removed obsolete overlay helper APIs and copied
+  compositor import suppressions; slim feature-profile CI now rejects warnings.
+  Portal picker fixtures use IPC deserialization defaults as the status schema
+  grows, fixing their missing-field compilation failure.
+- Elastic window animations start at their source rectangle, settle at their
+  destination, and keep resize dimensions positive during overshoot. Repeated
+  arrange events preserve the original animation deadline; immediate resize
+  and hide operations cancel stale motion, including instant/zero-duration
+  configurations. Animated rendering avoids a per-frame key-vector allocation.
+- V-stack cards stay within tiny or densely populated outputs even with large
+  configured gaps, and extreme border sizes no longer overflow its geometry.
+- XCB caches both root-wallpaper atoms alongside the X11RB backend's atom set,
+  avoiding repeated atom-intern round trips while publishing wallpapers.
+- iced bar widget boxing follows the current upstream renderer API. The GPUI
+  component bar now uses one coherent, pinned GPUI framework family, with its
+  matching platform constructor, window-close observer and button styling API.
+  This also removes the incompatible legacy xattr dependency chain.
+- Headless rendering checks isolate opaque color round trips from intentional
+  translucent-border blending and settle the HUD's appearance spring before
+  checking delivered pixels, keeping their original strict pixel thresholds.
+
 - The source installer recovers once from missing generated XCB sources by
   cleaning only that package's current-profile artifacts. Workspace/bridge
   artifact lookup follows `CARGO_TARGET_DIR`; native bars use independent

@@ -207,6 +207,8 @@ jobs:
           key: profile-${{ matrix.profile.name }}
 
       - name: Check all targets without default backends
+        env:
+          RUSTFLAGS: -D warnings
         run: >
           cargo check --locked --all-targets --no-default-features
           ${{ matrix.profile.features != '' && format('--features {0}', matrix.profile.features) || '' }}

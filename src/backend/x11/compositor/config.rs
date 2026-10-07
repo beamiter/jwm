@@ -1,19 +1,7 @@
 // State accessors, setters, apply_config
-#[allow(unused_imports)]
-use super::math::ortho;
-#[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::effects::finite_clamp;
-#[allow(unused_imports)]
 use glow::HasContext;
-#[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::ffi::CString;
-#[allow(unused_imports)]
-use std::sync::Arc;
-#[allow(unused_imports)]
-use std::sync::mpsc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WallpaperConfigUpdate {
