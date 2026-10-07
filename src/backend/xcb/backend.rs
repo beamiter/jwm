@@ -87,6 +87,8 @@ type XcbResult<T> = Result<T, BackendError>;
 
 #[derive(Clone, Copy)]
 struct XcbAtoms {
+    xrootpmap_id: x::Atom,
+    esetroot_pmap_id: x::Atom,
     wm_protocols: x::Atom,
     wm_delete_window: x::Atom,
     wm_take_focus: x::Atom,
@@ -195,6 +197,8 @@ impl XcbAtoms {
 
     fn new(conn: &xcb::Connection) -> XcbResult<Self> {
         Ok(Self {
+            xrootpmap_id: Self::intern(conn, b"_XROOTPMAP_ID")?,
+            esetroot_pmap_id: Self::intern(conn, b"ESETROOT_PMAP_ID")?,
             wm_protocols: Self::intern(conn, b"WM_PROTOCOLS")?,
             wm_delete_window: Self::intern(conn, b"WM_DELETE_WINDOW")?,
             wm_take_focus: Self::intern(conn, b"WM_TAKE_FOCUS")?,
@@ -1343,11 +1347,10 @@ impl XcbBackend {
     }
 
     fn published_root_pixmap(&self) -> Option<u32> {
-        let atom = XcbAtoms::intern(&self.conn, b"_XROOTPMAP_ID").ok()?;
         let cookie = self.conn.send_request(&x::GetProperty {
             delete: false,
             window: self.root,
-            property: atom,
+            property: self.atoms.xrootpmap_id,
             r#type: x::ATOM_PIXMAP,
             long_offset: 0,
             long_length: 1,
@@ -1364,9 +1367,7 @@ impl XcbBackend {
     }
 
     fn publish_root_pixmap(&self, pixmap: u32) -> XcbResult<()> {
-        let xroot = XcbAtoms::intern(&self.conn, b"_XROOTPMAP_ID")?;
-        let eset = XcbAtoms::intern(&self.conn, b"ESETROOT_PMAP_ID")?;
-        for property in [xroot, eset] {
+        for property in [self.atoms.xrootpmap_id, self.atoms.esetroot_pmap_id] {
             self.conn
                 .send_and_check_request(&x::ChangeProperty {
                     mode: x::PropMode::Replace,
