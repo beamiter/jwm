@@ -2,10 +2,9 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render,
-    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
-    px, rgb, size,
+    App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
+    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, Selectable, Sizable, Size, Theme, black, blue_400, blue_500, cyan_500, emerald_500,
@@ -300,11 +299,12 @@ impl GpuiComponentBar {
             .label(label)
             .compact()
             .rounded(px(12.))
+            .border_1()
+            .border_color(border)
             .selected(selected)
             .custom(
                 ButtonCustomVariant::new(cx)
                     .color(color)
-                    .border(border)
                     .foreground(foreground)
                     .hover(hover)
                     .active(border),
@@ -323,10 +323,11 @@ impl GpuiComponentBar {
             .label(label)
             .compact()
             .rounded(px(999.))
+            .border_1()
+            .border_color(border)
             .custom(
                 ButtonCustomVariant::new(cx)
                     .color(color)
-                    .border(border)
                     .foreground(foreground)
                     .hover(border)
                     .active(border),
@@ -824,9 +825,9 @@ fn main() {
         a: opacity as f32,
     };
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         init_components(cx);
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _closed_window| {
             if should_quit_after_window_close(cx.windows().len()) {
                 cx.quit();
             }
@@ -876,14 +877,10 @@ fn main() {
 
 // -------- Compositor coupling ------------------------------------------------
 
-/// Whether this bar's renderer can hand per-pixel alpha to the compositor at
-/// all. It cannot: gpui's blade renderer (blade-graphics 0.7.1,
-/// `src/vulkan/surface.rs:174-206`) only takes `POST_MULTIPLIED` or
-/// `PRE_MULTIPLIED` swapchain alpha — never `INHERIT`, which is all the usual
-/// X11 Vulkan drivers advertise — and gpui gives the app no way to learn what
-/// was negotiated. So the bar ships solid until a gpui/blade upgrade changes
-/// that; every mode seam is already in place, and flipping this const is the
-/// whole migration.
+/// Conservative startup policy until the aligned GPUI platform's negotiated
+/// surface alpha mode can be verified. A transparent window must not be used
+/// merely because a compositing manager is present; keep the solid fallback
+/// until a renderer-capability probe or platform validation justifies it.
 const RENDERER_ALPHA_CAPABLE: bool = false;
 
 /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`

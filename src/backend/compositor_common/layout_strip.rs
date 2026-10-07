@@ -239,8 +239,7 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     let hint_h = text_band(HINT_H, screen_h);
     let gap_y = gap_y(screen_h);
     let cd_h = countdown_h(screen_h);
-    let bands_h =
-        2.0 * pad + title_h + gap_y + gap_y + caption_h + cd_h + gap_y + hint_h;
+    let bands_h = 2.0 * pad + title_h + gap_y + gap_y + caption_h + cd_h + gap_y + hint_h;
     let max_cell_h = (screen_h - bands_h).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
@@ -388,12 +387,8 @@ pub fn cell_at(geometry: &StripGeometry, selected: Option<usize>, x: f32, y: f32
 pub fn window_rect(frame: Rect, window: [f32; 4]) -> Rect {
     let [fx, fy, fw, fh] = frame;
     let stroke = line_width(fw, fh);
-    let w = (window[2] * fw)
-        .max(stroke * 2.0)
-        .min(fw.max(0.0));
-    let h = (window[3] * fh)
-        .max(stroke * 2.0)
-        .min(fh.max(0.0));
+    let w = (window[2] * fw).max(stroke * 2.0).min(fw.max(0.0));
+    let h = (window[3] * fh).max(stroke * 2.0).min(fh.max(0.0));
     let x = (fx + window[0] * fw).clamp(fx, (fx + fw - w).max(fx));
     let y = (fy + window[1] * fh).clamp(fy, (fy + fh - h).max(fy));
     [x, y, w, h]
@@ -505,8 +500,14 @@ mod tests {
         let (film, frame) = presented_cell(cell, true);
         // The presented rectangles are the renderers' own transform.
         let pivot = center(cell.cell);
-        assert_eq!(film, scaled_about(cell.cell, pivot, selected_scale(cell.cell)));
-        assert_eq!(frame, scaled_about(cell.frame, pivot, selected_scale(cell.cell)));
+        assert_eq!(
+            film,
+            scaled_about(cell.cell, pivot, selected_scale(cell.cell))
+        );
+        assert_eq!(
+            frame,
+            scaled_about(cell.frame, pivot, selected_scale(cell.cell))
+        );
         assert_eq!(presented_cell(cell, false), (cell.cell, cell.frame));
         // The lift grows the film past its resting edges on every side.
         assert!(film[0] < cell.cell[0] && film[1] < cell.cell[1]);

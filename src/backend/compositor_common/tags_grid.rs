@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn the_selected_cell_is_hit_where_its_lift_draws_it() {
-        use crate::backend::compositor_common::layout_strip::{selected_scale, scaled_about};
+        use crate::backend::compositor_common::layout_strip::{scaled_about, selected_scale};
 
         let g = geom(9, 4);
         let index = 5;
@@ -448,8 +448,14 @@ mod tests {
         let (card, frame) = presented_cell(cell, true);
         // The presented rectangles are the renderers' own transform.
         let pivot = center(cell.cell);
-        assert_eq!(card, scaled_about(cell.cell, pivot, selected_scale(cell.cell)));
-        assert_eq!(frame, scaled_about(cell.frame, pivot, selected_scale(cell.cell)));
+        assert_eq!(
+            card,
+            scaled_about(cell.cell, pivot, selected_scale(cell.cell))
+        );
+        assert_eq!(
+            frame,
+            scaled_about(cell.frame, pivot, selected_scale(cell.cell))
+        );
         assert_eq!(presented_cell(cell, false), (cell.cell, cell.frame));
         // The lift grows the card past its unscaled edges on every side.
         assert!(card[0] < cell.cell[0] && card[1] < cell.cell[1]);

@@ -256,12 +256,7 @@ pub(crate) fn slider_bar(card: [f32; 4], fill: f32) -> Option<([f32; 4], [f32; 4
 /// contained island. When a slider occupies the right side, the label stays
 /// in the label zone instead of painting over the bar.
 #[must_use]
-pub(crate) fn label_rect(
-    card: [f32; 4],
-    text_w: f32,
-    text_h: f32,
-    reserve_bar: bool,
-) -> [f32; 4] {
+pub(crate) fn label_rect(card: [f32; 4], text_w: f32, text_h: f32, reserve_bar: bool) -> [f32; 4] {
     let [x, y, w, h] = card;
     let pad = card_pad(w);
     let inner = (w - 2.0 * pad).max(0.0);

@@ -540,7 +540,10 @@ mod tests {
             1.0,
         );
         assert_eq!(layout.card, box_);
-        assert_eq!(layout.chip_pill.2, 0.0, "the chip yields when the title cannot share the header");
+        assert_eq!(
+            layout.chip_pill.2, 0.0,
+            "the chip yields when the title cannot share the header"
+        );
         assert!(layout.meter_track.0 >= box_.0);
         assert!(layout.meter_track.0 + layout.meter_track.2 <= box_.0 + box_.2 + 0.01);
         assert!(layout.meter_fill.2 <= layout.meter_track.2 + 0.01);

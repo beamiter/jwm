@@ -474,11 +474,7 @@ pub fn track_extent(buttons: &[ToolbarButton], button_size: f32) -> (f32, f32) {
 /// As [`track_extent`], wrapping to two or three rows when a single row at
 /// the legibility floor would still overflow `max_width`.
 #[must_use]
-pub fn track_extent_for(
-    buttons: &[ToolbarButton],
-    button_size: f32,
-    max_width: f32,
-) -> (f32, f32) {
+pub fn track_extent_for(buttons: &[ToolbarButton], button_size: f32, max_width: f32) -> (f32, f32) {
     let starts = row_starts(buttons, max_width);
     let n = starts.len().max(1);
     if n == 1 {
@@ -564,10 +560,7 @@ fn bar_row_starts(bar: Rect, buttons: &[ToolbarButton], button_size: f32) -> Vec
             break;
         }
         if starts.len() >= 3 {
-            starts = vec![
-                0,
-                wrap_at(buttons, bar[2]).unwrap_or(buttons.len() / 2),
-            ];
+            starts = vec![0, wrap_at(buttons, bar[2]).unwrap_or(buttons.len() / 2)];
         } else {
             starts = vec![0];
         }
@@ -1645,7 +1638,13 @@ mod tests {
         let bottom = button_rect(bar, &buttons, size, split).unwrap();
         assert!(bottom[1] > top[1] + top[3] * 0.5, "second row sits below");
         assert_eq!(
-            button_at(bar, &buttons, size, top[0] + top[2] * 0.5, top[1] + top[3] * 0.5),
+            button_at(
+                bar,
+                &buttons,
+                size,
+                top[0] + top[2] * 0.5,
+                top[1] + top[3] * 0.5
+            ),
             Some(0)
         );
         assert_eq!(
@@ -1675,7 +1674,13 @@ mod tests {
         assert!(mid[1] > top[1] + top[3] * 0.4);
         assert!(bot[1] > mid[1] + mid[3] * 0.4);
         assert_eq!(
-            button_at(bar, &buttons, size, bot[0] + bot[2] * 0.5, bot[1] + bot[3] * 0.5),
+            button_at(
+                bar,
+                &buttons,
+                size,
+                bot[0] + bot[2] * 0.5,
+                bot[1] + bot[3] * 0.5
+            ),
             Some(12)
         );
     }
@@ -1721,7 +1726,10 @@ mod tests {
         assert!(light[0] < 80, "light fill needs a dark ring");
         assert!(dark[0] > 200, "dark fill needs a light ring");
         let (pixels, ..) = icon_rgba(ToolbarIcon::Color, 32, [240, 240, 240, 255]);
-        let ringed = pixels.chunks_exact(4).filter(|p| p[3] > 200 && p[0] < 80).count();
+        let ringed = pixels
+            .chunks_exact(4)
+            .filter(|p| p[3] > 200 && p[0] < 80)
+            .count();
         assert!(ringed > 0, "the hairline must land on the swatch");
     }
 

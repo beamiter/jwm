@@ -2,7 +2,8 @@ use iced::futures::{SinkExt, Stream};
 use iced::mouse;
 use iced::time;
 use iced::widget::container;
-use iced::widget::{Space, button, rich_text, tooltip};
+// Current iced widgets use explicit boxing at heterogeneous Element boundaries.
+use iced::widget::{Space, Widget as _, button, rich_text, tooltip};
 use iced::widget::{mouse_area, span};
 use iced::{Font, stream, theme};
 
@@ -718,11 +719,7 @@ impl IcedBar {
         (Color::WHITE.scale_alpha(0.9), 1.0, color!(0xDEE2E6))
     }
 
-    fn workspace_button<'a>(
-        &self,
-        index: usize,
-        label: &'a str,
-    ) -> iced::widget::Button<'a, Message> {
+    fn workspace_button<'a>(&self, index: usize, label: &'a str) -> Element<'a, Message> {
         let (bg, border_w, border_c) = self.tag_visuals(index);
         let view = self.runtime.view();
         let is_selected = view.wm_available
@@ -786,6 +783,7 @@ impl IcedBar {
             }
         })
         .on_press(Message::TabSelected(index))
+        .boxed()
     }
 
     // -------- Pills --------
@@ -828,7 +826,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .into()
+            .boxed()
     }
 
     fn battery_pill<'a>(&self) -> Element<'a, Message> {
@@ -845,7 +843,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .into()
+            .boxed()
     }
 
     fn brightness_pill<'a>(&self) -> Element<'a, Message> {
@@ -874,7 +872,7 @@ impl IcedBar {
                     Message::BrightnessAdjust(-5)
                 }
             })
-            .into()
+            .boxed()
     }
 
     fn volume_pill<'a>(&self) -> Element<'a, Message> {
@@ -923,7 +921,7 @@ impl IcedBar {
                     Message::AudioAdjust(-5)
                 }
             })
-            .into()
+            .boxed()
     }
 
     /// Entry point into JWM's own shell surface.
@@ -949,9 +947,9 @@ impl IcedBar {
 
         let area = mouse_area(pill);
         if available {
-            area.on_press(Message::OpenShell).into()
+            area.on_press(Message::OpenShell).boxed()
         } else {
-            area.into()
+            area.boxed()
         }
     }
 
@@ -973,7 +971,7 @@ impl IcedBar {
             .on_enter(Message::MouseEnterScreenShot)
             .on_exit(Message::MouseExitScreenShot)
             .on_press(Message::LeftClick)
-            .into()
+            .boxed()
     }
 
     fn time_pill<'a>(&self) -> Element<'a, Message> {
@@ -987,7 +985,9 @@ impl IcedBar {
         .height(Self::PILL_HEIGHT)
         .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE));
 
-        mouse_area(pill).on_press(Message::ShowSecondsToggle).into()
+        mouse_area(pill)
+            .on_press(Message::ShowSecondsToggle)
+            .boxed()
     }
 
     fn monitor_pill<'a>(&self, monitor_num: i32) -> Element<'a, Message> {
@@ -1004,7 +1004,7 @@ impl IcedBar {
         .padding([3, 10])
         .height(Self::PILL_HEIGHT)
         .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
-        .into()
+        .boxed()
     }
 
     fn scale_pill<'a>(&self, scale: Option<f32>) -> Element<'a, Message> {
@@ -1017,10 +1017,10 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
-            .into()
+            .boxed()
     }
 
-    fn layout_toggle_button<'a>(&self) -> iced::widget::Button<'a, Message> {
+    fn layout_toggle_button<'a>(&self) -> Element<'a, Message> {
         let view = self.runtime.view();
         let is_open = view.layout_selector_open;
         let color_open = color!(0x3CB371);
@@ -1053,6 +1053,7 @@ impl IcedBar {
                 }
             })
             .on_press(Message::ToggleLayoutSelector)
+            .boxed()
     }
 
     /// One button per layout the *window manager* offers.
@@ -1081,7 +1082,7 @@ impl IcedBar {
             })
             .collect();
 
-        let mut row = Row::new().spacing(6);
+        let mut row = Row::<Element<'_, Message>>::new().spacing(6);
         for (sym, idx, is_current) in layouts {
             let btn = button(text(sym).color(Color::WHITE))
                 .padding([3, 10])
@@ -1114,14 +1115,16 @@ impl IcedBar {
                 })
                 .on_press(Message::LayoutClicked(idx));
 
-            row = row.push(btn);
+            row = row.push(btn.boxed());
         }
 
-        row.into()
+        row.boxed()
     }
 
     fn minimized_dock(&self) -> Element<'_, Message> {
-        let mut items = Row::new().spacing(4).align_y(iced::Alignment::Center);
+        let mut items = Row::<Element<'_, Message>>::new()
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
         for minimized in self.dock.visible_windows() {
             let token = minimized.token;
             let Some(binding) = self.dock.item_binding(token) else {
@@ -1181,14 +1184,16 @@ impl IcedBar {
                     .width(DOCK_SLOT_WIDTH)
                     .height(32)
                     .align_x(iced::Alignment::Center)
-                    .align_y(iced::Alignment::Center),
+                    .align_y(iced::Alignment::Center)
+                    .boxed(),
             );
         }
         if self.dock.overflow() || self.dock.collapsed() {
             items = items.push(
                 container(text("+").size(12).color(Color::WHITE.scale_alpha(0.72)))
                     .width(12)
-                    .align_x(iced::Alignment::Center),
+                    .align_x(iced::Alignment::Center)
+                    .boxed(),
             );
         }
         container(items)
@@ -1208,12 +1213,12 @@ impl IcedBar {
                 },
                 ..Default::default()
             })
-            .into()
+            .boxed()
     }
 
     fn view_work_space(&self) -> Element<'_, Message> {
         // Workspace tag buttons
-        let mut tags_row = Row::new().spacing(Self::TAB_SPACING * 0.5);
+        let mut tags_row = Row::<Element<'_, Message>>::new().spacing(Self::TAB_SPACING * 0.5);
         for (index, label) in self.tabs.iter().enumerate() {
             tags_row = tags_row
                 .push(self.workspace_button(index, label))
@@ -1224,7 +1229,7 @@ impl IcedBar {
         let layout_selector = if self.runtime.view().layout_selector_open {
             self.layout_options_row()
         } else {
-            Row::new().into()
+            Row::<Element<'_, Message>>::new().boxed()
         };
 
         // System info pills
@@ -1248,45 +1253,50 @@ impl IcedBar {
         let scale_pill = self.scale_pill(Some(self.scale_factor));
         let minimized_dock = self.minimized_dock();
 
-        Row::new()
-            .push(tags_row)
-            .push(Space::new().width(6).height(Length::Fill))
+        Row::<Element<'_, Message>>::new()
+            .push(tags_row.boxed())
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(layout_button)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(layout_selector)
-            .push(Space::new().width(Length::Fill).height(Length::Fill))
+            .push(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .boxed(),
+            )
             .push(cpu_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(memory_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(battery_pill)
-            .push(Space::new().width(8).height(Length::Fill))
+            .push(Space::new().width(8).height(Length::Fill).boxed())
             .push(brightness_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(volume_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(shell_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(screenshot_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(time_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(monitor_pill)
-            .push(Space::new().width(6).height(Length::Fill))
+            .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(scale_pill)
-            .push(Space::new().width(4).height(Length::Fill))
+            .push(Space::new().width(4).height(Length::Fill).boxed())
             .push(minimized_dock)
             .align_y(iced::Alignment::Center)
-            .into()
+            .boxed()
     }
 
     fn view(&self) -> Element<'_, Message> {
         let work_space_row = self.view_work_space();
 
-        Column::new()
+        Column::<Element<'_, Message>>::new()
             .padding(4)
             .spacing(Self::TAB_SPACING)
             .push(work_space_row)
-            .into()
+            .boxed()
     }
 }

@@ -544,12 +544,10 @@ impl Jwm {
         let mut visual_overrides: HashMap<ClientKey, Rect> =
             HashMap::with_capacity(active_animation_count);
 
-        let keys: Vec<ClientKey> = self.animations.active.keys().copied().collect();
-        for key in keys {
-            let anim = match self.animations.active.get(&key) {
-                Some(a) => a,
-                None => continue,
-            };
+        // Entries are only removed after the render pass. Borrow them directly
+        // instead of allocating a key snapshot and hashing every key again on
+        // every animated frame.
+        for (&key, anim) in &self.animations.active {
             let (rect, done) = anim.sample(now);
 
             if self.state.clients.get(key).is_none() {

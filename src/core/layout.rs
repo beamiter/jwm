@@ -1293,12 +1293,12 @@ pub fn calculate_vstack<K: Copy>(
     } else {
         (5.0 / n as f32).sqrt().clamp(0.35, 1.0)
     };
-    let half_w = ((ww as f32 / 2.0) * scale) as i32;
-    let half_h = ((wh as f32 / 2.0) * scale) as i32;
+    let half_w = (((ww as f32 / 2.0) * scale) as i32).max(1);
+    let half_h = (((wh as f32 / 2.0) * scale) as i32).max(1);
 
     // Focused (main) client: centred horizontally, flush with the bottom
-    let center_x = wx + (ww - half_w) / 2;
-    let bottom_y = wy + wh - half_h;
+    let center_x = wx.saturating_add((ww - half_w) / 2);
+    let bottom_y = wy.saturating_add(wh - half_h);
 
     // Dynamic step: spread the V arms as wide as possible while keeping
     // every window inside the monitor.  max_depth is the largest depth
@@ -1316,11 +1316,12 @@ pub fn calculate_vstack<K: Copy>(
     //   step_y = step_x * tan30  ⇒  step_x <= (wh-half_h) / (max_depth * tan30)
     let max_step_y = ((wh - half_h) as f32 / (max_depth as f32 * TAN30)) as i32;
 
-    let step_x = max_step_x.min(max_step_y).max(gap);
+    // A configured gap cannot override the containment limit. Dense or
+    // tiny outputs intentionally overlap cards rather than push them offscreen.
+    let step_x = max_step_x.min(max_step_y).max(0);
     let step_y = (step_x as f32 * TAN30) as i32;
 
     for (i, c) in clients.iter().enumerate() {
-        let border2 = 2 * c.border_w;
         let (x, y) = if i == 0 {
             (center_x, bottom_y)
         } else {
@@ -1329,17 +1330,17 @@ pub fn calculate_vstack<K: Copy>(
             let dx = depth * step_x;
             let dy = depth * step_y;
             let x = if is_right {
-                center_x + dx
+                center_x.saturating_add(dx)
             } else {
-                center_x - dx
+                center_x.saturating_sub(dx)
             };
-            let y = bottom_y - dy;
+            let y = bottom_y.saturating_sub(dy);
             (x, y)
         };
 
         results.push(LayoutResult {
             key: c.key,
-            rect: Rect::new(x, y, (half_w - border2).max(1), (half_h - border2).max(1)),
+            rect: client_rect(x, y, half_w, half_h, c.border_w),
         });
     }
 
@@ -2146,6 +2147,63 @@ mod tests {
     // -----------------------------------------------------------------------
     // calculate_vstack
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn vstack_keeps_dense_cards_inside_tiny_and_offset_outputs() {
+        for (width, height) in [(1, 1), (32, 24), (320, 240), (1920, 1080)] {
+            for gap in [0, 8, 80, i32::MAX] {
+                for count in [1, 2, 5, 30, 100] {
+                    let p = LayoutParams {
+                        screen_area: Rect::new(-500, 200, width, height),
+                        n_master: 1,
+                        m_fact: 0.55,
+                        gap,
+                    };
+                    let clients: Vec<_> = (0..count)
+                        .map(|key| LayoutClient {
+                            key,
+                            factor: 1.0,
+                            border_w: 0,
+                        })
+                        .collect();
+                    for result in calculate_vstack(&p, &clients) {
+                        let r = result.rect;
+                        assert!(
+                            r.x >= -500 && r.y >= 200,
+                            "offscreen origin for {width}x{height}, gap {gap}, count {count}"
+                        );
+                        assert!(
+                            r.x + r.w <= -500 + width && r.y + r.h <= 200 + height,
+                            "offscreen edge for {width}x{height}, gap {gap}, count {count}"
+                        );
+                        assert!(r.w > 0 && r.h > 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vstack_saturates_extreme_origins_and_borders() {
+        for origin in [i32::MIN, i32::MAX] {
+            for border_w in [i32::MIN, i32::MAX] {
+                let p = LayoutParams {
+                    screen_area: Rect::new(origin, origin, 1920, 1080),
+                    n_master: 1,
+                    m_fact: 0.55,
+                    gap: 8,
+                };
+                let clients = [LayoutClient {
+                    key: 0,
+                    factor: 1.0,
+                    border_w,
+                }; 10];
+                for result in calculate_vstack(&p, &clients) {
+                    assert!(result.rect.w > 0 && result.rect.h > 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_vstack_single_fills_screen() {

@@ -18,11 +18,11 @@ use tao::{
 use glow::HasContext;
 use glutin::prelude::GlSurface;
 use x11rb::rust_connection::RustConnection;
+use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::glass::{
     DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, GlassError, GlassImage, MAX_GLASS_IMAGE_BYTES,
     StripRequest, WallpaperSource, fallback_rgb,
 };
-use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -879,7 +879,9 @@ impl WallpaperSource for OpaqueWallpaper {
         match self {
             Self::File(source) => source.strip(request),
             Self::Root(source) => source.strip(request),
-            Self::FileThenRoot { file, root } => file.strip(request).or_else(|_| root.strip(request)),
+            Self::FileThenRoot { file, root } => {
+                file.strip(request).or_else(|_| root.strip(request))
+            }
         }
     }
 }
@@ -905,7 +907,9 @@ impl RootPixmapSource {
         let xrootpmap = intern_atom(&conn, b"_XROOTPMAP_ID");
         let esetroot = intern_atom(&conn, b"ESETROOT_PMAP_ID");
         if root != 0 {
-            use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _, EventMask};
+            use x11rb::protocol::xproto::{
+                ChangeWindowAttributesAux, ConnectionExt as _, EventMask,
+            };
             let _ = conn.change_window_attributes(
                 root,
                 &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
@@ -976,7 +980,9 @@ impl WallpaperSource for RootPixmapSource {
             .get_geometry(pixmap)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
-            .ok_or_else(|| GlassError::Unavailable("root wallpaper pixmap has no geometry".into()))?;
+            .ok_or_else(|| {
+                GlassError::Unavailable("root wallpaper pixmap has no geometry".into())
+            })?;
         let pad = request.height.saturating_add(request.pad);
         let x0 = request.x.max(0);
         let y0 = request.y.max(0);
@@ -1110,11 +1116,11 @@ fn main() -> Result<()> {
     let tint = fallback_rgb(app_config.theme);
     let glass = {
         let params = app_config.glass.params();
-        if let Some(file) = app_config.glass.file_source(
-            screen_size.width,
-            screen_size.height,
-            tint,
-        ) {
+        if let Some(file) =
+            app_config
+                .glass
+                .file_source(screen_size.width, screen_size.height, tint)
+        {
             Some(match x11.as_ref() {
                 Some(conn) => GlassBackdrop::new(
                     OpaqueWallpaper::FileThenRoot {

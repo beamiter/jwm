@@ -1262,12 +1262,12 @@ impl WMController for Jwm {
                     }
                 }
                 if let Some(_track_x) = self.system_ui_scroll_drag_x {
-                    let t = backend
-                        .compositor_system_ui_scroll_t(root_y)
-                        .or_else(|| match backend.compositor_system_ui_hit_test(_track_x, root_y)
-                        {
-                            crate::backend::api::SystemUiHitTarget::Scrollbar(t) => Some(t),
-                            _ => None,
+                    let t =
+                        backend.compositor_system_ui_scroll_t(root_y).or_else(|| {
+                            match backend.compositor_system_ui_hit_test(_track_x, root_y) {
+                                crate::backend::api::SystemUiHitTarget::Scrollbar(t) => Some(t),
+                                _ => None,
+                            }
                         });
                     if let Some(t) = t {
                         let jumped = self.features.system_ui.seek_scroll(t);
@@ -4214,7 +4214,9 @@ mod tests {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
         for i in 0..12 {
-            jwm.features.clipboard.record(&format!("clip-{i}"), i as u64);
+            jwm.features
+                .clipboard
+                .record(&format!("clip-{i}"), i as u64);
         }
         jwm.features.system_ui = SystemUiState::clipboard_picker(&jwm.features.clipboard);
         assert_eq!(jwm.features.system_ui.selected_clipboard(), Some(0));
@@ -5921,7 +5923,9 @@ mod tests {
                 .decoration_styles
                 .lock()
                 .expect("decoration styles lock"),
-            [(window, 6, Pixel(0))]
+            // Stage before removing the overlay, then refresh after applying
+            // native colour schemes. Both writes must keep native borders.
+            [(window, 6, Pixel(0)), (window, 6, Pixel(0))]
         );
 
         jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
@@ -5935,7 +5939,11 @@ mod tests {
                 .decoration_styles
                 .lock()
                 .expect("decoration styles lock"),
-            [(window, 6, Pixel(0)), (window, 0, Pixel(0))]
+            [
+                (window, 6, Pixel(0)),
+                (window, 6, Pixel(0)),
+                (window, 0, Pixel(0))
+            ]
         );
         assert_eq!(backend.compositor_urgency, [(window, true)]);
         assert_eq!(backend.compositor_pip_updates, [(window, true)]);

@@ -89,14 +89,16 @@ mod tests {
     }
 
     fn window(class: &str, instance: &str, name: &str) -> WindowInfo {
-        WindowInfo {
-            id: 1,
-            name: name.into(),
-            class: class.into(),
-            instance: instance.into(),
-            tags: 1,
-            pid: None,
-        }
+        // Exercise the same backwards-compatible defaults as a real IPC
+        // response, rather than duplicating every optional status field.
+        serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "name": name,
+            "class": class,
+            "instance": instance,
+            "tags": 1,
+        }))
+        .expect("minimal IPC window fixture")
     }
 
     fn window_with_pid(class: &str, instance: &str, name: &str, pid: u32) -> WindowInfo {

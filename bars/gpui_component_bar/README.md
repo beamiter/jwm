@@ -20,3 +20,11 @@
 cargo check
 cargo run -- /path/to/shared-ring-buffer
 ```
+
+## Framework compatibility
+
+The GPUI component toolkit and the native platform must use the same GPUI
+snapshot: this bar pairs `gpui-component 0.6.6` with `gpui-pre 0.3.6` and
+`gpui-pre-platform 0.3.6`. Update these together after checking all targets.
+The older `gpui 0.2.2` is a different package with incompatible component types;
+using the aligned packages also removes its obsolete xattr dependency.

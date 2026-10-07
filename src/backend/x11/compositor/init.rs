@@ -1,22 +1,11 @@
 // Compositor::new() constructor
-#[allow(unused_imports)]
-use super::math::ortho;
-#[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::effects::finite_clamp;
 use crate::backend::x11::compositor_common::BootstrapState;
-#[allow(unused_imports)]
 use glow::HasContext;
-#[allow(unused_imports)]
 use std::cell::Cell;
-#[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
-#[allow(unused_imports)]
-use std::ffi::CString;
-#[allow(unused_imports)]
 use std::sync::Arc;
-#[allow(unused_imports)]
-use std::sync::mpsc;
 
 /// Vertex stage of the stand-in bound in place of an effect whose shader would
 /// not compile. Every vertex lands on the same clip-space point, so whatever

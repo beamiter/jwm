@@ -55,6 +55,13 @@ helpers cannot silently fall outside the CI list.
 it exercises updater arguments, scoping, artifact discovery, and output safety
 without contacting a network or installing software.
 
+Slim backend profiles must also remain free of compiler warnings. CI treats
+warnings as errors for each supported feature combination; reproduce one with:
+
+```bash
+RUSTFLAGS="-D warnings" cargo check --locked --all-targets --no-default-features --features backend-x11rb
+```
+
 Those commands validate the main `jwm` package. The workspace also contains
 the shared protocol and bar adapters; changes below `crates/xbar_core` must run:
 
