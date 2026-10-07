@@ -11793,7 +11793,8 @@ mod tests {
     fn evolve8h_wave_63_health_prints_occupancy() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains("show_bar: preference="));
+        assert!(TOOL.contains("show_bar: monitor={monitor}"));
+        assert!(TOOL.contains("preference={preference}"));
         assert!(TOOL.contains("owns_output={owns}"));
         assert!(DOCS.contains("`jwm-tool health` prints focused-bar occupancy"));
     }
@@ -12068,7 +12069,7 @@ mod tests {
         const TOOLS: &str = include_str!("../../tools/README.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOLS.contains("occupancy JSON includes `tag`, `prev_tag`"));
-        assert!(DOCS.contains("`tools/README.md` names the same occupancy"));
+        assert!(DOCS.contains("`tools/README.md`. README names occupancy"));
     }
 
     #[test]
@@ -14132,7 +14133,8 @@ mod tests {
             .expect("focused follows")
             .0;
         assert!(query.contains("\"prev_layout\":"));
-        assert!(query.contains("p.prev_lts.get(p.cur_tag)"));
+        let compact_query: String = query.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(compact_query.contains("p.prev_lts.get(p.cur_tag)"));
         assert!(DOCS.contains("also include `prev_layout`"));
         const LIB: &str = include_str!("../lib.rs");
         assert!(LIB.contains("#![recursion_limit = \"512\"]"));
@@ -14174,7 +14176,16 @@ mod tests {
     fn evolve8h_wave_292_window_tabs_occupancy_names_prev_layout() {
         const TABS: &str = include_str!("../../docs/window-tabs.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TABS.contains("`status_bar_count` / `prev_layout`"));
+        for field in [
+            "`status_bar_count`",
+            "`closed_placement_count`",
+            "`prev_layout`",
+        ] {
+            assert!(
+                TABS.contains(field),
+                "window-tabs occupancy must document {field}"
+            );
+        }
         assert!(DOCS.contains("Window-tabs docs also name `prev_layout`"));
     }
 
