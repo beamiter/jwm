@@ -6268,7 +6268,8 @@ mod window_ops {
                 false,
                 w,
                 x_mask,
-                GrabMode::ASYNC,
+                // Freeze this focus click until shared dispatch replays it or consumes it.
+                GrabMode::SYNC,
                 GrabMode::ASYNC,
                 0u32,
                 0u32,

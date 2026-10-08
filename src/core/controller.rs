@@ -6,6 +6,13 @@ use crate::backend::api::{
 };
 use crate::backend::common_define::{KeySym, Mods, WindowId};
 
+/// Whether a pointer press belongs to the WM or should reach its client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointerPressDisposition {
+    Consumed,
+    Replay,
+}
+
 pub trait WMController {
     // === 硬件与输出 ===
     fn on_output_added(&mut self, backend: &mut dyn Backend, info: OutputInfo);

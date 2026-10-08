@@ -2,8 +2,8 @@
 
 use crate::Jwm;
 use crate::backend::api::{
-    AllowMode, Backend, ExposeNavDirection, HitTarget, LayoutFilmCell, LayoutFilmstrip,
-    SystemUiOverlay, SystemUiViewport, TagsGrid, WindowChanges, WindowType,
+    Backend, ExposeNavDirection, HitTarget, LayoutFilmCell, LayoutFilmstrip, SystemUiOverlay,
+    SystemUiViewport, TagsGrid, WindowChanges, WindowType,
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
@@ -11,6 +11,7 @@ use crate::backend::compositor_common::screenshot_toolbar::{
     self, ScreenshotToolbar, ToolbarButton,
 };
 use crate::config::CONFIG;
+use crate::core::controller::PointerPressDisposition;
 use crate::core::maximize::{
     has_configure_geometry_bits, mirror_free_axes, strip_maximized_configure_bits,
 };
@@ -3309,7 +3310,7 @@ impl Jwm {
         state_bits: u16,
         detail_btn: u8,
         time: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<PointerPressDisposition, Box<dyn std::error::Error>> {
         // Nothing on a locked monitor is clickable. The shade is drawn by the
         // compositor and carries no input region of its own, so without this
         // a press over it would be delivered to whichever window happens to
@@ -3323,7 +3324,7 @@ impl Jwm {
                 .get_pointer_position()
                 .unwrap_or(self.last_mouse_root);
             if self.point_is_locked(x, y) {
-                return Ok(());
+                return Ok(PointerPressDisposition::Consumed);
             }
         }
 
@@ -3349,7 +3350,7 @@ impl Jwm {
                 {
                     self.features.capture.swallow_next_button_release();
                     self.finish_recording_region_interaction(backend)?;
-                    return Ok(());
+                    return Ok(PointerPressDisposition::Consumed);
                 }
                 if self.features.capture.recording == CaptureTarget::Region {
                     self.features.recording.begin_region_drag(xi, yi);
@@ -3365,7 +3366,7 @@ impl Jwm {
                 self.features.capture.swallow_next_button_release();
                 self.cancel_recording_region_interaction(backend);
             }
-            return Ok(());
+            return Ok(PointerPressDisposition::Consumed);
         }
 
         // Screenshot region selection intercept
@@ -3388,7 +3389,7 @@ impl Jwm {
                 self.sync_screenshot_annotation_style(backend);
                 self.sync_screenshot_annotation_overlay(backend, true);
                 self.sync_screenshot_toolbar(backend);
-                return Ok(());
+                return Ok(PointerPressDisposition::Consumed);
             }
 
             // The toolbar floats over the canvas, so a left press inside it is
@@ -3408,7 +3409,7 @@ impl Jwm {
                 {
                     self.apply_screenshot_toolbar_command(backend, command);
                 }
-                return Ok(());
+                return Ok(PointerPressDisposition::Consumed);
             }
 
             if btn == MouseButton::Left && self.features.screenshot.committed {
@@ -3436,7 +3437,7 @@ impl Jwm {
                         // so it cannot fall through to the desktop.
                         self.features.capture.swallow_next_button_release();
                     }
-                    return Ok(());
+                    return Ok(PointerPressDisposition::Consumed);
                 }
                 // Ink clicks and veil clicks are distinct gestures, even
                 // when both land within the double-click slop at a crop edge.
@@ -3494,7 +3495,7 @@ impl Jwm {
                 self.features.capture.swallow_next_button_release();
                 self.cancel_screenshot_select(backend);
             }
-            return Ok(());
+            return Ok(PointerPressDisposition::Consumed);
         }
 
         // Expose mode intercept: route clicks to compositor. Left / right /
@@ -3509,17 +3510,21 @@ impl Jwm {
                 expose_plan::ExposePress::Close => {
                     let (rx, ry) = self.last_mouse_root;
                     let hit = backend.compositor_expose_click(rx as f32, ry as f32);
-                    return self.close_expose_clicked(backend, hit);
+                    return self
+                        .close_expose_clicked(backend, hit)
+                        .map(|()| PointerPressDisposition::Consumed);
                 }
                 expose_plan::ExposePress::Browse(dir) => {
                     backend.compositor_expose_move(dir);
-                    return Ok(());
+                    return Ok(PointerPressDisposition::Consumed);
                 }
-                expose_plan::ExposePress::Inert => return Ok(()),
+                expose_plan::ExposePress::Inert => return Ok(PointerPressDisposition::Consumed),
                 expose_plan::ExposePress::Commit => {
                     let (rx, ry) = self.last_mouse_root;
                     let hit = backend.compositor_expose_click(rx as f32, ry as f32);
-                    return self.apply_expose_action(backend, expose_plan::plan_click(hit));
+                    return self
+                        .apply_expose_action(backend, expose_plan::plan_click(hit))
+                        .map(|()| PointerPressDisposition::Consumed);
                 }
             }
         }
@@ -3531,11 +3536,15 @@ impl Jwm {
             match button {
                 MouseButton::Other(4) | MouseButton::Other(6) => {
                     self.features.capture.swallow_next_button_release();
-                    return self.cycle_overview(backend, &WMArgEnum::Int(-1));
+                    return self
+                        .cycle_overview(backend, &WMArgEnum::Int(-1))
+                        .map(|()| PointerPressDisposition::Consumed);
                 }
                 MouseButton::Other(5) | MouseButton::Other(7) => {
                     self.features.capture.swallow_next_button_release();
-                    return self.cycle_overview(backend, &WMArgEnum::Int(1));
+                    return self
+                        .cycle_overview(backend, &WMArgEnum::Int(1))
+                        .map(|()| PointerPressDisposition::Consumed);
                 }
                 _ => {}
             }
@@ -3556,7 +3565,7 @@ impl Jwm {
                     // card never see a stuck button (Wayland latches at the
                     // compositor; screenshot wheel uses the same one-shot).
                     self.features.capture.swallow_next_button_release();
-                    return Ok(());
+                    return Ok(PointerPressDisposition::Consumed);
                 }
                 crate::backend::api::ToastClick::Action {
                     notification_id,
@@ -3569,7 +3578,7 @@ impl Jwm {
                         self.invoke_notification_action(notification_id, &action_key);
                     }
                     self.features.capture.swallow_next_button_release();
-                    return Ok(());
+                    return Ok(PointerPressDisposition::Consumed);
                 }
             }
         }
@@ -3606,7 +3615,7 @@ impl Jwm {
             if MouseButton::from_u8(detail_btn) == MouseButton::Middle {
                 // Middle-click closes the window the cell stands for.
                 if self.close_window_tab(backend, x, y)? {
-                    return Ok(());
+                    return Ok(PointerPressDisposition::Consumed);
                 }
             } else if self.click_window_tab(backend, x, y)? {
                 // A left press also arms a reorder drag, committed by the
@@ -3615,7 +3624,7 @@ impl Jwm {
                 if MouseButton::from_u8(detail_btn) == MouseButton::Left {
                     self.arm_window_tab_drag(x, y);
                 }
-                return Ok(());
+                return Ok(PointerPressDisposition::Consumed);
             }
         }
 
@@ -3697,18 +3706,11 @@ impl Jwm {
             }
         }
 
-        if is_client_click {
-            let _ = if handled_by_wm {
-                backend
-                    .input_ops()
-                    .allow_events(AllowMode::AsyncPointer, time)
-            } else {
-                backend
-                    .input_ops()
-                    .allow_events(AllowMode::ReplayPointer, time)
-            };
-        }
-        Ok(())
+        Ok(if is_client_click && !handled_by_wm {
+            PointerPressDisposition::Replay
+        } else {
+            PointerPressDisposition::Consumed
+        })
     }
 
     pub(crate) fn on_motion_notify_internal(
@@ -6465,7 +6467,10 @@ mod tests {
             "middle must still close the pointed cell"
         );
         assert!(
-            branch.contains(concat!("returnself.close_expose", "_clicked(backend,hit);")),
+            branch.contains(concat!(
+                "returnself.close_expose",
+                "_clicked(backend,hit).map(|()|PointerPressDisposition::Consumed);"
+            )),
             "Close must call the click-close helper"
         );
         assert!(
@@ -6477,7 +6482,9 @@ mod tests {
             "Browse must move the expose highlight"
         );
         assert!(
-            branch.contains(concat!("expose_plan::ExposePress::Inert=>returnOk(()),")),
+            branch.contains(concat!(
+                "expose_plan::ExposePress::Inert=>returnOk(PointerPressDisposition::Consumed),"
+            )),
             "Inert presses must still short-circuit"
         );
         assert!(

@@ -3161,7 +3161,8 @@ impl WindowOps for XcbWindowOps {
                 owner_events: false,
                 grab_window: self.win(win)?,
                 event_mask: event_mask_from_bits(mask),
-                pointer_mode: x::GrabMode::Async,
+                // Freeze this focus click until shared dispatch replays it or consumes it.
+                pointer_mode: x::GrabMode::Sync,
                 keyboard_mode: x::GrabMode::Async,
                 confine_to: x::WINDOW_NONE,
                 cursor: x::CURSOR_NONE,

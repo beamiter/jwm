@@ -11,7 +11,7 @@ use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
 use crate::config::{BackendFamily, CONFIG, ClientMoveResize, get_backend_family};
 use crate::core::animation::AnimationKind;
-use crate::core::controller::WMController;
+use crate::core::controller::{PointerPressDisposition, WMController};
 use crate::core::models::ClientKey;
 use crate::jwm::Jwm;
 use crate::jwm::features::CaptureTarget;
@@ -550,383 +550,20 @@ impl WMController for Jwm {
     fn on_button_press(
         &mut self,
         backend: &mut dyn Backend,
-        target: crate::backend::api::HitTarget,
+        target: HitTarget,
         state: u16,
         detail: u8,
         time: u32,
     ) {
-        // The switcher holds the pointer like every other clickable panel, so
-        // every press reaches here rather than the client its rows are drawn
-        // over — the wheel included, which X11 delivers as buttons 4-7. A
-        // left click on a row picks that window; a middle click closes the
-        // pointed row without ending the gesture (Delete's pointer twin);
-        // anything else cancels. The wheel browses the list the way it does
-        // on every other panel, because a scroll asks for the next row, not
-        // for the switch in flight to be thrown away.
-        if self.features.system_ui.is_window_switcher() {
-            use crate::backend::api::SystemUiHitTarget;
-            use crate::jwm::features::switcher::SwitcherPress;
-            match crate::jwm::features::switcher::switcher_press(detail) {
-                SwitcherPress::PickRow => {
-                    let (x, y) = backend
-                        .input_ops()
-                        .get_pointer_position()
-                        .unwrap_or(self.last_mouse_root);
-                    if let SystemUiHitTarget::Item(row, _) =
-                        backend.compositor_system_ui_hit_test(x, y)
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        if let Err(e) = self.commit_window_switcher(backend) {
-                            error!("Error committing window switcher from pointer: {:?}", e);
-                        }
-                        return;
-                    }
-                    self.cancel_window_switcher(backend);
-                }
-                SwitcherPress::CloseRow => {
-                    // Browser-tab / expose shape: close the row under the
-                    // pointer, not necessarily the keyboard highlight. A miss
-                    // on blank is inert — middle-click must not throw away
-                    // the Alt+Tab in flight the way a right-click still does.
-                    let (x, y) = backend
-                        .input_ops()
-                        .get_pointer_position()
-                        .unwrap_or(self.last_mouse_root);
-                    if let SystemUiHitTarget::Item(row, _) =
-                        backend.compositor_system_ui_hit_test(x, y)
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        if let Err(e) = self.close_window_switcher_row(backend) {
-                            error!("Error closing window switcher row from pointer: {:?}", e);
-                        }
-                    }
-                }
-                SwitcherPress::Browse(step) => {
-                    let (x, y) = backend
-                        .input_ops()
-                        .get_pointer_position()
-                        .unwrap_or(self.last_mouse_root);
-                    let hit = backend.compositor_system_ui_hit_test(x, y);
-                    // The scrim stays inert, exactly as it does for the
-                    // panels below: a scroll nowhere near the card must not
-                    // move a selection the pointer is not on.
-                    if !matches!(
-                        hit,
-                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
-                    ) {
-                        let row = if let SystemUiHitTarget::Item(row, _) = hit {
-                            Some(row)
-                        } else {
-                            None
-                        };
-                        self.scroll_system_ui_from_pointer(backend, step, row, false);
-                    }
-                }
-                SwitcherPress::Cancel => self.cancel_window_switcher(backend),
-            }
-            return;
-        }
-        if self.features.system_ui.is_layout_picker() {
-            let (x, y) = backend
-                .input_ops()
-                .get_pointer_position()
-                .unwrap_or(self.last_mouse_root);
-            match detail {
-                // Wheel: browse the strip without committing. Vertical and
-                // horizontal wheels both step (Left/Right keyboard twins).
-                4 | 6 => {
-                    let _ = self.layout_picker(backend, &WMArgEnum::Int(-1));
-                }
-                5 | 7 => {
-                    let _ = self.layout_picker(backend, &WMArgEnum::Int(1));
-                }
-                // Right-click: Esc twin — restore the origin layout.
-                3 => self.cancel_layout_picker(backend),
-                // Left-click: apply under the pointer (or the highlight).
-                1 => self.click_layout_picker(backend, x, y),
-                // Middle: Enter twin — commit the highlighted layout.
-                2 => self.confirm_layout_picker(backend),
-                _ => {}
-            }
-            return;
-        }
-        if self.features.system_ui.is_tags_overview() {
-            // The compositors register no hit map for the grid, so — like the
-            // film strip — the WM hit-tests the shared geometry itself. Left
-            // button arms a pending press; vertical wheel browses the
-            // highlight (Up/Down twin); middle confirms like Enter; horizontal
-            // wheel browses Left/Right; other presses stay swallowed by the
-            // grab so clicks never fall through to the desktop.
-            match detail {
-                1 => {
-                    let (x, y) = backend
-                        .input_ops()
-                        .get_pointer_position()
-                        .unwrap_or(self.last_mouse_root);
-                    self.press_tags_overview(backend, x, y);
-                }
-                // Middle: Enter twin — jump to the highlighted tag.
-                2 => {
-                    if let Err(error) = self.confirm_tags_overview(backend) {
-                        error!("Error confirming tags overview: {error}");
-                    }
-                }
-                4 => self.move_tags_overview_selection(backend, ExposeNavDirection::Up),
-                5 => self.move_tags_overview_selection(backend, ExposeNavDirection::Down),
-                6 => self.move_tags_overview_selection(backend, ExposeNavDirection::Left),
-                7 => self.move_tags_overview_selection(backend, ExposeNavDirection::Right),
-                _ => {}
-            }
-            return;
-        }
-        if self.features.system_ui.is_active() {
-            let (x, y) = backend
-                .input_ops()
-                .get_pointer_position()
-                .unwrap_or(self.last_mouse_root);
-            let hit = backend.compositor_system_ui_hit_test(x, y);
-            use crate::backend::api::SystemUiHitTarget;
-            let wheel_row = if let SystemUiHitTarget::Item(row, _) = hit {
-                Some(row)
-            } else {
-                None
-            };
-            match detail {
-                // Wheel anywhere on the card browses the current page. The
-                // scrim stays inert so an accidental scroll never changes a
-                // modal selection the pointer is not near. Vertical (4/5)
-                // and horizontal (6/7) wheels both step — layout-picker /
-                // tags-overview twin.
-                4 | 6
-                    if !matches!(
-                        hit,
-                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
-                    ) =>
-                {
-                    let shift = backend.key_ops().clean_mods(state).contains(Mods::SHIFT);
-                    self.scroll_system_ui_from_pointer(backend, -1, wheel_row, shift);
-                }
-                5 | 7
-                    if !matches!(
-                        hit,
-                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
-                    ) =>
-                {
-                    let shift = backend.key_ops().clean_mods(state).contains(Mods::SHIFT);
-                    self.scroll_system_ui_from_pointer(backend, 1, wheel_row, shift);
-                }
-                1 => match hit {
-                    SystemUiHitTarget::Item(row, text_x) => {
-                        // Click-to-position: a press that lands on a slider
-                        // row's bar sets the value and arms a drag; a press
-                        // on the selected notification's action strip fires
-                        // the chip under the pointer; the rest keeps the
-                        // keyboard's Return behavior (Volume's mute toggle
-                        // included).
-                        if !self.press_control_center_slider(backend, row, text_x, x) {
-                            if let Err(error) =
-                                self.activate_system_ui_pointer_row(backend, row, text_x)
-                            {
-                                error!("Error activating system UI row: {error}");
-                            }
-                        }
-                    }
-                    SystemUiHitTarget::Preview => {
-                        // Wallpaper side preview: apply the highlighted
-                        // candidate — the pointer twin of Enter. Other
-                        // panels never paint a preview, so the hit is a
-                        // no-op there.
-                        if self.features.system_ui.is_wallpaper_picker() {
-                            self.apply_selected_wallpaper(backend);
-                        }
-                    }
-                    SystemUiHitTarget::Outside => {
-                        self.dismiss_system_ui_from_pointer(backend);
-                    }
-                    SystemUiHitTarget::Scrollbar(t) => {
-                        self.system_ui_scroll_drag_x = Some(x);
-                        self.system_ui_scroll_drag_t = Some(t);
-                        let _ = self.features.system_ui.seek_scroll(t);
-                        self.sync_system_ui(backend);
-                    }
-                    SystemUiHitTarget::Query => {
-                        self.arm_system_ui_query_replace();
-                        if self.system_ui_query_replace {
-                            self.sync_system_ui(backend);
-                        }
-                    }
-                    SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
-                },
-                // List-picker middle-click forget / dismiss / apply. Clipboard
-                // and the notification center are one-shot (the twin of `d` /
-                // Delete, no arm). Wi-Fi / Bluetooth keep the two-press armed
-                // confirm keyboard `d` uses — first press arms, second deletes
-                // — and stay inert while a passphrase or pairing prompt owns
-                // the surface. Theme / Wallpaper / Audio / Players / Session
-                // middle-click apply through the same Enter path as left-click
-                // (session keeps its two-press confirm). Hub Volume and Input
-                // middle-click mute (the twin of `m` — Volume also of Enter,
-                // ignoring the slider bar so it never seeks); Network and
-                // Bluetooth middle-click toggle the radio (the twin of
-                // Left/Right — BT power-off still arms); Do Not Disturb /
-                // Caffeine / Night Light / Power Profile middle-click toggle
-                // through Enter (OSD / cycle path); Media middle-click pins
-                // the next player through `p`; Shell routes, Audio Output,
-                // Session, and Lock* middle-click activate through Enter;
-                // launcher middle-click activates through the same Enter path
-                // as left-click; Brightness and read-only rows stay inert.
-                // Blank is inert on every picker; the notification action
-                // strip stays left-only (middle-click there is a miss).
-                2 if self.features.system_ui.is_clipboard_picker() => {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        self.forget_selected_clipboard(backend);
-                    }
-                }
-                2 if self.features.system_ui.is_notification_center() => {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        use crate::jwm::features::notifications::CloseReason;
-                        if let Some((id, _)) = self.features.system_ui.selected_notification() {
-                            self.close_notification(id, CloseReason::Dismissed);
-                        }
-                        self.sync_system_ui(backend);
-                    }
-                }
-                2 if (self.features.system_ui.is_wifi_picker()
-                    || self.features.system_ui.is_bluetooth_picker())
-                    && !self.features.system_ui.is_prompting() =>
-                {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        if self.features.system_ui.is_wifi_picker() {
-                            self.forget_selected_wifi();
-                        } else {
-                            self.forget_selected_bluetooth();
-                        }
-                        self.sync_system_ui(backend);
-                    }
-                }
-                2 if self.features.system_ui.is_theme_picker() => {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        self.apply_selected_theme(backend);
-                    }
-                }
-                2 if self.features.system_ui.is_wallpaper_picker() => match hit {
-                    SystemUiHitTarget::Item(row, _)
-                        if self.features.system_ui.select_visible_row(row).is_some() =>
-                    {
-                        self.apply_selected_wallpaper(backend);
-                    }
-                    SystemUiHitTarget::Preview => {
-                        self.apply_selected_wallpaper(backend);
-                    }
-                    _ => {}
-                },
-                2 if self.features.system_ui.audio_picker_direction().is_some() => {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        self.use_selected_audio_device(backend);
-                    }
-                }
-                2 if self.features.system_ui.is_media_players_picker() => {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        self.apply_selected_media_player(backend);
-                    }
-                }
-                2 if self.features.system_ui.is_session_menu() => {
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        use crate::backend::common_define::keys;
-                        self.handle_session_menu_key(backend, keys::KEY_Return);
-                    }
-                }
-                2 if self.features.system_ui.is_launcher() => {
-                    // Same Enter path left-click uses: select the pointed row
-                    // then activate (launch / focus / copy / command).
-                    if let SystemUiHitTarget::Item(row, text_x) = hit {
-                        if let Err(error) =
-                            self.activate_system_ui_pointer_row(backend, row, text_x)
-                        {
-                            error!("Error activating system UI row: {error}");
-                        }
-                    }
-                }
-                2 if self.features.system_ui.is_monitor_layout() => {
-                    // Enter twin: apply the planned layout through xrandr.
-                    self.apply_monitor_layout(backend);
-                }
-                2 if self.features.system_ui.is_control_center() => {
-                    use crate::backend::common_define::keys;
-                    use crate::jwm::features::ControlKind;
-                    if let SystemUiHitTarget::Item(row, _) = hit
-                        && let Some(kind) = self.features.system_ui.control_at_visible_row(row)
-                        && matches!(
-                            kind,
-                            ControlKind::Volume
-                                | ControlKind::AudioInput
-                                | ControlKind::Network
-                                | ControlKind::Bluetooth
-                                | ControlKind::DoNotDisturb
-                                | ControlKind::Caffeine
-                                | ControlKind::NightLight
-                                | ControlKind::PowerProfile
-                                | ControlKind::Media
-                                | ControlKind::Shell(_)
-                                | ControlKind::AudioOutput
-                                | ControlKind::Session
-                                | ControlKind::LockScreen
-                                | ControlKind::LockMonitor
-                                | ControlKind::UnlockMonitor
-                        )
-                        && self.features.system_ui.select_visible_row(row).is_some()
-                    {
-                        let keysym = match kind {
-                            ControlKind::Network | ControlKind::Bluetooth => keys::KEY_Left,
-                            ControlKind::DoNotDisturb
-                            | ControlKind::Caffeine
-                            | ControlKind::NightLight
-                            | ControlKind::PowerProfile
-                            | ControlKind::Shell(_)
-                            | ControlKind::AudioOutput
-                            | ControlKind::Session
-                            | ControlKind::LockScreen
-                            | ControlKind::LockMonitor
-                            | ControlKind::UnlockMonitor => keys::KEY_Return,
-                            ControlKind::Media => keys::KEY_p,
-                            _ => keys::KEY_m,
-                        };
-                        self.handle_control_center_key(backend, kind, keysym, Mods::empty());
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        // Annotation mode: a button press starts a new stroke at the cursor.
-        if self.features.annotation_active {
-            self.features.annotation_drawing = true;
-            if backend.has_compositor() {
-                let (rx, ry) = self.last_mouse_root;
-                backend.compositor_annotation_begin_stroke();
-                backend.compositor_annotation_add_point(rx as f32, ry as f32);
-                backend.compositor_force_full_redraw();
-            }
-            return;
-        }
-
-        if let Err(e) = self.on_button_press_internal(backend, target, state, detail, time) {
-            error!("Error handling ButtonPress: {:?}", e);
-        }
+        let disposition = self.dispatch_pointer_press(backend, target, state, detail, time);
+        // Resolve a synchronous focus grab exactly once, including
+        // consumed/error/early-return paths. A second thaw after a
+        // replay could affect another queued passive grab.
+        let mode = match disposition {
+            PointerPressDisposition::Consumed => crate::backend::api::AllowMode::AsyncPointer,
+            PointerPressDisposition::Replay => crate::backend::api::AllowMode::ReplayPointer,
+        };
+        let _ = backend.input_ops().allow_events(mode, time);
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
@@ -1879,6 +1516,392 @@ impl WMController for Jwm {
 // _NET_WM_MOVERESIZE 请求处理
 // =================================================================================
 impl Jwm {
+    fn dispatch_pointer_press(
+        &mut self,
+        backend: &mut dyn Backend,
+        target: crate::backend::api::HitTarget,
+        state: u16,
+        detail: u8,
+        time: u32,
+    ) -> PointerPressDisposition {
+        // The switcher holds the pointer like every other clickable panel, so
+        // every press reaches here rather than the client its rows are drawn
+        // over — the wheel included, which X11 delivers as buttons 4-7. A
+        // left click on a row picks that window; a middle click closes the
+        // pointed row without ending the gesture (Delete's pointer twin);
+        // anything else cancels. The wheel browses the list the way it does
+        // on every other panel, because a scroll asks for the next row, not
+        // for the switch in flight to be thrown away.
+        if self.features.system_ui.is_window_switcher() {
+            use crate::backend::api::SystemUiHitTarget;
+            use crate::jwm::features::switcher::SwitcherPress;
+            match crate::jwm::features::switcher::switcher_press(detail) {
+                SwitcherPress::PickRow => {
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    if let SystemUiHitTarget::Item(row, _) =
+                        backend.compositor_system_ui_hit_test(x, y)
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        if let Err(e) = self.commit_window_switcher(backend) {
+                            error!("Error committing window switcher from pointer: {:?}", e);
+                        }
+                        return PointerPressDisposition::Consumed;
+                    }
+                    self.cancel_window_switcher(backend);
+                }
+                SwitcherPress::CloseRow => {
+                    // Browser-tab / expose shape: close the row under the
+                    // pointer, not necessarily the keyboard highlight. A miss
+                    // on blank is inert — middle-click must not throw away
+                    // the Alt+Tab in flight the way a right-click still does.
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    if let SystemUiHitTarget::Item(row, _) =
+                        backend.compositor_system_ui_hit_test(x, y)
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        if let Err(e) = self.close_window_switcher_row(backend) {
+                            error!("Error closing window switcher row from pointer: {:?}", e);
+                        }
+                    }
+                }
+                SwitcherPress::Browse(step) => {
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    let hit = backend.compositor_system_ui_hit_test(x, y);
+                    // The scrim stays inert, exactly as it does for the
+                    // panels below: a scroll nowhere near the card must not
+                    // move a selection the pointer is not on.
+                    if !matches!(
+                        hit,
+                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                    ) {
+                        let row = if let SystemUiHitTarget::Item(row, _) = hit {
+                            Some(row)
+                        } else {
+                            None
+                        };
+                        self.scroll_system_ui_from_pointer(backend, step, row, false);
+                    }
+                }
+                SwitcherPress::Cancel => self.cancel_window_switcher(backend),
+            }
+            return PointerPressDisposition::Consumed;
+        }
+        if self.features.system_ui.is_layout_picker() {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            match detail {
+                // Wheel: browse the strip without committing. Vertical and
+                // horizontal wheels both step (Left/Right keyboard twins).
+                4 | 6 => {
+                    let _ = self.layout_picker(backend, &WMArgEnum::Int(-1));
+                }
+                5 | 7 => {
+                    let _ = self.layout_picker(backend, &WMArgEnum::Int(1));
+                }
+                // Right-click: Esc twin — restore the origin layout.
+                3 => self.cancel_layout_picker(backend),
+                // Left-click: apply under the pointer (or the highlight).
+                1 => self.click_layout_picker(backend, x, y),
+                // Middle: Enter twin — commit the highlighted layout.
+                2 => self.confirm_layout_picker(backend),
+                _ => {}
+            }
+            return PointerPressDisposition::Consumed;
+        }
+        if self.features.system_ui.is_tags_overview() {
+            // The compositors register no hit map for the grid, so — like the
+            // film strip — the WM hit-tests the shared geometry itself. Left
+            // button arms a pending press; vertical wheel browses the
+            // highlight (Up/Down twin); middle confirms like Enter; horizontal
+            // wheel browses Left/Right; other presses stay swallowed by the
+            // grab so clicks never fall through to the desktop.
+            match detail {
+                1 => {
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    self.press_tags_overview(backend, x, y);
+                }
+                // Middle: Enter twin — jump to the highlighted tag.
+                2 => {
+                    if let Err(error) = self.confirm_tags_overview(backend) {
+                        error!("Error confirming tags overview: {error}");
+                    }
+                }
+                4 => self.move_tags_overview_selection(backend, ExposeNavDirection::Up),
+                5 => self.move_tags_overview_selection(backend, ExposeNavDirection::Down),
+                6 => self.move_tags_overview_selection(backend, ExposeNavDirection::Left),
+                7 => self.move_tags_overview_selection(backend, ExposeNavDirection::Right),
+                _ => {}
+            }
+            return PointerPressDisposition::Consumed;
+        }
+        if self.features.system_ui.is_active() {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            let hit = backend.compositor_system_ui_hit_test(x, y);
+            use crate::backend::api::SystemUiHitTarget;
+            let wheel_row = if let SystemUiHitTarget::Item(row, _) = hit {
+                Some(row)
+            } else {
+                None
+            };
+            match detail {
+                // Wheel anywhere on the card browses the current page. The
+                // scrim stays inert so an accidental scroll never changes a
+                // modal selection the pointer is not near. Vertical (4/5)
+                // and horizontal (6/7) wheels both step — layout-picker /
+                // tags-overview twin.
+                4 | 6
+                    if !matches!(
+                        hit,
+                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                    ) =>
+                {
+                    let shift = backend.key_ops().clean_mods(state).contains(Mods::SHIFT);
+                    self.scroll_system_ui_from_pointer(backend, -1, wheel_row, shift);
+                }
+                5 | 7
+                    if !matches!(
+                        hit,
+                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                    ) =>
+                {
+                    let shift = backend.key_ops().clean_mods(state).contains(Mods::SHIFT);
+                    self.scroll_system_ui_from_pointer(backend, 1, wheel_row, shift);
+                }
+                1 => match hit {
+                    SystemUiHitTarget::Item(row, text_x) => {
+                        // Click-to-position: a press that lands on a slider
+                        // row's bar sets the value and arms a drag; a press
+                        // on the selected notification's action strip fires
+                        // the chip under the pointer; the rest keeps the
+                        // keyboard's Return behavior (Volume's mute toggle
+                        // included).
+                        if !self.press_control_center_slider(backend, row, text_x, x) {
+                            if let Err(error) =
+                                self.activate_system_ui_pointer_row(backend, row, text_x)
+                            {
+                                error!("Error activating system UI row: {error}");
+                            }
+                        }
+                    }
+                    SystemUiHitTarget::Preview => {
+                        // Wallpaper side preview: apply the highlighted
+                        // candidate — the pointer twin of Enter. Other
+                        // panels never paint a preview, so the hit is a
+                        // no-op there.
+                        if self.features.system_ui.is_wallpaper_picker() {
+                            self.apply_selected_wallpaper(backend);
+                        }
+                    }
+                    SystemUiHitTarget::Outside => {
+                        self.dismiss_system_ui_from_pointer(backend);
+                    }
+                    SystemUiHitTarget::Scrollbar(t) => {
+                        self.system_ui_scroll_drag_x = Some(x);
+                        self.system_ui_scroll_drag_t = Some(t);
+                        let _ = self.features.system_ui.seek_scroll(t);
+                        self.sync_system_ui(backend);
+                    }
+                    SystemUiHitTarget::Query => {
+                        self.arm_system_ui_query_replace();
+                        if self.system_ui_query_replace {
+                            self.sync_system_ui(backend);
+                        }
+                    }
+                    SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
+                },
+                // List-picker middle-click forget / dismiss / apply. Clipboard
+                // and the notification center are one-shot (the twin of `d` /
+                // Delete, no arm). Wi-Fi / Bluetooth keep the two-press armed
+                // confirm keyboard `d` uses — first press arms, second deletes
+                // — and stay inert while a passphrase or pairing prompt owns
+                // the surface. Theme / Wallpaper / Audio / Players / Session
+                // middle-click apply through the same Enter path as left-click
+                // (session keeps its two-press confirm). Hub Volume and Input
+                // middle-click mute (the twin of `m` — Volume also of Enter,
+                // ignoring the slider bar so it never seeks); Network and
+                // Bluetooth middle-click toggle the radio (the twin of
+                // Left/Right — BT power-off still arms); Do Not Disturb /
+                // Caffeine / Night Light / Power Profile middle-click toggle
+                // through Enter (OSD / cycle path); Media middle-click pins
+                // the next player through `p`; Shell routes, Audio Output,
+                // Session, and Lock* middle-click activate through Enter;
+                // launcher middle-click activates through the same Enter path
+                // as left-click; Brightness and read-only rows stay inert.
+                // Blank is inert on every picker; the notification action
+                // strip stays left-only (middle-click there is a miss).
+                2 if self.features.system_ui.is_clipboard_picker() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.forget_selected_clipboard(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_notification_center() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        use crate::jwm::features::notifications::CloseReason;
+                        if let Some((id, _)) = self.features.system_ui.selected_notification() {
+                            self.close_notification(id, CloseReason::Dismissed);
+                        }
+                        self.sync_system_ui(backend);
+                    }
+                }
+                2 if (self.features.system_ui.is_wifi_picker()
+                    || self.features.system_ui.is_bluetooth_picker())
+                    && !self.features.system_ui.is_prompting() =>
+                {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        if self.features.system_ui.is_wifi_picker() {
+                            self.forget_selected_wifi();
+                        } else {
+                            self.forget_selected_bluetooth();
+                        }
+                        self.sync_system_ui(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_theme_picker() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.apply_selected_theme(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_wallpaper_picker() => match hit {
+                    SystemUiHitTarget::Item(row, _)
+                        if self.features.system_ui.select_visible_row(row).is_some() =>
+                    {
+                        self.apply_selected_wallpaper(backend);
+                    }
+                    SystemUiHitTarget::Preview => {
+                        self.apply_selected_wallpaper(backend);
+                    }
+                    _ => {}
+                },
+                2 if self.features.system_ui.audio_picker_direction().is_some() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.use_selected_audio_device(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_media_players_picker() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.apply_selected_media_player(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_session_menu() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        use crate::backend::common_define::keys;
+                        self.handle_session_menu_key(backend, keys::KEY_Return);
+                    }
+                }
+                2 if self.features.system_ui.is_launcher() => {
+                    // Same Enter path left-click uses: select the pointed row
+                    // then activate (launch / focus / copy / command).
+                    if let SystemUiHitTarget::Item(row, text_x) = hit {
+                        if let Err(error) =
+                            self.activate_system_ui_pointer_row(backend, row, text_x)
+                        {
+                            error!("Error activating system UI row: {error}");
+                        }
+                    }
+                }
+                2 if self.features.system_ui.is_monitor_layout() => {
+                    // Enter twin: apply the planned layout through xrandr.
+                    self.apply_monitor_layout(backend);
+                }
+                2 if self.features.system_ui.is_control_center() => {
+                    use crate::backend::common_define::keys;
+                    use crate::jwm::features::ControlKind;
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && let Some(kind) = self.features.system_ui.control_at_visible_row(row)
+                        && matches!(
+                            kind,
+                            ControlKind::Volume
+                                | ControlKind::AudioInput
+                                | ControlKind::Network
+                                | ControlKind::Bluetooth
+                                | ControlKind::DoNotDisturb
+                                | ControlKind::Caffeine
+                                | ControlKind::NightLight
+                                | ControlKind::PowerProfile
+                                | ControlKind::Media
+                                | ControlKind::Shell(_)
+                                | ControlKind::AudioOutput
+                                | ControlKind::Session
+                                | ControlKind::LockScreen
+                                | ControlKind::LockMonitor
+                                | ControlKind::UnlockMonitor
+                        )
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        let keysym = match kind {
+                            ControlKind::Network | ControlKind::Bluetooth => keys::KEY_Left,
+                            ControlKind::DoNotDisturb
+                            | ControlKind::Caffeine
+                            | ControlKind::NightLight
+                            | ControlKind::PowerProfile
+                            | ControlKind::Shell(_)
+                            | ControlKind::AudioOutput
+                            | ControlKind::Session
+                            | ControlKind::LockScreen
+                            | ControlKind::LockMonitor
+                            | ControlKind::UnlockMonitor => keys::KEY_Return,
+                            ControlKind::Media => keys::KEY_p,
+                            _ => keys::KEY_m,
+                        };
+                        self.handle_control_center_key(backend, kind, keysym, Mods::empty());
+                    }
+                }
+                _ => {}
+            }
+            return PointerPressDisposition::Consumed;
+        }
+        // Annotation mode: a button press starts a new stroke at the cursor.
+        if self.features.annotation_active {
+            self.features.annotation_drawing = true;
+            if backend.has_compositor() {
+                let (rx, ry) = self.last_mouse_root;
+                backend.compositor_annotation_begin_stroke();
+                backend.compositor_annotation_add_point(rx as f32, ry as f32);
+                backend.compositor_force_full_redraw();
+            }
+            return PointerPressDisposition::Consumed;
+        }
+
+        match self.on_button_press_internal(backend, target, state, detail, time) {
+            Ok(disposition) => disposition,
+            Err(e) => {
+                error!("Error handling ButtonPress: {:?}", e);
+                PointerPressDisposition::Consumed
+            }
+        }
+    }
+
     /// 处理 _NET_WM_MOVERESIZE 客户端消息
     ///
     /// 允许窗口通过协议请求进行移动或调整大小（例如 GTK 应用的窗口边框拖动）。
@@ -2630,6 +2653,7 @@ mod tests {
     struct GrabSpyInputOps {
         pointer_grabs: AtomicUsize,
         pointer_ungrabs: AtomicUsize,
+        allowed_events: Mutex<Vec<(crate::backend::api::AllowMode, u32)>>,
         /// Event-mask bits of the most recent grab; 0 before the first one.
         last_pointer_mask: AtomicU32,
         /// The position `get_pointer_position` reports; tests move the
@@ -2638,6 +2662,17 @@ mod tests {
     }
 
     impl InputOps for GrabSpyInputOps {
+        fn allow_events(
+            &self,
+            mode: crate::backend::api::AllowMode,
+            time: u32,
+        ) -> Result<(), BackendError> {
+            self.allowed_events
+                .lock()
+                .expect("allow-events log")
+                .push((mode, time));
+            Ok(())
+        }
         fn set_cursor(
             &self,
             _kind: crate::backend::common_define::StdCursorKind,
@@ -3608,8 +3643,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let system_ui = press
             .split_once("ifself.features.system_ui.is_active(){")
@@ -3655,8 +3690,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let system_ui = press
             .split_once("ifself.features.system_ui.is_active(){")
@@ -3903,8 +3938,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let system_ui = press
             .split_once("ifself.features.system_ui.is_active(){")
@@ -3958,8 +3993,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let system_ui = press
             .split_once("ifself.features.system_ui.is_active(){")
@@ -4064,8 +4099,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let system_ui = press
             .split_once("ifself.features.system_ui.is_active(){")
@@ -4173,8 +4208,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let system_ui = press
             .split_once("ifself.features.system_ui.is_active(){")
@@ -5139,6 +5174,78 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn ordinary_client_press_replays_once_without_a_second_thaw() {
+        use crate::backend::api::AllowMode;
+        let (mut jwm, _monitor, first, _second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let window = jwm.state.clients[first].win;
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ButtonPress {
+                target: HitTarget::Surface(window),
+                state: 0,
+                detail: 1,
+                time: 1234,
+                root_x: 120.0,
+                root_y: 130.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *backend
+                .input_ops
+                .allowed_events
+                .lock()
+                .expect("allow-events log"),
+            vec![(AllowMode::ReplayPointer, 1234)]
+        );
+    }
+
+    #[test]
+    fn consumed_pointer_presses_release_the_focus_grab() {
+        use crate::backend::api::AllowMode;
+        for mode in ["annotation", "screenshot", "ordinary-background"] {
+            let mut jwm = empty_jwm();
+            let mut backend = RenderSpyBackend::new();
+            match mode {
+                "annotation" => jwm.features.annotation_active = true,
+                "screenshot" => jwm.features.screenshot.start(),
+                _ => {}
+            }
+            capture_press(&mut jwm, &mut backend, 120.0, 130.0);
+            assert_eq!(
+                *backend
+                    .input_ops
+                    .allowed_events
+                    .lock()
+                    .expect("allow-events log"),
+                vec![(AllowMode::AsyncPointer, 1000)],
+                "{mode} must thaw the pointer without replaying its press"
+            );
+            capture_release(&mut jwm, &mut backend, 120.0, 130.0);
+            assert!(!jwm.features.annotation_drawing);
+        }
+    }
+
+    #[test]
+    fn locked_monitor_consumption_releases_without_replaying_pointer() {
+        use crate::backend::api::AllowMode;
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.point_is_locked(10.0, 10.0));
+        capture_press(&mut jwm, &mut backend, 10.0, 10.0);
+        assert_eq!(
+            *backend
+                .input_ops
+                .allowed_events
+                .lock()
+                .expect("allow-events log"),
+            vec![(AllowMode::AsyncPointer, 1000)]
+        );
     }
 
     #[test]
@@ -7686,7 +7793,11 @@ mod tests {
     fn tags_overview_middle_and_horizontal_wheel_are_wired() {
         const SOURCE: &str = include_str!("event_dispatcher.rs");
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
-        let arm = compact
+        let press = compact
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
+            .1;
+        let arm = press
             .split_once("ifself.features.system_ui.is_tags_overview(){")
             .expect("tags overview pointer branch")
             .1
@@ -7716,8 +7827,8 @@ mod tests {
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
         let press = compact
-            .split_once("fnon_button_press(")
-            .expect("on_button_press")
+            .split_once("fndispatch_pointer_press(")
+            .expect("dispatch_pointer_press")
             .1;
         let arm = press
             .split_once("ifself.features.system_ui.is_layout_picker(){")
