@@ -99,10 +99,28 @@ recording switched it on, whether or not the benchmark then started.
 | `idle` | idle CPU and wakeups | `cpu_percent_avg`, `wakeups_per_s`, `rss_mb` | `/proc/<pid>/stat` + `status` deltas over the idle window |
 | `steady_frame` | frame-time median/p95/p99 | `frame_time_{avg,p50,p95,p99,stddev}_ms`, `fps_avg`, `frame_samples` | compositor benchmark harness (`benchmark` IPC command) |
 | `damage_redraw` | damage-area and redraw ratios | `dirty_fraction_avg_percent`, `dirty_regions_avg`, `dirty_region_merges_avg` | `get_metrics` sampled once per second across the benchmark window |
-| `input_latency` | input-to-present latency | `input_latency_{p50,p95,p99}_ms` | benchmark harness when it observed input, else the compositor's rolling window |
+| `input_latency` | backend-reported input latency estimate | `input_latency_{p50,p95,p99}_ms` | benchmark harness when it observed input, else the compositor's rolling window |
 | `allocation_steady` | allocation counts in steady-state frame production | `allocs_per_frame`, `frames_observed` | `allocations` counter deltas (requires a jwm built with `--features alloc-counter`) |
 | `multi_monitor` | multi-monitor refresh-rate and mixed-scale behavior | `monitor_count`, `refresh_hz` | `get_monitors` + `get_metrics` |
 | `direct_scanout` | direct-scanout entry/exit stability | `scanout_toggles_per_minute`, `scanout_active_end` | `direct_scanout_count` deltas across the window |
+
+### Input-latency limits
+
+The current X11 `input_latency` values are a heuristic, not measured
+input-to-present latency. They time the latest observed pointer/button event
+until a compositor stage before the final overlays and buffer swap, then add
+an estimated display delay. Keyboard events are not sampled by this path.
+An input that causes no repaint can remain pending until an unrelated frame;
+a high value therefore does not by itself establish a slow visible response.
+
+The legacy OML estimate also applies a fixed 60 Hz modulo to the absolute
+UST value. [GLX_OML_sync_control](https://registry.khronos.org/OpenGL/extensions/OML/GLX_OML_sync_control.txt)
+defines UST at a refresh boundary with an unspecified initial value, so that
+calculation is not a validated time-to-next-vblank measurement. The fallback
+adds a nominal pipeline delay instead. Do not treat these values as hardware
+presentation measurements or compare them across OML/fallback paths, refresh
+rates or backends. The benchmark records each fresh reported sample once;
+that accounting does not validate the underlying estimator.
 
 ### Workload sensitivity
 
