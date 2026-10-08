@@ -206,7 +206,11 @@ impl IsolatedXvfb {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Preserve native startup diagnostics in CI. A displayfd timeout
+            // alone cannot distinguish initialization stalls from listener or
+            // driver errors, and discarding stderr made recurring failures
+            // impossible to diagnose from the test log.
+            .stderr(Stdio::inherit())
             .spawn()
         {
             Ok(child) => child,
