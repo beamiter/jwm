@@ -73,15 +73,25 @@ impl PixmapRefreshState {
         self.time_backoff = Self::INITIAL_TIME_BACKOFF;
     }
 
-    pub(super) fn needs_refresh_at(self, now: std::time::Instant) -> bool {
-        self.pending || self.retry_deadline.is_some_and(|deadline| deadline <= now)
+    /// A retiring window keeps its last valid texture for the close fade.
+    /// Its native XID may already be unmapped/destroyed, so neither import
+    /// work nor a retry wakeup is useful until that window is revived.
+    pub(super) fn needs_refresh_at(self, now: std::time::Instant, fading_out: bool) -> bool {
+        !fading_out && (self.pending || self.retry_deadline.is_some_and(|deadline| deadline <= now))
     }
 
-    /// Time until a future retry is due, or `None` when idle / already due.
+    /// Time until a retry is due (zero when ready), or `None` when idle/retiring.
     ///
     /// Used by `frame_deadline` so a composited session can drop the 20 ms
     /// idle poll without stranding a resize that waits on wall-clock backoff.
-    pub(super) fn next_refresh_in(self, now: std::time::Instant) -> Option<std::time::Duration> {
+    pub(super) fn next_refresh_in(
+        self,
+        now: std::time::Instant,
+        fading_out: bool,
+    ) -> Option<std::time::Duration> {
+        if fading_out {
+            return None;
+        }
         if self.pending {
             return Some(std::time::Duration::ZERO);
         }
@@ -313,18 +323,54 @@ mod tests {
     }
 
     #[test]
+    fn retiring_pending_resize_does_not_import_or_schedule_a_wakeup() {
+        let now = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        let before = state;
+        assert!(!state.needs_refresh_at(now, true));
+        assert_eq!(state.next_refresh_in(now, true), None);
+        assert_eq!(state, before, "retirement must not consume pending work");
+        assert!(state.needs_refresh_at(now, false));
+        assert_eq!(state.next_refresh_in(now, false), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retiring_retry_preserves_backoff_for_a_revived_window() {
+        let now = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(false);
+        state.refresh_failed_at(now);
+        let due = now + Duration::from_millis(100);
+        for instant in [now, due] {
+            assert!(!state.needs_refresh_at(instant, true));
+            assert_eq!(state.next_refresh_in(instant, true), None);
+        }
+        assert!(!state.needs_refresh_at(now, false));
+        assert_eq!(
+            state.next_refresh_in(now, false),
+            Some(Duration::from_millis(100))
+        );
+        assert!(state.needs_refresh_at(due, false));
+        assert_eq!(state.next_refresh_in(due, false), Some(Duration::ZERO));
+        state.damaged();
+        assert!(!state.needs_refresh_at(now, true));
+        assert!(state.needs_refresh_at(now, false));
+    }
+
+    #[test]
     fn damage_before_the_first_refresh_is_folded_into_that_attempt() {
         let now = Instant::now();
         let mut state = PixmapRefreshState::default();
         state.backing_changed(true);
         state.damaged();
-        assert!(state.needs_refresh_at(now));
+        assert!(state.needs_refresh_at(now, false));
 
         state.refresh_succeeded();
-        assert!(!state.needs_refresh_at(now));
+        assert!(!state.needs_refresh_at(now, false));
         state.damaged();
         assert!(
-            !state.needs_refresh_at(now),
+            !state.needs_refresh_at(now, false),
             "pre-import Damage must not cause a redundant second import"
         );
     }
@@ -335,14 +381,14 @@ mod tests {
         let mut state = PixmapRefreshState::default();
         state.backing_changed(true);
         state.refresh_succeeded();
-        assert!(!state.needs_refresh_at(now));
+        assert!(!state.needs_refresh_at(now, false));
 
         state.damaged();
-        assert!(state.needs_refresh_at(now));
+        assert!(state.needs_refresh_at(now, false));
         state.refresh_succeeded();
         state.damaged();
         assert!(
-            !state.needs_refresh_at(now),
+            !state.needs_refresh_at(now, false),
             "ordinary steady-state Damage must not rename the pixmap"
         );
     }
@@ -363,13 +409,15 @@ mod tests {
             (16, 1600),
         ] {
             state.refresh_failed_at(start);
-            assert!(!state.needs_refresh_at(start + Duration::from_millis(expected_millis - 1)));
-            assert!(state.needs_refresh_at(start + Duration::from_millis(expected_millis)));
+            assert!(
+                !state.needs_refresh_at(start + Duration::from_millis(expected_millis - 1), false)
+            );
+            assert!(state.needs_refresh_at(start + Duration::from_millis(expected_millis), false));
 
             for damage in 1..=expected_damages {
                 state.damaged();
                 assert_eq!(
-                    state.needs_refresh_at(start),
+                    state.needs_refresh_at(start, false),
                     damage == expected_damages,
                     "retry interval diverged at backoff {expected_damages}"
                 );
@@ -385,20 +433,20 @@ mod tests {
         state.damaged();
         for _ in 0..5 {
             state.refresh_failed_at(start);
-            while !state.needs_refresh_at(start) {
+            while !state.needs_refresh_at(start, false) {
                 state.damaged();
             }
         }
 
         state.backing_changed(true);
         state.refresh_failed_at(start);
-        assert!(!state.needs_refresh_at(start + Duration::from_millis(99)));
-        assert!(state.needs_refresh_at(start + Duration::from_millis(100)));
+        assert!(!state.needs_refresh_at(start + Duration::from_millis(99), false));
+        assert!(state.needs_refresh_at(start + Duration::from_millis(100), false));
 
         state.backing_changed(true);
         state.refresh_failed_at(start);
         state.damaged();
-        assert!(state.needs_refresh_at(start));
+        assert!(state.needs_refresh_at(start, false));
     }
 
     #[test]
@@ -409,8 +457,8 @@ mod tests {
         state.damaged();
         state.refresh_failed_at(start);
 
-        assert!(!state.needs_refresh_at(start + Duration::from_millis(99)));
-        assert!(state.needs_refresh_at(start + Duration::from_millis(100)));
+        assert!(!state.needs_refresh_at(start + Duration::from_millis(99), false));
+        assert!(state.needs_refresh_at(start + Duration::from_millis(100), false));
     }
 
     #[test]
@@ -422,7 +470,7 @@ mod tests {
         state.refresh_failed_at(start);
         state.refresh_succeeded();
 
-        assert!(!state.needs_refresh_at(start + Duration::from_secs(10)));
+        assert!(!state.needs_refresh_at(start + Duration::from_secs(10), false));
     }
 
     #[test]
@@ -433,7 +481,7 @@ mod tests {
         state.refresh_succeeded();
         state.damaged();
         assert!(
-            !state.needs_refresh_at(now),
+            !state.needs_refresh_at(now, false),
             "GLX must not pay for the EGL resize confirmation workaround"
         );
     }

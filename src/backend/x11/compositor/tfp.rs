@@ -840,11 +840,11 @@ impl<C: CompositorConnection> Compositor<C> {
         let now = std::time::Instant::now();
         let mut refresh_wins = std::mem::take(&mut self.scratch_refresh_wins);
         refresh_wins.clear();
-        refresh_wins.extend(
-            self.windows
-                .iter()
-                .filter_map(|(&id, wt)| wt.pixmap_refresh.needs_refresh_at(now).then_some(id)),
-        );
+        refresh_wins.extend(self.windows.iter().filter_map(|(&id, wt)| {
+            wt.pixmap_refresh
+                .needs_refresh_at(now, wt.fading_out)
+                .then_some(id)
+        }));
         if refresh_wins.is_empty() {
             self.scratch_refresh_wins = refresh_wins;
             return false;

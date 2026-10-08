@@ -2218,7 +2218,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let pixmap_refresh = if self.unredirected_window.is_none() {
             self.windows
                 .values()
-                .filter_map(|wt| wt.pixmap_refresh.next_refresh_in(now))
+                .filter_map(|wt| wt.pixmap_refresh.next_refresh_in(now, wt.fading_out))
                 .min()
         } else {
             None

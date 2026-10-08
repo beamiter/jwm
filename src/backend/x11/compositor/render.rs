@@ -5386,10 +5386,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // While scanning, also feed the precise dirty-rect tracker so we do not
         // walk the scene a second time later in the frame.
         let pixmap_refresh_now = std::time::Instant::now();
-        let pixmap_refresh_ready = self
-            .windows
-            .values()
-            .any(|wt| wt.pixmap_refresh.needs_refresh_at(pixmap_refresh_now));
+        let pixmap_refresh_ready = self.windows.values().any(|wt| {
+            wt.pixmap_refresh
+                .needs_refresh_at(pixmap_refresh_now, wt.fading_out)
+        });
         // Refreshes are global rather than scene-local: an off-scene window
         // with an expired retry deadline must still get one attempt, otherwise
         // needs_render() would remain armed and spin without reaching
@@ -5405,11 +5405,17 @@ impl<C: CompositorConnection> Compositor<C> {
             // implicit X/GL synchronization; omitting this on NVIDIA can show
             // an older client frame (most visibly terminal cursor/text damage).
             if (wt.dirty && wt.binding.is_some())
-                || wt.pixmap_refresh.needs_refresh_at(pixmap_refresh_now)
+                || wt
+                    .pixmap_refresh
+                    .needs_refresh_at(pixmap_refresh_now, wt.fading_out)
             {
                 needs_native_texture_sync = true;
             }
-            if wt.dirty || wt.pixmap_refresh.needs_refresh_at(pixmap_refresh_now) {
+            if wt.dirty
+                || wt
+                    .pixmap_refresh
+                    .needs_refresh_at(pixmap_refresh_now, wt.fading_out)
+            {
                 has_dirty = true;
                 let dirty_rect = DirtyRect::new(wt.x, wt.y, wt.w, wt.h);
                 self.dirty_region_tracker.mark_dirty(dirty_rect);

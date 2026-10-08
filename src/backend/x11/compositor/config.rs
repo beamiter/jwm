@@ -112,7 +112,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if self
                 .windows
                 .values()
-                .any(|wt| wt.pixmap_refresh.needs_refresh_at(now))
+                .any(|wt| wt.pixmap_refresh.needs_refresh_at(now, wt.fading_out))
             {
                 return true;
             }
