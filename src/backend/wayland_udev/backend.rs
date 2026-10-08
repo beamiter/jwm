@@ -2958,6 +2958,8 @@ impl UdevBackend {
                                 pending_events.lock_safe().push_back(BackendEvent::ButtonRelease {
                                     target: hit.unwrap_or(HitTarget::Background { output }),
                                     time: time.millis(),
+                                    root_x: x,
+                                    root_y: y,
                                 });
                             }
                         }
@@ -3433,6 +3435,8 @@ impl UdevBackend {
                                     pending.push_back(BackendEvent::ButtonRelease {
                                         target: HitTarget::Background { output },
                                         time: time.millis(),
+                                        root_x: x,
+                                        root_y: y,
                                     });
                                 }
                             } else if let Some(pointer) = state.seat.get_pointer() {

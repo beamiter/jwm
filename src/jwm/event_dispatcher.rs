@@ -976,6 +976,16 @@ impl WMController for Jwm {
         if self.features.recording.selecting_region {
             let was_dragging = self.features.recording.is_region_dragging();
             let pointer = self.last_mouse_root;
+            // The release may be newer than the last delivered motion. Finish
+            // new selections, moves and resizes at its exact endpoint.
+            if was_dragging {
+                self.features.recording.update_region_drag(
+                    pointer.0.round() as i32,
+                    pointer.1.round() as i32,
+                    self.s_w,
+                    self.s_h,
+                );
+            }
             self.features.recording.end_region_drag();
             // A near-zero region drag is a click: pick the probed window.
             if was_dragging
@@ -1052,6 +1062,14 @@ impl WMController for Jwm {
                 return;
             }
             self.features.screenshot.commit();
+            // Match the frozen crop to the release endpoint as well as the
+            // saved selection; the last motion preview may be older.
+            backend.compositor_set_snap_preview(Some((
+                rect.x as f32,
+                rect.y as f32,
+                rect.w as f32,
+                rect.h as f32,
+            )));
             self.features
                 .screenshot
                 .set_tool(crate::jwm::features::screenshot::ScreenshotTool::Pencil);
@@ -5093,6 +5111,176 @@ mod tests {
             0,
         );
         assert!(jwm.control_slider_drag.is_none());
+    }
+
+    fn capture_press(jwm: &mut Jwm, backend: &mut RenderSpyBackend, x: f64, y: f64) {
+        jwm.handle_event(
+            backend,
+            BackendEvent::ButtonPress {
+                target: HitTarget::Background { output: None },
+                state: 0,
+                detail: 1,
+                time: 1000,
+                root_x: x,
+                root_y: y,
+            },
+        )
+        .unwrap();
+    }
+
+    fn capture_release(jwm: &mut Jwm, backend: &mut RenderSpyBackend, x: f64, y: f64) {
+        jwm.handle_event(
+            backend,
+            BackendEvent::ButtonRelease {
+                target: HitTarget::Background { output: None },
+                time: 1100,
+                root_x: x,
+                root_y: y,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn capture_screenshot_uses_button_endpoints_in_every_drag_direction() {
+        use crate::core::types::Rect;
+        // No motion is delivered: button events alone must retain the actual
+        // anchor and endpoint. Reuse the session after cancellation each time.
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        for (start, end) in [
+            ((100.0, 100.0), (300.0, 250.0)),
+            ((300.0, 250.0), (100.0, 100.0)),
+            ((300.0, 100.0), (100.0, 250.0)),
+            ((100.0, 250.0), (300.0, 100.0)),
+        ] {
+            jwm.features.screenshot.start();
+            jwm.last_mouse_root = (900.0, 800.0);
+            capture_press(&mut jwm, &mut backend, start.0, start.1);
+            capture_release(&mut jwm, &mut backend, end.0, end.1);
+            assert!(jwm.features.screenshot.committed);
+            assert_eq!(
+                jwm.features.screenshot.get_selection_rect(),
+                Some(Rect::new(100, 100, 200, 150))
+            );
+            assert_eq!(
+                backend.snap_previews.last().copied().flatten(),
+                Some((100.0, 100.0, 200.0, 150.0))
+            );
+            jwm.cancel_screenshot_select(&mut backend);
+            assert!(!jwm.features.screenshot.active);
+            assert!(!jwm.features.screenshot.dragging);
+        }
+    }
+
+    #[test]
+    fn capture_screenshot_preserves_signed_fractional_root_coordinates() {
+        use crate::core::types::Rect;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.screenshot.start();
+        capture_press(&mut jwm, &mut backend, -250.75, 20.25);
+        capture_release(&mut jwm, &mut backend, -100.25, 100.75);
+        assert_eq!(
+            jwm.features.screenshot.get_selection_rect(),
+            Some(Rect::new(-251, 20, 151, 81))
+        );
+    }
+
+    #[test]
+    fn capture_recording_uses_release_endpoint_after_stale_motion() {
+        use crate::core::types::Rect;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        for deliver_motion in [false, true] {
+            for (start, end) in [
+                ((100.0, 100.0), (300.0, 250.0)),
+                ((300.0, 250.0), (100.0, 100.0)),
+                ((300.0, 100.0), (100.0, 250.0)),
+                ((100.0, 250.0), (300.0, 100.0)),
+            ] {
+                jwm.features
+                    .recording
+                    .begin_initial_region_selection("unused.mp4".into());
+                jwm.last_mouse_root = (900.0, 800.0);
+                capture_press(&mut jwm, &mut backend, start.0, start.1);
+                if deliver_motion {
+                    jwm.handle_event(
+                        &mut backend,
+                        BackendEvent::MotionNotify {
+                            target: HitTarget::Background { output: None },
+                            root_x: 200.0,
+                            root_y: 175.0,
+                            time: 1050,
+                        },
+                    )
+                    .unwrap();
+                }
+                capture_release(&mut jwm, &mut backend, end.0, end.1);
+                assert_eq!(
+                    jwm.features.recording.region,
+                    Some(Rect::new(100, 100, 200, 150))
+                );
+                assert!(!jwm.features.recording.is_region_dragging());
+                jwm.cancel_recording_region_interaction(&mut backend);
+                assert!(!jwm.features.recording.selecting_region);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_recording_move_and_resize_finish_at_release() {
+        use crate::core::types::Rect;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        jwm.features
+            .recording
+            .begin_initial_region_selection("unused.mp4".into());
+        jwm.features
+            .recording
+            .set_region(Rect::new(100, 100, 200, 150));
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        capture_release(&mut jwm, &mut backend, 230.0, 210.0);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(150, 150, 200, 150))
+        );
+        capture_press(&mut jwm, &mut backend, 350.0, 300.0);
+        capture_release(&mut jwm, &mut backend, 400.0, 350.0);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(150, 150, 250, 200))
+        );
+    }
+
+    #[test]
+    fn capture_tiny_empty_desktop_drag_stays_available_for_retry() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        for delta in [0.0, 1.0] {
+            jwm.features.screenshot.start();
+            capture_press(&mut jwm, &mut backend, 100.0, 100.0);
+            capture_release(&mut jwm, &mut backend, 100.0 + delta, 100.0 + delta);
+            assert!(jwm.features.screenshot.active);
+            assert!(!jwm.features.screenshot.committed);
+            assert!(!jwm.features.screenshot.dragging);
+            jwm.cancel_screenshot_select(&mut backend);
+            jwm.features
+                .recording
+                .begin_initial_region_selection("unused.mp4".into());
+            capture_press(&mut jwm, &mut backend, 100.0, 100.0);
+            capture_release(&mut jwm, &mut backend, 100.0 + delta, 100.0 + delta);
+            assert!(jwm.features.recording.selecting_region);
+            assert!(jwm.features.recording.region.is_none());
+            assert!(!jwm.features.recording.is_region_dragging());
+            jwm.cancel_recording_region_interaction(&mut backend);
+        }
     }
 
     #[test]
@@ -10015,6 +10203,8 @@ mod tests {
             BackendEvent::ButtonRelease {
                 target: HitTarget::Background { output: None },
                 time: 2,
+                root_x: 5.0,
+                root_y: 500.0,
             },
         )
         .unwrap();
@@ -10276,12 +10466,24 @@ impl EventHandler for Jwm {
                 state,
                 detail,
                 time,
-                ..
+                root_x,
+                root_y,
             } => {
+                // A press can arrive without a preceding motion (or after
+                // coalescing). Anchor capture drags at the event itself.
+                self.last_mouse_root = (root_x, root_y);
                 self.last_user_activity_time = time;
                 self.on_button_press(backend, target, state, detail, time);
             }
-            BackendEvent::ButtonRelease { target, time } => {
+            BackendEvent::ButtonRelease {
+                target,
+                time,
+                root_x,
+                root_y,
+            } => {
+                // Preserve the release endpoint without a synchronous pointer
+                // query, which could observe a later, already queued gesture.
+                self.last_mouse_root = (root_x, root_y);
                 self.on_button_release(backend, target, time)
             }
             BackendEvent::MotionNotify {

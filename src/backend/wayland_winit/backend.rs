@@ -1800,6 +1800,8 @@ fn process_input_event_windowed<B: InputBackend>(
                     .push_back(BackendEvent::ButtonRelease {
                         target: hit.unwrap_or(HitTarget::Background { output }),
                         time: time.millis(),
+                        root_x: x,
+                        root_y: y,
                     });
             }
         }
@@ -2019,6 +2021,8 @@ fn process_input_event_windowed<B: InputBackend>(
                     pending.push_back(BackendEvent::ButtonRelease {
                         target: HitTarget::Background { output },
                         time: time.millis(),
+                        root_x: x,
+                        root_y: y,
                     });
                 }
             } else if let Some(pointer) = state.seat.get_pointer() {

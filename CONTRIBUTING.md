@@ -173,3 +173,23 @@ Write descriptive commits such as `fix(ipc): bound subscription state` or
 `perf(x11): reuse damage-region storage`. Avoid large `update` commits in work
 intended for review. Keep generated files, editor state, credentials, private
 support bundles, and local benchmark captures out of the repository.
+
+### Capture input regression
+
+The normal Rust suite covers screenshot/recording press and release endpoints,
+reverse drags, tiny selections, and repeated cancellation. To exercise actual
+X11 motion delivery after a cursor change, start a dedicated Xvfb server and run:
+
+```bash
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp &
+xvfb_pid=$!
+trap 'kill "$xvfb_pid"' EXIT
+JWM_TEST_X11_DISPLAY=:99 scripts/test.sh --lib \
+  capture_cursor_updates_deliver_repeated_motion -- --ignored
+```
+
+Wait until the test display is ready before running the test. Never point this
+test at an active desktop: it grabs the pointer and generates XTEST events.
+It deliberately does not query pointer position between motion batches, because
+that would hide the motion-hint regression. This tests the X11 transport; it
+does not replace interactive capture or real-hardware Wayland validation.

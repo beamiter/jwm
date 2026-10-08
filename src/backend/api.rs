@@ -2177,6 +2177,8 @@ pub enum BackendEvent {
     ButtonRelease {
         target: HitTarget,
         time: u32,
+        root_x: f64,
+        root_y: f64,
     },
     MotionNotify {
         target: HitTarget,

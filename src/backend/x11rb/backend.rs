@@ -3024,6 +3024,8 @@ mod event_source {
                 XEvent::ButtonRelease(e) => Some(BackendEvent::ButtonRelease {
                     target: self.hit_target_from_pointer_event(e.event, e.child),
                     time: e.time,
+                    root_x: e.root_x as f64,
+                    root_y: e.root_y as f64,
                 }),
                 XEvent::RandrScreenChangeNotify(_) => Some(BackendEvent::ScreenLayoutChanged),
                 XEvent::RandrNotify(_) => Some(BackendEvent::ScreenLayoutChanged),
@@ -3917,6 +3919,13 @@ mod input_ops {
     use crate::backend::common_define::StdCursorKind;
     use crate::backend::common_define::WindowId;
 
+    fn capture_grab_event_mask() -> EventMask {
+        // Capture consumes every delivered coordinate rather than querying
+        // the pointer after a motion hint. Adding POINTER_MOTION_HINT here
+        // lets X11 stop reporting motion after the first hover/drag event.
+        EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION
+    }
+
     pub(super) struct X11InputOps<C: Connection> {
         conn: Arc<C>,
         root_x11: u32,
@@ -4012,14 +4021,9 @@ mod input_ops {
         }
 
         fn update_grab_cursor(&self, cursor: Option<u64>) -> Result<(), BackendError> {
-            use x11rb::protocol::xproto::{Cursor, EventMask};
             let cursor_id = Cursor::from(cursor.unwrap_or(0) as u32);
-            let mask = EventMask::BUTTON_PRESS
-                | EventMask::BUTTON_RELEASE
-                | EventMask::POINTER_MOTION
-                | EventMask::POINTER_MOTION_HINT;
             self.conn
-                .change_active_pointer_grab(cursor_id, 0u32, mask)?;
+                .change_active_pointer_grab(cursor_id, 0u32, capture_grab_event_mask())?;
             Ok(())
         }
 
@@ -4056,6 +4060,120 @@ mod input_ops {
             let w = self.ids.x11(win)?;
             self.conn.warp_pointer(0u32, w, 0, 0, 0, 0, x, y)?;
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::backend::common_define::EventMaskBits;
+        use x11rb::protocol::Event;
+        use x11rb::protocol::xtest::ConnectionExt as _;
+        use x11rb::rust_connection::RustConnection;
+
+        #[test]
+        fn capture_cursor_updates_keep_continuous_pointer_motion() {
+            let mask = capture_grab_event_mask();
+            assert!(mask.contains(EventMask::BUTTON_PRESS));
+            assert!(mask.contains(EventMask::BUTTON_RELEASE));
+            assert!(mask.contains(EventMask::POINTER_MOTION));
+            assert!(!mask.contains(EventMask::POINTER_MOTION_HINT));
+        }
+
+        /// Run against a dedicated server, never the active desktop, e.g.:
+        /// `JWM_TEST_X11_DISPLAY=:99 scripts/test.sh --no-default-features
+        /// --features backend-x11rb capture_cursor_updates_deliver_repeated_motion
+        /// -- --ignored` (start Xvfb :99 first).
+        #[test]
+        #[ignore = "requires a dedicated X11 server in JWM_TEST_X11_DISPLAY"]
+        fn capture_cursor_updates_deliver_repeated_motion() {
+            let display = std::env::var("JWM_TEST_X11_DISPLAY")
+                .expect("set JWM_TEST_X11_DISPLAY to a dedicated Xvfb server");
+            let (conn, screen) = RustConnection::connect(Some(&display)).unwrap();
+            let conn = Arc::new(conn);
+            let root = conn.setup().roots[screen].root;
+            assert!(conn.setup().roots[screen].width_in_pixels >= 128);
+            assert!(conn.setup().roots[screen].height_in_pixels >= 128);
+            let (driver, _) = RustConnection::connect(Some(&display)).unwrap();
+            driver.xtest_get_version(2, 2).unwrap().reply().unwrap();
+            // Even an assertion failure must not leave a synthetic button
+            // held or a pointer grab behind on the test server.
+            struct Cleanup<'a> {
+                conn: &'a RustConnection,
+                driver: &'a RustConnection,
+                root: u32,
+            }
+            impl Drop for Cleanup<'_> {
+                fn drop(&mut self) {
+                    let _ = self.driver.xtest_fake_input(
+                        BUTTON_RELEASE_EVENT,
+                        1,
+                        0,
+                        self.root,
+                        0,
+                        0,
+                        0,
+                    );
+                    let _ = self.driver.flush();
+                    let _ = self.conn.ungrab_pointer(0u32);
+                    let _ = self.conn.flush();
+                }
+            }
+            let _cleanup = Cleanup {
+                conn: conn.as_ref(),
+                driver: &driver,
+                root,
+            };
+            driver
+                .xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, 10, 10, 0)
+                .unwrap()
+                .check()
+                .unwrap();
+            let ops = X11InputOps::new(conn.clone(), root, X11IdRegistry::new(1));
+            let mask = (EventMaskBits::BUTTON_PRESS
+                | EventMaskBits::BUTTON_RELEASE
+                | EventMaskBits::POINTER_MOTION)
+                .bits();
+            assert!(ops.grab_pointer(mask, None).unwrap());
+
+            for pressed in [false, true] {
+                ops.update_grab_cursor(None).unwrap();
+                conn.get_input_focus().unwrap().reply().unwrap();
+                if pressed {
+                    driver
+                        .xtest_fake_input(BUTTON_PRESS_EVENT, 1, 0, root, 0, 0, 0)
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+                for coordinate in [40, 60, 80] {
+                    driver
+                        .xtest_fake_input(
+                            MOTION_NOTIFY_EVENT,
+                            0,
+                            0,
+                            root,
+                            coordinate,
+                            coordinate,
+                            0,
+                        )
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                    // A round trip drains the motion batch without a
+                    // QueryPointer, which would mask the hint regression.
+                    conn.get_input_focus().unwrap().reply().unwrap();
+                    let mut motion = None;
+                    while let Some(event) = conn.poll_for_event().unwrap() {
+                        if let Event::MotionNotify(event) = event {
+                            motion = Some(event);
+                        }
+                    }
+                    let motion = motion.expect("each motion batch must reach the capture grab");
+                    assert_eq!((motion.root_x, motion.root_y), (coordinate, coordinate));
+                    assert_ne!(motion.detail, Motion::HINT);
+                }
+            }
         }
     }
 }

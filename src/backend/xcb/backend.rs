@@ -1642,6 +1642,8 @@ impl XcbBackend {
             xcb::Event::X(x::Event::ButtonRelease(ev)) => Some(BackendEvent::ButtonRelease {
                 target: self.hit_target(ev.event(), ev.child()),
                 time: ev.time(),
+                root_x: ev.root_x() as f64,
+                root_y: ev.root_y() as f64,
             }),
             xcb::Event::X(x::Event::MotionNotify(ev)) => Some(BackendEvent::MotionNotify {
                 target: self.hit_target(ev.event(), ev.child()),

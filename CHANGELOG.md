@@ -2404,6 +2404,12 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Screenshot and recording region drags keep receiving continuous X11RB
+  motion after the selection cursor changes. Button events preserve their
+  exact root coordinates across every backend, so fast and reverse drags
+  finish at the release position, including recording moves/resizes and the
+  screenshot selection preview.
+
 - Current stable Rust deprecation warnings in clipboard worker admission and
   shared-memory waiter registration are fixed with MSRV-compatible atomic
   compare/exchange loops. Removed obsolete overlay helper APIs and copied
