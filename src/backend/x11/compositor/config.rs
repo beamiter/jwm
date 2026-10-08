@@ -950,6 +950,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.benchmark.bench_config = super::benchmark::BenchmarkConfig {
             blur_enabled: self.blur_enabled,
             blur_strength: self.blur_strength,
+            // Fallback for a report stopped before its first measured frame.
             window_count: self.windows.len(),
             hdr_enabled: self.hdr_enabled,
             vrr_active: self.vrr_active,

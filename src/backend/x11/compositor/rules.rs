@@ -182,8 +182,9 @@ impl<C: CompositorConnection> Compositor<C> {
         self.frame_stats.last_input_time = Some(std::time::Instant::now());
     }
 
-    /// Compute and record input→display latency when frame is rendered
-    pub(super) fn record_latency_sample(&mut self) {
+    /// Compute and record input→display latency when frame is rendered.
+    /// Returns only a new sample for this frame, independently of HUD history.
+    pub(super) fn record_latency_sample(&mut self) -> Option<f32> {
         if let Some(input_time) = self.frame_stats.last_input_time {
             let now = std::time::Instant::now();
             let input_to_render_ms = now.duration_since(input_time).as_secs_f32() * 1000.0;
@@ -234,7 +235,9 @@ impl<C: CompositorConnection> Compositor<C> {
 
             // Clear the input timestamp after recording
             self.frame_stats.last_input_time = None;
+            return Some(total_latency_ms);
         }
+        None
     }
 
     /// Compute latency statistics (p50, p95, p99)

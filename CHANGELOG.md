@@ -2404,6 +2404,16 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Compositor benchmarks now keep final-frame metadata, exclude warmup metadata,
+  and count only fresh input-latency samples instead of replaying old HUD
+  history on every frame. Workload window counts are captured on the first
+  measured frame, after lazy imports and warmup. Report fields and performance
+  thresholds are unchanged.
+- GLX OML synchronization entry points now match the C ABI for integer
+  booleans and signed 64-bit counters. Oversized unsigned wait targets are
+  rejected before they can become invalid negative driver arguments. OML
+  timing is used only when the GLX server advertises the extension, rather
+  than treating exported client-library stubs as proof of support.
 - Changing a recording capture source resets double-click confirmation, so a
   click used on the previous source cannot unexpectedly finish the new one.
 - X11 snap and capture previews no longer restart their fades on repeated

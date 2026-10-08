@@ -7525,7 +7525,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // === Always update frame stats (decoupled from HUD rendering) ===
-        {
+        let frame_input_latency = {
             let now = std::time::Instant::now();
             let dt = now
                 .duration_since(self.frame_stats.last_frame_time)
@@ -7544,8 +7544,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.frame_stats.frame_times.clear();
                 self.frame_stats.last_fps_update = now;
             }
-            self.record_latency_sample();
-        }
+            self.record_latency_sample()
+        };
 
         // === Pass 5: Debug HUD (feature 11) ===
         if self.debug_hud {
@@ -8363,24 +8363,25 @@ impl<C: CompositorConnection> Compositor<C> {
         // Benchmark: record frame data
         if self.benchmark.is_running() {
             let frame_us = bench_frame_start.elapsed().as_micros() as u64;
-            self.benchmark.record_frame(frame_us);
+            self.benchmark.finish_frame(frame_us, |benchmark| {
+                benchmark.record_window_count(self.windows.len());
+                // Feed only a new input sample from this frame, never HUD history.
+                if let Some(latency) = frame_input_latency {
+                    benchmark.record_input_latency(latency);
+                }
 
-            // Feed latest input latency
-            if let Some(&last_latency) = self.frame_stats.latency_samples.back() {
-                self.benchmark.record_input_latency(last_latency);
-            }
+                // Feed zone stats from profiler.
+                for (zone, zs) in self.frame_profiler.all_zone_stats() {
+                    benchmark.record_zone(zone, zs.avg_ms);
+                }
 
-            // Feed zone stats from profiler
-            for (zone, zs) in self.frame_profiler.all_zone_stats() {
-                self.benchmark.record_zone(zone, zs.avg_ms);
-            }
-
-            // Feed GL stats
-            self.benchmark.record_gl_stats(
-                self.frame_stats.draw_calls,
-                0, // state changes tracked elsewhere
-                0, // texture binds tracked elsewhere
-            );
+                // Feed GL stats.
+                benchmark.record_gl_stats(
+                    self.frame_stats.draw_calls,
+                    0, // state changes tracked elsewhere
+                    0, // texture binds tracked elsewhere
+                );
+            });
 
             // Feed blur cache stats
             self.benchmark.blur_cache_hits = self.frame_stats.blur_cache_hits;

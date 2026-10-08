@@ -4626,6 +4626,7 @@ impl WaylandCompositor {
         self.benchmark.bench_config = BenchmarkConfig {
             blur_enabled: self.blur_enabled,
             blur_strength: self.blur_strength,
+            // Fallback for a report stopped before its first measured frame.
             window_count: self.windows.len(),
             hdr_enabled: self.hdr_enabled,
             vrr_active: self.output_vrr_active,

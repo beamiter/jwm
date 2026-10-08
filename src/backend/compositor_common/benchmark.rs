@@ -72,6 +72,9 @@ pub struct SystemInfo {
 pub struct BenchmarkConfig {
     pub blur_enabled: bool,
     pub blur_strength: u32,
+    /// Tracked compositor windows at the end of the first measured frame.
+    /// With no measured frames, retain the caller's start-time snapshot.
+    /// This is neither a visible-window count nor an average over the run.
     pub window_count: usize,
     pub hdr_enabled: bool,
     pub vrr_active: bool,
@@ -213,6 +216,19 @@ impl BenchmarkHarness {
         self.state == BenchmarkState::Complete
     }
 
+    /// Record this frame's supplemental samples before advancing its state.
+    ///
+    /// In particular, the last warm-up frame must not contribute samples, and
+    /// the final measured frame must contribute them before becoming Complete.
+    pub(crate) fn finish_frame(&mut self, dt_us: u64, record_samples: impl FnOnce(&mut Self)) {
+        if self.is_collecting() {
+            record_samples(self);
+        }
+        self.record_frame(dt_us);
+    }
+
+    /// Advance the benchmark by one frame. Record supplemental samples first;
+    /// compositor callers use `finish_frame` to preserve that ordering.
     pub fn record_frame(&mut self, dt_us: u64) {
         match &mut self.state {
             BenchmarkState::Warmup { remaining } => {
@@ -245,6 +261,15 @@ impl BenchmarkHarness {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Capture the tracked-window inventory once, before the first measured
+    /// frame advances its state. Call from the `finish_frame` sample callback;
+    /// warmup and later frames must not overwrite this workload snapshot.
+    pub(crate) fn record_window_count(&mut self, window_count: usize) {
+        if matches!(self.state, BenchmarkState::Running { collected: 0, .. }) {
+            self.bench_config.window_count = window_count;
         }
     }
 
@@ -505,5 +530,212 @@ mod tests {
 
         assert!(harness.is_complete());
         assert_eq!(harness.frame_times_us, vec![16_000, 17_000]);
+    }
+
+    #[test]
+    fn finish_frame_includes_every_sample_in_a_one_frame_run() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(1, 0);
+        harness.finish_frame(16_000, |frame| {
+            frame.record_input_latency(7.0);
+            frame.record_zone("render", 3.0);
+            frame.record_gl_stats(11, 5, 2);
+            frame.record_blur_cost(1_000_000, 4.0);
+        });
+
+        assert!(harness.is_complete());
+        assert_eq!(harness.frame_times_us, [16_000]);
+        assert_eq!(harness.input_latency_samples, [7.0]);
+        assert_eq!(harness.zone_times["render"], [3.0]);
+        assert_eq!(harness.gl_draw_calls, [11]);
+        assert_eq!(harness.gl_state_changes, [5]);
+        assert_eq!(harness.gl_texture_binds, [2]);
+        assert_eq!(harness.blur_cost_samples.len(), 1);
+        let report = harness.generate_report();
+        assert_eq!(report.frame_time.count, 1);
+        assert_eq!(report.input_latency.count, 1);
+        assert_eq!(report.gl.draw_calls_per_frame, 11.0);
+        assert_eq!(report.zones["render"].avg_ms, 3.0);
+        assert_eq!(report.blur.cost_per_megapixel_ms, 4.0);
+    }
+
+    #[test]
+    fn finish_frame_excludes_warmup_and_includes_the_final_measured_frame() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(2, 2);
+        let mut collected_metadata = Vec::new();
+        for value in [90_u32, 80, 10, 20] {
+            harness.finish_frame(u64::from(value) * 1000, |frame| {
+                collected_metadata.push(value);
+                frame.record_input_latency(value as f32);
+                frame.record_zone("render", value as f32);
+                frame.record_gl_stats(value, value + 1, value + 2);
+                frame.record_blur_cost(1_000_000, value as f32);
+            });
+        }
+
+        assert!(harness.is_complete());
+        assert_eq!(collected_metadata, [10, 20]);
+        assert_eq!(harness.frame_times_us, [10_000, 20_000]);
+        assert_eq!(harness.input_latency_samples, [10.0, 20.0]);
+        assert_eq!(harness.zone_times["render"], [10.0, 20.0]);
+        assert_eq!(harness.gl_draw_calls, [10, 20]);
+        assert_eq!(harness.gl_state_changes, [11, 21]);
+        assert_eq!(harness.gl_texture_binds, [12, 22]);
+        assert_eq!(harness.blur_cost_samples.len(), 2);
+        let report = harness.generate_report();
+        assert_eq!(report.frame_time.count, 2);
+        assert_eq!(report.frame_time.avg_ms, 15.0);
+        assert_eq!(report.input_latency.count, 2);
+        assert_eq!(report.input_latency.avg_ms, 15.0);
+        assert_eq!(report.zones["render"].avg_ms, 15.0);
+        assert_eq!(report.gl.draw_calls_per_frame, 15.0);
+    }
+
+    #[test]
+    fn finish_frame_never_invokes_metadata_outside_collection() {
+        let mut harness = BenchmarkHarness::new();
+        harness.finish_frame(90_000, |_| panic!("idle callback"));
+        harness.start(1, 1);
+        harness.finish_frame(80_000, |_| panic!("warmup callback"));
+        assert_eq!(
+            harness.state,
+            BenchmarkState::Running {
+                target_frames: 1,
+                collected: 0,
+            }
+        );
+        harness.finish_frame(10_000, |frame| frame.record_gl_stats(9, 8, 7));
+        harness.finish_frame(70_000, |_| panic!("complete callback"));
+        assert!(harness.is_complete());
+        assert_eq!(harness.frame_times_us, [10_000]);
+        assert_eq!(harness.gl_draw_calls, [9]);
+        harness.stop();
+        harness.finish_frame(60_000, |_| panic!("stopped callback"));
+    }
+
+    #[test]
+    fn finish_frame_without_fresh_input_does_not_repeat_a_latency_sample() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(3, 0);
+        for latency in [Some(5.0), None, Some(9.0)] {
+            harness.finish_frame(16_000, |frame| {
+                if let Some(latency) = latency {
+                    frame.record_input_latency(latency);
+                }
+                frame.record_gl_stats(1, 0, 0);
+            });
+        }
+
+        assert!(harness.is_complete());
+        assert_eq!(harness.input_latency_samples, [5.0, 9.0]);
+        let report = harness.generate_report();
+        assert_eq!(report.frame_time.count, 3);
+        assert_eq!(report.input_latency.count, 2);
+        assert_eq!(report.input_latency.avg_ms, 7.0);
+    }
+
+    #[test]
+    fn finish_frame_restart_clears_samples_and_uses_new_warmup() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(1, 0);
+        harness.finish_frame(10_000, |frame| {
+            frame.record_input_latency(5.0);
+            frame.record_zone("old", 4.0);
+            frame.record_gl_stats(3, 2, 1);
+        });
+        harness.start(1, 1);
+        harness.finish_frame(80_000, |_| panic!("restarted warmup callback"));
+        harness.finish_frame(20_000, |frame| {
+            frame.record_zone("new", 2.0);
+            frame.record_gl_stats(6, 5, 4);
+        });
+
+        assert!(harness.is_complete());
+        assert_eq!(harness.frame_times_us, [20_000]);
+        assert!(harness.input_latency_samples.is_empty());
+        assert!(!harness.zone_times.contains_key("old"));
+        assert_eq!(harness.zone_times["new"], [2.0]);
+        assert_eq!(harness.gl_draw_calls, [6]);
+    }
+
+    #[test]
+    fn window_count_captures_the_first_and_final_single_frame() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(1, 0);
+        harness.bench_config.window_count = 0;
+        harness.finish_frame(10_000, |frame| frame.record_window_count(3));
+        assert!(harness.is_complete());
+        let report = harness.generate_report();
+        assert_eq!(report.frame_time.count, 1);
+        assert_eq!(report.config.window_count, 3);
+    }
+
+    #[test]
+    fn window_count_excludes_warmup_and_does_not_follow_later_inventory() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(2, 2);
+        harness.bench_config.window_count = 9;
+        for count in [8, 7] {
+            harness.finish_frame(10_000, |frame| frame.record_window_count(count));
+            assert_eq!(harness.generate_report().config.window_count, 9);
+        }
+        // An empty first measured inventory is valid, not an unset sentinel.
+        harness.finish_frame(10_000, |frame| frame.record_window_count(0));
+        harness.finish_frame(10_000, |frame| frame.record_window_count(5));
+        harness.finish_frame(10_000, |frame| frame.record_window_count(6));
+        let report = harness.generate_report();
+        assert_eq!(report.frame_time.count, 2);
+        assert_eq!(report.config.window_count, 0);
+    }
+
+    #[test]
+    fn window_count_without_measured_frames_keeps_the_start_snapshot() {
+        for (warmup, rendered) in [(0, 0), (2, 1), (2, 2)] {
+            let mut harness = BenchmarkHarness::new();
+            harness.start(1, warmup);
+            harness.bench_config.window_count = 9;
+            for _ in 0..rendered {
+                harness.finish_frame(10_000, |frame| frame.record_window_count(3));
+            }
+            let report = harness.stop().expect("started benchmark");
+            assert_eq!(report.frame_time.count, 0);
+            assert_eq!(report.config.window_count, 9);
+        }
+    }
+
+    #[test]
+    fn window_count_restart_captures_the_new_first_measured_inventory() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(1, 0);
+        harness.finish_frame(10_000, |frame| frame.record_window_count(3));
+        assert_eq!(harness.generate_report().config.window_count, 3);
+        harness.start(2, 1);
+        harness.bench_config.window_count = 9;
+        harness.finish_frame(10_000, |frame| frame.record_window_count(8));
+        assert_eq!(harness.generate_report().config.window_count, 9);
+        harness.finish_frame(10_000, |frame| frame.record_window_count(4));
+        harness.finish_frame(10_000, |frame| frame.record_window_count(7));
+        assert_eq!(harness.generate_report().config.window_count, 4);
+    }
+
+    #[test]
+    fn window_count_ignores_inactive_calls_and_survives_a_refused_restart() {
+        let mut harness = BenchmarkHarness::new();
+        harness.bench_config.window_count = 9;
+        harness.record_window_count(1);
+        assert_eq!(harness.generate_report().config.window_count, 9);
+        harness.start(2, 1);
+        harness.record_window_count(2);
+        assert_eq!(harness.generate_report().config.window_count, 9);
+        harness.finish_frame(10_000, |_| {});
+        harness.finish_frame(10_000, |frame| frame.record_window_count(3));
+        assert!(harness.try_start(0, 0).is_err());
+        harness.finish_frame(10_000, |frame| frame.record_window_count(4));
+        harness.record_window_count(5);
+        assert_eq!(harness.generate_report().config.window_count, 3);
+        harness.stop();
+        harness.record_window_count(6);
+        assert_eq!(harness.generate_report().config.window_count, 3);
     }
 }

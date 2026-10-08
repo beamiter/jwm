@@ -5145,11 +5145,13 @@ impl WaylandCompositor {
         // =================================================================
         let frame_ms = self.frame_profiler.end_frame();
         if let Some(start) = bench_frame_start {
-            self.benchmark
-                .record_frame(start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
-            for (zone, stats) in self.frame_profiler.all_zone_stats() {
-                self.benchmark.record_zone(zone, stats.avg_ms);
-            }
+            let frame_us = start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            self.benchmark.finish_frame(frame_us, |benchmark| {
+                benchmark.record_window_count(self.windows.len());
+                for (zone, stats) in self.frame_profiler.all_zone_stats() {
+                    benchmark.record_zone(zone, stats.avg_ms);
+                }
+            });
         }
         self.perf_metrics
             .record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));

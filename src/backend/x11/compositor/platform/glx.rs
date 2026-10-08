@@ -50,6 +50,7 @@ pub(super) struct GlxPlatform {
     context: x11::glx::GLXContext,
     drawable: x11::glx::GLXDrawable,
     buffer_age_supported: bool,
+    oml_sync_supported: bool,
     tfp: TfpFunctions,
     fbconfig_rgba: x11::glx::GLXFBConfig,
     fbconfig_rgb: x11::glx::GLXFBConfig,
@@ -78,6 +79,7 @@ impl GlxPlatform {
             return Err("GLX_EXT_texture_from_pixmap not available".into());
         }
         let buffer_age_supported = has_glx_extension(ext_str, "GLX_EXT_buffer_age");
+        let oml_sync_supported = has_glx_extension(ext_str, "GLX_OML_sync_control");
         log::info!("compositor: GLX extensions: {ext_str}");
         log::info!("compositor: GLX partial redraw buffer_age={buffer_age_supported}");
 
@@ -165,6 +167,7 @@ impl GlxPlatform {
             context,
             drawable,
             buffer_age_supported,
+            oml_sync_supported,
             tfp,
             fbconfig_rgba,
             fbconfig_rgb,
@@ -210,6 +213,12 @@ impl GlxPlatform {
     /// sync manager. Symbol resolution stays in this adapter; the manager only
     /// receives ready function pointers.
     pub(super) fn load_oml(&self, display: *mut x11::xlib::Display) -> Option<OmlSyncControl> {
+        // GLX entry points are context-independent. A non-null symbol alone
+        // does not establish support on this display/screen (Mesa can export
+        // OML stubs even when the server does not advertise the extension).
+        if !self.oml_sync_supported {
+            return None;
+        }
         let get_sync_values = glx_proc("glXGetSyncValuesOML");
         let wait_for_msc = glx_proc("glXWaitForMscOML");
         let swap_buffers_msc = glx_proc("glXSwapBuffersMscOML");
@@ -612,6 +621,19 @@ mod tests {
         assert_eq!(map.get(&argb_visual), Some(&(rgba_32, true)));
         // Without a known depth there is no evidence of real alpha.
         assert_eq!(map.get(&odd_visual), Some(&(rgb_unknown, false)));
+    }
+
+    #[test]
+    fn oml_sync_requires_an_exact_advertised_extension() {
+        assert!(!has_glx_extension("", "GLX_OML_sync_control"));
+        assert!(!has_glx_extension(
+            "GLX_OML_sync_control_extra GLX_ARB_get_proc_address",
+            "GLX_OML_sync_control"
+        ));
+        assert!(has_glx_extension(
+            "GLX_EXT_buffer_age GLX_OML_sync_control GLX_EXT_texture_from_pixmap",
+            "GLX_OML_sync_control"
+        ));
     }
 
     #[test]

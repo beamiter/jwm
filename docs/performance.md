@@ -106,6 +106,18 @@ recording switched it on, whether or not the benchmark then started.
 
 ### Workload sensitivity
 
+The raw compositor benchmark report's `config.window_count` is the tracked
+window inventory at the end of the first measured frame, after warmup. X11 and
+`wayland-udev` capture it at that boundary so clients imported after benchmark
+startup are included. If a run is stopped with `frame_time.count == 0`, the
+field retains the inventory snapshot from benchmark start. It is neither the
+number of visible or drawn windows nor an average over the run; hidden,
+auxiliary or retained closing-window entries may be tracked too. Later window
+changes do not update it, so keep the workload stable when comparing runs.
+Older reports captured the inventory only at benchmark start and can therefore
+under-count startup clients. Correcting this metadata is not a performance
+improvement; the report schema and comparison budgets are unchanged.
+
 `steady_frame`, `damage_redraw`, and `allocation_steady` measure whatever
 damage the desktop produced during the window. Two recordings taken minutes
 apart can differ wildly (an idle desktop renders frames in bursts; a 60 Hz
