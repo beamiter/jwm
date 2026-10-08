@@ -40,6 +40,7 @@ pub struct WindowTypeAtoms<A> {
     pub tooltip: A,
     pub notification: A,
     pub combo: A,
+    pub dnd: A,
 }
 
 #[derive(Clone, Copy)]
@@ -237,6 +238,8 @@ pub fn window_type_from_atom<A: Copy + Eq>(atom: A, atoms: WindowTypeAtoms<A>) -
         WindowType::Notification
     } else if atom == atoms.combo {
         WindowType::Combo
+    } else if atom == atoms.dnd {
+        WindowType::Dnd
     } else {
         WindowType::Unknown
     }
@@ -1819,6 +1822,46 @@ mod tests {
             false,
             None,
         )
+    }
+
+    #[test]
+    fn window_type_decoder_keeps_drag_icons_distinct_from_dialogs() {
+        use super::{WindowTypeAtoms, window_type_from_atom};
+        use crate::backend::api::WindowType;
+
+        let atoms = WindowTypeAtoms {
+            desktop: 1,
+            dock: 2,
+            toolbar: 3,
+            menu: 4,
+            utility: 5,
+            splash: 6,
+            dialog: 7,
+            dropdown_menu: 8,
+            popup_menu: 9,
+            tooltip: 10,
+            notification: 11,
+            combo: 12,
+            dnd: 13,
+        };
+        for (atom, expected) in [
+            (1, WindowType::Desktop),
+            (2, WindowType::Dock),
+            (3, WindowType::Toolbar),
+            (4, WindowType::Menu),
+            (5, WindowType::Utility),
+            (6, WindowType::Splash),
+            (7, WindowType::Dialog),
+            (8, WindowType::DropdownMenu),
+            (9, WindowType::PopupMenu),
+            (10, WindowType::Tooltip),
+            (11, WindowType::Notification),
+            (12, WindowType::Combo),
+            (13, WindowType::Dnd),
+            (99, WindowType::Unknown),
+        ] {
+            assert_eq!(window_type_from_atom(atom, atoms), expected);
+        }
     }
 
     #[test]

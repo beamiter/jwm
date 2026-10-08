@@ -5218,6 +5218,7 @@ mod property_ops {
                 tooltip: self.atoms._NET_WM_WINDOW_TYPE_TOOLTIP,
                 notification: self.atoms._NET_WM_WINDOW_TYPE_NOTIFICATION,
                 combo: self.atoms._NET_WM_WINDOW_TYPE_COMBO,
+                dnd: self.atoms._NET_WM_WINDOW_TYPE_DND,
             }
         }
 

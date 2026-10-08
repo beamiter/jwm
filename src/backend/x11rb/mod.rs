@@ -60,6 +60,7 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
         _NET_WM_WINDOW_TYPE_TOOLTIP,
         _NET_WM_WINDOW_TYPE_COMBO,
+        _NET_WM_WINDOW_TYPE_DND,
         _NET_WM_WINDOW_TYPE_NOTIFICATION,
 
         // Phase 1: EWMH compliance

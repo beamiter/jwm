@@ -134,6 +134,7 @@ struct XcbAtoms {
     net_wm_window_type_dropdown_menu: x::Atom,
     net_wm_window_type_tooltip: x::Atom,
     net_wm_window_type_combo: x::Atom,
+    net_wm_window_type_dnd: x::Atom,
     net_wm_window_type_notification: x::Atom,
     net_client_list: x::Atom,
     net_client_list_stacking: x::Atom,
@@ -240,6 +241,7 @@ impl XcbAtoms {
             )?,
             net_wm_window_type_tooltip: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_TOOLTIP")?,
             net_wm_window_type_combo: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_COMBO")?,
+            net_wm_window_type_dnd: Self::intern(conn, b"_NET_WM_WINDOW_TYPE_DND")?,
             net_wm_window_type_notification: Self::intern(
                 conn,
                 b"_NET_WM_WINDOW_TYPE_NOTIFICATION",
@@ -322,6 +324,7 @@ impl XcbAtoms {
             tooltip: self.net_wm_window_type_tooltip,
             notification: self.net_wm_window_type_notification,
             combo: self.net_wm_window_type_combo,
+            dnd: self.net_wm_window_type_dnd,
         }
     }
 

@@ -504,18 +504,14 @@ impl Jwm {
                     false
                 } else {
                     let types = backend.property_ops().get_window_types(c.win);
-                    let is_transient = backend.property_ops().transient_for(c.win).is_some();
-
-                    // Transient 窗口（用户交互触发的子窗口）应获得焦点
-                    if is_transient {
-                        true
-                    } else {
-                        let is_no_auto_focus = types.contains(&WindowType::Tooltip)
-                            || types.contains(&WindowType::Notification)
-                            || types.contains(&WindowType::Dnd)
-                            || types.contains(&WindowType::Combo);
-                        !is_no_auto_focus
-                    }
+                    // A transient parent associates the popup with a client;
+                    // it does not make a tooltip/notification an activation
+                    // request. Dialogs and other interactive popups still focus.
+                    let is_no_auto_focus = types.contains(&WindowType::Tooltip)
+                        || types.contains(&WindowType::Notification)
+                        || types.contains(&WindowType::Dnd)
+                        || types.contains(&WindowType::Combo);
+                    !is_no_auto_focus
                 }
             } else {
                 false
@@ -524,10 +520,12 @@ impl Jwm {
             if should_focus_this {
                 self.focus(backend, Some(client_key))?;
             } else {
-                if let Some(pk) = parent_key_opt {
-                    let _ = self.set_client_focus_by_key(backend, pk);
-                } else if let Some(prev_sel) = current_sel {
-                    let _ = self.set_client_focus_by_key(backend, prev_sel);
+                // Preserve the actual selection. Focusing a background parent
+                // first can briefly redirect keyboard input before FocusIn
+                // reconciliation restores the selected client. Use the full
+                // focus path so its stack reorder also restores monitor.sel.
+                if let Some(prev_sel) = current_sel {
+                    let _ = self.focus(backend, Some(prev_sel));
                 } else {
                     let _ = self.set_root_focus(backend);
                 }
@@ -559,7 +557,7 @@ impl Jwm {
                 self.focus(backend, Some(client_key))?;
             } else {
                 if let Some(prev_sel) = current_sel {
-                    let _ = self.set_client_focus_by_key(backend, prev_sel);
+                    let _ = self.focus(backend, Some(prev_sel));
                 } else {
                     let _ = self.set_root_focus(backend);
                 }
@@ -581,7 +579,7 @@ impl Jwm {
             }
         } else {
             if let Some(prev_sel) = current_sel {
-                let _ = self.set_client_focus_by_key(backend, prev_sel);
+                let _ = self.focus(backend, Some(prev_sel));
             } else {
                 let _ = self.set_root_focus(backend);
             }
@@ -2333,6 +2331,8 @@ mod unmanage_minimized_tests {
         dock_type: AtomicBool,
         /// Report `_NET_WM_WINDOW_TYPE_DIALOG` (a floating type) instead of Normal.
         dialog_type: AtomicBool,
+        popup_properties:
+            Mutex<std::collections::HashMap<WindowId, (WindowType, Option<WindowId>)>>,
         /// Pre-map `_NET_WM_STATE_MAXIMIZED_VERT` / `_HORZ` atoms.
         maximized_vert: AtomicBool,
         maximized_horz: AtomicBool,
@@ -2366,7 +2366,15 @@ mod unmanage_minimized_tests {
             self.class.lock().expect("class lock").clone()
         }
 
-        fn get_window_types(&self, _win: WindowId) -> Vec<WindowType> {
+        fn get_window_types(&self, win: WindowId) -> Vec<WindowType> {
+            if let Some((kind, _)) = self
+                .popup_properties
+                .lock()
+                .expect("popup properties")
+                .get(&win)
+            {
+                return vec![*kind];
+            }
             if self.dock_type.load(Ordering::Relaxed) {
                 vec![WindowType::Dock]
             } else if self.dialog_type.load(Ordering::Relaxed) {
@@ -2401,8 +2409,12 @@ mod unmanage_minimized_tests {
             Ok(())
         }
 
-        fn transient_for(&self, _win: WindowId) -> Option<WindowId> {
-            None
+        fn transient_for(&self, win: WindowId) -> Option<WindowId> {
+            self.popup_properties
+                .lock()
+                .expect("popup properties")
+                .get(&win)
+                .and_then(|(_, parent)| *parent)
         }
 
         fn get_wm_hints(&self, _win: WindowId) -> Option<WmHints> {
@@ -2870,6 +2882,7 @@ mod unmanage_minimized_tests {
     }
 
     struct ClientSpyBackend {
+        focus_changes: Vec<Option<WindowId>>,
         window_ops: ClientWindowOps,
         input_ops: DummyInputOps,
         property_ops: ClientPropertyOps,
@@ -2893,6 +2906,7 @@ mod unmanage_minimized_tests {
     impl ClientSpyBackend {
         fn new() -> Self {
             Self {
+                focus_changes: Vec::new(),
                 window_ops: ClientWindowOps::default(),
                 input_ops: DummyInputOps,
                 property_ops: ClientPropertyOps::default(),
@@ -3006,6 +3020,11 @@ mod unmanage_minimized_tests {
     }
 
     impl Backend for ClientSpyBackend {
+        fn on_focused_client_changed(&mut self, win: Option<WindowId>) -> Result<(), BackendError> {
+            self.focus_changes.push(win);
+            Ok(())
+        }
+
         fn capabilities(&self) -> Capabilities {
             Capabilities {
                 supports_client_list: self.supports_client_list,
@@ -3063,6 +3082,107 @@ mod unmanage_minimized_tests {
         ) -> Result<(), BackendError> {
             Ok(())
         }
+    }
+
+    fn popup_focus_fixture(
+        kind: WindowType,
+        has_parent: bool,
+        accepts_input: bool,
+    ) -> (Jwm, ClientSpyBackend, ClientKey, ClientKey) {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let parent = manage_window(&mut jwm, &mut backend, 0xf001);
+        let foreground = manage_window(&mut jwm, &mut backend, 0xf002);
+        assert_eq!(jwm.get_selected_client_key(), Some(foreground));
+        let monitor = jwm.state.clients[foreground].mon.unwrap();
+        let window = WindowId::from_raw(0xf003);
+        backend
+            .property_ops
+            .popup_properties
+            .lock()
+            .expect("popup properties")
+            .insert(
+                window,
+                (kind, has_parent.then_some(jwm.state.clients[parent].win)),
+            );
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.never_focus = !accepts_input;
+        client.state.is_floating = true;
+        client.geometry.w = 180;
+        client.geometry.h = 80;
+        let popup = jwm.insert_client(client);
+        // Use the same attachment path as manage_regular_client, which
+        // preserves the current selection until focus policy runs.
+        jwm.attach_new_client(popup);
+        jwm.attachstack(popup);
+        assert_eq!(jwm.get_selected_client_key(), Some(foreground));
+        backend.focus_changes.clear();
+        (jwm, backend, foreground, popup)
+    }
+
+    #[test]
+    fn passive_popup_mapping_never_redirects_focus_to_its_parent_or_itself() {
+        for kind in [
+            WindowType::Tooltip,
+            WindowType::Notification,
+            WindowType::Dnd,
+            WindowType::Combo,
+        ] {
+            for has_parent in [false, true] {
+                for accepts_input in [false, true] {
+                    let (mut jwm, mut backend, foreground, popup) =
+                        popup_focus_fixture(kind, has_parent, accepts_input);
+                    let expected = jwm.state.clients[foreground].win;
+                    jwm.handle_new_client_focus(&mut backend, popup).unwrap();
+                    assert_eq!(jwm.get_selected_client_key(), Some(foreground));
+                    assert_eq!(
+                        backend.focus_changes,
+                        vec![Some(expected)],
+                        "{kind:?}, parent={has_parent}, input={accepts_input}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_dialog_focus_and_no_input_dialog_guards_remain_intact() {
+        for accepts_input in [false, true] {
+            let (mut jwm, mut backend, foreground, popup) =
+                popup_focus_fixture(WindowType::Dialog, true, accepts_input);
+            let expected = if accepts_input { popup } else { foreground };
+            jwm.handle_new_client_focus(&mut backend, popup).unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(expected));
+            assert_eq!(
+                backend.focus_changes,
+                vec![Some(jwm.state.clients[expected].win)]
+            );
+        }
+    }
+
+    #[test]
+    fn normal_no_input_mapping_preserves_foreground_selection() {
+        let (mut jwm, mut backend, foreground, window) =
+            popup_focus_fixture(WindowType::Normal, false, false);
+        jwm.handle_new_client_focus(&mut backend, window).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(foreground));
+        assert_eq!(
+            backend.focus_changes,
+            vec![Some(jwm.state.clients[foreground].win)]
+        );
+    }
+
+    #[test]
+    fn passive_popup_without_a_selection_keeps_root_focus() {
+        let (mut jwm, mut backend, foreground, popup) =
+            popup_focus_fixture(WindowType::Tooltip, true, true);
+        let monitor = jwm.state.clients[foreground].mon.unwrap();
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(None);
+        jwm.handle_new_client_focus(&mut backend, popup).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), None);
+        assert_eq!(backend.focus_changes, vec![None]);
     }
 
     fn add_minimized_client(jwm: &mut Jwm, window: WindowId) -> (ClientKey, MonitorKey, i32) {
