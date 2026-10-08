@@ -964,7 +964,9 @@ pub fn net_wm_sync_request_message(protocol: u32, timestamp: u32, value: u64) ->
 }
 
 pub fn parse_wm_class(raw: &[u8]) -> (String, String) {
-    let mut parts = raw.split(|&b| b == 0).filter(|part| !part.is_empty());
+    // ICCCM defines positional instance/class strings. Empty fields still
+    // occupy their slot; filtering them would turn a class into an instance.
+    let mut parts = raw.split(|&b| b == 0);
     (
         decode_x11_string(parts.next().unwrap_or_default()).to_lowercase(),
         decode_x11_string(parts.next().unwrap_or_default()).to_lowercase(),
@@ -1825,6 +1827,43 @@ mod tests {
             parse_wm_class(b"XTerm\0UXTerm\0"),
             ("xterm".to_string(), "uxterm".to_string())
         );
+    }
+
+    #[test]
+    fn wm_class_preserves_empty_field_positions() {
+        let cases: &[(&[u8], &str, &str)] = &[
+            (
+                b"\0io.github.beamiter.ember\0",
+                "",
+                "io.github.beamiter.ember",
+            ),
+            (b"Instance\0\0", "instance", ""),
+            (b"\0\0Reserved\0", "", ""),
+            (b"Instance\0\0Reserved\0", "instance", ""),
+            (b"", "", ""),
+            (b"\0", "", ""),
+        ];
+        for &(raw, instance, class) in cases {
+            assert_eq!(
+                parse_wm_class(raw),
+                (instance.to_owned(), class.to_owned()),
+                "WM_CLASS field positions changed for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wm_class_keeps_decoding_and_partial_property_tolerance() {
+        let cases: &[(&[u8], &str, &str)] = &[
+            ("InstÄnce\0ClÄss\0".as_bytes(), "instänce", "cläss"),
+            (b"INST\xc4NCE\0CL\xc4SS\0", "instänce", "cläss"),
+            (b"App\0Class", "app", "class"),
+            (b"App", "app", ""),
+            (b"App\0Class\0Extra\0", "app", "class"),
+        ];
+        for &(raw, instance, class) in cases {
+            assert_eq!(parse_wm_class(raw), (instance.to_owned(), class.to_owned()));
+        }
     }
 
     #[test]
