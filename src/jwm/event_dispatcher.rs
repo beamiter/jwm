@@ -5142,6 +5142,114 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_annotation_click_does_not_arm_veil_confirmation() {
+        use crate::core::types::Rect;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(100, 100, 200, 150));
+
+        // A dot drawn just inside the crop and a nearby single veil click
+        // are different actions, not a double-click to finish the capture.
+        capture_press(&mut jwm, &mut backend, 102.0, 180.0);
+        capture_release(&mut jwm, &mut backend, 102.0, 180.0);
+        capture_press(&mut jwm, &mut backend, 98.0, 180.0);
+        capture_release(&mut jwm, &mut backend, 98.0, 180.0);
+        assert!(jwm.features.screenshot.active);
+        assert!(jwm.features.screenshot.committed);
+
+        // A second consecutive veil click still confirms as advertised.
+        capture_press(&mut jwm, &mut backend, 98.0, 180.0);
+        assert!(!jwm.features.screenshot.active);
+    }
+
+    #[test]
+    fn screenshot_veil_confirmation_resets_after_other_actions() {
+        use crate::core::types::Rect;
+        for action in ["annotation", "wheel", "source", "toolbar"] {
+            let mut jwm = empty_jwm();
+            let mut backend = RenderSpyBackend::new();
+            jwm.features.screenshot.start();
+            jwm.features
+                .screenshot
+                .select_rect(Rect::new(100, 100, 200, 150));
+            capture_press(&mut jwm, &mut backend, 98.0, 180.0);
+            capture_release(&mut jwm, &mut backend, 98.0, 180.0);
+
+            match action {
+                "annotation" => {
+                    capture_press(&mut jwm, &mut backend, 102.0, 180.0);
+                    capture_release(&mut jwm, &mut backend, 102.0, 180.0);
+                }
+                "wheel" => {
+                    <Jwm as WMController>::on_button_press(
+                        &mut jwm,
+                        &mut backend,
+                        HitTarget::Background { output: None },
+                        0,
+                        4,
+                        1000,
+                    );
+                    capture_release(&mut jwm, &mut backend, 98.0, 180.0);
+                }
+                "source" => {
+                    jwm.set_screenshot_capture_target(&mut backend, CaptureTarget::Region);
+                    jwm.features
+                        .screenshot
+                        .select_rect(Rect::new(100, 100, 200, 150));
+                }
+                "toolbar" => {
+                    use crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar;
+                    jwm.features.screenshot.toolbar = Some(ScreenshotToolbar {
+                        bar: [90.0, 170.0, 20.0, 20.0],
+                        button_size: 16.0,
+                        buttons: Vec::new(),
+                        hover_ease: Default::default(),
+                    });
+                    capture_press(&mut jwm, &mut backend, 98.0, 180.0);
+                    capture_release(&mut jwm, &mut backend, 98.0, 180.0);
+                    jwm.features.screenshot.toolbar = None;
+                }
+                _ => unreachable!(),
+            }
+
+            capture_press(&mut jwm, &mut backend, 98.0, 180.0);
+            capture_release(&mut jwm, &mut backend, 98.0, 180.0);
+            assert!(jwm.features.screenshot.active, "after {action}");
+            capture_press(&mut jwm, &mut backend, 98.0, 180.0);
+            assert!(!jwm.features.screenshot.active, "after {action}");
+        }
+    }
+
+    #[test]
+    fn recording_source_change_starts_a_new_confirmation_gesture() {
+        use crate::core::types::Rect;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        jwm.features.recording.active = true;
+        jwm.features
+            .recording
+            .set_region(Rect::new(100, 100, 200, 150));
+        assert!(jwm.features.recording.begin_region_adjustment());
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        capture_release(&mut jwm, &mut backend, 180.0, 160.0);
+
+        jwm.set_recording_capture_target(&mut backend, CaptureTarget::Desktop);
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        capture_release(&mut jwm, &mut backend, 180.0, 160.0);
+        assert!(jwm.features.recording.selecting_region);
+        assert!(jwm.features.recording.adjusting_region);
+
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        assert!(!jwm.features.recording.selecting_region);
+        assert!(jwm.features.recording.active);
+    }
+
+    #[test]
     fn capture_screenshot_uses_button_endpoints_in_every_drag_direction() {
         use crate::core::types::Rect;
         // No motion is delivered: button events alone must retain the actual

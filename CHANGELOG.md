@@ -2404,6 +2404,16 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Changing a recording capture source resets double-click confirmation, so a
+  click used on the previous source cannot unexpectedly finish the new one.
+- X11 snap and capture previews no longer restart their fades on repeated
+  pointer updates. Reversing a fade preserves its current opacity instead of
+  flashing fully visible or disappearing.
+- Screenshot veil confirmation now requires consecutive clicks on the veil.
+  Drawing near a crop edge, changing stroke width, using the toolbar, or
+  changing capture source no longer arms an accidental save on the next
+  nearby veil click.
+
 - Screenshot and recording region drags keep receiving continuous X11RB
   motion after the selection cursor changes. Button events preserve their
   exact root coordinates across every backend, so fast and reverse drags

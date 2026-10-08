@@ -21,6 +21,8 @@ pub struct SnapPreview {
     pub w: f32,
     pub h: f32,
     pub opacity: f32,
+    /// Opacity sampled when the current visibility transition began.
+    pub start_opacity: f32,
     pub start: std::time::Instant,
     pub fading_out: bool,
 }

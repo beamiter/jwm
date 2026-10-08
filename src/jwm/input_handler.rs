@@ -3378,6 +3378,7 @@ impl Jwm {
             // losing a half-annotated selection to a stray scroll was a nasty
             // way to find out otherwise.
             if self.features.screenshot.committed && matches!(btn, MouseButton::Other(4 | 5)) {
+                self.features.capture.clear_confirm_double_click();
                 self.features.capture.swallow_next_button_release();
                 if btn == MouseButton::Other(4) {
                     self.features.screenshot.increase_line_width();
@@ -3399,6 +3400,7 @@ impl Jwm {
                 && self.features.screenshot.committed
                 && self.screenshot_toolbar_contains(px, py)
             {
+                self.features.capture.clear_confirm_double_click();
                 self.features.capture.swallow_next_button_release();
                 if let Some(command) = self
                     .screenshot_toolbar_hit(px, py)
@@ -3419,13 +3421,13 @@ impl Jwm {
                     .is_none_or(|rect| {
                         !crate::jwm::features::capture::rect_contains_point(rect, xi, yi)
                     });
-                let double_click = self
-                    .features
-                    .capture
-                    .note_confirm_double_click(time, xi, yi);
                 // Double-click the dimmed veil (outside the crop) to save —
                 // keeps drawing tools free of an accidental double-tap save.
                 if outside {
+                    let double_click = self
+                        .features
+                        .capture
+                        .note_confirm_double_click(time, xi, yi);
                     if double_click {
                         self.features.capture.swallow_next_button_release();
                         self.finish_screenshot_select(backend, false);
@@ -3436,6 +3438,9 @@ impl Jwm {
                     }
                     return Ok(());
                 }
+                // Ink clicks and veil clicks are distinct gestures, even
+                // when both land within the double-click slop at a crop edge.
+                self.features.capture.clear_confirm_double_click();
                 let (x, y) = (px, py);
                 self.features
                     .screenshot

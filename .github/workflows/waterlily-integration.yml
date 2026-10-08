@@ -177,7 +177,10 @@ jobs:
           compat_project="$RUNNER_TEMP/waterlily-julia-1.10"
           cp -R waterlily "$compat_project"
           rm -f -- "$compat_project/Manifest.toml"
+          # With no manifest, instantiate resolves the compatibility project
+          # and bootstraps General on a cold depot. resolve alone assumes the
+          # registry already exists and fails before installing dependencies.
           julia --startup-file=no --project="$compat_project" -e \
-            'using Pkg; Pkg.resolve(); Pkg.instantiate(); Pkg.test()'
+            'using Pkg; Pkg.instantiate(); Pkg.test()'
           git diff --exit-code -- \
             waterlily/Project.toml waterlily/Manifest.toml

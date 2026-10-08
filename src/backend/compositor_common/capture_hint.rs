@@ -15,15 +15,19 @@ pub(crate) const HINT_TITLE_MAX_CHARS: usize = 28;
 #[must_use]
 pub(crate) fn truncate_hint_title(title: &str) -> String {
     let trimmed = title.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let count = trimmed.chars().count();
-    if count <= HINT_TITLE_MAX_CHARS {
+    if trimmed.len() <= HINT_TITLE_MAX_CHARS {
         return trimmed.to_string();
     }
-    let keep = HINT_TITLE_MAX_CHARS.saturating_sub(1);
-    let mut out: String = trimmed.chars().take(keep).collect();
+    // Probe only the visible prefix. Application titles can be much longer
+    // than this chip, and pointer motion calls this path repeatedly.
+    let mut chars = trimmed.char_indices();
+    let Some((boundary, _)) = chars.nth(HINT_TITLE_MAX_CHARS - 1) else {
+        return trimmed.to_string();
+    };
+    if chars.next().is_none() {
+        return trimmed.to_string();
+    }
+    let mut out = trimmed[..boundary].to_string();
     out.push('…');
     out
 }
@@ -174,6 +178,25 @@ mod tests {
         let truncated = truncate_hint_title(&long);
         assert_eq!(truncated.chars().count(), HINT_TITLE_MAX_CHARS);
         assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn bounded_title_prefix_preserves_unicode_and_boundary_behavior() {
+        for unit in ["a", "界", "🦀", "e\u{301}"] {
+            for length in [0, 1, 26, 27, 28, 29, 64, 4096] {
+                let title = format!(" \t{}\n ", unit.repeat(length));
+                let trimmed = title.trim();
+                let expected = if trimmed.chars().count() <= HINT_TITLE_MAX_CHARS {
+                    trimmed.to_string()
+                } else {
+                    let mut prefix: String =
+                        trimmed.chars().take(HINT_TITLE_MAX_CHARS - 1).collect();
+                    prefix.push('…');
+                    prefix
+                };
+                assert_eq!(truncate_hint_title(&title), expected);
+            }
+        }
     }
 
     #[test]

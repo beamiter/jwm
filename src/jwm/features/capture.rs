@@ -365,7 +365,6 @@ impl Jwm {
         use crate::backend::compositor_common::capture_hint::capture_hint_label;
 
         let probe = self.probed_capture_hint_title(self.last_mouse_root);
-        let probe = probe.as_deref();
 
         if self.features.screenshot.active && !self.features.screenshot.committed {
             let label =
@@ -394,19 +393,15 @@ impl Jwm {
     }
 
     /// Soft-probed window title (or class) for the selection hint chip.
-    fn probed_capture_hint_title(&self, pointer: (f64, f64)) -> Option<String> {
+    fn probed_capture_hint_title(&self, pointer: (f64, f64)) -> Option<&str> {
         let client_key = self.capture_client_at_pointer(pointer)?;
         let client = self.state.clients.get(client_key)?;
         let name = client.name.trim();
         if !name.is_empty() {
-            return Some(name.to_string());
+            return Some(name);
         }
         let class = client.class.trim();
-        if class.is_empty() {
-            None
-        } else {
-            Some(class.to_string())
-        }
+        if class.is_empty() { None } else { Some(class) }
     }
 
     /// Apply a cursor through both the soft set_cursor path and the active
@@ -552,6 +547,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         target: CaptureTarget,
     ) {
+        self.features.capture.clear_confirm_double_click();
         self.features.capture.screenshot = target;
         self.features.screenshot.reset_selection();
         // Switching source drops the selection, so the strip that belonged to
@@ -677,6 +673,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         target: CaptureTarget,
     ) {
+        self.features.capture.clear_recording_double_click();
         self.features.capture.recording = target;
         self.features.recording.end_region_drag();
 

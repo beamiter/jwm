@@ -109,6 +109,7 @@ jobs:
             libxrandr-dev \
             libxrender-dev \
             xauth \
+            xwayland \
             xvfb
 
       - name: Install stable Rust

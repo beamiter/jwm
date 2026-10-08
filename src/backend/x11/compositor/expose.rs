@@ -489,37 +489,12 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
 
-        match preview {
-            Some((x, y, w, h)) => {
-                if let Some(ref mut sp) = self.snap_target {
-                    // Update existing preview position
-                    sp.x = x;
-                    sp.y = y;
-                    sp.w = w;
-                    sp.h = h;
-                    sp.fading_out = false;
-                    if sp.opacity < 0.01 {
-                        sp.start = std::time::Instant::now();
-                    }
-                } else {
-                    self.snap_target = Some(SnapPreview {
-                        x,
-                        y,
-                        w,
-                        h,
-                        opacity: 0.0,
-                        start: std::time::Instant::now(),
-                        fading_out: false,
-                    });
-                }
-            }
-            None => {
-                if let Some(ref mut sp) = self.snap_target {
-                    sp.fading_out = true;
-                    sp.start = std::time::Instant::now();
-                }
-            }
-        }
+        update_snap_preview_state(
+            &mut self.snap_target,
+            preview,
+            std::time::Instant::now(),
+            self.snap_animation_duration_ms.max(1) as f32,
+        );
         self.needs_render = true;
     }
 
@@ -529,7 +504,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(ref mut sp) = self.snap_target {
             let elapsed = sp.start.elapsed().as_millis() as f32;
             let (opacity, still_animating) =
-                snap_preview_animation_state(elapsed, duration_ms, sp.fading_out);
+                snap_preview_animation_state(elapsed, duration_ms, sp.fading_out, sp.start_opacity);
             sp.opacity = opacity;
             if sp.fading_out {
                 if !still_animating {
@@ -1333,20 +1308,116 @@ fn tab_hover_for_pointer(
     window_tabs::tab_hover_at(groups, x, y)
 }
 
+/// Retarget only on a visibility change. Pointer motion can publish the same
+/// request many times between frames; it must not restart the fade clock.
+fn update_snap_preview_state(
+    state: &mut Option<SnapPreview>,
+    preview: Option<(f32, f32, f32, f32)>,
+    now: std::time::Instant,
+    duration_ms: f32,
+) {
+    let Some(sp) = state.as_mut() else {
+        if let Some((x, y, w, h)) = preview {
+            *state = Some(SnapPreview {
+                x,
+                y,
+                w,
+                h,
+                opacity: 0.0,
+                start_opacity: 0.0,
+                start: now,
+                fading_out: false,
+            });
+        }
+        return;
+    };
+    if let Some((x, y, w, h)) = preview {
+        (sp.x, sp.y, sp.w, sp.h) = (x, y, w, h);
+    }
+    let fading_out = preview.is_none();
+    if sp.fading_out != fading_out {
+        // Sample the old fade at the transition time, including time elapsed
+        // since the last rendered frame, so reversing never jumps to 0 or 1.
+        let elapsed = now.saturating_duration_since(sp.start).as_secs_f32() * 1000.0;
+        sp.opacity =
+            snap_preview_animation_state(elapsed, duration_ms, sp.fading_out, sp.start_opacity).0;
+        sp.start_opacity = sp.opacity;
+        sp.start = now;
+        sp.fading_out = fading_out;
+    }
+}
+
 fn snap_preview_animation_state(
     elapsed_ms: f32,
     duration_ms: f32,
     fading_out: bool,
+    start_opacity: f32,
 ) -> (f32, bool) {
     let t = (elapsed_ms / duration_ms.max(1.0)).clamp(0.0, 1.0);
-    let opacity = if fading_out { 1.0 - t } else { t };
+    let target = if fading_out { 0.0 } else { 1.0 };
+    let opacity = start_opacity + (target - start_opacity) * t;
     (opacity, t < 1.0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TabGroup, snap_preview_animation_state, tab_hover_for_pointer};
+    use super::{
+        TabGroup, snap_preview_animation_state, tab_hover_for_pointer, update_snap_preview_state,
+    };
     use crate::backend::compositor_common::window_tabs::Tab;
+
+    #[test]
+    fn repeated_snap_preview_requests_do_not_restart_fades() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let rect = Some((0.0, 0.0, 100.0, 100.0));
+        let mut state = None;
+        update_snap_preview_state(&mut state, rect, now, 100.0);
+        update_snap_preview_state(&mut state, rect, now + Duration::from_millis(50), 100.0);
+        let sp = state.as_ref().unwrap();
+        assert_eq!(
+            sp.start, now,
+            "motion must not restart an unpainted fade-in"
+        );
+        assert_eq!(
+            snap_preview_animation_state(50.0, 100.0, false, sp.start_opacity),
+            (0.5, true)
+        );
+
+        let hide = now + Duration::from_millis(100);
+        update_snap_preview_state(&mut state, None, hide, 100.0);
+        update_snap_preview_state(&mut state, None, hide + Duration::from_millis(150), 100.0);
+        let sp = state.as_ref().unwrap();
+        assert_eq!(
+            sp.start, hide,
+            "empty-hover motion must not restart fade-out"
+        );
+        assert_eq!(
+            snap_preview_animation_state(150.0, 100.0, true, sp.start_opacity),
+            (0.0, false)
+        );
+    }
+
+    #[test]
+    fn reversing_snap_preview_fade_preserves_current_opacity() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let rect = Some((0.0, 0.0, 100.0, 100.0));
+        let mut state = None;
+        update_snap_preview_state(&mut state, rect, now, 100.0);
+        update_snap_preview_state(&mut state, None, now + Duration::from_millis(50), 100.0);
+        assert_eq!(state.as_ref().unwrap().start_opacity, 0.5);
+        let moved = Some((20.0, 30.0, 120.0, 130.0));
+        update_snap_preview_state(&mut state, moved, now + Duration::from_millis(70), 100.0);
+        let sp = state.as_ref().unwrap();
+        assert!((sp.start_opacity - 0.4).abs() < 0.0001);
+        assert_eq!((sp.x, sp.y, sp.w, sp.h), moved.unwrap());
+        assert!(!sp.fading_out);
+        let (opacity, animating) =
+            snap_preview_animation_state(50.0, 100.0, false, sp.start_opacity);
+        assert!((opacity - 0.7).abs() < 0.0001);
+        assert!(animating);
+    }
 
     fn strip_at(bar: [f32; 4]) -> Vec<TabGroup> {
         vec![TabGroup {
@@ -1395,24 +1466,27 @@ mod tests {
     #[test]
     fn snap_preview_stops_animating_at_steady_state() {
         assert_eq!(
-            snap_preview_animation_state(50.0, 100.0, false),
+            snap_preview_animation_state(50.0, 100.0, false, 0.0),
             (0.5, true)
         );
         assert_eq!(
-            snap_preview_animation_state(100.0, 100.0, false),
+            snap_preview_animation_state(100.0, 100.0, false, 0.0),
             (1.0, false)
         );
         assert_eq!(
-            snap_preview_animation_state(150.0, 100.0, false),
+            snap_preview_animation_state(150.0, 100.0, false, 0.0),
             (1.0, false)
         );
     }
 
     #[test]
     fn snap_preview_fade_out_finishes_transparent() {
-        assert_eq!(snap_preview_animation_state(50.0, 100.0, true), (0.5, true));
         assert_eq!(
-            snap_preview_animation_state(100.0, 100.0, true),
+            snap_preview_animation_state(50.0, 100.0, true, 1.0),
+            (0.5, true)
+        );
+        assert_eq!(
+            snap_preview_animation_state(100.0, 100.0, true, 1.0),
             (0.0, false)
         );
     }
