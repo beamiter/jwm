@@ -153,6 +153,120 @@ impl XvfbStartupGuard {
     fn finish(mut self) -> std::process::Child {
         self.0.take().expect("Xvfb startup child")
     }
+
+    fn terminate(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            Self::terminate_child(&mut child);
+        }
+    }
+
+    fn child_is_running(child: &std::process::Child) -> std::io::Result<bool> {
+        // WNOWAIT keeps even an exited group leader waitable. Its PID cannot
+        // be reused before terminate_child has signalled the owned group.
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    child.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result == 0 {
+                return Ok(unsafe { info.si_pid() } == 0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
+    fn terminate_child(child: &mut std::process::Child) {
+        // Fixture ownership is exclusive: no path reaps this private leader
+        // before cleanup. If exact-child observation fails, do not signal a
+        // numeric PID whose ownership we can no longer establish.
+        if let Err(error) = Self::child_is_running(child) {
+            if error.raw_os_error() != Some(libc::ECHILD) {
+                eprintln!(
+                    "cannot verify Xvfb fixture child {} for cleanup: {error}",
+                    child.id()
+                );
+            }
+            return;
+        }
+        // acquire() gives this fixture its own process group. Xvfb can spawn
+        // xkbcomp with stdout inherited, so clean the whole owned launch tree.
+        if let Ok(group) = i32::try_from(child.id())
+            && group > 0
+        {
+            let _ = unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn read_display_number(
+        stdout: &mut std::process::ChildStdout,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::{Error, ErrorKind, Read as _};
+        use std::os::fd::AsRawFd as _;
+
+        let deadline = std::time::Instant::now() + timeout;
+        let mut line = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "Xvfb displayfd readiness timeout",
+                ));
+            }
+            let mut fd = libc::pollfd {
+                fd: stdout.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout_ms = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut fd, 1, timeout_ms) };
+            if ready == 0 {
+                continue;
+            }
+            if ready < 0 {
+                let error = Error::last_os_error();
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            // This is the pipe's only reader. POLLIN/POLLHUP guarantees this
+            // single-byte read cannot wait on a helper retaining the writer.
+            let mut byte = [0u8; 1];
+            match stdout.read(&mut byte) {
+                Ok(0) => {
+                    return Err(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "Xvfb closed displayfd before reporting readiness",
+                    ));
+                }
+                Ok(_) if byte[0] == b'\n' => return Ok(line),
+                Ok(_) if line.len() < 16 => line.push(byte[0]),
+                Ok(_) => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "Xvfb display number exceeded 16 bytes",
+                    ));
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 #[cfg(all(
@@ -165,10 +279,7 @@ impl XvfbStartupGuard {
 ))]
 impl Drop for XvfbStartupGuard {
     fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.terminate();
     }
 }
 
@@ -183,6 +294,7 @@ impl Drop for XvfbStartupGuard {
 impl IsolatedXvfb {
     pub(crate) fn acquire() -> Self {
         use std::io::{Read as _, Write as _};
+        use std::os::unix::process::CommandExt as _;
         use std::process::Stdio;
 
         let lock = X11_CLIPBOARD_TEST_LOCK
@@ -211,6 +323,7 @@ impl IsolatedXvfb {
             // driver errors, and discarding stderr made recurring failures
             // impossible to diagnose from the test log.
             .stderr(Stdio::inherit())
+            .process_group(0)
             .spawn()
         {
             Ok(child) => child,
@@ -228,53 +341,27 @@ impl IsolatedXvfb {
             .stdout
             .take()
             .expect("piped Xvfb displayfd");
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let reader = std::thread::spawn(move || {
-            let mut line = Vec::new();
-            let result = loop {
-                let mut byte = [0u8; 1];
-                match stdout.read(&mut byte) {
-                    Ok(0) => break Err("Xvfb closed displayfd before reporting readiness".into()),
-                    Ok(_) if byte[0] == b'\n' => break Ok(line),
-                    Ok(_) if line.len() < 16 => line.push(byte[0]),
-                    Ok(_) => break Err("Xvfb display number exceeded 16 bytes".into()),
-                    Err(error) => break Err(format!("read Xvfb displayfd: {error}")),
-                }
-            };
-            let _ = sender.send(result);
-        });
         // Starting an external X server is not a clipboard latency check.
         // Cold CI runners can spend several seconds initializing Xvfb before
         // displayfd becomes ready. Keep that startup bounded independently
         // of the three-second X11 setup/clipboard protocol deadlines below.
         let startup_timeout = std::time::Duration::from_secs(15);
-        let reported = receiver.recv_timeout(startup_timeout);
-        if !matches!(reported, Ok(Ok(_))) {
-            let _ = startup.child_mut().kill();
-        }
-        let _ = reader.join();
-        let display_number = match reported {
-            Ok(Ok(number)) => number,
-            Ok(Err(error)) => {
-                let _ = startup.child_mut().wait();
-                panic!("Xvfb displayfd failed: {error}");
-            }
-            Err(error) => {
-                let _ = startup.child_mut().wait();
-                panic!("Xvfb did not report a display within {startup_timeout:?}: {error}");
-            }
-        };
+        let display_number =
+            match XvfbStartupGuard::read_display_number(&mut stdout, startup_timeout) {
+                Ok(number) => number,
+                Err(error) => {
+                    startup.terminate();
+                    panic!("Xvfb displayfd failed within {startup_timeout:?}: {error}");
+                }
+            };
         let display_number = std::str::from_utf8(&display_number)
             .expect("Xvfb display number is UTF-8")
             .trim()
             .parse::<u32>()
             .expect("Xvfb display number is numeric");
         assert!(
-            startup
-                .child_mut()
-                .try_wait()
-                .expect("query Xvfb child")
-                .is_none()
+            XvfbStartupGuard::child_is_running(startup.child_mut())
+                .expect("query Xvfb child without reaping")
         );
 
         let display = format!(":{display_number}");
@@ -303,11 +390,8 @@ impl IsolatedXvfb {
             .read_exact(&mut setup)
             .expect("read complete X11 setup");
         assert!(
-            startup
-                .child_mut()
-                .try_wait()
-                .expect("query Xvfb child")
-                .is_none()
+            XvfbStartupGuard::child_is_running(startup.child_mut())
+                .expect("query Xvfb child without reaping")
         );
         let child = startup.finish();
 
@@ -334,8 +418,125 @@ impl IsolatedXvfb {
 ))]
 impl Drop for IsolatedXvfb {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        XvfbStartupGuard::terminate_child(&mut self.child);
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
+mod xvfb_startup_tests {
+    use super::XvfbStartupGuard;
+    use std::io::ErrorKind;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn child(script: &str) -> Child {
+        let child = Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn owned fixture probe");
+        assert!(child.id() > 0);
+        assert_eq!(
+            unsafe { libc::getpgid(child.id() as i32) },
+            child.id() as i32
+        );
+        assert_ne!(child.id() as i32, unsafe { libc::getpgrp() });
+        child
+    }
+
+    #[test]
+    fn readiness_line_and_normal_cleanup_leave_other_groups_alive() {
+        let mut control = XvfbStartupGuard(Some(child("sleep 30")));
+        let mut server = XvfbStartupGuard(Some(child("printf '42\\n'; sleep 30")));
+        let mut stdout = server.child_mut().stdout.take().unwrap();
+        assert_eq!(
+            XvfbStartupGuard::read_display_number(&mut stdout, Duration::from_secs(2)).unwrap(),
+            b"42"
+        );
+        server.terminate();
+        assert!(server.0.is_none());
+        assert!(XvfbStartupGuard::child_is_running(control.child_mut()).unwrap());
+    }
+
+    #[test]
+    fn inherited_writer_cannot_extend_readiness_or_cleanup() {
+        let mut server = XvfbStartupGuard(Some(child("(sleep 30) & exit 23")));
+        let mut stdout = server.child_mut().stdout.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while XvfbStartupGuard::child_is_running(server.child_mut()).unwrap() {
+            assert!(Instant::now() < deadline, "probe leader did not exit");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // Observing an exited leader must not reap it before group cleanup.
+        assert!(!XvfbStartupGuard::child_is_running(server.child_mut()).unwrap());
+        assert_eq!(
+            XvfbStartupGuard::read_display_number(&mut stdout, Duration::from_millis(20))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::TimedOut
+        );
+        server.terminate();
+        assert!(server.0.is_none());
+        // The descendant no longer owns the writer: no reader thread or
+        // abandoned pipe can keep the fixture alive after cleanup.
+        assert_eq!(
+            XvfbStartupGuard::read_display_number(&mut stdout, Duration::from_secs(2))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn partial_readiness_line_still_obeys_the_deadline() {
+        let mut server = XvfbStartupGuard(Some(child("printf '4'; sleep 30")));
+        let mut stdout = server.child_mut().stdout.take().unwrap();
+        assert_eq!(
+            XvfbStartupGuard::read_display_number(&mut stdout, Duration::from_millis(20))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    fn early_exit_and_oversized_display_lines_remain_errors() {
+        for (script, expected) in [
+            ("exit 7", ErrorKind::UnexpectedEof),
+            (
+                "printf '12345678901234567'; sleep 30",
+                ErrorKind::InvalidData,
+            ),
+        ] {
+            let mut server = XvfbStartupGuard(Some(child(script)));
+            let mut stdout = server.child_mut().stdout.take().unwrap();
+            assert_eq!(
+                XvfbStartupGuard::read_display_number(&mut stdout, Duration::from_secs(2))
+                    .unwrap_err()
+                    .kind(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn non_waitable_leader_is_not_signalled() {
+        let mut child = child("exit 23");
+        assert_eq!(child.wait().unwrap().code(), Some(23));
+        assert!(XvfbStartupGuard::child_is_running(&child).is_err());
+        XvfbStartupGuard::terminate_child(&mut child);
+        assert_eq!(child.try_wait().unwrap().unwrap().code(), Some(23));
     }
 }
 
