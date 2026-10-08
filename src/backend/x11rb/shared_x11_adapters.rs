@@ -53,21 +53,7 @@ where
             "compositor: setting empty INPUT shape on overlay 0x{:x} to pass through input",
             overlay_window
         );
-        let region = self.generate_id().map_err(|e| format!("gen id: {e}"))?;
-        self.xfixes_create_region(region, &[])
-            .map_err(|e| format!("create_region: {e}"))?;
-        self.xfixes_set_window_shape_region(
-            overlay_window,
-            x11rb::protocol::shape::SK::INPUT,
-            0,
-            0,
-            region,
-        )
-        .map_err(|e| format!("set_window_shape_region: {e}"))?;
-        self.xfixes_destroy_region(region)
-            .map_err(|e| format!("destroy_region: {e}"))?;
-        self.flush()
-            .map_err(|e| format!("flush after shape: {e}"))?;
+        self.set_overlay_input_shape(overlay_window, &[])?;
         self.get_input_focus()
             .map_err(|e| format!("sync after shape: {e}"))?
             .reply()
@@ -92,21 +78,32 @@ where
             .collect();
         let region = self.generate_id().map_err(|e| format!("gen id: {e}"))?;
         self.xfixes_create_region(region, &rectangles)
+            .map_err(|e| format!("create_region: {e}"))?
+            .check()
             .map_err(|e| format!("create_region: {e}"))?;
-        let applied = self.xfixes_set_window_shape_region(
-            overlay_window,
-            x11rb::protocol::shape::SK::INPUT,
-            0,
-            0,
-            region,
-        );
-        // The region is a server resource, so it is destroyed whether or not
-        // the shape request went out: a toast stack that re-flows once a
-        // second would otherwise leak one region per re-flow on the error
-        // path, and `?` here would take that path.
-        let destroyed = self.xfixes_destroy_region(region);
-        applied.map_err(|e| format!("set_window_shape_region: {e}"))?;
-        destroyed.map_err(|e| format!("destroy_region: {e}"))?;
+        let applied = self
+            .xfixes_set_window_shape_region(
+                overlay_window,
+                x11rb::protocol::shape::SK::INPUT,
+                0,
+                0,
+                region,
+            )
+            .map_err(|e| format!("set_window_shape_region: {e}"))
+            .and_then(|cookie| {
+                cookie
+                    .check()
+                    .map_err(|e| format!("set_window_shape_region: {e}"))
+            });
+        // Attempt cleanup before propagating a failed shape request. Checking
+        // the request also keeps the compositor's cached shape retryable when
+        // the server rejects it instead of treating queued work as success.
+        let destroyed = self
+            .xfixes_destroy_region(region)
+            .map_err(|e| format!("destroy_region: {e}"))
+            .and_then(|cookie| cookie.check().map_err(|e| format!("destroy_region: {e}")));
+        applied?;
+        destroyed?;
         self.flush()
             .map_err(|e| format!("flush after input shape: {e}"))?;
         Ok(())
@@ -577,5 +574,38 @@ where
 
     fn query_monitor_refresh_rates(&self, root: u32) -> HashMap<u32, u32> {
         build_monitor_refresh_rates_from_randr(self, root)
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use crate::backend::x11::compositor_common::x11_bootstrap::verify_overlay_input_shape;
+    use x11rb::protocol::shape::{ConnectionExt as _, SK};
+
+    #[test]
+    fn overlay_input_shape_round_trip() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let (connection, screen) = x11rb::connect(Some(display)).unwrap();
+        let root = connection.setup().roots[screen].root;
+        connection.query_composite_version().unwrap();
+        let overlay = X11BootstrapOps::get_overlay_window(&connection, root).unwrap();
+        verify_overlay_input_shape(&connection, overlay, || {
+            connection
+                .shape_get_rectangles(overlay, SK::INPUT)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .rectangles
+                .iter()
+                .map(|r| (r.x, r.y, r.width, r.height))
+                .collect()
+        });
+        connection
+            .composite_release_overlay_window(root)
+            .unwrap()
+            .check()
+            .unwrap();
     }
 }

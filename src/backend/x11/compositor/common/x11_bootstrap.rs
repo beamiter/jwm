@@ -27,16 +27,13 @@ pub trait X11BootstrapOps {
     /// and therefore propagates it to the root window the WM *does* select
     /// `ButtonPress` on.
     ///
-    /// The default is a no-op returning `Ok(())`: a transport that has not
-    /// implemented it keeps the click-through overlay every transport had
-    /// before, rather than failing the frame that asked.
+    /// Every X11 transport must implement this: silently keeping an empty
+    /// shape makes toast actions click through to the application underneath.
     fn set_overlay_input_shape(
         &self,
-        _overlay_window: u32,
-        _rects: &[(i16, i16, u16, u16)],
-    ) -> Result<(), String> {
-        Ok(())
-    }
+        overlay_window: u32,
+        rects: &[(i16, i16, u16, u16)],
+    ) -> Result<(), String>;
 
     fn bootstrap_state(&self, root: u32) -> Result<BootstrapState, String> {
         let damage_event_base = self.query_damage_event_base()?;
@@ -48,4 +45,47 @@ pub trait X11BootstrapOps {
             overlay_window,
         })
     }
+}
+
+#[cfg(test)]
+pub(crate) fn verify_overlay_input_shape(
+    connection: &impl X11BootstrapOps,
+    overlay: u32,
+    mut query: impl FnMut() -> Vec<(i16, i16, u16, u16)>,
+) {
+    connection.set_overlay_input_passthrough(overlay).unwrap();
+    assert!(query().is_empty(), "startup overlay must be click-through");
+    let rectangles = [(10, 20, 30, 40), (80, 100, 15, 20)];
+    connection
+        .set_overlay_input_shape(overlay, &rectangles)
+        .unwrap();
+    assert_eq!(query(), rectangles, "toast rectangles must intercept input");
+    let replacement = [(40, 50, 20, 10)];
+    connection
+        .set_overlay_input_shape(overlay, &replacement)
+        .unwrap();
+    assert_eq!(
+        query(),
+        replacement,
+        "a reflow replaces, rather than unions, the shape"
+    );
+    connection.set_overlay_input_shape(overlay, &[]).unwrap();
+    assert!(
+        query().is_empty(),
+        "dismissal must restore click-through input"
+    );
+    assert!(
+        connection.set_overlay_input_shape(0, &rectangles).is_err(),
+        "a rejected shape must not be cached as successfully applied"
+    );
+    connection
+        .set_overlay_input_shape(overlay, &rectangles)
+        .unwrap();
+    assert_eq!(
+        query(),
+        rectangles,
+        "a failed target must not poison later updates"
+    );
+    connection.set_overlay_input_passthrough(overlay).unwrap();
+    assert!(query().is_empty());
 }

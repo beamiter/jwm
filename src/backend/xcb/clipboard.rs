@@ -307,6 +307,12 @@ struct OutgoingIncr {
     last_activity: std::time::Instant,
 }
 
+// ICCCM INCR announces exactly one 32-bit byte count. Never index an
+// untrusted empty property while deciding whether its shape is valid.
+fn incr_announced_length(values: &[u32]) -> Option<u32> {
+    (values.len() == 1).then(|| values[0])
+}
+
 fn intern(conn: &Connection, name: &str) -> Result<Atom, String> {
     let cookie = conn.send_request(&x::InternAtom {
         only_if_exists: false,
@@ -956,7 +962,7 @@ impl Watcher {
         if reply.r#type() == self.atoms.incr {
             let announced = (reply.format() == 32)
                 .then(|| reply.value::<u32>())
-                .and_then(|values| (values.len() == 1).then_some(values[0]));
+                .and_then(incr_announced_length);
             if let Some(capture) = self.capture.as_mut() {
                 capture.incoming_incr = Some(IncomingIncr {
                     bytes: Vec::with_capacity(
@@ -1587,6 +1593,92 @@ fn publish_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incr_header_requires_exactly_one_length() {
+        assert_eq!(incr_announced_length(&[]), None);
+        assert_eq!(incr_announced_length(&[3, 4]), None);
+        assert_eq!(incr_announced_length(&[0]), Some(0));
+        assert_eq!(incr_announced_length(&[u32::MAX]), Some(u32::MAX));
+    }
+
+    #[test]
+    fn malformed_incr_headers_are_drained_without_poisoning_later_captures() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let mut watcher = Watcher::new(Some(x11.name())).unwrap();
+        watcher
+            .conn
+            .send_and_check_request(&x::SetSelectionOwner {
+                owner: watcher.window,
+                selection: watcher.atoms.clipboard,
+                time: x::CURRENT_TIME,
+            })
+            .unwrap();
+
+        // Empty and multi-value headers are malformed; a later valid transfer
+        // must still work on the same watcher after each has been drained.
+        let headers: [&[u32]; 3] = [&[], &[3, 4], &[3]];
+        for header in headers {
+            watcher.begin_capture(watcher.window, x::CURRENT_TIME);
+            let capture = watcher.capture.as_mut().unwrap();
+            capture.conversion = Conversion::Text;
+            capture.target = watcher.atoms.utf8_string;
+            let window = capture.window;
+            let property = watcher.atoms.transfer;
+            watcher
+                .conn
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window,
+                    property,
+                    r#type: watcher.atoms.incr,
+                    data: header,
+                })
+                .unwrap();
+            assert!(
+                watcher
+                    .on_selection_notify(&x::SelectionNotifyEvent::new(
+                        x::CURRENT_TIME,
+                        window,
+                        watcher.atoms.clipboard,
+                        watcher.atoms.utf8_string,
+                        property,
+                    ))
+                    .is_none()
+            );
+            assert_eq!(
+                watcher
+                    .capture
+                    .as_ref()
+                    .unwrap()
+                    .incoming_incr
+                    .as_ref()
+                    .unwrap()
+                    .oversized,
+                header.len() != 1
+            );
+
+            for chunk in [b"abc".as_slice(), b"".as_slice()] {
+                watcher
+                    .conn
+                    .send_and_check_request(&x::ChangeProperty {
+                        mode: x::PropMode::Replace,
+                        window,
+                        property,
+                        r#type: watcher.atoms.utf8_string,
+                        data: chunk,
+                    })
+                    .unwrap();
+                let result = watcher.on_incoming_incr_property(window, property);
+                if chunk.is_empty() && header.len() == 1 {
+                    assert_eq!(result, Some(CapturedClipboard::Text("abc".into())));
+                } else {
+                    assert!(result.is_none());
+                }
+            }
+            assert!(watcher.capture.is_none());
+        }
+    }
 
     fn wait_for_selection_owner(conn: &Connection, selection: Atom) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);

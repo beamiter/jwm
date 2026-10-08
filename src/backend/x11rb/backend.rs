@@ -4051,6 +4051,13 @@ mod input_ops {
             ))
         }
 
+        fn warp_pointer(&self, x: f64, y: f64) -> Result<(), BackendError> {
+            self.conn
+                .warp_pointer(0u32, self.root_x11, 0, 0, 0, 0, x as i16, y as i16)?
+                .check()?;
+            Ok(())
+        }
+
         fn warp_pointer_to_window(
             &self,
             win: WindowId,
@@ -4072,6 +4079,21 @@ mod input_ops {
         use x11rb::rust_connection::RustConnection;
 
         #[test]
+        fn root_pointer_warp_round_trip() {
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let display = x11.name();
+            let (conn, screen) = x11rb::connect(Some(display)).unwrap();
+            let root = conn.setup().roots[screen].root;
+            let ops = X11InputOps::new(Arc::new(conn), root, X11IdRegistry::new(1));
+            let previous = ops.get_pointer_position().unwrap();
+            for point in [(40.0, 50.0), (160.0, 120.0)] {
+                ops.warp_pointer(point.0, point.1).unwrap();
+                assert_eq!(ops.get_pointer_position().unwrap(), point);
+            }
+            ops.warp_pointer(previous.0, previous.1).unwrap();
+        }
+
+        #[test]
         fn capture_cursor_updates_keep_continuous_pointer_motion() {
             let mask = capture_grab_event_mask();
             assert!(mask.contains(EventMask::BUTTON_PRESS));
@@ -4080,21 +4102,17 @@ mod input_ops {
             assert!(!mask.contains(EventMask::POINTER_MOTION_HINT));
         }
 
-        /// Run against a dedicated server, never the active desktop, e.g.:
-        /// `JWM_TEST_X11_DISPLAY=:99 scripts/test.sh --no-default-features
-        /// --features backend-x11rb capture_cursor_updates_deliver_repeated_motion
-        /// -- --ignored` (start Xvfb :99 first).
+        /// A private server keeps synthetic input off the user's desktop.
         #[test]
-        #[ignore = "requires a dedicated X11 server in JWM_TEST_X11_DISPLAY"]
         fn capture_cursor_updates_deliver_repeated_motion() {
-            let display = std::env::var("JWM_TEST_X11_DISPLAY")
-                .expect("set JWM_TEST_X11_DISPLAY to a dedicated Xvfb server");
-            let (conn, screen) = RustConnection::connect(Some(&display)).unwrap();
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let display = x11.name();
+            let (conn, screen) = RustConnection::connect(Some(display)).unwrap();
             let conn = Arc::new(conn);
             let root = conn.setup().roots[screen].root;
             assert!(conn.setup().roots[screen].width_in_pixels >= 128);
             assert!(conn.setup().roots[screen].height_in_pixels >= 128);
-            let (driver, _) = RustConnection::connect(Some(&display)).unwrap();
+            let (driver, _) = RustConnection::connect(Some(display)).unwrap();
             driver.xtest_get_version(2, 2).unwrap().reply().unwrap();
             // Even an assertion failure must not leave a synthetic button
             // held or a pointer grab behind on the test server.
@@ -4737,6 +4755,11 @@ mod output_ops {
                 }
             }
 
+            self.query_crtc_outputs()
+        }
+
+        // Also used when RandR 1.5 is unavailable or reports no monitors.
+        fn query_crtc_outputs(&self) -> Vec<OutputInfo> {
             // Fallback: RandR 1.2 CRTC enumeration
             if let Ok(cookie) = self.conn.randr_get_screen_resources_current(self.root) {
                 if let Ok(resources) = cookie.reply() {
@@ -4766,6 +4789,17 @@ mod output_ops {
                                         })
                                         .filter(|name| !name.is_empty())
                                         .unwrap_or_else(|| format!("CRTC-{}", i));
+                                    let (hdr_capable, hdr_metadata) = if let Some(output) =
+                                        first_output
+                                    {
+                                        let caps = self.query_output_edid_hdr(output);
+                                        (
+                                            self.query_output_hdr_capable(output) || caps.is_some(),
+                                            caps,
+                                        )
+                                    } else {
+                                        (false, None)
+                                    };
                                     out.push(build_output_info(
                                         id,
                                         name,
@@ -4774,8 +4808,8 @@ mod output_ops {
                                         ci.width as i32,
                                         ci.height as i32,
                                         refresh,
-                                        false,
-                                        None,
+                                        hdr_capable,
+                                        hdr_metadata,
                                     ));
                                 }
                             }
@@ -4858,6 +4892,11 @@ mod output_ops {
                 .ok()?
                 .reply()
                 .ok()?;
+            // The CRTC fallback uses the CRTC itself as OutputId when it
+            // has no connector. Accept that ID just as the XCB backend does.
+            if resources.crtcs.contains(&output_id) {
+                return Some(output_id);
+            }
             for &output in &resources.outputs {
                 if output == output_id {
                     let info = self
@@ -4872,6 +4911,114 @@ mod output_ops {
                 }
             }
             None
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use x11rb::protocol::xproto::{AtomEnum, PropMode};
+        use x11rb::rust_connection::RustConnection;
+
+        #[test]
+        fn crtc_fallback_preserves_connector_hdr_metadata() {
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let (conn, screen) = RustConnection::connect(Some(x11.name())).unwrap();
+            let conn = Arc::new(conn);
+            let root = conn.setup().roots[screen].root;
+            let ops = X11OutputOps::new(Arc::clone(&conn), root, 800, 600);
+            let resources = conn
+                .randr_get_screen_resources_current(root)
+                .unwrap()
+                .reply()
+                .unwrap();
+            let output = resources.outputs[0];
+            let bpc_atom = conn
+                .intern_atom(false, b"max_bpc")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            conn.randr_change_output_property(
+                output,
+                bpc_atom,
+                AtomEnum::INTEGER.into(),
+                32,
+                PropMode::REPLACE,
+                1,
+                &8u32.to_ne_bytes(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let edid_atom = conn
+                .intern_atom(false, b"EDID")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            let mut edid = [0u8; 256];
+            edid[..8].copy_from_slice(&[0, 255, 255, 255, 255, 255, 255, 0]);
+            edid[126] = 1;
+            // CTA extension with PQ and explicit luminance metadata.
+            edid[128..139].copy_from_slice(&[2, 3, 11, 0, 0xe6, 6, 4, 1, 96, 64, 1]);
+            conn.randr_change_output_property(
+                output,
+                edid_atom,
+                AtomEnum::INTEGER.into(),
+                8,
+                PropMode::REPLACE,
+                edid.len() as u32,
+                &edid,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+
+            let outputs = ops.query_crtc_outputs();
+            let info = outputs
+                .iter()
+                .find(|info| info.id == OutputId(output as u64))
+                .unwrap();
+            assert!(
+                info.hdr_capable,
+                "EDID capability must survive the CRTC fallback"
+            );
+            let caps = info
+                .hdr_metadata
+                .as_ref()
+                .expect("fallback lost EDID metadata");
+            assert!(caps.supports_pq);
+            assert_eq!(caps.max_luminance_nits, 400.0);
+            assert_eq!(caps.max_frame_average_nits, 200.0);
+        }
+
+        #[test]
+        fn gamma_ramps_accept_crtc_fallback_ids() {
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let (conn, screen) = RustConnection::connect(Some(x11.name())).unwrap();
+            let conn = Arc::new(conn);
+            let root = conn.setup().roots[screen].root;
+            let ops = X11OutputOps::new(Arc::clone(&conn), root, 800, 600);
+            let resources = conn
+                .randr_get_screen_resources_current(root)
+                .unwrap()
+                .reply()
+                .unwrap();
+            let crtc = resources.crtcs[0];
+            assert_eq!(ops.output_to_crtc(crtc), Some(crtc));
+            assert_eq!(ops.output_to_crtc(0), None);
+            let connector = resources.outputs[0];
+            assert_eq!(ops.output_to_crtc(connector), Some(crtc));
+            let gamma = ops
+                .get_gamma_ramp(OutputId(crtc as u64))
+                .expect("CRTC gamma is readable");
+            assert!(!gamma.0.is_empty());
+            let ramp = vec![12345; gamma.0.len()];
+            ops.set_gamma_ramp(OutputId(crtc as u64), &ramp, &ramp, &ramp)
+                .unwrap();
+            let updated = ops.get_gamma_ramp(OutputId(crtc as u64)).unwrap();
+            assert_eq!(updated, (ramp.clone(), ramp.clone(), ramp));
         }
     }
 }
@@ -6095,7 +6242,13 @@ mod window_ops {
             let w = self.ids.x11(win)?;
             let x_mask = event_mask_from_generic(mask);
             let aux = ChangeWindowAttributesAux::new().event_mask(x_mask);
-            self.conn.change_window_attributes(w, &aux)?;
+            let cookie = self.conn.change_window_attributes(w, &aux)?;
+            // Root redirection is exclusive. Startup must reject a competing
+            // WM before publishing our EWMH properties; an async BadAccess is
+            // too late. Keep ordinary per-client subscriptions asynchronous.
+            if x_mask.contains(EventMask::SUBSTRUCTURE_REDIRECT) {
+                cookie.check()?;
+            }
             Ok(())
         }
 
@@ -6333,6 +6486,53 @@ mod window_ops {
                 },
                 Err(_) => false,
             }
+        }
+    }
+    #[cfg(test)]
+    mod parity_tests {
+        use super::*;
+        use crate::backend::common_define::EventMaskBits;
+
+        #[test]
+        fn competing_window_manager_redirect_is_rejected() {
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let display = x11.name();
+            let (owner, screen) = x11rb::connect(Some(display)).unwrap();
+            let root = owner.setup().roots[screen].root;
+            owner
+                .change_window_attributes(
+                    root,
+                    &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_REDIRECT),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            let (contender, _) = x11rb::connect(Some(display)).unwrap();
+            let ids = X11IdRegistry::new(1);
+            let root_id = ids.intern(root);
+            let atoms = Atoms::new(&contender).unwrap().reply().unwrap();
+            let ops = X11WindowOps::new(
+                Arc::new(contender),
+                atoms,
+                Arc::new(Mutex::new(0)),
+                root,
+                ids,
+                Default::default(),
+            );
+            let mask = EventMaskBits::SUBSTRUCTURE_REDIRECT.bits();
+            assert!(
+                ops.change_event_mask(root_id, mask).is_err(),
+                "exclusive root ownership must fail synchronously before registration"
+            );
+            owner
+                .change_window_attributes(
+                    root,
+                    &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            ops.change_event_mask(root_id, mask).unwrap();
         }
     }
 }

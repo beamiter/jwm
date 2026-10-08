@@ -10,10 +10,10 @@ use crate::backend::api::InteractionAction;
 use crate::backend::api::{
     AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
     CompositorBenchmark, CursorProvider, DisplayControl, EventHandler, EwmhFacade, EwmhFeature,
-    Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo, ManagedUnmapReason,
-    MaximizeAxes, MinimizedRestoreState, MotifWmHints, NetWmAction, NetWmState, NormalHints,
-    NotifyMode, OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge,
-    ScreenInfo, StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
+    Geometry, HitTarget, IconData, InputOps, KeyOps, ManagedUnmapReason, MaximizeAxes,
+    MinimizedRestoreState, MotifWmHints, NetWmAction, NetWmState, NormalHints, NotifyMode,
+    OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo,
+    StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
     WindowHandoffIdentity, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
@@ -3912,10 +3912,6 @@ impl PropertyOps for XcbPropertyOps {
         parse_strut(&fallback)
     }
 
-    fn get_layer_surface_info(&self, _win: WindowId) -> Option<LayerSurfaceInfo> {
-        None
-    }
-
     fn get_window_pid(&self, win: WindowId) -> Option<u32> {
         let w = self.win(win).ok()?;
         get_u32s_with_length(
@@ -5803,6 +5799,28 @@ mod parity_tests {
     const X11_COMPOSITOR_POSTPROCESS_SRC: &str = include_str!("../x11/compositor/postprocess.rs");
 
     #[test]
+    fn root_pointer_warp_round_trip() {
+        use super::{InputOps, XcbInputOps};
+        use std::sync::Arc;
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let (conn, screen) = xcb::Connection::connect(Some(display)).unwrap();
+        let root = conn
+            .get_setup()
+            .roots()
+            .nth(screen as usize)
+            .unwrap()
+            .root();
+        let ops = XcbInputOps::new(Arc::new(conn), XcbIdRegistry::new(1), root);
+        let previous = ops.get_pointer_position().unwrap();
+        for point in [(40.0, 50.0), (160.0, 120.0)] {
+            ops.warp_pointer(point.0, point.1).unwrap();
+            assert_eq!(ops.get_pointer_position().unwrap(), point);
+        }
+        ops.warp_pointer(previous.0, previous.1).unwrap();
+    }
+
+    #[test]
     fn native_lookup_survives_reordered_interning_without_allocating_unknown_xids() {
         let root = 0x100;
         let target = 0x200;
@@ -6854,7 +6872,7 @@ mod parity_tests {
                 "CursorProvider for XcbCursorProvider",
             ),
         ] {
-            assert_same_methods(x11rb_needle, xcb_needle, label, true);
+            assert_same_methods(x11rb_needle, xcb_needle, label, false);
         }
     }
 

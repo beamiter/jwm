@@ -122,30 +122,8 @@ impl<'a> XcbCompositorProtocol<'a> {
         &self,
         overlay: x::Window,
     ) -> Result<(), BackendError> {
-        let region: xfixes::Region = self.conn.generate_id();
-        self.conn
-            .send_and_check_request(&xfixes::CreateRegion {
-                region,
-                rectangles: &[],
-            })
-            .map_err(|e| BackendError::Message(format!("xfixes create_region failed: {e}")))?;
-        self.conn
-            .send_and_check_request(&xfixes::SetWindowShapeRegion {
-                dest: overlay,
-                dest_kind: shape::Sk::Input,
-                x_offset: 0,
-                y_offset: 0,
-                region,
-            })
-            .map_err(|e| {
-                BackendError::Message(format!("xfixes set_window_shape_region failed: {e}"))
-            })?;
-        self.conn
-            .send_and_check_request(&xfixes::DestroyRegion { region })
-            .map_err(|e| BackendError::Message(format!("xfixes destroy_region failed: {e}")))?;
-        self.conn
-            .flush()
-            .map_err(|e| BackendError::Message(format!("xcb flush after shape failed: {e}")))?;
+        <Self as X11BootstrapOps>::set_overlay_input_shape(self, overlay.resource_id(), &[])
+            .map_err(BackendError::Message)?;
         let focus_cookie = self.conn.send_request(&x::GetInputFocus {});
         let _ = self
             .conn
@@ -258,6 +236,48 @@ impl X11BootstrapOps for XcbCompositorProtocol<'_> {
     fn set_overlay_input_passthrough(&self, overlay_window: u32) -> Result<(), String> {
         XcbCompositorProtocol::set_overlay_input_passthrough(self, x::Window::new(overlay_window))
             .map_err(|e| e.to_string())
+    }
+
+    fn set_overlay_input_shape(
+        &self,
+        overlay_window: u32,
+        rects: &[(i16, i16, u16, u16)],
+    ) -> Result<(), String> {
+        let rectangles: Vec<x::Rectangle> = rects
+            .iter()
+            .map(|&(x, y, width, height)| x::Rectangle {
+                x,
+                y,
+                width,
+                height,
+            })
+            .collect();
+        let region: xfixes::Region = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&xfixes::CreateRegion {
+                region,
+                rectangles: &rectangles,
+            })
+            .map_err(|e| format!("xfixes create_region: {e}"))?;
+        let applied = self
+            .conn
+            .send_and_check_request(&xfixes::SetWindowShapeRegion {
+                dest: x::Window::new(overlay_window),
+                dest_kind: shape::Sk::Input,
+                x_offset: 0,
+                y_offset: 0,
+                region,
+            });
+        // Always release the temporary region, including when the target
+        // window vanished. Reflows must not leak one X resource per failure.
+        let destroyed = self
+            .conn
+            .send_and_check_request(&xfixes::DestroyRegion { region });
+        applied.map_err(|e| format!("xfixes set_window_shape_region: {e}"))?;
+        destroyed.map_err(|e| format!("xfixes destroy_region: {e}"))?;
+        self.conn
+            .flush()
+            .map_err(|e| format!("xcb flush after input shape: {e}"))
     }
 
     fn set_overlay_window_type_notification(&self, overlay_window: u32) -> Result<(), String> {
@@ -712,6 +732,15 @@ impl X11BootstrapOps for XcbSharedCompositorConnection {
         )
     }
 
+    fn set_overlay_input_shape(
+        &self,
+        overlay_window: u32,
+        rects: &[(i16, i16, u16, u16)],
+    ) -> Result<(), String> {
+        self.protocol()
+            .set_overlay_input_shape(overlay_window, rects)
+    }
+
     fn set_overlay_window_type_notification(&self, overlay_window: u32) -> Result<(), String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11BootstrapOps>::set_overlay_window_type_notification(
@@ -917,4 +946,46 @@ pub(crate) fn create_shared_compositor_connection(
     conn: Arc<xcb::Connection>,
 ) -> Result<Arc<XcbSharedCompositorConnection>, BackendError> {
     Ok(Arc::new(XcbSharedCompositorConnection::new(conn)))
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use crate::backend::x11::compositor_common::x11_bootstrap::verify_overlay_input_shape;
+
+    #[test]
+    fn overlay_input_shape_round_trip() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let (connection, screen) = xcb::Connection::connect(Some(display)).unwrap();
+        let root = connection
+            .get_setup()
+            .roots()
+            .nth(screen as usize)
+            .unwrap()
+            .root();
+        let connection = Arc::new(connection);
+        let protocol = XcbCompositorProtocol::new(&connection);
+        protocol.prime_extensions().unwrap();
+        let overlay = protocol.get_overlay_window(root).unwrap();
+        let query = || {
+            let cookie = connection.send_request(&shape::GetRectangles {
+                window: overlay,
+                source_kind: shape::Sk::Input,
+            });
+            connection
+                .wait_for_reply(cookie)
+                .unwrap()
+                .rectangles()
+                .iter()
+                .map(|r| (r.x, r.y, r.width, r.height))
+                .collect()
+        };
+        verify_overlay_input_shape(&protocol, overlay.resource_id(), query);
+        // The shared compositor uses the owning adapter, so checking only
+        // the borrowed protocol would miss a dropped forwarding override.
+        let shared = XcbSharedCompositorConnection::new(connection.clone());
+        verify_overlay_input_shape(&shared, overlay.resource_id(), query);
+        protocol.release_overlay_window(root).unwrap();
+    }
 }
