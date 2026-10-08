@@ -377,6 +377,7 @@ impl RecordingSink {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// Frames accepted by the writer queue, not completed encoder output.
     pub fn submitted_frames(&self) -> u64 {
         self.submitted
     }
@@ -409,6 +410,7 @@ impl RecordingSink {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecordingSinkStats {
+    /// Accepted queue submissions; ffmpeg may duplicate/drop frames or fail later.
     pub submitted: u64,
     pub dropped: u64,
     pub broken: bool,
@@ -418,7 +420,7 @@ impl std::fmt::Display for RecordingSinkStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} frames encoded, {} dropped (encoder behind){}",
+            "{} frames queued, {} dropped (queue full){}",
             self.submitted,
             self.dropped,
             if self.broken { ", pipe broken" } else { "" }
@@ -593,7 +595,7 @@ mod tests {
         };
         assert_eq!(
             stats.to_string(),
-            "900 frames encoded, 12 dropped (encoder behind)"
+            "900 frames queued, 12 dropped (queue full)"
         );
     }
 }
