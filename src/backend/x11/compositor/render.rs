@@ -8370,9 +8370,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     benchmark.record_input_latency(latency);
                 }
 
-                // Feed zone stats from profiler.
-                for (zone, zs) in self.frame_profiler.all_zone_stats() {
-                    benchmark.record_zone(zone, zs.avg_ms);
+                // Benchmark fresh frame totals, not the HUD's rolling averages.
+                for (zone, duration_ms) in self.frame_profiler.frame_zone_times() {
+                    benchmark.record_zone(zone, duration_ms);
                 }
 
                 // Feed GL stats.

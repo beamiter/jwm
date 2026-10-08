@@ -109,6 +109,15 @@ impl FrameProfiler {
         frame_time_ms
     }
 
+    /// Fresh zone totals for the current frame, without rolling HUD history.
+    /// Missing zones produce no sample; repeated visits are summed per frame.
+    pub(crate) fn frame_zone_times(&self) -> impl Iterator<Item = (&'static str, f32)> + '_ {
+        self.current_frame
+            .iter()
+            .filter(move |_| self.enabled)
+            .map(|(&name, duration)| (name, duration.as_secs_f32() * 1000.0))
+    }
+
     /// Get statistics for a zone
     pub fn zone_stats(&self, zone: &str) -> Option<ZoneStats> {
         let samples = self.history.get(zone)?;
@@ -318,5 +327,125 @@ mod tests {
 
         let samples = profiler.history.get("test").unwrap();
         assert_eq!(samples.len(), 10);
+    }
+}
+
+#[cfg(test)]
+mod frame_zone_tests {
+    use super::*;
+    use std::time::Duration;
+    fn record(p: &mut FrameProfiler, ms: u64) {
+        p.record_zone("windows", Duration::from_millis(ms));
+    }
+    fn frame(p: &mut FrameProfiler, ms: u64) {
+        p.begin_frame();
+        record(p, ms);
+        p.end_frame();
+    }
+    fn sample(p: &FrameProfiler) -> Option<f32> {
+        p.frame_zone_times()
+            .find(|(name, _)| *name == "windows")
+            .map(|(_, ms)| ms)
+    }
+    #[test]
+    fn measured_zone_excludes_slow_warmup() {
+        let mut p = FrameProfiler::new();
+        p.set_enabled(true);
+        frame(&mut p, 100);
+        frame(&mut p, 1);
+        assert_eq!(sample(&p), Some(1.0));
+        assert_eq!(p.zone_stats("windows").unwrap().avg_ms, 50.5);
+    }
+    #[test]
+    fn absent_zone_is_not_replayed_on_a_later_frame() {
+        let mut p = FrameProfiler::new();
+        p.set_enabled(true);
+        frame(&mut p, 1);
+        p.begin_frame();
+        p.end_frame();
+        assert_eq!(sample(&p), None);
+        assert!(p.zone_stats("windows").is_some());
+    }
+    #[test]
+    fn repeated_zone_visits_sum_within_one_frame() {
+        let mut p = FrameProfiler::new();
+        p.set_enabled(true);
+        p.begin_frame();
+        record(&mut p, 2);
+        record(&mut p, 3);
+        p.end_frame();
+        assert_eq!(sample(&p), Some(5.0));
+    }
+    #[test]
+    fn disabled_profiling_exposes_no_fresh_zones() {
+        let mut p = FrameProfiler::new();
+        p.set_enabled(true);
+        frame(&mut p, 1);
+        p.set_enabled(false);
+        record(&mut p, 9);
+        assert_eq!(sample(&p), None);
+    }
+    #[test]
+    fn reenabled_frame_starts_without_previous_samples() {
+        let mut p = FrameProfiler::new();
+        p.set_enabled(true);
+        frame(&mut p, 8);
+        p.set_enabled(false);
+        p.set_enabled(true);
+        p.begin_frame();
+        p.end_frame();
+        assert_eq!(sample(&p), None);
+        frame(&mut p, 2);
+        assert_eq!(sample(&p), Some(2.0));
+    }
+    #[test]
+    fn benchmark_report_excludes_warmup_and_absent_zones() {
+        use crate::backend::compositor_common::benchmark::BenchmarkHarness;
+        let mut profiler = FrameProfiler::new();
+        profiler.set_enabled(true);
+        let mut benchmark = BenchmarkHarness::new();
+        benchmark.start(2, 1);
+        for duration in [Some(100), Some(1), None] {
+            profiler.begin_frame();
+            if let Some(ms) = duration {
+                record(&mut profiler, ms);
+            }
+            profiler.end_frame();
+            benchmark.finish_frame(1_000, |sample| {
+                for (zone, ms) in profiler.frame_zone_times() {
+                    sample.record_zone(zone, ms);
+                }
+            });
+        }
+        let report = benchmark.generate_report();
+        assert_eq!(report.frame_time.count, 2);
+        let zone = &report.zones["windows"];
+        assert_eq!(
+            (zone.avg_ms, zone.min_ms, zone.max_ms, zone.p99_ms),
+            (1.0, 1.0, 1.0, 1.0)
+        );
+        assert_eq!(profiler.zone_stats("windows").unwrap().avg_ms, 50.5);
+    }
+
+    #[test]
+    fn restarted_benchmark_does_not_reuse_previous_zone_history() {
+        use crate::backend::compositor_common::benchmark::BenchmarkHarness;
+        let mut profiler = FrameProfiler::new();
+        profiler.set_enabled(true);
+        let mut benchmark = BenchmarkHarness::new();
+        for ms in [100, 2] {
+            benchmark.start(1, 0);
+            frame(&mut profiler, ms);
+            benchmark.finish_frame(1_000, |sample| {
+                for (zone, ms) in profiler.frame_zone_times() {
+                    sample.record_zone(zone, ms);
+                }
+            });
+            assert_eq!(
+                benchmark.generate_report().zones["windows"].avg_ms,
+                ms as f64
+            );
+        }
+        assert_eq!(profiler.zone_stats("windows").unwrap().avg_ms, 51.0);
     }
 }

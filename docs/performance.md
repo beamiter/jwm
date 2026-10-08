@@ -122,6 +122,20 @@ presentation measurements or compare them across OML/fallback paths, refresh
 rates or backends. The benchmark records each fresh reported sample once;
 that accounting does not validate the underlying estimator.
 
+### Zone timing
+
+The raw benchmark report's `zones` use fresh CPU timing totals from measured
+frames, excluding warmup and previous runs. Repeated visits to the same zone
+within a frame are summed. A frame that does not execute that zone supplies
+no sample; zone statistics therefore describe frames where the stage ran,
+not a zero-filled average over every frame. The HUD keeps its separate
+rolling history. Older reports sampled those rolling averages and could
+include warmup or repeat a stage that did not run in the measured frame.
+
+These are CPU-side instrumentation intervals, not GPU timer measurements or
+a complete breakdown of presentation time. Only instrumented stages appear;
+the X11 render path currently has no zone probes, so its map can be empty.
+
 ### Workload sensitivity
 
 The raw compositor benchmark report's `config.window_count` is the tracked
