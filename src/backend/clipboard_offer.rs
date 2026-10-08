@@ -243,7 +243,12 @@ impl IsolatedXvfb {
             };
             let _ = sender.send(result);
         });
-        let reported = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        // Starting an external X server is not a clipboard latency check.
+        // Cold CI runners can spend several seconds initializing Xvfb before
+        // displayfd becomes ready. Keep that startup bounded independently
+        // of the three-second X11 setup/clipboard protocol deadlines below.
+        let startup_timeout = std::time::Duration::from_secs(15);
+        let reported = receiver.recv_timeout(startup_timeout);
         if !matches!(reported, Ok(Ok(_))) {
             let _ = startup.child_mut().kill();
         }
@@ -256,7 +261,7 @@ impl IsolatedXvfb {
             }
             Err(error) => {
                 let _ = startup.child_mut().wait();
-                panic!("Xvfb did not report a display within 3 seconds: {error}");
+                panic!("Xvfb did not report a display within {startup_timeout:?}: {error}");
             }
         };
         let display_number = std::str::from_utf8(&display_number)
