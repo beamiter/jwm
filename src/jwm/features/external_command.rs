@@ -12,6 +12,15 @@ const MAX_HELPER_OUTPUT_BYTES: usize = 1024 * 1024;
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_DRAIN_BYTES_PER_POLL: usize = 64 * 1024;
 
+/// One-shot restart payloads belong only to the explicit compositor exec,
+/// never to an application/helper launched by that compositor. Command-local
+/// removals are safe even when the parent already has multiple threads.
+fn strip_restart_environment(command: &mut Command) {
+    for key in crate::application::RESTART_ENV_KEYS {
+        command.env_remove(key);
+    }
+}
+
 pub(super) fn output(cmd: &str, args: &[&str]) -> io::Result<Output> {
     output_with_limits(cmd, args, HELPER_TIMEOUT, MAX_HELPER_OUTPUT_BYTES)
 }
@@ -104,7 +113,22 @@ pub(crate) fn status_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> io::Result<ExitStatus> {
+    status_with_environment(
+        cmd,
+        args,
+        timeout,
+        &crate::child_environment::current_or_default(),
+    )
+}
+
+pub(crate) fn status_with_environment(
+    cmd: &str,
+    args: &[&str],
+    timeout: Duration,
+    environment: &crate::child_environment::ChildEnvironment,
+) -> io::Result<ExitStatus> {
     let mut command = Command::new(cmd);
+    environment.apply(&mut command);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -114,6 +138,7 @@ pub(crate) fn status_with_timeout(
         // (see `unblock_sigchld_in_child`), and a helper that is waited for
         // and whose group is killed afterwards leaves nobody who needs it.
         .process_group(0);
+    strip_restart_environment(&mut command);
     let mut child = command.spawn()?;
     let started = Instant::now();
     loop {
@@ -185,6 +210,8 @@ pub(crate) fn spawn_detached(
 /// process group is killed once they finish, so no descendant of theirs is
 /// left to need the signal, and they keep the cheap spawn.
 pub(crate) fn unblock_sigchld_in_child(command: &mut Command) {
+    crate::child_environment::apply(command);
+    strip_restart_environment(command);
     // SAFETY: the hook only calls sigemptyset/sigaddset/sigprocmask, which
     // are async-signal-safe, and the forked child has one thread.
     unsafe {
@@ -255,6 +282,8 @@ fn command_output_bounded_with_policy(
         // stay on posix_spawn; see `unblock_sigchld_in_child`.
         unblock_sigchld_in_child(command);
     }
+    crate::child_environment::apply(command);
+    strip_restart_environment(command);
     let mut child = command.spawn()?;
     let child_id = child.id();
     let mut stdout = if capture_stdout {
@@ -573,6 +602,33 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_commands_drop_all_restart_capabilities() {
+        let mut command = Command::new("sh");
+        for key in crate::application::RESTART_ENV_KEYS {
+            command.env(key, "private-fixture");
+        }
+        strip_restart_environment(&mut command);
+        for key in crate::application::RESTART_ENV_KEYS {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == std::ffi::OsStr::new(key)),
+                Some((std::ffi::OsStr::new(key), None))
+            );
+        }
+        command.args(["-c", "env"]);
+        let output = command.output().unwrap();
+        let environment = String::from_utf8(output.stdout).unwrap();
+        for key in crate::application::RESTART_ENV_KEYS {
+            assert!(
+                !environment
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key}=")))
+            );
+        }
+    }
 
     #[test]
     fn helper_output_is_bounded() {

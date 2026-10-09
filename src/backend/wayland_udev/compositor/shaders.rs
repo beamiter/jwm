@@ -1790,11 +1790,17 @@ vec3 srgb_inverse(vec3 c) {
 void main() {
     vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
     vec4 texel = texture(u_texture, uv);
+    // Decode straight source color, then restore premultiplication before
+    // blending, matching the ordinary window shader's coverage contract.
+    // RGB/force-opaque regions ignore the texture's alpha metadata.
+    float source_alpha = u_opacity >= 0.0 ? 1.0 : clamp(texel.a, 0.0, 1.0);
+    vec3 straight = source_alpha > 1e-6 ? texel.rgb / source_alpha : vec3(0.0);
     if (u_scene_linear == 1) {
-        texel.rgb = srgb_inverse(texel.rgb);
+        straight = srgb_inverse(straight);
     }
+    texel.rgb = straight * source_alpha;
     float layer_opacity = clamp(abs(u_opacity), 0.0, 1.0);
-    float a = (u_opacity >= 0.0 ? 1.0 : texel.a) * layer_opacity;
+    float a = source_alpha * layer_opacity;
     texel.rgb *= layer_opacity;
 
     // Rounded corners
@@ -2130,8 +2136,12 @@ in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
-    vec4 current = texture(u_current_blur, v_uv);
-    vec4 previous = texture(u_previous_blur, v_uv);
+    // This pass must preserve the storage orientation of the Kawase result.
+    // Its top-down orthographic quad otherwise samples the opposite row;
+    // history copies are same-origin blits and do not undo that extra flip.
+    vec2 source_uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec4 current = texture(u_current_blur, source_uv);
+    vec4 previous = texture(u_previous_blur, source_uv);
 
     // Linear blend: (1-ratio)*new + ratio*previous
     // High ratio (e.g., 0.8) = 80% previous, 20% new (more stable)

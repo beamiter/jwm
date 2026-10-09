@@ -13,6 +13,9 @@ on:
       - bars/tao_pixels_bar/Cargo.lock
       - video-demo/demo-client/Cargo.toml
       - video-demo/demo-client/Cargo.lock
+      - tests/glib_backport/Cargo.toml
+      - tests/glib_backport/Cargo.lock
+      - vendor/glib/**
       - .github/workflows/security.yml
   push:
     branches:
@@ -26,6 +29,9 @@ on:
       - bars/tao_pixels_bar/Cargo.lock
       - video-demo/demo-client/Cargo.toml
       - video-demo/demo-client/Cargo.lock
+      - tests/glib_backport/Cargo.toml
+      - tests/glib_backport/Cargo.lock
+      - vendor/glib/**
       - .github/workflows/security.yml
   schedule:
     - cron: "23 4 * * 1"
@@ -137,6 +143,21 @@ jobs:
           fi
           exit 0
 
+      - name: Audit the optimized GLib regression dependency graph
+        id: glib_backport_audit
+        shell: bash
+        run: |
+          set +e
+          cargo audit --file tests/glib_backport/Cargo.lock --json \
+            > cargo-audit-glib-backport.json 2> cargo-audit-glib-backport.stderr
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -s cargo-audit-glib-backport.stderr ]]; then
+            cat cargo-audit-glib-backport.stderr
+          fi
+          exit 0
+
       - name: Upload audit report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -151,6 +172,8 @@ jobs:
             cargo-audit-tao-pixels.stderr
             cargo-audit-tao-glow.json
             cargo-audit-tao-glow.stderr
+            cargo-audit-glib-backport.json
+            cargo-audit-glib-backport.stderr
           if-no-files-found: error
           retention-days: 14
 
@@ -159,5 +182,6 @@ jobs:
           steps.root_audit.outputs.status != '0' ||
           steps.demo_audit.outputs.status != '0' ||
           steps.bar_audit.outputs.status != '0' ||
-          steps.glow_bar_audit.outputs.status != '0'
+          steps.glow_bar_audit.outputs.status != '0' ||
+          steps.glib_backport_audit.outputs.status != '0'
         run: exit 1

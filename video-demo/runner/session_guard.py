@@ -73,7 +73,13 @@ class SessionGuard:
         except Exception:
             pass
         for source, backup in self.config_backups:
-            if backup.exists() and source.read_bytes() != backup.read_bytes():
+            if not backup.exists():
+                continue
+            try:
+                unchanged = source.read_bytes() == backup.read_bytes()
+            except FileNotFoundError:
+                unchanged = False
+            if not unchanged:
                 shutil.copy2(backup, source)
         if self.config_backups:
             try: self.ipc.command("reload_config")
@@ -88,8 +94,14 @@ class SessionGuard:
         self.state_path.unlink(missing_ok=True)
 
     def __exit__(self, *_: object) -> None:
-        self.restore()
-        if self.lock_file:
-            fcntl.flock(self.lock_file, fcntl.LOCK_UN)
-            self.lock_file.close()
-        self.lock_path.unlink(missing_ok=True)
+        try:
+            self.restore()
+        finally:
+            try:
+                if self.lock_file:
+                    try:
+                        fcntl.flock(self.lock_file, fcntl.LOCK_UN)
+                    finally:
+                        self.lock_file.close()
+            finally:
+                self.lock_path.unlink(missing_ok=True)

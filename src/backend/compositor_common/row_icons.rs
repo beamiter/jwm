@@ -133,7 +133,7 @@ pub(crate) fn decode_async(path: &str) -> mpsc::Receiver<RowIconData> {
                 }
             }
         } else {
-            match image::open(&path) {
+            match crate::backend::compositor_common::image_source::open_regular_image(&path) {
                 Ok(img) => img,
                 Err(e) => {
                     log::debug!("compositor: no row icon for '{path}': {e}");

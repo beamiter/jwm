@@ -28,6 +28,8 @@ use xbar_present_wgpu::{PresentRect, WgpuPresenter};
 
 const BAR_NAME: &str = "xcb_wgpu_bar";
 const X_TOKEN: u64 = 1;
+// Bound X work per turn so provider/IPC readiness still gets serviced.
+const X_EVENT_BUDGET: usize = 256;
 const TIMER_TOKEN: u64 = 2;
 const SHARED_TOKEN: u64 = 3;
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -472,7 +474,15 @@ fn main() -> Result<()> {
         let dock_timeout = bar
             .next_dock_deadline(now)
             .map(|deadline| deadline.saturating_duration_since(now));
-        ready_tokens.extend(epoll.wait_timeout(dock_timeout)?);
+        // A synchronous X reply can move events into the library's queue
+        // while leaving the socket quiet. Inspect that queue before sleeping.
+        let mut queued_x_event = conn.poll_for_event()?;
+        ready_tokens.extend(
+            epoll.wait_timeout_with_pending(
+                dock_timeout,
+                queued_x_event.as_ref().map(|_| X_TOKEN),
+            )?,
+        );
         if ready_tokens.is_empty() {
             // Dock retries and moving-preview anchors have sub-second
             // deadlines independent from the aligned provider timer.
@@ -493,78 +503,88 @@ fn main() -> Result<()> {
         }
         for token in &ready_tokens {
             match *token {
-                X_TOKEN => loop {
-                    let Some(x_event) = conn.poll_for_event()? else {
-                        break;
-                    };
-                    if destroys_window(&x_event, win) {
-                        break 'event_loop;
-                    }
-                    let should_redraw = match x_event {
-                        xcb::Event::X(x::Event::Expose(event)) => event.count() == 0,
-                        xcb::Event::X(x::Event::ConfigureNotify(event))
-                            if event.window() == win =>
-                        {
-                            current_width = event.width();
-                            current_height = event.height();
-                            window.sync_bar_height(&mut bar, event.height());
-                            gpu.resize(u32::from(current_width), u32::from(current_height));
-                            true
+                X_TOKEN => {
+                    for _ in 0..X_EVENT_BUDGET {
+                        let x_event = match queued_x_event.take() {
+                            Some(event) => Some(event),
+                            None => conn.poll_for_event()?,
+                        };
+                        let Some(x_event) = x_event else {
+                            break;
+                        };
+                        if destroys_window(&x_event, win) {
+                            break 'event_loop;
                         }
-                        xcb::Event::X(x::Event::EnterNotify(event)) => route_pointer_input(
-                            &window,
-                            &mut bar,
-                            PointerInput::Move(Point::new(
-                                f32::from(event.event_x()),
-                                f32::from(event.event_y()),
-                            )),
-                        )?,
-                        xcb::Event::X(x::Event::MotionNotify(event)) => route_pointer_input(
-                            &window,
-                            &mut bar,
-                            PointerInput::Move(Point::new(
-                                f32::from(event.event_x()),
-                                f32::from(event.event_y()),
-                            )),
-                        )?,
-                        xcb::Event::X(x::Event::LeaveNotify(_)) => {
-                            route_pointer_input(&window, &mut bar, PointerInput::Leave)?
-                        }
-                        xcb::Event::X(x::Event::ButtonPress(event)) => {
-                            let point =
-                                Point::new(f32::from(event.event_x()), f32::from(event.event_y()));
-                            if let Some(input) =
-                                PointerInput::from_x11_button(point, event.detail(), true)
+                        let should_redraw = match x_event {
+                            xcb::Event::X(x::Event::Expose(event)) => event.count() == 0,
+                            xcb::Event::X(x::Event::ConfigureNotify(event))
+                                if event.window() == win =>
                             {
-                                route_pointer_input(&window, &mut bar, input)?
-                            } else {
-                                false
+                                current_width = event.width();
+                                current_height = event.height();
+                                window.sync_bar_height(&mut bar, event.height());
+                                gpu.resize(u32::from(current_width), u32::from(current_height));
+                                true
                             }
-                        }
-                        xcb::Event::X(x::Event::ButtonRelease(event)) => {
-                            let point =
-                                Point::new(f32::from(event.event_x()), f32::from(event.event_y()));
-                            if let Some(input) =
-                                PointerInput::from_x11_button(point, event.detail(), false)
-                            {
-                                route_pointer_input(&window, &mut bar, input)?
-                            } else {
-                                false
+                            xcb::Event::X(x::Event::EnterNotify(event)) => route_pointer_input(
+                                &window,
+                                &mut bar,
+                                PointerInput::Move(Point::new(
+                                    f32::from(event.event_x()),
+                                    f32::from(event.event_y()),
+                                )),
+                            )?,
+                            xcb::Event::X(x::Event::MotionNotify(event)) => route_pointer_input(
+                                &window,
+                                &mut bar,
+                                PointerInput::Move(Point::new(
+                                    f32::from(event.event_x()),
+                                    f32::from(event.event_y()),
+                                )),
+                            )?,
+                            xcb::Event::X(x::Event::LeaveNotify(_)) => {
+                                route_pointer_input(&window, &mut bar, PointerInput::Leave)?
                             }
+                            xcb::Event::X(x::Event::ButtonPress(event)) => {
+                                let point = Point::new(
+                                    f32::from(event.event_x()),
+                                    f32::from(event.event_y()),
+                                );
+                                if let Some(input) =
+                                    PointerInput::from_x11_button(point, event.detail(), true)
+                                {
+                                    route_pointer_input(&window, &mut bar, input)?
+                                } else {
+                                    false
+                                }
+                            }
+                            xcb::Event::X(x::Event::ButtonRelease(event)) => {
+                                let point = Point::new(
+                                    f32::from(event.event_x()),
+                                    f32::from(event.event_y()),
+                                );
+                                if let Some(input) =
+                                    PointerInput::from_x11_button(point, event.detail(), false)
+                                {
+                                    route_pointer_input(&window, &mut bar, input)?
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if should_redraw {
+                            redraw(
+                                &mut gpu,
+                                &mut canvas,
+                                &window,
+                                current_width,
+                                current_height,
+                                &mut bar,
+                            )?;
                         }
-                        _ => false,
-                    };
-                    if should_redraw {
-                        redraw(
-                            &mut gpu,
-                            &mut canvas,
-                            &window,
-                            current_width,
-                            current_height,
-                            &mut bar,
-                        )?;
                     }
-                },
+                }
                 TIMER_TOKEN => {
                     if timer.drain()? > 0 {
                         let mut update = bar.tick();

@@ -337,16 +337,21 @@ impl ColorManagerState {
             .collect()
     }
 
-    /// Register a feedback resource so subsequent output changes can emit
-    /// preferred_changed on it. No-op when the surface has no feedback bucket
-    /// yet — the bucket is created here.
-    fn register_feedback(&self, surface: ObjectId, resource: WpColorManagementSurfaceFeedbackV1) {
-        self.feedback
-            .lock_safe()
-            .entry(surface)
-            .or_default()
-            .resources
-            .push(resource);
+    /// Subscribe without changing the surface's current output description.
+    /// Only the first subscription needs the sRGB bootstrap value.
+    fn register_feedback(
+        &self,
+        surface: ObjectId,
+        resource: WpColorManagementSurfaceFeedbackV1,
+    ) -> u64 {
+        let mut feedback = self.feedback.lock_safe();
+        let bucket = feedback.entry(surface).or_default();
+        let identity = bucket
+            .last_preferred
+            .get_or_insert_with(|| (self.next_id(), srgb_params()))
+            .0;
+        bucket.resources.push(resource);
+        identity
     }
 
     /// Look up the most recently emitted preferred (id, params) for a surface,
@@ -733,7 +738,7 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
     fn request(
         state: &mut Self,
         _client: &Client,
-        _resource: &WpColorManagerV1,
+        resource: &WpColorManagerV1,
         request: wp_color_manager_v1::Request,
         _data: &(),
         _dh: &DisplayHandle,
@@ -768,20 +773,9 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
                         surface: surface.clone(),
                     },
                 );
-                // Initial preferred: sRGB ride-along until the render loop
-                // observes the surface on a specific output and re-emits with
-                // EDID-derived params. Use a fresh id so the client can
-                // immediately call get_preferred and see a coherent description.
                 if let Some(cm) = state.color_manager.as_ref() {
-                    cm.register_feedback(surface.id(), resource.clone());
-                    let new_id = cm.next_id();
-                    // Seed the bucket with the sRGB description so
-                    // current_preferred() returns something sensible until the
-                    // first render-loop enter call.
-                    if let Some(bucket) = cm.feedback.lock_safe().get_mut(&surface.id()) {
-                        bucket.last_preferred = Some((new_id, srgb_params()));
-                    }
-                    resource.preferred_changed(new_id as u32);
+                    let identity = cm.register_feedback(surface.id(), resource.clone());
+                    resource.preferred_changed(identity as u32);
                 }
             }
             wp_color_manager_v1::Request::CreateIccCreator { obj } => {
@@ -795,10 +789,18 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
                 let data: ParametricCreatorData = Arc::new(Mutex::new(ParametricParams::default()));
                 data_init.init(obj, data);
             }
-            wp_color_manager_v1::Request::CreateWindowsScrgb { .. } => {
-                // Not advertised; if a client ignores feature negotiation, do nothing
-                // (it would have been a protocol error to call this, but the
-                // server-side enum lacks a way to send post-hoc errors here).
+            wp_color_manager_v1::Request::CreateWindowsScrgb { image_description } => {
+                // Even an unsupported request must initialize its new_id:
+                // leaving it uninitialized panics inside wayland-backend.
+                // DataInit::post_error is for GlobalDispatch, so initialize
+                // an inert child and post the protocol error on this manager.
+                let failed: ImageDescriptionData =
+                    Arc::new(Mutex::new(ImageDescriptionState::Failed));
+                data_init.init(image_description, failed);
+                resource.post_error(
+                    wp_color_manager_v1::Error::UnsupportedFeature,
+                    "Windows scRGB image descriptions are not supported",
+                );
             }
             _ => {}
         }
@@ -1009,6 +1011,22 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, SurfaceFeedbackData> for JwmWa
             _ => {}
         }
     }
+    fn destroyed(
+        state: &mut Self,
+        _client: smithay::reexports::wayland_server::backend::ClientId,
+        resource: &WpColorManagementSurfaceFeedbackV1,
+        data: &SurfaceFeedbackData,
+    ) {
+        if let Some(cm) = state.color_manager.as_ref() {
+            let mut feedback = cm.feedback.lock_safe();
+            if let Some(bucket) = feedback.get_mut(&data.surface.id()) {
+                bucket.resources.retain(|r| r != resource && r.is_alive());
+                if bucket.resources.is_empty() {
+                    feedback.remove(&data.surface.id());
+                }
+            }
+        }
+    }
 }
 
 // === wp_image_description_creator_icc_v1 ===
@@ -1027,7 +1045,7 @@ pub type IccCreatorData = Arc<Mutex<IccCreatorInner>>;
 
 impl Dispatch<WpImageDescriptionCreatorIccV1, IccCreatorData> for JwmWaylandState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &WpImageDescriptionCreatorIccV1,
         request: wp_image_description_creator_icc_v1::Request,
@@ -1048,12 +1066,9 @@ impl Dispatch<WpImageDescriptionCreatorIccV1, IccCreatorData> for JwmWaylandStat
                 let st: ImageDescriptionData = match result {
                     Some(parsed) => {
                         let params = parsed.into_params();
-                        let id = state_next_id_via_dispatch(); // resolved below
-                        Arc::new(Mutex::new(ImageDescriptionState::Ready {
-                            id,
-                            params,
-                            allow_info: true,
-                        }))
+                        // All creators share the manager allocator. Separate u64
+                        // ranges collide when v1's ready event narrows to u32.
+                        make_ready_description(state, params, true).1
                     }
                     None => Arc::new(Mutex::new(ImageDescriptionState::Failed)),
                 };
@@ -1105,17 +1120,6 @@ impl Dispatch<WpImageDescriptionCreatorIccV1, IccCreatorData> for JwmWaylandStat
             _ => {}
         }
     }
-}
-
-/// Helper to look up the next monotonic id without threading `&mut state` through.
-/// The id is only used as a debugging identity in events and IPC, so taking a
-/// fresh u64 from a process-wide counter is safe even if it's not the same
-/// counter the rest of the manager uses — until we have a real cross-creator id
-/// allocator, this keeps IDs unique inside a session.
-fn state_next_id_via_dispatch() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0x1_0000_0001);
-    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Debug)]
@@ -1358,6 +1362,42 @@ impl Dispatch<WpImageDescriptionReferenceV1, ()> for JwmWaylandState {
 mod tests {
     use super::*;
     use crate::backend::color_policy;
+
+    #[test]
+    fn unsupported_scrgb_request_disconnects_only_its_client() {
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::Server;
+
+        let mut server = Server::new();
+        server.state.color_manager = Some(init_color_management(&server.display.handle()));
+        let mut client = server.connect();
+        let manager = client.bind("wp_color_manager_v1", 1);
+        let description = client.new_id();
+        // wp_color_manager_v1.create_windows_scrgb exists since v1, even
+        // though our supported_feature events deliberately do not enable it.
+        client.request(manager, 6, &[description]);
+        server.roundtrip();
+        let events = client.events();
+        let error = events
+            .iter()
+            .find(|event| event.sender == 1 && event.opcode == 0)
+            .expect("unsupported feature must produce a wl_display protocol error");
+        assert_eq!(error.args[0], manager);
+        assert_eq!(
+            error.args[1],
+            wp_color_manager_v1::Error::UnsupportedFeature as u32
+        );
+
+        // A malformed client must not take the compositor or other clients down.
+        let mut unaffected = server.connect();
+        let other_manager = unaffected.bind("wp_color_manager_v1", 1);
+        server.roundtrip();
+        assert!(
+            unaffected
+                .events()
+                .iter()
+                .any(|event| event.sender == other_manager)
+        );
+    }
 
     fn complete_explicit_params(primaries: [i32; 8]) -> ParametricParams {
         ParametricParams {
@@ -1663,6 +1703,104 @@ mod tests {
         assert_eq!(
             advanced.primaries_named,
             Some(color_policy::PRIMARIES_NAMED_BT2020)
+        );
+    }
+    #[test]
+    fn additional_feedback_preserves_current_preferred_description() {
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::Server;
+        let mut server = Server::new();
+        server.state.color_manager = Some(init_color_management(&server.display.handle()));
+        let mut client = server.connect();
+        let compositor = client.bind("wl_compositor", 6);
+        let manager = client.bind("wp_color_manager_v1", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let first = client.new_id();
+        client.request(manager, 3, &[first, surface]);
+        server.roundtrip();
+        client.events();
+        let (identity, expected) = {
+            let cm = server.state.color_manager.as_ref().unwrap();
+            let identity = cm.next_id();
+            let mut params = srgb_params();
+            params.tf_named = Some(color_policy::TF_ST2084_PQ);
+            // Model the output metadata update without requiring an HDR device.
+            let mut feedback = cm.feedback.lock_safe();
+            let bucket = feedback.values_mut().next().unwrap();
+            bucket.outputs.insert("synthetic-HDR".into());
+            bucket.last_preferred = Some((identity, params.clone()));
+            for resource in &bucket.resources {
+                resource.preferred_changed(identity as u32);
+            }
+            (identity, params)
+        };
+        server.roundtrip();
+        assert!(client.events().iter().any(|event| event.sender == first
+            && event.opcode == 0
+            && event.args == [identity as u32]));
+        let second = client.new_id();
+        client.request(manager, 3, &[second, surface]);
+        server.roundtrip();
+        let events = client.events();
+        let cm = server.state.color_manager.as_ref().unwrap();
+        let feedback = cm.feedback.lock_safe();
+        let bucket = feedback.values().next().unwrap();
+        let (actual_id, actual_params) = bucket.last_preferred.as_ref().unwrap();
+        assert_eq!(
+            *actual_id, identity,
+            "subscribing must not replace output state"
+        );
+        assert!(params_match(actual_params, &expected));
+        assert!(bucket.outputs.contains("synthetic-HDR"));
+        assert_eq!(bucket.resources.len(), 2);
+        assert!(events.iter().any(|event| event.sender == second
+            && event.opcode == 0
+            && event.args == [identity as u32]));
+        assert!(!events.iter().any(|event| event.sender == first));
+    }
+
+    #[test]
+    fn destroyed_feedback_is_not_retained_on_a_live_surface() {
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::Server;
+        let mut server = Server::new();
+        server.state.color_manager = Some(init_color_management(&server.display.handle()));
+        let mut client = server.connect();
+        let compositor = client.bind("wl_compositor", 6);
+        let manager = client.bind("wp_color_manager_v1", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let kept = client.new_id();
+        client.request(manager, 3, &[kept, surface]);
+        server.roundtrip();
+        client.events();
+        for _ in 0..32 {
+            let feedback = client.new_id();
+            client.request(manager, 3, &[feedback, surface]);
+            client.request(feedback, 0, &[]);
+            server.roundtrip();
+            client.events();
+            let cm = server.state.color_manager.as_ref().unwrap();
+            assert_eq!(
+                cm.feedback
+                    .lock_safe()
+                    .values()
+                    .map(|b| b.resources.len())
+                    .sum::<usize>(),
+                1,
+                "only the one live feedback subscription may remain"
+            );
+        }
+        client.request(kept, 0, &[]);
+        server.roundtrip();
+        assert!(
+            server
+                .state
+                .color_manager
+                .as_ref()
+                .unwrap()
+                .feedback
+                .lock_safe()
+                .is_empty()
         );
     }
 }

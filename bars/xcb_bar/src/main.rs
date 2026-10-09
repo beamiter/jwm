@@ -20,6 +20,8 @@ use xcb::{self, Xid, x};
 
 const BAR_NAME: &str = "xcb_bar";
 const X_TOKEN: u64 = 1;
+// Bound X work per turn so provider/IPC readiness still gets serviced.
+const X_EVENT_BUDGET: usize = 256;
 const TIMER_TOKEN: u64 = 2;
 const SHARED_TOKEN: u64 = 3;
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -540,9 +542,14 @@ fn drain_x_events(
     current_width: &mut u16,
     current_height: &mut u16,
     bar: &mut CairoBar,
+    mut queued_event: Option<xcb::Event>,
 ) -> Result<bool> {
-    loop {
-        match window.conn.poll_for_event() {
+    for _ in 0..X_EVENT_BUDGET {
+        let next = match queued_event.take() {
+            Some(event) => Ok(Some(event)),
+            None => window.conn.poll_for_event(),
+        };
+        match next {
             Ok(Some(event)) => {
                 if destroys_window(&event, window.win) {
                     return Ok(false);
@@ -562,6 +569,7 @@ fn drain_x_events(
             Err(error) => return Err(error.into()),
         }
     }
+    Ok(true)
 }
 
 fn sync_notifier(
@@ -749,7 +757,15 @@ fn main() -> Result<()> {
         let dock_timeout = bar
             .next_dock_deadline(now)
             .map(|deadline| deadline.saturating_duration_since(now));
-        ready_tokens.extend(epoll.wait_timeout(dock_timeout)?);
+        // A synchronous X reply can move events into the library's queue
+        // while leaving the socket quiet. Inspect that queue before sleeping.
+        let mut queued_x_event = window.conn.poll_for_event()?;
+        ready_tokens.extend(
+            epoll.wait_timeout_with_pending(
+                dock_timeout,
+                queued_x_event.as_ref().map(|_| X_TOKEN),
+            )?,
+        );
         if ready_tokens.is_empty() {
             // A Dock deadline is independent from the aligned one-second
             // provider timer. Service it promptly so a final magnified anchor
@@ -782,6 +798,7 @@ fn main() -> Result<()> {
                         &mut current_width,
                         &mut current_height,
                         &mut bar,
+                        queued_x_event.take(),
                     )? {
                         break 'event_loop;
                     }

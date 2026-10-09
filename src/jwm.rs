@@ -1627,13 +1627,16 @@ impl Jwm {
 
     fn log_x11_environment() {
         info!("[X11 Environment Debug]");
-        info!("DISPLAY: {:?}", env::var("DISPLAY"));
+        info!("DISPLAY: {:?}", crate::child_environment::var("DISPLAY"));
         info!("XAUTHORITY: {:?}", env::var("XAUTHORITY"));
-        info!("XDG_SESSION_TYPE: {:?}", env::var("XDG_SESSION_TYPE"));
+        info!(
+            "XDG_SESSION_TYPE: {:?}",
+            crate::child_environment::var("XDG_SESSION_TYPE")
+        );
         info!("USER: {:?}", env::var("USER"));
         info!("HOME: {:?}", env::var("HOME"));
 
-        if let Ok(display) = env::var("DISPLAY") {
+        if let Ok(display) = crate::child_environment::var("DISPLAY") {
             let socket_path = format!("/tmp/.X11-unix/X{}", display.trim_start_matches(":"));
             info!("X11 socket path: {}", socket_path);
             info!(
@@ -2468,12 +2471,15 @@ impl Jwm {
         transition_mins: u32,
     ) -> f32 {
         fn parse_hhmm(s: &str) -> Option<u32> {
-            let parts: Vec<&str> = s.split(':').collect();
-            if parts.len() != 2 {
+            let (hour, minute) = s.split_once(':')?;
+            if hour.len() != 2 || minute.len() != 2 {
                 return None;
             }
-            let h: u32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
+            let h: u32 = hour.parse().ok()?;
+            let m: u32 = minute.parse().ok()?;
+            if h >= 24 || m >= 60 {
+                return None;
+            }
             Some(h * 60 + m)
         }
 
@@ -2501,49 +2507,7 @@ impl Jwm {
             (tm.tm_hour as u32) * 60 + (tm.tm_min as u32)
         };
 
-        let day = 24 * 60u32; // 1440
-        let trans = transition_mins;
-
-        // Normalize everything so that `start` is time-zero (modular arithmetic).
-        // Night window runs from 0 to `length` in the rotated space.
-        let length = if end >= start {
-            end - start
-        } else {
-            end + day - start
-        };
-        let cur = if now >= start {
-            now - start
-        } else {
-            now + day - start
-        };
-
-        if cur > length {
-            // Outside the night window — check if approaching start (ramp in)
-            let before_start = if now < start {
-                start - now
-            } else {
-                start + day - now
-            };
-            if trans > 0 && before_start < trans {
-                // Ramping in: approaching start
-                let t = 1.0 - (before_start as f32 / trans as f32);
-                return full_temp * t.clamp(0.0, 1.0);
-            }
-            return 0.0;
-        }
-
-        // Inside the night window
-        if trans > 0 && cur < trans {
-            // Ramp in at the start edge
-            let t = cur as f32 / trans as f32;
-            return full_temp * t.clamp(0.0, 1.0);
-        }
-        if trans > 0 && (length - cur) < trans {
-            // Ramp out at the end edge
-            let t = (length - cur) as f32 / trans as f32;
-            return full_temp * t.clamp(0.0, 1.0);
-        }
-        full_temp
+        night_light_temp_at_minute(start, end, now, full_temp, transition_mins)
     }
 
     /// 处理 Expose 事件（窗口需要重绘）
@@ -2745,6 +2709,33 @@ impl Jwm {
             false
         }
     }
+}
+
+/// Smooth temperature within the configured (possibly overnight) interval.
+/// Both ramps stay inside the window. When they overlap, the nearer edge
+/// controls the temperature rather than jumping from one ramp to the other.
+fn night_light_temp_at_minute(
+    start: u32,
+    end: u32,
+    now: u32,
+    full_temp: f32,
+    transition_mins: u32,
+) -> f32 {
+    const DAY: u32 = 24 * 60;
+    if start >= DAY || end >= DAY || now >= DAY {
+        return 0.0;
+    }
+    let length = (end + DAY - start) % DAY;
+    let elapsed = (now + DAY - start) % DAY;
+    if length == 0 || elapsed > length {
+        return 0.0;
+    }
+    // Retain the existing hard-switch behavior for a disabled transition.
+    if transition_mins == 0 {
+        return full_temp;
+    }
+    let edge_distance = elapsed.min(length - elapsed);
+    full_temp * (edge_distance as f32 / transition_mins as f32).min(1.0)
 }
 
 /// Translate a bar's wire route into the shell page JWM owns.
@@ -3579,5 +3570,145 @@ mod shell_hub_command_tests {
         assert!(minimized_preview_may_activate(
             None, None, a.0, a.1, 7, false, None
         ));
+    }
+}
+
+#[cfg(test)]
+mod night_light_invalid_time_tests {
+    use super::Jwm;
+
+    #[test]
+    fn invalid_night_light_start_is_neutral_and_cannot_overflow() {
+        for start in [
+            "4294967295:00",
+            "25:00",
+            "24:00",
+            "00:60",
+            "99:99",
+            "12:00:00",
+            "9:00",
+            "-1:00",
+        ] {
+            assert_eq!(
+                Jwm::compute_night_light_temp(start, "06:00", 0.7, 30),
+                0.0,
+                "invalid start {start:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_night_light_end_is_neutral_and_cannot_overflow() {
+        for end in [
+            "4294967295:00",
+            "25:00",
+            "24:00",
+            "00:60",
+            "99:99",
+            "12:00:00",
+            "9:00",
+            "-1:00",
+        ] {
+            assert_eq!(
+                Jwm::compute_night_light_temp("20:00", end, 0.7, 30),
+                0.0,
+                "invalid end {end:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod night_light_cycle_tests {
+    use super::night_light_temp_at_minute as temperature;
+
+    fn close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.000_001,
+            "actual={actual}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn night_light_does_not_warm_before_either_kind_of_start() {
+        for (start, end) in [(1200, 360), (480, 1080)] {
+            for minutes_before in [31, 30, 29, 1] {
+                close(
+                    temperature(start, end, start - minutes_before, 1.0, 30),
+                    0.0,
+                );
+            }
+            close(temperature(start, end, start, 1.0, 30), 0.0);
+            close(temperature(start, end, start + 1, 1.0, 30), 1.0 / 30.0);
+            close(temperature(start, end, start + 30, 1.0, 30), 1.0);
+            close(temperature(start, end, end - 1, 1.0, 30), 1.0 / 30.0);
+            close(temperature(start, end, end, 1.0, 30), 0.0);
+            close(temperature(start, end, end + 1, 1.0, 30), 0.0);
+        }
+    }
+
+    #[test]
+    fn short_and_empty_night_light_windows_have_no_ramp_handoff_jump() {
+        for (start, end) in [(1200, 1210), (1435, 5)] {
+            close(
+                temperature(start, end, (start + 1) % 1440, 1.0, 30),
+                1.0 / 30.0,
+            );
+            close(
+                temperature(start, end, (start + 5) % 1440, 1.0, 30),
+                5.0 / 30.0,
+            );
+            close(
+                temperature(start, end, (start + 9) % 1440, 1.0, 30),
+                1.0 / 30.0,
+            );
+            close(temperature(start, end, end, 1.0, 30), 0.0);
+        }
+        for minute in 0..1440 {
+            close(temperature(1200, 1200, minute, 1.0, 30), 0.0);
+            close(temperature(1200, 1200, minute, 1.0, 0), 0.0);
+        }
+    }
+
+    #[test]
+    fn entire_daily_cycle_has_bounded_steps_even_for_long_transitions() {
+        for (start, end) in [
+            (1200, 360),
+            (480, 1080),
+            (1200, 1210),
+            (1435, 5),
+            (1200, 1200),
+        ] {
+            for transition in [1, 30, 800, u32::MAX] {
+                for minute in 0..1440 {
+                    let a = temperature(start, end, minute, 0.7, transition);
+                    let b = temperature(start, end, (minute + 1) % 1440, 0.7, transition);
+                    assert!((0.0..=0.7).contains(&a));
+                    assert!(
+                        (b - a).abs() <= 0.7 / transition as f32 + 0.000_001,
+                        "start={start}, end={end}, transition={transition}, minute={minute}, {a}->{b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_transition_preserves_existing_hard_switch_endpoints() {
+        for (start, end) in [(1200, 360), (480, 1080)] {
+            close(temperature(start, end, start - 1, 0.7, 0), 0.0);
+            close(temperature(start, end, start, 0.7, 0), 0.7);
+            close(temperature(start, end, end, 0.7, 0), 0.7);
+            close(temperature(start, end, end + 1, 0.7, 0), 0.0);
+        }
+    }
+
+    #[test]
+    fn out_of_day_minute_inputs_are_neutral() {
+        for bad in [1440, u32::MAX] {
+            close(temperature(bad, 360, 0, 0.7, 30), 0.0);
+            close(temperature(1200, bad, 0, 0.7, 30), 0.0);
+            close(temperature(1200, 360, bad, 0.7, 30), 0.0);
+        }
     }
 }

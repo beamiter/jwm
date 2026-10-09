@@ -13,8 +13,6 @@ use nix::fcntl::{Flock, FlockArg, OFlag, open};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::Mode;
-use nix::sys::wait::WaitStatus;
-use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::{Pid, mkfifo, read, write as nix_write};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -691,6 +689,7 @@ struct JwmManager {
     backend: Option<String>,
     jwm_child: Option<Child>,
     jwm_pid: Option<i32>,
+    unexpected_exit: bool,
 }
 
 impl JwmManager {
@@ -700,6 +699,7 @@ impl JwmManager {
             backend,
             jwm_child: None,
             jwm_pid: None,
+            unexpected_exit: false,
         }
     }
 
@@ -725,6 +725,7 @@ impl JwmManager {
         let pid = child.id() as i32;
         self.jwm_pid = Some(pid);
         self.jwm_child = Some(child);
+        self.unexpected_exit = false;
         log_line(&format!("JWM已启动，PID: {}", pid));
         Ok(())
     }
@@ -754,97 +755,103 @@ impl JwmManager {
         command
     }
 
-    /// Wait for the managed process to exit within `timeout`.
-    /// Uses Child::try_wait if we own the handle, otherwise waitpid + kill(0).
-    /// Returns true if the process exited.
-    fn wait_for_exit(&mut self, pid: i32, timeout: Duration) -> bool {
+    /// Poll through the owning Child; no independent waitpid may reap it and
+    /// leave a reusable PID behind in the manager.
+    fn wait_for_exit(&mut self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        if let Some(child) = self.jwm_child.as_mut() {
-            while Instant::now() < deadline {
-                match child.try_wait() {
-                    Ok(Some(_)) => return true,
-                    Ok(None) => {}
-                    Err(e) => {
-                        log_line(&format!("try_wait 错误: {e}"));
-                        break;
-                    }
-                }
-                thread::sleep(Duration::from_millis(100));
+        loop {
+            if !self.is_running() {
+                return true;
             }
-        } else {
-            while Instant::now() < deadline {
-                match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
-                    Ok(WaitStatus::StillAlive) => {}
-                    Ok(_) => return true,
-                    Err(nix::errno::Errno::ECHILD) => {
-                        if kill(Pid::from_raw(pid), None).is_err() {
-                            return true;
-                        }
-                    }
-                    Err(e) => {
-                        log_line(&format!("waitpid 错误: {e}"));
-                        break;
-                    }
-                }
-                thread::sleep(Duration::from_millis(100));
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
             }
+            thread::sleep(Duration::from_millis(100).min(deadline - now));
         }
-        false
     }
 
-    fn stop(&mut self) {
-        let pid = match self.jwm_pid {
-            Some(pid) => pid,
-            None => {
-                log_line("JWM进程未运行");
-                return;
+    fn stop(&mut self) -> io::Result<()> {
+        self.stop_with(|manager, pid, signal| {
+            if let Err(error) = kill(Pid::from_raw(pid), signal) {
+                log_line(&format!("发送 {signal:?} 失败: {error}"));
             }
-        };
+            manager.wait_for_exit(Duration::from_secs(2))
+        })
+    }
 
-        log_line(&format!("停止JWM进程: {}", pid));
-
-        // Phase 1: graceful SIGTERM
-        let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-        let terminated = self.wait_for_exit(pid, Duration::from_secs(2));
-
-        // Phase 2: force SIGKILL if still alive
-        if !terminated {
-            log_line(&format!("强制终止JWM进程: {}", pid));
-            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-            self.wait_for_exit(pid, Duration::from_secs(2));
+    fn stop_with(
+        &mut self,
+        mut signal_and_wait: impl FnMut(&mut Self, i32, Signal) -> bool,
+    ) -> io::Result<()> {
+        if !self.is_running() {
+            self.unexpected_exit = false;
+            log_line("JWM进程未运行");
+            return Ok(());
         }
-
+        let pid = self.jwm_child.as_ref().expect("live child is owned").id() as i32;
+        log_line(&format!("停止JWM进程: {pid}"));
+        let mut terminated = signal_and_wait(self, pid, Signal::SIGTERM);
+        if !terminated {
+            log_line(&format!("强制终止JWM进程: {pid}"));
+            terminated = signal_and_wait(self, pid, Signal::SIGKILL);
+        }
+        if !terminated {
+            // An unconfirmed exit is not a successful stop. Keep the owning
+            // Child so neither restart nor daemon shutdown can orphan it.
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "JWM exit was not confirmed; retaining child ownership",
+            ));
+        }
         self.jwm_pid = None;
         self.jwm_child = None;
+        self.unexpected_exit = false;
         log_line("JWM进程已停止");
+        Ok(())
     }
 
     fn restart(&mut self) -> io::Result<()> {
         log_line("重启JWM...");
-        self.stop();
-        // stop() already waited for exit, no extra sleep needed
+        self.stop()?;
         self.start()
     }
 
-    fn status_str(&self) -> String {
-        if let Some(pid) = self.jwm_pid {
-            if self.process_exists(pid) {
+    fn status_str(&mut self) -> String {
+        if self.is_running() {
+            if let Some(pid) = self.jwm_pid {
                 return format!("JWM运行中，PID: {}", pid);
             }
         }
         "JWM未运行".to_string()
     }
 
-    fn is_running(&self) -> bool {
-        if let Some(pid) = self.jwm_pid {
-            self.process_exists(pid)
-        } else {
-            false
+    fn is_running(&mut self) -> bool {
+        let Some(child) = self.jwm_child.as_mut() else {
+            self.jwm_pid = None;
+            return false;
+        };
+        self.jwm_pid = Some(child.id() as i32);
+        loop {
+            match child.try_wait() {
+                Ok(None) => {
+                    self.jwm_pid = Some(child.id() as i32);
+                    return true;
+                }
+                Ok(Some(_)) => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break,
+                Err(error) => {
+                    // Do not replace or discard a child whose status is unknown.
+                    log_line(&format!("try_wait 错误: {error}"));
+                    return true;
+                }
+            }
         }
-    }
-
-    fn process_exists(&self, pid: i32) -> bool {
-        kill(Pid::from_raw(pid), None).is_ok()
+        self.jwm_pid = None;
+        self.jwm_child = None;
+        self.unexpected_exit = true;
+        false
     }
 }
 
@@ -1028,32 +1035,96 @@ fn write_fifo_nonblock(path: &Path, data: &[u8]) -> io::Result<()> {
     }
 }
 
-fn read_commands_from_fd<F: AsFd>(fd: F, buf: &mut String) -> io::Result<Vec<String>> {
-    let mut tmp = [0u8; 1024];
-    let n = match read(fd, &mut tmp) {
-        Ok(0) => 0,
-        Ok(n) => n,
-        Err(nix::errno::Errno::EAGAIN) => 0,
-        Err(e) => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("读取FIFO失败: {e}"),
-            ));
-        }
-    };
+/// Incremental FIFO decoder. The receiver enforces the sender's bound too:
+/// discard an oversized frame through its delimiter, never interpreting its
+/// suffix (which might be a valid lifecycle command) as a fresh command.
+#[derive(Default)]
+struct ControlCommandReader {
+    bytes: Vec<u8>,
+    discarding: bool,
+}
 
-    let mut cmds = Vec::new();
-    if n > 0 {
-        buf.push_str(&String::from_utf8_lossy(&tmp[..n]));
-        while let Some(pos) = buf.find('\n') {
-            let line: String = buf.drain(..=pos).collect();
-            let cmd = line.trim();
-            if !cmd.is_empty() {
-                cmds.push(cmd.to_string());
+impl ControlCommandReader {
+    fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        let mut commands = Vec::new();
+        for &byte in chunk {
+            if byte == b'\n' {
+                if !self.discarding {
+                    if let Ok(line) = std::str::from_utf8(&self.bytes) {
+                        let command = line.trim();
+                        if !command.is_empty() {
+                            commands.push(command.to_owned());
+                        }
+                    }
+                }
+                self.bytes.clear();
+                self.discarding = false;
+            } else if !self.discarding {
+                // MAX_CONTROL_COMMAND_BYTES includes the terminating newline.
+                if self.bytes.len() >= MAX_CONTROL_COMMAND_BYTES - 1 {
+                    self.bytes.clear();
+                    self.discarding = true;
+                } else {
+                    self.bytes.push(byte);
+                }
             }
         }
+        commands
     }
-    Ok(cmds)
+}
+
+fn read_commands_from_fd<F: AsFd>(
+    fd: F,
+    reader: &mut ControlCommandReader,
+) -> io::Result<Vec<String>> {
+    let mut chunk = [0u8; 1024];
+    loop {
+        match read(fd.as_fd(), &mut chunk) {
+            Ok(count) => return Ok(reader.feed(&chunk[..count])),
+            Err(nix::errno::Errno::EAGAIN) => return Ok(Vec::new()),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(io::Error::other(format!("读取FIFO失败: {error}"))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_command_tests {
+    use super::{ControlCommandReader, MAX_CONTROL_COMMAND_BYTES};
+
+    #[test]
+    fn fifo_receiver_bounds_unterminated_frames_and_discards_their_suffix() {
+        let mut reader = ControlCommandReader::default();
+        for _ in 0..128 {
+            assert!(reader.feed(&[b'x'; 1024]).is_empty());
+            assert!(reader.bytes.len() < MAX_CONTROL_COMMAND_BYTES);
+        }
+        assert_eq!(reader.feed(b"quit\nstatus\n"), vec!["status"]);
+        assert!(!reader.discarding);
+        assert!(reader.bytes.is_empty());
+    }
+
+    #[test]
+    fn fifo_receiver_accepts_exact_limit_and_rejects_one_extra_byte() {
+        let mut reader = ControlCommandReader::default();
+        let exact = vec![b'x'; MAX_CONTROL_COMMAND_BYTES - 1];
+        assert!(reader.feed(&exact).is_empty());
+        assert_eq!(
+            reader.feed(b"\n"),
+            vec!["x".repeat(MAX_CONTROL_COMMAND_BYTES - 1)]
+        );
+        assert!(reader.feed(&exact).is_empty());
+        assert!(reader.feed(b"x\n").is_empty());
+        assert_eq!(reader.feed(b"start\nstop\n"), vec!["start", "stop"]);
+    }
+
+    #[test]
+    fn fifo_receiver_preserves_split_utf8_and_rejects_invalid_frames() {
+        let mut reader = ControlCommandReader::default();
+        assert!(reader.feed(b" \xe4\xbd").is_empty());
+        assert_eq!(reader.feed(b"\xa0\r\n"), vec!["你"]);
+        assert_eq!(reader.feed(b"\xffquit\n\nstatus\n"), vec!["status"]);
+    }
 }
 
 // --- Daemon main loop ---
@@ -1114,16 +1185,20 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
     // process lifetime.
     drop(startup_lock);
 
-    let mut line_buf = String::new();
+    let mut line_buf = ControlCommandReader::default();
 
     loop {
-        if term_flag.load(Ordering::Relaxed) {
+        if term_flag.swap(false, Ordering::Relaxed) {
             if let Some(pid) = mgr.jwm_pid {
                 log_line(&format!("终止JWM进程: {}", pid));
             }
-            mgr.stop();
-            cleanup_resources(&control_pipe);
-            break;
+            match mgr.stop() {
+                Ok(()) => {
+                    cleanup_resources(&control_pipe);
+                    break;
+                }
+                Err(error) => log_line(&format!("停止尚未确认，守护进程保留子进程所有权: {error}")),
+            }
         }
 
         // poll() on FIFO fd — block up to 200ms instead of busy-sleep
@@ -1141,8 +1216,8 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
                             write_response(&resp_path, &response);
                         }
                         "stop" => {
-                            mgr.stop();
-                            write_response(&resp_path, "stop_done");
+                            let response = daemon_command_response("stop", mgr.stop());
+                            write_response(&resp_path, &response);
                         }
                         "start" => {
                             let response = daemon_command_response("start", mgr.start());
@@ -1150,10 +1225,13 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
                         }
                         "quit" => {
                             log_line("收到退出命令");
-                            write_response(&resp_path, "quit_done");
-                            mgr.stop();
-                            cleanup_resources(&control_pipe);
-                            return Ok(());
+                            let result = mgr.stop();
+                            let stopped = result.is_ok();
+                            write_response(&resp_path, &daemon_command_response("quit", result));
+                            if stopped {
+                                cleanup_resources(&control_pipe);
+                                return Ok(());
+                            }
                         }
                         "status" => {
                             let s = mgr.status_str();
@@ -1171,21 +1249,13 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
             }
         }
 
-        // Check JWM process health
-        if let Some(pid) = mgr.jwm_pid {
-            if kill(Pid::from_raw(pid), None).is_err() {
-                log_line(&format!(
-                    "检测到JWM意外退出 (PID: {}), 守护进程一并退出",
-                    pid
-                ));
-                mgr.jwm_pid = None;
-                mgr.jwm_child = None;
-                cleanup_resources(&control_pipe);
-                return Ok(());
-            } else {
-                // Reap zombie
-                let _ = waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG));
-            }
+        // Child::try_wait is the sole reaper. Keep observed exits even if a
+        // preceding status command already cleared the ownership fields.
+        let _ = mgr.is_running();
+        if mgr.unexpected_exit {
+            log_line("检测到JWM意外退出, 守护进程一并退出");
+            cleanup_resources(&control_pipe);
+            return Ok(());
         }
     }
 
@@ -1361,6 +1431,10 @@ fn force_restart_daemon() -> io::Result<()> {
 // --- Build & Install ---
 
 fn rebuild_and_restart(jwm_dir: &str) -> io::Result<()> {
+    let target_dir = jwm_target_dir(
+        Path::new(jwm_dir),
+        env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )?;
     if !check_daemon() {
         println!("守护进程未运行，正在强制重启...");
         force_restart_daemon()?;
@@ -1371,6 +1445,8 @@ fn rebuild_and_restart(jwm_dir: &str) -> io::Result<()> {
         .arg("build")
         .arg("--locked")
         .arg("--release")
+        .arg("--target-dir")
+        .arg(&target_dir)
         .current_dir(jwm_dir)
         .status()?;
     if !status.success() {
@@ -1386,22 +1462,102 @@ fn rebuild_and_restart(jwm_dir: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Run `sudo install -m <mode> <src> <dest_dir>` and return an error on failure.
+/// Copy into a private same-directory temporary first, then rename over the
+/// destination. An interrupted or failed copy never deletes/truncates the
+/// working executable. This is per-file atomic, not a multi-file transaction.
+const ATOMIC_INSTALL_SCRIPT: &str = r#"set -eu
+src=$1
+destdir=$2
+mode=$3
+name=${src##*/}
+temporary=$(mktemp "${destdir%/}/.jwm-install.XXXXXXXX")
+trap 'if [ -n "$temporary" ]; then rm -f -- "$temporary"; fi' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+install -m "$mode" -- "$src" "$temporary"
+mv -Tf -- "$temporary" "${destdir%/}/$name"
+temporary=
+"#;
+
 fn sudo_install(src: &Path, dest_dir: &str, mode: &str) -> io::Result<()> {
     let status = Command::new("sudo")
-        .arg("install")
-        .arg("-m")
-        .arg(mode)
+        .args(["sh", "-c", ATOMIC_INSTALL_SCRIPT, "jwm-install"])
         .arg(src)
         .arg(dest_dir)
+        .arg(mode)
         .status()?;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("install {} to {} failed", src.display(), dest_dir),
-        ));
+        return Err(io::Error::other(format!(
+            "install {} to {} failed",
+            src.display(),
+            dest_dir
+        )));
     }
     Ok(())
+}
+
+fn jwm_target_dir(
+    jwm_dir: &Path,
+    target_override: Option<&std::ffi::OsStr>,
+) -> io::Result<PathBuf> {
+    let root = if jwm_dir.is_absolute() {
+        jwm_dir.to_owned()
+    } else {
+        env::current_dir()?.join(jwm_dir)
+    };
+    let target = target_override
+        .filter(|value| !value.is_empty())
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("target"));
+    Ok(root.join(target))
+}
+
+#[cfg(test)]
+mod install_target_tests {
+    use super::*;
+
+    #[test]
+    fn target_path_is_shared_by_build_and_install() {
+        let root = Path::new("/fixture/project space");
+        assert_eq!(jwm_target_dir(root, None).unwrap(), root.join("target"));
+        assert_eq!(
+            jwm_target_dir(root, Some("custom target".as_ref())).unwrap(),
+            root.join("custom target")
+        );
+        assert_eq!(
+            jwm_target_dir(root, Some("/fixture/absolute target".as_ref())).unwrap(),
+            Path::new("/fixture/absolute target")
+        );
+        let plan = jwm_install_plan(root, Path::new("/fixture/absolute target"));
+        for entry in plan.iter().filter(|entry| entry.mode == "0755") {
+            assert_eq!(
+                entry.source,
+                Path::new("/fixture/absolute target/release").join(entry.name)
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_install_failure_preserves_destination_and_cleans_owned_temporary() {
+        let root = std::env::temp_dir().join(format!("jwm-atomic-install-{}", std::process::id()));
+        // create_dir proves ownership; never adopt/clean an existing test path.
+        fs::create_dir(&root).unwrap();
+        let destination = root.join("missing-source");
+        fs::write(&destination, b"old working binary").unwrap();
+        let failed = Command::new("sh")
+            .args(["-c", ATOMIC_INSTALL_SCRIPT, "jwm-install"])
+            .arg(root.join("absent/missing-source"))
+            .arg(&root)
+            .arg("0755")
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert_eq!(fs::read(&destination).unwrap(), b"old working binary");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_file(destination).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1417,23 +1573,23 @@ struct InstallPlanEntry {
 /// Keeping the source and destination together prevents a newly inserted file
 /// from silently changing another entry's destination through positional
 /// indexing.
-fn jwm_install_plan(jwm_dir: &Path) -> Vec<InstallPlanEntry> {
+fn jwm_install_plan(jwm_dir: &Path, target_dir: &Path) -> Vec<InstallPlanEntry> {
     vec![
         InstallPlanEntry {
             name: "jwm",
-            source: jwm_dir.join("target/release/jwm"),
+            source: target_dir.join("release/jwm"),
             destination_dir: "/usr/local/bin/",
             mode: "0755",
         },
         InstallPlanEntry {
             name: "jwm-tool",
-            source: jwm_dir.join("target/release/jwm-tool"),
+            source: target_dir.join("release/jwm-tool"),
             destination_dir: "/usr/local/bin/",
             mode: "0755",
         },
         InstallPlanEntry {
             name: "jwm-support",
-            source: jwm_dir.join("target/release/jwm-support"),
+            source: target_dir.join("release/jwm-support"),
             destination_dir: "/usr/local/bin/",
             mode: "0755",
         },
@@ -1460,7 +1616,8 @@ fn jwm_install_plan(jwm_dir: &Path) -> Vec<InstallPlanEntry> {
 
 fn install_jwm(jwm_dir: &str) -> io::Result<()> {
     let jwm_dir = Path::new(jwm_dir);
-    let install_plan = jwm_install_plan(jwm_dir);
+    let target_dir = jwm_target_dir(jwm_dir, env::var_os("CARGO_TARGET_DIR").as_deref())?;
+    let install_plan = jwm_install_plan(jwm_dir, &target_dir);
 
     for entry in &install_plan {
         if !entry.source.is_file() {
@@ -1472,20 +1629,6 @@ fn install_jwm(jwm_dir: &str) -> io::Result<()> {
     }
 
     println!("安装 JWM、jwm-tool 与 jwm-support...");
-
-    let status = Command::new("sudo")
-        .args([
-            "rm",
-            "-f",
-            "/usr/local/bin/jwm",
-            "/usr/local/bin/jwm-tool",
-            "/usr/local/bin/jwm-support",
-        ])
-        .status()?;
-    if !status.success() {
-        eprintln!("清理旧二进制失败！");
-        return Err(io::Error::new(io::ErrorKind::Other, "sudo rm failed"));
-    }
 
     for entry in &install_plan {
         sudo_install(&entry.source, entry.destination_dir, entry.mode)?;
@@ -2942,6 +3085,69 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 // later functions belong to independent smoke/reporting commands.
 #[allow(clippy::items_after_test_module)]
 mod tests {
+    #[test]
+    fn managed_child_exit_clears_both_ownership_fields() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        let mut manager = JwmManager::new(PathBuf::from("unused"), None);
+        manager.jwm_pid = Some(pid);
+        manager.jwm_child = Some(child);
+        assert!(!manager.is_running());
+        assert!(manager.jwm_pid.is_none());
+        assert!(manager.jwm_child.is_none());
+    }
+
+    #[test]
+    fn unconfirmed_stop_keeps_ownership_and_reports_failure() {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let mut manager = JwmManager::new(PathBuf::from("unused"), None);
+        manager.jwm_pid = Some(pid);
+        manager.jwm_child = Some(child);
+        let mut phases = Vec::new();
+        // Only the status query touches this owned child. The injected phases
+        // model failed/unknown termination without changing process limits.
+        let result = manager.stop_with(|_, observed_pid, signal| {
+            assert_eq!(observed_pid, pid);
+            phases.push(signal);
+            false
+        });
+        let retained = manager.jwm_child.as_ref().map(std::process::Child::id);
+        // Always reap our own fixture before asserting the result.
+        if let Some(mut child) = manager.jwm_child.take() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(retained, Some(pid as u32));
+        assert_eq!(manager.jwm_pid, Some(pid));
+        assert_eq!(phases, [super::Signal::SIGTERM, super::Signal::SIGKILL]);
+        assert!(!manager.unexpected_exit);
+    }
+
+    #[test]
+    fn managed_child_status_does_not_adopt_an_unrelated_live_pid() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let mut manager = JwmManager::new(PathBuf::from("unused"), None);
+        // Model PID reuse deterministically without allocating PIDs or sending
+        // a signal: the authoritative Child has already cached its exit.
+        manager.jwm_pid = Some(std::process::id() as i32);
+        manager.jwm_child = Some(child);
+        assert!(!manager.is_running());
+        assert!(manager.jwm_pid.is_none());
+    }
+
     use super::{
         Cli, Commands, DEBUG_JWM_PROCESS_GREP_ARGS, InstallPlanEntry, IpcLineReader, JwmManager,
         MAX_DAEMON_CMDLINE_BYTES, MAX_DAEMON_PIDFILE_BYTES, MAX_IPC_FRAME_BYTES, SmokeTarget,
@@ -4583,7 +4789,7 @@ mod tests {
         let root = Path::new("/src/jwm");
 
         assert_eq!(
-            jwm_install_plan(root),
+            jwm_install_plan(root, &root.join("target")),
             vec![
                 InstallPlanEntry {
                     name: "jwm",

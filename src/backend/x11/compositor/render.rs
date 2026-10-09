@@ -4344,9 +4344,13 @@ impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // Feature 12: Screenshot
     // =====================================================================
-    pub(crate) fn request_screenshot(&mut self, path: std::path::PathBuf) {
-        self.screenshot_requests.request_full(path);
+    pub(crate) fn request_screenshot(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
+        self.screenshot_requests.request_full(path)?;
         self.needs_render = true;
+        Ok(())
     }
 
     pub(crate) fn request_screenshot_region(
@@ -4356,9 +4360,10 @@ impl<C: CompositorConnection> Compositor<C> {
         y: i32,
         w: u32,
         h: u32,
-    ) {
-        self.screenshot_requests.request_region(path, x, y, w, h);
+    ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
+        self.screenshot_requests.request_region(path, x, y, w, h)?;
         self.needs_render = true;
+        Ok(())
     }
 
     /// Check if there's a single fullscreen opaque window covering the screen.
@@ -7795,8 +7800,11 @@ impl<C: CompositorConnection> Compositor<C> {
         let has_pending_screenshot = self.screenshot_requests.has_pending();
         for request in self.screenshot_requests.take_all() {
             match request {
-                crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(path) => {
-                    self.capture_screenshot(&path);
+                crate::backend::compositor_common::screenshot::ScreenshotRequest::Full {
+                    path,
+                    permit,
+                } => {
+                    self.capture_screenshot(&path, permit);
                 }
                 crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
                     path,
@@ -7804,8 +7812,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     y,
                     width,
                     height,
+                    permit,
                 } => {
-                    self.capture_screenshot_region(&path, x, y, width, height);
+                    self.capture_screenshot_region(&path, x, y, width, height, permit);
                 }
             }
         }

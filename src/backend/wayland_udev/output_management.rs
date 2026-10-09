@@ -787,7 +787,7 @@ fn mode_is_change(current: Option<smithay::output::Mode>, requested: (i32, i32, 
         Some(cur) => {
             !(cur.size.w == w
                 && cur.size.h == h
-                && (refresh == 0 || (cur.refresh - refresh).abs() <= 200))
+                && (refresh == 0 || (i64::from(cur.refresh) - i64::from(refresh)).abs() <= 200))
         }
     }
 }
@@ -896,13 +896,13 @@ fn build_changes(
         // set_mode takes precedence over set_custom_mode; both express (w, h, refresh).
         let requested_mode = pending.mode.or(pending.custom_mode);
         if let Some((w, h, refresh)) = requested_mode {
-            if w <= 0 || h <= 0 {
+            if w <= 0 || h <= 0 || refresh < 0 {
                 return Err(OutputConfigValidationError::field(
                     &name,
                     "mode",
                     Some("MODE_ID"),
                     mode_value(w, h, refresh),
-                    format!("invalid mode {w}x{h} for '{name}'"),
+                    format!("invalid mode {w}x{h}@{refresh} for '{name}'"),
                 ));
             }
             // For modes selected via set_mode, ensure they belong to the output.
@@ -910,7 +910,8 @@ fn build_changes(
                 let known = output.modes().iter().any(|m| {
                     m.size.w == w
                         && m.size.h == h
-                        && (refresh == 0 || (m.refresh - refresh).abs() <= 200)
+                        && (refresh == 0
+                            || (i64::from(m.refresh) - i64::from(refresh)).abs() <= 200)
                 });
                 if !known {
                     return Err(OutputConfigValidationError::field(
@@ -2005,5 +2006,42 @@ mod tests {
         );
         assert_eq!(rejection.reason, "mode change rejected");
         assert!(rejection.attempted_at_unix_ms > 0);
+    }
+    #[test]
+    fn hostile_custom_refresh_is_rejected_over_the_wayland_wire() {
+        for request in [CONFIGURATION_TEST, CONFIGURATION_APPLY] {
+            let (mut client, _management, manager) = bound_manager(&["WIRE-REFRESH"]);
+            let initial = client.roundtrip();
+            let head = announced_heads(&initial, manager)[0];
+            let serial = done_serial(&initial, manager).unwrap();
+            let config = client.new_id();
+            client.request(
+                manager,
+                MANAGER_CREATE_CONFIGURATION,
+                &words(&[config, serial]),
+            );
+            let configured_head = client.new_id();
+            client.request(config, 0, &words(&[configured_head, head]));
+            // set_custom_mode with valid dimensions and attacker-controlled int refresh.
+            client.request(configured_head, 1, &words(&[1920, 1080, i32::MIN as u32]));
+            client.request(config, request, &[]);
+            let events = client.roundtrip();
+            assert_eq!(
+                opcodes(&events, config),
+                [1],
+                "invalid refresh must fail without queueing KMS"
+            );
+            assert!(client.state.pending_events.lock().unwrap().is_empty());
+            assert!(client.state.pending_output_acks.is_empty());
+        }
+    }
+
+    #[test]
+    fn extreme_refresh_comparison_is_total_and_zero_remains_a_wildcard() {
+        let current = mode(1920, 1080, 60_000);
+        for refresh in [i32::MIN, i32::MAX, -1] {
+            assert!(mode_is_change(Some(current), (1920, 1080, refresh)));
+        }
+        assert!(!mode_is_change(Some(current), (1920, 1080, 0)));
     }
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import select
 import socket
 import subprocess
@@ -11,6 +12,37 @@ from .jwm_ipc import JwmIpc
 
 
 THEMES = ("blue", "green", "purple", "orange", "red", "gray")
+
+
+def _read_ready_line(stream, timeout: float = 5.0, max_bytes: int = 65536) -> str:
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    while b"\n" not in data:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([stream], [], [], remaining)[0]:
+            raise TimeoutError("demo client did not publish readiness before the deadline")
+        chunk = os.read(stream.fileno(), min(4096, max_bytes + 1 - len(data)))
+        if not chunk:
+            raise RuntimeError("demo client closed stdout before publishing readiness")
+        data.extend(chunk)
+        if len(data.split(b"\n", 1)[0]) > max_bytes:
+            raise RuntimeError("demo client readiness line exceeds the byte limit")
+    return data.split(b"\n", 1)[0].decode("utf-8").strip()
+
+
+def _stop_process(process) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        if process.stderr:
+            process.stderr.close()
 
 
 class DemoWindows:
@@ -35,20 +67,28 @@ class DemoWindows:
                 "--theme", THEMES[index % len(THEMES)], "--content", content,
                 "--opacity", str(opacity), "--animate", "--socket", str(socket),
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            ready, _, _ = select.select([process.stdout], [], [], 5.0) if process.stdout else ([], [], [])
-            line = process.stdout.readline().strip() if ready else ""
-            if not line:
-                raise RuntimeError(f"demo client failed to start: {process.stderr.read() if process.stderr else ''}")
-            metadata = json.loads(line)
-            window_id = int(metadata["window_id"])
-            reported_socket = Path(metadata["socket"])
-            if reported_socket != socket:
-                process.terminate()
-                raise RuntimeError(
-                    f"demo client reported unexpected control socket: {reported_socket}"
-                )
+            # Own the child before any fallible handshake/parsing operation.
             self.processes.append(process)
-            self.control_sockets[window_id] = socket
+            try:
+                if process.stdout is None:
+                    raise RuntimeError("demo client stdout pipe is unavailable")
+                metadata = json.loads(_read_ready_line(process.stdout))
+                window_id = int(metadata["window_id"])
+                reported_socket = Path(metadata["socket"])
+                if reported_socket != socket:
+                    raise RuntimeError(
+                        f"demo client reported unexpected control socket: {reported_socket}"
+                    )
+                self.control_sockets[window_id] = socket
+            except BaseException:
+                try:
+                    _stop_process(process)
+                except Exception:
+                    # Keep ownership so outer scene cleanup can retry.
+                    pass
+                else:
+                    self.processes.remove(process)
+                raise
 
     def control(self, window_id: int, command: str, timeout: float = 3.0) -> dict:
         if command not in ("minimize", "restore"):
@@ -94,11 +134,16 @@ class DemoWindows:
         raise TimeoutError(f"only {len(windows)} of {count} demo windows became managed")
 
     def close(self) -> None:
-        for process in self.processes:
-            if process.poll() is None: process.terminate()
-        for process in self.processes:
-            try: process.wait(timeout=2)
-            except subprocess.TimeoutExpired: process.kill()
-        self.processes.clear()
+        first_error: Exception | None = None
+        for process in list(self.processes):
+            try:
+                _stop_process(process)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+            else:
+                self.processes.remove(process)
         self.control_sockets.clear()
         self.last_minimized_window_id = None
+        if first_error is not None:
+            raise first_error

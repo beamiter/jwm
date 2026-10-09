@@ -4634,22 +4634,13 @@ mod output_ops {
 
     /// Calculate refresh rate in millihertz from a RandR ModeInfo.
     fn calc_refresh_mhz(mode: &randr::ModeInfo) -> u32 {
-        if mode.htotal == 0 || mode.vtotal == 0 {
-            return DEFAULT_OUTPUT_REFRESH_MHZ;
-        }
-        let mut vtotal = mode.vtotal as u64;
-        let flags = u32::from(mode.mode_flags);
-        if flags & (1 << 4) != 0 {
-            vtotal *= 2; // DoubleScan
-        }
-        if flags & (1 << 0) != 0 {
-            vtotal /= 2; // Interlace (fields per second → frames)
-        }
-        let denom = mode.htotal as u64 * vtotal;
-        if denom == 0 {
-            return DEFAULT_OUTPUT_REFRESH_MHZ;
-        }
-        ((mode.dot_clock as u64 * 1000) / denom) as u32
+        crate::backend::x11::wm::mode_refresh_millihz(
+            mode.dot_clock,
+            mode.htotal,
+            mode.vtotal,
+            u32::from(mode.mode_flags) & u32::from(randr::ModeFlag::INTERLACE) != 0,
+            u32::from(mode.mode_flags) & u32::from(randr::ModeFlag::DOUBLE_SCAN) != 0,
+        )
     }
 
     pub(super) struct X11OutputOps<C: Connection> {
@@ -5084,6 +5075,31 @@ mod output_ops {
         use super::*;
         use x11rb::protocol::xproto::{AtomEnum, PropMode};
         use x11rb::rust_connection::RustConnection;
+
+        #[test]
+        fn randr_refresh_uses_scan_flags_not_sync_polarity() {
+            for (mode_flags, expected) in [
+                (
+                    randr::ModeFlag::HSYNC_POSITIVE | randr::ModeFlag::VSYNC_POSITIVE,
+                    60_000,
+                ),
+                (
+                    randr::ModeFlag::HSYNC_NEGATIVE | randr::ModeFlag::VSYNC_NEGATIVE,
+                    60_000,
+                ),
+                (randr::ModeFlag::INTERLACE, 120_000),
+                (randr::ModeFlag::DOUBLE_SCAN, 30_000),
+            ] {
+                let mode = randr::ModeInfo {
+                    dot_clock: 148_500_000,
+                    htotal: 2200,
+                    vtotal: 1125,
+                    mode_flags,
+                    ..Default::default()
+                };
+                assert_eq!(calc_refresh_mhz(&mode), expected);
+            }
+        }
 
         #[test]
         fn crtc_fallback_preserves_connector_hdr_metadata() {

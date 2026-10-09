@@ -624,7 +624,9 @@ impl XilemBar {
         }
         for effect in update.platform_effects {
             match effect {
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
+                effect @ (BarEffect::Screenshot
+                | BarEffect::OpenAudioControl
+                | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("failed to handle platform effect: {error}");
                     }
@@ -981,14 +983,20 @@ fn usage_pill_view(
 
 fn battery_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     let battery = state.runtime.view().battery;
-    let pct = battery.percent.map_or(100.0, |percent| percent.as_f32());
+    let pct = battery
+        .percent
+        .filter(|_| battery.present)
+        .map(|percent| percent.as_f32());
     let charging = battery.charging;
     let icon = if charging {
         ICON_BAT_CHG
     } else {
         ICON_BAT_FULL
     };
-    let accent = battery_color(&state.theme, pct);
+    let accent = pct.map_or(state.theme.subtle, |value| {
+        battery_color(&state.theme, value)
+    });
+    let percent_label = pct.map_or_else(|| "--".to_owned(), |value| format!("{value:.0}%"));
     let fg = state.theme.fg;
     flat(
         flex(
@@ -997,9 +1005,7 @@ fn battery_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
                 label(icon.to_string())
                     .text_size(PILL_FONT_SIZE)
                     .color(accent),
-                label(format!("{:.0}%", pct))
-                    .text_size(PILL_FONT_SIZE)
-                    .color(fg),
+                label(percent_label).text_size(PILL_FONT_SIZE).color(fg),
             ),
         )
         .gap(Length::px(3.0)),
@@ -1620,11 +1626,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // alpha — gets a solid window; anything else would paint a wash over
     // undefined memory. A failed X connection (native Wayland, no Xwayland)
     // counts as "no compositor" for the same reason.
-    let translucent = match XCBConnection::connect(None) {
-        Ok((conn, screen_num)) => {
-            compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+    let translucent = if x11rb::xcb_ffi::load_libxcb().is_ok() {
+        match XCBConnection::connect(None) {
+            Ok((conn, screen_num)) => {
+                compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
+    } else {
+        false
     };
     info!("startup mode: translucent={translucent}");
 

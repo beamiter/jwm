@@ -24,7 +24,19 @@ python3 video-demo/runner/run_demo.py --backend x11rb --profile smoke --build-de
 The runner always builds and launches `demo-client/target/release/jwm-demo-client`
 and rejects a running JWM that does not report a release build profile.
 
-The runner switches to the last tag, creates only `JwmDemo` windows, records one MP4 per scene, verifies it with `ffprobe`, generates narration/SRT/report assets, and restores the original tag/layout on every normal, exception, SIGINT, or SIGTERM exit handled by Python. If the process is force-killed, run `bash video-demo/scripts/recover-session.sh`.
+The runner selects a tag with no ordinary user windows and refuses to start
+when none is available. Immediately before each recording it checks again for
+non-demo windows, including visible applications on other monitors. Sticky or
+floating state alone never makes a window exempt; only the WM's explicit bar
+classification does. Missing or malformed window metadata also cancels the
+recording. These are startup checks, so use an otherwise quiet dedicated session:
+applications or notifications appearing after recording starts can still enter
+the footage.
+
+It creates its own demo windows, records one MP4 per scene, verifies it with
+`ffprobe`, generates narration/SRT/report assets, and restores the original
+tag/layout on every normal, exception, SIGINT, or SIGTERM exit handled by Python.
+If the process is force-killed, run `bash video-demo/scripts/recover-session.sh`.
 
 Available release profiles:
 
@@ -59,7 +71,7 @@ window ID remains in JWM's `get_windows` result while fully offscreen and
 unfocused, then intersects a monitor and regains focus after restore. The short
 action holds only make both animation endpoints visible in the recorded clip.
 The structural assertion is automated; Genie/Dock appearance remains marked
-`manual_review`. The normal last-tag isolation and session guard apply to this
+`manual_review`. The same empty-tag admission and session guard apply to this
 profile as well.
 
 Compositor scenes use reversible runtime configuration and real XTest pointer

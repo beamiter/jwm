@@ -514,10 +514,10 @@ where
                                                                 .find(|m| m.id == crtc_info.mode)
                                                                 .map(|mode| {
                                                                     mode_refresh_hz(
-                                                                        mode.dot_clock,
-                                                                        mode.htotal,
-                                                                        mode.vtotal,
-                                                                    )
+        mode.dot_clock, mode.htotal, mode.vtotal,
+        u32::from(mode.mode_flags) & u32::from(x11rb::protocol::randr::ModeFlag::INTERLACE) != 0,
+        u32::from(mode.mode_flags) & u32::from(x11rb::protocol::randr::ModeFlag::DOUBLE_SCAN) != 0,
+    )
                                                                 })
                                                                 .unwrap_or(60);
                                                             rates.insert(idx as u32, refresh);
@@ -550,7 +550,21 @@ where
                                 .iter()
                                 .find(|m| m.id == info.mode)
                                 .map(|mode| {
-                                    mode_refresh_hz(mode.dot_clock, mode.htotal, mode.vtotal)
+                                    mode_refresh_hz(
+                                        mode.dot_clock,
+                                        mode.htotal,
+                                        mode.vtotal,
+                                        u32::from(mode.mode_flags)
+                                            & u32::from(
+                                                x11rb::protocol::randr::ModeFlag::INTERLACE,
+                                            )
+                                            != 0,
+                                        u32::from(mode.mode_flags)
+                                            & u32::from(
+                                                x11rb::protocol::randr::ModeFlag::DOUBLE_SCAN,
+                                            )
+                                            != 0,
+                                    )
                                 })
                                 .unwrap_or(60);
                             rates.insert(idx as u32, refresh);

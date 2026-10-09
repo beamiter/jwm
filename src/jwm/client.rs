@@ -1396,6 +1396,11 @@ impl Jwm {
         let cfg = CONFIG.load();
         let actual_bar_height = cfg.status_bar_height();
         let bar_height = if show_bar { actual_bar_height } else { 0 };
+        // Above this output may be another output. Keep the complete mapped
+        // bar outside the desktop, just like other parked native windows.
+        let hidden_x = self.state.clients.get(client_key).map(|client| {
+            hidden_x_left_of_desktop(self.desktop_left_edge(), client.total_width().max(1))
+        });
 
         // arrange() reconciles the bar on every pass, so a bar that is already
         // where this call would put it must cost nothing — no configure, no
@@ -1412,8 +1417,7 @@ impl Jwm {
                         && c.geometry.w == monitor.geometry.m_w - 2 * pad - 2 * c.geometry.border_w
                         && c.geometry.h == bar_height
                 } else {
-                    c.geometry.x == monitor.geometry.m_x
-                        && c.geometry.y == monitor.geometry.m_y - actual_bar_height
+                    Some(c.geometry.x) == hidden_x && c.geometry.y == monitor.geometry.m_y
                 }
             })
             .unwrap_or(false);
@@ -1450,9 +1454,10 @@ impl Jwm {
                 backend.window_ops().apply_window_changes(win, changes)?;
                 backend.compositor_force_full_redraw();
             } else {
-                // Hide bar by moving it off-screen above the monitor
-                let hidden_x = monitor.geometry.m_x;
-                let hidden_y = monitor.geometry.m_y - actual_bar_height;
+                // Park to the left of every output, including vertically
+                // stacked outputs and outputs with negative origins.
+                let hidden_x = hidden_x.expect("client exists in this branch");
+                let hidden_y = monitor.geometry.m_y;
                 if let Some(client) = self.state.clients.get_mut(client_key) {
                     client.geometry.x = hidden_x;
                     client.geometry.y = hidden_y;
@@ -3919,6 +3924,170 @@ mod unmanage_minimized_tests {
                     RestoreAccess::Get(window),
                     RestoreAccess::Set(window, normalized),
                 ]
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_secondary_bar_stays_outside_vertically_stacked_outputs() {
+        let mut backend = ClientSpyBackend::new();
+        backend.has_compositor = false;
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let upper = jwm.state.monitor_order[0];
+        let upper_monitor = jwm.state.monitors.get_mut(upper).unwrap();
+        upper_monitor.geometry.m_x = 0;
+        upper_monitor.geometry.m_y = 0;
+        upper_monitor.geometry.m_w = 1920;
+        upper_monitor.geometry.m_h = 1080;
+        let mut lower_monitor = jwm.createmon_numbered(false, 1, None);
+        lower_monitor.geometry.m_x = 0;
+        lower_monitor.geometry.m_y = 1080;
+        lower_monitor.geometry.m_w = 1920;
+        lower_monitor.geometry.m_h = 1080;
+        let lower = jwm.insert_monitor(lower_monitor);
+        let window = WindowId::from_raw(0x82fe);
+        let mut bar = WMClient::new(window);
+        bar.mon = Some(lower);
+        bar.state.is_dock = true;
+        bar.geometry.x = 0;
+        bar.geometry.y = 1080;
+        bar.geometry.w = 1920;
+        bar.geometry.h = CONFIG.load().status_bar_height();
+        bar.geometry.border_w = 0;
+        let key = jwm.insert_client(bar);
+
+        let assert_parked = |jwm: &Jwm, backend: &ClientSpyBackend| {
+            let bar = &jwm.state.clients[key];
+            assert!(
+                i64::from(bar.geometry.x) + i64::from(bar.total_width())
+                    <= i64::from(jwm.desktop_left_edge()),
+                "a hidden lower-output bar must not cover the upper output"
+            );
+            let changes = backend.window_ops.changes.lock().unwrap();
+            let (changed_window, changes) = changes.last().unwrap();
+            assert_eq!(*changed_window, window);
+            assert_eq!(changes.x, Some(bar.geometry.x));
+            assert_eq!(changes.y, Some(bar.geometry.y));
+        };
+        jwm.position_secondary_bar_on_monitor(&mut backend, key, window, 1)
+            .unwrap();
+        assert_parked(&jwm, &backend);
+        let count = backend.window_ops.changes.lock().unwrap().len();
+        jwm.position_secondary_bar_on_monitor(&mut backend, key, window, 1)
+            .unwrap();
+        assert_eq!(backend.window_ops.changes.lock().unwrap().len(), count);
+
+        // A new left-most output invalidates the previous parking coordinate.
+        jwm.state.monitors[upper].geometry.m_x = -4096;
+        jwm.position_secondary_bar_on_monitor(&mut backend, key, window, 1)
+            .unwrap();
+        assert_parked(&jwm, &backend);
+
+        let pertag = jwm.state.monitors[lower].pertag.as_mut().unwrap();
+        pertag.show_bars[pertag.cur_tag] = true;
+        jwm.position_secondary_bar_on_monitor(&mut backend, key, window, 1)
+            .unwrap();
+        let bar = &jwm.state.clients[key];
+        let pad = CONFIG.load().status_bar_padding();
+        assert_eq!((bar.geometry.x, bar.geometry.y), (pad, 1080 + pad));
+        assert_eq!(bar.geometry.h, CONFIG.load().status_bar_height());
+    }
+
+    #[test]
+    fn restart_refreshes_visible_floating_and_maximize_restore_slots() {
+        for maximized in [false, true] {
+            let mut backend = ClientSpyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let monitor = jwm.state.monitor_order[0];
+            let window = WindowId::from_raw(0x82fd);
+            let original = Rect::new(100, 120, 640, 480);
+            let mut client = WMClient::new(window);
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            client.state.is_floating = true;
+            client.geometry.x = original.x;
+            client.geometry.y = original.y;
+            client.geometry.w = original.w;
+            client.geometry.h = original.h;
+            client.geometry.floating_x = original.x;
+            client.geometry.floating_y = original.y;
+            client.geometry.floating_w = original.w;
+            client.geometry.floating_h = original.h;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            if maximized {
+                jwm.set_client_maximized(
+                    &mut backend,
+                    key,
+                    MaximizeAxes::BOTH,
+                    crate::core::maximize::MaximizeOrigin::User,
+                )
+                .unwrap();
+                assert_eq!(
+                    backend
+                        .property_ops
+                        .get_maximize_restore_state(window)
+                        .unwrap()
+                        .unwrap()
+                        .restore_rect
+                        .x,
+                    original.x
+                );
+            } else {
+                jwm.sync_floating_restore_property(&mut backend, key);
+                assert_eq!(
+                    backend
+                        .property_ops
+                        .get_floating_restore_state(window)
+                        .unwrap()
+                        .unwrap()
+                        .floating_rect
+                        .x,
+                    original.x
+                );
+            }
+
+            // Exercise the production monitor-transfer path: it rebases
+            // both live floating geometry and the pre-maximize return slot.
+            jwm.add_monitor(crate::jwm::monitor::test_support::output(
+                2, 4000, 0, 1920, 1080,
+            ));
+            let target = *jwm.state.monitor_order.last().unwrap();
+            jwm.sendmon(&mut backend, Some(key), Some(target));
+            let client = &jwm.state.clients[key];
+            assert_eq!(client.mon, Some(target));
+            let moved = if maximized {
+                client.geometry.maximize_restore_rect.unwrap()
+            } else {
+                Rect::new(
+                    client.geometry.floating_x,
+                    client.geometry.floating_y,
+                    client.geometry.floating_w,
+                    client.geometry.floating_h,
+                )
+            };
+            assert_ne!(moved, original, "the return slot must have migrated");
+            jwm.is_restarting.store(true, Ordering::SeqCst);
+            jwm.cleanup_all_clients_x11_state(&mut backend).unwrap();
+            let persisted = if maximized {
+                backend
+                    .property_ops
+                    .get_maximize_restore_state(window)
+                    .unwrap()
+                    .unwrap()
+                    .restore_rect
+            } else {
+                backend
+                    .property_ops
+                    .get_floating_restore_state(window)
+                    .unwrap()
+                    .unwrap()
+                    .floating_rect
+            };
+            assert_eq!(
+                Rect::new(persisted.x, persisted.y, persisted.w, persisted.h),
+                moved,
+                "restart must persist the latest visible restore slot, maximized={maximized}"
             );
         }
     }

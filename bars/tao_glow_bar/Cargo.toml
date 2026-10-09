@@ -31,3 +31,7 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
     "transport-shared",
 ] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
+
+# GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
+[patch.crates-io]
+glib = { path = "../../vendor/glib" }

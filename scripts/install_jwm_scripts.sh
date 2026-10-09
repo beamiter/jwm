@@ -497,12 +497,23 @@ build_bar() {
 # ============================================================
 # 同步选中的 bar 到用户配置
 # ============================================================
-update_toml_status_bar_name() {
+update_toml_status_bar_name() (
     local path="$1"
     local bar="$2"
     local tmp
 
-    tmp="$(mktemp "${path}.tmp.XXXXXX")"
+    # A shell line editor cannot distinguish TOML multiline values. Validate
+    # semantic preservation before publishing; no parser means no write.
+    if [[ ! -f "$path" || -L "$path" ]]; then
+        err "配置必须是普通文件；符号链接请手动设置 status_bar.name: $path"
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        err "安全更新配置需要 Python 3.11+，或 Python 3 + tomli；请手动设置 status_bar.name"
+        return 1
+    fi
+    tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
+    trap 'rm -f -- "$tmp"' EXIT
     awk -v bar="$bar" '
         BEGIN {
             in_status_bar = 0
@@ -542,12 +553,42 @@ update_toml_status_bar_name() {
                 print ""
                 print "[status_bar]"
                 print "name = \"" bar "\""
-                print "show_bar = true"
             }
         }
-    ' "$path" > "$tmp"
-    mv "$tmp" "$path"
-}
+    ' "$path" > "$tmp" || return 1
+    if ! python3 - "$path" "$tmp" "$bar" <<'PYTOML'
+import sys
+try:
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+    with open(sys.argv[1], "rb") as source:
+        before = tomllib.load(source)
+    with open(sys.argv[2], "rb") as source:
+        after = tomllib.load(source)
+    section = after.get("status_bar")
+    if not isinstance(section, dict) or section.get("name") != sys.argv[3]:
+        raise ValueError("status_bar.name was not updated as requested")
+    for value in (before, after):
+        section = value.get("status_bar")
+        if isinstance(section, dict):
+            section.pop("name", None)
+            if not section:
+                value.pop("status_bar")
+    if before != after:
+        raise ValueError("line edit would alter unrelated TOML values")
+except (ImportError, OSError, ValueError) as error:
+    print("配置未改动；需要 Python 3.11+ 或 tomli，且修改必须仅影响 status_bar.name: "
+          + str(error), file=sys.stderr)
+    sys.exit(1)
+PYTOML
+    then
+        return 1
+    fi
+    chmod --reference="$path" "$tmp" || return 1
+    mv -- "$tmp" "$path"
+)
 
 sync_selected_bar_config() {
     local bar="$1"
@@ -712,9 +753,6 @@ info " 重新生成配置: $REGEN_CONFIG"
 info "========================================="
 echo ""
 
-# JWM 只安装到 /usr/local/bin；无论本次是否跳过编译，都先清理旧遗留文件。
-remove_jwm_cargo_bins
-
 # 1. 安装 JWM_BAR_NAME 对应的 bar 到 cargo bin（源码就在 bars/ 目录）
 if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
     build_bar "$JWM_BAR_NAME"
@@ -723,6 +761,10 @@ fi
 # 2. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
+    # Only migrate the legacy cargo installation after every replacement and
+    # its session/bridge integration succeeded. A skipped or failed install
+    # must leave the user's previously working commands available.
+    remove_jwm_cargo_bins
     show_jwm_tool_help
 fi
 

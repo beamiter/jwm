@@ -1,0 +1,9 @@
+[package]
+name = "jwm_ipc_transport"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Bounded Unix-socket connections for JWM control clients"
+
+[dependencies]
+libc = "0.2"

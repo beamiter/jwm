@@ -6,6 +6,7 @@ description = "Linux desktop process-effect adapter for xbar_core"
 repository = "https://github.com/beamiter/xbar_core"
 
 [dependencies]
+jwm_ipc_transport = { path = "../../../jwm_ipc_transport" }
 log = "0.4.33"
 xbar_core = { path = "../..", default-features = false }
 

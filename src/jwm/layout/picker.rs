@@ -81,9 +81,26 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
         let current = self.current_selected_layout(sel_mon_key)?;
+        let owner_tag = self
+            .state
+            .monitors
+            .get(sel_mon_key)
+            .and_then(|monitor| monitor.pertag.as_ref())
+            .map(|pertag| pertag.cur_tag)
+            .ok_or("No pertag")?;
 
         self.prepare_system_ui(backend, "layout picker", SystemUiPointerGrab::Buttons)?;
         let mut picker = LayoutPickerState::new(&current);
+        picker.owner = Some((sel_mon_key, owner_tag));
+        let show_bar = self
+            .state
+            .monitors
+            .get(sel_mon_key)
+            .and_then(|monitor| monitor.pertag.as_ref())
+            .and_then(|pertag| pertag.show_bars.get(owner_tag))
+            .copied();
+        picker.origin_show_bar = show_bar;
+        picker.preview_show_bar = show_bar;
         let target = if delta == 0 {
             picker.selected_layout()
         } else {
@@ -101,6 +118,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         delta: i32,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.dismiss_stale_layout_picker(backend) {
+            return Ok(false);
+        }
         let Some(picker) = self.features.system_ui.layout_picker_mut() else {
             return Ok(false);
         };
@@ -121,6 +141,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         to_end: bool,
     ) -> bool {
+        if self.dismiss_stale_layout_picker(backend) {
+            return true;
+        }
         let Some(picker) = self.features.system_ui.layout_picker_mut() else {
             return false;
         };
@@ -134,6 +157,9 @@ impl Jwm {
 
     /// Page Up / Down on an open picker. Returns false when none is open.
     pub(crate) fn page_layout_picker(&mut self, backend: &mut dyn Backend, direction: i32) -> bool {
+        if self.dismiss_stale_layout_picker(backend) {
+            return true;
+        }
         let Some(picker) = self.features.system_ui.layout_picker_mut() else {
             return false;
         };
@@ -147,6 +173,9 @@ impl Jwm {
 
     /// Highlight the cell under the pointer, following the mouse.
     pub(crate) fn hover_layout_picker(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
+        if self.dismiss_stale_layout_picker(backend) {
+            return;
+        }
         let Some(index) = self.layout_picker_cell_at(x, y) else {
             return;
         };
@@ -165,6 +194,9 @@ impl Jwm {
     /// A click commits. Clicking a cell picks that one first; clicking
     /// anywhere else commits what is highlighted.
     pub(crate) fn click_layout_picker(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
+        if self.dismiss_stale_layout_picker(backend) {
+            return;
+        }
         if let Some(index) = self.layout_picker_cell_at(x, y) {
             if let Some(picker) = self.features.system_ui.layout_picker_mut() {
                 if let Some(target) = picker.select(index) {
@@ -178,6 +210,9 @@ impl Jwm {
     /// Commit the highlighted layout: it is already applied, so this only
     /// takes the panel down.
     pub(crate) fn confirm_layout_picker(&mut self, backend: &mut dyn Backend) {
+        if self.dismiss_stale_layout_picker(backend) {
+            return;
+        }
         if let Some(picker) = self.features.system_ui.layout_picker() {
             info!(
                 "[layout_picker] applied {}",
@@ -201,17 +236,126 @@ impl Jwm {
     /// hand-over to another shell panel has to undo the preview too, without
     /// dropping the grabs the incoming panel is about to inherit.
     pub(crate) fn restore_layout_picker_origin(&mut self, backend: &mut dyn Backend) {
-        let restore =
-            self.features.system_ui.layout_picker().and_then(|picker| {
-                (picker.selected != picker.origin).then(|| picker.origin_layout())
-            });
-        if let Some(layout) = restore {
-            self.apply_picked_layout(backend, layout);
+        let Some(picker) = self.features.system_ui.layout_picker() else {
+            return;
+        };
+        let (owner, preview, origin, origin_bar, preview_bar) = (
+            picker.owner,
+            picker.selected_layout(),
+            picker.origin_layout(),
+            picker.origin_show_bar,
+            picker.preview_show_bar,
+        );
+        let Some((monitor_key, tag)) = owner else {
+            if preview != origin {
+                self.apply_picked_layout(backend, origin);
+            }
+            return;
+        };
+        let Some(monitor) = self.state.monitors.get(monitor_key) else {
+            return;
+        };
+        let Some(pertag) = monitor.pertag.as_ref() else {
+            return;
+        };
+        let active = pertag.cur_tag == tag;
+        let still_our_preview = if active {
+            *monitor.lt == *preview
+        } else {
+            pertag
+                .lts
+                .get(tag)
+                .is_some_and(|layout| **layout == *preview)
+        };
+        // A newer explicit layout change owns the slot now. Cancelling this
+        // older picker must not undo that command or its bar preference.
+        if !still_our_preview {
+            return;
         }
+        let current_bar = pertag.show_bars.get(tag).copied();
+        let restore_bar = if current_bar == preview_bar {
+            origin_bar
+        } else {
+            current_bar
+        };
+        if active {
+            self.apply_picked_layout_on(backend, monitor_key, origin);
+        } else if preview != origin {
+            // Restore only the owner's saved slot, never the unrelated live tag.
+            let Some(pertag) = self
+                .state
+                .monitors
+                .get_mut(monitor_key)
+                .and_then(|monitor| monitor.pertag.as_mut())
+            else {
+                return;
+            };
+            if let Some(previous) = pertag.prev_lts.get_mut(tag) {
+                *previous = Rc::new(preview.clone());
+            }
+            if let Some(layout) = pertag.lts.get_mut(tag) {
+                *layout = Rc::new(origin.clone());
+            }
+        }
+        // Fullscreen transitions write show_bars themselves. Undo only that
+        // preview side effect, including a trip that ended back at the origin.
+        let mut bar_changed = false;
+        if let Some(restore_bar) = restore_bar {
+            if let Some(show_bar) = self
+                .state
+                .monitors
+                .get_mut(monitor_key)
+                .and_then(|monitor| monitor.pertag.as_mut())
+                .and_then(|pertag| pertag.show_bars.get_mut(tag))
+            {
+                bar_changed = *show_bar != restore_bar;
+                *show_bar = restore_bar;
+            }
+        }
+        if active && bar_changed {
+            if restore_bar == Some(false) {
+                if let Some(number) = self.state.monitors.get(monitor_key).map(|m| m.num) {
+                    self.clear_minimized_dock_for_monitor(backend, number);
+                }
+            }
+            self.sync_secondary_bar_position(backend, monitor_key);
+            self.arrange(backend, Some(monitor_key));
+            self.broadcast_visible_window_states_on_monitor(backend, monitor_key);
+            self.broadcast_monitor_bar_ipc(backend, monitor_key);
+        }
+        if preview != origin || bar_changed {
+            self.mark_layout_dirty();
+        }
+    }
+
+    /// A live preview belongs to its opening monitor/tag, not whichever
+    /// context an IPC activation, workspace change or hotplug selected later.
+    pub(crate) fn dismiss_stale_layout_picker(&mut self, backend: &mut dyn Backend) -> bool {
+        let stale = self
+            .features
+            .system_ui
+            .layout_picker()
+            .and_then(|picker| picker.owner)
+            .is_some_and(|(monitor_key, tag)| {
+                self.state.sel_mon != Some(monitor_key)
+                    || self
+                        .state
+                        .monitors
+                        .get(monitor_key)
+                        .and_then(|monitor| monitor.pertag.as_ref())
+                        .is_none_or(|pertag| pertag.cur_tag != tag)
+            });
+        if stale {
+            self.cancel_layout_picker(backend);
+        }
+        stale
     }
 
     /// Commit on the user's behalf once they stop interacting.
     pub(crate) fn tick_layout_picker(&mut self, backend: &mut dyn Backend, now: Instant) {
+        if self.dismiss_stale_layout_picker(backend) {
+            return;
+        }
         let Some(picker) = self.features.system_ui.layout_picker() else {
             return;
         };
@@ -251,9 +395,49 @@ impl Jwm {
     /// cell is a no-op, same as [`Jwm::setlayout`] — the early return here
     /// also skips the fullscreen/arrange side effects of a real change.
     fn apply_picked_layout(&mut self, backend: &mut dyn Backend, layout: &'static LayoutEnum) {
-        let Some(sel_mon_key) = self.state.sel_mon else {
+        let owner = self
+            .features
+            .system_ui
+            .layout_picker()
+            .and_then(|picker| picker.owner);
+        let Some(sel_mon_key) = owner.map(|(monitor, _)| monitor).or(self.state.sel_mon) else {
             return;
         };
+        let current_bar = owner.and_then(|(monitor, tag)| {
+            self.state
+                .monitors
+                .get(monitor)
+                .and_then(|monitor| monitor.pertag.as_ref())
+                .and_then(|pertag| pertag.show_bars.get(tag))
+                .copied()
+        });
+        if let Some(picker) = self.features.system_ui.layout_picker_mut() {
+            if current_bar != picker.preview_show_bar {
+                // A bar toggle between previews becomes the preference to
+                // restore, rather than being lost by the next fullscreen step.
+                picker.origin_show_bar = current_bar;
+            }
+        }
+        self.apply_picked_layout_on(backend, sel_mon_key, layout);
+        let preview_bar = owner.and_then(|(monitor, tag)| {
+            self.state
+                .monitors
+                .get(monitor)
+                .and_then(|monitor| monitor.pertag.as_ref())
+                .and_then(|pertag| pertag.show_bars.get(tag))
+                .copied()
+        });
+        if let Some(picker) = self.features.system_ui.layout_picker_mut() {
+            picker.preview_show_bar = preview_bar;
+        }
+    }
+
+    fn apply_picked_layout_on(
+        &mut self,
+        backend: &mut dyn Backend,
+        sel_mon_key: crate::core::models::MonitorKey,
+        layout: &'static LayoutEnum,
+    ) {
         if self
             .current_selected_layout(sel_mon_key)
             .map(|current| *current == *layout)

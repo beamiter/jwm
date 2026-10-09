@@ -1943,7 +1943,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 fps_str.as_str(),
                 "-movflags",
                 "+faststart",
-                "-y",
+                "-n",
                 output_path,
             ]
             .map(str::to_string),
@@ -2918,5 +2918,23 @@ mod minimized_recapture_tests {
         assert!(!minimized_preview_source_is_drawable(false, false, true));
         assert!(minimized_preview_source_is_drawable(false, true, true));
         assert!(minimized_preview_source_is_drawable(true, false, true));
+    }
+}
+
+#[cfg(test)]
+mod recording_output_ownership_tests {
+    #[test]
+    fn screen_recording_preserves_a_destination_created_after_preflight() {
+        // No GL or encoder is started: pin the production argv contract.
+        let source = include_str!("features.rs");
+        let launch = source
+            .split_once("pub(crate) fn start_recording_region(")
+            .unwrap()
+            .1
+            .split_once("let mut command =")
+            .unwrap()
+            .0;
+        assert!(launch.contains("\"-n\""));
+        assert!(!launch.contains("\"-y\""));
     }
 }

@@ -688,9 +688,9 @@ impl Jwm {
         let rebuilt = self.tags_overview_state(sel_mon_key);
         if let Some(overview) = self.features.system_ui.tags_overview_mut() {
             let selected = overview.selected;
-            let pending = overview
-                .pending
-                .filter(|pending| pending.cell < rebuilt.cells.len());
+            let pending = overview.pending.filter(|pending| {
+                overview.monitor == rebuilt.monitor && pending.cell < rebuilt.cells.len()
+            });
             *overview = rebuilt;
             overview.selected = selected.min(overview.cells.len().saturating_sub(1));
             overview.pending = pending;
@@ -762,6 +762,43 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_overview_monitor_cancels_the_previous_drag() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let first = jwm.state.monitor_order[0];
+        let second = jwm.state.monitor_order[1];
+        let mut overview = jwm.tags_overview_state(first);
+        overview.pending = Some(PendingCellPress {
+            cell: 0,
+            window: Some(42),
+            dragging: true,
+        });
+        jwm.features.system_ui = SystemUiState::TagsOverview(overview);
+        jwm.state.sel_mon = Some(first);
+        jwm.refresh_tags_overview();
+        assert!(
+            jwm.features
+                .system_ui
+                .tags_overview()
+                .unwrap()
+                .pending
+                .is_some()
+        );
+        jwm.state.sel_mon = Some(second);
+        jwm.refresh_tags_overview();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(overview.monitor, Some(second));
+        assert!(
+            overview.pending.is_none(),
+            "a drag cannot migrate to another monitor's grid"
+        );
+    }
 
     const WORK: [i32; 4] = [0, 0, 1920, 1080];
 

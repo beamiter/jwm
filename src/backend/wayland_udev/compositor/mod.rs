@@ -1132,6 +1132,7 @@ pub(crate) struct WaylandCompositor {
     win_uniforms: WindowUniforms,
     shadow_uniforms: ShadowUniforms,
     blur_uniforms: BlurUniforms,
+    blur_up_uniforms: BlurUniforms,
     border_uniforms: BorderUniforms,
     gradient_border_uniforms: GradientBorderUniforms,
     glass_uniforms: GlassUniforms,
@@ -2355,6 +2356,15 @@ impl WaylandCompositor {
                 halfpixel: get_uniform_loc(gl, blur_down_program, "u_halfpixel"),
             };
 
+            // Locations belong to one linked program, even when both
+            // shaders declare exactly the same uniform names.
+            let blur_up_uniforms = BlurUniforms {
+                rect: get_uniform_loc(gl, blur_up_program, "u_rect"),
+                projection: get_uniform_loc(gl, blur_up_program, "u_projection"),
+                texture: get_uniform_loc(gl, blur_up_program, "u_texture"),
+                halfpixel: get_uniform_loc(gl, blur_up_program, "u_halfpixel"),
+            };
+
             let border_uniforms = BorderUniforms {
                 rect: get_uniform_loc(gl, border_program, "u_rect"),
                 projection: get_uniform_loc(gl, border_program, "u_projection"),
@@ -2761,6 +2771,7 @@ impl WaylandCompositor {
                 win_uniforms,
                 shadow_uniforms,
                 blur_uniforms,
+                blur_up_uniforms,
                 border_uniforms,
                 gradient_border_uniforms,
                 glass_uniforms,
@@ -3304,6 +3315,7 @@ impl WaylandCompositor {
             // Jobs and synchronization objects may still reference the main
             // render targets. Retire them before deleting any target storage.
             self.recording.stop(gl);
+            self.screenshot_requests.clear();
             self.screenshot_readback.clear(gl);
             self.gpu_fence_sync_mgr.clear(gl);
             self.pbo_uploader.clear(gl);

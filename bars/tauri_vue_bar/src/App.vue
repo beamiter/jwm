@@ -644,12 +644,16 @@ onMounted(() => {
     }
     unlisten = stopListening;
 
-    try {
-      scaleFactor.value = await getCurrentWindow().scaleFactor();
-    } catch (error) {
-      console.error('Failed to query the Tauri window scale factor:', error);
-    }
     await invoke<void>('frontend_ready');
+    if (cancelled) return;
+    try {
+      const scale = await getCurrentWindow().scaleFactor();
+      if (!cancelled) scaleFactor.value = scale;
+    } catch (error) {
+      if (!cancelled) {
+        console.error('Failed to query the Tauri window scale factor:', error);
+      }
+    }
   })().catch((error) => {
     console.error('Failed to initialize xbar Tauri bridge:', error);
   });

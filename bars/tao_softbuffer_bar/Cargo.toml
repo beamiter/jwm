@@ -29,3 +29,7 @@ pango = "0.22.9"
 tao = "0.37.0"
 x11rb = "0.14"
 raw-window-handle = "0.6"
+
+# GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
+[patch.crates-io]
+glib = { path = "../../vendor/glib" }

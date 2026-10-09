@@ -10,6 +10,7 @@ name = "jwm-portal"
 path = "src/main.rs"
 
 [dependencies]
+jwm_ipc_transport = { path = "../crates/jwm_ipc_transport" }
 # Async runtime — zbus + pipewire-rs both need executors.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-util", "net", "time", "fs"] }
 futures-util = "0.3"

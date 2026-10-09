@@ -958,7 +958,9 @@ struct QueuedRequest {
 /// volume and 1 for brightness — both brightness backends floor a decrease
 /// at a nonzero level (`brightnessctl -n1`, sysfs's `max(1)`).
 fn adjusted_level(percent: u8, delta: i32, floor: u8) -> u8 {
-    (i32::from(percent) + delta).clamp(i32::from(floor), 100) as u8
+    i32::from(percent)
+        .saturating_add(delta)
+        .clamp(i32::from(floor), 100) as u8
 }
 
 /// Fold two queued value requests for one domain into the single write that
@@ -1023,9 +1025,20 @@ fn fold_request(
     next: QueuedRequest,
 ) {
     let domain = next.request.domain();
-    let last = batch
-        .iter()
-        .rposition(|queued| queued.request.domain() == domain);
+    let last = batch.iter().rposition(|queued| {
+        queued.request.domain() == domain
+            && match (&queued.request, &next.request) {
+                (
+                    ControlRequest::AudioSetDefault {
+                        direction: pending, ..
+                    },
+                    ControlRequest::AudioSetDefault {
+                        direction: next, ..
+                    },
+                ) => pending == next,
+                _ => true,
+            }
+    });
     match (&next.request, last) {
         (ControlRequest::VolumeToggleMute, Some(index))
             if batch[index].request == ControlRequest::VolumeToggleMute =>
@@ -2244,6 +2257,39 @@ impl crate::jwm::Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_level_adjustments_saturate_before_clamping() {
+        for floor in [0, 1] {
+            assert_eq!(adjusted_level(50, i32::MAX, floor), 100);
+            assert_eq!(adjusted_level(50, i32::MIN, floor), floor);
+        }
+        assert_eq!(adjusted_level(50, 5, 0), 55);
+    }
+
+    #[test]
+    fn queued_input_and_output_switches_never_replace_each_other() {
+        let switch = |direction, id: &str| ControlRequest::AudioSetDefault {
+            direction,
+            id: id.to_string(),
+        };
+        let (batch, _) = fold_all([
+            queued(1, switch(AudioDirection::Output, "speakers")),
+            queued(2, switch(AudioDirection::Input, "microphone")),
+            queued(3, switch(AudioDirection::Output, "headphones")),
+        ]);
+        assert_eq!(batch.len(), 2);
+        assert!(
+            batch
+                .iter()
+                .any(|queued| { queued.request == switch(AudioDirection::Input, "microphone") })
+        );
+        assert!(
+            batch
+                .iter()
+                .any(|queued| { queued.request == switch(AudioDirection::Output, "headphones") })
+        );
+    }
 
     #[test]
     fn wpctl_output_parses_volume_and_mute() {

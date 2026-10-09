@@ -7788,6 +7788,99 @@ mod tests {
     /// cannot wake the loop; the maintenance tick is what adopts its outcome,
     /// so the loop keeps waking at frame rate until the worker returns.
     #[test]
+    fn chord_deadline_participates_in_maintenance_without_a_second_keypress() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        // Same non-composited, empty spy setup as the existing maintenance tests.
+        // No outputs, bars, native-wallpaper support or connectivity jobs exist.
+        let before = std::time::Instant::now();
+        EventHandler::update(&mut jwm, &mut backend).unwrap();
+        assert!(jwm.maintenance_next_wakeup_at(before) > FRAME_INTERVAL);
+        let deadline = before + std::time::Duration::from_millis(5);
+        jwm.chord_armed_until = Some(deadline);
+        assert_eq!(
+            jwm.maintenance_next_wakeup_at(before),
+            std::time::Duration::from_millis(5)
+        );
+        assert_eq!(
+            jwm.maintenance_next_wakeup_at(deadline),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn expired_chord_releases_the_keyboard_on_update_without_another_key() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        jwm.chord_compiled = Some(crate::config::CompiledChord {
+            leader: (Mods::empty(), u32::from(b'z')),
+            timeout: std::time::Duration::from_millis(100),
+            bindings: Vec::new(),
+        });
+        jwm.on_key_press_internal(&mut backend, b'z', 0).unwrap();
+        assert_eq!(
+            backend.key_ops.keyboard_grabs.load(AtomicOrdering::Relaxed),
+            1
+        );
+        jwm.chord_armed_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        EventHandler::update(&mut jwm, &mut backend).unwrap();
+        assert!(
+            jwm.chord_armed_until.is_none(),
+            "a timed-out chord cannot retain an active grab"
+        );
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn chord_cleanup_preserves_a_modal_that_took_over_the_keyboard() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let now = std::time::Instant::now();
+        jwm.chord_armed_until = Some(now);
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        jwm.expire_chord(&mut backend, now);
+        assert!(jwm.chord_armed_until.is_none());
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert!(jwm.features.system_ui.is_locked());
+        // The reload path uses this same cleanup, without waiting for expiry.
+        jwm.chord_armed_until = Some(now + std::time::Duration::from_secs(1));
+        jwm.cancel_chord(&mut backend);
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        jwm.features.system_ui.cancel();
+        jwm.chord_armed_until = Some(now);
+        jwm.cancel_chord(&mut backend);
+        jwm.cancel_chord(&mut backend);
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
     fn a_finalizing_audio_recording_keeps_the_maintenance_tick_scheduled() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -7933,6 +8026,217 @@ mod tests {
         let key = jwm.state.sel_mon.unwrap();
         let monitor = jwm.state.monitors.get(key).unwrap();
         (*monitor.lt).clone()
+    }
+
+    #[test]
+    fn layout_picker_tick_dismisses_a_preview_after_monitor_switch() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        let left_tag = jwm.state.monitors[left].pertag.as_ref().unwrap().cur_tag;
+        let right_tag = jwm.state.monitors[right].pertag.as_ref().unwrap().cur_tag;
+        jwm.set_new_layout(left, &Rc::new(LayoutEnum::TILE), left_tag);
+        jwm.set_new_layout(right, &Rc::new(LayoutEnum::MONOCLE), right_tag);
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        jwm.focusmon(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        jwm.tick_layout_picker(&mut backend, std::time::Instant::now());
+        assert!(jwm.features.system_ui.layout_picker().is_none());
+        assert_eq!(*jwm.state.monitors[left].lt, LayoutEnum::TILE);
+        assert_eq!(*jwm.state.monitors[right].lt, LayoutEnum::MONOCLE);
+    }
+
+    #[test]
+    fn cancelling_layout_picker_preserves_a_newer_explicit_layout_command() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        let preview = jwm.state.monitors[monitor].lt.as_ref().clone();
+        let explicit = LayoutEnum::all()
+            .iter()
+            .find(|layout| **layout != preview && **layout != LayoutEnum::TILE)
+            .unwrap()
+            .clone();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(explicit.clone())))
+            .unwrap();
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(*jwm.state.monitors[monitor].lt, explicit);
+    }
+
+    #[test]
+    fn cancelling_layout_picker_restores_hidden_bar_on_its_inactive_owner_tag() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        jwm.state.monitors[monitor]
+            .pertag
+            .as_mut()
+            .unwrap()
+            .show_bars[1] = false;
+        let delta =
+            LayoutEnum::FULLSCREEN.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        assert_eq!(*jwm.state.monitors[monitor].lt, LayoutEnum::FULLSCREEN);
+        jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+        let other_layout = jwm.state.monitors[monitor].lt.clone();
+        let other_bar = jwm.state.monitors[monitor]
+            .pertag
+            .as_ref()
+            .unwrap()
+            .show_bars[2];
+        jwm.cancel_layout_picker(&mut backend);
+        let pertag = jwm.state.monitors[monitor].pertag.as_ref().unwrap();
+        assert_eq!(*pertag.lts[1], LayoutEnum::TILE);
+        assert!(
+            !pertag.show_bars[1],
+            "cancel must restore the opening bar preference, not infer it from the layout"
+        );
+        assert_eq!(jwm.state.monitors[monitor].lt, other_layout);
+        assert_eq!(pertag.show_bars[2], other_bar);
+    }
+
+    #[test]
+    fn cancelling_layout_picker_restores_hidden_bar_even_after_returning_to_origin() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        let tag = jwm.state.monitors[monitor].pertag.as_ref().unwrap().cur_tag;
+        jwm.state.monitors[monitor]
+            .pertag
+            .as_mut()
+            .unwrap()
+            .show_bars[tag] = false;
+        let delta =
+            LayoutEnum::FULLSCREEN.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(-delta))
+            .unwrap();
+        assert_eq!(*jwm.state.monitors[monitor].lt, LayoutEnum::TILE);
+        assert!(
+            jwm.state.monitors[monitor]
+                .pertag
+                .as_ref()
+                .unwrap()
+                .show_bars[tag]
+        );
+        jwm.cancel_layout_picker(&mut backend);
+        assert!(
+            !jwm.state.monitors[monitor]
+                .pertag
+                .as_ref()
+                .unwrap()
+                .show_bars[tag]
+        );
+    }
+
+    #[test]
+    fn cancelling_layout_picker_preserves_an_independent_bar_toggle() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        let tag = jwm.state.monitors[monitor].pertag.as_ref().unwrap().cur_tag;
+        jwm.state.monitors[monitor]
+            .pertag
+            .as_mut()
+            .unwrap()
+            .show_bars[tag] = false;
+        let delta =
+            LayoutEnum::FULLSCREEN.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        jwm.togglebar(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(
+            jwm.state.monitors[monitor]
+                .pertag
+                .as_ref()
+                .unwrap()
+                .show_bars[tag]
+        );
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(*jwm.state.monitors[monitor].lt, LayoutEnum::TILE);
+        assert!(
+            jwm.state.monitors[monitor]
+                .pertag
+                .as_ref()
+                .unwrap()
+                .show_bars[tag]
+        );
+    }
+
+    #[test]
+    fn cancelling_layout_picker_after_monitor_switch_restores_only_its_owner() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        let left_tag = jwm.state.monitors[left].pertag.as_ref().unwrap().cur_tag;
+        let right_tag = jwm.state.monitors[right].pertag.as_ref().unwrap().cur_tag;
+        jwm.set_new_layout(left, &Rc::new(LayoutEnum::TILE), left_tag);
+        jwm.set_new_layout(right, &Rc::new(LayoutEnum::MONOCLE), right_tag);
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_ne!(*jwm.state.monitors[left].lt, LayoutEnum::TILE);
+        jwm.focusmon(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(
+            *jwm.state.monitors[right].lt,
+            LayoutEnum::MONOCLE,
+            "cancelling another monitor's preview must not overwrite this monitor"
+        );
+        assert_eq!(
+            *jwm.state.monitors[left].lt,
+            LayoutEnum::TILE,
+            "cancel must restore the monitor that owned the preview"
+        );
+    }
+
+    #[test]
+    fn cancelling_layout_picker_after_tag_switch_restores_only_its_owner_tag() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+        jwm.setlayout(
+            &mut backend,
+            &WMArgEnum::Layout(Rc::new(LayoutEnum::MONOCLE)),
+        )
+        .unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(
+            *jwm.state.monitors[monitor].lt,
+            LayoutEnum::MONOCLE,
+            "cancelling tag 1's preview must not overwrite tag 2"
+        );
+        let pertag = jwm.state.monitors[monitor].pertag.as_ref().unwrap();
+        assert_eq!(*pertag.lts[1], LayoutEnum::TILE);
     }
 
     #[test]
@@ -10816,6 +11120,11 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        next = min_optional_duration(
+            next,
+            self.chord_armed_until
+                .map(|deadline| deadline.saturating_duration_since(now)),
+        );
         if let Some(picker) = self.layout_picker_wakeup(now) {
             next = min_optional_duration(next, Some(picker.min(FRAME_INTERVAL)));
         }
@@ -11113,6 +11422,9 @@ impl EventHandler for Jwm {
         {
             log::warn!("could not drain async update notifier; restoring timer fallback: {error}");
         }
+        // A chord owns the keyboard only until its deadline, even when no
+        // second key ever arrives. Retire it before processing new actions.
+        self.expire_chord(backend, now);
         // Backends without SIGCHLD still reap exact child handles, but the
         // supervisor rate-limits this insurance path instead of issuing one
         // wait syscall per live application on every frame/update tick.

@@ -82,10 +82,10 @@ impl EguiBarApp {
         let configured_height = presentation.bar_height;
 
         let runtime = if shared_path.is_empty() {
-            BarRuntime::new(ModelConfig::default())?
+            BarRuntime::new(model_config(&config))?
         } else {
             let recovery = TransportRecoveryConfig::new(shared_path, Duration::from_secs(2))?;
-            BarRuntime::with_managed_transport(ModelConfig::default(), recovery)?
+            BarRuntime::with_managed_transport(model_config(&config), recovery)?
         };
 
         let fallback = fallback_rgb(config.theme);
@@ -325,7 +325,9 @@ impl EguiBarApp {
                 BarEffect::ClearMonitorGeometry => {
                     self.active_monitor_geometry = None;
                 }
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
+                effect @ (BarEffect::Screenshot
+                | BarEffect::OpenAudioControl
+                | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("could not run platform effect: {error}");
                     }
@@ -428,5 +430,21 @@ impl eframe::App for EguiBarApp {
         } else {
             self.fallback.to_normalized_gamma_f32()
         }
+    }
+}
+
+fn model_config(config: &xbar_core::config::BarConfig) -> ModelConfig {
+    config.model_config()
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn configured_light_theme_seeds_the_egui_model() {
+        let config = xbar_core::config::BarConfig::from_toml("theme = 'light'").unwrap();
+        let model = xbar_core::BarModel::new(model_config(&config)).unwrap();
+        assert_eq!(model.view().theme, xbar_core::ThemeMode::Light);
     }
 }

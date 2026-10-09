@@ -757,9 +757,9 @@ dependencies = [
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -2216,6 +2216,7 @@ dependencies = [
  "glob",
  "glow",
  "image",
+ "jwm_ipc_transport",
  "lazy_static",
  "libc 0.2.189",
  "libseat",
@@ -2248,6 +2249,7 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "futures-util",
+ "jwm_ipc_transport",
  "libc 0.2.189",
  "log",
  "serde_json",
@@ -2266,6 +2268,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "gbm",
+ "jwm_ipc_transport",
  "libc 0.2.189",
  "libspa",
  "libspa-sys",
@@ -2283,6 +2286,13 @@ dependencies = [
  "wayland-protocols-wlr",
  "zbus",
  "zvariant",
+]
+
+[[package]]
+name = "jwm_ipc_transport"
+version = "0.1.0"
+dependencies = [
+ "libc 0.2.189",
 ]
 
 [[package]]
@@ -3619,7 +3629,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
- "chacha20 0.10.1",
+ "chacha20 0.10.2",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -5871,6 +5881,7 @@ dependencies = [
 name = "xbar_linux_actions"
 version = "0.2.0"
 dependencies = [
+ "jwm_ipc_transport",
  "libc 0.2.189",
  "log",
  "serde_json",
@@ -5949,9 +5960,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

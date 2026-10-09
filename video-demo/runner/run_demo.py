@@ -214,29 +214,58 @@ def uses_symbol(value: object, symbol: str) -> bool:
     return False
 
 
+def window_snapshot(ipc: JwmIpc) -> list[dict]:
+    windows = ipc.query("get_windows")
+    if not isinstance(windows, list):
+        raise RuntimeError("recording refused: invalid window snapshot")
+    for window in windows:
+        if not isinstance(window, dict):
+            raise RuntimeError("recording refused: invalid window entry")
+        window_id, tags = window.get("id"), window.get("tags")
+        if (type(window_id) is not int or not 0 < window_id <= 0xffffffffffffffff
+                or type(tags) is not int or not 0 <= tags <= 0xffffffff):
+            raise RuntimeError("recording refused: invalid window identity or tags")
+        for key in ("is_status_bar", "is_sticky", "is_on_view"):
+            if key in window and type(window[key]) is not bool:
+                raise RuntimeError(f"recording refused: invalid {key} metadata")
+    return windows
+
+
 def occupied_user_tags(windows: list[dict], tags_length: int) -> int:
+    if not 1 <= tags_length <= 32:
+        raise RuntimeError("recording refused: invalid tag count")
     all_tags = (1 << tags_length) - 1
     occupied = 0
     for window in windows:
-        if str(window.get("class", "")).lower() == "jwmdemo":
+        # Only the WM's explicit bar classification permits this exception.
+        # Floating/sticky state and a class name do not establish ownership.
+        if window.get("is_status_bar") is True:
             continue
-        tags = int(window.get("tags", 0))
-        # Bars and shell windows intentionally appear on every tag. They do
-        # not contain private per-workspace content and must not make every
-        # candidate look occupied.
-        if tags == all_tags and bool(window.get("is_floating")):
-            continue
+        tags = all_tags if window.get("is_sticky") else int(window["tags"])
         occupied |= tags
     return occupied
 
 
 def choose_unused_tag(ipc: JwmIpc, tags_length: int, demo_tag: int, original_tag: int | None) -> int:
-    occupied = occupied_user_tags(ipc.query("get_windows") or [], tags_length)
+    occupied = occupied_user_tags(window_snapshot(ipc), tags_length)
     for index in range(tags_length - 1, -1, -1):
         candidate = 1 << index
         if candidate != demo_tag and candidate != original_tag and not occupied & candidate:
             return candidate
-    raise RuntimeError("no unused secondary tag is available for safe tag automation")
+    raise RuntimeError("no unused tag is available for safe video automation")
+
+
+def ensure_recording_isolated(ipc: JwmIpc, windows: DemoWindows, demo_tag: int) -> None:
+    owned_ids = set(windows.control_sockets)
+    for window in window_snapshot(ipc):
+        if window.get("id") in owned_ids or window.get("is_status_bar") is True:
+            continue
+        # Capture spans the desktop: another monitor's visible applications
+        # also require refusal. Missing view metadata is not proof of isolation.
+        if (window.get("is_on_view") is not False
+                or window.get("is_sticky")
+                or int(window["tags"]) & demo_tag):
+            raise RuntimeError("recording refused: a non-demo window may be visible")
 
 
 def restore_workspace_baseline(ipc: JwmIpc, tag: int, baseline: dict) -> None:
@@ -439,6 +468,7 @@ def run_scene(scene: dict, ipc: JwmIpc, recorder: Recorder, windows: DemoWindows
     guard.update(False, windows.pids)
     managed = windows.wait_managed(int(scene["windows"]))
     workspace = ensure_layout(ipc, scene["layout"])
+    ensure_recording_isolated(ipc, windows, demo_tag)
     recorder.start(clip)
     guard.update(True, windows.pids)
     initial_focus = focused_demo_window(ipc)
@@ -554,7 +584,8 @@ def main() -> int:
         except Exception as exc:
             print(f"warning: cannot hot-set recording FPS; using the running JWM configuration: {exc}", file=sys.stderr)
         config = ipc.query("get_config") or {}
-        demo_tag = 1 << max(0, int(config.get("tags_length", 9)) - 1)
+        tags_length = int(config.get("tags_length", 9))
+        demo_tag = choose_unused_tag(ipc, tags_length, 0, None)
         select_tag(ipc, demo_tag)
         demo_baseline = focused_workspace(ipc)
         effect_baseline = ipc.query("get_config") or {}

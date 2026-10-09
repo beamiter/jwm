@@ -1250,6 +1250,9 @@ delegate_dispatch2!(JwmWaylandState);
 // ---------------------------------------------------------------------------
 impl PointerConstraintsHandler for JwmWaylandState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if self.session_locked {
+            return;
+        }
         if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
             if self.active_toplevel == Some(win) {
                 with_pointer_constraint(surface, pointer, |constraint| {
@@ -1277,6 +1280,9 @@ impl PointerConstraintsHandler for JwmWaylandState {
         _pointer: &PointerHandle<Self>,
         location: Point<f64, Logical>,
     ) {
+        if self.session_locked {
+            return;
+        }
         if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
             if let Some(geo) = self.window_geometry.get(&win) {
                 self.pointer_location =
@@ -1316,9 +1322,8 @@ impl SessionLockHandler for JwmWaylandState {
         self.lock_surfaces.clear();
         self.session_locked = true;
         self.session_lock_epoch = self.session_lock_epoch.wrapping_add(1);
-        self.pending_events
-            .lock_safe()
-            .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
+        self.revoke_unlocked_input();
+        self.discard_locked_wm_input();
         self.needs_redraw = true;
 
         // `locked` is owed only once no unlocked content is visible: the
@@ -1337,7 +1342,8 @@ impl SessionLockHandler for JwmWaylandState {
             epoch,
             owed_outputs,
         });
-        // An output that never presents must not leave the lock unconfirmed.
+        // Diagnose a slow output, but never confirm without evidence that
+        // every live output has actually stopped showing unlocked content.
         let deadline = Timer::from_duration(SESSION_LOCK_CONFIRM_DEADLINE);
         if let Err(error) = self
             .loop_handle
@@ -1403,6 +1409,125 @@ impl SessionLockHandler for JwmWaylandState {
 }
 
 impl JwmWaylandState {
+    /// Drop pre-lock input ownership before accepting any more input. A
+    /// missing or crashed locker surface must leave the seat unfocused.
+    fn revoke_unlocked_input(&mut self) {
+        let serial = SCOUNTER.next_serial();
+        let time = smithay::backend::input::InputTime::from_millis(0);
+        self.popup_grab_toplevel = None;
+        self.popup_grab_prev_kbd_focus = None;
+        self.pending_pointer_warp = None;
+        self.gesture_swipe = Default::default();
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.unset_grab(self);
+            keyboard.set_focus(self, None, serial);
+        }
+        if let Some(pointer) = self.seat.get_pointer() {
+            if let Some(surface) = pointer.current_focus() {
+                with_pointer_constraint(&surface, &pointer, |constraint| {
+                    if let Some(constraint) = constraint {
+                        constraint.deactivate();
+                    }
+                });
+            }
+            pointer.unset_grab(self, serial, time);
+            let location = self.pointer_location;
+            pointer.motion(
+                self,
+                None,
+                &smithay::input::pointer::MotionEvent {
+                    location,
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+        }
+        if let Some(touch) = self.seat.get_touch() {
+            touch.unset_grab(self);
+            touch.cancel(self);
+        }
+        self.dnd_icon = None;
+    }
+
+    fn is_lock_surface(&self, surface: &WlSurface) -> bool {
+        if !surface.is_alive() {
+            return false;
+        }
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        self.lock_surfaces
+            .values()
+            .any(|lock| lock.alive() && lock.wl_surface() == &root)
+    }
+
+    /// Centralize compositor focus changes so late window/popup callbacks
+    /// cannot replace the locker's focus with an ordinary client.
+    pub(crate) fn set_keyboard_focus(&mut self, focus: Option<WlSurface>, serial: Serial) {
+        if self.session_locked
+            && focus
+                .as_ref()
+                .is_some_and(|surface| !self.is_lock_surface(surface))
+        {
+            return;
+        }
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, focus, serial);
+        }
+    }
+
+    /// Return true when the lock owns this key. All backends take this path
+    /// before layers, modal UI or WM shortcuts. Recompute even a missing
+    /// focus: keeping yesterday's focus when a lock surface is absent leaks
+    /// input to an app while the screen is black or the locker is starting.
+    pub(crate) fn route_locked_keyboard_input(
+        &mut self,
+        keycode: smithay::input::keyboard::Keycode,
+        key_state: smithay::backend::input::KeyState,
+        serial: Serial,
+        time: smithay::backend::input::InputTime,
+    ) -> bool {
+        if !self.session_locked {
+            return false;
+        }
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let focus = self
+                .surface_under(self.pointer_location)
+                .map(|(_, surface, _)| surface);
+            keyboard.unset_grab(self);
+            self.set_keyboard_focus(focus, serial);
+            keyboard.input::<(), _>(self, keycode, key_state, serial, time, |_, _, _| {
+                smithay::input::keyboard::FilterResult::Forward
+            });
+        }
+        self.discard_locked_wm_input();
+        self.request_client_flush();
+        true
+    }
+
+    /// Physical input while locked belongs only to the lock client. Keep
+    /// structural window/output events, but never run desktop bindings or
+    /// click/gesture actions behind its opaque shield.
+    pub(crate) fn discard_locked_wm_input(&self) {
+        if self.session_locked {
+            self.pending_events.lock_safe().retain(|event| {
+                !matches!(
+                    event,
+                    BackendEvent::KeyPress { .. }
+                        | BackendEvent::WmKeyboardShortcut { .. }
+                        | BackendEvent::KeyRelease { .. }
+                        | BackendEvent::ButtonPress { .. }
+                        | BackendEvent::ButtonRelease { .. }
+                        | BackendEvent::MotionNotify { .. }
+                        | BackendEvent::GestureSwipeAction { .. }
+                        | BackendEvent::MoveResizeRequest { .. }
+                )
+            });
+        }
+    }
+
     /// Bring the protocol state that follows the output layout up to date.
     /// Backends call it after they republished `outputs`, `gamma_sizes` and
     /// `soft_disabled_outputs` or changed an output's mode, scale or
@@ -1550,9 +1675,9 @@ impl JwmWaylandState {
         }
     }
 
-    /// Timer callback for [`SESSION_LOCK_CONFIRM_DEADLINE`]: confirm lock
-    /// generation `epoch` even though some output never presented a locked
-    /// frame. A no-op once that request was confirmed, replaced or unlocked.
+    /// Diagnose a lock that is still waiting for an output. Elapsed time is
+    /// not presentation evidence: only a locked frame or a verified dark/gone
+    /// output pays its obligation. The session stays fail-closed meanwhile.
     fn confirm_session_lock_after_deadline(&mut self, epoch: u64) {
         let Some(pending) = self.pending_session_lock.as_ref() else {
             return;
@@ -1565,10 +1690,10 @@ impl JwmWaylandState {
             return;
         }
         warn!(
-            "[udev/wayland] confirming the session lock without a locked frame on {:?}",
+            "[udev/wayland] session lock still waiting for a locked frame on {:?}",
             pending.owed_outputs
         );
-        self.confirm_pending_session_lock();
+        self.settle_pending_session_lock();
     }
 
     fn confirm_pending_session_lock(&mut self) {
@@ -1856,6 +1981,9 @@ impl PointerWarpHandler for JwmWaylandState {
         pos: Point<f64, Logical>,
         _serial: Serial,
     ) {
+        if self.session_locked {
+            return;
+        }
         if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
             let origin = self
                 .toplevel_buffer_origin(win)
@@ -1877,6 +2005,9 @@ impl XWaylandKeyboardGrabHandler for JwmWaylandState {
         &self,
         surface: &WlSurface,
     ) -> Option<<Self as SeatHandler>::KeyboardFocus> {
+        if self.session_locked {
+            return None;
+        }
         // Xwayland asks for its own surfaces, which never enter `toplevels`:
         // an associated X11 window's surface is itself the focus to grab.
         let win = self.surface_to_window.get(&surface.id())?;
@@ -3373,6 +3504,9 @@ impl JwmWaylandState {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WindowId, WlSurface, Point<f64, Logical>)> {
+        if self.session_locked {
+            return None;
+        }
         // Popups are always above their parent toplevel. Prefer them for hit-testing.
         for win in self.window_stack.iter().rev() {
             if !self.mapped_windows.contains(win) {
@@ -3728,6 +3862,7 @@ impl JwmWaylandState {
 
     pub(crate) fn push_event(&mut self, ev: BackendEvent) {
         self.pending_events.lock_safe().push_back(ev);
+        self.discard_locked_wm_input();
     }
 
     pub fn try_lookup_toplevel(&mut self, win: WindowId) -> Option<&mut ToplevelSurface> {
@@ -4842,6 +4977,10 @@ impl WaylandDndGrabHandler for JwmWaylandState {
         serial: Serial,
         type_: GrabType,
     ) {
+        if self.session_locked {
+            source.cancel();
+            return;
+        }
         self.dnd_icon = icon.map(|surface| DndIcon {
             surface,
             offset: (0, 0).into(),
@@ -5061,6 +5200,10 @@ impl XdgShellHandler for JwmWaylandState {
         _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
         _serial: Serial,
     ) {
+        if self.session_locked {
+            _surface.send_popup_done();
+            return;
+        }
         // Record the toplevel this grab belongs to, and remember current keyboard focus.
         if self.popup_grab_prev_kbd_focus.is_none() {
             self.popup_grab_prev_kbd_focus =
@@ -5076,10 +5219,7 @@ impl XdgShellHandler for JwmWaylandState {
 
         // Give the popup keyboard focus (menus often need this), while we remember the previous focus
         // for restoration when the grab ends.
-        if let Some(kbd) = self.seat.get_keyboard() {
-            let serial = SCOUNTER.next_serial();
-            kbd.set_focus(self, Some(_surface.wl_surface().clone()), serial);
-        }
+        self.set_keyboard_focus(Some(_surface.wl_surface().clone()), SCOUNTER.next_serial());
     }
 
     fn reposition_request(
@@ -5221,13 +5361,11 @@ impl XdgShellHandler for JwmWaylandState {
                 self.popup_grab_toplevel = None;
 
                 // Restore keyboard focus to what it was before the popup grab.
-                if let Some(kbd) = self.seat.get_keyboard() {
-                    let serial = SCOUNTER.next_serial();
-                    if let Some(prev) = self.popup_grab_prev_kbd_focus.take() {
-                        kbd.set_focus(self, Some(prev), serial);
-                    } else if let Some(surface) = self.surface_for_window(grab_win) {
-                        kbd.set_focus(self, Some(surface), serial);
-                    }
+                let serial = SCOUNTER.next_serial();
+                if let Some(prev) = self.popup_grab_prev_kbd_focus.take() {
+                    self.set_keyboard_focus(Some(prev), serial);
+                } else if let Some(surface) = self.surface_for_window(grab_win) {
+                    self.set_keyboard_focus(Some(surface), serial);
                 }
             }
         }
@@ -7034,6 +7172,188 @@ mod protocol_hardening_tests {
         (server, client, manager)
     }
 
+    /// Make a synthetic client with a wl_surface and wl_keyboard. No real
+    /// seat, framebuffer, session lock or desktop is used by these tests.
+    fn input_test_client(server: &mut Server) -> (RawClient, WlSurface, u32) {
+        let mut client = RawClient::connect(server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let surface_id = client.new_id();
+        client.request(compositor, 0, &[surface_id]);
+        let seat = client.bind("wl_seat", 7);
+        let keyboard_id = client.new_id();
+        client.request(seat, 1, &[keyboard_id]);
+        server.roundtrip();
+        let surface = client.surface(server, surface_id);
+        client.events();
+        (client, surface, keyboard_id)
+    }
+
+    fn locked_test_key(state: &mut JwmWaylandState, pressed: bool) -> bool {
+        state.route_locked_keyboard_input(
+            smithay::input::keyboard::Keycode::new(38),
+            if pressed {
+                smithay::backend::input::KeyState::Pressed
+            } else {
+                smithay::backend::input::KeyState::Released
+            },
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+            smithay::backend::input::InputTime::from_millis(100),
+        )
+    }
+
+    #[test]
+    fn locking_revokes_old_focus_before_a_lock_surface_exists() {
+        let mut server = Server::new();
+        server.state.outputs = vec![test_output("LOCK-INPUT")];
+        let (mut app, app_surface, app_keyboard) = input_test_client(&mut server);
+        let keyboard = server.state.seat.get_keyboard().unwrap();
+        server.state.set_keyboard_focus(
+            Some(app_surface.clone()),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        assert_eq!(keyboard.current_focus(), Some(app_surface.clone()));
+        let (mut locker, _, _) = input_test_client(&mut server);
+        let manager = locker.bind("ext_session_lock_manager_v1", 1);
+        request_lock(&mut server, &mut locker, manager);
+        assert!(keyboard.current_focus().is_none());
+        assert!(server.state.popup_grab_prev_kbd_focus.is_none());
+        app.events();
+
+        assert!(locked_test_key(&mut server.state, true));
+        assert!(locked_test_key(&mut server.state, false));
+        server.roundtrip();
+        assert!(
+            !app.events()
+                .iter()
+                .any(|(sender, opcode, _)| { *sender == app_keyboard && *opcode == 3 }),
+            "the previously focused app must receive no locked key events"
+        );
+        server.state.set_keyboard_focus(
+            Some(app_surface),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        assert!(
+            keyboard.current_focus().is_none(),
+            "ordinary focus callbacks cannot enter a locked seat"
+        );
+    }
+
+    #[test]
+    fn locked_keys_reach_only_the_locker_and_a_dead_locker_clears_focus() {
+        let mut server = Server::new();
+        let output = test_output("LOCK-INPUT");
+        output.create_global::<JwmWaylandState>(&server.display.handle());
+        server.state.outputs = vec![output];
+        server.state.pointer_location = (8.0, 8.0).into();
+        let (mut app, app_surface, app_keyboard) = input_test_client(&mut server);
+        let (mut locker, lock_surface, lock_keyboard) = input_test_client(&mut server);
+        let manager = locker.bind("ext_session_lock_manager_v1", 1);
+        let output = locker.bind("wl_output", 4);
+        let lock = request_lock(&mut server, &mut locker, manager);
+        let role = locker.new_id();
+        locker.request(
+            lock,
+            GET_LOCK_SURFACE,
+            &[role, lock_surface.id().protocol_id(), output],
+        );
+        server.roundtrip();
+        locker.events();
+        app.events();
+        assert!(locked_test_key(&mut server.state, true));
+        assert!(locked_test_key(&mut server.state, false));
+        server.roundtrip();
+        assert!(
+            locker
+                .events()
+                .iter()
+                .any(|(sender, opcode, _)| { *sender == lock_keyboard && *opcode == 3 }),
+            "the locker receives the key"
+        );
+        assert!(
+            !app.events()
+                .iter()
+                .any(|(sender, opcode, _)| { *sender == app_keyboard && *opcode == 3 })
+        );
+        let keyboard = server.state.seat.get_keyboard().unwrap();
+        assert_eq!(keyboard.current_focus(), Some(lock_surface.clone()));
+        server.state.set_keyboard_focus(
+            Some(app_surface.clone()),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        assert_eq!(keyboard.current_focus(), Some(lock_surface));
+        assert!(
+            server
+                .state
+                .keyboard_focus_for_xsurface(&app_surface)
+                .is_none()
+        );
+
+        drop(locker);
+        server.roundtrip();
+        assert!(server.state.session_locked);
+        assert!(locked_test_key(&mut server.state, true));
+        assert!(locked_test_key(&mut server.state, false));
+        server.roundtrip();
+        assert!(keyboard.current_focus().is_none());
+        assert!(
+            !app.events()
+                .iter()
+                .any(|(sender, opcode, _)| { *sender == app_keyboard && *opcode == 3 })
+        );
+    }
+
+    #[test]
+    fn locked_input_filter_keeps_structural_events_and_drops_desktop_actions() {
+        let mut server = Server::new();
+        let win = WindowId::from_raw(0x71);
+        server.state.session_locked = true;
+        server.state.push_event(BackendEvent::WindowCreated(win));
+        server.state.push_event(BackendEvent::KeyPress {
+            keycode: 38,
+            state: 0,
+            time: 1,
+        });
+        server.state.push_event(BackendEvent::KeyRelease {
+            keycode: 38,
+            state: 0,
+            time: 2,
+        });
+        server.state.push_event(BackendEvent::WmKeyboardShortcut {
+            keysym: 0x61,
+            mods: crate::backend::common_define::Mods::empty(),
+        });
+        server.state.push_event(BackendEvent::GestureSwipeAction {
+            fingers: 3,
+            direction: "left",
+        });
+        let events = server.state.pending_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events.front(), Some(BackendEvent::WindowCreated(id)) if *id == win));
+    }
+
+    #[test]
+    fn lock_request_immediately_revokes_the_previous_application_focus() {
+        let (mut server, mut locker, manager) = locked_server(&["LOCK-FOCUS"]);
+        let mut app = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = app.bind("wl_compositor", 6);
+        let surface_id = app.new_id();
+        app.request(compositor, 0, &[surface_id]);
+        server.roundtrip();
+        let surface = app.surface(&server, surface_id);
+        let keyboard = server.state.seat.get_keyboard().unwrap();
+        keyboard.set_focus(
+            &mut server.state,
+            Some(surface),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        assert!(keyboard.current_focus().is_some());
+        request_lock(&mut server, &mut locker, manager);
+        assert!(
+            keyboard.current_focus().is_none(),
+            "locked input must not remain focused on an application before the locker has a surface"
+        );
+    }
+
     #[test]
     fn session_lock_is_confirmed_once_every_output_presented_a_locked_frame() {
         let (mut server, mut client, manager) = locked_server(&["LOCK-1", "LOCK-2"]);
@@ -7097,7 +7417,7 @@ mod protocol_hardening_tests {
     }
 
     #[test]
-    fn the_deadline_confirms_a_lock_no_output_presented() {
+    fn the_deadline_never_confirms_an_output_without_a_locked_frame() {
         let (mut server, mut client, manager) = locked_server(&["STUCK-1"]);
         let lock = request_lock(&mut server, &mut client, manager);
         let epoch = server.state.session_lock_epoch;
@@ -7109,10 +7429,14 @@ mod protocol_hardening_tests {
         assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
 
         server.state.confirm_session_lock_after_deadline(epoch);
-        assert_eq!(opcodes_for(&mut server, &mut client, lock), [LOCKED_EVENT]);
-        // Firing again after the confirmation changes nothing.
+        assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+        assert!(server.state.session_lock_confirmation_pending());
+        assert!(server.state.session_locked);
+        // Repeated timeouts still cannot substitute for a presented frame.
         server.state.confirm_session_lock_after_deadline(epoch);
         assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+        server.state.note_locked_frame_presented("STUCK-1", epoch);
+        assert_eq!(opcodes_for(&mut server, &mut client, lock), [LOCKED_EVENT]);
     }
 
     #[test]

@@ -154,6 +154,8 @@ impl CaptureSessionData {
 }
 
 pub struct CaptureFrameData {
+    /// A frame accepts one capture; afterwards only destroy is legal.
+    pub captured: AtomicBool,
     /// `None` for a frame of a stopped session; capturing it fails.
     pub source: Option<CaptureSource>,
     /// The session that created this frame, stopped once the frame shows
@@ -709,6 +711,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                 data_init.init(
                     frame,
                     CaptureFrameData {
+                        captured: AtomicBool::new(false),
                         source,
                         session: resource.downgrade(),
                         paint_cursors: data.paint_cursors,
@@ -740,6 +743,22 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        let consumes = matches!(&request, ext_image_copy_capture_frame_v1::Request::Capture);
+        let destroys = matches!(&request, ext_image_copy_capture_frame_v1::Request::Destroy);
+        let allowed = if consumes {
+            data.captured
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        } else {
+            !data.captured.load(Ordering::Relaxed)
+        };
+        if !destroys && !allowed {
+            resource.post_error(
+                ext_image_copy_capture_frame_v1::Error::AlreadyCaptured,
+                "only destroy is allowed after a frame capture request",
+            );
+            return;
+        }
         match request {
             ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => {
                 // Stash until capture; the new buffer replaces any previous one.
@@ -1261,6 +1280,63 @@ mod tests {
             .filter(|event| event.sender == object)
             .map(|event| (event.opcode, event.args.clone()))
             .collect()
+    }
+
+    #[test]
+    fn a_captured_frame_rejects_reuse_without_growing_the_queue() {
+        use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::Error;
+        // Test every request that must become illegal after the first capture.
+        for next_opcode in [1u16, 2, FRAME_CAPTURE] {
+            let mut server = capture_server();
+            let output = test_output("CAPTURE-ONCE");
+            let (mut client, session) = output_session(&mut server, &output);
+            // No rendering is needed to test queue admission. This synthetic
+            // wl_buffer is only held by the request, never read as pixels.
+            let pixels = client.bind("wp_single_pixel_buffer_manager_v1", 1);
+            let buffer = client.new_id();
+            client.request(pixels, 1, &[buffer, 0, 0, 0, u32::MAX]);
+            let frame = client.new_id();
+            client.request(session, SESSION_CREATE_FRAME, &[frame]);
+            client.request(frame, 1, &[buffer]);
+            client.request(frame, FRAME_CAPTURE, &[]);
+            server.roundtrip();
+            client.events();
+            assert_eq!(
+                server
+                    .state
+                    .image_capture_pending
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            match next_opcode {
+                1 => client.request(frame, 1, &[buffer]),
+                2 => client.request(frame, 2, &[0, 0, 1, 1]),
+                _ => client.request(frame, FRAME_CAPTURE, &[]),
+            }
+            server.roundtrip();
+            let error = client
+                .events()
+                .into_iter()
+                .find(|event| event.sender == 1 && event.opcode == 0)
+                .expect("post-capture requests must disconnect only the invalid client");
+            assert_eq!(error.args[0], frame);
+            assert_eq!(error.args[1], Error::AlreadyCaptured as u32);
+            assert_eq!(
+                server
+                    .state
+                    .image_capture_pending
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
     }
 
     #[test]

@@ -376,7 +376,11 @@ impl Jwm {
 
     /// Keep `_JWM_MAXIMIZE_RESTORE_V1` aligned with the live restore slot so a
     /// seamless X11 exec can adopt the same pre-maximize rectangle.
-    fn sync_maximize_restore_property(&self, backend: &mut dyn Backend, client_key: ClientKey) {
+    pub(crate) fn sync_maximize_restore_property(
+        &self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
         let Some(client) = self.state.clients.get(client_key) else {
             return;
         };

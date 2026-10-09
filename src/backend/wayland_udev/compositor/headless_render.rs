@@ -5379,14 +5379,19 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
             smithay::backend::renderer::gles::ffi::FRAMEBUFFER,
             output_fbo,
         );
-        compositor.screenshot_readback.enqueue(
-            &gl,
-            std::path::PathBuf::from("/tmp/jwm-cancelled-headless-readback.png"),
-            0,
-            0,
-            1,
-            1,
-        );
+        let mut screenshot_queue =
+            crate::backend::compositor_common::screenshot::ScreenshotQueue::isolated_for_test();
+        screenshot_queue
+            .request_full("/tmp/jwm-cancelled-headless-readback.png".into())
+            .unwrap();
+        let crate::backend::compositor_common::screenshot::ScreenshotRequest::Full { path, permit } =
+            screenshot_queue.take_all().pop_front().unwrap()
+        else {
+            unreachable!()
+        };
+        compositor
+            .screenshot_readback
+            .enqueue(&gl, path, 0, 0, 1, 1, permit);
         compositor
             .recording
             .seed_inactive_gpu_resources_for_tests(&gl);
@@ -9959,5 +9964,231 @@ fn wayland_recording_cursor_stays_out_of_the_letterbox_bars() {
         gl.DeleteFramebuffers(1, &fbo);
         gl.DeleteTextures(1, &texture);
         gl.DeleteProgram(program);
+    }
+}
+
+/// Exercise the production two-level blur with deliberately disjoint
+/// uniform namespaces. Shader compilation/resource construction uses the
+/// isolated EGL context; uniform queries/uploads are deterministic probes.
+#[test]
+fn wayland_blur_uploads_uniforms_owned_by_the_current_program() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    use std::cell::{Cell, RefCell};
+    thread_local! {
+        static CURRENT: Cell<u32> = const { Cell::new(0) };
+        static WRONG: RefCell<Vec<(u32, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(location: i32) {
+        CURRENT.with(|current| {
+            let program = current.get();
+            if location != program as i32 {
+                WRONG.with(|wrong| wrong.borrow_mut().push((program, location)));
+            }
+        });
+    }
+    unsafe extern "system" fn get_uniform(program: u32, _: *const i8) -> i32 {
+        program as i32
+    }
+    unsafe extern "system" fn use_program(program: u32) {
+        CURRENT.with(|current| current.set(program));
+    }
+    unsafe extern "system" fn uniform4(location: i32, _: f32, _: f32, _: f32, _: f32) {
+        record(location);
+    }
+    unsafe extern "system" fn uniform2(location: i32, _: f32, _: f32) {
+        record(location);
+    }
+    unsafe extern "system" fn uniform1(location: i32, _: i32) {
+        record(location);
+    }
+    unsafe extern "system" fn matrix4(location: i32, _: i32, _: u8, _: *const f32) {
+        record(location);
+    }
+    unsafe extern "system" fn draw(_: u32, _: i32, _: i32) {}
+    let gl = ffi::Gles2::load_with(|symbol| match symbol {
+        "glGetUniformLocation" => get_uniform as *const c_void,
+        "glUseProgram" => use_program as *const c_void,
+        "glUniform4f" => uniform4 as *const c_void,
+        "glUniform2f" => uniform2 as *const c_void,
+        "glUniform1i" => uniform1 as *const c_void,
+        "glUniformMatrix4fv" => matrix4 as *const c_void,
+        "glDrawArrays" => draw as *const c_void,
+        _ => egl::get_proc_address(symbol) as *const c_void,
+    });
+    WRONG.with(|wrong| wrong.borrow_mut().clear());
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false)
+            .expect("synthetic compositor must initialize");
+        assert!(compositor.blur_fbos.len() >= 2);
+        compositor.run_blur_passes_levels(&gl, compositor.scene_texture, &[0.0; 16], 2);
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+    WRONG.with(|wrong| {
+        assert!(
+            wrong.borrow().is_empty(),
+            "uniform uploads crossed linked-program namespaces: {:?}",
+            *wrong.borrow()
+        )
+    });
+}
+
+/// Exercise the production Kawase -> temporal mix -> history-copy chain with
+/// an asymmetric synthetic image. Mixing identical current/history textures
+/// must preserve every storage row, irrespective of the consumer's UV convention.
+#[test]
+fn wayland_temporal_mix_preserves_kawase_rows_and_history() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: u32 = 64;
+    const H: u32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W, H, false)
+            .expect("headless compositor initializes");
+        let mut pixels = Vec::with_capacity((W * H * 4) as usize);
+        for row in 0..H {
+            let color = if row < H / 2 {
+                [230u8, 20, 30, 255]
+            } else {
+                [10, 40, 220, 255]
+            };
+            for _ in 0..W {
+                pixels.extend_from_slice(&color);
+            }
+        }
+        let source = create_element_texture(&gl, W as i32, H as i32, &pixels);
+        gl.Disable(ffi::SCISSOR_TEST);
+        compositor.run_blur_passes_levels(&gl, source, &[0.0; 16], 2);
+        let level = &compositor.blur_fbos[0];
+        let (fresh_fbo, fresh_tex, bw, bh) = (
+            level.fbo,
+            level.texture,
+            level.width as i32,
+            level.height as i32,
+        );
+        let expected = read_fbo_frame(&gl, fresh_fbo, bw, bh);
+        // Guard against a blank/flat input accidentally making a flip invisible.
+        assert_ne!(expected[..4], expected[expected.len() - 4..]);
+        for ratio in [0.0, 0.5, 0.8, 1.0] {
+            compositor.copy_blur_to_prev_fbo(&gl, fresh_tex);
+            for iteration in 0..3 {
+                let history = compositor.prev_blur_fbo.unwrap().1;
+                let mixed = compositor.run_temporal_mix(&gl, fresh_tex, history, ratio);
+                let got = read_fbo_frame(&gl, compositor.temporal_mix_fbo.unwrap().0, bw, bh);
+                for (index, (actual, wanted)) in got
+                    .chunks_exact(4)
+                    .zip(expected.chunks_exact(4))
+                    .enumerate()
+                {
+                    assert_pixel(
+                        actual.try_into().unwrap(),
+                        wanted.try_into().unwrap(),
+                        2,
+                        &format!("ratio={ratio} iteration={iteration} pixel={index}"),
+                    );
+                }
+                compositor.copy_blur_to_prev_fbo(&gl, mixed);
+            }
+        }
+        assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        gl.DeleteTextures(1, &source);
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}
+
+/// Compare the real focused-window tilt branch with the ordinary window
+/// branch in a common-linear frame, using only synthetic premultiplied pixels.
+#[test]
+fn wayland_tilt_preserves_premultiplied_alpha_in_linear_frames() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+        compositor.inactive_dim = 1.0;
+        compositor.inactive_desaturate = 0.0;
+        compositor.active_opacity = 1.0;
+        compositor.shadow_enabled = false;
+        compositor.border_enabled = false;
+        compositor.blur_enabled = false;
+        compositor.focus_highlight_enabled = false;
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+        };
+        let scene = [(7u64, 16i32, 12i32, 32u32, 24u32)];
+        for (has_alpha, input) in [
+            (true, [0u8, 0, 0, 0]),
+            (true, [51, 26, 13, 64]),
+            (true, [102, 51, 26, 128]),
+            (true, [204, 102, 51, 255]),
+            (false, [204, 102, 51, 64]),
+        ] {
+            let texture = create_element_texture(&gl, 4, 4, &input.repeat(16));
+            insert_opaque_test_window(&mut compositor, 7, texture, 4, 4);
+            compositor.windows.get_mut(&7).unwrap().has_alpha = has_alpha;
+            let mut samples = Vec::new();
+            for tilted in [false, true] {
+                compositor.window_tilt_enabled = tilted;
+                compositor.tilt_amount = 0.004;
+                compositor.tilt_x = if tilted { 0.002 } else { 0.0 };
+                compositor.tilt_y = 0.0;
+                // The production target calculation reproduces exactly 0.002.
+                compositor.mouse_x = 32.0;
+                compositor.mouse_y = 18.0;
+                compositor.force_full_redraw();
+                assert!(compositor.render_frame(
+                    &gl,
+                    &scene,
+                    Some(7),
+                    true,
+                    false,
+                    false,
+                    Some(std::slice::from_ref(&region)),
+                    false
+                ));
+                if tilted {
+                    assert!(compositor.tilt_x > 0.001);
+                }
+                let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+                samples.push(frame_pixel(&frame, W as usize, H as usize, 32, 24));
+            }
+            // This shallow angle's intentional specular/darkening contribution
+            // is below two RGBA8 steps. A transfer applied to premultiplied
+            // source RGB produces a much larger discrepancy at partial alpha.
+            assert_pixel(
+                samples[1],
+                samples[0],
+                2,
+                &format!("alpha={} meaningful={has_alpha}", input[3]),
+            );
+            compositor.windows.remove(&7);
+            gl.DeleteTextures(1, &texture);
+        }
+        assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
     }
 }

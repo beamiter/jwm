@@ -380,7 +380,9 @@ fn handle_runtime_update(update: RuntimeUpdate, window: &DesktopContext, baselin
                 apply_monitor_geometry(geometry, window);
             }
             BarEffect::ClearMonitorGeometry => restore_window_baseline(baseline, window),
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
+            effect @ (BarEffect::Screenshot
+            | BarEffect::OpenAudioControl
+            | BarEffect::MediaPlayPause) => {
                 static ACTIONS: OnceLock<Mutex<ProcessActionHandler>> = OnceLock::new();
                 let actions = ACTIONS.get_or_init(|| Mutex::new(ProcessActionHandler::default()));
                 match actions.lock() {
@@ -497,15 +499,14 @@ fn SystemInfoDisplay(
     };
 
     if let Some(ref s) = snapshot {
-        let battery_percent = battery_percent.map(f32::from).unwrap_or(100.0);
+        let battery_percent = battery_percent.map(f32::from);
         let cpu_class = sev(s.cpu_average);
         let mem_class = sev(s.memory_usage_percent);
-        let batt_class = if battery_percent > 50.0 {
-            "usage-good"
-        } else if battery_percent > 20.0 {
-            "usage-warn"
-        } else {
-            "usage-danger"
+        let batt_class = match battery_percent {
+            None => "usage-warn",
+            Some(percent) if percent > 50.0 => "usage-good",
+            Some(percent) if percent > 20.0 => "usage-warn",
+            Some(_) => "usage-danger",
         };
 
         let cpu_cls = format!("pill usage-pill {}", cpu_class);
@@ -517,10 +518,10 @@ fn SystemInfoDisplay(
             format_bytes(s.memory_used),
             format_bytes(s.memory_total)
         );
-        let batt_title = if is_charging {
-            format!("电池充电中: {:.1}%", battery_percent)
-        } else {
-            format!("电池电量: {:.1}%", battery_percent)
+        let batt_title = match battery_percent {
+            None => "电池电量不可用".to_owned(),
+            Some(percent) if is_charging => format!("电池充电中: {percent:.1}%"),
+            Some(percent) => format!("电池电量: {percent:.1}%"),
         };
         let batt_icon = if is_charging {
             ICON_BAT_CHG
@@ -529,7 +530,8 @@ fn SystemInfoDisplay(
         };
         let cpu_text = format!("{:.0}%", s.cpu_average);
         let mem_text = format!("{:.0}%", s.memory_usage_percent);
-        let batt_text = format!("{:.0}%", battery_percent);
+        let batt_text =
+            battery_percent.map_or_else(|| "--".to_owned(), |percent| format!("{percent:.0}%"));
 
         rsx! {
             div { class: "system-info-container",
@@ -1113,7 +1115,7 @@ fn App() -> Element {
             div { class: "right-info-container",
                 SystemInfoDisplay {
                     snapshot: state.system.cpu_percent.is_some().then(|| state.system_details.clone()),
-                    battery_percent: state.battery.percent.map(|value| value.rounded()),
+                    battery_percent: state.battery.percent.filter(|_| state.battery.present).map(|value| value.rounded()),
                     is_charging: state.battery.charging,
                 }
                 BrightnessControl {

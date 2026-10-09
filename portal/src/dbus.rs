@@ -15,7 +15,7 @@ use zbus::{
 };
 
 use crate::capture::{self, CaptureHandle, CaptureTransport};
-use crate::picker::{SourceSelection, pick_outputs, pick_windows};
+use crate::picker::{SourceSelection, pick_sources, selection_fits_request};
 use crate::pipewire_stream::{self, Source, StreamHandle, StreamSpec};
 use crate::restore;
 use crate::session::Runtime;
@@ -161,8 +161,8 @@ impl ScreenCast {
                         Vec::new()
                     },
                 };
-                if !filtered.outputs.is_empty() || !filtered.toplevels.is_empty() {
-                    info!("SelectSources honoring restore_token `{tok}`");
+                if selection_fits_request(&filtered, multiple) {
+                    info!("SelectSources honoring saved source selection");
                     selection = Some(filtered);
                     honored_token = Some(tok.to_string());
                 }
@@ -172,34 +172,22 @@ impl ScreenCast {
         let selection = if let Some(sel) = selection {
             sel
         } else {
-            use crate::picker::PickerOutcome;
-            let outs = if want_monitor {
-                pick_outputs(&outputs, multiple)
+            let permitted_outputs = if want_monitor {
+                outputs.as_slice()
             } else {
-                PickerOutcome::Picked(Vec::new())
+                &[]
             };
-            let tops = if want_window {
-                pick_windows(&toplevels, multiple)
+            let permitted_toplevels = if want_window {
+                toplevels.as_slice()
             } else {
-                PickerOutcome::Picked(Vec::new())
+                &[]
             };
-            // If the user cancelled either picker, treat the whole
-            // SelectSources as cancelled — silently substituting a default
-            // would defeat the consent dialog and share the screen anyway.
-            if matches!(outs, PickerOutcome::Cancelled) || matches!(tops, PickerOutcome::Cancelled)
-            {
-                info!("SelectSources cancelled by user");
+            let Some(selection) = pick_sources(permitted_outputs, permitted_toplevels, multiple)
+            else {
+                info!("SelectSources cancelled by user or invalid source override");
                 return (1, HashMap::new());
-            }
-            let outputs = match outs {
-                PickerOutcome::Picked(p) => p,
-                _ => Vec::new(),
             };
-            let toplevels = match tops {
-                PickerOutcome::Picked(p) => p,
-                _ => Vec::new(),
-            };
-            SourceSelection { outputs, toplevels }
+            selection
         };
         info!(
             "SelectSources picked {} output(s), {} toplevel(s)",
@@ -375,8 +363,8 @@ impl ScreenCast {
                 }
                 None => restore::save_new(&selection, persist_mode),
             };
-            if let Ok(v) = Value::from(token).try_into() {
-                results.insert("restore_token".to_string(), v);
+            if let Ok(v) = restore::encode_data(&token) {
+                results.insert("restore_data".to_string(), v);
             }
             if let Ok(v) = Value::from(persist_mode).try_into() {
                 results.insert("persist_mode".to_string(), v);
@@ -464,11 +452,9 @@ pub(crate) fn parse_select_sources_opts(
     let cursor_mode = options
         .get("cursor_mode")
         .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or(CursorMode::Embedded as u32);
+        .unwrap_or(CursorMode::Hidden as u32);
     let paint_cursors = cursor_mode & (CursorMode::Embedded as u32) != 0;
-    let restore_token = options
-        .get("restore_token")
-        .and_then(|v| <&str>::try_from(&**v).ok().map(str::to_string));
+    let restore_token = options.get("restore_data").and_then(restore::decode_data);
     SelectSourcesOpts {
         types_mask,
         multiple,
@@ -500,10 +486,10 @@ mod tests {
         assert_eq!(p.types_mask, SourceType::Monitor as u32);
         assert!(!p.multiple);
         assert_eq!(p.persist_mode, 0);
-        assert_eq!(p.cursor_mode, CursorMode::Embedded as u32);
+        assert_eq!(p.cursor_mode, CursorMode::Hidden as u32);
         assert!(
-            p.paint_cursors,
-            "Embedded default means cursors are composited"
+            !p.paint_cursors,
+            "the backend specification defaults to Hidden"
         );
         assert!(p.restore_token.is_none());
     }
@@ -574,11 +560,21 @@ mod tests {
     }
 
     #[test]
-    fn restore_token_extracted_as_owned_string() {
+    fn backend_restore_data_extracts_private_token() {
         let mut opts = HashMap::new();
-        opts.insert("restore_token".into(), ov_str("abc123deadbeef"));
+        opts.insert(
+            "restore_data".into(),
+            restore::encode_data("abc123deadbeef").unwrap(),
+        );
         let p = parse_select_sources_opts(&opts);
         assert_eq!(p.restore_token.as_deref(), Some("abc123deadbeef"));
+    }
+
+    #[test]
+    fn frontend_restore_token_is_not_a_backend_restore_grant() {
+        let mut opts = HashMap::new();
+        opts.insert("restore_token".into(), ov_str("abc123deadbeef"));
+        assert!(parse_select_sources_opts(&opts).restore_token.is_none());
     }
 
     #[test]

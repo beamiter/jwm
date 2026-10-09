@@ -26,3 +26,7 @@ xbar_linux_actions = { path = "../xbar_linux_actions" }
 
 [dev-dependencies]
 tauri = { version = "2.11.5", default-features = false, features = ["wry"] }
+
+# GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
+[patch.crates-io]
+glib = { path = "../../../../vendor/glib" }

@@ -3579,9 +3579,13 @@ impl KmsState {
         retired
     }
 
-    pub(super) fn request_screenshot(&mut self, path: std::path::PathBuf) {
-        self.screenshot_requests.request_full(path);
+    pub(super) fn request_screenshot(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
+        self.screenshot_requests.request_full(path)?;
         self.needs_render = true;
+        Ok(())
     }
 
     pub(super) fn request_screenshot_region(
@@ -3591,9 +3595,10 @@ impl KmsState {
         y: i32,
         w: u32,
         h: u32,
-    ) {
-        self.screenshot_requests.request_region(path, x, y, w, h);
+    ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
+        self.screenshot_requests.request_region(path, x, y, w, h)?;
         self.needs_render = true;
+        Ok(())
     }
 
     /// Take the latest presentation time (returns None if not updated since last take).
@@ -6349,6 +6354,9 @@ impl KmsState {
         // Resolve a DRM mode if a *different* mode was requested.
         let mut prev_drm_mode: Option<smithay::reexports::drm::control::Mode> = None;
         let drm_mode = if let Some((w, h, refresh)) = mode {
+            if w <= 0 || h <= 0 || refresh < 0 {
+                return Err(format!("invalid mode {w}x{h}@{refresh} for '{name}'"));
+            }
             if !allow_modeset {
                 // Defense-in-depth: build_changes should have rejected this
                 // at validation time. If we reach here the gate was bypassed
@@ -6382,7 +6390,8 @@ impl KmsState {
                             let wl = WlMode::from(*m);
                             wl.size.w == w
                                 && wl.size.h == h
-                                && (refresh == 0 || (wl.refresh - refresh).abs() <= 200)
+                                && (refresh == 0
+                                    || (i64::from(wl.refresh) - i64::from(refresh)).abs() <= 200)
                         })
                     });
                 // Capture the currently-active DRM mode (not just the
@@ -6564,7 +6573,18 @@ impl KmsState {
         height: i32,
         elements: &[KmsRenderElement],
         path: &std::path::Path,
+        permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) {
+        let expected_len = match crate::backend::compositor_common::capture::rgba_capture_len(
+            width as u32,
+            height as u32,
+        ) {
+            Ok(len) => len,
+            Err(error) => {
+                log::warn!("screenshot extent refused: {error}");
+                return;
+            }
+        };
         let size: Size<i32, BufferCoord> = (width, height).into();
 
         // 1. Create offscreen renderbuffer
@@ -6626,13 +6646,28 @@ impl KmsState {
         // PNG compression and filesystem I/O are deliberately outside the
         // compositor frame. Readback still has to happen on the GL thread,
         // but encoding a 4K frame must not block input and presentation.
-        let pixels = pixels.to_vec();
+        if pixels.len() != expected_len {
+            log::warn!("screenshot mapping length mismatch");
+            return;
+        }
+        let pixels = match crate::backend::compositor_common::capture::copy_rgba_capture(
+            pixels,
+            width as u32,
+            height as u32,
+        ) {
+            Ok(pixels) => pixels,
+            Err(error) => {
+                log::warn!("screenshot CPU allocation refused: {error}");
+                return;
+            }
+        };
         spawn_screenshot_png_write(
             path.to_owned(),
             width as u32,
             height as u32,
             pixels,
             "screenshot",
+            permit,
         );
     }
 
@@ -6647,7 +6682,18 @@ impl KmsState {
         ry: i32,
         rw: u32,
         rh: u32,
+        permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) {
+        let expected_len = match crate::backend::compositor_common::capture::rgba_capture_len(
+            width as u32,
+            height as u32,
+        ) {
+            Ok(len) => len,
+            Err(error) => {
+                log::warn!("screenshot extent refused: {error}");
+                return;
+            }
+        };
         let size: Size<i32, BufferCoord> = (width, height).into();
 
         let mut renderbuffer: GlesRenderbuffer =
@@ -6709,21 +6755,32 @@ impl KmsState {
 
         // Crop the region from the full pixel buffer.
         // Pixels are in top-to-bottom order (smithay flips Y in projection).
-        let x = rx.max(0) as u32;
-        let y = ry.max(0) as u32;
-        let cw = rw.min((width as u32).saturating_sub(x));
-        let ch = rh.min((height as u32).saturating_sub(y));
-        if cw == 0 || ch == 0 {
-            log::warn!(
-                "{}: region is empty",
-                renderer_ctx("screenshot-region: crop")
-            );
+        let Some(region) = crate::backend::compositor_common::capture::clip_region(
+            width as u32,
+            height as u32,
+            rx,
+            ry,
+            rw,
+            rh,
+        ) else {
+            log::warn!("screenshot region is empty");
+            return;
+        };
+        if full_pixels.len() != expected_len {
+            log::warn!("screenshot region mapping length mismatch");
             return;
         }
-
-        let full_row_bytes = (width as u32 * 4) as usize;
-        let crop_row_bytes = (cw * 4) as usize;
-        let mut cropped = vec![0u8; (cw * ch * 4) as usize];
+        let (x, y, cw, ch) = (region.x, region.y, region.width, region.height);
+        let full_row_bytes = width as usize * 4;
+        let crop_row_bytes = cw as usize * 4;
+        let mut cropped =
+            match crate::backend::compositor_common::capture::allocate_rgba_capture(cw, ch) {
+                Ok(pixels) => pixels,
+                Err(error) => {
+                    log::warn!("screenshot crop allocation refused: {error}");
+                    return;
+                }
+            };
         for row in 0..ch as usize {
             let src_offset = (y as usize + row) * full_row_bytes + (x as usize * 4);
             let dst_offset = row * crop_row_bytes;
@@ -6731,7 +6788,14 @@ impl KmsState {
                 .copy_from_slice(&full_pixels[src_offset..src_offset + crop_row_bytes]);
         }
 
-        spawn_screenshot_png_write(path.to_owned(), cw, ch, cropped, "screenshot-region");
+        spawn_screenshot_png_write(
+            path.to_owned(),
+            cw,
+            ch,
+            cropped,
+            "screenshot-region",
+            permit,
+        );
     }
 
     /// Fulfill pending wlr-screencopy copy requests for a given output.
@@ -9336,9 +9400,7 @@ impl KmsState {
                 // this is the queue the udev backend actually uses.
                 for request in self.screenshot_requests.take_all() {
                     let path = match &request {
-                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
-                            path,
-                        )
+                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Full { path, .. }
                         | crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
                             path,
                             ..
@@ -9353,14 +9415,13 @@ impl KmsState {
             if out_idx == 0 && !capture_unavailable {
                 for request in self.screenshot_requests.take_all() {
                     match request {
-                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
-                            path,
-                        ) => Self::capture_screenshot_offscreen_impl(
+                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Full { path, permit } => Self::capture_screenshot_offscreen_impl(
                             &mut self.renderer,
                             out_w,
                             out_h,
                             &elements,
                             &path,
+                            permit,
                         ),
                         crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
                             path,
@@ -9368,6 +9429,7 @@ impl KmsState {
                             y,
                             width,
                             height,
+                            permit,
                         } => Self::capture_screenshot_region_impl(
                             &mut self.renderer,
                             out_w,
@@ -9378,6 +9440,7 @@ impl KmsState {
                             y,
                             width,
                             height,
+                            permit,
                         ),
                     }
                 }
@@ -9809,13 +9872,16 @@ fn spawn_screenshot_png_write(
     height: u32,
     pixels: Vec<u8>,
     label: &'static str,
+    permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
 ) {
-    match std::thread::Builder::new()
-        .name("jwm-screenshot-png".to_owned())
-        .spawn(move || match save_rgba_png(&path, width, height, &pixels) {
+    match crate::backend::compositor_common::screenshot::spawn_screenshot_worker(
+        "jwm-screenshot-png",
+        permit,
+        move || match save_rgba_png(&path, width, height, &pixels) {
             Ok(()) => log::info!("[{label}] saved to {}", path.display()),
             Err(error) => log::error!("[{label}: save PNG] {error}"),
-        }) {
+        },
+    ) {
         Ok(_) => {}
         Err(error) => log::error!("[screenshot] could not start PNG writer: {error}"),
     }

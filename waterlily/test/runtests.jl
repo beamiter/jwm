@@ -1083,3 +1083,29 @@ include("jelly_detail_options.jl")
 include("jelly_display.jl")
 
 include("jelly_pose_protocol.jl")
+
+@testset "rain inverse CDF accepts every random endpoint" begin
+    # The standard generator samples [0, 1), including exactly zero.
+    for lambda in (2_000.0f0, 4_000.0f0, 7_000.0f0)
+        @test JwmWaterLily.rain_impact_diameter(lambda, 0.0f0) ==
+              JwmWaterLily.RAIN_TRACKED_CUTOFF
+        for sample in (0.0f0, eps(Float32), 0.5f0, prevfloat(1.0f0))
+            diameter = JwmWaterLily.rain_impact_diameter(lambda, sample)
+            @test isfinite(diameter)
+            @test diameter >= JwmWaterLily.RAIN_TRACKED_CUTOFF
+            weber = JwmWaterLily.RAIN_WATER_DENSITY *
+                    JwmWaterLily.RAIN_WIND_SPEED^2 * diameter /
+                    JwmWaterLily.RAIN_SURFACE_TENSION
+            reynolds = JwmWaterLily.RAIN_WATER_DENSITY *
+                       JwmWaterLily.RAIN_WIND_SPEED * diameter /
+                       JwmWaterLily.RAIN_VISCOSITY
+            splash = sqrt(weber) * sqrt(sqrt(reynolds))
+            @test isfinite(splash)
+            if splash > JwmWaterLily.RAIN_SPLASH_PARAMETER
+                satellites = min(3, floor(Int,
+                    (splash / JwmWaterLily.RAIN_SPLASH_PARAMETER - 1.0f0) * 4.0f0))
+                @test 0 <= satellites <= 3
+            end
+        end
+    end
+end

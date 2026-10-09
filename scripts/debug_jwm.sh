@@ -1,7 +1,7 @@
 #!/bin/bash
 # 快速调试脚本 - 启用所有调试选项
 
-set -e
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
@@ -22,7 +22,7 @@ export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_CLASS=user
 export JWM_BACKEND=wayland-udev
 
-LOG_FILE="/tmp/jwm_debug_$(date +%s).log"
+LOG_FILE=$(mktemp "${TMPDIR:-/tmp}/jwm_debug.XXXXXXXX.log")
 echo "📝 Logging to: $LOG_FILE"
 
 jwm 2>&1 | tee "$LOG_FILE"

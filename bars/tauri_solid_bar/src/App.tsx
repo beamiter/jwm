@@ -636,7 +636,6 @@ function App() {
 
   onMount(() => {
     const initialize = async () => {
-      setScaleFactor(await getCurrentWindow().scaleFactor());
       const stopListening = await listen<FrontendEnvelope>("xbar-state", (event) => {
         if (cancelled) return;
         if (revision !== null && event.payload.revision < revision) return;
@@ -650,6 +649,15 @@ function App() {
       }
       unlisten = stopListening;
       await invoke<void>("frontend_ready");
+      if (cancelled) return;
+      try {
+        const scale = await getCurrentWindow().scaleFactor();
+        if (!cancelled) setScaleFactor(scale);
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to query the Tauri window scale factor:", error);
+        }
+      }
     };
 
     initialize().catch((error) => {

@@ -279,8 +279,10 @@ impl GeometryConstraints {
     pub fn covers_full_monitor(window_rect: &Rect, monitor_rect: &Rect) -> bool {
         window_rect.x <= monitor_rect.x
             && window_rect.y <= monitor_rect.y
-            && window_rect.w >= monitor_rect.w
-            && window_rect.h >= monitor_rect.h
+            && i64::from(window_rect.x) + i64::from(window_rect.w)
+                >= i64::from(monitor_rect.x) + i64::from(monitor_rect.w)
+            && i64::from(window_rect.y) + i64::from(window_rect.h)
+                >= i64::from(monitor_rect.y) + i64::from(monitor_rect.h)
     }
 
     /// 计算两个矩形的交集
@@ -541,6 +543,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn full_monitor_coverage_requires_both_far_edges() {
+        for monitor in [
+            Rect::new(0, 0, 1920, 1080),
+            Rect::new(1920, 200, 1920, 1080),
+        ] {
+            let shifted_left = Rect::new(monitor.x - 100, monitor.y, monitor.w, monitor.h);
+            let shifted_up = Rect::new(monitor.x, monitor.y - 100, monitor.w, monitor.h);
+            assert!(!GeometryConstraints::covers_full_monitor(
+                &shifted_left,
+                &monitor
+            ));
+            assert!(!GeometryConstraints::covers_full_monitor(
+                &shifted_up,
+                &monitor
+            ));
+            let covering = Rect::new(
+                monitor.x - 100,
+                monitor.y - 100,
+                monitor.w + 100,
+                monitor.h + 100,
+            );
+            assert!(GeometryConstraints::covers_full_monitor(
+                &covering, &monitor
+            ));
+        }
+        let edge = Rect::new(i32::MAX - 100, i32::MAX - 100, 200, 200);
+        assert!(GeometryConstraints::covers_full_monitor(&edge, &edge));
     }
 
     #[test]

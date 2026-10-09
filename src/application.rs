@@ -365,7 +365,11 @@ fn preflight_config(choice: BackendChoice) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+fn create_backend(
+    choice: BackendChoice,
+    restart_intent: bool,
+) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+    let _ = restart_intent; // used when the udev backend is compiled
     if !choice.is_compiled() {
         return Err(format!(
             "backend '{}' is not compiled into this jwm binary (rebuild with \
@@ -393,7 +397,9 @@ fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std
         #[cfg(feature = "backend-xcb")]
         BackendChoice::Xcb => XcbBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
         #[cfg(feature = "backend-wayland-udev")]
-        BackendChoice::WaylandUdev => UdevBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        BackendChoice::WaylandUdev => {
+            UdevBackend::new_with_restart(restart_intent).map(|b| Box::new(b) as Box<dyn Backend>)
+        }
         #[cfg(feature = "backend-wayland-nested")]
         BackendChoice::WaylandX11 => {
             WaylandX11Backend::new().map(|b| Box::new(b) as Box<dyn Backend>)
@@ -416,50 +422,52 @@ fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std
     )?)
 }
 
-/// Temporarily expose restart intent to backends that must distinguish their
-/// own inherited display socket from a genuinely nested session. The marker is
-/// restored as soon as backend construction finishes, so the replacement WM's
-/// event loop and subsequently spawned children do not inherit a one-shot
-/// bootstrap signal.
-struct RestartMarkerGuard {
-    previous: Option<OsString>,
+pub(crate) const RESTART_ENV_KEYS: [&str; 4] = [
+    RESTART_MARKER_ENV,
+    SCRATCHPAD_HANDOFF_ENV,
+    LEGACY_SCRATCHPAD_HANDOFF_ENV,
+    TRANSIENT_CHILD_HANDOFF_ENV,
+];
+
+/// One startup's immutable restart information. Backend construction receives
+/// explicit intent instead of publishing a temporary process-global marker.
+pub struct StartupContext {
+    restarting: bool,
+    scratchpads: Option<ScratchpadRestartHandoff>,
+    transient_children: Option<TransientChildRestartHandoff>,
 }
 
-impl RestartMarkerGuard {
-    fn install() -> Self {
-        let previous = env::var_os(RESTART_MARKER_ENV);
-        // SAFETY: application bootstrap owns process-environment mutation at
-        // this boundary, before the new backend and its worker threads exist.
-        unsafe { env::set_var(RESTART_MARKER_ENV, "1") };
-        Self { previous }
-    }
-}
-
-impl Drop for RestartMarkerGuard {
-    fn drop(&mut self) {
-        // SAFETY: this guard is scoped to synchronous backend construction and
-        // is dropped before the replacement JWM starts its event loop.
-        unsafe {
-            if let Some(previous) = self.previous.as_ref() {
-                env::set_var(RESTART_MARKER_ENV, previous);
-            } else {
-                env::remove_var(RESTART_MARKER_ENV);
-            }
+impl StartupContext {
+    /// Read startup state without modifying the process environment.
+    /// Compatibility/library callers may use this after starting threads;
+    /// ordinary child-process launch paths strip these one-shot markers.
+    pub fn from_environment() -> Self {
+        let marker = env::var_os(RESTART_MARKER_ENV);
+        let restarting = marker.as_deref() == Some(OsStr::new("1"));
+        if marker.is_some() && !restarting {
+            warn!("[application] ignoring invalid {RESTART_MARKER_ENV} marker");
+        }
+        Self {
+            restarting,
+            scratchpads: read_restart_handoff_from_environment(restarting),
+            transient_children: read_transient_child_handoff_from_environment(restarting),
         }
     }
-}
 
-fn take_restart_intent_from_environment() -> bool {
-    let marker = env::var_os(RESTART_MARKER_ENV);
-    // Consume the exec marker once at the composition root. A narrowly scoped
-    // guard reinstalls it around backend construction when it is authoritative.
-    // SAFETY: this runs before any backend or application worker is created.
-    unsafe { env::remove_var(RESTART_MARKER_ENV) };
-    let restarting = marker.as_deref() == Some(OsStr::new("1"));
-    if marker.is_some() && !restarting {
-        warn!("[application] ignoring invalid {RESTART_MARKER_ENV} marker");
+    /// Capture and remove the inherited one-shot environment before startup.
+    ///
+    /// # Safety
+    /// The caller must ensure no other thread is running or accessing the
+    /// process environment, including native-library threads. The JWM binary
+    /// calls this before installing its logger or constructing any backend.
+    pub unsafe fn take_environment_before_threads() -> Self {
+        let context = Self::from_environment();
+        for key in RESTART_ENV_KEYS {
+            // SAFETY: inherited from this method's explicit caller contract.
+            unsafe { env::remove_var(key) };
+        }
+        context
     }
-    restarting
 }
 
 fn reload_validated_global_config(choice: BackendChoice) -> Result<(), ConfigError> {
@@ -484,8 +492,7 @@ fn create_backend_for_startup(
     choice: BackendChoice,
     restart_intent: bool,
 ) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
-    let _restart_marker = restart_intent.then(RestartMarkerGuard::install);
-    create_backend(choice)
+    create_backend(choice, restart_intent)
 }
 
 fn bootstrap_jwm_instance(
@@ -493,7 +500,18 @@ fn bootstrap_jwm_instance(
     scratchpad_handoff: Option<&ScratchpadRestartHandoff>,
     transient_child_handoff: Option<&TransientChildRestartHandoff>,
     restart_intent: bool,
-) -> Result<(Box<dyn Backend>, Jwm), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        Box<dyn Backend>,
+        Jwm,
+        crate::child_environment::ActiveEnvironment<'static>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    // Reserve the one application slot before config reload or backend construction.
+    // Reject parallel applications before either changes shared state. No candidate session values are published yet.
+    let environment =
+        crate::child_environment::activate(crate::child_environment::ChildEnvironment::default())?;
     if restart_intent {
         // A real exec would initialize CONFIG from disk in the replacement
         // process. Do the same after exec(2) fails instead of accidentally
@@ -512,6 +530,11 @@ fn bootstrap_jwm_instance(
         "acquire window-manager selection",
     )?;
 
+    // Publish only this successful backend's map before setup can spawn bars.
+    // Every subsequent error drops the guard, so retries cannot retain a
+    // half-initialized backend's environment.
+    environment.publish(backend.child_environment())?;
+
     // Feature threads started from here to `run` must not be able to take
     // SIGCHLD; see `SigchldBlockedDuringBootstrap`. Dropped on every return,
     // so a failed attempt restores the mask too.
@@ -527,7 +550,7 @@ fn bootstrap_jwm_instance(
     }
     jwm.setup(&mut *backend)?;
     drop(sigchld_blocked);
-    Ok((backend, jwm))
+    Ok((backend, jwm, environment))
 }
 
 /// Keeps `SIGCHLD` blocked on the startup thread while the `Jwm` instance is
@@ -623,6 +646,7 @@ impl RestartCommand {
         transient_child_handoff: Option<&str>,
     ) -> Command {
         let mut command = Command::new(&self.executable);
+        crate::child_environment::apply_for_restart(&mut command);
         command
             .args(&self.arguments)
             .env(RESTART_MARKER_ENV, "1")
@@ -729,16 +753,8 @@ fn decode_restart_handoff(
         .map_err(|error| error.to_string())
 }
 
-fn take_restart_handoff_from_environment(restarting: bool) -> Option<ScratchpadRestartHandoff> {
+fn read_restart_handoff_from_environment(restarting: bool) -> Option<ScratchpadRestartHandoff> {
     let payload = env::var_os(SCRATCHPAD_HANDOFF_ENV);
-    // This is called at the process composition root before a backend (and
-    // its worker threads) is constructed. Consuming the value prevents JWM's
-    // own children or a later restart from inheriting a replayable payload.
-    unsafe { env::remove_var(SCRATCHPAD_HANDOFF_ENV) };
-    // V1 never carried pending launches. It is deliberately not decoded by
-    // the strict V2 reader, but remove it so an upgraded exec cannot leak the
-    // obsolete one-shot capability to children.
-    unsafe { env::remove_var(LEGACY_SCRATCHPAD_HANDOFF_ENV) };
     match decode_restart_handoff(restarting, payload.as_deref(), std::process::id()) {
         Ok(handoff) => handoff,
         Err(error) => {
@@ -769,13 +785,10 @@ fn decode_transient_child_restart_handoff(
         .map_err(|error| error.to_string())
 }
 
-fn take_transient_child_handoff_from_environment(
+fn read_transient_child_handoff_from_environment(
     restarting: bool,
 ) -> Option<TransientChildRestartHandoff> {
     let payload = env::var_os(TRANSIENT_CHILD_HANDOFF_ENV);
-    // Consume the one-shot capability before backend construction can spawn
-    // workers or helper processes that might otherwise inherit it.
-    unsafe { env::remove_var(TRANSIENT_CHILD_HANDOFF_ENV) };
     match decode_transient_child_restart_handoff(restarting, payload.as_deref(), std::process::id())
     {
         Ok(handoff) => handoff,
@@ -791,15 +804,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     run_with_options(ApplicationOptions::from_env()?)
 }
 
-/// Run JWM until it exits or replaces itself during a restart.
+/// Run JWM using a read-only environment snapshot. This compatibility entry
+/// point never mutates the process environment; the binary uses an explicitly
+/// consumed pre-thread snapshot through [`run_with_context`].
 pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_context(options, StartupContext::from_environment())
+}
+
+/// Run JWM with startup state captured by the caller.
+pub fn run_with_context(
+    options: ApplicationOptions,
+    startup: StartupContext,
+) -> Result<(), Box<dyn std::error::Error>> {
     let restart_command = RestartCommand::current();
-    let inherited_restart_intent = take_restart_intent_from_environment();
-    let mut pending_scratchpad_handoff =
-        take_restart_handoff_from_environment(inherited_restart_intent);
-    let mut pending_transient_child_handoff =
-        take_transient_child_handoff_from_environment(inherited_restart_intent);
-    let mut restart_bootstrap = inherited_restart_intent;
+    let mut pending_scratchpad_handoff = startup.scratchpads;
+    let mut pending_transient_child_handoff = startup.transient_children;
+    let mut restart_bootstrap = startup.restarting;
 
     loop {
         let startup = || {
@@ -810,7 +830,7 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
                 restart_bootstrap,
             )
         };
-        let (mut backend, mut jwm) = if restart_bootstrap {
+        let (mut backend, mut jwm, _environment) = if restart_bootstrap {
             run_restart_bootstrap_with_retry(startup, std::thread::sleep)?
         } else {
             startup()?
@@ -1182,7 +1202,7 @@ mod tests {
         assert!(request.contains("env::var_os(DAEMON_PID_ENV)"));
         assert!(request.contains("std::os::unix::process::parent_id()"));
 
-        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
+        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_context");
         assert!(application.contains("request_daemon_shutdown();"));
         assert!(
             !application.contains("\"jwm-tool\""),
@@ -1312,7 +1332,7 @@ mod tests {
             "Jwm::setup already owns QueryTree adoption; a second application-level scan can turn a successful adoption into startup failure"
         );
 
-        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
+        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_context");
         assert!(application.contains("bootstrap_jwm_instance("));
         assert!(!application.contains("jwm.setup_initial_windows("));
     }
@@ -1417,12 +1437,13 @@ mod tests {
 
     #[test]
     fn restart_bootstrap_scopes_marker_and_reloads_config_before_backend_creation() {
-        let intent =
-            function_body_after(APPLICATION_SRC, "fn take_restart_intent_from_environment");
-        assert!(intent.contains("env::remove_var(RESTART_MARKER_ENV)"));
-
+        let capture = function_body_after(APPLICATION_SRC, "pub fn from_environment");
+        assert!(!capture.contains("env::remove_var"));
+        assert!(!capture.contains("env::set_var"));
         let create = function_body_after(APPLICATION_SRC, "fn create_backend_for_startup");
-        assert!(create.contains("restart_intent.then(RestartMarkerGuard::install)"));
+        assert!(create.contains("create_backend(choice, restart_intent)"));
+        assert!(!create.contains("env::set_var"));
+        assert!(!create.contains("env::remove_var"));
 
         let bootstrap = function_body_after(APPLICATION_SRC, "fn bootstrap_jwm_instance");
         let reload = bootstrap
@@ -1431,6 +1452,11 @@ mod tests {
         let create = bootstrap
             .find("create_backend_for_startup(options.backend, restart_intent)?")
             .expect("restart bootstrap must construct its backend");
+        let reserve = bootstrap.find("child_environment::activate").unwrap();
+        assert!(
+            reserve < reload,
+            "reserve the application before changing CONFIG"
+        );
         assert!(reload < create, "validated CONFIG must be installed first");
     }
 
@@ -1611,7 +1637,7 @@ mod tests {
 
     #[test]
     fn exec_failure_fallback_reinstalls_the_captured_transient_handoff() {
-        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
+        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_context");
         let capture = application
             .find("let (transient_child_handoff, transient_child_payload)")
             .expect("restart must retain the validated handoff beside its payload");

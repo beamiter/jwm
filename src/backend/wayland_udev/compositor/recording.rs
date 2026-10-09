@@ -423,7 +423,7 @@ impl RecordingState {
         }
         args.extend(
             [
-                "-y",
+                "-n",
                 "-use_wallclock_as_timestamps",
                 "1",
                 "-f",
@@ -1354,5 +1354,23 @@ mod tests {
         // submit them back to back into the encoder we are protecting.
         state.last_capture = Instant::now() - Duration::from_millis(500);
         assert!(state.next_capture_anchor() > state.last_capture + interval);
+    }
+}
+
+#[cfg(test)]
+mod recording_output_ownership_tests {
+    #[test]
+    fn screen_recording_preserves_a_destination_created_after_preflight() {
+        // No GL or encoder is started: pin the production argv contract.
+        let source = include_str!("recording.rs");
+        let launch = source
+            .split_once("pub(crate) unsafe fn start(")
+            .unwrap()
+            .1
+            .split_once("let mut command =")
+            .unwrap()
+            .0;
+        assert!(launch.contains("\"-n\""));
+        assert!(!launch.contains("\"-y\""));
     }
 }

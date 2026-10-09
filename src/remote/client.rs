@@ -33,7 +33,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+// Stay comfortably inside the host's 600 ms held-input safety lease even
+// while a modifier is held over a static desktop and no frame ACKs arrive.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 /// How often the viewer loop looks for newly copied local text.
 ///
 /// The loop otherwise parks until its next heartbeat, and a quarter second of
@@ -93,10 +95,10 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
                 (Some(captures), Some(setter))
             }
             Err(error) => {
-                eprintln!(
-                    "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
-                );
-                (None, None)
+                return Err(io::Error::other(format!(
+                    "negotiated clipboard sharing could not start: {error}"
+                ))
+                .into());
             }
         }
     } else {
@@ -105,10 +107,18 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
 
     let state = Arc::new(ReceiveState::new());
     let mut telemetry_reporter = ClientTelemetryReporter::new(&state.telemetry);
-    let (kind, payload) = reader.read_message()?;
-    if kind != MessageKind::Frame {
-        return Err(invalid_data("host did not send an initial video frame").into());
-    }
+    let payload = read_initial_frame(
+        &mut reader,
+        hello.clipboard_enabled,
+        FIRST_FRAME_TIMEOUT,
+        |text| {
+            let setter = receiver_clipboard
+                .as_ref()
+                .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?;
+            setter.set_text(text);
+            Ok(())
+        },
+    )?;
     state.telemetry.record_received();
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
@@ -248,12 +258,66 @@ fn negotiate_session(
         return Err(invalid_data("host did not acknowledge remote session negotiation").into());
     }
     let hello = ServerHello::decode(&payload)?;
+    validate_server_capabilities(&hello, request_input, request_clipboard)?;
     negotiation_deadline.cancel();
     reader
         .get_ref()
         .set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
     writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
     Ok((reader, writer, hello))
+}
+
+/// A peer can grant only capabilities the local user requested.
+fn validate_server_capabilities(
+    hello: &ServerHello,
+    request_input: bool,
+    request_clipboard: bool,
+) -> RemoteResult<()> {
+    if hello.clipboard_enabled && !request_clipboard {
+        return Err(invalid_data("host enabled clipboard sharing without client consent").into());
+    }
+    if (hello.pointer_enabled || hello.keyboard_enabled) && !request_input {
+        return Err(invalid_data("host enabled input without client consent").into());
+    }
+    Ok(())
+}
+
+/// Clipboard and video share the host writer and may arrive in either order.
+/// One absolute budget covers all records, including a partial first frame.
+fn read_initial_frame(
+    reader: &mut SessionReader<TcpStream>,
+    clipboard_enabled: bool,
+    timeout: Duration,
+    set_clipboard: impl FnMut(&str) -> RemoteResult<()>,
+) -> RemoteResult<Vec<u8>> {
+    let mut deadline = TcpStreamDeadline::arm(reader.get_ref(), timeout)?;
+    let payload = read_initial_frame_records(reader, clipboard_enabled, set_clipboard)?;
+    deadline.cancel();
+    Ok(payload)
+}
+
+fn read_initial_frame_records<R: io::Read>(
+    reader: &mut SessionReader<R>,
+    clipboard_enabled: bool,
+    mut set_clipboard: impl FnMut(&str) -> RemoteResult<()>,
+) -> RemoteResult<Vec<u8>> {
+    let mut payload = Vec::new();
+    loop {
+        match reader.read_message_into(&mut payload)? {
+            MessageKind::Frame => return Ok(payload),
+            MessageKind::Clipboard if clipboard_enabled => {
+                set_clipboard(&decode_clipboard(&payload)?)?;
+            }
+            MessageKind::Close => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "host closed before sending an initial video frame",
+                )
+                .into());
+            }
+            _ => return Err(invalid_data("host did not send an initial video frame").into()),
+        }
+    }
 }
 
 fn viewer_loop(
@@ -1136,6 +1200,86 @@ mod tests {
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
 
+    #[test]
+    fn heartbeats_renew_static_held_input_before_host_safety_release() {
+        assert!(HEARTBEAT_INTERVAL.saturating_mul(2) < Duration::from_millis(600));
+    }
+
+    #[test]
+    fn hello_ack_cannot_enable_unrequested_clipboard_or_input() {
+        let mut hello = ServerHello {
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: true,
+        };
+        assert!(validate_server_capabilities(&hello, false, false).is_err());
+        assert!(validate_server_capabilities(&hello, false, true).is_ok());
+        hello.clipboard_enabled = false;
+        hello.pointer_enabled = true;
+        assert!(validate_server_capabilities(&hello, false, false).is_err());
+        assert!(validate_server_capabilities(&hello, true, false).is_ok());
+    }
+
+    #[test]
+    fn negotiated_clipboard_may_precede_the_first_video_record() {
+        let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+        writer
+            .write_message(
+                MessageKind::Clipboard,
+                encode_clipboard("synthetic fixture").unwrap(),
+            )
+            .unwrap();
+        writer
+            .write_message(MessageKind::Frame, b"synthetic frame header")
+            .unwrap();
+        let bytes = writer.into_inner();
+        let mut reader = SessionReader::new(Cursor::new(bytes.clone()), TEST_PSK);
+        let mut copied = Vec::new();
+        let frame = read_initial_frame_records(&mut reader, true, |text| {
+            copied.push(text.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(copied, ["synthetic fixture"]);
+        assert_eq!(frame, b"synthetic frame header");
+        let mut reader = SessionReader::new(Cursor::new(bytes), TEST_PSK);
+        assert!(
+            read_initial_frame_records(&mut reader, false, |_| {
+                panic!("unnegotiated clipboard must never reach the setter")
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn clipboard_traffic_cannot_extend_the_first_frame_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (receiver, _) = listener.accept().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let sender = thread::spawn(move || {
+            let mut writer = SessionWriter::new(sender, TEST_PSK);
+            for _ in 0..100 {
+                if writer
+                    .write_message(MessageKind::Clipboard, b"fixture")
+                    .is_err()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let mut reader = SessionReader::new(receiver, TEST_PSK);
+        let started = Instant::now();
+        assert!(
+            read_initial_frame(&mut reader, true, Duration::from_millis(40), |_| Ok(())).is_err()
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        sender.join().unwrap();
+    }
+
     /// One self-contained tile keyframe, as the host would put on the wire.
     fn tile_keyframe_payload(sequence: u64, frame: &CapturedFrame, quality: u8) -> Vec<u8> {
         let mut encoder = TileEncoder::new();
@@ -1963,6 +2107,64 @@ mod tests {
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn authenticated_ack_cannot_enable_unrequested_clipboard() {
+        // This regression calls only APIs already present in the baseline.
+        // It can be transplanted unchanged to show the old execution path
+        // accepts an unsolicited grant; no X11 or real clipboard is touched.
+        for request_clipboard in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let keys = server_handshake(&mut stream, &TEST_PSK, [0x39; 32]).unwrap();
+                let reader_stream = stream.try_clone().unwrap();
+                let (receive_key, send_key) = keys.into_server();
+                let mut reader = SessionReader::new(reader_stream, receive_key);
+                let mut writer = SessionWriter::new(stream, send_key);
+                let (kind, payload) = reader.read_message().unwrap();
+                assert_eq!(kind, MessageKind::Hello);
+                let hello = ClientHello::decode(&payload).unwrap();
+                assert_eq!(hello.request_clipboard, request_clipboard);
+                writer
+                    .write_message(
+                        MessageKind::HelloAck,
+                        &ServerHello {
+                            pointer_enabled: false,
+                            keyboard_enabled: false,
+                            clipboard_enabled: true,
+                        }
+                        .encode(),
+                    )
+                    .unwrap();
+                writer.flush().unwrap();
+            });
+            let stream = TcpStream::connect(address).unwrap();
+            let result = negotiate_session(
+                stream,
+                &TEST_PSK,
+                false,
+                request_clipboard,
+                [0; 32],
+                Duration::from_secs(5),
+            );
+            server.join().unwrap();
+            if request_clipboard {
+                assert!(result.is_ok(), "explicit clipboard consent must still work");
+            } else {
+                assert!(
+                    result.is_err(),
+                    "an authenticated host cannot opt in local clipboard sharing"
+                );
+                let error = match result {
+                    Err(error) => error.to_string(),
+                    Ok(_) => unreachable!(),
+                };
+                assert!(error.contains("without client consent"), "{error}");
+            }
+        }
     }
 
     #[test]

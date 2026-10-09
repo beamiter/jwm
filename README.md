@@ -423,6 +423,11 @@ path; Wayland uses the compositor data-device selection
 neither native path is available. `take_screenshot_fullscreen` captures the
 whole desktop with no interaction.
 
+Screenshot admission is bounded across all queues and PNG writers to four
+concurrent captures. Additional requests return a busy error. A single CPU RGBA
+readback is limited to 512 MiB, with checked dimensions and fallible allocation;
+oversized captures fail without attempting a giant readback.
+
 A finished capture announces itself: a toast carries the saved path (or
 confirms the clipboard copy), and a failed one surfaces even while Do Not
 Disturb is on. While a recording runs, a small `REC` chip with the running
@@ -444,6 +449,12 @@ by default. To keep clients and animations live instead, set this in the
 screenshot_freeze_enabled = false
 ```
 
+Source-install configuration synchronization requires Python 3.11+ (`tomllib`)
+or Python 3 with `tomli` already installed. It refuses to rewrite a symlinked
+configuration or an edit that changes values other than `status_bar.name`;
+set that one key manually when synchronization is refused. Existing binaries
+and configuration remain available on build or validation failure.
+
 ## Portal and diagnostics
 
 The optional `portal/` crate provides JWM's screencast portal backend. Its
@@ -454,6 +465,32 @@ service with the correct home path, and restarts an older activated backend:
 scripts/install-portal.sh
 scripts/test-portal.sh
 ```
+
+Source selection requires consent: the backend auto-detects an installed `rofi`
+or `wofi`, or uses `JWM_PORTAL_PICKER=rofi|wofi|/path/to/custom-picker` from its
+D-Bus activation environment. If no picker is available, cannot start, or is
+cancelled, the request is cancelled. The installer does not install a picker or
+change the session environment. Configure that environment before activating the
+portal; variables set only on the requesting application do not configure it.
+For deliberately unattended sharing, `JWM_PORTAL_OUTPUT=<name-or-description>`
+or `JWM_PORTAL_WINDOW=class:<app_id>` / `title:<substring>` explicitly selects
+matching sources. An empty or unmatched output override, or an unmatched window
+override, cancels rather than selecting another source. This replaces the earlier
+MVP behavior that silently chose the first source (or all sources for multi-pick).
+
+ScreenCast source selection shows monitors and windows in one picker. A single-source
+request permits exactly one choice across both kinds. Conflicting or ambiguous
+`JWM_PORTAL_OUTPUT`/`JWM_PORTAL_WINDOW` overrides cancel that request instead of
+sharing multiple sources or silently choosing one. Empty overrides also cancel.
+
+ScreenCast cursor compatibility: when `cursor_mode` is omitted, the portal uses the
+standard Hidden mode. Applications that want the cursor included must explicitly
+request Embedded mode. Earlier JWM versions incorrectly defaulted to Embedded.
+
+Dedicated cancellable capture connections require the session’s named
+`WAYLAND_DISPLAY` socket; an inherited-fd-only `WAYLAND_SOCKET` session is not
+supported by this path. Closing a portal session interrupts that private
+connection rather than the discovery connection.
 
 Portal builds require PipeWire 1.2 development files, `pkg-config`, and libclang.
 System installations are discovered automatically. For a private PipeWire

@@ -26,6 +26,13 @@ pub struct LayoutPickerState {
     pub selected: usize,
     /// The layout that was current when the picker opened, restored on cancel.
     pub origin: usize,
+    /// The monitor and per-tag slot that own this live preview. Pure picker
+    /// construction leaves it unset; the JWM opener supplies the context.
+    pub(crate) owner: Option<(crate::core::models::MonitorKey, usize)>,
+    /// Bar preference before previewing, and the last value left by a preview.
+    /// Comparing the latter preserves a newer independent toggle on cancel.
+    pub(crate) origin_show_bar: Option<bool>,
+    pub(crate) preview_show_bar: Option<bool>,
     /// When the auto-confirm delay started running.
     pub touched: Instant,
 }
@@ -44,6 +51,9 @@ impl LayoutPickerState {
             previews,
             selected,
             origin: selected,
+            owner: None,
+            origin_show_bar: None,
+            preview_show_bar: None,
             touched: Instant::now(),
         }
     }
@@ -59,8 +69,8 @@ impl LayoutPickerState {
     /// Step the selection by `delta`, wrapping in both directions. Returns the
     /// layout now highlighted.
     pub fn step(&mut self, delta: i32) -> &'static LayoutEnum {
-        let len = self.layouts.len() as i32;
-        let next = (self.selected as i32 + delta).rem_euclid(len);
+        let len = self.layouts.len() as i64;
+        let next = (self.selected as i64 + i64::from(delta)).rem_euclid(len);
         self.selected = next as usize;
         self.touch();
         self.selected_layout()
@@ -130,6 +140,17 @@ impl LayoutPickerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_picker_accepts_the_complete_ipc_delta_range() {
+        for delta in [i32::MIN, i32::MAX, -1, 0, 1] {
+            let mut picker = LayoutPickerState::new(&LayoutEnum::TILE);
+            picker.select(1).unwrap();
+            let expected = (1_i64 + i64::from(delta)).rem_euclid(picker.layouts.len() as i64);
+            picker.step(delta);
+            assert_eq!(picker.selected, expected as usize);
+        }
+    }
 
     #[test]
     fn opens_on_the_current_layout_and_remembers_it() {

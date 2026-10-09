@@ -58,7 +58,7 @@ impl Jwm {
         let _ = self.setclienttagprop(backend, client_key);
 
         self.focus(backend, None)?;
-        self.arrange(backend, self.state.sel_mon);
+        self.arrange(backend, client_mon);
         self.broadcast_window_state_ipc(backend, client_key);
         if was_fullscreen {
             if let Some(mk) = client_mon.or(self.state.sel_mon) {
@@ -285,6 +285,39 @@ mod tests {
     use std::any::Any;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn retagging_a_window_on_another_monitor_updates_its_visibility() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let selected = jwm.state.monitor_order[0];
+        let source = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(selected);
+        let mut client = WMClient::new(WindowId::from_raw(0x1616));
+        client.mon = Some(source);
+        client.state.tags = 1;
+        client.state.is_floating = true;
+        client.geometry.x = 2000;
+        client.geometry.y = 100;
+        client.geometry.w = 400;
+        client.geometry.h = 300;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, source);
+        jwm.move_client_to_tag(&mut backend, key, 2).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(selected));
+        assert_eq!(jwm.state.clients[key].state.tags, 2);
+        assert!(
+            jwm.state.clients[key]
+                .geometry
+                .hidden_restore_rect
+                .is_some(),
+            "retagging must hide the actual source window even if selection moved"
+        );
+    }
 
     #[derive(Default)]
     struct DockSpyWindowOps {

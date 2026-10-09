@@ -8,7 +8,7 @@
 # and subtitles. Everything is driven over jwm IPC — no manual hotkeys.
 #
 # Requirements: a running jwm session with the compositor active, jwm-tool
-# built, julia with the waterlily project instantiated, xdotool for the mouse
+# built, python3, julia with the waterlily project instantiated, xdotool for the mouse
 # segments (skipped with a warning if missing).
 #
 # Usage: record_waterlily_showcase.sh [acts]
@@ -25,6 +25,8 @@
 #   WALTZ_DWELL   seconds per waltz palette (fluent/sith/mica) (default: 40)
 
 set -euo pipefail
+
+command -v python3 >/dev/null 2>&1 || { echo "python3 is required for JSON encoding" >&2; exit 1; }
 
 ACTS="${1:-all}"
 wants() { [[ "$ACTS" == "all" || ",$ACTS," == *",$1,"* ]]; }
@@ -193,22 +195,84 @@ waltz_performance() {
 
 # --- worker lifecycle --------------------------------------------------------
 
-worker_pids() { pgrep -f "julia.*waterlily/runner" || true; }
+worker_pids() { pgrep -u "$(id -u)" -f "julia.*waterlily/runner" || true; }
 
-# TERM first, KILL after a grace period: a worker stuck in shutdown (blocked
-# exit-time task) would otherwise linger for hours and shadow future runs.
-kill_workers() {
-    local -a pids=()
-    mapfile -t pids < <(worker_pids)
-    ((${#pids[@]} == 0)) && return
-    kill -- "${pids[@]}" 2>/dev/null || true
-    for _ in {1..10}; do
-        sleep 0.5
-        mapfile -t pids < <(worker_pids)
-        ((${#pids[@]} == 0)) && return
-    done
-    log "worker ignored SIGTERM; escalating to SIGKILL"
-    kill -9 -- "${pids[@]}" 2>/dev/null || true
+# Never claim a process by its command-line pattern. Only the direct child
+# spawned by this invocation may be stopped, and its /proc start time must
+# still match before every signal (Bash can reap background children early).
+worker_identity() {
+    local pid=$1 stat rest
+    local -a fields=()
+    [[ $pid =~ ^[1-9][0-9]*$ && -r /proc/$pid/stat ]] || return 1
+    stat=$(<"/proc/$pid/stat") || return 1
+    rest=${stat##*) }
+    read -r -a fields <<< "$rest"
+    [[ ${#fields[@]} -ge 20 && ${fields[1]} == "$$" && ${fields[0]} != Z ]] || return 1
+    printf '%s\n' "${fields[19]}"
+}
+
+owned_worker_state() {
+    local stat rest
+    local -a fields=()
+    if [[ -z $SPAWNED_WORKER_PID || -z $SPAWNED_WORKER_START ]]; then
+        printf 'unknown\n'; return
+    fi
+    if [[ ! -e /proc/$SPAWNED_WORKER_PID ]]; then
+        printf 'gone\n'; return
+    fi
+    if [[ ! -r /proc/$SPAWNED_WORKER_PID/stat ]] || ! stat=$(<"/proc/$SPAWNED_WORKER_PID/stat"); then
+        printf 'unknown\n'; return
+    fi
+    rest=${stat##*) }
+    read -r -a fields <<< "$rest"
+    if [[ ${#fields[@]} -lt 20 ]]; then
+        printf 'unknown\n'
+    elif [[ ${fields[1]} != "$$" || ${fields[19]} != "$SPAWNED_WORKER_START" ]]; then
+        printf 'mismatch\n'
+    elif [[ ${fields[0]} == Z || ${fields[0]} == X ]]; then
+        printf 'exited\n'
+    else
+        printf 'live\n'
+    fi
+}
+
+owned_worker_is_live() { [[ $(owned_worker_state) == live ]]; }
+
+kill_owned_worker() {
+    local state
+    state=$(owned_worker_state)
+    if [[ $state == live ]]; then
+        kill -- "$SPAWNED_WORKER_PID" 2>/dev/null || true
+        for _ in {1..10}; do
+            state=$(owned_worker_state)
+            [[ $state == live ]] || break
+            sleep 0.5
+        done
+        if [[ $state == live ]]; then
+            log "owned worker ignored SIGTERM; escalating to SIGKILL"
+            # Recheck immediately before the second signal, then bound reaping.
+            if owned_worker_is_live; then
+                kill -9 -- "$SPAWNED_WORKER_PID" 2>/dev/null || true
+            fi
+            for _ in {1..20}; do
+                state=$(owned_worker_state)
+                [[ $state == live ]] || break
+                sleep 0.1
+            done
+        fi
+    fi
+    state=$(owned_worker_state)
+    case "$state" in
+        gone|exited)
+            wait "$SPAWNED_WORKER_PID" 2>/dev/null || true
+            SPAWNED_WORKER_PID=""
+            SPAWNED_WORKER_START=""
+            ;;
+        *)
+            echo "owned worker state is $state; not waiting or signaling further (PID $SPAWNED_WORKER_PID)" >&2
+            return 1
+            ;;
+    esac
 }
 
 # 唯一可信的健康信号是压缩器视角的 worker_connected;pgrep 只能证明有进程,
@@ -239,6 +303,8 @@ gpu_preflight() {
 }
 
 SPAWNED_WORKER=0
+SPAWNED_WORKER_PID=""
+SPAWNED_WORKER_START=""
 ensure_worker() {
     # 任一控制命令都会触发压缩器懒重绑 wake socket(重启竞态自愈)。
     ipc waterlily_case --args '"cylinder"' || true
@@ -252,14 +318,20 @@ ensure_worker() {
             log "worker connected"
             return
         fi
-        log "replacing unresponsive worker"
-        kill_workers
+        echo "An existing WaterLily worker is not connected to this session; refusing to stop an unowned process." >&2
+        echo "Check that worker and its target display before retrying." >&2
+        exit 1
     fi
     gpu_preflight
     log "starting WaterLily worker (--sim-size $SIM_SIZE --fps $WORKER_FPS, device auto)"
     nohup julia --project="$REPO/waterlily" "$REPO/waterlily/runner.jl" \
         --device auto --fps "$WORKER_FPS" --sim-size "$SIM_SIZE" \
         >"$WORKER_LOG" 2>&1 &
+    SPAWNED_WORKER_PID=$!
+    SPAWNED_WORKER_START=$(worker_identity "$SPAWNED_WORKER_PID") || {
+        echo "could not establish owned worker identity for PID $SPAWNED_WORKER_PID; no process-name cleanup will be attempted" >&2
+        exit 1
+    }
     SPAWNED_WORKER=1
     # GPU probe + package load can take minutes on a cold cache.
     local deadline=$((SECONDS + WORKER_WAIT))
@@ -269,7 +341,7 @@ ensure_worker() {
             tail -20 "$WORKER_LOG" >&2
             exit 1
         fi
-        if [[ -z "$(worker_pids)" ]]; then
+        if ! owned_worker_is_live; then
             echo "worker exited early; log tail:" >&2
             tail -20 "$WORKER_LOG" >&2
             exit 1
@@ -283,25 +355,46 @@ ensure_worker() {
 
 RECORDING=0
 EFFECT_TOGGLED=0
+PALETTE_CHANGED=0
+ORIGINAL_PALETTE_JSON='"auto"'
+
+set_palette() {
+    ipc waterlily_palette --args "$1"
+    PALETTE_CHANGED=1
+}
 cleanup() {
     set +e
     ((RECORDING)) && ipc stop_recording
-    ipc waterlily_palette --args '"auto"'
+    ((PALETTE_CHANGED)) && ipc waterlily_palette --args "$ORIGINAL_PALETTE_JSON"
     ((EFFECT_TOGGLED)) && ipc toggle_waterlily
-    ((SPAWNED_WORKER)) && kill_workers
+    ((SPAWNED_WORKER)) && kill_owned_worker
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- showcase ----------------------------------------------------------------
 
 mkdir -p "$OUT_DIR"
 
 # 一次探测覆盖三件事:jwm 在跑、compositor 激活、构建带 waterlily 状态查询。
-if ! ipc_query get_waterlily_status | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+INITIAL_STATUS=$(ipc_query get_waterlily_status)
+if ! grep -q '\"success\"[[:space:]]*:[[:space:]]*true' <<< "$INITIAL_STATUS"; then
     echo "get_waterlily_status failed — jwm 未运行、compositor 未激活或二进制过旧:" >&2
-    ipc_query get_waterlily_status >&2
+    printf '%s\n' "$INITIAL_STATUS" >&2
     exit 1
 fi
+ORIGINAL_PALETTE_JSON=$(python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+if status.get("success") is not True:
+    raise SystemExit("WaterLily status query failed")
+palette = status["data"]["requested_palette"]
+if palette is not None and not isinstance(palette, str):
+    raise SystemExit("Invalid WaterLily palette status")
+print(json.dumps(palette if palette is not None else "auto"))
+' <<< "$INITIAL_STATUS")
 
 ensure_worker
 
@@ -317,7 +410,7 @@ OPENING_CASE=cylinder
 if ! wants cases && ! wants palettes; then
     if wants stylus; then OPENING_CASE=stylus; else OPENING_CASE=waltz; fi
 fi
-ipc waterlily_palette --args '"auto"'
+set_palette '"auto"'
 ipc waterlily_case --args "\"$OPENING_CASE\""
 # 非交互开场把光标藏进角落;交互开场停在中心,海螺线正是从那里出发。
 if ((HAVE_XDOTOOL)); then
@@ -343,7 +436,7 @@ sleep 2 # 让第一帧涡街铺开
 
 log "recording to $OUT_FILE"
 : >"$CHAPTERS"
-ipc start_recording --args "{\"path\": \"$OUT_FILE\"}"
+ipc start_recording --args "$(python3 -c 'import json, sys; print(json.dumps({"path": sys.argv[1]}))' "$OUT_FILE")"
 RECORDING=1
 RECORD_EPOCH="$(date +%s.%N)"
 
@@ -361,11 +454,11 @@ if wants palettes; then
     ipc waterlily_case --args '"cylinder"'
     sleep 2
     for palette in "${PALETTES[@]}"; do
-        ipc waterlily_palette --args "\"$palette\""
+        set_palette "\"$palette\""
         chapter "palette:$palette"
         sleep "$PALETTE_DWELL"
     done
-    ipc waterlily_palette --args '"auto"'
+    set_palette '"auto"'
 fi
 
 # 第三幕:stylus 交互长段——三种粉丝配色各 STYLUS_DWELL 秒,每种画一幅
@@ -374,7 +467,7 @@ if wants stylus; then
     ipc waterlily_case --args '"stylus"'
     sleep 2
     for palette in "${INTERACTIVE_PALETTES[@]}"; do
-        ipc waterlily_palette --args "\"$palette\""
+        set_palette "\"$palette\""
         chapter "stylus:$palette (mouse-driven)"
         stylus_performance "$STYLUS_DWELL"
     done
@@ -386,7 +479,7 @@ if wants waltz; then
     ipc waterlily_case --args '"waltz"'
     sleep 2
     for palette in "${INTERACTIVE_PALETTES[@]}"; do
-        ipc waterlily_palette --args "\"$palette\""
+        set_palette "\"$palette\""
         chapter "waltz:$palette (mouse-led braided wake)"
         waltz_performance "$WALTZ_DWELL"
     done

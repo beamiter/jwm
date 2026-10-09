@@ -296,13 +296,14 @@ impl WaylandCompositor {
         std::thread::spawn(move || {
             // Bound concurrent decodes; released when this thread exits.
             let _permit = decode_gate().acquire();
-            let img = match image::open(&path) {
-                Ok(img) => img,
-                Err(e) => {
-                    log::warn!("[wallpaper] failed to load '{}': {}", path, e);
-                    return;
-                }
-            };
+            let img =
+                match crate::backend::compositor_common::image_source::open_regular_image(&path) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        log::warn!("[wallpaper] failed to load '{}': {}", path, e);
+                        return;
+                    }
+                };
 
             let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
                 log::info!(
@@ -349,7 +350,7 @@ impl WaylandCompositor {
             .name("jwm-preview".to_string())
             .spawn(move || {
                 let preview = decode_side_preview(gate, &SIDE_PREVIEW_REQUESTS, ticket, || {
-                    image::open(&path)
+                    crate::backend::compositor_common::image_source::open_regular_image(&path)
                         .map_err(|e| {
                             log::debug!("[wallpaper] no side preview for '{}': {}", path, e)
                         })

@@ -175,7 +175,9 @@ fn screenshot_request_path(
 ) -> &std::path::Path {
     use crate::backend::compositor_common::screenshot::ScreenshotRequest;
     match request {
-        ScreenshotRequest::Full(path) | ScreenshotRequest::Region { path, .. } => path.as_path(),
+        ScreenshotRequest::Full { path, .. } | ScreenshotRequest::Region { path, .. } => {
+            path.as_path()
+        }
     }
 }
 
@@ -5304,12 +5306,14 @@ impl WaylandCompositor {
         unsafe {
             for request in self.screenshot_requests.take_all() {
                 match request {
-                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
+                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Full {
                         path,
-                    ) => {
+                        permit,
+                    } => {
                         let w = self.screen_w;
                         let h = self.screen_h;
-                        self.screenshot_readback.enqueue(gl, path, 0, 0, w, h);
+                        self.screenshot_readback
+                            .enqueue(gl, path, 0, 0, w, h, permit);
                     }
                     crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
                         path,
@@ -5317,6 +5321,7 @@ impl WaylandCompositor {
                         y,
                         width,
                         height,
+                        permit,
                     } => {
                         let Some(region) =
                             clip_region(self.screen_w, self.screen_h, x, y, width, height)
@@ -5332,6 +5337,7 @@ impl WaylandCompositor {
                             self.screen_h.saturating_sub(y + h) as i32,
                             w,
                             h,
+                            permit,
                         );
                     }
                 }
@@ -8768,9 +8774,13 @@ impl WaylandCompositor {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn request_screenshot(&mut self, path: PathBuf) {
-        self.screenshot_requests.request_full(path);
+    pub(crate) fn request_screenshot(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
+        self.screenshot_requests.request_full(path)?;
         self.needs_render = true;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -8781,9 +8791,10 @@ impl WaylandCompositor {
         y: i32,
         w: u32,
         h: u32,
-    ) {
-        self.screenshot_requests.request_region(path, x, y, w, h);
+    ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
+        self.screenshot_requests.request_region(path, x, y, w, h)?;
         self.needs_render = true;
+        Ok(())
     }
 
     /// Render annotation strokes as GL_LINES using the line shader.

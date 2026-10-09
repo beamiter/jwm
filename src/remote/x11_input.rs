@@ -358,9 +358,25 @@ fn prepare_batch(
             next_pressed.record_success(InputEvent::ReleaseAll, None);
             continue;
         }
-        let Some(request) =
+        // A normal button edge must use the physical button pinned by its
+        // press, just like ReleaseAll. A changed map must not release a
+        // different physical button and then forget the one still held.
+        let pinned_button = match event {
+            InputEvent::Button { button, .. } => next_pressed.held.iter().copied().find(
+                |held| matches!(held, HeldInput::Button { logical, .. } if *logical == button),
+            ),
+            _ => None,
+        };
+        let request = if let Some(held) = pinned_button {
+            let mut request = release_request(held, min_keycode, max_keycode)?;
+            if matches!(event, InputEvent::Button { pressed: true, .. }) {
+                request.type_ = BUTTON_PRESS_EVENT;
+            }
+            Some(request)
+        } else {
             prepare_input(event, min_keycode, max_keycode, pointer_mapping, origin)?
-        else {
+        };
+        let Some(request) = request else {
             continue;
         };
         let physical = matches!(event, InputEvent::Button { .. }).then_some(request.detail);
@@ -830,6 +846,50 @@ mod tests {
             [(BUTTON_RELEASE_EVENT, 3)]
         );
         assert!(after.release_plan().is_empty());
+    }
+
+    #[test]
+    fn ordinary_button_release_and_repeat_use_the_pinned_physical_button() {
+        let (_, pressed, _) = prepare_batch(
+            &[InputEvent::Button {
+                button: 1,
+                pressed: true,
+            }],
+            &PressedState::default(),
+            8,
+            255,
+            &[3, 2, 1],
+            (0, 0),
+        )
+        .unwrap();
+        for mapping in [&[1_u8, 2, 3][..], &[0_u8, 2, 3][..]] {
+            let (prepared, after, _) = prepare_batch(
+                &[
+                    InputEvent::Button {
+                        button: 1,
+                        pressed: true,
+                    },
+                    InputEvent::Button {
+                        button: 1,
+                        pressed: false,
+                    },
+                ],
+                &pressed,
+                8,
+                255,
+                mapping,
+                (0, 0),
+            )
+            .unwrap();
+            assert_eq!(
+                prepared
+                    .iter()
+                    .map(|p| (p.type_, p.detail))
+                    .collect::<Vec<_>>(),
+                [(BUTTON_PRESS_EVENT, 3), (BUTTON_RELEASE_EVENT, 3)]
+            );
+            assert!(after.release_plan().is_empty());
+        }
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub enum IccError {
     TagOutOfBounds,
     /// rTRC/gTRC/bTRC could not be mapped to either a named TF or a power.
     UnsupportedTransferFunction,
+    /// Explicit chromaticities are invalid or cannot form a safe color matrix.
+    InvalidPrimaries,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +76,11 @@ impl IccParsed {
         // ICC display profiles (HDR clients use parametric, not ICC).
         const SRGB_D65_W_X: i32 = 312_700;
         const SRGB_D65_W_Y: i32 = 329_000;
-        const TOL: i32 = 10_000; // ±0.01 in xy
-        if (self.primaries[6] - SRGB_D65_W_X).abs() <= TOL
-            && (self.primaries[7] - SRGB_D65_W_Y).abs() <= TOL
-            && (self.primaries[0] - 640_000).abs() <= 30_000
-            && (self.primaries[2] - 300_000).abs() <= 30_000
+        const TOL: i64 = 10_000; // ±0.01 in xy
+        if (i64::from(self.primaries[6]) - i64::from(SRGB_D65_W_X)).abs() <= TOL
+            && (i64::from(self.primaries[7]) - i64::from(SRGB_D65_W_Y)).abs() <= TOL
+            && (i64::from(self.primaries[0]) - i64::from(640_000)).abs() <= 30_000
+            && (i64::from(self.primaries[2]) - i64::from(300_000)).abs() <= 30_000
         {
             p.primaries_named = Some(1 /* Primaries::Srgb */);
         }
@@ -114,7 +116,12 @@ pub fn parse_icc(bytes: &[u8]) -> Result<IccParsed, IccError> {
     // Tag table starts at byte 128: 4-byte count, then 12-byte entries.
     let tag_count = read_u32(bytes, 128).ok_or(IccError::TooShort)? as usize;
     let table_end = 128usize
-        .checked_add(4 + tag_count * 12)
+        .checked_add(
+            tag_count
+                .checked_mul(12)
+                .and_then(|n| n.checked_add(4))
+                .ok_or(IccError::TooShort)?,
+        )
         .ok_or(IccError::TooShort)?;
     if bytes.len() < table_end {
         return Err(IccError::TooShort);
@@ -153,7 +160,7 @@ pub fn parse_icc(bytes: &[u8]) -> Result<IccParsed, IccError> {
 
     let (tf_named, tf_power) = read_trc_tag(bytes, trc)?;
 
-    Ok(IccParsed {
+    let parsed = IccParsed {
         primaries: [
             scale_xy(rx),
             scale_xy(ry),
@@ -166,7 +173,17 @@ pub fn parse_icc(bytes: &[u8]) -> Result<IccParsed, IccError> {
         ],
         tf_named,
         tf_power,
-    })
+    };
+    // Use exactly the admission boundary used by parametric creators, before
+    // any client-derived coordinate reaches convenience arithmetic or GL.
+    let params = ParametricParams {
+        primaries: Some(parsed.primaries),
+        ..Default::default()
+    };
+    if !crate::backend::wayland_udev::color_pipeline::parametric_primaries_are_valid(&params) {
+        return Err(IccError::InvalidPrimaries);
+    }
+    Ok(parsed)
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -480,5 +497,121 @@ mod tests {
         assert_eq!(params.primaries_named, Some(1 /* Primaries::Srgb */));
         assert!(params.primaries.is_some());
         assert_eq!(params.tf_named, Some(2));
+    }
+    #[test]
+    fn hostile_icc_xyz_fails_cleanly_over_the_wayland_wire() {
+        use crate::backend::wayland_udev::color_management::init_color_management;
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::Server;
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        // Exact s15Fixed16 numbers. Their nonzero near-cancelling sum makes
+        // xy saturate to i32::MIN/MAX in the old parser.
+        let profile = build_min_profile(
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (-1.0, 1.0, 1.0 / 65536.0),
+            2.2,
+        );
+        let raw = unsafe { libc::memfd_create(c"jwm-test-icc".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(raw >= 0);
+        let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+        file.write_all(&profile).unwrap();
+        let mut server = Server::new();
+        server.state.color_manager = Some(init_color_management(&server.display.handle()));
+        let mut client = server.connect();
+        let manager = client.bind("wp_color_manager_v1", 1);
+        let creator = client.new_id();
+        client.request(manager, 4, &[creator]);
+        client.request_with_fd_args(creator, 1, &[0, profile.len() as u32], file.as_raw_fd());
+        let description = client.new_id();
+        client.request(creator, 0, &[description]);
+        server.roundtrip();
+        server.roundtrip();
+        let events = client.events();
+        assert!(
+            events.iter().any(|event| event.sender == description
+                && event.opcode == 0
+                && event.args[0] == 1),
+            "unsupported XYZ must yield image-description.failed"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.sender == 1 && event.opcode == 0),
+            "an unsupported ICC profile is not a client protocol error"
+        );
+        // The same connection remains usable after this graceful failure.
+        let creator = client.new_id();
+        client.request(manager, 4, &[creator]);
+        server.roundtrip();
+        assert!(
+            !client
+                .events()
+                .iter()
+                .any(|event| event.sender == 1 && event.opcode == 0)
+        );
+    }
+
+    #[test]
+    fn hostile_icc_coordinates_are_rejected_before_parametric_conversion() {
+        let profile = build_min_profile(
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (-1.0, 1.0, 1.0 / 65536.0),
+            2.2,
+        );
+        assert!(parse_icc(&profile).is_err());
+    }
+    #[test]
+    fn icc_and_parametric_creators_publish_distinct_live_identities() {
+        use crate::backend::wayland_udev::color_management::init_color_management;
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::Server;
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let profile = build_min_profile(
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (0.95, 1.0, 1.09),
+            2.2,
+        );
+        let raw = unsafe { libc::memfd_create(c"jwm-test-icc-id".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(raw >= 0);
+        let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+        file.write_all(&profile).unwrap();
+        let mut server = Server::new();
+        server.state.color_manager = Some(init_color_management(&server.display.handle()));
+        let mut client = server.connect();
+        let manager = client.bind("wp_color_manager_v1", 1);
+        let params_creator = client.new_id();
+        client.request(manager, 5, &[params_creator]);
+        client.request(params_creator, 1, &[9]); // sRGB transfer
+        client.request(params_creator, 3, &[1]); // sRGB primaries
+        let parametric_description = client.new_id();
+        client.request(params_creator, 0, &[parametric_description]);
+        let icc_creator = client.new_id();
+        client.request(manager, 4, &[icc_creator]);
+        client.request_with_fd_args(icc_creator, 1, &[0, profile.len() as u32], file.as_raw_fd());
+        let icc_description = client.new_id();
+        client.request(icc_creator, 0, &[icc_description]);
+        server.roundtrip();
+        server.roundtrip();
+        let events = client.events();
+        let identity = |object| {
+            events
+                .iter()
+                .find(|e| e.sender == object && e.opcode == 1)
+                .expect("valid image description becomes ready")
+                .args[0]
+        };
+        let (params_id, icc_id) = (identity(parametric_description), identity(icc_description));
+        assert_ne!(params_id, 0);
+        assert_ne!(icc_id, 0);
+        assert_ne!(
+            params_id, icc_id,
+            "different live image descriptions cannot share a wire identity"
+        );
     }
 }

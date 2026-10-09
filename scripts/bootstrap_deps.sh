@@ -53,7 +53,7 @@ done
 # sudo helper (works whether or not we are already root)
 # ------------------------------------------------------------------
 SUDO=""
-if [[ "$(id -u)" -ne 0 ]]; then
+if [[ "$DO_APT" == true && "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         SUDO="sudo"
     else
@@ -198,16 +198,21 @@ CN_MIRROR="${JWM_CN_MIRROR:-0}"
 RUSTUP_INIT_URL="https://sh.rustup.rs"
 
 setup_cn_cargo_mirror() {
-    local cfg="$HOME/.cargo/config.toml"
-    mkdir -p "$HOME/.cargo"
-    if [[ -f "$cfg" ]] && ! grep -q 'rsproxy-sparse' "$cfg"; then
-        cp "$cfg" "$cfg.pre-jwm.$(date +%s)"
-        warn "Existing ~/.cargo/config.toml backed up before adding mirror."
+    local cfg="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+    # Cargo configuration can contain unrelated registries, credentials helpers,
+    # linker settings and build options. Never replace an existing document,
+    # even when it already mentions this mirror. Shell text matching cannot
+    # safely merge arbitrary TOML.
+    if [[ -e "$cfg" || -L "$cfg" ]]; then
+        warn "Existing Cargo configuration preserved at $cfg; crates.io mirror settings were not changed."
+        warn "If needed, merge the rsproxy source replacement into that file manually."
+        return 0
     fi
-    cat > "$cfg" <<'EOF'
-# China mirror (rsproxy.cn) for fast crates.io + git fetches.
-# Source replacement keeps the exact versions/checksums from Cargo.lock;
-# it only changes where the bytes are downloaded from.
+    mkdir -p "$(dirname -- "$cfg")"
+    # Fail closed if another process creates the file after our existence check.
+    if ! (set -o noclobber; cat > "$cfg" <<'EOF'
+# China mirror (rsproxy.cn) for crates.io downloads.
+# Source replacement keeps the exact versions/checksums from Cargo.lock.
 [source.crates-io]
 replace-with = "rsproxy-sparse"
 
@@ -217,6 +222,10 @@ registry = "sparse+https://rsproxy.cn/index/"
 [net]
 git-fetch-with-cli = true
 EOF
+    ); then
+        err "Could not create Cargo mirror configuration without replacing an existing file: $cfg"
+        return 1
+    fi
     ok "Configured cargo mirror at $cfg"
 }
 

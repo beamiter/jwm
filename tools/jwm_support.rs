@@ -407,9 +407,93 @@ fn sanitize_doctor_detail(id: &str, detail: Option<String>) -> Option<String> {
     }
 }
 
+fn retain_object_keys(value: &mut Value, keys: &[&str]) {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| keys.contains(&key.as_str()));
+    } else {
+        *value = Value::Null;
+    }
+}
+
 fn sanitize_live_data(query: &str, data: &mut Value) {
     if query != "get_status" {
         return;
+    }
+
+    // RuntimeStatusV1 grows with bar-facing fields, including full focused
+    // window metadata, media, connectivity and user paths. Support bundles
+    // opt in only to diagnostic fields; a new runtime field is not consent
+    // to include application content in a shareable support report.
+    retain_object_keys(
+        data,
+        &[
+            "schema_version",
+            "version",
+            "backend",
+            "compiled_backends",
+            "pid",
+            "allocations",
+            "uptime_ms",
+            "health",
+            "counts",
+            "config",
+            "compositor_active",
+            "compositor_configured",
+            "compositor_temporary",
+            "compositor_transition",
+            "features",
+        ],
+    );
+    if let Some(health) = data.get_mut("health") {
+        retain_object_keys(health, &["status", "reasons"]);
+    }
+    if let Some(counts) = data.get_mut("counts") {
+        retain_object_keys(counts, &["windows", "monitors", "workspaces"]);
+    }
+    if let Some(features) = data.get_mut("features") {
+        if let Some(flags) = features.as_object_mut() {
+            flags.retain(|_, value| value.is_boolean());
+        } else {
+            *features = Value::Null;
+        }
+    }
+    if let Some(transition) = data.get_mut("compositor_transition") {
+        retain_object_keys(
+            transition,
+            &[
+                "attempts",
+                "last_requested_active",
+                "last_attempt_unix_ms",
+                "last_success",
+                "last_error",
+            ],
+        );
+    }
+    if let Some(config) = data.get_mut("config") {
+        retain_object_keys(
+            config,
+            &[
+                "path",
+                "exists",
+                "modified_unix_ms",
+                "diagnostics",
+                "reload",
+            ],
+        );
+        if let Some(diagnostics) = config.get_mut("diagnostics") {
+            retain_object_keys(diagnostics, &["error_count", "warning_count", "issues"]);
+        }
+        if let Some(reload) = config.get_mut("reload") {
+            retain_object_keys(
+                reload,
+                &[
+                    "attempt_count",
+                    "last_attempt_unix_ms",
+                    "last_success",
+                    "last_error",
+                ],
+            );
+        }
     }
 
     if let Some(reasons) = data
@@ -569,12 +653,9 @@ fn normalize_ipc_response(response: Value) -> QueryProbe {
             error: None,
         }
     } else {
-        QueryProbe::failed(
-            response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("JWM reported an unspecified IPC failure"),
-        )
+        // A server-side failure may include filenames or application content.
+        // Preserve its failure state, not its unreviewed diagnostic text.
+        QueryProbe::failed("JWM reported an IPC failure; inspect locally with jwm-tool")
     }
 }
 
@@ -851,7 +932,27 @@ SECRET_TOKEN=do-not-copy
             "error": "not available"
         }));
         assert!(!failure.success);
-        assert_eq!(failure.error.as_deref(), Some("not available"));
+        assert_eq!(
+            failure.error.as_deref(),
+            Some("JWM reported an IPC failure; inspect locally with jwm-tool")
+        );
+    }
+
+    #[test]
+    fn future_feature_shapes_and_ipc_errors_cannot_copy_private_content() {
+        let mut status = json!({"features": ["PRIVATE_SENTINEL"]});
+        sanitize_live_data("get_status", &mut status);
+        assert!(status["features"].is_null());
+        let response = normalize_ipc_response(json!({
+            "success": false,
+            "error": "PRIVATE_SENTINEL /home/example/private-document.txt"
+        }));
+        assert!(!response.success);
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("PRIVATE_SENTINEL")
+        );
     }
 
     #[test]
@@ -951,6 +1052,37 @@ SECRET_TOKEN=do-not-copy
             status["health"]["reasons"][2],
             "last compositor transition failed (detail redacted)"
         );
+    }
+
+    #[test]
+    fn live_status_excludes_application_content_and_future_fields() {
+        let mut status = json!({
+            "schema_version": 1,
+            "backend": "x11rb",
+            "counts": { "windows": 3, "monitors": 1, "workspaces": 9,
+                        "new_private_field": "PRIVATE_SENTINEL" },
+            "features": { "recording": true, "unexpected_text": "PRIVATE_SENTINEL" },
+            "focused": { "title": "PRIVATE_SENTINEL", "class": "private-app" },
+            "windows": [{ "title": "PRIVATE_SENTINEL" }],
+            "media": { "title": "PRIVATE_SENTINEL", "artist": "PRIVATE_SENTINEL" },
+            "connectivity": { "ssid": "PRIVATE_SENTINEL" },
+            "wallpaper": { "path": "/home/PRIVATE_SENTINEL/picture.png" },
+            "recording": { "last_error": "/home/PRIVATE_SENTINEL/output.mp4" },
+            "audio_recording": { "last_error": "PRIVATE_SENTINEL" },
+            "future_runtime_field": { "contents": "PRIVATE_SENTINEL" },
+            "config": { "future_field": "PRIVATE_SENTINEL", "exists": true,
+                        "diagnostics": { "error_count": 0, "future": "PRIVATE_SENTINEL" },
+                        "reload": { "last_success": true, "future": "PRIVATE_SENTINEL" } }
+        });
+        sanitize_live_data("get_status", &mut status);
+        let encoded = serde_json::to_string(&status).unwrap();
+        assert!(!encoded.contains("PRIVATE_SENTINEL"), "{encoded}");
+        assert_eq!(status["backend"], "x11rb");
+        assert_eq!(status["counts"]["windows"], 3);
+        assert_eq!(status["features"]["recording"], true);
+        assert_eq!(status["config"]["exists"], true);
+        assert!(status.get("focused").is_none());
+        assert!(status.get("future_runtime_field").is_none());
     }
 
     #[test]

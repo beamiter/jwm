@@ -4198,22 +4198,13 @@ impl XcbOutputOps {
     }
 
     fn calc_refresh_mhz(mode: &xcb::randr::ModeInfo) -> u32 {
-        if mode.htotal == 0 || mode.vtotal == 0 {
-            return 60000;
-        }
-        let mut vtotal = mode.vtotal as u64;
-        let flags = mode.mode_flags.bits();
-        if flags & (1 << 4) != 0 {
-            vtotal *= 2;
-        }
-        if flags & (1 << 0) != 0 {
-            vtotal /= 2;
-        }
-        let denom = mode.htotal as u64 * vtotal;
-        if denom == 0 {
-            return 60000;
-        }
-        ((mode.dot_clock as u64 * 1000) / denom) as u32
+        crate::backend::x11::wm::mode_refresh_millihz(
+            mode.dot_clock,
+            mode.htotal,
+            mode.vtotal,
+            mode.mode_flags.contains(xcb::randr::ModeFlag::INTERLACE),
+            mode.mode_flags.contains(xcb::randr::ModeFlag::DOUBLE_SCAN),
+        )
     }
 
     fn query_output_hdr_capable(&self, output: xcb::randr::Output) -> bool {
@@ -8024,5 +8015,38 @@ mod parity_tests {
                 && platform_impl.contains("let attrs = ["),
             "GLX pixmap attributes should use stack arrays instead of heap Vecs"
         );
+    }
+}
+
+#[cfg(test)]
+mod output_refresh_tests {
+    use super::XcbOutputOps;
+    use xcb::randr::{ModeFlag, ModeInfo};
+
+    #[test]
+    fn randr_refresh_uses_scan_flags_not_sync_polarity() {
+        for (mode_flags, expected) in [
+            (ModeFlag::HSYNC_POSITIVE | ModeFlag::VSYNC_POSITIVE, 60_000),
+            (ModeFlag::HSYNC_NEGATIVE | ModeFlag::VSYNC_NEGATIVE, 60_000),
+            (ModeFlag::INTERLACE, 120_000),
+            (ModeFlag::DOUBLE_SCAN, 30_000),
+        ] {
+            let mode = ModeInfo {
+                id: 1,
+                width: 1920,
+                height: 1080,
+                dot_clock: 148_500_000,
+                hsync_start: 2008,
+                hsync_end: 2052,
+                htotal: 2200,
+                hskew: 0,
+                vsync_start: 1084,
+                vsync_end: 1089,
+                vtotal: 1125,
+                name_len: 0,
+                mode_flags,
+            };
+            assert_eq!(XcbOutputOps::calc_refresh_mhz(&mode), expected);
+        }
     }
 }

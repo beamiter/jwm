@@ -23,3 +23,7 @@ xbar_core = { path = "../../../crates/xbar_core", default-features = false, feat
 xbar_tauri = { path = "../../../crates/xbar_core/crates/xbar_tauri", features = ["clock-chrono", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system"] }
 
 [workspace]
+
+# GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
+[patch.crates-io]
+glib = { path = "../../../vendor/glib" }

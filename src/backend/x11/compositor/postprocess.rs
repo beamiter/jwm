@@ -468,10 +468,21 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// Capture the current framebuffer to a PNG file.
-    pub(super) fn capture_screenshot(&mut self, path: &std::path::Path) -> bool {
+    pub(super) fn capture_screenshot(
+        &mut self,
+        path: &std::path::Path,
+        permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
+    ) -> bool {
         let w = self.screen_w;
         let h = self.screen_h;
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        let mut pixels =
+            match crate::backend::compositor_common::capture::allocate_rgba_capture(w, h) {
+                Ok(pixels) => pixels,
+                Err(error) => {
+                    log::warn!("screenshot readback refused: {error}");
+                    return false;
+                }
+            };
         unsafe {
             self.gl.read_pixels(
                 0,
@@ -490,6 +501,7 @@ impl<C: CompositorConnection> Compositor<C> {
             w,
             h,
             self.renderer_ctx("screenshot: save PNG"),
+            permit,
         );
         true
     }
@@ -502,6 +514,7 @@ impl<C: CompositorConnection> Compositor<C> {
         ry: i32,
         rw: u32,
         rh: u32,
+        permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) -> bool {
         let Some(region) = clip_region(self.screen_w, self.screen_h, rx, ry, rw, rh) else {
             log::warn!(
@@ -513,11 +526,22 @@ impl<C: CompositorConnection> Compositor<C> {
         let (x, y, w, h) = (region.x, region.y, region.width, region.height);
         // OpenGL Y is flipped: GL origin is bottom-left
         let gl_y = self.screen_h.saturating_sub(y + h);
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        let (Ok(x), Ok(gl_y)) = (i32::try_from(x), i32::try_from(gl_y)) else {
+            log::warn!("screenshot region coordinates do not fit GLsizei");
+            return false;
+        };
+        let mut pixels =
+            match crate::backend::compositor_common::capture::allocate_rgba_capture(w, h) {
+                Ok(pixels) => pixels,
+                Err(error) => {
+                    log::warn!("screenshot readback refused: {error}");
+                    return false;
+                }
+            };
         unsafe {
             self.gl.read_pixels(
-                x as i32,
-                gl_y as i32,
+                x,
+                gl_y,
                 w as i32,
                 h as i32,
                 glow::RGBA,
@@ -532,6 +556,7 @@ impl<C: CompositorConnection> Compositor<C> {
             w,
             h,
             self.renderer_ctx("screenshot-region: save PNG"),
+            permit,
         );
         log::info!(
             "compositor: region screenshot queued to {} ({}x{} at {},{})",

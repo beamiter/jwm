@@ -92,7 +92,12 @@ Verify:
   XDG_CURRENT_DESKTOP=jwm chromium --enable-features=WebRTCPipeWireCapturer
   XDG_CURRENT_DESKTOP=jwm obs
 
-Env overrides for the MVP auto-picker:
+Source consent:
+  The portal auto-detects rofi, then wofi. Without a usable picker it cancels.
+  JWM_PORTAL_PICKER=rofi|wofi|/path/to/custom-picker overrides auto-detection.
+  Configure these in the portal service activation environment, not just the app.
+
+Explicit source overrides for unattended use (unmatched sources cancel):
   JWM_PORTAL_OUTPUT=<output-name-or-substring>
   JWM_PORTAL_WINDOW=class:<app_id>      # or title:<substring>
 EOF

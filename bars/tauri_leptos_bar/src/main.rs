@@ -965,13 +965,14 @@ fn App() -> impl IntoView {
                 tauri_listen("xbar-state", &state_callback).await?;
                 install_geometry_resize_listener();
 
+                tauri_invoke("frontend_ready", JsValue::NULL).await?;
+
                 let window = get_current_window();
                 match window.scale_factor().await {
                     Ok(value) => set_scale_factor.set(value.as_f64()),
                     Err(error) => error!(format!("failed to query scale factor: {error:?}")),
                 }
 
-                tauri_invoke("frontend_ready", JsValue::NULL).await?;
                 Ok::<(), JsValue>(())
             }
             .await;

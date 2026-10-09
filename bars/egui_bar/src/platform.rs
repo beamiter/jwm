@@ -76,11 +76,7 @@ impl X11Session {
     /// Only interning and the property writes live here; which properties a
     /// dock needs is `xbar_core::placement`'s decision, shared with every
     /// other X11 bar.
-    pub fn write_dock_properties(
-        &self,
-        window: Window,
-        properties: &[DockProperty],
-    ) -> Result<()> {
+    pub fn write_dock_properties(&self, window: Window, properties: &[DockProperty]) -> Result<()> {
         for property in properties {
             let name = self.intern(property.name)?;
             match &property.value {
@@ -107,13 +103,7 @@ impl X11Session {
                 DockPropertyValue::Utf8Text(text) => {
                     let utf8 = self.intern("UTF8_STRING")?;
                     self.conn
-                        .change_property8(
-                            PropMode::REPLACE,
-                            window,
-                            name,
-                            utf8,
-                            text.as_bytes(),
-                        )?
+                        .change_property8(PropMode::REPLACE, window, name, utf8, text.as_bytes())?
                         .check()?;
                 }
             }
@@ -256,13 +246,12 @@ pub fn surface_alpha_capable() -> bool {
             let Ok(surface) = instance.create_surface(target) else {
                 return false;
             };
-            let adapter = pollster::block_on(instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::LowPower,
                     compatible_surface: Some(&surface),
                     ..Default::default()
-                },
-            ));
+                }));
             let Ok(adapter) = adapter else {
                 return false;
             };

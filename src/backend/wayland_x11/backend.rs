@@ -315,9 +315,7 @@ impl WindowOps for WaylandWindowOps {
         unsafe {
             self.with_state_mut(|state| {
                 if let Some(surface) = state.surface_for_window(win) {
-                    if let Some(kbd) = state.seat.get_keyboard() {
-                        kbd.set_focus(state, Some(surface), SCOUNTER.next_serial());
-                    }
+                    state.set_keyboard_focus(Some(surface), SCOUNTER.next_serial());
                 }
             });
         }
@@ -589,6 +587,7 @@ impl PropertyOps for WaylandPropertyOps {
 }
 
 pub struct WaylandX11Backend {
+    child_environment: crate::child_environment::ChildEnvironment,
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
     state: Box<JwmWaylandState>,
     #[allow(dead_code)]
@@ -1197,6 +1196,7 @@ impl WaylandX11Backend {
     }
 
     pub fn new() -> Result<Self, BackendError> {
+        let child_environment = crate::child_environment::ChildEnvironment::for_nested_host();
         let event_loop: EventLoop<'static, JwmWaylandState> =
             EventLoop::try_new().map_err(|e| BackendError::Other(Box::new(e)))?;
         let display = Rc::new(RefCell::new(
@@ -1294,9 +1294,7 @@ impl WaylandX11Backend {
         .map_err(|e| BackendError::Message(format!("wayland init failed: {e}")))?;
 
         if let Some(name) = socket_name.as_deref() {
-            unsafe {
-                std::env::set_var("WAYLAND_DISPLAY", name);
-            }
+            child_environment.set("WAYLAND_DISPLAY", name);
         }
 
         let mut state = Box::new(wayland_state);
@@ -1601,6 +1599,7 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
         }
 
         let mut backend = Self {
+            child_environment,
             display,
             display_handle,
             event_loop: SendWrapper(event_loop),
@@ -1970,6 +1969,15 @@ fn process_input_event_windowed<B: InputBackend>(
             let state_key = event.state();
             let serial = SCOUNTER.next_serial();
             let pressed = matches!(state_key, smithay::backend::input::KeyState::Pressed);
+            if state.route_locked_keyboard_input(keycode, state_key, serial, time) {
+                let mut s = shared.lock_safe();
+                s.suppressed_keycodes.clear();
+                if let Some(keyboard) = state.seat.get_keyboard() {
+                    s.mods_state = mods_from_smithay(&keyboard.modifier_state()).bits();
+                }
+                drop(s);
+                return;
+            }
 
             // If nothing is focused, focus the surface under the pointer (best-effort).
             if let Some(kbd) = state.seat.get_keyboard() {
@@ -2149,7 +2157,7 @@ fn process_input_event_windowed<B: InputBackend>(
             // branches.
             let (grab_active, clicks, x, y, output, mods_state) = {
                 let mut s = shared.lock_safe();
-                let grab_active = s.system_ui_grab_active;
+                let grab_active = s.system_ui_grab_active && !state.session_locked;
                 let mut clicks = 0;
                 if grab_active {
                     let (steps, remainder) = wayland_dummy_ops::wheel_steps(
@@ -2210,6 +2218,7 @@ fn process_input_event_windowed<B: InputBackend>(
 
         _ => {}
     }
+    state.discard_locked_wm_input();
 }
 
 impl CompositorBenchmark for WaylandX11Backend {}
@@ -2255,6 +2264,10 @@ impl RenderScheduler for WaylandX11Backend {
 }
 
 impl Backend for WaylandX11Backend {
+    fn child_environment(&self) -> crate::child_environment::ChildEnvironment {
+        self.child_environment.clone()
+    }
+
     fn set_clipboard_text(&mut self, text: &str) -> bool {
         self.state.offer_clipboard_text(text)
     }

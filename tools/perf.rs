@@ -468,18 +468,29 @@ fn sample_proc(pid: u32) -> Result<ProcSample, String> {
 /// process-name scan.
 fn compositor_pid(status: &Value) -> Result<u32, String> {
     if let Some(pid) = status.get("pid").and_then(Value::as_u64) {
-        return u32::try_from(pid).map_err(|_| "status pid out of range".into());
+        return u32::try_from(pid)
+            .ok()
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "status pid out of range".into());
     }
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-    if let Some(runtime) = runtime
-        && let Ok(daemon) = std::fs::read_to_string(runtime.join("jwm_daemon.pid"))
-        && let Ok(daemon_pid) = daemon.trim().parse::<u32>()
+    // Legacy status responses can omit the compositor PID. A versioned daemon
+    // record is only a hint after its process identity has been verified.
+    if let Some(daemon) = crate::read_daemon_identity()
+        && crate::process_identity_matches(daemon)
         && let Ok(children) =
-            std::fs::read_to_string(format!("/proc/{daemon_pid}/task/{daemon_pid}/children"))
-        && let Some(child) = children.split_whitespace().next()
-        && let Ok(pid) = child.parse::<u32>()
+            std::fs::read_to_string(format!("/proc/{}/task/{}/children", daemon.pid, daemon.pid))
     {
-        return Ok(pid);
+        let candidates: Vec<u32> = children
+            .split_whitespace()
+            .filter_map(|child| child.parse::<u32>().ok())
+            .filter(|pid| {
+                std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .is_ok_and(|comm| comm.trim() == "jwm")
+            })
+            .collect();
+        if !candidates.is_empty() {
+            return unique_compositor_pid(&candidates);
+        }
     }
     // Last resort: unique process whose comm is exactly "jwm".
     let mut candidates = Vec::new();
@@ -497,12 +508,32 @@ fn compositor_pid(status: &Value) -> Result<u32, String> {
         }
     }
     candidates.sort_unstable();
-    match candidates.as_slice() {
-        [pid] => Ok(*pid),
+    unique_compositor_pid(&candidates)
+}
+
+fn unique_compositor_pid(candidates: &[u32]) -> Result<u32, String> {
+    match candidates {
+        [pid] if *pid > 0 => Ok(*pid),
         [] => Err(
-            "could not determine the compositor pid (no status pid, daemon, or jwm process)".into(),
+            "could not determine the compositor pid (no status pid or unique jwm process)".into(),
         ),
-        many => Ok(many[0]),
+        _ => {
+            Err("ambiguous compositor pid; refusing to mix metrics from different sessions".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod compositor_identity_tests {
+    use super::unique_compositor_pid;
+
+    #[test]
+    fn legacy_pid_fallback_requires_one_unambiguous_process() {
+        assert_eq!(unique_compositor_pid(&[42]).unwrap(), 42);
+        assert!(unique_compositor_pid(&[]).is_err());
+        assert!(unique_compositor_pid(&[0]).is_err());
+        assert!(unique_compositor_pid(&[42, 43]).is_err());
+        assert!(unique_compositor_pid(&[43, 42]).is_err());
     }
 }
 

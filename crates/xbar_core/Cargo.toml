@@ -18,7 +18,7 @@ config-toml = ["dep:toml"]
 # part that needs an image decoder.
 glass = ["dep:log"]
 glass-wallpaper = ["glass", "dep:image"]
-logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log"]
+logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log", "dep:libc"]
 provider-alsa = ["dep:alsa", "dep:anyhow", "dep:log"]
 provider-battery-sysfs = []
 provider-brightnessctl = ["dep:libc", "dep:log"]

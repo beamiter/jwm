@@ -376,6 +376,9 @@ impl Jwm {
     }
 
     pub(crate) fn sync_system_ui(&mut self, backend: &mut dyn Backend) {
+        if self.dismiss_stale_layout_picker(backend) {
+            return;
+        }
         self.system_ui_dirty = false;
         let active = self.features.system_ui.is_active();
         let viewport = self.system_ui_viewport();
@@ -1638,22 +1641,41 @@ impl Jwm {
         } else if !prompting && (keysym == keys::KEY_Down || keysym == keys::KEY_Tab) {
             self.features.system_ui.move_selection(1);
         } else if !prompting && keysym == keys::KEY_r {
-            match crate::jwm::features::connectivity::start_scan() {
-                Some(scan) => {
-                    self.features.wifi_scan = Some(self.track_background_job(scan));
-                    self.features.system_ui.set_wifi_message("Scanning\u{2026}");
-                }
-                None => self
-                    .features
-                    .system_ui
-                    .set_wifi_message("nmcli is not available"),
-            }
+            self.request_wifi_rescan_with(crate::jwm::features::connectivity::start_scan);
         } else if !prompting && keysym == keys::KEY_d {
             self.forget_selected_wifi();
         } else if prompting && let Some(ch) = Self::system_ui_char(keysym, mods) {
             self.features.system_ui.push_char(ch);
         }
         self.sync_system_ui(backend);
+    }
+
+    /// Rescans keep the current worker until its result is adopted. Dropping
+    /// a handle does not cancel nmcli, so repeated R must not detach workers.
+    /// The factory also lets tests prove admission without scanning the host.
+    fn request_wifi_rescan_with(
+        &mut self,
+        start: impl FnOnce() -> Option<
+            crate::jwm::features::connectivity::BackgroundJob<
+                Vec<crate::jwm::features::connectivity::WifiNetwork>,
+            >,
+        >,
+    ) {
+        use crate::jwm::features::connectivity::job_in_flight;
+        if job_in_flight(self.features.wifi_scan.as_ref()) {
+            self.features.system_ui.set_wifi_message("Scanning\u{2026}");
+            return;
+        }
+        match start() {
+            Some(scan) => {
+                self.features.wifi_scan = Some(self.track_background_job(scan));
+                self.features.system_ui.set_wifi_message("Scanning\u{2026}");
+            }
+            None => self
+                .features
+                .system_ui
+                .set_wifi_message("nmcli is not available"),
+        }
     }
 
     /// `d` / middle-click in the Wi-Fi picker: arm the highlighted row on the
@@ -2312,6 +2334,33 @@ impl Jwm {
             self.return_to_shell_hub(backend);
         } else {
             self.close_system_ui(backend);
+        }
+    }
+
+    /// Retire a chord's grab ownership. Modal surfaces may have replaced
+    /// that grab since the leader was pressed; their grabs are not ours to
+    /// release, even on a config reload or an expired chord deadline.
+    pub(crate) fn cancel_chord(&mut self, backend: &mut dyn Backend) {
+        if self.chord_armed_until.take().is_none() {
+            return;
+        }
+        let modal_owns_keyboard = self.features.system_ui.is_active()
+            || self.features.screenshot.active
+            || self.features.recording.selecting_region
+            || self.features.overview.active
+            || self.features.expose_active
+            || self.features.annotation_active;
+        if !modal_owns_keyboard {
+            let _ = backend.key_ops().ungrab_keyboard();
+        }
+    }
+
+    pub(crate) fn expire_chord(&mut self, backend: &mut dyn Backend, now: std::time::Instant) {
+        if self
+            .chord_armed_until
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.cancel_chord(backend);
         }
     }
 
@@ -3184,13 +3233,9 @@ impl Jwm {
         // The next key either matches a chord binding (dispatch + ungrab) or
         // falls through to normal handling (also ungrab).
         if let Some(chord) = self.chord_compiled.clone() {
-            // Expire stale arming.
-            if let Some(deadline) = self.chord_armed_until {
-                if std::time::Instant::now() >= deadline {
-                    self.chord_armed_until = None;
-                    let _ = backend.key_ops().ungrab_keyboard();
-                }
-            }
+            // Normally the maintenance deadline expires this first; retain
+            // the check for an event delivered on the deadline itself.
+            self.expire_chord(backend, std::time::Instant::now());
 
             if self.chord_armed_until.is_some() {
                 // Find a matching second-key binding.
@@ -3201,8 +3246,7 @@ impl Jwm {
                         break;
                     }
                 }
-                self.chord_armed_until = None;
-                let _ = backend.key_ops().ungrab_keyboard();
+                self.cancel_chord(backend);
                 if let Some((func, arg)) = hit {
                     if let Err(e) = func(self, backend, &arg) {
                         error!("Error executing chord shortcut: {:?}", e);
@@ -3953,10 +3997,15 @@ impl Jwm {
                 // Defer workarea clamping until after we release the mutable borrow.
                 // Skip clamping for windows that cover the full monitor (e.g.
                 // screenshot overlays that intentionally span strut areas).
-                let covers_monitor = client.geometry.x <= mx
-                    && client.geometry.y <= my
-                    && client.total_width() >= mw
-                    && client.total_height() >= mh;
+                let covers_monitor = crate::jwm::geometry::GeometryConstraints::covers_full_monitor(
+                    &Rect::new(
+                        client.geometry.x,
+                        client.geometry.y,
+                        client.total_width(),
+                        client.total_height(),
+                    ),
+                    &Rect::new(mx, my, mw, mh),
+                );
                 if client.state.is_floating && !client.state.is_fullscreen && !covers_monitor {
                     clamp_request = Some((
                         client.geometry.x,
@@ -6991,6 +7040,92 @@ mod tests {
     /// picker's status line says so, success and failure alike. The fake
     /// jobs' closures are pure — no nmcli — so only the adoption path is
     /// under test; the delete itself is pinned by source scan above.
+    #[test]
+    fn wifi_rescan_coalesces_a_running_job_and_retries_a_refused_worker() {
+        use crate::jwm::features::connectivity::{BackgroundJob, job_in_flight};
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        jwm.features.wifi_scan = Some(BackgroundJob::spawn(move || {
+            // No nmcli, no external command: just a bounded in-memory job.
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(5));
+            Vec::new()
+        }));
+        for _ in 0..20 {
+            jwm.request_wifi_rescan_with(|| panic!("an active scan must suppress another start"));
+        }
+        assert!(job_in_flight(jwm.features.wifi_scan.as_ref()));
+        release.send(()).unwrap();
+        jwm.features.wifi_scan = Some(BackgroundJob::refused());
+        let mut attempts = 0;
+        jwm.request_wifi_rescan_with(|| {
+            attempts += 1;
+            Some(BackgroundJob::refused())
+        });
+        assert_eq!(
+            attempts, 1,
+            "a refused worker cannot hold the rescan gate shut"
+        );
+        jwm.features.wifi_scan = None;
+        jwm.request_wifi_rescan_with(|| None);
+        assert!(
+            jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("nmcli is not available"))
+        );
+    }
+
+    #[test]
+    fn wifi_poll_consumes_a_finished_scan_without_retargeting_the_prompt() {
+        use crate::jwm::features::connectivity::{BackgroundJob, WifiNetwork};
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let network = |ssid: &str| WifiNetwork {
+            ssid: ssid.into(),
+            signal: 80,
+            security: "WPA2".into(),
+            in_use: false,
+        };
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+        jwm.features
+            .system_ui
+            .set_wifi_networks(&[network("Alpha")]);
+        jwm.features.system_ui.prompt_wifi_passphrase();
+        for ch in "dummy-secret".chars() {
+            jwm.features.system_ui.push_char(ch);
+        }
+        let beta = network("Beta");
+        let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+        jwm.features.wifi_scan =
+            Some(BackgroundJob::spawn(move || vec![beta]).with_notifier(Some(notifier.clone())));
+        let mut ready = false;
+        for _ in 0..200 {
+            if notifier.drain().unwrap() > 0 {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ready, "the pure scan stub must publish its value");
+        jwm.poll_wifi_jobs(&mut backend);
+        assert!(
+            jwm.features.wifi_scan.is_none(),
+            "the completed result must not be requeued"
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_wifi(),
+            Some(("Alpha".into(), true))
+        );
+        assert_eq!(
+            jwm.features.system_ui.take_wifi_passphrase().as_deref(),
+            Some("dummy-secret")
+        );
+    }
+
     #[test]
     fn a_finished_wifi_forget_lands_on_the_picker_status_line() {
         use crate::jwm::features::connectivity;

@@ -3007,14 +3007,14 @@ impl Config {
         let theme = {
             let configured = &self.inner.appearance.cursor_theme;
             if configured.trim().is_empty() {
-                std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into())
+                crate::child_environment::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into())
             } else {
                 configured.clone()
             }
         };
         let size = resolve_cursor_size(
             self.inner.appearance.cursor_size,
-            std::env::var_os("XCURSOR_SIZE").as_deref(),
+            crate::child_environment::var_os("XCURSOR_SIZE").as_deref(),
         );
         (theme, size)
     }
@@ -3947,9 +3947,9 @@ impl Config {
         edited: &str,
         theme: &str,
     ) -> Result<(), ConfigError> {
-        if toml::from_str::<toml::Table>(existing).is_err() {
+        let Ok(before) = toml::from_str::<toml::Table>(existing) else {
             return Ok(());
-        }
+        };
         let problem = match toml::from_str::<toml::Table>(edited) {
             Err(error) => error.message().to_owned(),
             Ok(table) => {
@@ -3957,10 +3957,15 @@ impl Config {
                     .get("appearance")
                     .and_then(|appearance| appearance.get("ui_theme"))
                     .and_then(toml::Value::as_str);
-                if written == Some(theme) {
+                if written != Some(theme) {
+                    "the key would not land under [appearance]".to_owned()
+                } else if Self::without_owned_config_key(before, "appearance", "ui_theme")
+                    != Self::without_owned_config_key(table, "appearance", "ui_theme")
+                {
+                    "the edit would change another configuration value".to_owned()
+                } else {
                     return Ok(());
                 }
-                "the key would not land under [appearance]".to_owned()
             }
         };
         Err(ConfigError::Io(std::io::Error::new(
@@ -4116,11 +4121,19 @@ impl Config {
         existing: &str,
         edited: &str,
     ) -> Result<(), ConfigError> {
-        if toml::from_str::<toml::Table>(existing).is_err() {
+        let Ok(before) = toml::from_str::<toml::Table>(existing) else {
             return Ok(());
-        }
-        let Err(error) = toml::from_str::<toml::Table>(edited) else {
-            return Ok(());
+        };
+        let problem = match toml::from_str::<toml::Table>(edited) {
+            Err(error) => error.message().to_owned(),
+            Ok(after) => {
+                if Self::without_owned_config_key(before, "layout", "tags")
+                    == Self::without_owned_config_key(after, "layout", "tags")
+                {
+                    return Ok(());
+                }
+                "the edit would change another configuration value".to_owned()
+            }
         };
         Err(ConfigError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -4129,9 +4142,22 @@ impl Config {
                  the file was left unchanged, move [layout] tags into \
                  [[layout.tags]] tables to let JWM save them",
                 path.display(),
-                error.message()
+                problem
             ),
         )))
+    }
+
+    /// Compare parsed values outside the one key a surgical edit owns.
+    /// An absent section and an empty section are equivalent here: inserting
+    /// the owned key may legitimately create its containing table.
+    fn without_owned_config_key(mut table: toml::Table, section: &str, key: &str) -> toml::Table {
+        if let Some(toml::Value::Table(values)) = table.get_mut(section) {
+            values.remove(key);
+            if values.is_empty() {
+                table.remove(section);
+            }
+        }
+        table
     }
 
     /// Remove every `[[layout.tags]]` table from a config file's text, along
@@ -5648,6 +5674,36 @@ tags = [{ tag = 4, monitor = -1, layout = \"grid\" }]
         }
         assert!(error.to_string().contains("left unchanged"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), handwritten);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn theme_edit_refuses_to_change_multiline_command_content() {
+        let path = temporary_config_path("ui-theme-multiline-command");
+        let original = "[behavior]\nsuspend_command = '''\n[appearance]\nui_theme = \"original-command-data\"\n'''\n[appearance]\nui_theme = \"glass\"\n";
+        toml::from_str::<toml::Table>(original).unwrap();
+        std::fs::write(&path, original).unwrap();
+        let result = Config::default().persist_ui_theme_to(&path, "glass");
+        assert!(
+            result.is_err(),
+            "a valid edit must not alter an unrelated command"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn layout_edit_refuses_to_strip_multiline_command_content() {
+        let path = temporary_config_path("layout-tags-multiline-command");
+        let original = "[behavior]\nsuspend_command = '''\n[[layout.tags]]\ndiscarded command text\n[not-a-real-section]\nstill command\n'''\n[layout]\nm_fact = 0.55\n";
+        toml::from_str::<toml::Table>(original).unwrap();
+        std::fs::write(&path, original).unwrap();
+        let result = Config::default().persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")]);
+        assert!(
+            result.is_err(),
+            "a valid edit must not alter an unrelated command"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
     }
 

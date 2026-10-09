@@ -88,8 +88,16 @@ open never returns — is abandoned rather than waited on. The start fails with
 `audio recorder did not initialize within 3s` instead of hanging the
 compositor, and further starts are refused ("the previous audio recorder is
 still stuck opening the capture device") until the stuck open returns. When it
-finally does, the abandoned recorder releases the device at once and deletes
-the empty file it may have left instead of recording.
+finally does, the abandoned recorder releases the device at once instead of
+recording. Failed or partial output files are retained: cleanup does not delete
+a path whose current file may belong to someone else. Inspect and remove such
+files manually if they are no longer needed.
+
+The built-in PCM WAV writer stops before RIFF's 32-bit size fields would
+become unrepresentable, finalizes the valid prefix, and reports a recording
+failure. Long recordings needing more than roughly 4 GiB should use an encoded
+format or be split into separate recordings. Existing destinations are never
+overwritten automatically; late file creation makes ffmpeg refuse the output.
 
 ## Configuration
 
@@ -163,7 +171,10 @@ canvas. ffmpeg is never restarted, and the microphone track is never
 interrupted. The red adjustment border shows only on the local desktop and is
 never written into the video.
 
-Automation can set the region at start and update it while recording:
+Automation can set the region at start and update it while recording.
+Omitting all four region fields selects the full screen. Once any field is
+supplied, all four must be valid integers with positive dimensions; malformed
+or partial regions return an error instead of broadening capture to fullscreen:
 
 ```bash
 jwm-tool msg start_recording \

@@ -1313,7 +1313,7 @@ mod tests {
             media.bindings.secondary,
             Some(UserAction::OpenShellHub(ShellRoute::Hub))
         );
-        let disconnected = PresentationProjector::project(snapshot().view(), &config);
+        let disconnected = PresentationProjector::project(self::snapshot().view(), &config);
         let network = by_id(&disconnected, NodeId::Network);
         assert!(!network.available);
         assert!(network.state.enabled);

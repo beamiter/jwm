@@ -136,7 +136,10 @@ fn family_candidates(description: &str) -> Vec<String> {
     ];
 
     let mut tokens = description.split_whitespace().collect::<Vec<_>>();
-    if tokens.last().is_some_and(|last| last.parse::<f32>().is_ok()) {
+    if tokens
+        .last()
+        .is_some_and(|last| last.parse::<f32>().is_ok())
+    {
         tokens.pop();
     }
     if tokens.is_empty() {

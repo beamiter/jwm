@@ -459,7 +459,7 @@ macro_rules! delegate_compositor_capabilities {
                 path: &std::path::Path,
             ) -> Result<bool, crate::backend::error::BackendError> {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.request_screenshot(path.to_path_buf());
+                    compositor.request_screenshot(path.to_path_buf()).map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
                     Ok(true)
                 } else {
                     Ok(false)
@@ -475,7 +475,7 @@ macro_rules! delegate_compositor_capabilities {
                 height: u32,
             ) -> Result<bool, crate::backend::error::BackendError> {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.request_screenshot_region(path.to_path_buf(), x, y, width, height);
+                    compositor.request_screenshot_region(path.to_path_buf(), x, y, width, height).map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
                     Ok(true)
                 } else {
                     Ok(false)

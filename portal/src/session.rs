@@ -33,15 +33,14 @@ pub struct Session {
     /// entry is replaced).
     pub captures: Vec<CaptureHandle>,
     /// Caller's persist_mode from SelectSources (0=none, 1=transient,
-    /// 2=permanent). When >0, Start generates a restore_token.
+    /// 2=permanent). When >0, Start returns backend restore_data.
     pub persist_mode: u32,
-    /// Pre-existing token the caller asked us to honor (echoed back from
+    /// Private key decoded from validated backend restore_data (wrapped in
     /// Start if the stored selection still resolves).
     pub restore_token: Option<String>,
     /// Whether the compositor should composite the cursor into captured
     /// frames. Mirrors the cursor_mode bit set in SelectSources (Embedded=true,
-    /// Hidden=false). Defaults to true so callers that omit cursor_mode get
-    /// the historically expected behavior.
+    /// Hidden=false). Defaults to false as required by the backend interface.
     pub paint_cursors: bool,
 }
 
@@ -53,7 +52,7 @@ impl Default for Session {
             captures: Vec::new(),
             persist_mode: 0,
             restore_token: None,
-            paint_cursors: true,
+            paint_cursors: false,
         }
     }
 }

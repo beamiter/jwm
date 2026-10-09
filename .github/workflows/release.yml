@@ -121,7 +121,14 @@ jobs:
         run: bash scripts/test-install-lifecycle.sh
 
       - name: Test source installer build recovery
-        run: bash scripts/test-install-jwm-build.sh
+        run: |
+          bash scripts/test-install-jwm-build.sh
+          bash scripts/test-runtime-helpers.sh
+          bash scripts/test-bootstrap-deps.sh
+          python3 scripts/test-release-install-failures.py
+          python3 scripts/test-showcase-lifecycle.py
+          python3 scripts/test-collector.py
+          python3 scripts/test-installer-config.py
 
       - name: Build release bundle
         run: bash scripts/package-release.sh --output-dir dist

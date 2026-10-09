@@ -253,11 +253,15 @@ fn main() -> iced::Result {
     // alpha — gets a solid window; anything else would paint a wash over
     // undefined memory. A failed X connection (native Wayland, no Xwayland)
     // counts as "no compositor" for the same reason.
-    let translucent = match XCBConnection::connect(None) {
-        Ok((conn, screen_num)) => {
-            compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+    let translucent = if x11rb::xcb_ffi::load_libxcb().is_ok() {
+        match XCBConnection::connect(None) {
+            Ok((conn, screen_num)) => {
+                compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
+    } else {
+        false
     };
     info!("startup mode: translucent={translucent}");
     let _ = TRANSLUCENT.set(translucent);
@@ -613,7 +617,9 @@ impl IcedBar {
                         }
                     }
                 }
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
+                effect @ (BarEffect::Screenshot
+                | BarEffect::OpenAudioControl
+                | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("failed to handle platform effect: {error}");
                     }
@@ -831,15 +837,22 @@ impl IcedBar {
 
     fn battery_pill<'a>(&self) -> Element<'a, Message> {
         let battery = self.runtime.view().battery;
-        let pct = battery.percent.map_or(100.0, |value| value.as_f32());
+        let pct = battery
+            .percent
+            .filter(|_| battery.present)
+            .map(|value| value.as_f32());
         let charging = battery.charging;
         let icon = if charging {
             ICON_BAT_CHG
         } else {
             ICON_BAT_FULL
         };
-        let (bg, fg) = Self::battery_colors(pct);
-        container(text(format!("{}  {:.0}%", icon, pct)).size(14).color(fg))
+        let (bg, fg) = pct.map_or(
+            (color!(0x787878).scale_alpha(0.85), color!(0xEEEEEE)),
+            Self::battery_colors,
+        );
+        let label = pct.map_or_else(|| "--".to_owned(), |value| format!("{value:.0}%"));
+        container(text(format!("{icon}  {label}")).size(14).color(fg))
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))

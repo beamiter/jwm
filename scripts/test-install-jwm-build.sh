@@ -26,7 +26,11 @@ while (($#)); do
     esac
 done
 [[ $command == build ]] || exit 0
-if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success ]]; then
+if [[ $package == jwm-bridge && $SCENARIO == bridge-failure ]]; then
+    echo 'error: bridge compilation failure' >&2
+    exit 101
+fi
+if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure ]]; then
     count=0
     [[ ! -f $CASE_DIR/count ]] || read -r count < "$CASE_DIR/count"
     count=$((count + 1))
@@ -50,6 +54,9 @@ STUB
 cat > "$TEST_ROOT/bin/sudo" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CASE_DIR/system.log"
+if [[ $SCENARIO == install-failure && $* == *jwm-remote* ]]; then
+    exit 73
+fi
 STUB
 cat > "$TEST_ROOT/bin/install" <<'STUB'
 #!/usr/bin/env bash
@@ -67,12 +74,23 @@ fail() { printf 'test-install-jwm-build: FAIL: %s\n' "$*" >&2; exit 1; }
 run_case() {
     local scenario=$1 mode=$2 target=$3 expected=$4 status=0
     export CASE_DIR="$TEST_ROOT/$scenario-$mode" SCENARIO=$scenario
-    mkdir -p "$CASE_DIR/home" "$CASE_DIR/config/jwm"
+    mkdir -p "$CASE_DIR/home/.cargo/bin" "$CASE_DIR/config/jwm"
+    local binary
+    for binary in jwm jwm-tool jwm-support jwm-remote; do
+        printf 'old %s\n' "$binary" > "$CASE_DIR/home/.cargo/bin/$binary"
+    done
     printf '[status_bar]\nname = "old"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
     cp "$CASE_DIR/config/jwm/config_x11.toml" "$CASE_DIR/config/jwm/config_wayland.toml"
     TMPDIR="$CASE_DIR" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" CARGO_TARGET_DIR="$target" \
         bash "$REPO/scripts/install_jwm_scripts.sh" --mode "$mode" --jobs 2 > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $status == "$expected" ]] || fail "$scenario/$mode status $status, expected $expected"
+    for binary in jwm jwm-tool jwm-support jwm-remote; do
+        if [[ $expected == 0 ]]; then
+            [[ ! -e $CASE_DIR/home/.cargo/bin/$binary ]] || fail "successful migration retained $binary"
+        else
+            [[ $(cat "$CASE_DIR/home/.cargo/bin/$binary") == "old $binary" ]] || fail "failed install removed $binary"
+        fi
+    done
     if compgen -G "$CASE_DIR/jwm-build.*" >/dev/null; then
         fail 'owned build log was not cleaned'
     fi
@@ -84,7 +102,9 @@ run_case() {
         grep -Fq '<-p> <jwm-bridge>' "$CASE_DIR/cargo.log" || fail 'bridge build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
     else
-        [[ ! -e $CASE_DIR/system.log ]] || fail 'failed build installed system files'
+        if [[ $scenario != bridge-failure && $scenario != install-failure ]]; then
+            [[ ! -e $CASE_DIR/system.log ]] || fail 'failed build installed system files'
+        fi
     fi
     local cleans
     cleans=$(grep -c '^clean ' "$CASE_DIR/cargo.log" || true)
@@ -110,4 +130,17 @@ run_case ordinary release 'failed target' 101
 run_case repeated release 'repeated target' 101
 run_case tee-cargo release 'tee cargo target' 101
 run_case tee-success release 'tee success target' 74
+run_case bridge-failure release 'bridge failed target' 101
+run_case install-failure debug 'install failed target' 73
+# A bar-only/no-op invocation must never remove an existing JWM installation.
+export CASE_DIR="$TEST_ROOT/skip-jwm" SCENARIO=success
+mkdir -p "$CASE_DIR/home/.cargo/bin"
+for binary in jwm jwm-tool jwm-support jwm-remote; do
+    printf 'old %s\n' "$binary" > "$CASE_DIR/home/.cargo/bin/$binary"
+done
+PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" \
+    bash "$REPO/scripts/install_jwm_scripts.sh" --skip-jwm --skip-bar > "$CASE_DIR/output.log" 2>&1
+for binary in jwm jwm-tool jwm-support jwm-remote; do
+    [[ $(cat "$CASE_DIR/home/.cargo/bin/$binary") == "old $binary" ]] || fail "--skip-jwm removed $binary"
+done
 printf 'test-install-jwm-build: PASS\n'

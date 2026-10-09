@@ -389,6 +389,8 @@ impl Jwm {
     /// toolkits can connect to this compositor.  When running the udev backend
     /// we propagate the XWayland DISPLAY so X11 apps can connect.
     pub(super) fn setup_smithay_child_env(command: &mut Command, backend: &dyn Backend) {
+        let environment = backend.child_environment();
+        environment.apply(command);
         // Share the session's Xcursor theme/size with every launched client so
         // its *own* windows use the same pointer. On X11 the WM cannot re-cursor
         // a client's content window; libXcursor in the client reads these env
@@ -399,26 +401,32 @@ impl Jwm {
         command.env("XCURSOR_SIZE", cursor_size.to_string());
 
         if Self::is_smithay_backend(backend) {
-            if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
+            if let Ok(v) = environment.var("WAYLAND_DISPLAY") {
                 command.env("WAYLAND_DISPLAY", &v);
             }
             if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {
                 command.env("XDG_RUNTIME_DIR", &v);
             }
-            if std::env::var_os("XDG_SESSION_TYPE").is_none() {
+            if environment.var_os("XDG_SESSION_TYPE").is_none() {
                 command.env("XDG_SESSION_TYPE", "wayland");
             }
             command.env(
                 "XDG_CURRENT_DESKTOP",
-                std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "jwm".to_string()),
+                environment
+                    .var("XDG_CURRENT_DESKTOP")
+                    .unwrap_or_else(|_| "jwm".to_string()),
             );
             command.env(
                 "XDG_SESSION_DESKTOP",
-                std::env::var("XDG_SESSION_DESKTOP").unwrap_or_else(|_| "jwm".to_string()),
+                environment
+                    .var("XDG_SESSION_DESKTOP")
+                    .unwrap_or_else(|_| "jwm".to_string()),
             );
             command.env(
                 "DESKTOP_SESSION",
-                std::env::var("DESKTOP_SESSION").unwrap_or_else(|_| "jwm".to_string()),
+                environment
+                    .var("DESKTOP_SESSION")
+                    .unwrap_or_else(|_| "jwm".to_string()),
             );
             if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
                 command.env("WINIT_UNIX_BACKEND", "wayland");
@@ -427,18 +435,20 @@ impl Jwm {
         if Self::is_udev_backend(backend) {
             // With XWayland running, DISPLAY is set to e.g. ":0" and is valid.
             // Propagate it so X11 apps can connect via XWayland.
-            if let Ok(display) = std::env::var("DISPLAY") {
+            if let Ok(display) = environment.var("DISPLAY") {
                 command.env("DISPLAY", &display);
             }
             // In nested mode (JWM running inside another Wayland compositor),
-            // backend.rs already cleared DBUS_SESSION_BUS_ADDRESS from the process
-            // env so children don't reach the parent compositor's session bus
+            // backend.rs overrides DBUS_SESSION_BUS_ADDRESS in the child session
+            // environment so children don't reach the parent compositor's session bus
             // (gnome-terminal-server in the parent would steal the window).
             // In primary-session mode (launched from a login manager), the env
             // var holds the real session bus address that children actually need.
-            // Propagate whatever the process env says: if empty, isolate; if set,
+            // Propagate the effective child session value: if empty, isolate; if set,
             // let children use it (e.g. gnome-terminal-server activation).
-            let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default();
+            let dbus_addr = environment
+                .var("DBUS_SESSION_BUS_ADDRESS")
+                .unwrap_or_default();
             if dbus_addr.is_empty() {
                 command.env("DBUS_SESSION_BUS_ADDRESS", "");
                 // GTK4 apps block indefinitely on IBus/fcitx5 D-Bus negotiation

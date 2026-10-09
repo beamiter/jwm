@@ -212,9 +212,10 @@ pub(crate) fn seed_pertag_from_config(
 /// wildcard (`monitor = -1`) entries. Replacing the whole list erased an
 /// unplugged monitor's layouts on the first save after the unplug.
 ///
-/// Live ownership is by monitor number **or** connector: after hotplug
-/// hole-fill renumbers a panel, the stale `(old_num, connector)` row is
-/// dropped in favour of the live one rather than kept beside it.
+/// A named output owns its rows by connector, even when hotplug reuses its
+/// previous monitor number for another output. Only legacy rows without a
+/// connector use monitor-number ownership; renumbered live connectors still
+/// replace their old rows.
 fn merge_layout_tag_entries(
     existing: &[LayoutTagConfig],
     live: Vec<LayoutTagConfig>,
@@ -232,12 +233,13 @@ fn merge_layout_tag_entries(
             if entry.monitor < 0 {
                 return true;
             }
-            if live_monitors.contains(&entry.monitor) {
-                return false;
-            }
-            match entry.connector.as_deref() {
-                Some(connector) if live_connectors.contains(connector) => false,
-                _ => true,
+            match entry
+                .connector
+                .as_deref()
+                .filter(|connector| !connector.is_empty())
+            {
+                Some(connector) => !live_connectors.contains(connector),
+                None => !live_monitors.contains(&entry.monitor),
             }
         })
         .cloned()
@@ -727,6 +729,40 @@ mod tests {
                 (1, 2, "deck"),
             ]
         );
+    }
+
+    #[test]
+    fn saving_preserves_an_offline_connector_when_its_monitor_number_is_reused() {
+        let existing = vec![
+            entry_on(1, 0, "HDMI-A-1", "monocle"),
+            entry_on(2, 0, "HDMI-A-1", "deck"),
+            entry_on(1, 1, "DP-1", "tile"),
+            entry(1, 0, "grid"),
+        ];
+        let merged = merge_layout_tag_entries(&existing, vec![entry_on(1, 0, "DP-1", "fibonacci")]);
+        assert_eq!(merged.len(), 3);
+        assert!(
+            merged
+                .iter()
+                .any(|entry| entry.connector.as_deref() == Some("HDMI-A-1")
+                    && entry.tag == 1
+                    && entry.layout == "monocle")
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|entry| entry.connector.as_deref() == Some("HDMI-A-1")
+                    && entry.tag == 2
+                    && entry.layout == "deck")
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|entry| entry.connector.as_deref() == Some("DP-1"))
+                .count(),
+            1
+        );
+        assert!(!merged.iter().any(|entry| entry.connector.is_none()));
     }
 
     #[test]

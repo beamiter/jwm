@@ -99,7 +99,6 @@ impl WaylandCompositor {
 
             // --- Upsample pass ---
             gl.UseProgram(self.blur_up_program);
-            // Reuse blur_uniforms since upsample shader has same uniforms
 
             for i in (0..levels - 1).rev() {
                 let level = &self.blur_fbos[i];
@@ -107,7 +106,7 @@ impl WaylandCompositor {
                 gl.Viewport(0, 0, level.width as i32, level.height as i32);
 
                 gl.Uniform4f(
-                    self.blur_uniforms.rect,
+                    self.blur_up_uniforms.rect,
                     0.0,
                     0.0,
                     level.width as f32,
@@ -115,20 +114,20 @@ impl WaylandCompositor {
                 );
                 let blur_proj = ortho(0.0, level.width as f32, level.height as f32, 0.0);
                 gl.UniformMatrix4fv(
-                    self.blur_uniforms.projection,
+                    self.blur_up_uniforms.projection,
                     1,
                     ffi::FALSE as u8,
                     blur_proj.as_ptr(),
                 );
                 gl.Uniform2f(
-                    self.blur_uniforms.halfpixel,
+                    self.blur_up_uniforms.halfpixel,
                     0.5 / level.width as f32,
                     0.5 / level.height as f32,
                 );
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 gl.BindTexture(ffi::TEXTURE_2D, prev_tex);
-                gl.Uniform1i(self.blur_uniforms.texture, 0);
+                gl.Uniform1i(self.blur_up_uniforms.texture, 0);
 
                 gl.BindVertexArray(self.quad_vao);
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);

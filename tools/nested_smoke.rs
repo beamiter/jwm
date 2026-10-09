@@ -14,7 +14,7 @@
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -1537,35 +1537,82 @@ fn create_private_runtime_dir(kind: NestedBackendKind) -> io::Result<PathBuf> {
 // --- IPC plumbing ----------------------------------------------------------
 
 fn ipc_roundtrip(socket: &Path, request: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let mut stream =
-        UnixStream::connect(socket).map_err(|error| format!("connect {socket:?}: {error}"))?;
-    stream
-        .set_read_timeout(Some(IPC_IO_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(IPC_IO_TIMEOUT)))
-        .map_err(|error| format!("socket timeout setup: {error}"))?;
+    let stream = jwm::ipc_connection::connect(socket, IPC_IO_TIMEOUT)
+        .map_err(|error| format!("connect {socket:?}: {error}"))?;
+    ipc_exchange(stream, request, IPC_IO_TIMEOUT)
+}
+
+fn ipc_exchange(
+    mut stream: UnixStream,
+    request: &serde_json::Value,
+    budget: Duration,
+) -> Result<serde_json::Value, String> {
+    // Connection and exchange each have a finite budget. Within the exchange,
+    // partial writes and reads cannot renew the absolute frame deadline.
+    let deadline = Instant::now() + budget;
     let mut line = request.to_string();
     line.push('\n');
-    stream
-        .write_all(line.as_bytes())
+    jwm::ipc_connection::write_all_with_timeout(&mut stream, line.as_bytes(), budget)
         .map_err(|error| format!("send request: {error}"))?;
-    let mut response = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        match stream.read(&mut byte) {
-            Ok(0) => break,
-            Ok(_) => {
-                if byte[0] == b'\n' {
+    let mut reader = crate::IpcLineReader::new(stream);
+    let response = reader
+        .read_line_until(deadline)
+        .map_err(|error| format!("read response: {error}"))?;
+    serde_json::from_str(&response).map_err(|error| format!("parse response: {error}"))
+}
+
+#[cfg(test)]
+mod ipc_deadline_tests {
+    use super::*;
+    use std::io::Write;
+    use std::thread;
+
+    fn response(bytes: &'static [u8]) -> Result<serde_json::Value, String> {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = thread::spawn(move || {
+            let mut request = [0; 1024];
+            let _ = server.read(&mut request);
+            server.write_all(bytes).unwrap();
+        });
+        let result = ipc_exchange(
+            client,
+            &serde_json::json!({"query":"get_status"}),
+            Duration::from_secs(1),
+        );
+        peer.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn nested_ipc_requires_complete_frame_even_when_eof_json_is_valid() {
+        assert!(response(b"{\"success\":true}").is_err());
+        assert_eq!(response(b"{\"success\":true}\n").unwrap()["success"], true);
+    }
+
+    #[test]
+    fn nested_ipc_trickling_response_cannot_extend_frame_budget() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = thread::spawn(move || {
+            let mut request = [0; 1024];
+            let _ = server.read(&mut request);
+            for _ in 0..30 {
+                if server.write_all(b" ").is_err() {
                     break;
                 }
-                response.push(byte[0]);
-                if response.len() > 1 << 20 {
-                    return Err("response exceeded 1 MiB".to_string());
-                }
+                thread::sleep(Duration::from_millis(20));
             }
-            Err(error) => return Err(format!("read response: {error}")),
-        }
+        });
+        let started = Instant::now();
+        let result = ipc_exchange(
+            client,
+            &serde_json::json!({"query":"get_status"}),
+            Duration::from_millis(80),
+        );
+        let elapsed = started.elapsed();
+        peer.join().unwrap();
+        assert!(result.is_err());
+        assert!(elapsed < Duration::from_millis(500), "elapsed: {elapsed:?}");
     }
-    serde_json::from_slice(&response).map_err(|error| format!("parse response: {error}"))
 }
 
 fn ipc_command(socket: &Path, name: &str) -> Result<serde_json::Value, String> {

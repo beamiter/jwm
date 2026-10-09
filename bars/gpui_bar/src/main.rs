@@ -264,7 +264,9 @@ impl GpuiBar {
                     self.active_geometry = None;
                     self.geometry_dirty = true;
                 }
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
+                effect @ (BarEffect::Screenshot
+                | BarEffect::OpenAudioControl
+                | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("failed to handle platform effect: {error}");
                     }
@@ -421,15 +423,22 @@ impl GpuiBar {
 
     fn render_battery_pill(&self) -> impl IntoElement {
         let battery = self.runtime.view().battery;
-        let pct = battery.percent.map_or(100.0, |value| value.as_f32());
+        let pct = battery
+            .percent
+            .filter(|_| battery.present)
+            .map(|value| value.as_f32());
         let charging = battery.charging;
         let icon = if charging {
             ICON_BAT_CHG
         } else {
             ICON_BAT_FULL
         };
-        let (bg, fg) = battery_colors(pct);
-        self.render_pill("battery", bg, bg, fg, format!("{}  {:.0}%", icon, pct))
+        let (bg, fg) = pct.map_or(
+            (rgba_alpha(0x787878, 0.85), rgba_alpha(0xEEEEEE, 1.0)),
+            battery_colors,
+        );
+        let label = pct.map_or_else(|| "--".to_owned(), |value| format!("{value:.0}%"));
+        self.render_pill("battery", bg, bg, fg, format!("{icon}  {label}"))
     }
 
     fn render_brightness_pill(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

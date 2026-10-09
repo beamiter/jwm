@@ -688,6 +688,23 @@ fn parse_required_i32_ipc_arg(
     Err(format!("{command}: '{field}' must be a 32-bit integer"))
 }
 
+/// Default to fullscreen only when no region field was supplied. A malformed
+/// or partial region must not silently widen the capture to the whole desktop.
+fn parse_initial_recording_region(args: &serde_json::Value, screen: Rect) -> Result<Rect, String> {
+    const FIELDS: [&str; 4] = ["x", "y", "width", "height"];
+    if FIELDS.iter().all(|field| args.get(*field).is_none()) {
+        return Ok(screen);
+    }
+    let x = parse_required_i32_ipc_arg(args, "start_recording", "x")?;
+    let y = parse_required_i32_ipc_arg(args, "start_recording", "y")?;
+    let width = parse_required_i32_ipc_arg(args, "start_recording", "width")?;
+    let height = parse_required_i32_ipc_arg(args, "start_recording", "height")?;
+    if width <= 0 || height <= 0 {
+        return Err("start_recording: width and height must be positive".to_string());
+    }
+    Ok(Rect::new(x, y, width, height))
+}
+
 fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u32, i32) {
     let current_layout = || format!("{:?}", *mon.lt);
     let Some(pertag_index) = tag_index.checked_add(1) else {
@@ -2647,34 +2664,11 @@ impl Jwm {
             let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("start_recording: expected string field 'path'");
             };
-            let region_fields = (
-                args.get("x").and_then(|value| value.as_i64()),
-                args.get("y").and_then(|value| value.as_i64()),
-                args.get("width").and_then(|value| value.as_u64()),
-                args.get("height").and_then(|value| value.as_u64()),
-            );
-            let region = match region_fields {
-                (None, None, None, None) => Rect::new(0, 0, self.s_w, self.s_h),
-                (Some(x), Some(y), Some(width), Some(height)) => {
-                    let parsed = i32::try_from(x)
-                        .ok()
-                        .zip(i32::try_from(y).ok())
-                        .zip(i32::try_from(width).ok())
-                        .zip(i32::try_from(height).ok())
-                        .map(|(((x, y), width), height)| Rect::new(x, y, width, height));
-                    let Some(region) = parsed else {
-                        return IpcResponse::err(
-                            "start_recording: region values are outside supported ranges",
-                        );
-                    };
-                    region
-                }
-                _ => {
-                    return IpcResponse::err(
-                        "start_recording: x, y, width and height must be provided together",
-                    );
-                }
-            };
+            let region =
+                match parse_initial_recording_region(args, Rect::new(0, 0, self.s_w, self.s_h)) {
+                    Ok(region) => region,
+                    Err(error) => return IpcResponse::err(error),
+                };
             return match self.start_recording_region(backend, path, region) {
                 Ok(()) => {
                     let region = self.features.recording.region;
@@ -3230,7 +3224,7 @@ impl Jwm {
                     IpcResponse::ok(Some(serde_json::json!({
                         "available": false,
                         "wm_ready": false,
-                        "display": std::env::var("DISPLAY").ok(),
+                        "display": crate::child_environment::var("DISPLAY").ok(),
                         "mapped_window_count": 0,
                         "associated_surface_count": 0,
                         "pending_association_count": 0,
@@ -3459,7 +3453,7 @@ impl Jwm {
                 serde_json::json!({
                     "available": false,
                     "wm_ready": false,
-                    "display": std::env::var("DISPLAY").ok(),
+                    "display": crate::child_environment::var("DISPLAY").ok(),
                     "mapped_window_count": 0,
                     "associated_surface_count": 0,
                     "pending_association_count": 0,
@@ -23244,5 +23238,89 @@ mod tests {
     fn evolve9h_wave_349_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
         assert!(COMPAT.contains("evolve9h wave 349: Health compact `bluetooth` is diagnosable through `jwm-tool health`."));
+    }
+}
+
+#[cfg(test)]
+mod recording_region_input_tests {
+    use super::{Rect, parse_initial_recording_region};
+    use serde_json::{Value, json};
+
+    fn screen() -> Rect {
+        Rect::new(0, 0, 1920, 1080)
+    }
+
+    #[test]
+    fn omitted_recording_region_preserves_fullscreen_default() {
+        assert_eq!(
+            parse_initial_recording_region(&json!({"path": "/tmp/record.mp4"}), screen()),
+            Ok(screen())
+        );
+    }
+
+    #[test]
+    fn valid_recording_region_preserves_coordinates() {
+        let requested = json!({"x": -100, "y": 30, "width": 640, "height": 480});
+        assert_eq!(
+            parse_initial_recording_region(&requested, screen()),
+            Ok(Rect::new(-100, 30, 640, 480))
+        );
+        let extreme = json!({"x": i32::MIN, "y": i32::MAX, "width": i32::MAX, "height": 1});
+        assert_eq!(
+            parse_initial_recording_region(&extreme, screen()),
+            Ok(Rect::new(i32::MIN, i32::MAX, i32::MAX, 1))
+        );
+    }
+
+    #[test]
+    fn supplied_invalid_recording_region_never_defaults_to_fullscreen() {
+        for invalid in [
+            Value::Null,
+            json!(true),
+            json!("100"),
+            json!(1.5),
+            json!([]),
+            json!({}),
+        ] {
+            let all = json!({"x": invalid, "y": invalid, "width": invalid, "height": invalid});
+            assert!(
+                parse_initial_recording_region(&all, screen()).is_err(),
+                "accepted {all}"
+            );
+            for field in ["x", "y", "width", "height"] {
+                let mut partial = json!({});
+                partial[field] = invalid.clone();
+                assert!(
+                    parse_initial_recording_region(&partial, screen()).is_err(),
+                    "accepted {partial}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recording_region_rejects_missing_zero_negative_and_overflow_fields() {
+        let valid = json!({"x": 0, "y": 0, "width": 640, "height": 480});
+        for field in ["x", "y", "width", "height"] {
+            let mut partial = valid.clone();
+            partial.as_object_mut().unwrap().remove(field);
+            assert!(parse_initial_recording_region(&partial, screen()).is_err());
+            for bad in [
+                json!(i64::from(i32::MAX) + 1),
+                json!(i64::from(i32::MIN) - 1),
+                json!(u64::MAX),
+            ] {
+                let mut region = valid.clone();
+                region[field] = bad;
+                assert!(parse_initial_recording_region(&region, screen()).is_err());
+            }
+        }
+        for field in ["width", "height"] {
+            for bad in [json!(0), json!(-1), json!(i32::MIN)] {
+                let mut region = valid.clone();
+                region[field] = bad;
+                assert!(parse_initial_recording_region(&region, screen()).is_err());
+            }
+        }
     }
 }

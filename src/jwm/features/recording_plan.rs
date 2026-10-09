@@ -134,7 +134,7 @@ pub fn plan_finalization(segments: &[String], output_path: &str) -> Finalization
             list_path: Path::new(output_path).with_extension("concat.txt"),
             list_content: segments
                 .iter()
-                .map(|segment| format!("file '{segment}'"))
+                .map(|segment| format!("file '{}'", segment.replace('\'', "'\\''")))
                 .collect::<Vec<_>>()
                 .join("\n"),
             output_path: output_path.to_string(),
@@ -218,6 +218,21 @@ mod tests {
             vec!["ffprobe"]
         );
         assert_eq!(missing_runtime_tools(|_| false), vec!["ffmpeg", "ffprobe"]);
+    }
+
+    #[test]
+    fn concat_manifest_escapes_apostrophes_without_changing_backslashes() {
+        let plan = plan_finalization(
+            &["/v/user's clip.mp4".into(), "/v/back\\slash.mp4".into()],
+            "/v/final.mp4",
+        );
+        let FinalizationPlan::ConcatSegments { list_content, .. } = plan else {
+            panic!("concat expected")
+        };
+        assert_eq!(
+            list_content,
+            "file '/v/user'\\''s clip.mp4'\nfile '/v/back\\slash.mp4'"
+        );
     }
 
     #[test]

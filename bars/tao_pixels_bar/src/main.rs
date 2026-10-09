@@ -45,6 +45,10 @@ fn pixel_frame_bytes(size: PhysicalSize<u32>) -> Option<usize> {
     (bytes <= xbar_core::MAX_FRONTEND_FRAME_BYTES).then_some(bytes)
 }
 
+fn surface_can_present(window_size: PhysicalSize<u32>, surface_size: PhysicalSize<u32>) -> bool {
+    window_size.width != 0 && window_size.height != 0 && window_size == surface_size
+}
+
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
@@ -57,6 +61,8 @@ struct App {
     pixels: Option<Pixels<'static>>,
     pixels_width: u32,
     pixels_height: u32,
+    pixels_surface_width: u32,
+    pixels_surface_height: u32,
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
@@ -94,6 +100,8 @@ impl App {
             pixels: None,
             pixels_width: 0,
             pixels_height: 0,
+            pixels_surface_width: 0,
+            pixels_surface_height: 0,
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
@@ -221,6 +229,8 @@ impl App {
         self.default_logical_size = self.logical_size;
         self.pixels_width = safe_width;
         self.pixels_height = safe_height;
+        self.pixels_surface_width = safe_width;
+        self.pixels_surface_height = safe_height;
         self.pixels = Some(pixels);
 
         let tick = self.bar.tick();
@@ -237,6 +247,13 @@ impl App {
             return Ok(());
         }
         self.sync_surface_to_window();
+        if !surface_can_present(
+            self.last_physical_size,
+            PhysicalSize::new(self.pixels_surface_width, self.pixels_surface_height),
+        ) {
+            // A rejected surface resize must not enter pixels' acquisition retry loop.
+            return Ok(());
+        }
 
         // A rejected or failed resize must keep drawing against the texture
         // dimensions pixels actually owns, rather than describing its old
@@ -289,7 +306,11 @@ impl App {
         else {
             return;
         };
-        if size.width != self.pixels_width || size.height != self.pixels_height {
+        if size.width != self.pixels_width
+            || size.height != self.pixels_height
+            || size.width != self.pixels_surface_width
+            || size.height != self.pixels_surface_height
+        {
             self.resize_pixels(size);
         }
     }
@@ -317,20 +338,24 @@ impl App {
             }
             return;
         }
-        if self.pixels_width != size.width || self.pixels_height != size.height {
-            let Some(pixels) = self.pixels.as_mut() else {
-                return;
-            };
-            if let Err(error) = pixels.resize_surface(size.width, size.height) {
-                warn!("pixels surface resize failed: {error}");
-                return;
+        if let Some(pixels) = self.pixels.as_mut() {
+            if self.pixels_surface_width != size.width || self.pixels_surface_height != size.height
+            {
+                if let Err(error) = pixels.resize_surface(size.width, size.height) {
+                    warn!("pixels surface resize failed: {error}");
+                    return;
+                }
+                self.pixels_surface_width = size.width;
+                self.pixels_surface_height = size.height;
             }
-            if let Err(error) = pixels.resize_buffer(size.width, size.height) {
-                warn!("pixels buffer resize failed: {error}");
-                return;
+            if self.pixels_width != size.width || self.pixels_height != size.height {
+                if let Err(error) = pixels.resize_buffer(size.width, size.height) {
+                    warn!("pixels buffer resize failed: {error}");
+                    return;
+                }
+                self.pixels_width = size.width;
+                self.pixels_height = size.height;
             }
-            self.pixels_width = size.width;
-            self.pixels_height = size.height;
         }
         self.logical_size = size.to_logical(self.scale_factor);
         // The WM's ConfigureNotify is authoritative. JWM deliberately owns
@@ -712,6 +737,18 @@ mod tests {
             pixel_frame_bytes(PhysicalSize::new(u32::from(u16::MAX), u32::from(u16::MAX),)),
             None
         );
+    }
+
+    #[test]
+    fn rejected_surface_resize_suspends_presentation_until_recovery() {
+        let configured = PhysicalSize::new(1920, 42);
+        assert!(surface_can_present(configured, configured));
+        // Simulate a rejected extent without creating a window or allocating pixels.
+        let rejected = PhysicalSize::new(u32::from(u16::MAX), u32::from(u16::MAX));
+        assert!(pixel_frame_bytes(rejected).is_none());
+        assert!(!surface_can_present(rejected, configured));
+        assert!(!surface_can_present(PhysicalSize::new(0, 0), configured));
+        assert!(surface_can_present(configured, configured));
     }
 
     #[test]

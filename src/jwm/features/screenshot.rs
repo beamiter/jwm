@@ -24,9 +24,19 @@ const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIPBOARD_HELPER_STDERR_BYTES: usize = 64 * 1024;
 const SCREENSHOT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
 const SCREENSHOT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// Completion watchers in flight at most; a burst of captures drops the
-/// oldest waiter (its toast is the least useful) rather than piling threads.
+/// Admit captures only while their completion watcher can be retained. Dropping
+/// a live BackgroundJob handle does not stop its worker.
 const MAX_SCREENSHOT_WATCHERS: usize = 4;
+
+fn screenshot_watcher_capacity(pending: usize) -> Result<(), crate::backend::error::BackendError> {
+    if pending >= MAX_SCREENSHOT_WATCHERS {
+        Err(crate::backend::error::BackendError::Message(
+            "screenshot busy: four completion watchers are already in flight".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 /// What baking annotations into a published capture reports.
 type BakeResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -1385,6 +1395,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.ensure_screenshot_completion_capacity(backend)?;
         let path = Self::prepare_screenshot_path()?;
         if let Err(error) = execute_fullscreen_capture(backend, &path) {
             error!("[take_screenshot_fullscreen] compositor screenshot failed: {error}");
@@ -1506,6 +1517,11 @@ impl Jwm {
             }
         };
 
+        // Admission is after the selector's ungrab/overlay cleanup, but before
+        // asking the backend to allocate capture resources or spawning a watcher.
+        if self.ensure_screenshot_completion_capacity(backend).is_err() {
+            return;
+        }
         let (x, y, width, height) = plan.region;
         let captured = match execute_capture_plan(backend, &plan) {
             CaptureExecution::CapturedRegion => {
@@ -1552,6 +1568,20 @@ impl Jwm {
         }
     }
 
+    fn ensure_screenshot_completion_capacity(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), crate::backend::error::BackendError> {
+        screenshot_watcher_capacity(self.features.screenshot_completions.len()).inspect_err(
+            |error| {
+                self.push_system_toast(
+                    backend,
+                    screenshot_completion_toast(&ScreenshotCompletion::Failed(error.to_string())),
+                );
+            },
+        )
+    }
+
     /// Arm the completion watcher for a capture the compositor just accepted.
     ///
     /// The GL readback and PNG encode run on compositor workers that report
@@ -1569,6 +1599,13 @@ impl Jwm {
         to_clipboard: bool,
         bake_annotations: bool,
     ) {
+        // Both submitters checked on this same event thread. Keep a defensive
+        // refusal here too: never detach an old worker to start a fifth one.
+        if let Err(error) = screenshot_watcher_capacity(self.features.screenshot_completions.len())
+        {
+            error!("[take_screenshot] completion watcher was not admitted: {error}");
+            return;
+        }
         let annotations = if bake_annotations {
             annotations
         } else {
@@ -1599,9 +1636,6 @@ impl Jwm {
                 let _ = std::fs::remove_file(path);
             }
             return;
-        }
-        if self.features.screenshot_completions.len() >= MAX_SCREENSHOT_WATCHERS {
-            self.features.screenshot_completions.remove(0);
         }
         self.features
             .screenshot_completions
@@ -2321,6 +2355,104 @@ impl Jwm {
 mod tests {
     use super::*;
     use crate::backend::compositor_common::screenshot_toolbar::ButtonFace;
+
+    #[test]
+    fn screenshot_watcher_admission_refuses_fullscreen_before_path_preflight() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        // Retained handles consume slots until the normal completion poll.
+        // Refused test handles avoid starting any file watcher or host process.
+        for _ in 0..MAX_SCREENSHOT_WATCHERS {
+            jwm.features
+                .screenshot_completions
+                .push(connectivity::BackgroundJob::refused());
+        }
+        let error = jwm.submit_screenshot_fullscreen(&mut backend).unwrap_err();
+        assert!(error.to_string().contains("screenshot busy"));
+        assert_eq!(
+            jwm.features.screenshot_completions.len(),
+            MAX_SCREENSHOT_WATCHERS
+        );
+    }
+
+    #[test]
+    fn screenshot_watcher_admission_cleans_up_a_refused_selection() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        for _ in 0..MAX_SCREENSHOT_WATCHERS {
+            jwm.features
+                .screenshot_completions
+                .push(connectivity::BackgroundJob::refused());
+        }
+        jwm.features.screenshot.start();
+        jwm.features.screenshot.output_path = Some("/nonexistent/not-captured.png".into());
+        jwm.features.screenshot.select_rect(Rect::new(0, 0, 8, 8));
+        jwm.finish_screenshot_select(&mut backend, false);
+        assert!(!jwm.features.screenshot.active);
+        assert!(jwm.features.screenshot.output_path.is_none());
+        assert_eq!(
+            jwm.features.screenshot_completions.len(),
+            MAX_SCREENSHOT_WATCHERS
+        );
+    }
+
+    #[test]
+    fn screenshot_watcher_admission_precedes_capture_and_never_evicts_live_jobs() {
+        const SOURCE: &str = include_str!("screenshot.rs");
+        let shipped = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let full = shipped
+            .split_once("fn submit_screenshot_fullscreen")
+            .unwrap()
+            .1
+            .split_once("fn cancel_screenshot_select")
+            .unwrap()
+            .0;
+        assert!(
+            full.find("ensure_screenshot_completion_capacity").unwrap()
+                < full.find("prepare_screenshot_path").unwrap()
+        );
+        let region = shipped
+            .split_once("fn finish_screenshot_select")
+            .unwrap()
+            .1
+            .split_once("fn ensure_screenshot_completion_capacity")
+            .unwrap()
+            .0;
+        let admission = region
+            .find("if self.ensure_screenshot_completion_capacity")
+            .unwrap();
+        assert!(region.find("ungrab_keyboard()").unwrap() < admission);
+        assert!(region.find("ungrab_pointer()").unwrap() < admission);
+        assert!(
+            admission
+                < region
+                    .find("let captured = match execute_capture_plan")
+                    .unwrap()
+        );
+        let track = shipped
+            .split_once("fn track_screenshot_completion")
+            .unwrap()
+            .1
+            .split_once("fn complete_capture")
+            .unwrap()
+            .0;
+        assert!(
+            track.find("screenshot_watcher_capacity").unwrap()
+                < track.find("BackgroundJob::spawn").unwrap()
+        );
+        assert!(!track.contains("screenshot_completions.remove"));
+        for pending in 0..MAX_SCREENSHOT_WATCHERS {
+            assert!(screenshot_watcher_capacity(pending).is_ok());
+        }
+        assert!(screenshot_watcher_capacity(MAX_SCREENSHOT_WATCHERS).is_err());
+        assert!(screenshot_watcher_capacity(usize::MAX).is_err());
+    }
 
     struct ScratchDir(PathBuf);
 

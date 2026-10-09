@@ -10,7 +10,7 @@ use std::num::NonZeroU32;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, MAX_GLASS_IMAGE_BYTES};
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::Point;
 use xbar_core::render::cairo::{CairoBar, PointerInput};
@@ -23,9 +23,40 @@ use xcb::{self, Xid, x};
 
 const BAR_NAME: &str = "xcb_glow_bar";
 const X_TOKEN: u64 = 1;
+// Bound X work per turn so provider/IPC readiness still gets serviced.
+const X_EVENT_BUDGET: usize = 256;
 const TIMER_TOKEN: u64 = 2;
 const SHARED_TOKEN: u64 = 3;
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+fn bgra_frame_len(width: u32, height: u32) -> Result<usize> {
+    // GL clamps a zero axis to one while creating its initial surface, so
+    // validate that effective allocation as well as non-empty CPU frames.
+    let surface_len = (width.max(1) as usize)
+        .checked_mul(height.max(1) as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("BGRA surface dimensions overflow"))?;
+    if surface_len > MAX_GLASS_IMAGE_BYTES {
+        anyhow::bail!(
+            "BGRA surface needs {surface_len} bytes; frame budget is {MAX_GLASS_IMAGE_BYTES} bytes"
+        );
+    }
+    Ok(if width == 0 || height == 0 {
+        0
+    } else {
+        surface_len
+    })
+}
+
+fn allocate_bgra_frame(width: u32, height: u32) -> Result<Vec<u8>> {
+    let len = bgra_frame_len(width, height)?;
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(len)
+        .map_err(|error| anyhow::anyhow!("failed to reserve {len}-byte BGRA frame: {error}"))?;
+    frame.resize(len, 0);
+    Ok(frame)
+}
 
 // ---------------- GL state ----------------
 struct GlState {
@@ -47,6 +78,7 @@ impl GlState {
         width: u32,
         height: u32,
     ) -> Result<Self> {
+        bgra_frame_len(width, height)?;
         use glutin::config::ConfigTemplateBuilder;
         use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext};
         use glutin::display::{Display, DisplayApiPreference, GlDisplay};
@@ -127,6 +159,10 @@ impl GlState {
     }
 
     fn resize(&self, width: u32, height: u32) {
+        if let Err(error) = bgra_frame_len(width, height) {
+            warn!("ignoring oversized GL surface resize: {error}");
+            return;
+        }
         if let (Some(width), Some(height)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
             self.surface.resize(&self.context, width, height);
             unsafe {
@@ -148,12 +184,7 @@ impl GlState {
             return Ok(());
         }
 
-        let mut frame = vec![
-            0u8;
-            (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4)
-        ];
+        let mut frame = allocate_bgra_frame(width, height)?;
         loop {
             bar.render_into_bgra(
                 &mut frame,
@@ -645,9 +676,14 @@ fn drain_x_events(
     current_width: &mut u16,
     current_height: &mut u16,
     bar: &mut CairoBar,
+    mut queued_event: Option<xcb::Event>,
 ) -> Result<bool> {
-    loop {
-        match window.conn.poll_for_event() {
+    for _ in 0..X_EVENT_BUDGET {
+        let next = match queued_event.take() {
+            Some(event) => Ok(Some(event)),
+            None => window.conn.poll_for_event(),
+        };
+        match next {
             Ok(Some(event)) => {
                 if destroys_window(&event, window.win) {
                     return Ok(false);
@@ -658,6 +694,7 @@ fn drain_x_events(
             Err(error) => return Err(error.into()),
         }
     }
+    Ok(true)
 }
 
 fn sync_notifier(
@@ -843,7 +880,15 @@ fn main() -> Result<()> {
         let dock_timeout = bar
             .next_dock_deadline(now)
             .map(|deadline| deadline.saturating_duration_since(now));
-        ready_tokens.extend(epoll.wait_timeout(dock_timeout)?);
+        // A synchronous X reply can move events into the library's queue
+        // while leaving the socket quiet. Inspect that queue before sleeping.
+        let mut queued_x_event = window.conn.poll_for_event()?;
+        ready_tokens.extend(
+            epoll.wait_timeout_with_pending(
+                dock_timeout,
+                queued_x_event.as_ref().map(|_| X_TOKEN),
+            )?,
+        );
         if ready_tokens.is_empty() {
             // A Dock deadline is independent from the aligned one-second
             // provider timer. Service it promptly so a final magnified anchor
@@ -872,6 +917,7 @@ fn main() -> Result<()> {
                         &mut current_width,
                         &mut current_height,
                         &mut bar,
+                        queued_x_event.take(),
                     )? {
                         break 'event_loop;
                     }
@@ -936,5 +982,18 @@ mod tests {
 
         assert!(destroys_window(&destroyed(other, target), target));
         assert!(!destroys_window(&destroyed(target, other), target));
+    }
+}
+
+#[cfg(test)]
+mod frame_budget_tests {
+    use super::*;
+
+    #[test]
+    fn raw_x_dimensions_are_bounded_before_cpu_or_surface_allocation() {
+        assert_eq!(bgra_frame_len(1920, 42).unwrap(), 1920 * 42 * 4);
+        assert_eq!(bgra_frame_len(0, 42).unwrap(), 0);
+        assert!(bgra_frame_len(u32::from(u16::MAX), u32::from(u16::MAX)).is_err());
+        assert!(bgra_frame_len(u32::MAX, u32::MAX).is_err());
     }
 }

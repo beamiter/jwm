@@ -209,7 +209,7 @@ fn compose(
         return Err(GlassError::EmptyRegion);
     }
     let decoded = decode(path)?;
-    let placement = destination_rect(mode, screen, (decoded.width(), decoded.height()));
+    let placement = bounded_destination_rect(mode, screen, (decoded.width(), decoded.height()))?;
 
     let mut canvas = GlassImage::new(screen_width, screen_height)?;
     let fill = pack([0xff, background[0], background[1], background[2]]).to_ne_bytes();
@@ -266,6 +266,18 @@ struct Placement {
     y: i64,
     width: u32,
     height: u32,
+}
+
+/// Bound the intermediate scaled raster too: Fill may overshoot the screen
+/// by orders of magnitude for a very thin source image.
+fn bounded_destination_rect(
+    mode: WallpaperMode,
+    screen: (u32, u32),
+    image: (u32, u32),
+) -> Result<Placement, GlassError> {
+    let placement = destination_rect(mode, screen, image);
+    super::byte_len(placement.width, placement.height)?;
+    Ok(placement)
 }
 
 fn destination_rect(mode: WallpaperMode, screen: (u32, u32), image: (u32, u32)) -> Placement {
@@ -378,6 +390,25 @@ mod tests {
         let center = placement(WallpaperMode::Center, screen, (200, 100));
         assert_eq!((center.width, center.height), (200, 100));
         assert_eq!((center.x, center.y), (400, 200));
+    }
+
+    #[test]
+    fn fill_bounds_the_intermediate_raster_before_resizing() {
+        for image in [(1000, 1), (1, 1000), (32_768, 1), (1, 32_768)] {
+            assert!(matches!(
+                bounded_destination_rect(WallpaperMode::Fill, (1920, 1080), image),
+                Err(GlassError::Overflow)
+            ));
+        }
+        for mode in [
+            WallpaperMode::Fill,
+            WallpaperMode::Fit,
+            WallpaperMode::Stretch,
+            WallpaperMode::Center,
+        ] {
+            assert!(bounded_destination_rect(mode, (1920, 1080), (3840, 2160)).is_ok());
+        }
+        assert!(bounded_destination_rect(WallpaperMode::Fit, (1920, 1080), (32_768, 1)).is_ok());
     }
 
     #[test]

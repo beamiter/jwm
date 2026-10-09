@@ -331,4 +331,48 @@ for invalid_host in -bad 'name with space' 'ssh://host' 'host;command'; do
         fail "invalid host was accepted: $invalid_host"
     fi
 done
+# A successful pull is still incomplete when publishing is rejected. The
+# remote and receive hook below are private fixtures, never a network service.
+PUSH_FAILURE_ROOT="$TEST_ROOT/push-failure"
+git init -q --bare "$PUSH_FAILURE_ROOT/remote.git"
+init_repo "$PUSH_FAILURE_ROOT/seed"
+git -C "$PUSH_FAILURE_ROOT/seed" remote add origin "$PUSH_FAILURE_ROOT/remote.git"
+git -C "$PUSH_FAILURE_ROOT/seed" push -q -u origin HEAD
+git clone -q "$PUSH_FAILURE_ROOT/remote.git" "$PUSH_FAILURE_ROOT/jagent"
+git -C "$PUSH_FAILURE_ROOT/jagent" config user.name updater-test
+git -C "$PUSH_FAILURE_ROOT/jagent" config user.email updater-test@example.invalid
+printf 'local\n' > "$PUSH_FAILURE_ROOT/jagent/local.txt"
+git -C "$PUSH_FAILURE_ROOT/jagent" add local.txt
+git -C "$PUSH_FAILURE_ROOT/jagent" commit -q -m local
+printf 'remote\n' > "$PUSH_FAILURE_ROOT/seed/remote.txt"
+git -C "$PUSH_FAILURE_ROOT/seed" add remote.txt
+git -C "$PUSH_FAILURE_ROOT/seed" commit -q -m remote
+git -C "$PUSH_FAILURE_ROOT/seed" push -q
+printf '#!/bin/sh\nexit 1\n' > "$PUSH_FAILURE_ROOT/remote.git/hooks/pre-receive"
+chmod +x "$PUSH_FAILURE_ROOT/remote.git/hooks/pre-receive"
+if /bin/bash "$UPDATER" -N -T jagent "$PUSH_FAILURE_ROOT" > "$TEST_ROOT/push-failure.out" 2>&1; then
+    fail "a rejected push after a successful pull reported success"
+fi
+assert_contains "$TEST_ROOT/push-failure.out" "push 失败"
+[ -f "$PUSH_FAILURE_ROOT/jagent/remote.txt" ] || fail "pull did not precede the rejected push"
+
+# Restoring autostashed edits can conflict even when the update itself works.
+STASH_FAILURE_ROOT="$TEST_ROOT/stash-failure"
+git init -q --bare "$STASH_FAILURE_ROOT/remote.git"
+init_repo "$STASH_FAILURE_ROOT/seed"
+git -C "$STASH_FAILURE_ROOT/seed" remote add origin "$STASH_FAILURE_ROOT/remote.git"
+git -C "$STASH_FAILURE_ROOT/seed" push -q -u origin HEAD
+git clone -q "$STASH_FAILURE_ROOT/remote.git" "$STASH_FAILURE_ROOT/jagent"
+printf 'local edit\n' > "$STASH_FAILURE_ROOT/jagent/tracked.txt"
+printf 'remote edit\n' > "$STASH_FAILURE_ROOT/seed/tracked.txt"
+git -C "$STASH_FAILURE_ROOT/seed" add tracked.txt
+git -C "$STASH_FAILURE_ROOT/seed" commit -q -m 'remote edit'
+git -C "$STASH_FAILURE_ROOT/seed" push -q
+if /bin/bash "$UPDATER" -Ns --no-push -T jagent "$STASH_FAILURE_ROOT" > "$TEST_ROOT/stash-failure.out" 2>&1; then
+    fail "an unresolved autostash conflict reported success"
+fi
+assert_contains "$TEST_ROOT/stash-failure.out" "stash 冲突"
+[ -n "$(git -C "$STASH_FAILURE_ROOT/jagent" diff --name-only --diff-filter=U)" ] \
+    || fail "the fixture did not produce an unresolved conflict"
+
 printf 'test-git-update-all: ok\n'

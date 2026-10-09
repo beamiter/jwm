@@ -570,7 +570,17 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
                                                 .iter()
                                                 .find(|m| m.id == crtc_info.mode().resource_id())
                                                 .map(|m| {
-                                                    mode_refresh_hz(m.dot_clock, m.htotal, m.vtotal)
+                                                    mode_refresh_hz(
+                                                        m.dot_clock,
+                                                        m.htotal,
+                                                        m.vtotal,
+                                                        m.mode_flags.contains(
+                                                            xcb::randr::ModeFlag::INTERLACE,
+                                                        ),
+                                                        m.mode_flags.contains(
+                                                            xcb::randr::ModeFlag::DOUBLE_SCAN,
+                                                        ),
+                                                    )
                                                 })
                                                 .unwrap_or(60);
                                             rates.insert(idx as u32, refresh);
@@ -602,7 +612,15 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
                         let refresh = modes
                             .iter()
                             .find(|m| m.id == info.mode().resource_id())
-                            .map(|m| mode_refresh_hz(m.dot_clock, m.htotal, m.vtotal))
+                            .map(|m| {
+                                mode_refresh_hz(
+                                    m.dot_clock,
+                                    m.htotal,
+                                    m.vtotal,
+                                    m.mode_flags.contains(xcb::randr::ModeFlag::INTERLACE),
+                                    m.mode_flags.contains(xcb::randr::ModeFlag::DOUBLE_SCAN),
+                                )
+                            })
                             .unwrap_or(60);
                         rates.insert(idx as u32, refresh);
                     }

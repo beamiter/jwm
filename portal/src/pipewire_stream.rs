@@ -95,8 +95,8 @@ pub struct DmabufBridge {
     pub next_req_seq: std::sync::atomic::AtomicU64,
     /// PW → capture: `(seq, slot_idx)`.
     pub fill_req_tx: mpsc::Sender<(u64, usize)>,
-    /// Capture → PW: the seq of the request just completed.
-    pub fill_done_rx: Mutex<mpsc::Receiver<u64>>,
+    /// Capture → PW: (request sequence, capture succeeded).
+    pub fill_done_rx: Mutex<mpsc::Receiver<(u64, bool)>>,
 }
 
 pub type SharedBridge = Arc<DmabufBridge>;
@@ -311,26 +311,11 @@ fn run(
                         .next_req_seq
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = bridge.fill_req_tx.send((req_seq, slot_idx));
-                    let deadline = std::time::Instant::now() + Duration::from_millis(100);
-                    let filled = {
-                        let rx = bridge.fill_done_rx.lock().unwrap();
-                        loop {
-                            let now = std::time::Instant::now();
-                            if now >= deadline {
-                                break false;
-                            }
-                            match rx.recv_timeout(deadline - now) {
-                                Ok(seq) if seq == req_seq => break true,
-                                Ok(stale) => {
-                                    log::trace!(
-                                        "dmabuf: discarding stale done seq={stale} (want {req_seq})"
-                                    );
-                                    continue;
-                                }
-                                Err(_) => break false,
-                            }
-                        }
-                    };
+                    let filled = wait_for_fill(
+                        &bridge.fill_done_rx.lock().unwrap(),
+                        req_seq,
+                        Duration::from_millis(100),
+                    );
                     let chunk = data.chunk_mut();
                     *chunk.offset_mut() = 0;
                     *chunk.stride_mut() = bridge.stride as i32;
@@ -395,7 +380,7 @@ fn run(
                     reported.set(true);
                 }
             }
-            if shutdown_rx.try_recv().is_ok() {
+            if shutdown_requested(&shutdown_rx) {
                 if let Some(ml) = mainloop_weak.upgrade() {
                     ml.quit();
                 }
@@ -422,7 +407,6 @@ fn run(
 /// `size=stride*height`.
 fn build_connect_params(spec: &StreamSpec, source: &Source) -> Result<Vec<OwnedPod>, String> {
     use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
-    use spa::param::video::VideoFormat;
     use spa::pod::{Property, PropertyFlags, Value, serialize::PodSerializer};
     use spa::utils::{Fraction, Rectangle, SpaTypes};
 
@@ -436,14 +420,8 @@ fn build_connect_params(spec: &StreamSpec, source: &Source) -> Result<Vec<OwnedP
         pw::spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
         pw::spa::pod::property!(
             FormatProperties::VideoFormat,
-            Choice,
-            Enum,
             Id,
-            VideoFormat::BGRx,
-            VideoFormat::BGRx,
-            VideoFormat::RGBx,
-            VideoFormat::RGBA,
-            VideoFormat::BGRA,
+            source_video_format(source)?
         ),
         pw::spa::pod::property!(
             FormatProperties::VideoSize,
@@ -532,5 +510,146 @@ pub struct OwnedPod(Vec<u8>);
 impl OwnedPod {
     pub fn as_pod(&mut self) -> &Pod {
         Pod::from_bytes(&self.0).expect("pod always parses (round-trip from serialize)")
+    }
+}
+
+/// Dropping the startup owner (including its five-second timeout path) is
+/// cancellation too; a worker must not outlive the only handle that can stop it.
+fn shutdown_requested(receiver: &mpsc::Receiver<()>) -> bool {
+    !matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty))
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn timed_out_startup_owner_disconnect_requests_worker_shutdown() {
+        let (owner, worker) = mpsc::channel();
+        assert!(!shutdown_requested(&worker));
+        drop(owner);
+        assert!(shutdown_requested(&worker));
+    }
+
+    #[test]
+    fn explicit_stream_shutdown_requests_worker_shutdown() {
+        let (owner, worker) = mpsc::channel();
+        owner.send(()).unwrap();
+        assert!(shutdown_requested(&worker));
+    }
+}
+
+/// A matching completion only publishes a full chunk if capture succeeded.
+/// Stale sequence numbers cannot authorize the current request's buffer.
+fn wait_for_fill(receiver: &mpsc::Receiver<(u64, bool)>, wanted: u64, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        match receiver.recv_timeout(deadline - now) {
+            Ok((sequence, succeeded)) if sequence == wanted => return succeeded,
+            Ok(_) => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    #[test]
+    fn failed_capture_completion_never_publishes_a_full_chunk() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send((7, false)).unwrap();
+        assert!(!wait_for_fill(&receiver, 7, Duration::from_millis(20)));
+    }
+
+    #[test]
+    fn only_matching_successful_capture_publishes_a_full_chunk() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send((6, true)).unwrap();
+        sender.send((7, false)).unwrap();
+        assert!(!wait_for_fill(&receiver, 7, Duration::from_millis(20)));
+        sender.send((8, true)).unwrap();
+        assert!(wait_for_fill(&receiver, 8, Duration::from_millis(20)));
+        drop(sender);
+        assert!(!wait_for_fill(&receiver, 9, Duration::from_millis(20)));
+    }
+}
+
+/// Match the capture allocation's byte layout. No color conversion occurs in
+/// either on_process path, so unsupported layouts must not be advertised.
+fn source_video_format(source: &Source) -> Result<spa::param::video::VideoFormat, String> {
+    use spa::param::video::VideoFormat;
+    match source {
+        Source::Empty => Ok(VideoFormat::BGRx),
+        Source::Shm(frame) => {
+            let frame = frame.lock().map_err(|_| "capture frame lock poisoned")?;
+            Ok(shm_video_format(
+                frame.has_alpha,
+                cfg!(target_endian = "little"),
+            ))
+        }
+        Source::Dmabuf(bridge) => dmabuf_video_format(bridge.fourcc),
+    }
+}
+
+fn shm_video_format(has_alpha: bool, little_endian: bool) -> spa::param::video::VideoFormat {
+    use spa::param::video::VideoFormat;
+    match (has_alpha, little_endian) {
+        (false, true) => VideoFormat::BGRx,
+        (true, true) => VideoFormat::BGRA,
+        (false, false) => VideoFormat::xRGB,
+        (true, false) => VideoFormat::ARGB,
+    }
+}
+
+fn dmabuf_video_format(fourcc: u32) -> Result<spa::param::video::VideoFormat, String> {
+    use spa::param::video::VideoFormat;
+    // Supported DRM fourcc values have no BIG_ENDIAN flag: bytes are LE.
+    match fourcc {
+        dmabuf::fourcc::XRGB8888 => Ok(VideoFormat::BGRx),
+        dmabuf::fourcc::ARGB8888 => Ok(VideoFormat::BGRA),
+        _ => Err(format!("unsupported capture dmabuf fourcc 0x{fourcc:x}")),
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    use spa::param::video::VideoFormat;
+
+    #[test]
+    fn capture_formats_do_not_advertise_unswizzled_rgb_channels() {
+        assert_eq!(
+            dmabuf_video_format(dmabuf::fourcc::XRGB8888).unwrap(),
+            VideoFormat::BGRx
+        );
+        assert_eq!(
+            dmabuf_video_format(dmabuf::fourcc::ARGB8888).unwrap(),
+            VideoFormat::BGRA
+        );
+        assert!(dmabuf_video_format(0).is_err());
+        assert_eq!(shm_video_format(false, true), VideoFormat::BGRx);
+        assert_eq!(shm_video_format(true, true), VideoFormat::BGRA);
+        assert_eq!(shm_video_format(false, false), VideoFormat::xRGB);
+        assert_eq!(shm_video_format(true, false), VideoFormat::ARGB);
+    }
+
+    #[test]
+    fn shm_enum_format_is_one_exact_source_layout() {
+        let frame = crate::capture::new_frame_slot();
+        frame.lock().unwrap().has_alpha = true;
+        let source = Source::Shm(frame);
+        let mut params = build_connect_params(&StreamSpec::default(), &source).unwrap();
+        let mut info = spa::param::video::VideoInfoRaw::default();
+        info.parse(params[0].as_pod()).unwrap();
+        assert_eq!(
+            info.format(),
+            shm_video_format(true, cfg!(target_endian = "little"))
+        );
     }
 }

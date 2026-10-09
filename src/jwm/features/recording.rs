@@ -361,6 +361,18 @@ impl RecordingState {
     ) -> Option<Rect> {
         let screen_width = screen_width.max(MIN_RECORDING_REGION_SIZE);
         let screen_height = screen_height.max(MIN_RECORDING_REGION_SIZE);
+        // A monitor can shrink or disappear while this interaction is armed.
+        // Refit its saved rectangle before calculating edge clamp bounds.
+        let fit_initial = |initial: Rect| {
+            let width = initial.w.clamp(MIN_RECORDING_REGION_SIZE, screen_width);
+            let height = initial.h.clamp(MIN_RECORDING_REGION_SIZE, screen_height);
+            Rect::new(
+                initial.x.clamp(0, screen_width - width),
+                initial.y.clamp(0, screen_height - height),
+                width,
+                height,
+            )
+        };
         let updated = match self.drag {
             RecordingRegionDrag::None => return self.region,
             RecordingRegionDrag::New { anchor_x, anchor_y } => {
@@ -375,16 +387,24 @@ impl RecordingState {
                 pointer_y: start_y,
                 initial,
             } => {
+                let initial = fit_initial(initial);
                 let max_x = (screen_width - initial.w).max(0);
                 let max_y = (screen_height - initial.h).max(0);
                 Rect::new(
-                    (initial.x + pointer_x - start_x).clamp(0, max_x),
-                    (initial.y + pointer_y - start_y).clamp(0, max_y),
+                    initial
+                        .x
+                        .saturating_add(pointer_x.saturating_sub(start_x))
+                        .clamp(0, max_x),
+                    initial
+                        .y
+                        .saturating_add(pointer_y.saturating_sub(start_y))
+                        .clamp(0, max_y),
                     initial.w.min(screen_width),
                     initial.h.min(screen_height),
                 )
             }
             RecordingRegionDrag::Resize { edges, initial } => {
+                let initial = fit_initial(initial);
                 let mut left = initial.x;
                 let mut top = initial.y;
                 let mut right = initial.x + initial.w;
@@ -431,6 +451,27 @@ impl RecordingState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_resize_remains_valid_after_screen_shrinks() {
+        for (press_x, press_y, move_x, move_y) in [
+            (1900, 250, 1000, 250),
+            (1500, 250, 1000, 250),
+            (1700, 100, 1000, 200),
+            (1700, 400, 1000, 700),
+            (1900, 400, 1000, 700),
+        ] {
+            let mut state = RecordingState::new();
+            state.start("/tmp/synthetic.mp4".into());
+            state.set_region(Rect::new(1500, 100, 400, 300));
+            assert!(state.begin_region_adjustment());
+            state.begin_region_drag(press_x, press_y);
+            let region = state.update_region_drag(move_x, move_y, 1280, 720).unwrap();
+            assert!(region.x >= 0 && region.y >= 0);
+            assert!(region.w >= MIN_RECORDING_REGION_SIZE && region.h >= MIN_RECORDING_REGION_SIZE);
+            assert!(region.x + region.w <= 1280 && region.y + region.h <= 720);
+        }
+    }
 
     #[test]
     fn test_recording_lifecycle() {

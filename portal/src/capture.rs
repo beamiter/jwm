@@ -61,6 +61,8 @@ pub struct FrameSlot {
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+    /// Whether the native-endian SHM ARGB word carries alpha rather than X.
+    pub has_alpha: bool,
     /// Last delivered frame pixels (overwritten on each capture). When `seq`
     /// is zero, contents are undefined (no frame has landed yet).
     pub data: Vec<u8>,
@@ -75,6 +77,7 @@ impl Default for FrameSlot {
             width: 0,
             height: 0,
             stride: 0,
+            has_alpha: false,
             data: Vec::new(),
             seq: 0,
         }
@@ -101,19 +104,7 @@ pub struct CaptureHandle {
     pub framerate_num: u32,
     pub framerate_den: u32,
     pub transport: CaptureTransport,
-    shutdown: Option<mpsc::Sender<()>>,
-    join: Option<JoinHandle<()>>,
-}
-
-impl Drop for CaptureHandle {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
-    }
+    _worker: CaptureWorker,
 }
 
 /// Which source the capture thread should track. The string identifies it on
@@ -159,22 +150,40 @@ fn spawn_capture(target: CaptureTarget, paint_cursors: bool) -> Result<CaptureHa
     let (init_tx, init_rx) = mpsc::sync_channel::<Result<InitResult, String>>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
     let init_tx_for_thread = init_tx.clone();
+    let cancellation = Arc::new(CaptureCancellation::default());
+    let thread_cancellation = Arc::clone(&cancellation);
     let join = std::thread::Builder::new()
         .name("jwm-portal-cap".into())
         .spawn(move || {
-            let result = run_capture(target, paint_cursors, &init_tx_for_thread, shutdown_rx);
+            let result = run_capture(
+                target,
+                paint_cursors,
+                &init_tx_for_thread,
+                shutdown_rx,
+                &thread_cancellation,
+            );
             if let Err(e) = result {
                 // If we failed before sending an init result, surface it.
-                let _ = init_tx_for_thread.send(Err(e.clone()));
+                report_capture_error(&init_tx_for_thread, &e);
                 warn!("capture thread exited: {e}");
             }
         })
         .map_err(|e| format!("spawn capture thread: {e}"))?;
+    // Own the worker before waiting: every startup error shuts down its dedicated
+    // socket and joins. Socket connection itself has a separate bounded deadline.
+    let worker = CaptureWorker {
+        cancellation,
+        shutdown: Some(shutdown_tx),
+        join: Some(join),
+    };
 
-    let init = init_rx
+    let init_result = init_rx
         .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| format!("capture thread did not negotiate within 5s: {e}"))?
-        .map_err(|e| format!("capture thread negotiation failed: {e}"))?;
+        .map_err(|e| format!("capture thread did not negotiate within 5s: {e}"))
+        .and_then(|result| result.map_err(|e| format!("capture thread negotiation failed: {e}")));
+    // Close before worker cleanup; a late init result must not block its sender.
+    drop(init_rx);
+    let init = init_result?;
 
     Ok(CaptureHandle {
         width: init.width,
@@ -182,9 +191,39 @@ fn spawn_capture(target: CaptureTarget, paint_cursors: bool) -> Result<CaptureHa
         framerate_num: init.framerate_num,
         framerate_den: init.framerate_den,
         transport: init.transport,
-        shutdown: Some(shutdown_tx),
-        join: Some(join),
+        _worker: worker,
     })
+}
+
+/// Mapping ownership must survive every early return, including init receiver
+/// cancellation after the compositor has already negotiated a large buffer.
+struct ShmMapping {
+    ptr: NonNull<c_void>,
+    len: usize,
+}
+
+impl ShmMapping {
+    fn new(fd: std::os::fd::BorrowedFd<'_>, len: usize) -> Result<Self, String> {
+        let nonzero = NonZeroUsize::new(len).ok_or("zero-sized buffer")?;
+        let ptr = unsafe {
+            mmap(
+                None,
+                nonzero,
+                ProtFlags::PROT_READ,
+                MapFlags::MAP_SHARED,
+                fd,
+                0,
+            )
+        }
+        .map_err(|e| format!("mmap: {e}"))?;
+        Ok(Self { ptr, len })
+    }
+}
+
+impl Drop for ShmMapping {
+    fn drop(&mut self) {
+        let _ = unsafe { munmap(self.ptr, self.len) };
+    }
 }
 
 struct InitResult {
@@ -235,13 +274,34 @@ struct State {
     frame_failure: Option<FailureReason>,
 }
 
+/// Resolve only the source the user selected. A disconnected or renamed
+/// output must not turn consent for one display into capture of another.
+fn selected_output_index<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    selected: &str,
+) -> Result<usize, String> {
+    if selected.is_empty() {
+        return Err("selected output name is empty".into());
+    }
+    names
+        .into_iter()
+        .position(|name| name == selected)
+        .ok_or_else(|| format!("selected output `{selected}` is no longer available"))
+}
+
 fn run_capture(
     target: CaptureTarget,
     paint_cursors: bool,
     init_tx: &mpsc::SyncSender<Result<InitResult, String>>,
     shutdown_rx: mpsc::Receiver<()>,
+    cancellation: &CaptureCancellation,
 ) -> Result<(), String> {
-    let conn = Connection::connect_to_env().map_err(|e| format!("connect_to_env: {e}"))?;
+    let path = capture_socket_path(
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+    )?;
+    let conn = connect_capture_socket(&path, Duration::from_secs(2))?;
+    cancellation.register(&conn)?;
     let (globals, mut event_queue) =
         registry_queue_init::<State>(&conn).map_err(|e| format!("registry_queue_init: {e}"))?;
     let qh = event_queue.handle();
@@ -321,15 +381,13 @@ fn run_capture(
                     .blocking_dispatch(&mut state)
                     .map_err(|e| format!("dispatch (outputs): {e}"))?;
                 if Instant::now() > deadline {
-                    warn!("capture: timed out waiting for wl_output names; using first output");
-                    break;
+                    return Err("timed out waiting for wl_output names".into());
                 }
             }
-            let target_idx = state
-                .outputs
-                .iter()
-                .position(|(_, p)| &p.name == name)
-                .unwrap_or(0);
+            let target_idx = selected_output_index(
+                state.outputs.iter().map(|(_, probe)| probe.name.as_str()),
+                name,
+            )?;
             let target_output = state.outputs[target_idx].0.clone();
             let refresh_mhz = state.outputs[target_idx].1.refresh_mhz;
             let resolved_name = state.outputs[target_idx].1.name.clone();
@@ -464,7 +522,7 @@ fn run_capture(
         let size = stride0 as u32 * height;
         let modifier = buffers[0].modifier;
         let (fill_req_tx, fill_req_rx) = mpsc::channel::<(u64, usize)>();
-        let (fill_done_tx, fill_done_rx) = mpsc::channel::<u64>();
+        let (fill_done_tx, fill_done_rx) = mpsc::channel::<(u64, bool)>();
         let bridge = Arc::new(DmabufBridge {
             fourcc: pick,
             modifier,
@@ -537,18 +595,7 @@ fn run_capture(
     let memfd = memfd_create(cname.as_c_str(), MFdFlags::MFD_CLOEXEC)
         .map_err(|e| format!("memfd_create: {e}"))?;
     ftruncate(&memfd, buffer_bytes as i64).map_err(|e| format!("ftruncate: {e}"))?;
-    let len = NonZeroUsize::new(buffer_bytes).ok_or("zero-sized buffer")?;
-    let map_ptr: NonNull<c_void> = unsafe {
-        mmap(
-            None,
-            len,
-            ProtFlags::PROT_READ,
-            MapFlags::MAP_SHARED,
-            &memfd,
-            0,
-        )
-        .map_err(|e| format!("mmap: {e}"))?
-    };
+    let mapping = ShmMapping::new(memfd.as_fd(), buffer_bytes)?;
 
     let pool: wl_shm_pool::WlShmPool = shm.create_pool(memfd.as_fd(), buffer_bytes as i32, &qh, ());
     let wl_buf: wl_buffer::WlBuffer = pool.create_buffer(
@@ -567,6 +614,7 @@ fn run_capture(
         f.width = width;
         f.height = height;
         f.stride = stride;
+        f.has_alpha = format == wl_shm::Format::Argb8888;
         f.data = vec![0u8; buffer_bytes];
         f.seq = 0;
     }
@@ -592,7 +640,7 @@ fn run_capture(
         width,
         height,
         buffer_bytes,
-        map_ptr,
+        mapping.ptr,
         &qh,
         &shutdown_rx,
     );
@@ -601,7 +649,6 @@ fn run_capture(
     pool.destroy();
     session.destroy();
     source.destroy();
-    let _ = unsafe { munmap(map_ptr, buffer_bytes) };
     info!("capture: SHM thread exiting");
     result
 }
@@ -610,12 +657,12 @@ fn run_capture(
 /// All fields drop in declaration order: wl_buffers first (already destroyed
 /// explicitly), then DmabufBuffers (close fds + free BO), then GbmContext.
 struct DmabufSetup {
-    _gbm: GbmContext,
-    _bufs: Vec<DmabufBuffer>,
     wl_buffers: Vec<wl_buffer::WlBuffer>,
+    _bufs: Vec<DmabufBuffer>,
+    _gbm: GbmContext,
     bridge: SharedBridge,
     fill_req_rx: mpsc::Receiver<(u64, usize)>,
-    fill_done_tx: mpsc::Sender<u64>,
+    fill_done_tx: mpsc::Sender<(u64, bool)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -701,7 +748,7 @@ fn frame_loop_dmabuf(
     width: u32,
     height: u32,
     fill_req_rx: &mpsc::Receiver<(u64, usize)>,
-    fill_done_tx: &mpsc::Sender<u64>,
+    fill_done_tx: &mpsc::Sender<(u64, bool)>,
     qh: &QueueHandle<State>,
     shutdown_rx: &mpsc::Receiver<()>,
 ) -> Result<(), String> {
@@ -723,7 +770,7 @@ fn frame_loop_dmabuf(
             // Still ack — PW is waiting on this seq. Without the ack PW will
             // time out and the next round will see this as stale anyway,
             // but acking with the matching seq lets PW progress quickly.
-            let _ = fill_done_tx.send(req_seq);
+            let _ = fill_done_tx.send((req_seq, false));
             continue;
         };
 
@@ -747,7 +794,7 @@ fn frame_loop_dmabuf(
 
         match state.frame_status {
             FrameStatus::Ready => {
-                let _ = fill_done_tx.send(req_seq);
+                let _ = fill_done_tx.send((req_seq, true));
             }
             FrameStatus::Failed => {
                 warn!(
@@ -758,7 +805,7 @@ fn frame_loop_dmabuf(
                 // an empty chunk (size=0) which downstream treats as a
                 // dropped frame. Brief backoff so we don't tight-loop on a
                 // persistently broken source.
-                let _ = fill_done_tx.send(req_seq);
+                let _ = fill_done_tx.send((req_seq, false));
                 std::thread::sleep(Duration::from_millis(100));
             }
             _ => {}
@@ -961,5 +1008,303 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_output_index;
+
+    #[test]
+    fn selected_output_must_still_exist() {
+        assert!(selected_output_index(["DP-1"], "DP-2").is_err());
+        assert!(selected_output_index([], "DP-2").is_err());
+        assert!(selected_output_index([""], "").is_err());
+    }
+
+    #[test]
+    fn selected_output_identity_survives_enumeration_reordering() {
+        assert_eq!(selected_output_index(["DP-1", "DP-2"], "DP-2"), Ok(1));
+        assert_eq!(selected_output_index(["DP-2", "DP-1"], "DP-2"), Ok(0));
+    }
+}
+
+#[cfg(test)]
+mod shm_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn startup_error_releases_the_synthetic_mapping() {
+        let name = CString::new("jwm-portal-mapping-test").unwrap();
+        let fd = memfd_create(name.as_c_str(), MFdFlags::MFD_CLOEXEC).unwrap();
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        assert!(page_size > 0);
+        ftruncate(&fd, page_size as i64).unwrap();
+        let ptr;
+        {
+            let mapping = ShmMapping::new(fd.as_fd(), page_size).unwrap();
+            ptr = mapping.ptr;
+            // Same unwinding path as failed init_tx.send: no frame and no reads.
+            let _startup_failure: Result<(), &str> = Err("init receiver closed");
+        }
+        let mut residency = 0u8;
+        let result = unsafe { libc::mincore(ptr.as_ptr(), page_size, &mut residency) };
+        assert_eq!(result, -1, "mapping survived owner drop");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENOMEM)
+        );
+    }
+}
+
+#[derive(Default)]
+struct CaptureSocketState {
+    stopped: bool,
+    socket: Option<std::os::fd::OwnedFd>,
+}
+
+#[derive(Default)]
+struct CaptureCancellation(Mutex<CaptureSocketState>);
+
+impl CaptureCancellation {
+    // Call only for this worker's dedicated connection. Never register discovery.
+    fn register(&self, conn: &Connection) -> Result<(), String> {
+        use std::os::fd::AsRawFd;
+        let backend = conn.backend();
+        let socket = backend
+            .poll_fd()
+            .try_clone_to_owned()
+            .map_err(|e| format!("duplicate capture cancellation fd: {e}"))?;
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| "capture cancellation mutex poisoned")?;
+        if state.stopped {
+            // Cancellation can race connection setup. Do not begin a roundtrip.
+            unsafe {
+                libc::shutdown(socket.as_raw_fd(), libc::SHUT_RDWR);
+            }
+            return Err("capture cancelled during startup".into());
+        }
+        if state.socket.is_some() {
+            return Err("capture cancellation socket already registered".into());
+        }
+        state.socket = Some(socket);
+        Ok(())
+    }
+
+    fn shutdown(&self) {
+        use std::os::fd::AsRawFd;
+        let socket = {
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.stopped = true;
+            state.socket.take()
+        };
+        if let Some(socket) = socket {
+            // This owned duplicate refers only to the capture connection. The
+            // shared socket shutdown wakes its blocking dispatcher/roundtrip;
+            // dropping the duplicate alone would not do that.
+            unsafe {
+                libc::shutdown(socket.as_raw_fd(), libc::SHUT_RDWR);
+            }
+        }
+    }
+}
+
+struct CaptureWorker {
+    cancellation: Arc<CaptureCancellation>,
+    shutdown: Option<mpsc::Sender<()>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for CaptureWorker {
+    fn drop(&mut self) {
+        self.cancellation.shutdown();
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn dropping_capture_handle_interrupts_real_wayland_dispatch_without_server_traffic() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(client).unwrap();
+        let cancellation = Arc::new(CaptureCancellation::default());
+        cancellation.register(&conn).unwrap();
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let mut queue = conn.new_event_queue::<()>();
+            entered_tx.send(()).unwrap();
+            // No globals, frame requests, pixels, or real display are involved.
+            let _ = queue.blocking_dispatch(&mut ());
+        });
+        let handle = CaptureHandle {
+            width: 0,
+            height: 0,
+            framerate_num: 1,
+            framerate_den: 1,
+            transport: CaptureTransport::Shm(new_frame_slot()),
+            _worker: CaptureWorker {
+                cancellation,
+                shutdown: Some(shutdown_tx),
+                join: Some(join),
+            },
+        };
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            // Old mpsc-only Drop reaches this deadline, then unwinds rather than
+            // hanging the whole test suite. A fixed Drop finishes beforehand.
+            let _ = done_rx.recv_timeout(Duration::from_millis(800));
+            let _ = server.shutdown(Shutdown::Both);
+        });
+        let started = Instant::now();
+        drop(handle);
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        watchdog.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "worker waited for server traffic: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn cancelled_startup_cannot_register_a_late_connection() {
+        let cancellation = CaptureCancellation::default();
+        cancellation.shutdown();
+        cancellation.shutdown();
+        let (client, _server) = UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(client).unwrap();
+        assert!(cancellation.register(&conn).is_err());
+        assert!(cancellation.0.lock().unwrap().socket.is_none());
+    }
+}
+
+// Capture needs its own connection. WAYLAND_SOCKET belongs to the initial
+// discovery connection and must never be duplicated or shut down here.
+fn capture_socket_path(
+    display: Option<std::ffi::OsString>,
+    runtime: Option<std::ffi::OsString>,
+) -> Result<std::path::PathBuf, String> {
+    let display = display.filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "capture requires a reconnectable WAYLAND_DISPLAY path; fd-only WAYLAND_SOCKET is unsupported".to_string())?;
+    if display.is_absolute() {
+        return Ok(display);
+    }
+    let runtime = runtime
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            "capture requires an absolute XDG_RUNTIME_DIR for relative WAYLAND_DISPLAY".to_string()
+        })?;
+    Ok(runtime.join(display))
+}
+
+fn connect_capture_socket(path: &std::path::Path, timeout: Duration) -> Result<Connection, String> {
+    let stream = jwm_ipc_transport::connect(path, timeout)
+        .map_err(|e| format!("connect dedicated capture socket {}: {e}", path.display()))?;
+    Connection::from_socket(stream)
+        .map_err(|e| format!("initialize dedicated capture connection: {e}"))
+}
+
+#[cfg(test)]
+mod capture_connection_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    #[test]
+    fn capture_requires_a_named_dedicated_socket() {
+        assert!(
+            capture_socket_path(None, Some("/tmp".into()))
+                .unwrap_err()
+                .contains("fd-only")
+        );
+        assert!(capture_socket_path(Some("wayland-test".into()), Some("relative".into())).is_err());
+        assert_eq!(
+            capture_socket_path(Some("/tmp/wayland-test".into()), None).unwrap(),
+            std::path::Path::new("/tmp/wayland-test")
+        );
+        assert_eq!(
+            capture_socket_path(Some("wayland-test".into()), Some("/tmp".into())).unwrap(),
+            std::path::Path::new("/tmp/wayland-test")
+        );
+    }
+
+    #[test]
+    fn full_capture_accept_queue_has_a_connection_deadline() {
+        let dir = std::env::temp_dir().join(format!("jwm-capture-backlog-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("wayland-test");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let pending = UnixStream::connect(&path).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let _ = done_rx.recv_timeout(Duration::from_secs(2));
+            drop(listener);
+        });
+        let started = Instant::now();
+        let result = connect_capture_socket(&path, Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        drop(pending);
+        watchdog.join().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "connection deadline bypassed: {elapsed:?}"
+        );
+    }
+}
+
+fn report_capture_error(sender: &mpsc::SyncSender<Result<InitResult, String>>, error: &str) {
+    // Initial errors must reach the caller, but a successfully queued init result
+    // is already sufficient. Never block on an unused second startup report.
+    let _ = sender.try_send(Err(error.to_string()));
+}
+
+#[cfg(test)]
+mod init_report_tests {
+    use super::*;
+
+    #[test]
+    fn reporting_an_error_does_not_wait_behind_a_queued_init_result() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        assert!(tx.send(Err("already reported".to_string())).is_ok());
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let _ = done_rx.recv_timeout(Duration::from_millis(800));
+            drop(rx);
+        });
+        let started = Instant::now();
+        report_capture_error(&tx, "late failure");
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        watchdog.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "second init report blocked: {elapsed:?}"
+        );
     }
 }

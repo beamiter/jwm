@@ -35,9 +35,9 @@ fn is_executable(path: &Path) -> bool {
 #[must_use]
 pub fn is_wayland_session() -> bool {
     is_wayland_session_from(
-        env::var_os("WAYLAND_DISPLAY").as_deref(),
-        env::var_os("XDG_SESSION_TYPE").as_deref(),
-        env::var_os("DISPLAY").as_deref(),
+        crate::child_environment::var_os("WAYLAND_DISPLAY").as_deref(),
+        crate::child_environment::var_os("XDG_SESSION_TYPE").as_deref(),
+        crate::child_environment::var_os("DISPLAY").as_deref(),
     )
 }
 

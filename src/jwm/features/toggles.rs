@@ -908,22 +908,40 @@ impl Jwm {
     /// Coalesce a stale-while-revalidate read. Opening and ordinary panel
     /// rebuilds call this freely; at most one external-tool worker is alive.
     pub(crate) fn ensure_control_snapshot_refresh(&mut self, now: std::time::Instant) {
+        self.ensure_control_snapshot_refresh_with(now, |epoch| {
+            crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
+                (
+                    epoch,
+                    crate::jwm::features::system_controls::ControlCenterSnapshot::read(),
+                )
+            })
+        });
+    }
+
+    /// Keep admission testable without reading the host's control tools.
+    fn ensure_control_snapshot_refresh_with(
+        &mut self,
+        now: std::time::Instant,
+        start: impl FnOnce(
+            u64,
+        ) -> crate::jwm::features::connectivity::BackgroundJob<(
+            u64,
+            crate::jwm::features::system_controls::ControlCenterSnapshot,
+        )>,
+    ) {
         self.poll_control_snapshot_job();
         if !should_start_control_snapshot(
-            self.features.control_snapshot_job.is_some(),
+            crate::jwm::features::connectivity::job_in_flight(
+                self.features.control_snapshot_job.as_ref(),
+            ),
             self.features.control_snapshot_refreshed_at,
             now,
         ) {
             return;
         }
         let epoch = self.features.control_snapshot_epoch;
-        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
-            (
-                epoch,
-                crate::jwm::features::system_controls::ControlCenterSnapshot::read(),
-            )
-        });
-        self.features.control_snapshot_job = Some(self.track_background_job(job));
+        let job = start(epoch);
+        self.features.control_snapshot_job = job.started().then(|| self.track_background_job(job));
     }
 
     fn mutate_control_snapshot(
@@ -1069,23 +1087,38 @@ impl Jwm {
     /// stale-while-revalidate scan when necessary. No directory traversal or
     /// PATH inspection happens on this event-loop path.
     fn cached_launcher_state(&mut self) -> SystemUiState {
+        self.cached_launcher_state_with(
+            crate::jwm::features::system_ui::start_application_discovery,
+        )
+    }
+
+    /// The factory is invoked only after the cache/worker admission checks.
+    fn cached_launcher_state_with(
+        &mut self,
+        start: impl FnOnce() -> crate::jwm::features::connectivity::BackgroundJob<
+            std::sync::Arc<[crate::jwm::features::system_ui::LaunchEntry]>,
+        >,
+    ) -> SystemUiState {
         // A worker may have finished between frame ticks. Taking its result is
         // non-blocking and avoids showing the indexing row for an extra frame.
         self.poll_launcher_catalog_job();
 
         let now = std::time::Instant::now();
-        if self.features.launcher_catalog_job.is_none()
-            && crate::jwm::features::system_ui::application_catalog_is_stale(
-                self.features.launcher_catalog_refreshed_at,
-                now,
-            )
-        {
-            let job = crate::jwm::features::system_ui::start_application_discovery();
-            self.features.launcher_catalog_job = Some(self.track_background_job(job));
+        if !crate::jwm::features::connectivity::job_in_flight(
+            self.features.launcher_catalog_job.as_ref(),
+        ) && crate::jwm::features::system_ui::application_catalog_is_stale(
+            self.features.launcher_catalog_refreshed_at,
+            now,
+        ) {
+            let job = start();
+            self.features.launcher_catalog_job =
+                job.started().then(|| self.track_background_job(job));
         }
 
         let indexing = self.features.launcher_catalog.is_empty()
-            && self.features.launcher_catalog_job.is_some();
+            && crate::jwm::features::connectivity::job_in_flight(
+                self.features.launcher_catalog_job.as_ref(),
+            );
         SystemUiState::open_launcher(
             std::sync::Arc::clone(&self.features.launcher_catalog),
             self.launcher_window_snapshot(),
@@ -1817,6 +1850,26 @@ impl Jwm {
 
     /// Connect, disconnect, or pair the selected device.
     pub(crate) fn activate_selected_bluetooth(&mut self, backend: &mut dyn Backend) {
+        self.activate_selected_bluetooth_with(
+            backend,
+            crate::jwm::features::connectivity::start_device_action,
+        );
+    }
+
+    fn activate_selected_bluetooth_with(
+        &mut self,
+        backend: &mut dyn Backend,
+        start: impl FnOnce(
+            &str,
+            &'static str,
+        )
+            -> crate::jwm::features::connectivity::BackgroundJob<Result<String, String>>,
+    ) {
+        if crate::jwm::features::connectivity::job_in_flight(
+            self.features.bluetooth_action.as_ref(),
+        ) {
+            return;
+        }
         let Some((address, name, action)) = self.features.system_ui.selected_bluetooth() else {
             return;
         };
@@ -1827,7 +1880,7 @@ impl Jwm {
         self.features
             .system_ui
             .set_bluetooth_message(format!("{action}ing\u{2026}"));
-        let job = crate::jwm::features::connectivity::start_device_action(&address, action);
+        let job = start(&address, action);
         self.features.bluetooth_action = Some(self.track_background_job(job));
         self.sync_system_ui(backend);
     }
@@ -2137,6 +2190,26 @@ impl Jwm {
 
     /// Act on the selected network: join it, or ask for its passphrase first.
     pub(crate) fn join_selected_wifi(&mut self, backend: &mut dyn Backend) {
+        self.join_selected_wifi_with(
+            backend,
+            crate::jwm::features::connectivity::has_saved_profile,
+            crate::jwm::features::connectivity::start_connect,
+        );
+    }
+
+    /// Both external operations are behind admission, including the saved
+    /// profile lookup. Tests supply pure factories and never invoke nmcli.
+    fn join_selected_wifi_with(
+        &mut self,
+        backend: &mut dyn Backend,
+        has_saved_profile: impl FnOnce(&str) -> bool,
+        start: impl FnOnce(
+            &str,
+            &crate::jwm::features::connectivity::ConnectPlan,
+            Option<String>,
+        )
+            -> crate::jwm::features::connectivity::BackgroundJob<Result<String, String>>,
+    ) {
         use crate::jwm::features::connectivity::{self, ConnectPlan};
 
         let Some((ssid, secured)) = self.features.system_ui.selected_wifi() else {
@@ -2145,7 +2218,9 @@ impl Jwm {
         // A forget in flight owns the air: joining now would race the delete
         // and its completion re-read. `forget_selected_wifi` guards both
         // directions; this arm is the recorded asymmetry's other half.
-        if connectivity::job_in_flight(self.features.wifi_forget.as_ref()) {
+        if connectivity::job_in_flight(self.features.wifi_forget.as_ref())
+            || connectivity::job_in_flight(self.features.wifi_connect.as_ref())
+        {
             return;
         }
         let mut passphrase = self.features.system_ui.take_wifi_passphrase();
@@ -2161,7 +2236,7 @@ impl Jwm {
             },
             in_use: false,
         };
-        let saved = connectivity::has_saved_profile(&ssid);
+        let saved = has_saved_profile(&ssid);
         let plan = connectivity::plan_connect(&network, saved, passphrase.as_deref());
 
         if plan == ConnectPlan::NeedsPassphrase {
@@ -2176,7 +2251,7 @@ impl Jwm {
             "Connecting to {}\u{2026}",
             connectivity::display_ssid(&ssid)
         ));
-        let job = connectivity::start_connect(&ssid, &plan, passphrase.clone());
+        let job = start(&ssid, &plan, passphrase.clone());
         self.features.wifi_connect = Some(self.track_background_job(job));
         if let Some(secret) = passphrase.as_mut() {
             // The worker owns its own copy; wipe ours rather than dropping it.
@@ -3360,10 +3435,13 @@ impl Jwm {
             for (index, entry) in layout.iter_mut().enumerate() {
                 entry.5 = index == plan.selected_in_window;
             }
-            backend.compositor_set_overview_mode(true, &layout);
-            if let Some(root) = backend.root_window() {
-                let _ = backend.key_ops().grab_keyboard(root);
+            if let Some(root) = backend.root_window()
+                && let Err(error) = backend.key_ops().grab_keyboard(root)
+            {
+                self.features.overview.deactivate();
+                return Err(error.into());
             }
+            backend.compositor_set_overview_mode(true, &layout);
         }
         Ok(())
     }
@@ -3445,7 +3523,7 @@ impl Jwm {
         if !self.features.overview.active || self.features.overview.clients.is_empty() {
             return Ok(());
         }
-        let _ = self.prune_overview_clients(backend);
+        let pruned = self.prune_overview_clients(backend);
         if !self.features.overview.active || self.features.overview.clients.is_empty() {
             return Ok(());
         }
@@ -3454,7 +3532,7 @@ impl Jwm {
         } else {
             0
         };
-        if self.features.overview.index == target {
+        if self.features.overview.index == target && !pruned {
             return Ok(());
         }
         self.features.overview.jump_to(target);
@@ -3471,7 +3549,7 @@ impl Jwm {
         if !self.features.overview.active || self.features.overview.clients.is_empty() {
             return Ok(());
         }
-        let _ = self.prune_overview_clients(backend);
+        let pruned = self.prune_overview_clients(backend);
         if !self.features.overview.active || self.features.overview.clients.is_empty() {
             return Ok(());
         }
@@ -3484,7 +3562,7 @@ impl Jwm {
         };
         let next =
             (self.features.overview.index as isize + delta).clamp(0, (len - 1) as isize) as usize;
-        if next == self.features.overview.index {
+        if next == self.features.overview.index && !pruned {
             return Ok(());
         }
         self.features.overview.jump_to(next);
@@ -4559,6 +4637,31 @@ impl Jwm {
         match action {
             expose_plan::ExposeAction::Keep => {}
             expose_plan::ExposeAction::Enter { windows } => {
+                let keyboard_grabbed = if let Some(root) = backend.root_window() {
+                    backend.key_ops().grab_keyboard(root)?;
+                    true
+                } else {
+                    false
+                };
+                let pointer_mask = (EventMaskBits::BUTTON_PRESS
+                    | EventMaskBits::BUTTON_RELEASE
+                    | EventMaskBits::POINTER_MOTION)
+                    .bits();
+                match backend.input_ops().grab_pointer(pointer_mask, None) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if keyboard_grabbed {
+                            let _ = backend.key_ops().ungrab_keyboard();
+                        }
+                        return Err("could not grab pointer for expose".into());
+                    }
+                    Err(error) => {
+                        if keyboard_grabbed {
+                            let _ = backend.key_ops().ungrab_keyboard();
+                        }
+                        return Err(error.into());
+                    }
+                }
                 self.features.expose_active = true;
                 backend.compositor_set_expose_mode(true, windows);
                 // 高亮落在当前聚焦窗口上：进入后直接回车等于回到原窗口。
@@ -4567,14 +4670,6 @@ impl Jwm {
                     .and_then(|ck| self.state.clients.get(ck))
                     .map(|client| client.win);
                 backend.compositor_expose_select(focused);
-                if let Some(root) = backend.root_window() {
-                    let _ = backend.key_ops().grab_keyboard(root);
-                }
-                let pointer_mask = (EventMaskBits::BUTTON_PRESS
-                    | EventMaskBits::BUTTON_RELEASE
-                    | EventMaskBits::POINTER_MOTION)
-                    .bits();
-                let _ = backend.input_ops().grab_pointer(pointer_mask, None);
             }
             expose_plan::ExposeAction::Exit { focus } => {
                 self.features.expose_active = false;
@@ -5164,40 +5259,6 @@ mod shell_entry_tests {
         assert!(
             poll.contains(&format!("{}(", "display_ssid")),
             "the joined log line no longer goes through the display helper"
-        );
-    }
-
-    /// Enter(join) must not race a forget that is still deleting the profile:
-    /// the join would spawn against a half-deleted connection and the forget's
-    /// completion re-read would then report a world the join already changed.
-    /// `forget_selected_wifi` guards both slots; this arm is the other
-    /// direction of that recorded asymmetry. Runtime-assembled needles over a
-    /// single function body, so this cannot match its own source.
-    #[test]
-    fn the_join_path_yields_to_a_forget_in_flight() {
-        const SOURCE: &str = include_str!("toggles.rs");
-        let join = SOURCE
-            .split_once(&format!("fn {}(", "join_selected_wifi"))
-            .expect("join_selected_wifi")
-            .1
-            .split_once(&format!("fn {}(", "toggle_wifi"))
-            .expect("the function that follows join_selected_wifi")
-            .0;
-        let guard = join
-            .find(&format!(
-                "{}(self.features.{}",
-                "job_in_flight", "wifi_forget"
-            ))
-            .expect("the forget-in-flight guard is still there");
-        let passphrase = join
-            .find(&format!("{}(", "take_wifi_passphrase"))
-            .expect("the passphrase take is still there");
-        let connect = join
-            .find(&format!("{}(", "start_connect"))
-            .expect("the worker spawn is still there");
-        assert!(
-            guard < passphrase && passphrase < connect,
-            "the forget guard must precede the passphrase take and the worker spawn"
         );
     }
 
@@ -6271,14 +6332,13 @@ mod keyboard_grab_tests {
     use crate::backend::common_define::{KeySym, Mods, WindowId};
     use crate::backend::error::BackendError;
     use crate::backend::wayland_dummy_ops::{
-        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyOutputOps, DummyPropertyOps,
-        DummyWindowOps,
+        DummyColorAllocator, DummyCursorProvider, DummyOutputOps, DummyPropertyOps, DummyWindowOps,
     };
     use crate::core::types::Rect;
     use crate::jwm::Jwm;
     use crate::jwm::features::audio_recording::AudioRecordingState;
     use crate::jwm::types::WMArgEnum;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
     const NO_ARG: WMArgEnum = WMArgEnum::Int(0);
 
@@ -6331,9 +6391,50 @@ mod keyboard_grab_tests {
         fn clear_cache(&mut self) {}
     }
 
+    /// Real pointer-grab outcomes without touching a display server.
+    #[derive(Default)]
+    struct PointerGrabInputOps {
+        held: AtomicBool,
+        // 0 = success, 1 = busy, 2 = transport error.
+        reply: AtomicU8,
+    }
+
+    impl InputOps for PointerGrabInputOps {
+        fn set_cursor(
+            &self,
+            _kind: crate::backend::common_define::StdCursorKind,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn get_pointer_position(&self) -> Result<(f64, f64), BackendError> {
+            Ok((0.0, 0.0))
+        }
+
+        fn grab_pointer(&self, _mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
+            match self.reply.load(Ordering::Relaxed) {
+                1 => Ok(false),
+                2 => Err(BackendError::Message("pointer grab failed".into())),
+                _ => {
+                    self.held.store(true, Ordering::Relaxed);
+                    Ok(true)
+                }
+            }
+        }
+
+        fn ungrab_pointer(&self) -> Result<(), BackendError> {
+            self.held.store(false, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn query_pointer_root(&self) -> Result<(i32, i32, u16, u16), BackendError> {
+            Ok((0, 0, 0, 0))
+        }
+    }
+
     struct GrabSpyBackend {
         window_ops: DummyWindowOps,
-        input_ops: DummyInputOps,
+        input_ops: PointerGrabInputOps,
         property_ops: DummyPropertyOps,
         output_ops: DummyOutputOps,
         key_ops: KeyboardGrabKeyOps,
@@ -6341,19 +6442,25 @@ mod keyboard_grab_tests {
         color_allocator: DummyColorAllocator,
         /// Every toast pushed past the do-not-disturb gate, in order.
         toasts: Vec<ToastNotification>,
+        overview_windows: Vec<Vec<WindowId>>,
+        overview_selection: Option<WindowId>,
+        expose_modes: Vec<bool>,
     }
 
     impl GrabSpyBackend {
         fn new() -> Self {
             Self {
                 window_ops: DummyWindowOps,
-                input_ops: DummyInputOps,
+                input_ops: PointerGrabInputOps::default(),
                 property_ops: DummyPropertyOps,
                 output_ops: DummyOutputOps,
                 key_ops: KeyboardGrabKeyOps::default(),
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 toasts: Vec::new(),
+                overview_windows: Vec::new(),
+                overview_selection: None,
+                expose_modes: Vec::new(),
             }
         }
 
@@ -6374,6 +6481,29 @@ mod keyboard_grab_tests {
     impl CompositorControl for GrabSpyBackend {}
     impl CompositorMedia for GrabSpyBackend {}
     impl CompositorWorkspaceEffects for GrabSpyBackend {
+        fn compositor_set_overview_mode(
+            &mut self,
+            active: bool,
+            windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+        ) {
+            if active {
+                self.overview_windows
+                    .push(windows.iter().map(|entry| entry.0).collect());
+            }
+        }
+
+        fn compositor_set_overview_selection(&mut self, window: WindowId) {
+            self.overview_selection = Some(window);
+        }
+
+        fn compositor_set_expose_mode(
+            &mut self,
+            active: bool,
+            _windows: Vec<(WindowId, i32, i32, u32, u32, String)>,
+        ) {
+            self.expose_modes.push(active);
+        }
+
         fn compositor_push_toast(&mut self, toast: ToastNotification) {
             self.toasts.push(toast);
         }
@@ -6443,6 +6573,332 @@ mod keyboard_grab_tests {
 
     fn jwm(backend: &mut GrabSpyBackend) -> Jwm {
         Jwm::new_with_runtime_backend(backend, "test").expect("test jwm")
+    }
+
+    fn overview_window(jwm: &mut Jwm, raw: u64) -> crate::core::models::ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = crate::core::models::WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.geometry.w = 800;
+        client.geometry.h = 600;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        key
+    }
+
+    #[test]
+    fn overview_keyboard_refusal_does_not_publish_an_active_prism() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        overview_window(&mut jwm, 0xa01);
+        backend.key_ops.refuse.store(true, Ordering::Relaxed);
+
+        assert!(jwm.toggle_overview(&mut backend, &NO_ARG).is_err());
+        assert!(!jwm.features.overview.active);
+        assert!(jwm.features.overview.clients.is_empty());
+        assert!(backend.overview_windows.is_empty());
+        assert!(!backend.keyboard_held());
+    }
+
+    #[test]
+    fn expose_grab_failures_leave_no_overlay_or_partial_grab() {
+        for (refuse_keyboard, pointer_reply) in [(true, 0), (false, 1), (false, 2)] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            backend
+                .key_ops
+                .refuse
+                .store(refuse_keyboard, Ordering::Relaxed);
+            backend
+                .input_ops
+                .reply
+                .store(pointer_reply, Ordering::Relaxed);
+
+            let result = jwm.apply_expose_action(
+                &mut backend,
+                crate::jwm::features::expose_plan::ExposeAction::Enter {
+                    windows: vec![(WindowId::from_raw(0xa02), 0, 0, 800, 600, "one".into())],
+                },
+            );
+
+            assert!(
+                result.is_err(),
+                "keyboard={refuse_keyboard}, pointer={pointer_reply}"
+            );
+            assert!(!jwm.features.expose_active);
+            assert!(backend.expose_modes.is_empty());
+            assert!(!backend.keyboard_held());
+            assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        }
+    }
+
+    #[test]
+    fn expose_success_still_acquires_and_releases_both_grabs() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.apply_expose_action(
+            &mut backend,
+            crate::jwm::features::expose_plan::ExposeAction::Enter {
+                windows: vec![(WindowId::from_raw(0xa03), 0, 0, 800, 600, "one".into())],
+            },
+        )
+        .expect("expose opens");
+        assert!(jwm.features.expose_active);
+        assert!(backend.keyboard_held());
+        assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        jwm.apply_expose_action(
+            &mut backend,
+            crate::jwm::features::expose_plan::ExposeAction::Exit { focus: None },
+        )
+        .expect("expose closes");
+        assert!(!jwm.features.expose_active);
+        assert!(!backend.keyboard_held());
+        assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        assert_eq!(backend.expose_modes, vec![true, false]);
+    }
+
+    #[test]
+    fn overview_edge_and_page_refresh_a_pruned_selection_even_without_an_index_move() {
+        for (to_end, page) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            let a = overview_window(&mut jwm, 0xa11);
+            let b = overview_window(&mut jwm, 0xa12);
+            let c = overview_window(&mut jwm, 0xa13);
+            jwm.toggle_overview(&mut backend, &NO_ARG)
+                .expect("overview opens");
+            jwm.jump_overview_edge(&mut backend, to_end)
+                .expect("select the edge");
+            let closed = if to_end { c } else { a };
+            jwm.unmanage(&mut backend, Some(closed), true)
+                .expect("window closes");
+            let old_pushes = backend.overview_windows.len();
+
+            if page {
+                jwm.page_overview(&mut backend, if to_end { 1 } else { -1 })
+                    .expect("page after close");
+            } else {
+                jwm.jump_overview_edge(&mut backend, to_end)
+                    .expect("edge after close");
+            }
+
+            let expected = if to_end {
+                [0xa11, 0xa12]
+            } else {
+                [0xa12, 0xa13]
+            }
+            .map(WindowId::from_raw)
+            .to_vec();
+            assert_eq!(
+                backend.overview_windows.len(),
+                old_pushes + 1,
+                "end={to_end}, page={page}: the pruned list must be re-sent"
+            );
+            assert_eq!(backend.overview_windows.last(), Some(&expected));
+            assert_eq!(backend.overview_selection, Some(WindowId::from_raw(0xa12)));
+            assert_eq!(jwm.features.overview.get_selected_client(), Some(b));
+        }
+    }
+
+    /// A real BackgroundJob with no system I/O. Keeping the sender alive
+    /// holds its result back; dropping it releases the worker even on panic.
+    fn held_job<T: Send + 'static>(
+        value: T,
+    ) -> (
+        crate::jwm::features::connectivity::BackgroundJob<T>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (release, wait) = std::sync::mpsc::channel();
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
+            let _ = wait.recv();
+            value
+        });
+        assert!(job.started(), "the pure test worker must start");
+        (job, release)
+    }
+
+    #[test]
+    fn refused_snapshot_submission_retries_and_a_running_one_coalesces() {
+        use crate::jwm::features::connectivity::{BackgroundJob, job_in_flight};
+        use crate::jwm::features::system_controls::ControlCenterSnapshot;
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.features.control_snapshot_job = None;
+        jwm.features.control_snapshot_refreshed_at = None;
+        let now = std::time::Instant::now();
+        let calls = std::cell::Cell::new(0);
+        jwm.ensure_control_snapshot_refresh_with(now, |_| {
+            calls.set(calls.get() + 1);
+            BackgroundJob::refused()
+        });
+        assert!(jwm.features.control_snapshot_job.is_none());
+        let epoch = jwm.features.control_snapshot_epoch;
+        let (job, _release) = held_job((epoch, ControlCenterSnapshot::default()));
+        jwm.ensure_control_snapshot_refresh_with(now, |asked_epoch| {
+            calls.set(calls.get() + 1);
+            assert_eq!(asked_epoch, epoch);
+            job
+        });
+        jwm.ensure_control_snapshot_refresh_with(now, |_| panic!("running read is not duplicated"));
+        assert_eq!(calls.get(), 2);
+        assert!(job_in_flight(jwm.features.control_snapshot_job.as_ref()));
+    }
+
+    #[test]
+    fn refused_launcher_submission_is_not_indexing_and_retries_on_reopen() {
+        use crate::jwm::features::SystemUiState;
+        use crate::jwm::features::connectivity::{BackgroundJob, job_in_flight};
+        use crate::jwm::features::system_ui::LaunchEntry;
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.features.launcher_catalog_job = None;
+        jwm.features.launcher_catalog_refreshed_at = None;
+        jwm.features.launcher_catalog = std::sync::Arc::from(Vec::<LaunchEntry>::new());
+        let refused = jwm.cached_launcher_state_with(BackgroundJob::refused);
+        assert!(matches!(
+            refused,
+            SystemUiState::Launcher {
+                indexing: false,
+                ..
+            }
+        ));
+        assert!(jwm.features.launcher_catalog_job.is_none());
+
+        let (job, _release) = held_job(std::sync::Arc::from(Vec::<LaunchEntry>::new()));
+        let retry = jwm.cached_launcher_state_with(|| job);
+        assert!(matches!(
+            retry,
+            SystemUiState::Launcher { indexing: true, .. }
+        ));
+        let still_running =
+            jwm.cached_launcher_state_with(|| panic!("running discovery is not duplicated"));
+        assert!(matches!(
+            still_running,
+            SystemUiState::Launcher { indexing: true, .. }
+        ));
+        assert!(job_in_flight(jwm.features.launcher_catalog_job.as_ref()));
+    }
+
+    fn wifi_panel(jwm: &mut Jwm) {
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+        jwm.features.system_ui.set_wifi_networks(&[
+            crate::jwm::features::connectivity::WifiNetwork {
+                ssid: "Cafe".into(),
+                signal: 80,
+                security: String::new(),
+                in_use: false,
+            },
+            crate::jwm::features::connectivity::WifiNetwork {
+                ssid: "Office".into(),
+                signal: 70,
+                security: String::new(),
+                in_use: false,
+            },
+        ]);
+    }
+
+    #[test]
+    fn repeated_wifi_join_keeps_the_original_worker_even_after_selection_moves() {
+        use crate::jwm::features::connectivity::{ConnectPlan, job_in_flight};
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        wifi_panel(&mut jwm);
+        let (job, _release) = held_job(Ok::<_, String>("Cafe".to_owned()));
+        jwm.join_selected_wifi_with(
+            &mut backend,
+            |_| false,
+            |ssid, plan, passphrase| {
+                assert_eq!(ssid, "Cafe");
+                assert_eq!(*plan, ConnectPlan::Open);
+                assert_eq!(passphrase, None);
+                job
+            },
+        );
+        jwm.features.system_ui.move_selection(1);
+        jwm.join_selected_wifi_with(
+            &mut backend,
+            |_| panic!("a running join must precede the profile lookup"),
+            |_, _, _| panic!("a running join must not be replaced"),
+        );
+        assert!(job_in_flight(jwm.features.wifi_connect.as_ref()));
+        assert!(jwm.features.system_ui.is_wifi_picker());
+    }
+
+    #[test]
+    fn wifi_join_yields_to_forget_without_consuming_the_prompt() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        wifi_panel(&mut jwm);
+        jwm.features.system_ui.prompt_wifi_passphrase();
+        jwm.features.system_ui.push_char('x');
+        let (job, _release) = held_job(Ok::<_, String>("Cafe".to_owned()));
+        jwm.features.wifi_forget = Some(job);
+        jwm.join_selected_wifi_with(
+            &mut backend,
+            |_| panic!("forget owns the action"),
+            |_, _, _| panic!("forget owns the action"),
+        );
+        assert!(jwm.features.wifi_connect.is_none());
+        assert_eq!(
+            jwm.features.system_ui.take_wifi_passphrase().as_deref(),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn wifi_join_retries_a_refused_worker() {
+        use crate::jwm::features::connectivity::{BackgroundJob, job_in_flight};
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        wifi_panel(&mut jwm);
+        jwm.features.wifi_connect = Some(BackgroundJob::refused());
+        let (job, _release) = held_job(Ok::<_, String>("Cafe".to_owned()));
+        jwm.join_selected_wifi_with(&mut backend, |_| false, |_, _, _| job);
+        assert!(job_in_flight(jwm.features.wifi_connect.as_ref()));
+    }
+
+    fn bluetooth_panel(jwm: &mut Jwm) {
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::bluetooth_picker("");
+        jwm.features.system_ui.set_bluetooth_devices(&[
+            crate::jwm::features::connectivity::BluetoothDevice {
+                address: "AA:BB:CC:DD:EE:FF".into(),
+                name: "Headset".into(),
+                connected: false,
+                paired: true,
+                rssi: None,
+                battery: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn repeated_bluetooth_activation_keeps_the_original_worker() {
+        use crate::jwm::features::connectivity::job_in_flight;
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        bluetooth_panel(&mut jwm);
+        let (job, _release) = held_job(Ok::<_, String>("AA:BB:CC:DD:EE:FF".to_owned()));
+        jwm.activate_selected_bluetooth_with(&mut backend, |address, action| {
+            assert_eq!(address, "AA:BB:CC:DD:EE:FF");
+            assert_eq!(action, "connect");
+            job
+        });
+        jwm.activate_selected_bluetooth_with(&mut backend, |_, _| panic!("duplicate action"));
+        assert!(job_in_flight(jwm.features.bluetooth_action.as_ref()));
+        assert!(jwm.features.system_ui.is_bluetooth_picker());
+    }
+
+    #[test]
+    fn bluetooth_activation_retries_a_refused_worker() {
+        use crate::jwm::features::connectivity::{BackgroundJob, job_in_flight};
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        bluetooth_panel(&mut jwm);
+        jwm.features.bluetooth_action = Some(BackgroundJob::refused());
+        let (job, _release) = held_job(Ok::<_, String>("AA:BB:CC:DD:EE:FF".to_owned()));
+        jwm.activate_selected_bluetooth_with(&mut backend, |_, _| job);
+        assert!(job_in_flight(jwm.features.bluetooth_action.as_ref()));
     }
 
     /// A capture selector started over IPC while a panel was up, then the

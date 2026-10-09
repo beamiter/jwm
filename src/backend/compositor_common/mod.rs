@@ -13,6 +13,7 @@ pub mod effects;
 pub mod event_coalescer;
 pub mod expose;
 pub(crate) mod genie;
+pub(crate) mod image_source;
 pub mod layout_strip;
 pub mod math;
 pub mod media;

@@ -312,7 +312,7 @@ fn validate_runtime_endpoint(socket: &Path, uid: u32) -> io::Result<()> {
 /// Validate the runtime endpoint, then connect to it.
 fn connect_validated(socket: &Path, uid: u32) -> io::Result<UnixStream> {
     validate_runtime_endpoint(socket, uid)?;
-    UnixStream::connect(socket)
+    jwm_ipc_transport::connect(socket, Duration::from_millis(500))
 }
 
 pub fn query_windows() -> std::io::Result<Vec<WindowInfo>> {
@@ -646,5 +646,46 @@ mod tests {
         let dir = ScratchDir::new(0o700);
         let error = validate_runtime_endpoint(&dir.socket(), effective_uid()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn full_accept_queue_does_not_block_control_client() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("jwm-backlog-portal-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("ipc.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // SAFETY: listener owns a live listening AF_UNIX descriptor. Linux
+        // backlog zero permits one pending connection, filled below.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let pending = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let budget = Duration::from_millis(500);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        // Bound the regression even against the old blocking implementation:
+        // the watchdog closes the listener after the client's deadline.
+        let watchdog = std::thread::spawn(move || {
+            let _ = done_rx.recv_timeout(budget + std::time::Duration::from_secs(2));
+            drop(listener);
+        });
+        let started = std::time::Instant::now();
+        let result = connect_validated(&path, effective_uid());
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        watchdog.join().unwrap();
+        drop(pending);
+        let retained_endpoint = path.exists();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(
+            matches!(&result, Err(error) if error.kind() == io::ErrorKind::TimedOut),
+            "expected the connection deadline"
+        );
+        assert!(elapsed < budget + std::time::Duration::from_secs(1));
+        assert!(
+            retained_endpoint,
+            "a full live listener must not be unlinked"
+        );
     }
 }

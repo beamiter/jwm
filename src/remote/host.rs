@@ -1516,6 +1516,30 @@ fn serve_client(
         None
     };
     let pointer_enabled = injector.is_some();
+    // Clipboard sharing needs its own X connection and thread; the watcher
+    // must not be able to delay a frame, and a conversion blocks until the
+    // current selection owner answers.
+    let (clipboard_captures, clipboard_setter) = if clipboard_enabled {
+        match Clipboard::start(options.display.as_deref()) {
+            Ok(clipboard) => {
+                let (captures, setter) = clipboard.split();
+                eprintln!("jwm-remote: clipboard sharing enabled");
+                (Some(captures), Some(setter))
+            }
+            Err(error) => {
+                eprintln!(
+                    "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
+                );
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let clipboard_enabled = clipboard_setter.is_some();
+    if clipboard_enabled {
+        reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
+    }
     writer.write_message(
         MessageKind::HelloAck,
         &ServerHello {
@@ -1556,29 +1580,6 @@ fn serve_client(
             "jwm-remote: adaptive JPEG quality active ({}..={})",
             options.jpeg_quality_floor, options.jpeg_quality
         );
-    }
-    // Clipboard sharing needs its own X connection and thread; the watcher
-    // must not be able to delay a frame, and a conversion blocks until the
-    // current selection owner answers.
-    let (clipboard_captures, clipboard_setter) = if clipboard_enabled {
-        match Clipboard::start(options.display.as_deref()) {
-            Ok(clipboard) => {
-                let (captures, setter) = clipboard.split();
-                eprintln!("jwm-remote: clipboard sharing enabled");
-                (Some(captures), Some(setter))
-            }
-            Err(error) => {
-                eprintln!(
-                    "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
-                );
-                (None, None)
-            }
-        }
-    } else {
-        (None, None)
-    };
-    if clipboard_setter.is_some() {
-        reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
     }
 
     let input_running = Arc::clone(&running);
@@ -2152,12 +2153,14 @@ fn receive_input(
             .set_read_timeout(Some(initial_activity_timeout))?;
         let mut awaiting_first_activity = true;
         while running.load(Ordering::Acquire) {
-            // While the peer holds something down, wait for readability in a
-            // short slice first and release on silence. Waiting for the socket
-            // to become readable — rather than shortening the read timeout —
-            // means a record is never interrupted part-way through, which the
-            // authenticated stream could not resynchronise from.
-            if injector.as_ref().is_some_and(InputInjector::has_pressed)
+            // Complete authenticated activity renews the held-input lease.
+            // Readability alone is insufficient: a stalled partial record
+            // must not extend a held key to the eight-second socket timeout.
+            let held_deadline = injector
+                .as_ref()
+                .is_some_and(InputInjector::has_pressed)
+                .then(|| Instant::now() + HELD_INPUT_SILENCE_TIMEOUT);
+            if held_deadline.is_some()
                 && !wait_readable(reader.get_ref(), HELD_INPUT_SILENCE_TIMEOUT)?
             {
                 if let Some(injector) = injector.as_mut() {
@@ -2171,7 +2174,7 @@ fn receive_input(
                 }
                 continue;
             }
-            let kind = reader.read_message_into(&mut payload)?;
+            let kind = read_input_record(&mut reader, &mut payload, held_deadline)?;
             if awaiting_first_activity {
                 reader
                     .get_ref()
@@ -2192,8 +2195,13 @@ fn receive_input(
                     if contains_keyboard && !keyboard_enabled {
                         return Err(invalid_data("keyboard input was not negotiated").into());
                     }
-                    if contains_keyboard {
+                    // Pointer mappings can change in pointer-only sessions
+                    // too. Drain their notices before the next button edge,
+                    // without ever granting a disabled keyboard capability.
+                    if keyboard_enabled {
                         verify_injector_keymap(injector, verified_keymap)?;
+                    } else {
+                        let _ = injector.take_keymap_change()?;
                     }
                     injector.inject_batch(&events, input_origin)?;
                 }
@@ -2279,6 +2287,27 @@ fn receive_input(
         }
     };
     outcome
+}
+
+/// A partial record cannot be resynchronized, so expiry closes the session;
+/// receive_input's existing error cleanup then releases every held edge.
+/// The same budget includes the readability wait, header, ciphertext and tag.
+fn read_input_record(
+    reader: &mut SessionReader<TcpStream>,
+    payload: &mut Vec<u8>,
+    held_deadline: Option<Instant>,
+) -> RemoteResult<MessageKind> {
+    let mut guard = held_deadline
+        .map(|deadline| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            TcpStreamDeadline::arm(reader.get_ref(), remaining)
+        })
+        .transpose()?;
+    let kind = reader.read_message_into(payload)?;
+    if let Some(guard) = guard.as_mut() {
+        guard.cancel();
+    }
+    Ok(kind)
 }
 
 fn verify_injector_keymap(
@@ -3905,6 +3934,31 @@ mod tests {
             .expect_err("an unread loopback peer must hit the absolute deadline");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn partial_input_record_cannot_outlive_the_held_input_lease() {
+        let (receiver, mut peer) = loopback_pair();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut writer = SessionWriter::new(Vec::new(), [0x5a; 32]);
+        writer.write_message(MessageKind::Heartbeat, &[]).unwrap();
+        let bytes = writer.into_inner();
+        let drip = thread::spawn(move || {
+            for byte in bytes {
+                if peer.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let mut reader = SessionReader::new(receiver, [0x5a; 32]);
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(40);
+        assert!(read_input_record(&mut reader, &mut Vec::new(), Some(deadline)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        drip.join().unwrap();
     }
 
     #[test]

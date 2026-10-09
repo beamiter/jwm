@@ -2257,6 +2257,14 @@ impl SystemUiState {
     /// Fill in a finished scan, keeping the selection on the same network
     /// when it is still in range.
     pub fn set_wifi_networks(&mut self, networks: &[crate::jwm::features::WifiNetwork]) {
+        // The prompt's passphrase belongs to the selected SSID. A scan
+        // started before the prompt may finish after it opened; replacing
+        // the rows could retarget the typed secret if that SSID disappeared.
+        // The polling caller still consumes this completed scan. A later
+        // explicit rescan may refresh the list after the prompt has ended.
+        if self.is_prompting_wifi_passphrase() {
+            return;
+        }
         let rows = networks
             .iter()
             .map(|network| ListRow {
@@ -5861,6 +5869,36 @@ mod tests {
                 .items[0]
                 .contains("/walls")
         );
+    }
+
+    #[test]
+    fn a_late_wifi_scan_cannot_retarget_an_open_passphrase() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false)]);
+        panel.prompt_wifi_passphrase();
+        for ch in "dummy-secret".chars() {
+            panel.push_char(ch);
+        }
+        // The old target disappeared during an already-running rescan.
+        panel.set_wifi_networks(&[wifi("Beta", false)]);
+        assert_eq!(panel.selected_wifi(), Some(("Alpha".into(), true)));
+        assert!(panel.is_prompting_wifi_passphrase());
+        assert!(
+            panel
+                .overlay_parts()
+                .items
+                .last()
+                .unwrap()
+                .contains("Alpha")
+        );
+        assert_eq!(
+            panel.take_wifi_passphrase().as_deref(),
+            Some("dummy-secret")
+        );
+        // Once the prompt is over a later scan may replace the old rows.
+        panel.set_wifi_networks(&[wifi("Beta", false)]);
+        assert_eq!(panel.selected_wifi(), Some(("Beta".into(), true)));
+        assert_eq!(panel.take_wifi_passphrase(), None);
     }
 
     #[test]

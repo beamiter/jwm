@@ -1017,7 +1017,7 @@ if [ "$BUILD" -eq 1 ]; then
     fi
 fi
 
-if [ "$n_fail" -gt 0 ] || [ "$n_bfail" -gt 0 ]; then
+if [ "$n_fail" -gt 0 ] || [ "$n_warn" -gt 0 ] || [ "$n_bfail" -gt 0 ]; then
     exit 1
 fi
 exit 0

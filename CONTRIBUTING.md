@@ -33,6 +33,13 @@ cargo fmt --all -- --check
 scripts/lint-shell.sh
 scripts/test-git-update-all.sh
 scripts/test-install-jwm-build.sh
+scripts/test-runtime-helpers.sh
+scripts/test-bootstrap-deps.sh
+python3 scripts/test-release-install-failures.py
+python3 scripts/test-showcase-lifecycle.py
+python3 scripts/test-collector.py
+python3 scripts/test-installer-config.py
+PYTHONPATH=video-demo python3 -m unittest discover -s video-demo/tests -v
 cargo check --locked --all-targets
 cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 cargo test --locked --lib --bins --tests
@@ -193,3 +200,13 @@ test at an active desktop: it grabs the pointer and generates XTEST events.
 It deliberately does not query pointer position between motion batches, because
 that would hide the motion-hint regression. This tests the X11 transport; it
 does not replace interactive capture or real-hardware Wayland validation.
+
+### Audit regressions outside the root package
+
+Run `node scripts/test-bar-startup.mjs` with Node 24 for the isolated
+async-readiness contract (no browser or Tauri host). The locked React/Vue
+frontends additionally require a frozen pnpm install and their build scripts.
+The GTK3 compatibility patch has an optimization-sensitive regression:
+`./scripts/test.sh --manifest-path tests/glib_backport/Cargo.toml --release`.
+It uses synthetic strings only; see `vendor/glib/JWM-BACKPORT.md` for upstream
+provenance and the version-based audit warning that remains applicable.

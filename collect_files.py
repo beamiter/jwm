@@ -8,8 +8,23 @@
 """
 import argparse
 import os
+import stat
 from pathlib import Path
 from typing import Iterable, List, Optional, Set, Tuple
+
+
+def read_regular_text(path: Path) -> str:
+    """Do not block on a FIFO/device, including a path swapped during discovery."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("not a regular file")
+        with os.fdopen(descriptor, 'r', encoding='utf-8', errors='ignore') as stream:
+            descriptor = -1  # fdopen owns and closes the descriptor.
+            return stream.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _display_path(
@@ -75,8 +90,7 @@ def collect_from_directory(
             continue
 
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+            content = read_regular_text(file_path)
 
             files_content.append(f"{relative_path}\n{content}")
             file_count += 1
@@ -162,8 +176,7 @@ def collect_from_file_list(
             break
 
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+            content = read_regular_text(file_path)
 
             files_content.append(f"{relative_path}\n{content}")
             file_count += 1
@@ -206,6 +219,7 @@ def collect_files(
     exclude_files.add(os.path.basename(output_file))
 
     source_paths: Optional[List[Path]] = None
+    invalid_sources = 0
     if enable_dir_scan:
         if not source_dirs:
             raise ValueError("启用目录扫描时必须提供 source")
@@ -217,9 +231,11 @@ def collect_files(
             source_path = Path(source_dir).resolve()
             if not source_path.exists():
                 print(f"错误: 目录 '{source_dir}' 不存在")
+                invalid_sources += 1
                 continue
             if not source_path.is_dir():
                 print(f"错误: '{source_dir}' 不是一个目录")
+                invalid_sources += 1
                 continue
             if source_path in seen_source:
                 continue
@@ -228,7 +244,7 @@ def collect_files(
 
         if not source_paths:
             print("错误: 没有可用的源目录可扫描")
-            return
+            return False
 
         print(f"源目录数量: {len(source_paths)}")
         for source_path in source_paths:
@@ -244,7 +260,7 @@ def collect_files(
 
     all_contents: List[str] = []
     total_files = 0
-    total_errors = 0
+    total_errors = invalid_sources
     seen_files: Set[Path] = set()
 
     # 1) 目录递归收集（可选）
@@ -295,9 +311,11 @@ def collect_files(
         else:
             size_str = f"{file_size / (1024 * 1024):.2f} MB"
         print(f"文件大小: {size_str}")
+        return total_errors == 0
 
     except Exception as e:
         print(f"✗ 写入输出文件失败: {e}")
+        return False
 
 
 def main():
@@ -404,7 +422,7 @@ def main():
             enable_dir_scan = True
             source_dirs = ['.']
 
-    collect_files(
+    succeeded = collect_files(
         source_dirs=source_dirs,
         output_file=args.output,
         exclude_dirs=exclude_dirs,
@@ -413,6 +431,8 @@ def main():
         enable_dir_scan=enable_dir_scan,
     )
 
+    return 0 if succeeded else 1
+
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

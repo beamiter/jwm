@@ -36,9 +36,19 @@ class XdotoolInput:
 
     def drag(self, start: tuple[int, int], end: tuple[int, int], duration: float = 2.0, modifier: str | None = "Alt_L") -> None:
         self._run("mousemove", *start)
-        if modifier: self._run("keydown", modifier)
-        self._run("mousedown", 1)
-        try: self.smooth(start, end, duration=duration)
+        modifier_attempted = False
+        button_attempted = False
+        try:
+            if modifier:
+                modifier_attempted = True
+                self._run("keydown", modifier)
+            button_attempted = True
+            self._run("mousedown", 1)
+            self.smooth(start, end, duration=duration)
         finally:
-            self._run("mouseup", 1)
-            if modifier: self._run("keyup", modifier)
+            try:
+                if button_attempted:
+                    self._run("mouseup", 1)
+            finally:
+                if modifier_attempted:
+                    self._run("keyup", modifier)

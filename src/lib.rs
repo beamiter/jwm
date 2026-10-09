@@ -11,6 +11,7 @@
 pub mod alloc_counter;
 pub mod application;
 pub mod backend;
+pub mod child_environment;
 pub mod command_line;
 pub mod config;
 pub mod core;

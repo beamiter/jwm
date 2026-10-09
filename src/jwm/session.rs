@@ -1938,15 +1938,27 @@ impl Jwm {
                 );
             }
             if plan.is_minimized {
-                let hidden_restore = plan.hidden_restore.map(|restore| {
-                    let area = self
-                        .state
-                        .clients
-                        .get(*key)
-                        .and_then(|client| client.mon)
-                        .and_then(|monitor_key| self.monitor_work_area(monitor_key));
-                    area.map_or(restore, |area| clamp_floating_rect(restore, area))
-                });
+                // Fullscreen already staged the current output rectangle.
+                // Its visible target includes the bar/strut area; clamping
+                // the old parking snapshot to the work area here shifts a
+                // later fullscreen restore down below the bar.
+                let hidden_restore = plan
+                    .hidden_restore
+                    .filter(|_| {
+                        self.state
+                            .clients
+                            .get(*key)
+                            .is_some_and(|client| !client.state.is_fullscreen)
+                    })
+                    .map(|restore| {
+                        let area = self
+                            .state
+                            .clients
+                            .get(*key)
+                            .and_then(|client| client.mon)
+                            .and_then(|monitor_key| self.monitor_work_area(monitor_key));
+                        area.map_or(restore, |area| clamp_floating_rect(restore, area))
+                    });
                 if let Some(order) = plan.minimized_order.filter(|&o| o > 0) {
                     if let Some(c) = self.state.clients.get_mut(*key) {
                         c.state.minimized_order = order;
@@ -4025,6 +4037,63 @@ mod tests {
         assert!(hidden_restore.x >= work.x && hidden_restore.y >= work.y);
         assert!(hidden_restore.x + hidden_restore.w <= work.x + work.w);
         assert!(hidden_restore.y + hidden_restore.h <= work.y + work.h);
+    }
+
+    #[test]
+    fn session_minimized_fullscreen_keeps_the_complete_output_restore_rect() {
+        let output_rect = Rect::new(0, 0, 1920, 1080);
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        // A real dock reservation distinguishes the output from its work
+        // area. The ordinary fullscreen-only fixture has no bar and cannot
+        // expose a work-area clamp mistakenly applied to fullscreen.
+        let mut dock = WMClient::new(WindowId::from_raw(0x780));
+        dock.mon = Some(monitor);
+        dock.state.tags = tags;
+        dock.state.is_dock = true;
+        dock.state.is_floating = true;
+        dock.geometry.x = 0;
+        dock.geometry.y = 0;
+        dock.geometry.w = 1920;
+        dock.geometry.h = 32;
+        let dock_key = jwm.insert_client(dock);
+        jwm.attach_to_monitor(dock_key, monitor);
+
+        let mut client = WMClient::new(WindowId::from_raw(0x781));
+        client.class = "FullscreenSession".into();
+        client.instance = "fullscreen-session".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.geometry.x = 100;
+        client.geometry.y = 80;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        jwm.setfullscreen(&mut backend, key, true).unwrap();
+        jwm.set_client_minimized(&mut backend, key, true).unwrap();
+        assert!(jwm.monitor_work_area(monitor).unwrap().y > output_rect.y);
+        let snapshot = capture_snapshot(&jwm.state, "status-bar");
+        assert_eq!(snapshot.clients.len(), 1);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+        assert!(jwm.state.clients[key].state.is_fullscreen);
+        assert!(jwm.state.clients[key].state.is_hidden);
+        assert_eq!(
+            jwm.state.clients[key].geometry.hidden_restore_rect,
+            Some(output_rect),
+            "session restore must not shrink fullscreen into the bar's work area"
+        );
+
+        jwm.set_client_minimized(&mut backend, key, false).unwrap();
+        let geometry = &jwm.state.clients[key].geometry;
+        assert_eq!(
+            Rect::new(geometry.x, geometry.y, geometry.w, geometry.h),
+            output_rect
+        );
+        assert!(jwm.state.clients[key].state.is_fullscreen);
     }
 
     #[test]

@@ -132,7 +132,7 @@ fn secondary_bar_command(bar_name: &str, shared_path: &str, monitor_id: i32) -> 
     command.arg(shared_path);
 
     // Set environment variables
-    if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
+    if let Ok(v) = crate::child_environment::var("WAYLAND_DISPLAY") {
         command.env("WAYLAND_DISPLAY", v);
     }
     if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {

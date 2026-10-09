@@ -528,10 +528,10 @@ impl PairingAgent {
         self.authorize(device, Some(uuid)).await
     }
 
-    async fn cancel(&self, device: OwnedObjectPath) {
-        if !self.device_matches(&device) {
-            return;
-        }
+    async fn cancel(&self) {
+        // Agent1.Cancel carries no device argument. It withdraws this
+        // registered agent's current request; the target was bound by the
+        // earlier request (or by the outbound session).
         // BlueZ withdrew the outstanding request: the user can no longer
         // answer it, so the pending callback resolves as cancelled and the
         // Pair call unwinds. Whatever is pending is what bluez withdrew, so
@@ -549,8 +549,8 @@ impl PairingAgent {
         // unwind that resolution sets off ends in `report_done`, and the two
         // frames must land in this order — withdraw first, outcome second —
         // or the outcome would be processed against a panel still showing
-        // the stale prompt. The device is bound by `device_matches` above,
-        // so a missing target is not a real arm.
+        // the stale prompt. An inbound agent with no bound target has no
+        // prompt to withdraw.
         if let Some(target) = self.shared.target() {
             report_withdraw(&self.shared.ipc, &target, &self.shared.cookie, request_id).await;
         }
@@ -3861,8 +3861,7 @@ mod tests {
         // The remote side gives up before the user answers, so bluez
         // withdraws the request. The prompt must come down now, not when
         // jwm's own prompt timeout notices it has gone unanswered.
-        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
-        call_agent(&bluez, &agent, "Cancel", &(device,))
+        call_agent(&bluez, &agent, "Cancel", &())
             .await
             .expect("Cancel returns unit");
         let withdraw = jwm.recv_command("bluetooth_pairing_withdraw");
@@ -3920,7 +3919,7 @@ mod tests {
         // The device gives up before the user answers: bluez cancels the
         // request. The prompt it raised comes down, but the window was the
         // user's gesture — it stays armed for whatever rings next.
-        call_agent(&bluez, &agent, "Cancel", &(device,))
+        call_agent(&bluez, &agent, "Cancel", &())
             .await
             .expect("Cancel returns unit");
         let withdraw = jwm.recv_command("bluetooth_pairing_withdraw");
@@ -3964,8 +3963,7 @@ mod tests {
         // not a prompt. The withdraw still reports, naming no request: jwm
         // no-ops on no match, and a display-only prompt would still come
         // down, which is the case this frame exists for.
-        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
-        call_agent(&bluez, &agent, "Cancel", &(device,))
+        call_agent(&bluez, &agent, "Cancel", &())
             .await
             .expect("Cancel returns unit");
         let withdraw = jwm.recv_command("bluetooth_pairing_withdraw");

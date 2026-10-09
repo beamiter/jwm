@@ -3215,13 +3215,21 @@ mod tests {
 
     fn bar_is_parked_off_monitor(jwm: &Jwm, bar_key: ClientKey) -> bool {
         let bar = &jwm.state.clients[bar_key];
-        let monitor = bar.mon.expect("bar monitor");
-        let (mx, my) = {
-            let geometry = &jwm.state.monitors[monitor].geometry;
-            (geometry.m_x, geometry.m_y)
-        };
-        let height = CONFIG.load().status_bar_height();
-        bar.geometry.x == mx && bar.geometry.y == my - height
+        let left = i64::from(bar.geometry.x);
+        let top = i64::from(bar.geometry.y);
+        let right = left + i64::from(bar.total_width());
+        let bottom = top + i64::from(bar.total_height());
+        // Hidden bars must miss every output, not merely the old expected
+        // coordinate above their own output (which may cover another panel).
+        jwm.state.monitors.values().all(|monitor| {
+            let geometry = &monitor.geometry;
+            let mx = i64::from(geometry.m_x);
+            let my = i64::from(geometry.m_y);
+            right <= mx
+                || bottom <= my
+                || left >= mx + i64::from(geometry.m_w)
+                || top >= my + i64::from(geometry.m_h)
+        })
     }
 
     fn bar_is_on_monitor(jwm: &Jwm, bar_key: ClientKey) -> bool {

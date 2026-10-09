@@ -474,6 +474,7 @@ backup_existing() {
     [[ ! -e $backup && ! -L $backup ]] || die "backup destination already exists: $relative"
     mkdir -p -- "$(dirname -- "$backup")"
     mv -- "$source" "$backup"
+    INSTALL_TX_BACKUPS+=("$relative")
     printf '%s\n' "$relative" >> "$STATE/backups.tsv"
 }
 
@@ -500,6 +501,82 @@ read_versions() {
         destination_ref+=("$value")
     done < "$filename"
 }
+
+
+# An install stages all payload bytes before moving an existing destination.
+# These records are only populated after each mutation succeeds, so a normal
+# command failure or handled signal can restore the previous installation.
+INSTALL_TX_ACTIVE=0
+INSTALL_TX_COMMITTED=0
+INSTALL_TX_NEW_STATE=0
+INSTALL_TX_NEW_VERSION=0
+INSTALL_TX_CURRENT_CHANGED=0
+INSTALL_TX_STATE_CHANGED=0
+INSTALL_TX_VERSION=""
+INSTALL_TX_STAGING=""
+INSTALL_TX_OLD_CURRENT=""
+declare -a INSTALL_TX_OLD_INSTALLED=() INSTALL_TX_OLD_HISTORY=()
+declare -a INSTALL_TX_LINKS=() INSTALL_TX_BACKUPS=()
+
+finish_install_transaction() {
+    local status=$? relative destination backup expected rollback_ok=1
+    trap - EXIT HUP INT TERM
+    set +e
+    if ((INSTALL_TX_ACTIVE == 1 && INSTALL_TX_COMMITTED == 0)); then
+        printf 'install-release: installation failed; restoring the previous installation\n' >&2
+        for relative in "${INSTALL_TX_LINKS[@]}"; do
+            destination=$(root_path "$relative")
+            expected=$(relative_link_target "$relative" "${INSTALL_TX_LINK_TARGETS[$relative]}")
+            if [[ -L $destination && $(readlink -- "$destination") == "$expected" ]]; then
+                unlink -- "$destination" || rollback_ok=0
+            elif [[ -e $destination || -L $destination ]]; then
+                printf 'install-release: changed destination retained: %s\n' "$destination" >&2
+                rollback_ok=0
+            fi
+        done
+        if ((INSTALL_TX_CURRENT_CHANGED == 1)); then
+            if [[ -L $CURRENT && $(readlink -- "$CURRENT") == "versions/$INSTALL_TX_VERSION" ]]; then
+                if ((INSTALL_TX_NEW_STATE == 1)); then
+                    unlink -- "$CURRENT" || rollback_ok=0
+                else
+                    set_current "$INSTALL_TX_OLD_CURRENT" || rollback_ok=0
+                fi
+            else
+                printf 'install-release: current link changed; automatic rollback stopped\n' >&2
+                rollback_ok=0
+            fi
+        fi
+        if ((INSTALL_TX_NEW_STATE == 0 && INSTALL_TX_STATE_CHANGED == 1)); then
+            atomic_lines "$STATE/installed" "${INSTALL_TX_OLD_INSTALLED[@]}" || rollback_ok=0
+            atomic_lines "$STATE/history" "${INSTALL_TX_OLD_HISTORY[@]}" || rollback_ok=0
+        fi
+        for relative in "${INSTALL_TX_BACKUPS[@]}"; do
+            destination=$(root_path "$relative")
+            backup="$STATE/backups/$relative"
+            if [[ ! -e $destination && ! -L $destination && ( -e $backup || -L $backup ) ]]; then
+                mv -- "$backup" "$destination" || rollback_ok=0
+            else
+                printf 'install-release: could not restore backup for %s; state retained\n' "$relative" >&2
+                rollback_ok=0
+            fi
+        done
+        if ((rollback_ok == 1)); then
+            if ((INSTALL_TX_NEW_VERSION == 1)); then
+                rm -rf -- "${VERSIONS:?}/${INSTALL_TX_VERSION:?}"
+            fi
+            if ((INSTALL_TX_NEW_STATE == 1)); then
+                rm -rf -- "$STATE"
+            fi
+        else
+            printf 'install-release: rollback incomplete; preserving version/state for recovery\n' >&2
+        fi
+    fi
+    if [[ -n $INSTALL_TX_STAGING && -d $INSTALL_TX_STAGING && ! -L $INSTALL_TX_STAGING ]]; then
+        rm -rf -- "$INSTALL_TX_STAGING"
+    fi
+    exit "$status"
+}
+declare -A INSTALL_TX_LINK_TARGETS=()
 
 install_release() {
     local manifest="$SCRIPT_DIR/release-manifest.tsv" version_file="$SCRIPT_DIR/VERSION"
@@ -560,9 +637,33 @@ install_release() {
         fi
         base_preexisting=0
         [[ -d $BASE && ! -L $BASE ]] && base_preexisting=1
-        make_parent_chain usr/local/lib/jwm 1
-        [[ -d $BASE ]] || die "failed to create the JWM library directory"
+    fi
+
+    # Build the complete immutable tree before moving any legacy destination or
+    # changing state/current. Disk-full/read/copy errors leave the old install live.
+    make_parent_chain usr/local/lib/jwm/versions 1
+    [[ -d $VERSIONS ]] || die "failed to create versions directory"
+    local staging
+    staging=$(mktemp -d "$VERSIONS/.install-$version.XXXXXXXX")
+    INSTALL_TX_ACTIVE=1
+    INSTALL_TX_VERSION=$version
+    INSTALL_TX_STAGING=$staging
+    INSTALL_TX_OLD_INSTALLED=("${installed[@]}")
+    if ((new_install == 0)); then
+        read_versions "$STATE/history" history
+        INSTALL_TX_OLD_HISTORY=("${history[@]}")
+        INSTALL_TX_OLD_CURRENT=${history[-1]}
+    fi
+    trap finish_install_transaction EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    copy_payload_normalized "$payload" "$staging"
+    install -m 0644 -- "$manifest" "$staging/.release-manifest.tsv"
+
+    if ((new_install == 1)); then
         mkdir -- "$STATE"
+        INSTALL_TX_NEW_STATE=1
         mkdir -- "$STATE/backups"
         printf '1\n' > "$STATE/format"
         printf '%s\n' "$base_preexisting" > "$STATE/base-preexisting"
@@ -577,15 +678,8 @@ install_release() {
             backup_existing "$collision"
         done
     fi
-
-    make_parent_chain usr/local/lib/jwm/versions 1
-    [[ -d $VERSIONS ]] || die "failed to create versions directory"
-    local staging="$VERSIONS/.install-$version.$$"
-    [[ ! -e $staging && ! -L $staging ]] || die "temporary version path already exists"
-    mkdir -- "$staging"
-    copy_payload_normalized "$payload" "$staging"
-    install -m 0644 -- "$manifest" "$staging/.release-manifest.tsv"
     mv -- "$staging" "$VERSIONS/$version"
+    INSTALL_TX_NEW_VERSION=1
 
     if ((new_install == 0)); then
         read_versions "$STATE/installed" installed
@@ -593,9 +687,11 @@ install_release() {
     fi
     installed+=("$version")
     history+=("$version")
+    INSTALL_TX_STATE_CHANGED=1
     atomic_lines "$STATE/installed" "${installed[@]}"
     atomic_lines "$STATE/history" "${history[@]}"
     set_current "$version"
+    INSTALL_TX_CURRENT_CHANGED=1
 
     for ((index = 0; index < ${#STABLE_DESTINATIONS[@]}; index++)); do
         destination=$(root_path "${STABLE_DESTINATIONS[$index]}")
@@ -607,8 +703,11 @@ install_release() {
         [[ ! -e $destination ]] || die "managed destination became occupied during install: $destination"
         make_parent_chain "${STABLE_DESTINATIONS[$index]}" 0
         ln -s -- "$expected" "$destination"
+        INSTALL_TX_LINKS+=("${STABLE_DESTINATIONS[$index]}")
+        INSTALL_TX_LINK_TARGETS["${STABLE_DESTINATIONS[$index]}"]=${STABLE_VERSION_PATHS[$index]}
     done
 
+    INSTALL_TX_COMMITTED=1
     printf 'Installed JWM %s\n' "$version"
 }
 
@@ -708,7 +807,7 @@ uninstall_one() {
     printf 'Uninstalled JWM %s\n' "$requested"
 }
 
-for tool in chmod dirname find grep install ln mkdir mv readlink rm rmdir unlink wc; do
+for tool in chmod dirname find grep install ln mkdir mktemp mv readlink rm rmdir unlink wc; do
     command -v "$tool" >/dev/null 2>&1 || die "required command not found: $tool"
 done
 

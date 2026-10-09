@@ -197,6 +197,28 @@ impl Epoll {
         self.wait_timeout(None)
     }
 
+    /// Include work already buffered by a registered client library without
+    /// sleeping for new kernel readiness. Other descriptors are still polled
+    /// once per turn, and the pending token is yielded exactly once, last.
+    ///
+    /// Callers must bound each dispatch batch so continuously queued work does
+    /// not starve timers or other descriptors.
+    pub fn wait_timeout_with_pending(
+        &mut self,
+        timeout: Option<Duration>,
+        pending_token: Option<u64>,
+    ) -> io::Result<impl Iterator<Item = u64> + '_> {
+        let timeout = if pending_token.is_some() {
+            Some(Duration::ZERO)
+        } else {
+            timeout
+        };
+        Ok(self
+            .wait_timeout(timeout)?
+            .filter(move |token| Some(*token) != pending_token)
+            .chain(pending_token))
+    }
+
     /// Wait for descriptor readiness, bounded by an optional monotonic
     /// duration.
     ///
@@ -370,5 +392,50 @@ mod tests {
             0
         );
         assert_eq!(current.it_interval.tv_sec, 1);
+    }
+}
+
+#[cfg(test)]
+mod pending_token_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn userspace_pending_work_does_not_wait_for_kernel_readiness() {
+        let mut epoll = Epoll::new().unwrap();
+        let start = std::time::Instant::now();
+        let ready: Vec<_> = epoll
+            .wait_timeout_with_pending(Some(Duration::from_secs(2)), Some(1))
+            .unwrap()
+            .collect();
+        assert_eq!(ready, [1]);
+        assert!(start.elapsed() < Duration::from_millis(500));
+        assert_eq!(
+            epoll
+                .wait_timeout_with_pending(Some(Duration::ZERO), None)
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn pending_work_is_not_duplicated_and_other_descriptors_are_serviced_first() {
+        let (x_reader, mut x_writer) = UnixStream::pair().unwrap();
+        let (timer_reader, mut timer_writer) = UnixStream::pair().unwrap();
+        let mut epoll = Epoll::new().unwrap();
+        epoll.add(x_reader.as_fd(), 1).unwrap();
+        epoll.add(timer_reader.as_fd(), 2).unwrap();
+        x_writer.write_all(&[1]).unwrap();
+        timer_writer.write_all(&[1]).unwrap();
+        // Keep both fds readable, as if X events arrive continuously.
+        for _ in 0..4 {
+            let ready: Vec<_> = epoll
+                .wait_timeout_with_pending(None, Some(1))
+                .unwrap()
+                .collect();
+            assert_eq!(ready, [2, 1]);
+        }
     }
 }

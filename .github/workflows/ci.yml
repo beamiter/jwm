@@ -54,7 +54,17 @@ jobs:
         run: bash scripts/test-install-lifecycle.sh
 
       - name: Exercise source installer build recovery
-        run: bash scripts/test-install-jwm-build.sh
+        run: |
+          bash scripts/test-install-jwm-build.sh
+          bash scripts/test-runtime-helpers.sh
+          bash scripts/test-bootstrap-deps.sh
+          python3 scripts/test-release-install-failures.py
+          python3 scripts/test-showcase-lifecycle.py
+          python3 scripts/test-collector.py
+          python3 scripts/test-installer-config.py
+
+      - name: Exercise video automation contracts without a desktop
+        run: PYTHONPATH=video-demo python3 -m unittest discover -s video-demo/tests -v
 
       - name: Exercise offline metrics-tool contracts
         run: bash scripts/test-metrics-tools.sh

@@ -1152,6 +1152,11 @@ impl Jwm {
             if !self.state.clients.contains_key(client_key) {
                 continue;
             }
+            // Moving/resizing a hand-float or migrating a maximized client
+            // can change its restore slots after the last mode toggle. The
+            // replacement adopts these private properties over live server
+            // geometry, so refresh both from the final in-memory placement.
+            self.sync_maximize_restore_property(backend, client_key);
             if let Err(error) = self.persist_minimized_restore_state(backend, client_key) {
                 // Keep the previous valid property if refreshing it fails.
                 // Restart adoption may still use legacy state.
@@ -1475,8 +1480,8 @@ impl Jwm {
 
         // 1. Rebind keys
         self.key_bindings = cfg.get_keys();
+        self.cancel_chord(backend);
         self.chord_compiled = cfg.compile_chord();
-        self.chord_armed_until = None;
         if let Err(e) = self.grabkeys(backend) {
             warn!("[config] failed to re-grab keys: {e}");
         }

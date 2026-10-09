@@ -210,3 +210,138 @@ fn every_tauri_web_preview_retries_fresh_enter_before_renewing() {
         }
     }
 }
+
+#[test]
+fn tauri_development_urls_match_their_frontend_server_ports() {
+    for frontend in ["react", "solid", "svelte", "vue", "leptos", "yew"] {
+        let bar = repository_root().join(format!("bars/tauri_{frontend}_bar"));
+        let config: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(bar.join("src-tauri/tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        let url = config["build"]["devUrl"].as_str().unwrap();
+        let expected_port = if matches!(frontend, "leptos" | "yew") {
+            let trunk: toml::Value =
+                toml::from_str(&fs::read_to_string(bar.join("Trunk.toml")).unwrap()).unwrap();
+            trunk["serve"]["port"].as_integer().unwrap().to_string()
+        } else {
+            let vite = fs::read_to_string(bar.join("vite.config.ts")).unwrap();
+            let server = vite.split_once("server: {").unwrap().1;
+            server
+                .split_once("port:")
+                .unwrap()
+                .1
+                .split(',')
+                .next()
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(
+            url.rsplit(':').next().unwrap().trim_end_matches('/'),
+            expected_port,
+            "{frontend} must wait on the port its dev server actually binds"
+        );
+    }
+}
+
+#[test]
+fn optional_scale_queries_cannot_precede_the_tauri_ready_handshake() {
+    for (frontend, source, initializer, query) in [
+        (
+            "solid",
+            "src/App.tsx",
+            "onMount(() =>",
+            "getCurrentWindow().scaleFactor()",
+        ),
+        (
+            "svelte",
+            "src/App.svelte",
+            "onMount(() =>",
+            "getCurrentWindow().scaleFactor()",
+        ),
+        (
+            "vue",
+            "src/App.vue",
+            "onMounted(() =>",
+            "getCurrentWindow().scaleFactor()",
+        ),
+        (
+            "leptos",
+            "src/main.rs",
+            "let registration = async {",
+            "window.scale_factor().await",
+        ),
+        (
+            "yew",
+            "src/main.rs",
+            "let registration = async {",
+            "window.scale_factor().await",
+        ),
+    ] {
+        let text = fs::read_to_string(
+            repository_root().join(format!("bars/tauri_{frontend}_bar/{source}")),
+        )
+        .unwrap();
+        let startup = text.split_once(initializer).unwrap().1;
+        assert!(
+            startup.find("frontend_ready").unwrap() < startup.find(query).unwrap(),
+            "{frontend}'s optional diagnostic query cannot prevent bridge readiness"
+        );
+    }
+}
+
+#[test]
+fn gpui_component_layout_controls_have_distinct_stable_ids() {
+    let text =
+        fs::read_to_string(repository_root().join("bars/gpui_component_bar/src/main.rs")).unwrap();
+    let layouts = text
+        .split_once("fn render_layouts(")
+        .unwrap()
+        .1
+        .split_once("fn render_usage_pills(")
+        .unwrap()
+        .0;
+    assert!(layouts.contains("SharedString::from(format!(\"layout-option-{layout_index}\"))"));
+    assert!(!layouts.contains("\"layout-option\",\n"));
+}
+
+#[test]
+fn native_battery_views_do_not_fabricate_full_charge() {
+    for frontend in [
+        "gpui_bar",
+        "gpui_component_bar",
+        "iced_bar",
+        "xilem_bar",
+        "dioxus_bar",
+    ] {
+        let text =
+            fs::read_to_string(repository_root().join(format!("bars/{frontend}/src/main.rs")))
+                .unwrap();
+        assert!(!text.contains("battery.percent.map_or(100.0"), "{frontend}");
+        assert!(
+            !text.contains("battery_percent.map(f32::from).unwrap_or(100.0)"),
+            "{frontend}"
+        );
+        assert!(
+            text.contains("filter(|_| battery.present)")
+                || text.contains("filter(|_| state.battery.present)"),
+            "{frontend}"
+        );
+    }
+}
+
+#[test]
+fn optional_native_alpha_probes_handle_missing_libxcb_without_panicking() {
+    for frontend in ["iced_bar", "xilem_bar"] {
+        let text =
+            fs::read_to_string(repository_root().join(format!("bars/{frontend}/src/main.rs")))
+                .unwrap();
+        let main = text.split_once("fn main(").unwrap().1;
+        assert!(
+            main.find("x11rb::xcb_ffi::load_libxcb().is_ok()")
+                .is_some_and(|guard| guard < main.find("XCBConnection::connect(None)").unwrap()),
+            "{frontend}'s optional probe must catch the documented lazy-loader failure"
+        );
+    }
+}

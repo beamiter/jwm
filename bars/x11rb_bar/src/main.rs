@@ -28,6 +28,8 @@ use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
 const BAR_NAME: &str = "x11rb_bar";
 const X_TOKEN: u64 = 1;
+// Bound X work per turn so provider/IPC readiness still gets serviced.
+const X_EVENT_BUDGET: usize = 256;
 const TIMER_TOKEN: u64 = 2;
 const SHARED_TOKEN: u64 = 3;
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -491,8 +493,14 @@ fn drain_x_events(
     current_width: &mut u16,
     current_height: &mut u16,
     bar: &mut CairoBar,
+    mut queued_event: Option<x11rb::protocol::Event>,
 ) -> Result<bool> {
-    while let Some(event) = window.conn.poll_for_event()? {
+    for _ in 0..X_EVENT_BUDGET {
+        let event = match queued_event.take() {
+            Some(event) => Some(event),
+            None => window.conn.poll_for_event()?,
+        };
+        let Some(event) = event else { break };
         if destroys_window(&event, window.win) {
             return Ok(false);
         }
@@ -689,7 +697,15 @@ fn main() -> Result<()> {
         let dock_timeout = bar
             .next_dock_deadline(now)
             .map(|deadline| deadline.saturating_duration_since(now));
-        ready_tokens.extend(epoll.wait_timeout(dock_timeout)?);
+        // A synchronous X reply can move events into the library's queue
+        // while leaving the socket quiet. Inspect that queue before sleeping.
+        let mut queued_x_event = window.conn.poll_for_event()?;
+        ready_tokens.extend(
+            epoll.wait_timeout_with_pending(
+                dock_timeout,
+                queued_x_event.as_ref().map(|_| X_TOKEN),
+            )?,
+        );
         if ready_tokens.is_empty() {
             // Dock retries and moving-preview anchors have sub-second
             // deadlines independent from the aligned provider timer.
@@ -720,6 +736,7 @@ fn main() -> Result<()> {
                         &mut current_width,
                         &mut current_height,
                         &mut bar,
+                        queued_x_event.take(),
                     )? {
                         break 'event_loop;
                     }

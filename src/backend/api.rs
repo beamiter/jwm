@@ -3584,6 +3584,11 @@ pub trait Backend:
     + DisplayControl
     + RenderScheduler
 {
+    /// Session overrides owned by this backend; never libc process globals.
+    fn child_environment(&self) -> crate::child_environment::ChildEnvironment {
+        crate::child_environment::ChildEnvironment::default()
+    }
+
     fn capabilities(&self) -> Capabilities;
     fn root_window(&self) -> Option<WindowId>;
     fn as_any(&self) -> &dyn Any;

@@ -373,6 +373,7 @@ impl AudioRecordingState {
                     capture_to_wav(&path, &thread_device, sample_rate, channels, stop, ready)
                 }
                 AudioBackend::Ffmpeg => capture_with_ffmpeg(
+                    "ffmpeg",
                     &path,
                     &thread_device,
                     sample_rate,
@@ -610,13 +611,13 @@ impl AudioRecordingState {
         if let Err(error) = join_outcome(abandoned.handle) {
             log::debug!("[audio-recording] abandoned recorder exited: {error}");
         }
-        // A device that finally opened after start() gave up leaves at most a
-        // header behind: start() already reported that recording as failed.
-        if std::fs::metadata(&abandoned.output_path)
-            .is_ok_and(|metadata| metadata.len() <= WAV_HEADER_LEN)
-        {
-            let _ = std::fs::remove_file(&abandoned.output_path);
-        }
+        // A pathname does not prove ownership: initialization may have failed
+        // before create_new, or another writer may have claimed/replaced it.
+        // Preserve failed outputs instead of unlinking an unrelated file.
+        log::debug!(
+            "[audio-recording] abandoned output retained at {}",
+            abandoned.output_path.display()
+        );
     }
 
     /// An active recording whose recorder thread runs `body` with the stop
@@ -666,6 +667,7 @@ fn recorder_command(program: &str, args: &[String], stderr: Stdio) -> Command {
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "media-audio")]
 fn capture_with_ffmpeg(
+    program: &str,
     path: &Path,
     device: &str,
     requested_rate: u32,
@@ -719,7 +721,7 @@ fn capture_with_ffmpeg(
             return Err(error);
         }
     };
-    let child = match recorder_command("ffmpeg", &args, Stdio::from(stderr)).spawn() {
+    let child = match recorder_command(program, &args, Stdio::from(stderr)).spawn() {
         Ok(child) => child,
         Err(error) => {
             let error = format!("cannot start ffmpeg audio recorder: {error}");
@@ -736,7 +738,8 @@ fn capture_with_ffmpeg(
         .map_err(|error| error.to_string())?
     {
         let detail = read_ffmpeg_log_tail(log.path());
-        let _ = std::fs::remove_file(path);
+        // ffmpeg -n may have refused a file created after start's preflight.
+        // Never unlink the destination merely because the child failed.
         let error = format!(
             "ffmpeg audio recorder exited during startup ({status}): {}",
             detail.trim()
@@ -746,7 +749,7 @@ fn capture_with_ffmpeg(
     }
     if !claim_ready(&stop, &ready, (rate, channels)) {
         drop(child);
-        let _ = std::fs::remove_file(path);
+        // This path may now name another writer's output; preserve it.
         return Err("ffmpeg audio recorder started after start() gave up on it".into());
     }
 
@@ -870,10 +873,16 @@ fn capture_to_wav(
                     {
                         output.copy_from_slice(&sample.to_le_bytes());
                     }
+                    let Some(next_len) = checked_wav_data_len(data_len, count * 2) else {
+                        break Err(
+                            "WAV recording reached its RIFF size limit; use flac for longer recordings"
+                                .into(),
+                        );
+                    };
                     if let Err(error) = file.write_all(&bytes[..count * 2]) {
                         break Err(error.to_string());
                     }
-                    data_len = data_len.saturating_add((count * 2) as u32);
+                    data_len = next_len;
                 }
                 Err(error) if error.errno() == libc::EAGAIN => {
                     if let Err(error) = pcm.wait(Some(100)) {
@@ -899,11 +908,19 @@ fn capture_to_wav(
         // Never block on start(): it may have stopped reading already, and a
         // worker it abandoned must still finish its cleanup below.
         let _ = ready.try_send(Err(error.clone()));
-        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() <= WAV_HEADER_LEN) {
-            let _ = std::fs::remove_file(path);
-        }
+        // Errors can precede create_new or follow a pathname replacement.
+        // Without exclusive ownership, even a short destination is not ours
+        // to remove. Keep partial recordings for inspection/recovery.
     }
     result
+}
+
+/// A RIFF chunk size includes the header's bytes after the first eight.
+/// Reject before writing so the finalized file never exceeds that field.
+#[cfg(feature = "media-audio")]
+fn checked_wav_data_len(current: u32, additional: usize) -> Option<u32> {
+    let next = current.checked_add(u32::try_from(additional).ok()?)?;
+    (u64::from(next) <= u64::from(u32::MAX) - (WAV_HEADER_LEN - 8)).then_some(next)
 }
 
 #[cfg(feature = "media-audio")]
@@ -913,11 +930,22 @@ fn write_wav_header(
     channels: u16,
     data_len: u32,
 ) -> std::io::Result<()> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WAV size or format exceeds its header fields",
+        )
+    };
+    let riff_len = data_len.checked_add(36).ok_or_else(invalid)?;
     let bits_per_sample = 16u16;
-    let block_align = channels * (bits_per_sample / 8);
-    let byte_rate = rate * u32::from(block_align);
+    let block_align = channels
+        .checked_mul(bits_per_sample / 8)
+        .ok_or_else(invalid)?;
+    let byte_rate = rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(invalid)?;
     file.write_all(b"RIFF")?;
-    file.write_all(&data_len.saturating_add(36).to_le_bytes())?;
+    file.write_all(&riff_len.to_le_bytes())?;
     file.write_all(b"WAVEfmt ")?;
     file.write_all(&16u32.to_le_bytes())?;
     file.write_all(&1u16.to_le_bytes())?;
@@ -933,6 +961,61 @@ fn write_wav_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn wav_capacity_reserves_the_riff_header_and_rejects_before_writing() {
+        let max = u32::MAX - 36;
+        assert_eq!(checked_wav_data_len(max - 4096, 4096), Some(max));
+        assert_eq!(checked_wav_data_len(max - 4095, 4096), None);
+        assert_eq!(checked_wav_data_len(u32::MAX, 1), None);
+        assert_eq!(checked_wav_data_len(0, usize::MAX), None);
+        let path = unique_output_path("riff-bound");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        assert!(write_wav_header(&mut file, 48_000, 2, u32::MAX).is_err());
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        write_wav_header(&mut file, 48_000, 2, max).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), WAV_HEADER_LEN);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn failed_ffmpeg_never_unlinks_a_destination_it_did_not_create() {
+        let directory = unique_output_path("ffmpeg-collision").with_extension("dir");
+        std::fs::create_dir(&directory).unwrap();
+        let program = directory.join("fake-ffmpeg");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nfor path do :; done\n[ -e \"$path\" ] && exit 1\nexit 9\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.join("collision.wav");
+        assert!(!path.exists());
+        // Another writer claims the destination after start's preflight.
+        let sentinel = b"another writer owns this recording";
+        std::fs::write(&path, sentinel).unwrap();
+        let (ready, _receiver) = mpsc::sync_channel(1);
+        let result = capture_with_ffmpeg(
+            program.to_str().unwrap(),
+            &path,
+            "unused-fake-device",
+            48_000,
+            2,
+            "wav",
+            "128k",
+            Arc::new(AtomicBool::new(false)),
+            ready,
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[cfg(feature = "media-audio")]
     #[test]
@@ -1303,7 +1386,11 @@ mod tests {
         }
         assert_eq!(state.check_can_start(), Ok(()));
         assert!(state.abandoned.is_none(), "refresh() reaped the worker");
-        assert!(!path.exists(), "the late header-only output was removed");
+        assert!(
+            path.exists(),
+            "an abandoned pathname is not evidence of ownership"
+        );
+        std::fs::remove_file(path).unwrap(); // The test owns this fixture.
     }
 
     #[cfg(feature = "media-audio")]

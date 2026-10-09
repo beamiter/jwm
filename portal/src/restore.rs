@@ -1,8 +1,9 @@
-//! `restore_token` persistence for ScreenCast sessions.
+//! Private restore-data persistence for backend ScreenCast sessions.
 //!
 //! When a caller passes `persist_mode > 0` to `SelectSources`, the spec lets
-//! the portal hand back a `restore_token` in the `Start` response so the same
-//! caller can later pass it back to skip the picker UI. We keep the mapping
+//! the backend hand back `restore_data` in the `Start` response. The portal
+//! frontend owns public restore tokens and their app/lifetime binding. Our
+//! `(suv)` payload wraps a private opaque key into the existing local store. We keep the mapping
 //! `token → selection` on disk at `~/.config/jwm-portal/sessions.json` so the
 //! token survives portal restarts (OBS users in particular expect "use last
 //! selection" to keep working across compositor reloads).
@@ -22,6 +23,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::picker::SourceSelection;
 use crate::wayland::{OutputInfo, ToplevelInfo};
+
+const RESTORE_VENDOR: &str = "JWM";
+const RESTORE_VERSION: u32 = 1;
+
+/// Backend wire format, distinct from the frontend's public restore_token.
+pub fn encode_data(token: &str) -> Result<zvariant::OwnedValue, zvariant::Error> {
+    zvariant::Value::from((
+        RESTORE_VENDOR,
+        RESTORE_VERSION,
+        zvariant::Value::from(token),
+    ))
+    .try_into()
+}
+
+/// Reject other implementations/versions and every malformed private value.
+pub fn decode_data(value: &zvariant::OwnedValue) -> Option<String> {
+    let structure = <&zvariant::Structure<'_>>::try_from(value).ok()?;
+    let fields = structure.fields();
+    if fields.len() != 3 {
+        return None;
+    }
+    let vendor = <&str>::try_from(&fields[0]).ok()?;
+    let version = u32::try_from(&fields[1]).ok()?;
+    let zvariant::Value::Value(private) = &fields[2] else {
+        return None;
+    };
+    let token = <&str>::try_from(private.as_ref()).ok()?;
+    (vendor == RESTORE_VENDOR && version == RESTORE_VERSION && !token.is_empty())
+        .then(|| token.to_string())
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RestoredSelection {
@@ -337,5 +368,35 @@ mod tests {
             sel.outputs.iter().map(|o| &o.name).collect::<Vec<_>>(),
             vec!["B", "A"]
         );
+    }
+}
+
+#[cfg(test)]
+mod backend_wire_tests {
+    use super::*;
+    use zvariant::{OwnedValue, Value};
+
+    #[test]
+    fn restore_data_has_backend_signature_and_round_trips() {
+        let data = encode_data("private-key").unwrap();
+        assert_eq!(data.value_signature().to_string(), "(suv)");
+        assert_eq!(decode_data(&data).as_deref(), Some("private-key"));
+    }
+
+    #[test]
+    fn foreign_or_malformed_restore_data_is_not_honored() {
+        let values = [
+            Value::from(("OTHER", RESTORE_VERSION, Value::from("key"))),
+            Value::from((RESTORE_VENDOR, 999u32, Value::from("key"))),
+            Value::from((RESTORE_VENDOR, RESTORE_VERSION, Value::from(42u32))),
+            Value::from((RESTORE_VENDOR, RESTORE_VERSION, "unwrapped")),
+            Value::from((RESTORE_VENDOR, RESTORE_VERSION)),
+            Value::from("not-a-structure"),
+        ];
+        for value in values {
+            let value: OwnedValue = value.try_into().unwrap();
+            assert!(decode_data(&value).is_none());
+        }
+        assert!(decode_data(&encode_data("").unwrap()).is_none());
     }
 }

@@ -857,15 +857,40 @@ pub fn refresh_millihz_to_hz(refresh_millihz: u32) -> u32 {
     ((refresh_millihz as u64 + 500) / 1000).clamp(1, u32::MAX as u64) as u32
 }
 
-/// Calculate a rounded whole-Hz refresh rate from a RandR mode.
-pub fn mode_refresh_hz(dot_clock: u32, htotal: u16, vtotal: u16) -> u32 {
+/// Calculate a RandR mode's refresh in millihertz. Sync polarity does not
+/// affect timing. Interlace doubles the field rate, while DoubleScan halves
+/// it; adjust the rational rather than dividing an odd vertical total first.
+pub fn mode_refresh_millihz(
+    dot_clock: u32,
+    htotal: u16,
+    vtotal: u16,
+    interlaced: bool,
+    double_scan: bool,
+) -> u32 {
     if dot_clock == 0 || htotal == 0 || vtotal == 0 {
-        return 60;
+        return DEFAULT_OUTPUT_REFRESH_MHZ;
     }
-    let denominator = htotal as u64 * vtotal as u64;
-    let refresh_millihz =
-        ((dot_clock as u64 * 1000 + denominator / 2) / denominator).min(u32::MAX as u64) as u32;
-    refresh_millihz_to_hz(refresh_millihz).max(1)
+    let numerator = u64::from(dot_clock) * 1000 * if interlaced { 2 } else { 1 };
+    let denominator = u64::from(htotal) * u64::from(vtotal) * if double_scan { 2 } else { 1 };
+    ((numerator + denominator / 2) / denominator).clamp(1, u64::from(u32::MAX)) as u32
+}
+
+/// Calculate the rounded whole-Hz rate used by compositor policy.
+pub fn mode_refresh_hz(
+    dot_clock: u32,
+    htotal: u16,
+    vtotal: u16,
+    interlaced: bool,
+    double_scan: bool,
+) -> u32 {
+    refresh_millihz_to_hz(mode_refresh_millihz(
+        dot_clock,
+        htotal,
+        vtotal,
+        interlaced,
+        double_scan,
+    ))
+    .max(1)
 }
 
 /// Primary-monitor refresh rate in both the backend-facing millihertz
@@ -1263,9 +1288,10 @@ mod tests {
         ICCCM_ICONIC_STATE, NetWmStateAtoms, ProtocolErrorClass, SET_INPUT_FOCUS_OPCODE,
         SUPPORTED_EWMH_FEATURES, classify_client_message, current_desktop_request,
         decode_text_property, enrich_background_event, expand_net_wm_state_requests,
-        forwards_property_notify, mode_refresh_hz, net_wm_state_from_atom, parse_icon_data,
-        parse_normal_hints, parse_strut, parse_wm_class, primary_refresh, protocol_error_log_level,
-        refresh_millihz_to_hz, unclassified_client_message_event, with_maximize_atoms,
+        forwards_property_notify, mode_refresh_hz, mode_refresh_millihz, net_wm_state_from_atom,
+        parse_icon_data, parse_normal_hints, parse_strut, parse_wm_class, primary_refresh,
+        protocol_error_log_level, refresh_millihz_to_hz, unclassified_client_message_event,
+        with_maximize_atoms,
     };
     use crate::backend::api::{
         BackendEvent, EwmhFeature, EwmhSourceIndication, HitTarget, MaximizeAxes, NetWmAction,
@@ -1787,8 +1813,30 @@ mod tests {
         assert_eq!(refresh_millihz_to_hz(0), 0);
         assert_eq!(refresh_millihz_to_hz(59_940), 60);
         assert_eq!(refresh_millihz_to_hz(120_081), 120);
-        assert_eq!(mode_refresh_hz(497_500_000, 2720, 1525), 120);
-        assert_eq!(mode_refresh_hz(0, 0, 0), 60);
+        assert_eq!(mode_refresh_hz(497_500_000, 2720, 1525, false, false), 120);
+        assert_eq!(mode_refresh_hz(0, 0, 0, false, false), 60);
+    }
+
+    #[test]
+    fn randr_scan_modes_adjust_refresh_without_truncating_odd_totals() {
+        for (interlaced, double_scan, expected) in [
+            (false, false, 60_000),
+            (true, false, 120_000),
+            (false, true, 30_000),
+            (true, true, 60_000),
+        ] {
+            assert_eq!(
+                mode_refresh_millihz(148_500_000, 2200, 1125, interlaced, double_scan),
+                expected,
+            );
+            assert_eq!(
+                mode_refresh_hz(148_500_000, 2200, 1125, interlaced, double_scan),
+                expected / 1000,
+            );
+        }
+        assert_eq!(mode_refresh_millihz(0, 2200, 1125, false, false), 60_000);
+        assert_eq!(mode_refresh_millihz(1, 0, 1125, true, false), 60_000);
+        assert_eq!(mode_refresh_millihz(u32::MAX, 1, 1, true, false), u32::MAX);
     }
 
     #[test]

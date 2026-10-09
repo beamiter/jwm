@@ -27,6 +27,12 @@ void main() {
 }
 "#;
 
+/// Prefer the current root extent; the startup size is only an error fallback.
+fn initial_root_size(live: Option<(u32, u32)>, startup: (u32, u32)) -> (u32, u32) {
+    live.filter(|&(width, height)| width != 0 && height != 0)
+        .unwrap_or(startup)
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn new(
         conn: Arc<C>,
@@ -35,6 +41,12 @@ impl<C: CompositorConnection> Compositor<C> {
         screen_h: u32,
         primary_refresh_hz: u32,
     ) -> Result<Self, String> {
+        // The X11 setup screen is a connection-time snapshot. RandR may have
+        // resized the root while compositing was disabled, so initialize every
+        // viewport and render target from the live root before the first frame.
+        let (screen_w, screen_h) =
+            initial_root_size(conn.query_window_size(root), (screen_w, screen_h));
+
         // 1. Check composite extension
         conn.query_composite_version()?;
 
@@ -1548,5 +1560,26 @@ impl<C: CompositorConnection> Compositor<C> {
             gl.delete_shader(fs);
             Ok(program)
         }
+    }
+}
+
+#[cfg(test)]
+mod root_size_tests {
+    use super::initial_root_size;
+
+    #[test]
+    fn a_reenabled_compositor_uses_current_root_geometry() {
+        assert_eq!(initial_root_size(Some((800, 600)), (1280, 720)), (800, 600));
+        assert_eq!(
+            initial_root_size(Some((1920, 1080)), (1280, 720)),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn unavailable_root_geometry_uses_the_startup_fallback() {
+        assert_eq!(initial_root_size(None, (1280, 720)), (1280, 720));
+        assert_eq!(initial_root_size(Some((0, 720)), (1280, 720)), (1280, 720));
+        assert_eq!(initial_root_size(Some((1280, 0)), (1280, 720)), (1280, 720));
     }
 }

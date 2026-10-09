@@ -33,13 +33,19 @@ esac
 
 declare -a build_args=()
 case "$profile" in
-    release) build_args=(--release); bin="target/release/jwm" ;;
-    debug)                            bin="target/debug/jwm" ;;
+    release) build_args=(--release) ;;
+    debug) ;;
     *)
         echo "❌ 未知 profile '$profile';可选 debug | release" >&2
         exit 1
         ;;
 esac
+
+# Cargo resolves relative target directories from the project root above.
+# Pass the same explicit path to both build and launch, including spaces.
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+[[ $target_dir == /* ]] || target_dir="$PWD/$target_dir"
+bin="$target_dir/$profile/jwm"
 
 # ---- 前置检查 ----------------------------------------------------------------
 # wayland-x11 后端依赖 smithay 的 X11 backend,宿主必须是 X11 会话。
@@ -56,7 +62,7 @@ fi
 
 # ---- 构建 --------------------------------------------------------------------
 echo "🔧 构建 jwm ($profile) ..."
-cargo build --locked "${build_args[@]}" --bin jwm
+cargo build --locked --target-dir "$target_dir" "${build_args[@]}" --bin jwm
 
 # ---- 运行 --------------------------------------------------------------------
 export JWM_BACKEND
@@ -64,7 +70,7 @@ export RUST_LOG="${RUST_LOG:-info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export WAYLAND_DEBUG="${WAYLAND_DEBUG:-0}"
 
-log_file="/tmp/jwm_${backend_arg}_$(date +%s).log"
+log_file=$(mktemp "${TMPDIR:-/tmp}/jwm_${backend_arg}.XXXXXXXX.log")
 
 echo ""
 echo "🚀 启动:JWM_BACKEND=$JWM_BACKEND  profile=$profile"

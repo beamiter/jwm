@@ -352,7 +352,7 @@ function build_rain_case(dimensions::Tuple{Int,Int}; memory=Array)
     for _ in 1:seeds
         x = rand(Float32) * width
         y = rand(Float32) * height
-        diameter = RAIN_TRACKED_CUTOFF - log(rand(Float32)) / lambda
+        diameter = rain_impact_diameter(lambda)
         radius = rain_impact_radius(diameter)
         age = 40.0f0 * rand(Float32)
         radius = sqrt(radius^2 + 2.0f0 * RAIN_CONDENSATION * age)
@@ -445,6 +445,12 @@ spread and relaxed on the glass, from `(π/6)D³ = (π/3)f·a³`.
 rain_impact_radius(diameter::Float32) =
     min(diameter / cbrt(2.0f0 * RAIN_CAP_FACTOR), RAIN_MAX_CONTACT)
 
+# rand(Float32) includes zero and excludes one. Use the inverse CDF in this
+# orientation so every possible sample produces a finite impact diameter;
+# -log(u) at zero otherwise reaches floor(Int, Inf) in the splash calculation.
+@inline rain_impact_diameter(lambda::Float32, u::Float32=rand(Float32)) =
+    RAIN_TRACKED_CUTOFF - log1p(-u) / lambda
+
 function rain_spawn!(case::RainCase, spawned::Vector{Raindrop}, dt::Float64)
     width, height = case.dimensions
     resolution = case.resolution
@@ -457,7 +463,7 @@ function rain_spawn!(case::RainCase, spawned::Vector{Raindrop}, dt::Float64)
         # tracked cutoff. Impacts that land already past the local critical
         # radius start running immediately; nothing forces that fraction, it
         # is exp(-Λ·ΔD) of the distribution.
-        diameter = RAIN_TRACKED_CUTOFF - log(rand(Float32)) / lambda
+        diameter = rain_impact_diameter(lambda)
         radius = rain_impact_radius(diameter)
         drop = rain_stuck_drop(case, x, y, radius * resolution)
         push!(spawned, drop)

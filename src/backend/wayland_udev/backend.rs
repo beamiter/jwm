@@ -856,9 +856,7 @@ impl WindowOps for WaylandWindowOps {
                             return;
                         }
                     }
-                    if let Some(kbd) = state.seat.get_keyboard() {
-                        kbd.set_focus(state, Some(surface), serial);
-                    }
+                    state.set_keyboard_focus(Some(surface), serial);
                 }
             });
         }
@@ -1341,6 +1339,7 @@ const fn should_release_minimized_offscreen_owner(
 }
 
 pub struct UdevBackend {
+    child_environment: crate::child_environment::ChildEnvironment,
     display_handle: DisplayHandle,
     /// `--benchmark` asked the session to print its report and exit once the
     /// compositor's harness completes.
@@ -1428,16 +1427,17 @@ fn run_env_import_command(
     command: &str,
     args: &[&str],
     timeout: Duration,
+    environment: &crate::child_environment::ChildEnvironment,
 ) -> io::Result<std::process::ExitStatus> {
-    crate::external_command::status_with_timeout(command, args, timeout)
+    crate::external_command::status_with_environment(command, args, timeout, environment)
 }
 
-fn sync_env_import(vars: &[&str]) {
+fn sync_env_import(vars: &[&str], environment: &crate::child_environment::ChildEnvironment) {
     // Activated children may be launched immediately after backend setup (or
     // XWayland readiness), so the import must finish before the caller
     // continues. Each optional helper retains its own hard deadline.
     sync_env_import_with(vars, |command, args| {
-        run_env_import_command(command, args, ENV_IMPORT_TIMEOUT)
+        run_env_import_command(command, args, ENV_IMPORT_TIMEOUT, environment)
     });
 }
 
@@ -1499,26 +1499,27 @@ fn path_has_executable(bin: &str) -> bool {
     })
 }
 
-fn ensure_fcitx_env_for_primary_session(nested: bool) {
+fn ensure_fcitx_env_for_primary_session(
+    nested: bool,
+    environment: &crate::child_environment::ChildEnvironment,
+) {
     if nested || !path_has_executable("fcitx5") {
         return;
     }
     // Do not override an explicit user choice. These defaults make systemd/D-Bus
     // activated XWayland and toolkit helper processes pick up fcitx5 after an
     // exec restart even when the login environment was sparse.
-    unsafe {
-        if std::env::var_os("GTK_IM_MODULE").is_none() {
-            std::env::set_var("GTK_IM_MODULE", "fcitx");
-        }
-        if std::env::var_os("QT_IM_MODULE").is_none() {
-            std::env::set_var("QT_IM_MODULE", "fcitx");
-        }
-        if std::env::var_os("XMODIFIERS").is_none() {
-            std::env::set_var("XMODIFIERS", "@im=fcitx");
-        }
-        if std::env::var_os("SDL_IM_MODULE").is_none() {
-            std::env::set_var("SDL_IM_MODULE", "fcitx");
-        }
+    if environment.var_os("GTK_IM_MODULE").is_none() {
+        environment.set("GTK_IM_MODULE", "fcitx");
+    }
+    if environment.var_os("QT_IM_MODULE").is_none() {
+        environment.set("QT_IM_MODULE", "fcitx");
+    }
+    if environment.var_os("XMODIFIERS").is_none() {
+        environment.set("XMODIFIERS", "@im=fcitx");
+    }
+    if environment.var_os("SDL_IM_MODULE").is_none() {
+        environment.set("SDL_IM_MODULE", "fcitx");
     }
 }
 
@@ -2138,6 +2139,11 @@ impl UdevBackend {
     }
 
     pub fn new() -> Result<Self, BackendError> {
+        Self::new_with_restart(false)
+    }
+
+    pub(crate) fn new_with_restart(restarting: bool) -> Result<Self, BackendError> {
+        let child_environment = crate::child_environment::ChildEnvironment::default();
         let event_loop: EventLoop<'static, JwmWaylandState> =
             EventLoop::try_new().map_err(|e| BackendError::Other(Box::new(e)))?;
         let display: Rc<RefCell<Display<JwmWaylandState>>> = Rc::new(RefCell::new(
@@ -2301,46 +2307,45 @@ impl UdevBackend {
             // bus.  Children (bar, terminals) would connect to that bus where
             // GtkApplication may find conflicting existing registrations and either
             // hang or delegate window creation back to the parent compositor.
-            // Clear D-Bus from our process env so that every subsequently spawned
+            // Override D-Bus only for child commands so that every subsequently spawned
             // child starts without a pre-existing bus address and either skips
             // D-Bus registration or starts its own session.
-            let restarting = std::env::var_os("JWM_RESTARTING").is_some();
             let nested = !restarting && std::env::var_os("WAYLAND_DISPLAY").is_some();
             // Publish the resolved cursor theme/size so GTK/Qt/toolkit clients
             // load the same pointer style as the compositor renders — a single,
             // session-wide cursor like macOS.
             let (cursor_theme, cursor_size) = crate::config::CONFIG.load().resolved_cursor();
-            // SAFETY: JWM's backend is single-threaded and we set this once at startup.
-            unsafe {
-                std::env::set_var("WAYLAND_DISPLAY", name);
-                std::env::set_var("XDG_CURRENT_DESKTOP", "jwm");
-                std::env::set_var("XDG_SESSION_DESKTOP", "jwm");
-                std::env::set_var("DESKTOP_SESSION", "jwm");
-                std::env::set_var("XDG_SESSION_TYPE", "wayland");
-                std::env::set_var("XCURSOR_THEME", &cursor_theme);
-                std::env::set_var("XCURSOR_SIZE", cursor_size.to_string());
-                if nested {
-                    log::info!(
-                        "Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus"
-                    );
-                    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");
-                }
+            child_environment.set("WAYLAND_DISPLAY", name);
+            child_environment.set("XDG_CURRENT_DESKTOP", "jwm");
+            child_environment.set("XDG_SESSION_DESKTOP", "jwm");
+            child_environment.set("DESKTOP_SESSION", "jwm");
+            child_environment.set("XDG_SESSION_TYPE", "wayland");
+            child_environment.set("XCURSOR_THEME", &cursor_theme);
+            child_environment.set("XCURSOR_SIZE", cursor_size.to_string());
+            if nested {
+                log::info!(
+                    "Nested Wayland session detected: overriding child DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus"
+                );
+                child_environment.set("DBUS_SESSION_BUS_ADDRESS", "");
             }
-            ensure_fcitx_env_for_primary_session(nested);
-            sync_env_import(&[
-                "WAYLAND_DISPLAY",
-                "XDG_CURRENT_DESKTOP",
-                "XDG_SESSION_DESKTOP",
-                "DESKTOP_SESSION",
-                "XDG_SESSION_TYPE",
-                "XCURSOR_THEME",
-                "XCURSOR_SIZE",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "GTK_IM_MODULE",
-                "QT_IM_MODULE",
-                "XMODIFIERS",
-                "SDL_IM_MODULE",
-            ]);
+            ensure_fcitx_env_for_primary_session(nested, &child_environment);
+            sync_env_import(
+                &[
+                    "WAYLAND_DISPLAY",
+                    "XDG_CURRENT_DESKTOP",
+                    "XDG_SESSION_DESKTOP",
+                    "DESKTOP_SESSION",
+                    "XDG_SESSION_TYPE",
+                    "XCURSOR_THEME",
+                    "XCURSOR_SIZE",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "GTK_IM_MODULE",
+                    "QT_IM_MODULE",
+                    "XMODIFIERS",
+                    "SDL_IM_MODULE",
+                ],
+                &child_environment,
+            );
         }
         let mut state = Box::new(wayland_state);
 
@@ -2363,6 +2368,7 @@ impl UdevBackend {
             )
             .map_err(|e| BackendError::Message(format!("XWayland spawn failed: {e}")))?;
 
+            let xwayland_environment = child_environment.clone();
             let xw_client = xwayland_client.clone();
             let loop_handle = event_loop.handle();
             let xw_loop_handle = loop_handle.clone();
@@ -2375,10 +2381,8 @@ impl UdevBackend {
                         } => {
                             log::info!("[xwayland] ready on DISPLAY=:{display_number}");
                             // SAFETY: single-threaded backend, set once.
-                            unsafe {
-                                std::env::set_var("DISPLAY", format!(":{display_number}"));
-                            }
-                            sync_env_import(&["DISPLAY"]);
+                            xwayland_environment.set("DISPLAY", format!(":{display_number}"));
+                            sync_env_import(&["DISPLAY"], &xwayland_environment);
                             // `start_wm` requires `D: XwmHandler + XWaylandShellHandler + SeatHandler`.
                             // Our `JwmWaylandState` implements all three.
                             let dh = wl_state.display_handle.clone();
@@ -2618,7 +2622,7 @@ impl UdevBackend {
                                     .iter()
                                     .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
                                     .map(|o| o.id);
-                                (x, y, output, s.screenshot_grab_active || s.system_ui_grab_active)
+                                (x, y, output, (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked)
                             };
 
                             let mut location: Point<f64, Logical> = (x, y).into();
@@ -2701,7 +2705,7 @@ impl UdevBackend {
                                 s.pointer_x = origin_x as f64 + pos.x;
                                 s.pointer_y = origin_y as f64 + pos.y;
                                 let output = output_at(&s.outputs, s.pointer_x, s.pointer_y);
-                                (s.pointer_x, s.pointer_y, output, s.screenshot_grab_active || s.system_ui_grab_active)
+                                (s.pointer_x, s.pointer_y, output, (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked)
                             };
 
                             let mut location: Point<f64, Logical> = (x, y).into();
@@ -2798,8 +2802,8 @@ impl UdevBackend {
                                     x,
                                     y,
                                     output,
-                                    s.screenshot_grab_active || s.system_ui_grab_active,
-                                    press_hits_toast(&s.toast_rects, x, y),
+                                    (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked,
+                                    !state.session_locked && press_hits_toast(&s.toast_rects, x, y),
                                 )
                             };
                             // A card is drawn over the client, so it absorbs
@@ -2970,6 +2974,17 @@ impl UdevBackend {
                             let serial = SCOUNTER.next_serial();
                             let pressed = matches!(state_key, smithay::backend::input::KeyState::Pressed);
                             let session_locked = state.session_locked;
+                            if state.route_locked_keyboard_input(keycode, state_key, serial, time) {
+                                let mut s = shared.lock_safe();
+                                s.suppressed_keycodes.clear();
+                                if let Some(keyboard) = state.seat.get_keyboard() {
+                                    s.mods_state = mods_from_smithay(&keyboard.modifier_state()).bits();
+                                }
+                                drop(s);
+                                cancel_key_repeat_timer(&state.loop_handle, &shared);
+                                return;
+                            }
+
 
                             let (_, stale_repeat_token) = {
                                 let mut shared = shared.lock_safe();
@@ -3399,7 +3414,7 @@ impl UdevBackend {
                             let (grab_active, clicks, x, y, output, mods_state) = {
                                 let mut s = shared.lock_safe();
                                 let grab_active =
-                                    s.screenshot_grab_active || s.system_ui_grab_active;
+                                    (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked;
                                 let mut clicks = 0;
                                 if grab_active {
                                     let (steps, remainder) = wheel_steps(
@@ -3526,7 +3541,7 @@ impl UdevBackend {
                         InputEvent::GestureSwipeBegin { event, .. } => {
                             let fingers = event.fingers();
                             let cfg = crate::config::CONFIG.load();
-                            let intercept = gesture_swipe_should_intercept(
+                            let intercept = !state.session_locked && gesture_swipe_should_intercept(
                                 fingers,
                                 &cfg.behavior().gesture_swipe,
                             );
@@ -3666,6 +3681,7 @@ impl UdevBackend {
                         _ => {}
                     }
 
+                    state.discard_locked_wm_input();
                     // Input events can enqueue Wayland protocol messages; flush them promptly.
                     if !flush_pending.swap(true, Ordering::SeqCst) {
                         let _ = flush_tx.send(());
@@ -3816,6 +3832,7 @@ impl UdevBackend {
         }
 
         Ok(Self {
+            child_environment,
             display_handle,
             benchmark_auto_exit: false,
             event_loop: SendWrapper(event_loop),
@@ -4235,7 +4252,7 @@ impl BackendDiagnostics for UdevBackend {
         Some(crate::backend::api::XWaylandStatus {
             available: true,
             wm_ready: self.state.x11_wm.is_some(),
-            display: std::env::var("DISPLAY").ok(),
+            display: self.child_environment.var("DISPLAY").ok(),
             mapped_window_count: self.state.x11_surfaces.len(),
             associated_surface_count: self.state.x11_surfaces.len(),
             pending_association_count: self
@@ -4423,7 +4440,9 @@ impl CompositorControl for UdevBackend {
 impl CompositorMedia for UdevBackend {
     fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
         if let Some(kms) = &self.kms {
-            kms.borrow_mut().request_screenshot(path.to_path_buf());
+            kms.borrow_mut()
+                .request_screenshot(path.to_path_buf())
+                .map_err(|error| BackendError::Message(error.to_string()))?;
             self.state.needs_redraw = true;
             Ok(true)
         } else {
@@ -4441,7 +4460,8 @@ impl CompositorMedia for UdevBackend {
     ) -> Result<bool, BackendError> {
         if let Some(kms) = &self.kms {
             kms.borrow_mut()
-                .request_screenshot_region(path.to_path_buf(), x, y, width, height);
+                .request_screenshot_region(path.to_path_buf(), x, y, width, height)
+                .map_err(|error| BackendError::Message(error.to_string()))?;
             self.state.needs_redraw = true;
             Ok(true)
         } else {
@@ -5113,6 +5133,10 @@ impl RenderScheduler for UdevBackend {
 }
 
 impl Backend for UdevBackend {
+    fn child_environment(&self) -> crate::child_environment::ChildEnvironment {
+        self.child_environment.clone()
+    }
+
     fn set_clipboard_text(&mut self, text: &str) -> bool {
         self.state.offer_clipboard_text(text)
     }
@@ -7434,9 +7458,13 @@ mod udev_backend_selection_tests {
     #[test]
     fn environment_import_command_has_a_hard_deadline() {
         let started = Instant::now();
-        let error =
-            run_env_import_command("sh", &["-c", "exec sleep 10"], Duration::from_millis(25))
-                .expect_err("stalled environment importer must time out");
+        let error = run_env_import_command(
+            "sh",
+            &["-c", "exec sleep 10"],
+            Duration::from_millis(25),
+            &crate::child_environment::ChildEnvironment::default(),
+        )
+        .expect_err("stalled environment importer must time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
@@ -7458,6 +7486,7 @@ mod udev_backend_selection_tests {
                 marker_arg.as_str(),
             ],
             Duration::from_secs(1),
+            &crate::child_environment::ChildEnvironment::default(),
         )
         .expect("short environment importer should complete");
         assert!(status.success());

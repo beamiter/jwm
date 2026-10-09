@@ -3,8 +3,8 @@
 
 use clap::Parser;
 use jwm::application::{
-    ApplicationOptions, BackendChoice, BenchmarkRequest, config_path, generate_config_templates,
-    launch_dbus_session, run_with_options, validate_config,
+    ApplicationOptions, BackendChoice, BenchmarkRequest, StartupContext, config_path,
+    generate_config_templates, launch_dbus_session, run_with_context, validate_config,
 };
 use log::{error, info, warn};
 use std::env;
@@ -210,10 +210,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // SAFETY: CLI parsing is complete, but neither logging nor backend/native
+    // worker threads have been started.
+    let startup = unsafe { StartupContext::take_environment_before_threads() };
     configure_logging(cli.log_filter.as_deref());
     // The logger starts background threads that live as long as the process;
     // they must not be able to take SIGCHLD. See `SigchldBlockedForEarlyThreads`.
     let sigchld_blocked = SigchldBlockedForEarlyThreads::new();
+    // Locale and session-bus discovery may change the process environment.
+    // Complete those mutations before the logger starts its cleanup thread.
+    setup_locale();
+    ensure_dbus_session();
     initialize_logging("jwm", "/dev/shm/jwm_bar_global")?;
     install_panic_hook();
     info!("[main] begin");
@@ -221,9 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!("[main] could not block SIGCHLD for early helper threads: {error}");
     }
 
-    setup_locale();
-    ensure_dbus_session();
-    // Hand `run_with_options` the mask this thread started with.
+    // Hand `run_with_context` the mask this thread started with.
     drop(sigchld_blocked);
 
     let benchmark = cli
@@ -231,7 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|frames| BenchmarkRequest::new(frames, cli.benchmark_warmup.unwrap_or(60)))
         .transpose()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    run_with_options(ApplicationOptions { backend, benchmark })?;
+    run_with_context(ApplicationOptions { backend, benchmark }, startup)?;
     Ok(())
 }
 
@@ -463,6 +468,28 @@ mod tests {
     use jwm::application::BackendChoice;
     use nix::sys::signal::{SigSet, Signal};
 
+    #[test]
+    fn environment_bootstrap_precedes_logger_worker_creation() {
+        let source = include_str!("main.rs");
+        let main = source.split("fn main()").nth(1).unwrap();
+        let main = main.split("/// Keeps `SIGCHLD`").next().unwrap();
+        let locale = main.find("    setup_locale();").unwrap();
+        let dbus = main.find("    ensure_dbus_session();").unwrap();
+        let logger = main.find("    initialize_logging(").unwrap();
+        let restart = main
+            .find("StartupContext::take_environment_before_threads()")
+            .unwrap();
+        assert!(
+            restart < logger,
+            "restart environment must be consumed before logger threads"
+        );
+        assert!(
+            locale < logger,
+            "locale mutation must precede logger threads"
+        );
+        assert!(dbus < logger, "D-Bus mutation must precede logger threads");
+    }
+
     /// Parses `args` with the `JWM_BACKEND` env binding removed, so the
     /// result does not depend on the ambient process environment.
     fn parse_without_backend_env(args: &[&str]) -> Cli {
@@ -616,7 +643,7 @@ mod tests {
         assert!(guard < position("initialize_logging("));
         let restored = position("drop(sigchld_blocked)");
         assert!(position("ensure_dbus_session();") < restored);
-        assert!(restored < position("run_with_options("));
+        assert!(restored < position("run_with_context("));
     }
 
     #[test]

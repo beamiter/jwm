@@ -43,6 +43,8 @@ pub struct WgpuPresenter {
     /// Set when the upload texture was reallocated and so retains nothing of
     /// the previous frame; the next present must upload all of it.
     texture_empty: bool,
+    /// The requested window extent cannot currently be configured.
+    presentation_suspended: bool,
 }
 
 // Fullscreen triangle sampling the upload texture; no vertex buffer needed.
@@ -112,6 +114,10 @@ const fn mode_is_transparent(mode: wgpu::CompositeAlphaMode) -> bool {
     )
 }
 
+fn valid_surface_extent(width: u32, height: u32, limit: u32) -> bool {
+    width != 0 && height != 0 && width <= limit && height <= limit
+}
+
 impl WgpuPresenter {
     /// Create a presenter over any wgpu surface target (an `Arc<Window>` for
     /// winit/tao, or a raw-window-handle wrapper for XCB/x11rb).
@@ -147,6 +153,12 @@ impl WgpuPresenter {
                 trace: Default::default(),
             })
             .await?;
+
+        let limit = device.limits().max_texture_dimension_2d;
+        anyhow::ensure!(
+            valid_surface_extent(width, height, limit),
+            "surface extent {width}x{height} is zero or exceeds device limit {limit}"
+        );
 
         let caps = surface.get_capabilities(&adapter);
         let surface_format = caps
@@ -275,6 +287,7 @@ impl WgpuPresenter {
             height,
             surface_stale: false,
             texture_empty: true,
+            presentation_suspended: false,
         })
     }
 
@@ -310,7 +323,18 @@ impl WgpuPresenter {
 
     /// Reconfigure the surface and reallocate the upload texture.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 || (width == self.width && height == self.height) {
+        let limit = self.device.limits().max_texture_dimension_2d;
+        if !valid_surface_extent(width, height, limit) {
+            if !self.presentation_suspended {
+                log::warn!(
+                    "suspending presentation for unsupported extent {width}x{height} (limit {limit})"
+                );
+            }
+            self.presentation_suspended = true;
+            return;
+        }
+        self.presentation_suspended = false;
+        if width == self.width && height == self.height {
             return;
         }
         self.width = width;
@@ -340,6 +364,9 @@ impl WgpuPresenter {
         stride: u32,
         damage: Option<PresentRect>,
     ) -> Result<()> {
+        if self.presentation_suspended {
+            return Ok(());
+        }
         let tight_row = self
             .width
             .checked_mul(4)
@@ -624,5 +651,23 @@ mod tests {
             40,
         );
         assert!(outside.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod extent_tests {
+    use super::valid_surface_extent;
+
+    #[test]
+    fn surface_extent_respects_the_requested_device_limits() {
+        let limit = 8192;
+        assert!(valid_surface_extent(1920, 42, limit));
+        assert!(valid_surface_extent(limit, limit, limit));
+        assert!(!valid_surface_extent(limit + 1, 42, limit));
+        assert!(!valid_surface_extent(1920, limit + 1, limit));
+        assert!(!valid_surface_extent(0, 42, limit));
+        assert!(!valid_surface_extent(1920, 0, limit));
+        // A later valid extent permits resuming, including the prior configured size.
+        assert!(valid_surface_extent(1920, 42, limit));
     }
 }

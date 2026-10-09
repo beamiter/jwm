@@ -252,7 +252,9 @@ impl GpuiComponentBar {
                     self.active_geometry = None;
                     self.geometry_dirty = true;
                 }
-                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl | BarEffect::MediaPlayPause) => {
+                effect @ (BarEffect::Screenshot
+                | BarEffect::OpenAudioControl
+                | BarEffect::MediaPlayPause) => {
                     if let Err(error) = self.process_actions.handle(effect) {
                         warn!("failed to handle platform effect: {error}");
                     }
@@ -312,7 +314,7 @@ impl GpuiComponentBar {
     }
 
     fn chip_button(
-        id: &'static str,
+        id: impl Into<gpui::ElementId>,
         label: impl Into<SharedString>,
         color: gpui::Hsla,
         border: gpui::Hsla,
@@ -388,7 +390,7 @@ impl GpuiComponentBar {
             for (symbol, layout_index) in options {
                 let selected = symbol == self.runtime.view().layout_symbol;
                 let button = Self::chip_button(
-                    "layout-option",
+                    SharedString::from(format!("layout-option-{layout_index}")),
                     symbol,
                     if selected {
                         emerald_500()
@@ -445,21 +447,24 @@ impl GpuiComponentBar {
 
     fn battery_chip(&self) -> impl IntoElement {
         let battery = self.runtime.view().battery;
-        let percent = battery.percent.map_or(100.0, |value| value.as_f32());
+        let percent = battery
+            .percent
+            .filter(|_| battery.present)
+            .map(|value| value.as_f32());
         let charging = battery.charging;
         let icon = if charging {
             ICON_BAT_CHG
         } else {
             ICON_BAT_FULL
         };
-        let (bg, fg) = if percent > 50.0 {
-            (green_500(), white())
-        } else if percent > 20.0 {
-            (rgb(0xFACC15).into(), black())
-        } else {
-            (red_500(), white())
+        let (bg, fg) = match percent {
+            None => (gray_500(), white()),
+            Some(percent) if percent > 50.0 => (green_500(), white()),
+            Some(percent) if percent > 20.0 => (rgb(0xFACC15).into(), black()),
+            Some(_) => (red_500(), white()),
         };
-        self.chip_tag(format!("{icon}  {percent:.0}%"), bg, fg, bg)
+        let label = percent.map_or_else(|| "--".to_owned(), |value| format!("{value:.0}%"));
+        self.chip_tag(format!("{icon}  {label}"), bg, fg, bg)
     }
 
     fn render_interactive_pills(&self, cx: &mut Context<Self>) -> impl IntoElement {

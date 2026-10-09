@@ -311,6 +311,7 @@ struct ReconciledCapture {
     drawable: Window,
     width: u16,
     height: u16,
+    root_dimensions: (u16, u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1106,18 +1107,13 @@ impl X11Capture {
         }
         let (root_width, root_height) = self.root_geometry.dimensions(&self.conn, self.root)?;
         validate_root_geometry(root_width, root_height)?;
-        // A layout change can move or retire the monitor being shared, so the
-        // area is re-resolved rather than remembered as a fixed rectangle.
-        if self.region.is_some_and(|region| {
-            clip_region_to_root(region, root_width, root_height) != Some(region)
-        }) || (self.region.is_none() && self.area != CaptureArea::Root)
-        {
-            self.refresh_region()?;
-        }
-        let (mut source_width, mut source_height) =
-            self.region.map_or((root_width, root_height), |region| {
-                (region.width, region.height)
-            });
+        // Resolve the original selection even when the old rectangle still
+        // fits: a monitor can move or disappear without resizing the root.
+        // Changed scoped geometry requires reconnecting because input and
+        // already queued frames still use the original coordinate space.
+        self.refresh_region()?;
+        let mut root_dimensions = (root_width, root_height);
+        let (mut source_width, mut source_height) = scoped_dimensions(self.region, root_dimensions);
         validate_root_geometry(source_width, source_height)?;
         let mut source_geometry_epoch = self.root_geometry.epoch();
 
@@ -1158,9 +1154,13 @@ impl X11Capture {
                 source_width,
                 source_height,
                 source_geometry_epoch,
+                root_dimensions,
                 allow_render,
             ) {
                 Ok(CaptureDrawableOutcome::Frame(captured)) => {
+                    // Do not publish a frame if scoped metadata changed while
+                    // readback was in flight. No pixel inspection is needed.
+                    self.refresh_region()?;
                     self.damage.capture_succeeded(
                         Instant::now(),
                         (source_width, source_height),
@@ -1176,9 +1176,10 @@ impl X11Capture {
                         .root_geometry
                         .refresh_authoritative(&self.conn, self.root)?;
                     validate_root_geometry(width, height)?;
+                    self.refresh_region()?;
                     drawable = self.drawable;
-                    source_width = width;
-                    source_height = height;
+                    root_dimensions = (width, height);
+                    (source_width, source_height) = scoped_dimensions(self.region, root_dimensions);
                     source_geometry_epoch = self.root_geometry.epoch();
                     match root_snapshot_race_action(
                         root_staging_retry_available,
@@ -1214,6 +1215,7 @@ impl X11Capture {
                             drawable = reconciled.drawable;
                             source_width = reconciled.width;
                             source_height = reconciled.height;
+                            root_dimensions = reconciled.root_dimensions;
                             source_geometry_epoch = self.root_geometry.epoch();
                             validate_root_geometry(source_width, source_height)?;
                             continue;
@@ -1261,6 +1263,7 @@ impl X11Capture {
         source_width: u16,
         source_height: u16,
         source_geometry_epoch: u64,
+        root_dimensions: (u16, u16),
         allow_render: bool,
     ) -> Result<CaptureDrawableOutcome, CaptureFailure> {
         let origin = self.origin();
@@ -1306,6 +1309,7 @@ impl X11Capture {
                         &mut self.cursor,
                         pending_cursor,
                     )?;
+                    let root_position = position;
                     let position = translate_cursor(position, origin);
                     self.finish_cursor(position, &mut image, source_width, source_height)
                         .map_err(CaptureFailure::fatal)?;
@@ -1316,14 +1320,14 @@ impl X11Capture {
                                 &self.conn,
                                 self.root,
                                 source_geometry_epoch,
-                                (source_width, source_height),
+                                root_dimensions,
                             )
                             .map_err(CaptureFailure::fatal)?
                     {
                         return Ok(CaptureDrawableOutcome::RootGeometryChanged);
                     }
                     return Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
-                        cursor: captured_cursor_snapshot(&self.cursor, position),
+                        cursor: captured_cursor_snapshot(&self.cursor, root_position),
                         frame: CapturedFrame {
                             image,
                             source_width,
@@ -1360,6 +1364,8 @@ impl X11Capture {
         };
         let position =
             resolve_cursor_for_frame(&self.conn, self.root, &mut self.cursor, pending_cursor)?;
+        let root_position = position;
+        let position = translate_cursor(position, origin);
         self.finish_cursor(position, &mut image, source_width, source_height)
             .map_err(CaptureFailure::fatal)?;
         let image = if output_width == source_width && output_height == source_height {
@@ -1374,7 +1380,7 @@ impl X11Capture {
         };
 
         Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
-            cursor: captured_cursor_snapshot(&self.cursor, position),
+            cursor: captured_cursor_snapshot(&self.cursor, root_position),
             frame: CapturedFrame {
                 image,
                 source_width,
@@ -1477,6 +1483,9 @@ impl X11Capture {
         let (width, height) = self
             .root_geometry
             .refresh_authoritative(&self.conn, self.root)?;
+        self.refresh_region()?;
+        let root_dimensions = (width, height);
+        let (width, height) = scoped_dimensions(self.region, root_dimensions);
         let changed = source_transition
             || self.drawable != attempted_drawable
             || width != attempted_width
@@ -1486,6 +1495,7 @@ impl X11Capture {
             drawable: self.drawable,
             width,
             height,
+            root_dimensions,
         }))
     }
 
@@ -1662,8 +1672,10 @@ impl X11Capture {
     /// Re-resolve the shared area against the current root geometry.
     fn refresh_region(&mut self) -> RemoteResult<()> {
         let (root_width, root_height) = self.root_geometry.dimensions(&self.conn, self.root)?;
-        self.region =
+        let region =
             resolve_capture_area(&self.conn, self.root, &self.area, root_width, root_height)?;
+        validate_scope_transition(self.region, region)?;
+        self.region = region;
         Ok(())
     }
 
@@ -4023,6 +4035,27 @@ fn resolve_capture_area(
         .map(Some)
 }
 
+/// Keep cropped capture dimensions distinct from the root used to validate
+/// topology/readback races. Recovery must never substitute the whole root.
+fn scoped_dimensions(region: Option<CaptureRegion>, root: (u16, u16)) -> (u16, u16) {
+    region.map_or(root, |region| (region.width, region.height))
+}
+
+/// Existing frame/input coordinates cannot safely be reinterpreted in place.
+/// Startup has no previous region; subsequent scoped changes fail closed.
+fn validate_scope_transition(
+    previous: Option<CaptureRegion>,
+    next: Option<CaptureRegion>,
+) -> RemoteResult<()> {
+    if previous.is_some() && previous != next {
+        return Err(invalid_data(
+            "selected capture area changed; reconnect to verify the shared area and input mapping",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Move a root-absolute cursor position into shared-area coordinates.
 ///
 /// A cursor outside the shared area lands at a negative or out-of-range
@@ -4135,6 +4168,61 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn scoped_recovery_keeps_selected_dimensions_separate_from_root() {
+        let selected = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        for root in [(1920, 1080), (2560, 1440)] {
+            assert_eq!(scoped_dimensions(Some(selected), root), (800, 600));
+            assert_eq!(scoped_dimensions(None, root), root);
+        }
+    }
+
+    #[test]
+    fn scoped_layout_changes_require_reconnection_even_inside_same_root() {
+        let selected = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        assert!(validate_scope_transition(None, Some(selected)).is_ok());
+        assert!(validate_scope_transition(Some(selected), Some(selected)).is_ok());
+        assert!(
+            validate_scope_transition(Some(selected), Some(CaptureRegion { x: 800, ..selected }))
+                .is_err()
+        );
+        assert!(
+            validate_scope_transition(
+                Some(selected),
+                Some(CaptureRegion {
+                    width: 640,
+                    ..selected
+                })
+            )
+            .is_err()
+        );
+        assert!(validate_scope_transition(Some(selected), None).is_err());
+    }
+
+    #[test]
+    fn cropped_cursor_uses_local_pixels_but_root_space_for_damage() {
+        let root_position = Some((2050, 75));
+        assert_eq!(translate_cursor(root_position, (1920, 0)), Some((130, 75)));
+        let now = Instant::now();
+        let mut gate = DamageGateState::new();
+        gate.subtract_queued();
+        gate.capture_succeeded(now, (1920, 1080), CursorSnapshot::Position(root_position));
+        assert_eq!(
+            gate.decide_cursor(CursorSnapshot::Position(root_position)),
+            DamageGateDecision::NoChange
+        );
+    }
 
     fn standard_bgrx_visual() -> Visualtype {
         Visualtype {

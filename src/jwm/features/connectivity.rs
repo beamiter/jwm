@@ -709,7 +709,8 @@ pub fn parse_networks(output: &str) -> Vec<WifiNetwork> {
         else {
             continue;
         };
-        let ssid = ssid.trim();
+        // SSIDs are opaque identities, including leading/trailing spaces.
+        // Only a truly empty field denotes a hidden network.
         if ssid.is_empty() || ssid.len() > MAX_WIFI_SSID_BYTES {
             continue;
         }
@@ -2071,6 +2072,17 @@ impl crate::jwm::Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legal_ssid_whitespace_is_preserved_as_identity() {
+        let rows = parse_networks(
+            ":Cafe:60:WPA2\n: Cafe:70:WPA2\n:Cafe :80:WPA2\n: :90:WPA2\n::100:WPA2\n",
+        );
+        assert_eq!(rows.len(), 4);
+        for name in ["Cafe", " Cafe", "Cafe ", " "] {
+            assert!(rows.iter().any(|row| row.ssid == name), "missing {name:?}");
+        }
+    }
 
     #[test]
     fn radio_state_parses_both_words() {

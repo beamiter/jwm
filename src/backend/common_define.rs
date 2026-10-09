@@ -238,6 +238,10 @@ pub enum SchemeType {
 fn parse_hex_color(hex: &str) -> Result<(u8, u8, u8), Box<dyn std::error::Error>> {
     let hex = if hex.starts_with('#') { &hex[1..] } else { hex };
 
+    // Byte slicing below is valid only after rejecting non-ASCII input.
+    if !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        return Err("Invalid hex color format".into());
+    }
     match hex.len() {
         3 => {
             // #RGB -> #RRGGBB
@@ -295,6 +299,21 @@ bitflags! {
 #[cfg(test)]
 mod color_tests {
     use super::ArgbColor;
+
+    #[test]
+    fn invalid_unicode_hex_colors_return_errors_without_panicking() {
+        for value in ["界", "界界", "éa", "#界", "abcdefg", "12g", ""] {
+            assert!(ArgbColor::from_hex(value, 255).is_err(), "{value:?}");
+        }
+        assert_eq!(
+            ArgbColor::from_hex("#aB3", 128).unwrap().components(),
+            (128, 170, 187, 51)
+        );
+        assert_eq!(
+            ArgbColor::from_hex("123aBC", 255).unwrap().components(),
+            (255, 18, 58, 188)
+        );
+    }
 
     #[test]
     fn normalized_rgba_conversion_rounds_and_clamps_components() {
