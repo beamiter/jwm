@@ -12,7 +12,9 @@ pub struct FrameRateLimiter {
 }
 
 impl FrameRateLimiter {
+    /// Create a limiter, clamping to the same 1..=300 FPS range as the setter.
     pub fn new(target_fps: u32) -> Self {
+        let target_fps = target_fps.clamp(1, 300);
         let frame_budget = 1_000_000_000.0 / target_fps as f64;
         Self {
             target_fps: Arc::new(AtomicU32::new(target_fps)),
@@ -137,9 +139,13 @@ pub struct AdaptiveFrameRate {
 }
 
 impl AdaptiveFrameRate {
+    /// Clamp endpoints to the limiter's supported range and order them.
     pub fn new(min_fps: u32, max_fps: u32) -> Self {
+        let a = min_fps.clamp(1, 300);
+        let b = max_fps.clamp(1, 300);
+        let (min_fps, max_fps) = (a.min(b), a.max(b));
         Self {
-            limiter: FrameRateLimiter::new((min_fps + max_fps) / 2),
+            limiter: FrameRateLimiter::new(min_fps + (max_fps - min_fps) / 2),
             min_fps,
             max_fps,
             current_load: Arc::new(std::sync::atomic::AtomicU32::new(50)),
@@ -152,17 +158,19 @@ impl AdaptiveFrameRate {
         let load = load.min(100);
         self.current_load.store(load, Ordering::Relaxed);
 
-        // Adaptive FPS: reduce when busy, increase when idle
+        // Interpolate within the configured interval, rather than scaling the
+        // sum of its endpoints (which can leave the interval).
+        let span = self.max_fps - self.min_fps;
         let new_fps = if load > 90 {
             self.min_fps
         } else if load > 75 {
-            (self.min_fps + self.max_fps) / 4
+            self.min_fps + span / 4
         } else if load < 30 {
             self.max_fps
         } else if load < 50 {
-            (self.min_fps + self.max_fps) * 3 / 4
+            self.min_fps + span * 3 / 4
         } else {
-            (self.min_fps + self.max_fps) / 2
+            self.min_fps + span / 2
         };
 
         self.limiter.set_target_fps(new_fps);
@@ -402,5 +410,55 @@ mod tests {
             "60 FPS should have larger frame budget than 120 FPS"
         );
         assert!(budget_60.as_nanos() > budget_120.as_nanos() * 1_900_000_000 / 1_000_000_000);
+    }
+}
+#[cfg(test)]
+mod fps_contract_tests {
+    use super::*;
+    #[test]
+    fn constructor_matches_setter_bounds() {
+        for fps in [0, 1, 60, 300, u32::MAX] {
+            let limiter = FrameRateLimiter::new(fps);
+            assert_eq!(limiter.target_fps(), fps.clamp(1, 300));
+            let initial_budget = limiter.frame_budget();
+            limiter.set_target_fps(fps);
+            assert_eq!(initial_budget, limiter.frame_budget());
+        }
+    }
+    #[test]
+    fn adaptive_load_stays_within_range_and_is_monotonic() {
+        for (min, max) in [(60, 144), (30, 60), (60, 60), (1, 300)] {
+            let adaptive = AdaptiveFrameRate::new(min, max);
+            assert_eq!(adaptive.limiter().target_fps(), min + (max - min) / 2);
+            for (load, expected) in [(0, max), (50, min + (max - min) / 2), (100, min)] {
+                adaptive.update_load(load);
+                assert_eq!(adaptive.limiter().target_fps(), expected);
+            }
+            let mut previous = max;
+            for load in 0..=100 {
+                adaptive.update_load(load);
+                let fps = adaptive.limiter().target_fps();
+                assert!(
+                    (min..=max).contains(&fps),
+                    "{min}..{max}: load={load} fps={fps}"
+                );
+                assert!(fps <= previous);
+                previous = fps;
+            }
+        }
+    }
+    #[test]
+    fn invalid_ranges_are_normalized_before_arithmetic() {
+        for (a, b, lo, hi) in [
+            (0, 0, 1, 1),
+            (u32::MAX, u32::MAX, 300, 300),
+            (144, 60, 60, 144),
+        ] {
+            let adaptive = AdaptiveFrameRate::new(a, b);
+            for load in [0, 40, 50, 80, 100] {
+                adaptive.update_load(load);
+                assert!((lo..=hi).contains(&adaptive.limiter().target_fps()));
+            }
+        }
     }
 }

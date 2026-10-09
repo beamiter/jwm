@@ -177,11 +177,13 @@ impl PresentationTimingManager {
 // --- AdaptiveFrameScheduler ---
 
 impl AdaptiveFrameScheduler {
+    /// Zero FPS is normalized to one; the default lower bound cannot exceed the target.
     pub fn new(target_fps: u32) -> Self {
+        let target_fps = target_fps.max(1);
         let frame_budget = Duration::from_secs(1) / target_fps;
         Self {
             target_fps,
-            min_fps: 15,
+            min_fps: 15.min(target_fps),
             max_fps: target_fps,
             current_fps: target_fps,
             last_schedule: Instant::now(),
@@ -193,7 +195,11 @@ impl AdaptiveFrameScheduler {
         }
     }
 
+    /// Normalize zero endpoints to one and order the resulting interval.
     pub fn with_range(min_fps: u32, max_fps: u32) -> Self {
+        let a = min_fps.max(1);
+        let b = max_fps.max(1);
+        let (min_fps, max_fps) = (a.min(b), a.max(b));
         let target = max_fps;
         let frame_budget = Duration::from_secs(1) / target;
         Self {
@@ -296,8 +302,11 @@ impl AdaptiveFrameScheduler {
         self.frame_budget
     }
 
+    /// Set a nonzero target, lowering the minimum when necessary to keep the range ordered.
     pub fn set_target_fps(&mut self, fps: u32) {
+        let fps = fps.max(1);
         self.target_fps = fps;
+        self.min_fps = self.min_fps.min(fps);
         self.max_fps = fps;
         self.current_fps = fps;
         self.frame_budget = Duration::from_secs(1) / fps;
@@ -323,15 +332,66 @@ impl AdaptiveFrameScheduler {
 
     fn decrease_fps(&mut self) {
         if self.current_fps > self.min_fps {
-            self.current_fps = (self.current_fps - 5).max(self.min_fps);
+            self.current_fps = self.current_fps.saturating_sub(5).max(self.min_fps);
             self.frame_budget = Duration::from_secs(1) / self.current_fps;
         }
     }
 
     fn increase_fps(&mut self) {
         if self.current_fps < self.max_fps {
-            self.current_fps = (self.current_fps + 5).min(self.max_fps);
+            self.current_fps = self.current_fps.saturating_add(5).min(self.max_fps);
             self.frame_budget = Duration::from_secs(1) / self.current_fps;
         }
+    }
+}
+#[cfg(test)]
+mod fps_contract_tests {
+    use super::*;
+    #[test]
+    fn low_fps_decrease_stays_in_range() {
+        let mut scheduler = AdaptiveFrameScheduler::with_range(1, 4);
+        for _ in 0..3 {
+            scheduler.on_frame_presented(true);
+        }
+        assert_eq!(scheduler.current_fps(), 1);
+        assert_eq!(scheduler.frame_budget(), Duration::from_secs(1));
+        for _ in 0..30 {
+            scheduler.on_frame_completed(Duration::ZERO);
+        }
+        assert_eq!(scheduler.current_fps(), 4);
+    }
+    #[test]
+    fn zero_and_reversed_ranges_have_nonzero_ordered_bounds() {
+        for mut scheduler in [
+            AdaptiveFrameScheduler::new(0),
+            AdaptiveFrameScheduler::with_range(0, 0),
+            AdaptiveFrameScheduler::with_range(60, 15),
+        ] {
+            assert!(scheduler.min_fps >= 1);
+            assert!(
+                scheduler.min_fps <= scheduler.current_fps
+                    && scheduler.current_fps <= scheduler.max_fps
+            );
+            scheduler.set_target_fps(0);
+            assert_eq!(scheduler.current_fps(), 1);
+            assert_eq!(scheduler.frame_budget(), Duration::from_secs(1));
+            assert_eq!(scheduler.min_fps, 1);
+        }
+        let mut normal = AdaptiveFrameScheduler::new(60);
+        assert_eq!(normal.frame_budget(), Duration::from_secs(1) / 60);
+        for target in [120, 10, 60, 1, 144] {
+            normal.set_target_fps(target);
+            assert_eq!(normal.current_fps(), target);
+            assert_eq!(normal.frame_budget(), Duration::from_secs(1) / target);
+            assert!(normal.min_fps >= 1 && normal.min_fps <= normal.max_fps);
+            for _ in 0..3 {
+                normal.on_frame_presented(true);
+            }
+            assert!((normal.min_fps..=normal.max_fps).contains(&normal.current_fps()));
+        }
+        let mut scheduler = AdaptiveFrameScheduler::with_range(u32::MAX - 1, u32::MAX);
+        scheduler.current_fps = u32::MAX - 1;
+        scheduler.increase_fps();
+        assert_eq!(scheduler.current_fps(), u32::MAX);
     }
 }

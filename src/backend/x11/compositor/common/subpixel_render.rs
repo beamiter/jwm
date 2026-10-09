@@ -329,11 +329,16 @@ impl SubpixelRenderManager {
             .unwrap_or_else(ColorFringeCorrection::standard)
     }
 
-    /// Register window and detect type
+    /// Register window and detect type, replacing any previous classification.
     pub fn register_window(&mut self, window_id: u32, class_name: &str) {
         let window_type = WindowType::from_class(class_name);
-        self.window_types.insert(window_id, window_type);
-        self.total_windows += 1;
+        if let Some(previous) = self.window_types.insert(window_id, window_type) {
+            if previous.should_use_subpixel() {
+                self.subpixel_windows = self.subpixel_windows.saturating_sub(1);
+            }
+        } else {
+            self.total_windows += 1;
+        }
 
         if window_type.should_use_subpixel() {
             self.subpixel_windows += 1;
@@ -613,5 +618,30 @@ mod tests {
 
         mgr.set_enabled(true);
         assert!(mgr.is_enabled());
+    }
+}
+#[cfg(test)]
+mod registration_contract_tests {
+    use super::*;
+    #[test]
+    fn repeated_and_reclassified_registration_tracks_live_windows() {
+        let mut manager = SubpixelRenderManager::new();
+        manager.register_window(1, "kitty");
+        manager.register_window(1, "kitty");
+        assert_eq!(manager.stats(), (1, 1, 100.0));
+        manager.register_window(2, "mpv");
+        assert_eq!(manager.stats(), (2, 1, 50.0));
+        manager.register_window(1, "mpv");
+        assert_eq!(manager.stats(), (2, 0, 0.0));
+        assert_eq!(manager.get_subpixel_mode(1), SubpixelMode::None);
+        manager.register_window(2, "code");
+        assert_eq!(manager.stats(), (2, 1, 50.0));
+        assert_eq!(manager.get_subpixel_mode(2), SubpixelMode::RGB);
+        manager.remove_window(1);
+        manager.remove_window(2);
+        manager.remove_window(2);
+        assert_eq!(manager.stats(), (0, 0, 0.0));
+        assert_eq!(manager.metrics().total_windows, 0);
+        assert_eq!(manager.metrics().subpixel_windows, 0);
     }
 }

@@ -67,8 +67,20 @@ impl MonitorDPI {
 }
 
 impl SubpixelBlurKernel {
+    // Match the manager's supported strength interval. A nonfinite value has
+    // no useful weighting interpretation; construct a zero-strength kernel.
+    fn normalized_strength(strength: f32) -> f32 {
+        if strength.is_finite() {
+            strength.clamp(0.0, 10.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Standard symmetric gaussian-like blur kernel applied uniformly to all channels.
+    /// Finite strength is clamped to 0..=10; nonfinite input uses zero strength.
     pub(crate) fn standard_kernel(strength: f32) -> Self {
+        let strength = Self::normalized_strength(strength);
         let radius = (strength * 3.0).ceil() as u32;
         let size = (radius * 2 + 1) as usize;
         let sigma = strength.max(0.5);
@@ -100,7 +112,9 @@ impl SubpixelBlurKernel {
 
     /// RGB subpixel-aware kernel with per-channel offset weights.
     /// R channel is shifted left, G is centered, B is shifted right.
+    /// Finite strength is clamped to 0..=10; nonfinite input uses zero strength.
     pub(crate) fn rgb_kernel(strength: f32) -> Self {
+        let strength = Self::normalized_strength(strength);
         let radius = (strength * 3.0).ceil() as u32;
         let size = (radius * 2 + 1) as usize;
         let sigma = strength.max(0.5);
@@ -241,7 +255,11 @@ impl SubpixelRenderManager {
     }
 
     /// Set the blur strength for a specific window.
+    /// Nonfinite updates preserve the last valid value.
     pub(crate) fn set_window_blur_strength(&mut self, window_id: u64, strength: f32) {
+        if !strength.is_finite() {
+            return;
+        }
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.blur_strength = strength.clamp(0.0, 10.0);
         }
@@ -351,5 +369,54 @@ mod tests {
         manager.register_window(7, "alacritty");
         manager.remove_window(7);
         assert!(manager.windows.is_empty());
+    }
+}
+#[cfg(test)]
+mod strength_contract_tests {
+    use super::*;
+    #[test]
+    fn nonfinite_updates_preserve_last_valid_strength() {
+        let mut manager = SubpixelRenderManager::new();
+        manager.set_enabled(true);
+        manager.register_window(1, "kitty");
+        manager.set_window_blur_strength(1, 2.0);
+        for strength in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            manager.set_window_blur_strength(1, strength);
+            assert_eq!(manager.get_blur_kernel(1).unwrap().blur_strength, 2.0);
+        }
+    }
+    #[test]
+    fn kernel_constructors_are_bounded_and_finite() {
+        for strength in [
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            -1.0,
+            0.0,
+            0.5,
+            1.0,
+            10.0,
+            100.0,
+        ] {
+            for kernel in [
+                SubpixelBlurKernel::standard_kernel(strength),
+                SubpixelBlurKernel::rgb_kernel(strength),
+            ] {
+                let expected = if strength.is_finite() {
+                    strength.clamp(0.0, 10.0)
+                } else {
+                    0.0
+                };
+                assert_eq!(kernel.blur_strength, expected);
+                assert!(kernel.blur_strength.is_finite());
+                assert!((0.0..=10.0).contains(&kernel.blur_strength));
+                assert!(kernel.radius <= 30);
+                for weights in [&kernel.weights_r, &kernel.weights_g, &kernel.weights_b] {
+                    assert_eq!(weights.len(), (kernel.radius * 2 + 1) as usize);
+                    assert!(weights.iter().all(|w| w.is_finite() && *w >= 0.0));
+                    assert!((weights.iter().sum::<f32>() - 1.0).abs() < 0.0001);
+                }
+            }
+        }
     }
 }
