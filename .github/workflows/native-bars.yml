@@ -90,7 +90,7 @@ jobs:
         run: scripts/test.sh --manifest-path tests/glib_backport/Cargo.toml --release -j 1
 
       - name: Test the shared wire protocol
-        run: cargo test --locked -p shared_structures --all-targets
+        run: cargo test --locked -p shared_structures -p jwm_ipc_transport --all-targets
 
       - name: Test every xbar_core adapter feature
         run: cargo test --locked -p xbar_core --all-features --all-targets
