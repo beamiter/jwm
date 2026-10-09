@@ -253,6 +253,15 @@ impl DirtyRegionTracker {
         }
         merged.push(current);
 
+        // Disjoint rectangles cannot be reduced by overlap merging. Keep the
+        // queue's hard bound without dropping any pending damage: redraw the
+        // bounding box instead, accepting extra pixels rather than stale ones.
+        if merged.len() > self.max_regions {
+            let bounds = merged.iter().copied().reduce(|a, b| a.union(&b)).unwrap();
+            self.merge_count = self.merge_count.saturating_add((merged.len() - 1) as u64);
+            merged.clear();
+            merged.push(bounds);
+        }
         self.regions = merged.into();
     }
 
@@ -304,6 +313,37 @@ impl Default for DirtyRegionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disjoint_damage_stays_bounded_without_losing_coverage() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+        let inputs: Vec<_> = (0..32)
+            .map(|i| DirtyRect::new((i % 16) * 100, (i / 16) * 100, 10, 10))
+            .collect();
+        for rect in &inputs {
+            tracker.mark_dirty(*rect);
+            assert!(
+                tracker.region_count() <= 16,
+                "pending regions={}",
+                tracker.region_count()
+            );
+        }
+        for rect in &inputs {
+            assert!(tracker.is_region_dirty(rect));
+            for x in [rect.x, rect.x + rect.width as i32 - 1] {
+                for y in [rect.y, rect.y + rect.height as i32 - 1] {
+                    assert!(tracker.iter().any(|region| x >= region.x
+                        && y >= region.y
+                        && i64::from(x) < i64::from(region.x) + i64::from(region.width)
+                        && i64::from(y) < i64::from(region.y) + i64::from(region.height)));
+                }
+            }
+        }
+        assert!(tracker.merge_count() > 0);
+        tracker.clear();
+        assert_eq!(tracker.region_count(), 0);
+        assert_eq!(tracker.merged(), None);
+    }
 
     #[test]
     fn test_dirty_rect_intersection() {

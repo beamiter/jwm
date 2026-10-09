@@ -27,10 +27,13 @@ impl PixelBufferPool {
     pub fn acquire(&self, size: usize) -> Vec<u8> {
         if let Ok(mut buffers) = self.buffers.lock() {
             if let Some(pool) = buffers.get_mut(&size) {
-                if let Some(buffer) = pool.pop() {
+                if let Some(mut buffer) = pool.pop() {
                     if let Ok(mut stats) = self.stats.lock() {
                         stats.reuses += 1;
                     }
+                    // Release is keyed by capacity, which survives truncate()
+                    // and clear(). Restore the requested logical length.
+                    buffer.resize(size, 0);
                     return buffer;
                 }
             }
@@ -109,6 +112,23 @@ impl Default for PixelBufferPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusing_a_truncated_buffer_preserves_requested_length() {
+        let pool = PixelBufferPool::new();
+        let mut b = pool.acquire(16);
+        b.fill(7);
+        b.truncate(2);
+        pool.release(b);
+        let b = pool.acquire(16);
+        assert_eq!(b.len(), 16);
+        assert_eq!(&b[..2], &[7; 2]);
+        assert_eq!(&b[2..], &[0; 14]);
+        let mut b = b;
+        b.clear();
+        pool.release(b);
+        assert_eq!(pool.acquire(16), vec![0; 16]);
+    }
 
     #[test]
     fn test_new_pool_is_empty() {
