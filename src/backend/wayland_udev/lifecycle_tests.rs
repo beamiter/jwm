@@ -836,26 +836,36 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
         ));
     }
 
-    for (flag, atom) in [(NetWmState::Above, above), (NetWmState::Below, below)] {
-        state
-            .set_x11_net_state(first_win, flag, true)
-            .expect("write X11 state property");
-        conn.flush().expect("flush X11 property read connection");
-        assert!(state.has_x11_net_state(first_win, flag));
-        let atoms = conn
-            .get_property(false, first, net_wm_state, AtomEnum::ATOM, 0, u32::MAX)
+    let read_state_atoms = || {
+        conn.get_property(false, first, net_wm_state, AtomEnum::ATOM, 0, u32::MAX)
             .expect("query _NET_WM_STATE")
             .reply()
             .expect("read _NET_WM_STATE")
             .value32()
             .expect("32-bit state atoms")
-            .collect::<Vec<_>>();
-        assert!(atoms.contains(&atom));
+            .collect::<Vec<_>>()
+    };
+    for (flag, atom) in [(NetWmState::Above, above), (NetWmState::Below, below)] {
+        state
+            .set_x11_net_state(first_win, flag, true)
+            .expect("write X11 state property");
+        assert!(state.has_x11_net_state(first_win, flag));
+        // Smithay writes and flushes its own X connection. A round trip on
+        // this separate observer connection does not order the server's
+        // handling of that write. Wait for the real property, not a delay.
+        pump_xwm(&mut event_loop, &mut state, |_| {
+            read_state_atoms().contains(&atom)
+        });
+        assert!(read_state_atoms().contains(&atom));
 
         state
             .set_x11_net_state(first_win, flag, false)
             .expect("remove X11 state property");
         assert!(!state.has_x11_net_state(first_win, flag));
+        pump_xwm(&mut event_loop, &mut state, |_| {
+            !read_state_atoms().contains(&atom)
+        });
+        assert!(!read_state_atoms().contains(&atom));
     }
 
     let first_frame = state.x11_surfaces[&first_win]
@@ -867,7 +877,17 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
     state
         .raise_window(first_win)
         .expect("raise first X11 window");
-    conn.flush().expect("flush before querying X11 stack");
+    pump_xwm(&mut event_loop, &mut state, |_| {
+        let children = conn
+            .query_tree(root)
+            .expect("query root tree while awaiting raise")
+            .reply()
+            .expect("read root tree while awaiting raise")
+            .children;
+        let first_pos = children.iter().position(|window| *window == first_frame);
+        let second_pos = children.iter().position(|window| *window == second_frame);
+        matches!((first_pos, second_pos), (Some(first), Some(second)) if first > second)
+    });
     let children = conn
         .query_tree(root)
         .expect("query root tree")
@@ -931,16 +951,12 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
     state
         .set_window_maximized(first_win, MaximizeAxes::BOTH)
         .expect("publish XWayland maximize");
-    conn.flush().expect("flush X11 property read connection");
     assert!(state.x11_surfaces[&first_win].is_maximized());
-    let atoms = conn
-        .get_property(false, first, net_wm_state, AtomEnum::ATOM, 0, u32::MAX)
-        .expect("query _NET_WM_STATE")
-        .reply()
-        .expect("read _NET_WM_STATE")
-        .value32()
-        .expect("32-bit state atoms")
-        .collect::<Vec<_>>();
+    pump_xwm(&mut event_loop, &mut state, |_| {
+        let atoms = read_state_atoms();
+        atoms.contains(&maximized_horz) && atoms.contains(&maximized_vert)
+    });
+    let atoms = read_state_atoms();
     assert!(atoms.contains(&maximized_horz) && atoms.contains(&maximized_vert));
 
     // `Geometry` has no `PartialEq`; compare its fields.

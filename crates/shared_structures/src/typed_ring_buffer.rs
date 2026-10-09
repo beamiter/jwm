@@ -3001,6 +3001,14 @@ mod tests {
                 std::process::id(),
                 "cursor lock recorded the process instead of its holding thread"
             );
+            // Joining the thread synchronizes its Rust work, but /proc can
+            // still briefly expose the kernel task's final exit transition.
+            // Keep the liveness and recovery assertions; wait only for that
+            // observable transition, bounded by the child's outer watchdog.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while process_alive(holder) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             assert!(
                 !process_alive(holder),
                 "exited lock-holder thread is still reported alive"
