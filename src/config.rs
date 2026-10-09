@@ -4244,6 +4244,9 @@ impl Config {
             if let Some(gap) = entry.gap {
                 out.push_str(&format!("gap = {gap}\n"));
             }
+            if let Some(show_bar) = entry.show_bar {
+                out.push_str(&format!("show_bar = {show_bar}\n"));
+            }
         }
         out
     }
@@ -4292,7 +4295,17 @@ impl Config {
             result.push_str(line);
             result.push('\n');
         }
-        result
+        // These comments are optional decoration. A serialized string may
+        // itself span lines and contain table/key-looking text; never let
+        // line-based annotation alter its value. Keep the serializer's exact
+        // output whenever semantic preservation cannot be established.
+        match (
+            toml::from_str::<toml::Table>(toml),
+            toml::from_str::<toml::Table>(&result),
+        ) {
+            (Ok(before), Ok(after)) if before == after => result,
+            _ => toml.to_owned(),
+        }
     }
 
     pub fn save_default(&self) -> Result<(), ConfigError> {
@@ -6102,6 +6115,22 @@ border_px = 3
     }
 
     #[test]
+    fn layout_tag_bar_visibility_round_trips_through_repeated_persist() {
+        let path = temporary_config_path("layout-tags-bar-visibility");
+        Config::default().save_to_file(&path).unwrap();
+        for show_bar in [Some(false), Some(true), None] {
+            let mut entry = layout_tag(1, 0, "tile");
+            entry.show_bar = show_bar;
+            Config::default()
+                .persist_layout_tags_to(&path, &[entry.clone()])
+                .unwrap();
+            let loaded = Config::load_from_file(&path).unwrap();
+            assert_eq!(loaded.layout_tags(), [entry]);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn layout_tags_without_connector_still_load() {
         let path = temporary_config_path("layout-tags-no-connector");
         Config::default().save_to_file(&path).unwrap();
@@ -6238,6 +6267,35 @@ border_px = 3
         assert_eq!(loaded.gap_px(), config.gap_px());
         assert!(loaded.diagnostics().is_empty());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn option_comments_never_change_serialized_multiline_values() {
+        let path = temporary_config_path("comments-multiline");
+        let mut config = Config::default();
+        let command =
+            "printf hello\n[behavior]\ntransition_mode = payload\nwallpaper_mode = data\n";
+        config.inner.behavior.suspend_command = command.into();
+        config.save_to_file(&path).unwrap();
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.behavior().suspend_command, command);
+        assert_eq!(
+            toml::to_string(&loaded.inner).unwrap(),
+            toml::to_string(&config.inner).unwrap()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ordinary_option_comments_preserve_values_and_remain_present() {
+        let serialized = toml::to_string_pretty(&Config::default().inner).unwrap();
+        let annotated = Config::add_option_comments(&serialized);
+        assert!(annotated.contains("# available: slide, cube"));
+        assert!(annotated.contains("# available: linear, ease-out"));
+        assert_eq!(
+            toml::from_str::<toml::Table>(&serialized).unwrap(),
+            toml::from_str::<toml::Table>(&annotated).unwrap()
+        );
     }
 
     #[test]

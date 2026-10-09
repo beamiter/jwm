@@ -591,6 +591,9 @@ fn record_baseline(
     let mut resolution = "unknown".to_string();
     let mut renderer_api = "unknown".to_string();
 
+    // Both cumulative baselines must be taken after idle sampling. Using the
+    // startup status here includes idle allocations but excludes idle frames.
+    let allocation_status_before = session.query("get_status").unwrap_or(Value::Null);
     let measured = match compositor_metrics(&status, session.query("get_metrics")) {
         Err(reason) => Err(reason),
         Ok(before) => {
@@ -621,8 +624,6 @@ fn record_baseline(
             }
         }
         Ok((before, window)) => {
-            let allocations_before = status.get("allocations").and_then(Value::as_u64);
-            let frames_before = metric_f64(&before, "frame_count").unwrap_or(0.0);
             let BenchmarkWindow {
                 report,
                 stopped_report,
@@ -812,29 +813,8 @@ fn record_baseline(
             );
 
             // Steady-state allocations per produced frame.
-            let allocations_after = status_after.get("allocations").and_then(Value::as_u64);
-            let frames_after = after
-                .is_object()
-                .then(|| metric_f64(&after, "frame_count"))
-                .flatten()
-                .unwrap_or(frames_before);
-            let alloc_result = match (allocations_before, allocations_after) {
-                (Some(first), Some(last)) if frames_after > frames_before => {
-                    let mut metrics = BTreeMap::new();
-                    metrics.insert(
-                        "allocs_per_frame".into(),
-                        (last.saturating_sub(first)) as f64 / (frames_after - frames_before),
-                    );
-                    metrics.insert("frames_observed".into(), frames_after - frames_before);
-                    ScenarioResult::recorded(metrics)
-                }
-                (Some(_), Some(_)) => {
-                    ScenarioResult::skipped("no frames were produced during the window")
-                }
-                _ => ScenarioResult::skipped(
-                    "allocation counter not compiled in (build with --features alloc-counter)",
-                ),
-            };
+            let alloc_result =
+                allocation_scenario(&allocation_status_before, &before, &status_after, &after);
             scenarios.insert("allocation_steady".into(), alloc_result);
         }
     }
@@ -904,6 +884,48 @@ fn record_baseline(
         label,
         scenarios,
     })
+}
+
+fn allocation_scenario(
+    status_before: &Value,
+    metrics_before: &Value,
+    status_after: &Value,
+    metrics_after: &Value,
+) -> ScenarioResult {
+    let (Some(first), Some(last)) = (
+        status_before.get("allocations").and_then(Value::as_u64),
+        status_after.get("allocations").and_then(Value::as_u64),
+    ) else {
+        return ScenarioResult::skipped(
+            "allocation counter unavailable (build with --features alloc-counter)",
+        );
+    };
+    let pid = status_before.get("pid").and_then(Value::as_u64);
+    if pid.is_none_or(|pid| pid == 0) || pid != status_after.get("pid").and_then(Value::as_u64) {
+        return ScenarioResult::skipped("compositor identity changed or is unavailable");
+    }
+    let (Some(frames_before), Some(frames_after)) = (
+        metrics_before.get("frame_count").and_then(Value::as_u64),
+        metrics_after.get("frame_count").and_then(Value::as_u64),
+    ) else {
+        return ScenarioResult::skipped("frame counter unavailable during the allocation window");
+    };
+    let (Some(allocations), Some(frames)) = (
+        last.checked_sub(first),
+        frames_after.checked_sub(frames_before),
+    ) else {
+        return ScenarioResult::skipped("cumulative counters reset during the allocation window");
+    };
+    if frames == 0 {
+        return ScenarioResult::skipped("no frames were produced during the window");
+    }
+    ScenarioResult::recorded(BTreeMap::from([
+        (
+            "allocs_per_frame".into(),
+            allocations as f64 / frames as f64,
+        ),
+        ("frames_observed".into(), frames as f64),
+    ]))
 }
 
 /// Drive one benchmark window: make sure the WaterLily workload runs when it
@@ -1652,6 +1674,87 @@ mod tests {
             "pid": 1,
             "compositor_active": compositor_active,
         })
+    }
+
+    #[test]
+    fn allocation_rate_excludes_allocations_from_the_idle_phase() {
+        struct Session {
+            inner: FakeSession,
+            idle_allocations: u64,
+            allocations: u64,
+            frames: u64,
+        }
+        impl RecordSession for Session {
+            fn query(&mut self, name: &str) -> Result<Value, String> {
+                let mut value = self.inner.query(name)?;
+                match name {
+                    "get_status" => value["allocations"] = json!(self.allocations),
+                    "get_metrics" => value["frame_count"] = json!(self.frames),
+                    _ => {}
+                }
+                Ok(value)
+            }
+            fn command(&mut self, name: &str, args: Value) -> Result<Value, String> {
+                if name == "benchmark" && args["action"] == "start" {
+                    self.allocations += 3_000;
+                    self.frames += 300;
+                }
+                self.inner.command(name, args)
+            }
+            fn sample_idle(
+                &mut self,
+                _pid: u32,
+                _seconds: u32,
+            ) -> Result<BTreeMap<String, f64>, String> {
+                self.allocations += self.idle_allocations;
+                Ok(BTreeMap::new())
+            }
+            fn wait_poll(&mut self, deadline: Instant) -> bool {
+                self.inner.wait_poll(deadline)
+            }
+        }
+        for idle_allocations in [0, 10_000, 1_000_000] {
+            let mut session = Session {
+                inner: FakeSession::new(
+                    status(true),
+                    json!({"frame_count": 100, "renderer_api": "egl/gles3"}),
+                ),
+                idle_allocations,
+                allocations: 10_000,
+                frames: 100,
+            };
+            let baseline = record_baseline(&mut session, &options(false)).unwrap();
+            assert_eq!(
+                baseline.scenarios["allocation_steady"].metrics["allocs_per_frame"], 10.0,
+                "idle allocations {idle_allocations} must not enter the benchmark delta"
+            );
+        }
+    }
+
+    #[test]
+    fn allocation_rate_rejects_counter_resets_and_identity_changes() {
+        let before = json!({"pid": 10, "allocations": 1000});
+        let frames = json!({"frame_count": 100});
+        for (after, after_frames) in [
+            (
+                json!({"pid": 10, "allocations": 999}),
+                json!({"frame_count": 200}),
+            ),
+            (
+                json!({"pid": 10, "allocations": 1100}),
+                json!({"frame_count": 99}),
+            ),
+            (
+                json!({"pid": 11, "allocations": 1100}),
+                json!({"frame_count": 200}),
+            ),
+            (json!({"allocations": 1100}), json!({"frame_count": 200})),
+        ] {
+            assert_eq!(
+                allocation_scenario(&before, &frames, &after, &after_frames).status,
+                ScenarioStatus::Skipped
+            );
+        }
     }
 
     fn assert_compositor_scenarios_skipped(baseline: &PerfBaselineV1, reason_part: &str) {

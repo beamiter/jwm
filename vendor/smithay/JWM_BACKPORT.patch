@@ -1,0 +1,49 @@
+--- a/src/backend/allocator/swapchain.rs
++++ b/src/backend/allocator/swapchain.rs
+@@ -195,6 +195,9 @@
+     /// Buffers can always just be safely discarded by dropping them, but not
+     /// calling this function before may affect performance characteristics
+     /// (e.g. by not tracking the buffer age).
++    // JWM vendoring compatibility: keep the pinned Atomic behavior and upstream
++    // Rust 1.87 MSRV (JWM: 1.89); try_update is newer. Revisit on upstream update.
++    #[allow(deprecated)]
+     pub fn submitted(&mut self, slot: &Slot<A::Buffer>) {
+         // don't mess up the state, if the user submitted and old buffer, after e.g. a resize
+         if !self.slots.iter().any(|other| Arc::ptr_eq(&slot.0, other)) {
+--- a/src/input/touch/mod.rs
++++ b/src/input/touch/mod.rs
+@@ -671,19 +671,21 @@
+     }
+ 
+     fn cancel(&mut self, data: &mut D, seat: &Seat<D>) {
+-        let Some(marker) = self.pending_frame.take() else {
+-            tracing::warn!("cancel called without prior events");
+-            return;
+-        };
+-
+-        for state in self.focus.values_mut() {
+-            if state.current.map(|c| c == state.pending).unwrap_or(false) {
+-                continue;
+-            }
+-
+-            state.current = Some(marker);
+-
+-            if let Some((focus, _)) = state.focus.take() {
++        // Cancellation is a new event even if the preceding batch was already
++        // framed. It retires every slot, not only slots changed in this batch.
++        let marker = self.frame_marker();
++        self.pending_frame = None;
++
++        for (_, mut state) in self.focus.drain() {
++            // An up may still owe its final frame. Retire that target as well,
++            // so neither its pending owner nor its slot survives cancellation.
++            let targets = state
++                .focus
++                .take()
++                .map(|(focus, _)| focus)
++                .into_iter()
++                .chain(state.frame_pending.take());
++            for focus in targets {
+                 if focus.last_frame(seat, data) != Some(marker) {
+                     focus.cancel(seat, data, marker);
+                 }

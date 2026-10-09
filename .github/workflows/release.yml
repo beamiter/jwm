@@ -129,6 +129,7 @@ jobs:
           python3 scripts/test-showcase-lifecycle.py
           python3 scripts/test-collector.py
           python3 scripts/test-installer-config.py
+          python3 scripts/test-compositor-init-lifecycle.py
 
       - name: Build release bundle
         run: bash scripts/package-release.sh --output-dir dist

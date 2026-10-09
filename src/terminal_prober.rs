@@ -19,11 +19,23 @@ pub(crate) fn command_exists_in_path(cmd: &str, path: Option<&OsStr>) -> bool {
     env::split_paths(path).any(|directory| is_executable(&directory.join(command_path)))
 }
 
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+/// Probe regular-file execution using effective credentials. The result is not a
+/// guarantee against subsequent file or permission changes.
+pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
 
-    path.metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    if !path.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // A group/other execute bit does not grant execution when the current
+    // identity matches an owner whose execute bit is absent. Ask the kernel
+    // about effective credentials, ACLs and noexec mounts instead of guessing
+    // from mode bits. This remains a probe, not a guarantee against races.
+    // SAFETY: path is a live, NUL-terminated CString for this synchronous call.
+    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -565,5 +577,66 @@ mod tests {
             command_exists_in_path("sh", Some(OsStr::new(""))),
             is_executable(Path::new("sh"))
         );
+    }
+    #[test]
+    fn executable_probe_matches_actual_launch_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "jwm-probe-access-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let temporary = Fixture(path);
+        let program = temporary.0.join("frost");
+        let fallback = temporary.0.join("forge");
+        std::fs::write(&fallback, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fallback_launched = std::process::Command::new(&fallback)
+            .status()
+            .is_ok_and(|status| status.success());
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        for mode in [0o600, 0o610, 0o700] {
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(mode)).unwrap();
+            let launched = std::process::Command::new(&program)
+                .status()
+                .is_ok_and(|status| status.success());
+            assert_eq!(is_executable(&program), launched, "mode {mode:o}");
+            let selected = available_terminal_in_path(
+                Some(temporary.0.as_os_str()),
+                false,
+                TerminalPurpose::Interactive,
+            );
+            let expected = if launched {
+                Some("frost")
+            } else if fallback_launched {
+                Some("forge")
+            } else {
+                None
+            };
+            assert_eq!(
+                selected.as_ref().map(|item| item.command.as_str()),
+                expected
+            );
+        }
+        assert!(!is_executable(&temporary.0));
+    }
+
+    #[test]
+    fn executable_probe_rejects_embedded_nul() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!is_executable(Path::new(OsStr::from_bytes(
+            b"/bin/sh\0suffix"
+        ))));
     }
 }

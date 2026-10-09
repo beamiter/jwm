@@ -43,6 +43,11 @@ impl EventQueue {
 
     /// Push event to queue (from event thread)
     pub fn push(&self, event: AsyncX11Event) -> bool {
+        if self.max_queue_size == 0 {
+            self.dropped_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
         if let Ok(mut q) = self.queue.lock() {
             if q.len() >= self.max_queue_size {
                 // Queue full, drop oldest event
@@ -148,6 +153,9 @@ impl DeferredOpQueue {
 
     /// Defer an operation
     pub fn defer(&self, op: DeferredX11Op) -> bool {
+        if self.max_queue_size == 0 {
+            return false;
+        }
         if let Ok(mut q) = self.queue.lock() {
             if q.len() >= self.max_queue_size {
                 log::warn!("deferred_op_queue: queue full, dropping oldest op");
@@ -320,6 +328,26 @@ impl Default for PriorityEventQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_capacity_queues_never_retain_work() {
+        let events = EventQueue::new(0);
+        assert!(!events.push(AsyncX11Event {
+            timestamp: Instant::now(),
+            event_type: "fixture".into(),
+            window_id: 1,
+            data: vec![],
+        }));
+        assert_eq!(events.len(), 0);
+        let operations = DeferredOpQueue::new(0);
+        assert!(!operations.defer(DeferredX11Op {
+            deferred_at: Instant::now(),
+            op_type: "fixture".into(),
+            window_id: 1,
+            data: vec![],
+        }));
+        assert_eq!(operations.len(), 0);
+    }
 
     #[test]
     fn test_event_queue_basic() {

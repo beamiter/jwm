@@ -581,6 +581,31 @@ pub(crate) fn x11_selection_time_is_valid(request: u32, acquired: Option<u32>) -
     request == 0 || acquired.is_none_or(|acquired| (request.wrapping_sub(acquired) as i32) >= 0)
 }
 
+/// Stop waiting promptly after a SAVE_TARGETS refusal unless the manager
+/// has begun an actual clipboard conversion during the short grace period.
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn x11_handoff_poll_deadline(
+    deadline: std::time::Instant,
+    provisional_failure: Option<std::time::Instant>,
+    protocol_activity: bool,
+) -> std::time::Instant {
+    if protocol_activity {
+        deadline
+    } else {
+        provisional_failure
+            .and_then(|failed_at| failed_at.checked_add(std::time::Duration::from_millis(100)))
+            .map_or(deadline, |grace| deadline.min(grace))
+    }
+}
+
 /// Payload JWM asks a backend-owned clipboard worker to serve.
 ///
 /// X11 selections are lazy: the owner keeps the bytes and answers requests
@@ -815,6 +840,29 @@ pub fn preferred_history_mime(mime_types: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refused_handoff_poll_wakes_at_grace_deadline() {
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_secs(10);
+        assert_eq!(
+            super::x11_handoff_poll_deadline(deadline, Some(now), false),
+            now + std::time::Duration::from_millis(100)
+        );
+        assert_eq!(
+            super::x11_handoff_poll_deadline(deadline, Some(now), true),
+            deadline
+        );
+        assert_eq!(
+            super::x11_handoff_poll_deadline(deadline, None, false),
+            deadline
+        );
+        let sooner = now + std::time::Duration::from_millis(20);
+        assert_eq!(
+            super::x11_handoff_poll_deadline(sooner, Some(now), false),
+            sooner
+        );
+    }
+
     use super::*;
 
     #[test]

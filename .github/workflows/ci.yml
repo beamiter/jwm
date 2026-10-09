@@ -62,6 +62,7 @@ jobs:
           python3 scripts/test-showcase-lifecycle.py
           python3 scripts/test-collector.py
           python3 scripts/test-installer-config.py
+          python3 scripts/test-compositor-init-lifecycle.py
 
       - name: Exercise video automation contracts without a desktop
         run: PYTHONPATH=video-demo python3 -m unittest discover -s video-demo/tests -v

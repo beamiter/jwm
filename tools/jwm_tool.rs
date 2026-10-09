@@ -22,7 +22,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -260,6 +260,12 @@ fn acquire_response_lock(control_pipe: &Path, timeout: Duration) -> io::Result<R
     let deadline = Instant::now() + timeout;
 
     loop {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "another jwm-tool command is still waiting for the daemon response",
+            ));
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -292,7 +298,11 @@ fn acquire_response_lock(control_pipe: &Path, timeout: Duration) -> io::Result<R
                             .and_then(|modified| modified.elapsed().ok())
                             .is_some_and(|age| age >= Duration::from_secs(1));
                         if !owner_live && old_enough_to_be_stale {
-                            let _ = fs::remove_file(&legacy_path);
+                            match fs::remove_file(&legacy_path) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                                Err(error) => return Err(error),
+                            }
                             drop(flock);
                             continue;
                         }
@@ -984,14 +994,23 @@ fn remove_owned_pidfile() {
     }
 }
 
-fn cleanup_resources(control_pipe: &Path) {
+fn cleanup_resources(control_pipe: &Path, preserve_response: bool) {
     log_line("开始清理资源...");
     let resp = response_path(control_pipe);
     let _ = fs::remove_file(control_pipe);
-    let _ = fs::remove_file(&resp);
-    let _ = fs::remove_file(resp.with_extension("tmp"));
+    cleanup_response_files(&resp, preserve_response);
     remove_owned_pidfile();
     log_line("清理完成，守护进程退出");
+}
+
+fn cleanup_response_files(response: &Path, preserve_response: bool) {
+    // A successful quit's final acknowledgement belongs to the serialized
+    // requesting client until it has read it. Removing it during daemon
+    // cleanup races the client's polling interval.
+    if !preserve_response {
+        let _ = fs::remove_file(response);
+    }
+    let _ = fs::remove_file(response.with_extension("tmp"));
 }
 
 fn mkfifo_safe(p: &Path) -> io::Result<()> {
@@ -1175,7 +1194,7 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
 
     let mut mgr = JwmManager::new(jwm_binary, backend);
     if let Err(error) = mgr.start() {
-        cleanup_resources(&control_pipe);
+        cleanup_resources(&control_pipe, false);
         return Err(error);
     }
 
@@ -1194,7 +1213,7 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
             }
             match mgr.stop() {
                 Ok(()) => {
-                    cleanup_resources(&control_pipe);
+                    cleanup_resources(&control_pipe, false);
                     break;
                 }
                 Err(error) => log_line(&format!("停止尚未确认，守护进程保留子进程所有权: {error}")),
@@ -1229,7 +1248,7 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
                             let stopped = result.is_ok();
                             write_response(&resp_path, &daemon_command_response("quit", result));
                             if stopped {
-                                cleanup_resources(&control_pipe);
+                                cleanup_resources(&control_pipe, true);
                                 return Ok(());
                             }
                         }
@@ -1254,7 +1273,7 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
         let _ = mgr.is_running();
         if mgr.unexpected_exit {
             log_line("检测到JWM意外退出, 守护进程一并退出");
-            cleanup_resources(&control_pipe);
+            cleanup_resources(&control_pipe, false);
             return Ok(());
         }
     }
@@ -1365,17 +1384,160 @@ fn check_daemon() -> bool {
     }
 }
 
-fn kill_daemon_by_pidfile() {
-    if let Some(identity) = read_daemon_identity()
-        && process_identity_matches(identity)
-    {
-        println!("终止旧的守护进程: {}", identity.pid);
-        let _ = kill(Pid::from_raw(identity.pid), Signal::SIGTERM);
-        thread::sleep(Duration::from_secs(1));
-        if process_identity_matches(identity) {
-            let _ = kill(Pid::from_raw(identity.pid), Signal::SIGKILL);
+// The daemon owns the Child and needs up to two 2-second stop phases plus
+// its poll interval. Never SIGKILL the owner before it can reap that child.
+const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(6);
+
+fn observe_daemon_process(pid: i32) -> io::Result<Option<ProcessIdentity>> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let (state, start_time) = parse_linux_proc_stat_identity(&stat)
+        .filter(|(_, start_time)| *start_time > 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid daemon process identity",
+            )
+        })?;
+    if matches!(state, 'Z' | 'X' | 'x') {
+        return Ok(None);
+    }
+    let boot_id = current_boot_id().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cannot verify current boot identity",
+        )
+    })?;
+    Ok(Some(ProcessIdentity {
+        pid,
+        start_time,
+        boot_id,
+    }))
+}
+
+fn stop_daemon_owner_with(
+    expected: ProcessIdentity,
+    mut observe: impl FnMut() -> io::Result<Option<ProcessIdentity>>,
+    mut terminate: impl FnMut() -> io::Result<()>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut pause: impl FnMut(Duration),
+) -> io::Result<()> {
+    let mut signalled = false;
+    loop {
+        match observe()? {
+            None => return Ok(()),
+            Some(actual) if actual != expected => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "daemon process identity changed; preserving runtime files",
+                ));
+            }
+            Some(_) => {}
+        }
+        let elapsed = elapsed();
+        if elapsed >= DAEMON_STOP_TIMEOUT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "daemon exit is unconfirmed; preserving its child ownership and runtime files",
+            ));
+        }
+        if !signalled {
+            terminate()?;
+            signalled = true;
+        }
+        pause(Duration::from_millis(50).min(DAEMON_STOP_TIMEOUT - elapsed));
+    }
+}
+
+fn daemon_pidfile_record() -> io::Result<Option<String>> {
+    match read_bounded_text_file(&pidfile_path(), MAX_DAEMON_PIDFILE_BYTES) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn daemon_record_cleanup_allowed(before: &Option<String>, after: &Option<String>) -> bool {
+    after.is_none() || before == after
+}
+
+fn terminate_verified_daemon(expected: ProcessIdentity) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // Pin the process before the final identity check. A PID reused between
+    // verification and signaling must never redirect SIGTERM to its successor.
+    // SAFETY: pidfd_open takes an integer PID and flags; ownership of a valid
+    // returned descriptor is transferred once into OwnedFd.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+    match observe_daemon_process(expected.pid)? {
+        None => return Ok(()),
+        Some(actual) if actual == expected => {}
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "daemon identity changed while acquiring pidfd",
+            ));
         }
     }
+    // SAFETY: fd owns a live pidfd, siginfo is null and flags are zero.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn kill_daemon_by_pidfile() -> io::Result<Option<String>> {
+    let record = daemon_pidfile_record()?;
+    if record.is_none() {
+        return Ok(None);
+    }
+    let identity = match read_daemon_identity() {
+        Some(identity) => identity,
+        None => {
+            // An old PID-only/v1 record cannot authenticate a live owner, but
+            // a definite disappearance is safe to clean once the singleton
+            // lock below is acquired. Permission/parse errors stay failures.
+            let text = record.as_deref().expect("record checked above");
+            let legacy_pid = parse_v1_daemon_pidfile(text)
+                .map(|(pid, _)| pid)
+                .or_else(|| parse_legacy_daemon_pidfile(text));
+            if let Some(pid) = legacy_pid
+                && observe_daemon_process(pid)?.is_none()
+            {
+                return Ok(record);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cannot authenticate daemon pidfile; preserving runtime files",
+            ));
+        }
+    };
+    println!("终止旧的守护进程: {}", identity.pid);
+    let started = Instant::now();
+    stop_daemon_owner_with(
+        identity,
+        || observe_daemon_process(identity.pid),
+        || terminate_verified_daemon(identity),
+        || started.elapsed(),
+        thread::sleep,
+    )?;
+    Ok(record)
 }
 
 fn cleanup_old_pipes_and_pidfile() {
@@ -1399,7 +1561,16 @@ fn cleanup_old_pipes_and_pidfile() {
 fn force_restart_daemon() -> io::Result<()> {
     let operation_lock = acquire_daemon_operation_lock(RESPONSE_LOCK_TIMEOUT)?;
     println!("强制重启守护进程...");
-    kill_daemon_by_pidfile();
+    let old_record = kill_daemon_by_pidfile()?;
+    // A disappeared/unreadable PID is not enough: also acquire the kernel
+    // singleton lock before removing resources or launching a replacement.
+    let daemon_lock = acquire_daemon_lock_at(&daemon_lock_path())?;
+    if !daemon_record_cleanup_allowed(&old_record, &daemon_pidfile_record()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daemon pidfile changed during stop; preserving runtime files",
+        ));
+    }
     cleanup_old_pipes_and_pidfile();
 
     println!("启动新的守护进程...");
@@ -1413,6 +1584,7 @@ fn force_restart_daemon() -> io::Result<()> {
     let _ = child.id();
     // The replacement daemon starts by taking this same operation lock, so it
     // cannot publish a pidfile/FIFO until cleanup above is irrevocably done.
+    drop(daemon_lock);
     drop(operation_lock);
 
     thread::sleep(Duration::from_secs(1));
@@ -2050,10 +2222,7 @@ fn executable_in_dirs(command: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn is_executable_file(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    meta.is_file() && (meta.permissions().mode() & 0o111) != 0
+    jwm::terminal_prober::is_executable(path)
 }
 
 fn smoke_target_json(
@@ -5046,6 +5215,48 @@ mod tests {
         assert!(!lock_path.exists());
         assert!(flock_path.exists());
         std::fs::remove_file(flock_path).unwrap();
+    }
+
+    #[test]
+    fn quit_response_survives_cleanup_until_the_client_reads_it() {
+        let response = std::env::temp_dir().join(format!(
+            "jwm-tool-final-response-test-{}",
+            std::process::id()
+        ));
+        let temporary = response.with_extension("tmp");
+        std::fs::write(&response, "quit_done\n").unwrap();
+        std::fs::write(&temporary, "unfinished").unwrap();
+        super::cleanup_response_files(&response, true);
+        // Model a client whose next poll happens strictly after cleanup.
+        let reply = std::fs::read_to_string(&response).unwrap();
+        validate_daemon_response(reply.trim()).unwrap();
+        assert!(!temporary.exists());
+        super::cleanup_response_files(&response, false);
+        assert!(!response.exists());
+    }
+
+    #[test]
+    fn an_unremovable_stale_response_sentinel_fails_without_spinning() {
+        let directory = std::env::temp_dir().join(format!(
+            "jwm-tool-stale-lock-directory-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let pipe = directory.join("control");
+        let sentinel = response_lock_path(&pipe);
+        std::fs::create_dir(&sentinel).unwrap();
+        std::fs::File::open(&sentinel)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result = acquire_response_lock(&pipe, std::time::Duration::from_millis(50));
+        let elapsed = started.elapsed();
+        let preserved = sentinel.is_dir();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(result.is_err());
+        assert!(preserved, "cleanup must not remove a directory sentinel");
+        assert!(elapsed < std::time::Duration::from_secs(1));
     }
 
     #[test]
@@ -8425,4 +8636,153 @@ fn frame_timed_out() -> io::Error {
         io::ErrorKind::TimedOut,
         "timed out waiting for a complete JWM IPC frame",
     )
+}
+
+#[cfg(test)]
+mod daemon_owner_stop_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn identity(start_time: u64) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: 42,
+            start_time,
+            boot_id: [1; 16],
+        }
+    }
+
+    #[test]
+    fn owner_can_finish_child_cleanup_before_restart_proceeds() {
+        let clock = Cell::new(Duration::ZERO);
+        let signals = Cell::new(0);
+        let expected = identity(1);
+        stop_daemon_owner_with(
+            expected,
+            || Ok((clock.get() < Duration::from_secs(3)).then_some(expected)),
+            || {
+                signals.set(signals.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |delay| clock.set(clock.get() + delay),
+        )
+        .unwrap();
+        assert_eq!(signals.get(), 1);
+        assert_eq!(clock.get(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn unconfirmed_owner_never_receives_a_kill_or_allows_cleanup() {
+        let clock = Cell::new(Duration::ZERO);
+        let signals = Cell::new(0);
+        let expected = identity(1);
+        let error = stop_daemon_owner_with(
+            expected,
+            || Ok(Some(expected)),
+            || {
+                signals.set(signals.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |delay| clock.set(clock.get() + delay),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(signals.get(), 1);
+        assert_eq!(clock.get(), DAEMON_STOP_TIMEOUT);
+    }
+
+    #[test]
+    fn mismatched_or_reused_pids_and_unreadable_identity_fail_closed() {
+        for changed_after_signal in [false, true] {
+            let signals = Cell::new(0);
+            let expected = identity(1);
+            let error = stop_daemon_owner_with(
+                expected,
+                || {
+                    Ok(Some(if changed_after_signal && signals.get() == 0 {
+                        expected
+                    } else {
+                        identity(2)
+                    }))
+                },
+                || {
+                    signals.set(signals.get() + 1);
+                    Ok(())
+                },
+                || Duration::ZERO,
+                |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(signals.get(), i32::from(changed_after_signal));
+        }
+        assert!(
+            stop_daemon_owner_with(
+                identity(1),
+                || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                || panic!("must not signal an unverified process"),
+                || Duration::ZERO,
+                |_| {}
+            )
+            .is_err()
+        );
+        assert!(
+            stop_daemon_owner_with(
+                identity(1),
+                || Ok(None),
+                || panic!("must not signal a gone process"),
+                || Duration::ZERO,
+                |_| {}
+            )
+            .is_ok()
+        );
+        assert!(daemon_record_cleanup_allowed(&Some("old".into()), &None));
+        assert!(daemon_record_cleanup_allowed(
+            &Some("old".into()),
+            &Some("old".into())
+        ));
+        assert!(!daemon_record_cleanup_allowed(
+            &Some("old".into()),
+            &Some("new".into())
+        ));
+        assert!(!daemon_record_cleanup_allowed(&None, &Some("new".into())));
+    }
+}
+
+#[cfg(test)]
+mod executable_probe_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn smoke_discovery_matches_effective_launch_permission() {
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(env::temp_dir().join(format!(
+                "jwm-tool-exec-probe-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+        fs::create_dir(&directory.0).unwrap();
+        let program = directory.0.join("probe-program");
+        fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        for mode in [0o600, 0o610, 0o700] {
+            fs::set_permissions(&program, fs::Permissions::from_mode(mode)).unwrap();
+            let launched = Command::new(&program)
+                .status()
+                .is_ok_and(|status| status.success());
+            assert_eq!(is_executable_file(&program), launched, "mode {mode:o}");
+            assert_eq!(
+                executable_in_dirs("probe-program", std::slice::from_ref(&directory.0)).is_some(),
+                launched
+            );
+        }
+    }
 }

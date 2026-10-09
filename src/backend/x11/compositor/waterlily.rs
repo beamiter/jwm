@@ -275,10 +275,9 @@ fn deliver_command(slot: &mut Option<UnixStream>, payload: &[u8]) -> bool {
 impl Drop for WaterlilyIpc {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let _ = UnixStream::connect(&self.path).and_then(|mut stream| {
-            use std::io::Write;
-            stream.write_all(&[0])
-        });
+        // accept is nonblocking and connected reads have RECEIVE_TIMEOUT.
+        // Do not connect to a pathname during teardown: it can have been
+        // replaced, and a full accept queue would make that connect unbounded.
         if let Some(receiver) = self.receiver.take() {
             let _ = receiver.join();
         }
@@ -1687,8 +1686,10 @@ fn prepare_runtime_parent(path: &Path) -> io::Result<()> {
 }
 
 fn remove_stale_socket(path: &Path) -> io::Result<()> {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return Ok(());
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
     if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::getuid() } {
         return Err(io::Error::new(
@@ -1696,13 +1697,31 @@ fn remove_stale_socket(path: &Path) -> io::Result<()> {
             "WaterLily socket path is not a stale socket owned by this user",
         ));
     }
-    if UnixStream::connect(path).is_ok() {
+    let probe = crate::ipc_connection::connect(path, Duration::from_millis(100)).map(drop);
+    if !socket_probe_proves_stale(probe)? {
         return Err(io::Error::new(
             io::ErrorKind::AddrInUse,
             "another WaterLily consumer is already listening",
         ));
     }
+    let current = fs::symlink_metadata(path)?;
+    if (current.dev(), current.ino()) != (metadata.dev(), metadata.ino()) {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "WaterLily socket changed while checking whether it was stale",
+        ));
+    }
     fs::remove_file(path)
+}
+
+fn socket_probe_proves_stale(probe: io::Result<()>) -> io::Result<bool> {
+    match probe {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => Ok(true),
+        // Permission errors, timeouts and resource exhaustion do not prove
+        // that the other listener is gone. Leave its endpoint untouched.
+        Err(error) => Err(error),
+    }
 }
 
 fn peer_is_current_user(stream: &UnixStream) -> bool {
@@ -1726,6 +1745,44 @@ fn peer_is_current_user(stream: &UnixStream) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_socket_cleanup_requires_connection_refused() {
+        use std::io::{Error, ErrorKind};
+        assert!(!super::socket_probe_proves_stale(Ok(())).unwrap());
+        assert!(
+            super::socket_probe_proves_stale(Err(Error::from(ErrorKind::ConnectionRefused)))
+                .unwrap()
+        );
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::TimedOut,
+            ErrorKind::WouldBlock,
+            ErrorKind::NotFound,
+            ErrorKind::Interrupted,
+            ErrorKind::Other,
+        ] {
+            assert_eq!(
+                super::socket_probe_proves_stale(Err(Error::from(kind)))
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn waterlily_drop_never_connects_to_a_replaced_socket_path() {
+        let source = include_str!("waterlily.rs");
+        let drop_body = source
+            .split_once("impl Drop for WaterlilyIpc")
+            .unwrap()
+            .1
+            .split_once("pub(super) struct WaterlilyTexture")
+            .unwrap()
+            .0;
+        assert!(!drop_body.contains("UnixStream::connect"));
+    }
+
     fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
         a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     }

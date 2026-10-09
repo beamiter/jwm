@@ -20,4 +20,10 @@ repo-file	README.md	share/doc/jwm/README.md	-	0644
 repo-file	CHANGELOG.md	share/doc/jwm/CHANGELOG.md	-	0644
 repo-file	LICENSE	share/doc/jwm/LICENSE	-	0644
 repo-tree	docs	share/doc/jwm/docs	-	0644
+repo-file	vendor/smithay/LICENSE.txt	share/doc/jwm/third-party/smithay/LICENSE.txt	-	0644
+repo-file	vendor/smithay/JWM_BACKPORT.md	share/doc/jwm/third-party/smithay/JWM_BACKPORT.md	-	0644
+repo-file	vendor/smithay/JWM_BACKPORT.patch	share/doc/jwm/third-party/smithay/JWM_BACKPORT.patch	-	0644
+repo-file	vendor/glib/LICENSE	share/doc/jwm/third-party/glib/LICENSE	-	0644
+repo-file	vendor/glib/COPYRIGHT	share/doc/jwm/third-party/glib/COPYRIGHT	-	0644
+repo-file	vendor/glib/JWM-BACKPORT.md	share/doc/jwm/third-party/glib/JWM-BACKPORT.md	-	0644
 stable-link	-	share/doc/jwm	usr/local/share/doc/jwm	-

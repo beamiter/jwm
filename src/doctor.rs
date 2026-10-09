@@ -925,15 +925,11 @@ fn check_status_bar(config_path: &Path, path: Option<&OsStr>) -> DoctorCheck {
 fn find_executable_in_path(path: &OsStr, command: &str) -> Option<PathBuf> {
     if command.contains('/') {
         let candidate = PathBuf::from(command);
-        return fs::metadata(&candidate).ok().and_then(|metadata| {
-            (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(candidate)
-        });
+        return crate::terminal_prober::is_executable(&candidate).then_some(candidate);
     }
     env::split_paths(path).find_map(|directory| {
         let candidate = directory.join(command);
-        fs::metadata(&candidate).ok().and_then(|metadata| {
-            (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).then_some(candidate)
-        })
+        crate::terminal_prober::is_executable(&candidate).then_some(candidate)
     })
 }
 
@@ -1176,6 +1172,37 @@ mod tests {
         assert_eq!(check.status, DoctorStatus::Pass);
         let expected = binary.to_string_lossy().into_owned();
         assert_eq!(check.detail.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn executable_discovery_uses_effective_permissions_for_paths_and_names() {
+        let root = TestDir::new();
+        let program = root.path().join("jwm-tool");
+        fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        for mode in [0o600, 0o610, 0o700] {
+            fs::set_permissions(&program, fs::Permissions::from_mode(mode)).unwrap();
+            let launched = std::process::Command::new(&program)
+                .status()
+                .is_ok_and(|status| status.success());
+            assert_eq!(
+                find_executable_in_path(root.path().as_os_str(), "jwm-tool").is_some(),
+                launched,
+                "name lookup mode {mode:o}"
+            );
+            assert_eq!(
+                find_executable_in_path(OsStr::new(""), program.to_str().unwrap()).is_some(),
+                launched,
+                "explicit path mode {mode:o}"
+            );
+            assert_eq!(
+                check_jwm_tool(Some(root.path().as_os_str())).status,
+                if launched {
+                    DoctorStatus::Pass
+                } else {
+                    DoctorStatus::Warning
+                }
+            );
+        }
     }
 
     #[test]

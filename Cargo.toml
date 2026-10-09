@@ -23,6 +23,7 @@ members = [
 exclude = [
     "tests/glib_backport",
     "vendor/glib",
+    "vendor/smithay",
     # Every bar package (and its vendored/src-tauri crates): exclude must name
     # exact package dirs — globs only work in `members`.
     "bars/dioxus_bar",
@@ -234,3 +235,7 @@ harness = false
 inherits = "release"
 debug = true
 strip = "none"
+
+# Fixed upstream revision with the local touch cancellation correctness patch.
+[patch."https://github.com/Smithay/smithay.git"]
+smithay = { path = "vendor/smithay" }

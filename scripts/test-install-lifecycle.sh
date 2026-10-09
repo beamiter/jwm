@@ -234,6 +234,13 @@ HASH_TWO=$(sha256sum -- "$ARCHIVE_TWO" | awk '{print $1}')
 [[ $HASH_ONE == "$HASH_TWO" ]] || fail "fixed-epoch release archives are not reproducible"
 BUNDLE_NAME=${ARCHIVE_NAME%.tar.gz}
 tar -tzf "$ARCHIVE_ONE" > "$TMP_ROOT/archive-contents.txt"
+for license_path in \
+    share/doc/jwm/third-party/smithay/LICENSE.txt \
+    share/doc/jwm/third-party/smithay/JWM_BACKPORT.patch \
+    share/doc/jwm/third-party/glib/LICENSE \
+    share/doc/jwm/third-party/glib/COPYRIGHT; do
+    grep -Fq -- "/$license_path" "$TMP_ROOT/archive-contents.txt" || fail "vendored dependency notice missing: $license_path"
+done
 for required_path in \
     release-manifest.tsv \
     install-release.sh \

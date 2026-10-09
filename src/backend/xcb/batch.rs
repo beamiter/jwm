@@ -165,7 +165,9 @@ impl<'a> BatchedPropertyRequest<'a> {
         for (key, cookie) in cookies {
             match self.conn.wait_for_reply(cookie) {
                 Ok(reply) => {
-                    results.insert(key, reply.value::<u8>().to_vec());
+                    if let Some(bytes) = property_reply_bytes(&reply) {
+                        results.insert(key, bytes);
+                    }
                 }
                 Err(e) => {
                     log::debug!(
@@ -183,6 +185,30 @@ impl<'a> BatchedPropertyRequest<'a> {
 
     pub fn pending_count(&self) -> usize {
         self.queries.len()
+    }
+}
+
+// XCB enforces the typed accessor's format at runtime. Preserve the same
+// native-endian byte representation as x11rb for all legal X11 formats.
+fn property_reply_bytes(reply: &x::GetPropertyReply) -> Option<Vec<u8>> {
+    match reply.format() {
+        0 => Some(Vec::new()),
+        8 => Some(reply.value::<u8>().to_vec()),
+        16 => Some(
+            reply
+                .value::<u16>()
+                .iter()
+                .flat_map(|value| value.to_ne_bytes())
+                .collect(),
+        ),
+        32 => Some(
+            reply
+                .value::<u32>()
+                .iter()
+                .flat_map(|value| value.to_ne_bytes())
+                .collect(),
+        ),
+        _ => None,
     }
 }
 
@@ -272,5 +298,47 @@ mod tests {
         batch.queue_geometry(1);
         batch.queue_geometry(2);
         assert_eq!(batch.pending_count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod property_format_tests {
+    use super::*;
+    use xcb::Reply;
+
+    fn reply(format: u8, payload: &[u8]) -> x::GetPropertyReply {
+        let padded = payload.len().div_ceil(4) * 4;
+        // SAFETY: calloc supplies aligned storage owned by this synthetic XCB
+        // reply. Header lengths match the complete payload; Reply::drop uses
+        // free, exactly as for a real libxcb reply. No server is contacted.
+        unsafe {
+            let raw = libc::calloc(1, 32 + padded).cast::<u8>();
+            assert!(!raw.is_null());
+            *raw = 1;
+            *raw.add(1) = format;
+            raw.add(4).cast::<u32>().write((padded / 4) as u32);
+            raw.add(16).cast::<u32>().write(if format == 0 {
+                0
+            } else {
+                (payload.len() / (format as usize / 8)) as u32
+            });
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), raw.add(32), payload.len());
+            x::GetPropertyReply::from_raw(raw)
+        }
+    }
+
+    #[test]
+    fn property_bytes_accept_all_x11_element_widths() {
+        assert_eq!(property_reply_bytes(&reply(0, &[])), Some(vec![]));
+        for (format, bytes) in [
+            (8, vec![1, 2, 3]),
+            (16, [1_u16.to_ne_bytes(), 0x1234_u16.to_ne_bytes()].concat()),
+            (
+                32,
+                [1_u32.to_ne_bytes(), 0x12345678_u32.to_ne_bytes()].concat(),
+            ),
+        ] {
+            assert_eq!(property_reply_bytes(&reply(format, &bytes)), Some(bytes));
+        }
     }
 }

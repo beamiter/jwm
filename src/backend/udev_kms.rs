@@ -8403,6 +8403,7 @@ impl KmsState {
         state: &crate::backend::wayland::state::JwmWaylandState,
         cursor_kind: StdCursorKind,
         compositor: Option<&super::super::compositor::WaylandCompositor>,
+        builtin_session_lock_shield: bool,
     ) {
         // Ahead of the early return: a capture of a dark or replaced output
         // must be answered even when nothing on screen needs a frame.
@@ -8627,6 +8628,20 @@ impl KmsState {
                 }
 
                 // Opaque shield behind the lock surface and above regular clients.
+                elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
+                    Id::new(),
+                    Rectangle::<i32, Physical>::from_size((out_w, out_h).into()),
+                    0usize,
+                    smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0),
+                    Kind::Unspecified,
+                )));
+            }
+
+            // The built-in lock is compositor UI, not an ext-session-lock
+            // client. If GPU reconstruction failed (or effects were disabled),
+            // keep its session opaque until a frame paints the replayed UI. This does
+            // not satisfy or alter the native protocol's confirmation epoch.
+            if builtin_session_lock_shield {
                 elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
                     Id::new(),
                     Rectangle::<i32, Physical>::from_size((out_w, out_h).into()),

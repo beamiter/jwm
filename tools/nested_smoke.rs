@@ -327,6 +327,26 @@ pub fn png_signature_valid(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
 }
 
+// Smoke artifacts live in a private run directory, but a broken capture tool
+// must not turn validation into an unbounded read or image allocation.
+const MAX_CAPTURE_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+fn png_capture_valid(bytes: &[u8]) -> bool {
+    if !png_signature_valid(bytes) {
+        return false;
+    }
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    reader
+        .decode()
+        .is_ok_and(|image| image.width() > 0 && image.height() > 0)
+}
+
 /// Sanity-check an `xwd` dump: the header is at least 100 bytes and encodes
 /// `header_size` then `file_version == 7`, both big-endian.
 #[must_use]
@@ -2018,6 +2038,19 @@ fn wait_for_child_exit(
     }
 }
 
+fn wait_for_capture_success(
+    child: &mut Child,
+    deadline: Instant,
+    command: &str,
+) -> Result<(), String> {
+    let status = wait_for_child_exit(child, deadline, command)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{command} failed: {status}"))
+    }
+}
+
 fn run_xwininfo(
     context: &RunContext,
     arguments: &[&str],
@@ -2781,25 +2814,11 @@ fn run_screenshot_step(spec: &StepSpec, context: &RunContext) -> StepReport {
         Ok(child) => child,
         Err(error) => return step_fail(spec, started, format!("spawn grim: {error}"), context),
     };
-    let deadline = started + spec.timeout;
-    let exited = poll_until(deadline, || {
-        child
-            .try_wait()
-            .map(|status| status.is_some())
-            .map_err(|error| error.to_string())
-    });
-    if !matches!(exited, Ok(true)) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return step_fail(
-            spec,
-            started,
-            "grim did not finish before the step deadline".to_string(),
-            context,
-        );
+    if let Err(error) = wait_for_capture_success(&mut child, started + spec.timeout, "grim") {
+        return step_fail(spec, started, error, context);
     }
-    match fs::read(&shot) {
-        Ok(bytes) if png_signature_valid(&bytes) => StepReport {
+    match super::read_bounded_regular_file(&shot, MAX_CAPTURE_FILE_BYTES) {
+        Ok(bytes) if png_capture_valid(&bytes) => StepReport {
             name: spec.name,
             status: StepStatus::Pass,
             required: spec.required,
@@ -2856,25 +2875,11 @@ fn run_x11_screenshot_step(spec: &StepSpec, context: &RunContext) -> StepReport 
         Ok(child) => child,
         Err(error) => return step_fail(spec, started, format!("spawn xwd: {error}"), context),
     };
-    let deadline = started + spec.timeout;
-    let exited = poll_until(deadline, || {
-        child
-            .try_wait()
-            .map(|status| status.is_some())
-            .map_err(|error| error.to_string())
-    });
-    if !matches!(exited, Ok(true)) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return step_fail(
-            spec,
-            started,
-            "xwd did not finish before the step deadline".to_string(),
-            context,
-        );
+    if let Err(error) = wait_for_capture_success(&mut child, started + spec.timeout, "xwd") {
+        return step_fail(spec, started, error, context);
     }
-    match fs::read(&shot) {
-        Ok(bytes) if xwd_signature_valid(&bytes) => StepReport {
+    match super::read_bounded_regular_file(&shot, MAX_CAPTURE_FILE_BYTES) {
+        Ok(bytes) if xwd_window_pixels(&bytes).is_ok() => StepReport {
             name: spec.name,
             status: StepStatus::Pass,
             required: spec.required,
@@ -3883,6 +3888,43 @@ mod tests {
         assert!(outcome.detail.contains("snapshot 0"));
         assert!(outcome.detail.contains("windows"));
         assert!(outcome.action.is_some());
+    }
+
+    #[test]
+    fn capture_checks_reject_failed_commands_and_signature_only_images() {
+        let mut child = Command::new("sh").args(["-c", "exit 19"]).spawn().unwrap();
+        assert!(
+            wait_for_capture_success(
+                &mut child,
+                Instant::now() + Duration::from_secs(2),
+                "fixture"
+            )
+            .unwrap_err()
+            .contains("failed")
+        );
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        assert!(
+            wait_for_capture_success(
+                &mut child,
+                Instant::now() + Duration::from_secs(2),
+                "fixture"
+            )
+            .is_ok()
+        );
+        let signature = b"\x89PNG\r\n\x1a\n";
+        assert!(png_signature_valid(signature));
+        assert!(!png_capture_valid(signature));
+        let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        assert!(png_capture_valid(encoded.get_ref()));
+        assert!(!png_capture_valid(&encoded.get_ref()[..24]));
+        let xwd = truecolor_xwd(0, [0; 12]);
+        assert!(xwd_window_pixels(&xwd).is_ok());
+        assert!(xwd_signature_valid(&xwd[..100]));
+        assert!(xwd_window_pixels(&xwd[..100]).is_err());
     }
 
     #[test]

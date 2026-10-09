@@ -32,7 +32,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use crate::sync_ext::MutexExt as _;
 
@@ -78,58 +78,70 @@ pub(crate) struct RowIconData {
     pub(crate) height: u32,
 }
 
-fn decode_gate() -> &'static (Mutex<usize>, Condvar) {
-    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+fn decode_gate() -> &'static Mutex<usize> {
+    static GATE: OnceLock<Mutex<usize>> = OnceLock::new();
     GATE.get_or_init(|| {
         let max = std::thread::available_parallelism()
             .map(|n| n.get().min(4))
             .unwrap_or(2);
-        (Mutex::new(max), Condvar::new())
+        Mutex::new(max)
     })
 }
 
-/// RAII permit for the row-icon decode gate, the wallpaper loaders' pattern:
-/// blocks until a permit is free, returns it on drop.
-struct DecodePermit;
+/// Admission happens before creating a thread. Closing and reopening a panel
+/// therefore cannot accumulate sleeping workers behind the decode limit.
+struct DecodePermit(&'static Mutex<usize>);
 
 impl DecodePermit {
-    fn acquire() -> Self {
-        let (lock, cvar) = decode_gate();
-        let mut avail = lock.lock_safe();
-        while *avail == 0 {
-            avail = cvar.wait(avail).unwrap_or_else(|e| e.into_inner());
+    fn try_acquire(gate: &'static Mutex<usize>) -> Option<Self> {
+        let mut available = gate.lock_safe();
+        if *available == 0 {
+            return None;
         }
-        *avail -= 1;
-        DecodePermit
+        *available -= 1;
+        Some(Self(gate))
     }
 }
 
 impl Drop for DecodePermit {
     fn drop(&mut self) {
-        let (lock, cvar) = decode_gate();
-        let mut avail = lock.lock_safe();
-        *avail += 1;
-        cvar.notify_one();
+        *self.0.lock_safe() += 1;
     }
+}
+
+fn spawn_decode<T: Send + 'static>(
+    gate: &'static Mutex<usize>,
+    work: impl FnOnce() -> Option<T> + Send + 'static,
+) -> Option<mpsc::Receiver<T>> {
+    let permit = DecodePermit::try_acquire(gate)?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("jwm-row-icon".into())
+        .spawn(move || {
+            let _permit = permit;
+            if let Some(data) = work() {
+                let _ = tx.send(data);
+            }
+        })
+        .ok()?;
+    Some(rx)
 }
 
 /// Decode one icon on a background thread. Same worker pattern as the
 /// wallpaper picker's side preview — decode gate, bounded thumbnail, channel
-/// back — and the same quiet failure: an unreadable file sends nothing, which
+/// back. Saturated admission returns None for a later poll to retry; an actual
+/// decode failure closes its receiver, the same quiet failure: an unreadable file sends nothing, which
 /// the cache records as a miss instead of retrying. `jwm-mem:` keys load
 /// registered PNG bytes instead of touching the filesystem.
-pub(crate) fn decode_async(path: &str) -> mpsc::Receiver<RowIconData> {
-    let (tx, rx) = mpsc::channel();
+pub(crate) fn decode_async(path: &str) -> Option<mpsc::Receiver<RowIconData>> {
     let path = path.to_string();
-    std::thread::spawn(move || {
-        // Bound concurrent decodes; released when this thread exits.
-        let _permit = DecodePermit::acquire();
+    spawn_decode(decode_gate(), move || {
         let img = if let Some(bytes) = memory_icon_bytes(&path) {
             match image::load_from_memory(&bytes) {
                 Ok(img) => img,
                 Err(e) => {
                     log::debug!("compositor: no row icon for memory key '{path}': {e}");
-                    return;
+                    return None;
                 }
             }
         } else {
@@ -137,7 +149,7 @@ pub(crate) fn decode_async(path: &str) -> mpsc::Receiver<RowIconData> {
                 Ok(img) => img,
                 Err(e) => {
                     log::debug!("compositor: no row icon for '{path}': {e}");
-                    return;
+                    return None;
                 }
             }
         };
@@ -152,13 +164,12 @@ pub(crate) fn decode_async(path: &str) -> mpsc::Receiver<RowIconData> {
         };
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
-        let _ = tx.send(RowIconData {
+        Some(RowIconData {
             rgba: rgba.into_raw(),
             width: w,
             height: h,
-        });
-    });
-    rx
+        })
+    })
 }
 
 static MEMORY_ICONS: OnceLock<Mutex<HashMap<String, Arc<[u8]>>>> = OnceLock::new();
@@ -297,6 +308,8 @@ pub(crate) struct RowIconCache<T> {
     /// In-flight decodes. A dropped receiver turns a superseded worker's send
     /// into a no-op, so clearing or capping never waits on a thread.
     pending: HashMap<String, mpsc::Receiver<RowIconData>>,
+    /// Bounded requests awaiting admission; no OS thread exists for these.
+    deferred: HashSet<String>,
     /// Paths whose decode already failed. Remembered for the life of the
     /// panel: a miss must not be re-decoded on every sync.
     missed: HashSet<String>,
@@ -314,6 +327,7 @@ impl<T> RowIconCache<T> {
             textures: HashMap::new(),
             recency: VecDeque::new(),
             pending: HashMap::new(),
+            deferred: HashSet::new(),
             missed: HashSet::new(),
         }
     }
@@ -326,7 +340,7 @@ impl<T> RowIconCache<T> {
     /// Whether any decode is still in flight — the render loop's reason to
     /// keep polling frames coming, the side preview's wake-up pattern.
     pub(crate) fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+        !self.pending.is_empty() || !self.deferred.is_empty()
     }
 
     /// Start decodes for the wanted paths the cache has no answer for. A
@@ -340,15 +354,22 @@ impl<T> RowIconCache<T> {
                 self.touch(path);
                 continue;
             }
-            if self.missed.contains(path) || self.pending.contains_key(path) {
+            if self.missed.contains(path)
+                || self.pending.contains_key(path)
+                || self.deferred.contains(path)
+            {
                 continue;
             }
             // A full pipe asks again on a later sync rather than queueing
             // unboundedly; decodes drain in milliseconds.
-            if self.pending.len() >= MAX_PENDING {
+            if self.pending.len() + self.deferred.len() >= MAX_PENDING {
                 continue;
             }
-            self.pending.insert(path.to_string(), decode_async(path));
+            if let Some(receiver) = decode_async(path) {
+                self.pending.insert(path.to_string(), receiver);
+            } else {
+                self.deferred.insert(path.to_string());
+            }
         }
     }
 
@@ -374,7 +395,22 @@ impl<T> RowIconCache<T> {
                 self.missed.insert(path);
             }
         }
+        self.retry_deferred(decode_async);
         completed
+    }
+
+    fn retry_deferred(
+        &mut self,
+        mut start: impl FnMut(&str) -> Option<mpsc::Receiver<RowIconData>>,
+    ) {
+        self.deferred.retain(|path| {
+            if let Some(receiver) = start(path) {
+                self.pending.insert(path.clone(), receiver);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Remember that `path` never decoded. For the failures only the renderer
@@ -426,6 +462,7 @@ impl<T> RowIconCache<T> {
     /// that appeared in the meantime.
     pub(crate) fn clear(&mut self) -> Vec<T> {
         self.pending.clear();
+        self.deferred.clear();
         self.missed.clear();
         self.recency.clear();
         self.textures.drain().map(|(_, texture)| texture).collect()
@@ -463,6 +500,60 @@ mod tests {
     /// not run concurrently — a parallel clear would pull another test's
     /// fixture from under its assertion.
     static BAND_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn admission_precedes_thread_creation_and_survives_abandoned_receivers() {
+        let gate = Box::leak(Box::new(Mutex::new(1)));
+        let (release, wait) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let receiver = spawn_decode(gate, move || {
+            wait.recv().unwrap();
+            finished.send(()).unwrap();
+            Some(1_u32)
+        })
+        .unwrap();
+        drop(receiver); // Closing a panel does not release a running decode.
+        for _ in 0..100 {
+            assert!(spawn_decode(gate, || Some(2_u32)).is_none());
+        }
+        release.send(()).unwrap();
+        done.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while *gate.lock_safe() != 1 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let next = spawn_decode(gate, || Some(3_u32)).unwrap();
+        assert_eq!(
+            next.recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn deferred_requests_keep_polling_retry_and_clear_without_an_overlay_update() {
+        let mut cache = RowIconCache::<u32>::new();
+        cache.deferred.insert("/icons/later.png".into());
+        assert!(cache.has_pending());
+        cache.retry_deferred(|_| None);
+        assert_eq!(cache.deferred.len(), 1);
+        let mut senders = Vec::new();
+        cache.retry_deferred(|_| {
+            let (tx, rx) = mpsc::channel();
+            senders.push(tx);
+            Some(rx)
+        });
+        assert!(cache.deferred.is_empty());
+        assert_eq!(cache.pending.len(), 1);
+        senders[0].send(data()).unwrap();
+        assert_eq!(cache.drain_completed().len(), 1);
+        assert!(!cache.has_pending());
+        cache.deferred.insert("/icons/abandoned.png".into());
+        cache.clear();
+        assert!(!cache.has_pending());
+    }
 
     #[test]
     fn a_published_band_is_handed_out_only_for_its_own_rows() {
@@ -510,13 +601,14 @@ mod tests {
         let mut cache = RowIconCache::<u32>::new();
         let want = vec![Some("/icons/a.png".to_string()), None];
         cache.sync(&want);
-        assert_eq!(cache.pending.len(), 1);
+        assert_eq!(cache.pending.len() + cache.deferred.len(), 1);
         // A repeated sync does not duplicate the in-flight decode.
         cache.sync(&want);
-        assert_eq!(cache.pending.len(), 1);
+        assert_eq!(cache.pending.len() + cache.deferred.len(), 1);
 
         // Once uploaded, the texture short-circuits later syncs.
         cache.pending.clear();
+        cache.deferred.clear();
         assert!(cache.insert_texture("/icons/a.png".into(), 7).is_none());
         cache.sync(&want);
         assert!(cache.pending.is_empty());
@@ -582,7 +674,10 @@ mod tests {
         // Once a slot drains, the same sync asks again.
         cache.pending.remove("/icons/p0.png");
         cache.sync(&[Some("/icons/overflow.png".to_string())]);
-        assert!(cache.pending.contains_key("/icons/overflow.png"));
+        assert!(
+            cache.pending.contains_key("/icons/overflow.png")
+                || cache.deferred.contains("/icons/overflow.png")
+        );
         // Keep the workers' sends deliverable so nothing here logs.
         drop(senders);
         cache.pending.clear();

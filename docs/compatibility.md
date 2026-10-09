@@ -21,6 +21,14 @@ rather than half-appearing. Everything that does not need a panel (layouts,
 tags, keybindings, IPC) works there, which is what makes them useful for
 development.
 
+The experimental `wayland-x11` backend refuses new `ext-session-lock-v1`
+requests with `finished`. Its pinned Smithay host backend exposes only the
+window ID for `PresentCompleted`, discarding the presentation serial and mode;
+submitting a frame is not proof that it was displayed. This limitation does
+not change DRM/KMS or `wayland-winit` lock handling, and does not unlock an
+existing lock. Native host presentation validation remains required before
+re-enabling this capability.
+
 Native xdg fullscreen and minimize requests use the shared window policy, as do
 XWayland fullscreen, minimize and activation requests. Fullscreen uses the
 window's current monitor; the optional xdg output hint is not applied. Activation
@@ -570,3 +578,13 @@ evolve9h wave 346: Health compact `waterlily` is diagnosable through `jwm-tool h
 evolve9h wave 347: Health compact `audio` is diagnosable through `jwm-tool health`.
 evolve9h wave 348: Health compact `wallpaper` is diagnosable through `jwm-tool health`.
 evolve9h wave 349: Health compact `bluetooth` is diagnosable through `jwm-tool health`.
+
+
+## Daemon restart ownership
+
+`jwm-tool` force-restart waits for the verified daemon owner to finish stopping
+and reaping its child. If identity, signaling, or bounded exit confirmation
+fails, it preserves the old runtime files and reports an error instead of
+launching another instance. Linux pidfds are required for this forced-stop
+path; an unsupported kernel is an explicit error, without a PID-racy signal
+fallback. Normal acknowledged daemon commands keep their existing interface.

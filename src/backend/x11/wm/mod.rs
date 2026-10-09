@@ -1020,6 +1020,36 @@ pub fn decode_text_property<A: Copy + Eq>(
     }
 }
 
+/// Build a complete WM_HINTS replacement without dropping unobserved fields.
+/// Read errors are handled by callers before this pure validation boundary.
+pub(crate) fn wm_hints_with_urgency(
+    actual_type: u32,
+    expected_type: u32,
+    format: u8,
+    bytes_after: u32,
+    values: &[u32],
+    urgent: bool,
+) -> Option<Vec<u32>> {
+    let mut result = if actual_type == 0 && format == 0 && bytes_after == 0 && values.is_empty() {
+        vec![0; 9]
+    } else {
+        if actual_type != expected_type
+            || format != 32
+            || bytes_after != 0
+            || !(8..=20).contains(&values.len())
+        {
+            return None;
+        }
+        values.to_vec()
+    };
+    if urgent {
+        result[0] |= 1 << 8;
+    } else {
+        result[0] &= !(1 << 8);
+    }
+    Some(result)
+}
+
 pub fn parse_wm_hints(values: &[u32]) -> Option<WmHints> {
     let flags = *values.first()?;
     Some(WmHints {
@@ -2077,5 +2107,47 @@ mod tests {
             Some("title")
         );
         assert_eq!(decode_text_property(&[0xff], 3, 1, 2).as_deref(), Some("ÿ"));
+    }
+}
+
+#[cfg(test)]
+mod urgency_rewrite_tests {
+    use super::wm_hints_with_urgency;
+
+    #[test]
+    fn changing_urgency_preserves_complete_hints_and_initializes_absence() {
+        let original = vec![1, 1, 3, 4, 5, 6, 7, 8, 9];
+        let set = wm_hints_with_urgency(35, 35, 32, 0, &original, true).unwrap();
+        assert_eq!(set[0], 257);
+        assert_eq!(&set[1..], &original[1..]);
+        assert_eq!(
+            wm_hints_with_urgency(35, 35, 32, 0, &set, false).unwrap(),
+            original
+        );
+        // ICCCM's older 8-word form omits window_group; preserve it too.
+        let legacy = &original[..8];
+        let legacy_set = wm_hints_with_urgency(35, 35, 32, 0, legacy, true).unwrap();
+        assert_eq!(legacy_set.len(), 8);
+        assert_eq!(&legacy_set[1..], &legacy[1..]);
+        assert_eq!(
+            wm_hints_with_urgency(0, 35, 0, 0, &[], true).unwrap(),
+            vec![256, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn incomplete_or_wrongly_typed_hints_are_not_replaced() {
+        for (actual_type, format, bytes_after, size) in [
+            (1, 32, 0, 9),
+            (35, 8, 0, 9),
+            (35, 32, 4, 9),
+            (35, 32, 0, 1),
+            (35, 32, 0, 21),
+        ] {
+            assert!(
+                wm_hints_with_urgency(actual_type, 35, format, bytes_after, &vec![1; size], false)
+                    .is_none()
+            );
+        }
     }
 }

@@ -117,6 +117,42 @@ impl Default for SharedState {
     }
 }
 
+impl SharedState {
+    fn replace_key_bindings(&mut self, bindings: &[(Mods, KeySym)]) {
+        let allowed_mods = Mods::SHIFT
+            | Mods::CONTROL
+            | Mods::ALT
+            | Mods::SUPER
+            | Mods::MOD2
+            | Mods::MOD3
+            | Mods::MOD5;
+        self.key_bindings = bindings
+            .iter()
+            .map(|(mods, keysym)| (*mods & allowed_mods, *keysym))
+            .collect();
+        // Keep suppressed_keycodes: releases still belong to intercepted presses
+        // even if their bindings were removed by this reload.
+    }
+
+    fn suppresses_key_binding(&self, keycode: u8, clean_mods: Mods) -> bool {
+        let keysym = self.keysym_table[keycode as usize];
+        self.key_bindings
+            .iter()
+            .any(|(mods, symbol)| *symbol == keysym && *mods == clean_mods)
+    }
+}
+
+fn pointer_button_detail(button_code: u32) -> u8 {
+    match button_code {
+        272 => 1, // BTN_LEFT
+        273 => 3, // BTN_RIGHT
+        274 => 2, // BTN_MIDDLE
+        275 => 8, // BTN_SIDE
+        276 => 9, // BTN_EXTRA
+        _ => (button_code & 0xFF) as u8,
+    }
+}
+
 fn mods_from_smithay(mods: &ModifiersState) -> Mods {
     let mut out = Mods::empty();
 
@@ -1500,7 +1536,22 @@ impl WaylandWinitBackend {
             }
         }));
 
-        backend.key_ops = Box::new(wayland_key_ops::UdevKeyOps::new()?);
+        backend.key_ops = Box::new(wayland_key_ops::BindingAwareKeyOps::new(
+            Box::new(wayland_key_ops::UdevKeyOps::new()?),
+            {
+                let shared = backend.shared.clone();
+                move |bindings| shared.lock_safe().replace_key_bindings(bindings)
+            },
+        ));
+        // Suppression must use the exact unmodified keymap policy uses, including
+        // non-Latin configured layouts, rather than the current modified symbol.
+        {
+            let mut shared = backend.shared.lock_safe();
+            for keycode in u8::MIN..=u8::MAX {
+                shared.keysym_table[keycode as usize] =
+                    backend.key_ops.keysym_from_keycode(keycode)?;
+            }
+        }
 
         let state_ptr: *mut JwmWaylandState = &mut *backend.state;
         backend.window_ops = Box::new(WaylandWindowOps {
@@ -1778,7 +1829,7 @@ fn process_input_event_windowed<B: InputBackend>(
                 }
             }
 
-            let detail_btn: u8 = u8::try_from(button_code & 0xFF).unwrap_or(0);
+            let detail_btn = pointer_button_detail(button_code);
 
             if pressed {
                 pending_events
@@ -1876,16 +1927,14 @@ fn process_input_event_windowed<B: InputBackend>(
                     kbd.set_focus(state, Some(surface), serial);
                 }
 
-                kbd.input(
-                    state,
+                state.keyboard_input_for_popup(
                     keycode,
                     state_key,
                     serial,
                     time,
-                    |_, modifiers, keysym_handle| {
+                    |_, modifiers, _keysym_handle| {
                         let keycode_u32 = u32::from(keycode);
                         let xkb_keycode_u8 = u8::try_from(keycode_u32).unwrap_or(0);
-                        let keysym = keysym_handle.modified_sym().raw();
 
                         let mods_bits = mods_from_smithay(modifiers).bits();
                         if let Some(mut s) = shared.lock().ok() {
@@ -1910,19 +1959,10 @@ fn process_input_event_windowed<B: InputBackend>(
                             | Mods::MOD5;
                         let clean_mods = mods_from_smithay(modifiers) & allowed_mods;
 
-                        let should_suppress = if let Ok(mut s) = shared.lock() {
-                            if (xkb_keycode_u8 as usize) < s.keysym_table.len() {
-                                if s.keysym_table[xkb_keycode_u8 as usize] == 0 {
-                                    let base = keysym_handle
-                                        .raw_latin_sym_or_raw_current_sym()
-                                        .unwrap_or_else(|| keysym_handle.modified_sym());
-                                    s.keysym_table[xkb_keycode_u8 as usize] = base.raw();
-                                }
-                            }
-
-                            s.key_bindings
-                                .iter()
-                                .any(|(m, ks)| *ks == keysym && *m == clean_mods)
+                        let should_suppress = if let Ok(s) = shared.lock() {
+                            // Use the same base keysym policy resolves for this keycode.
+                            // Modified symbols (Shift/Caps) must not leak WM shortcuts.
+                            s.suppresses_key_binding(xkb_keycode_u8, clean_mods)
                         } else {
                             false
                         };
@@ -2225,5 +2265,84 @@ impl Backend for WaylandWinitBackend {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nested_input_tests {
+    use super::*;
+
+    #[test]
+    fn pointer_buttons_use_policy_numbers() {
+        for (evdev, expected) in [(272, 1), (273, 3), (274, 2), (275, 8), (276, 9)] {
+            assert_eq!(pointer_button_detail(evdev), expected);
+        }
+        assert_eq!(
+            pointer_button_detail(300),
+            44,
+            "retain the fallback for unknown buttons"
+        );
+    }
+
+    #[test]
+    fn shifted_and_caps_locked_shortcuts_use_the_policy_base_symbol() {
+        let mut shared = SharedState::default();
+        shared.keysym_table[56] = b'b' as KeySym;
+        shared.key_bindings = vec![(Mods::ALT | Mods::SHIFT, b'b' as KeySym)];
+        // Shift can make the delivered symbol B, but policy resolves base b.
+        assert!(shared.suppresses_key_binding(56, Mods::ALT | Mods::SHIFT));
+        shared.key_bindings = vec![(Mods::ALT, b'b' as KeySym)];
+        // Caps is removed by the input handler's clean modifier mask.
+        assert!(shared.suppresses_key_binding(56, Mods::ALT));
+        assert!(!shared.suppresses_key_binding(56, Mods::empty()));
+        assert!(!shared.suppresses_key_binding(57, Mods::ALT));
+    }
+
+    #[test]
+    fn configured_non_latin_base_symbols_are_not_replaced_with_latin() {
+        let mut shared = SharedState::default();
+        let cyrillic_be: KeySym = 0x06c2;
+        shared.keysym_table[56] = cyrillic_be;
+        shared.key_bindings = vec![(Mods::ALT | Mods::SHIFT, cyrillic_be)];
+        assert!(shared.suppresses_key_binding(56, Mods::ALT | Mods::SHIFT));
+        shared.key_bindings[0].1 = b'b' as KeySym;
+        assert!(!shared.suppresses_key_binding(56, Mods::ALT | Mods::SHIFT));
+    }
+
+    #[test]
+    fn reloaded_bindings_replace_old_shortcuts_without_losing_held_releases() {
+        let mut shared = SharedState::default();
+        shared.keysym_table[56] = b'b' as KeySym;
+        shared.keysym_table[57] = b'c' as KeySym;
+        shared.replace_key_bindings(&[(Mods::ALT, b'b' as KeySym)]);
+        shared.suppressed_keycodes.insert(56);
+        assert!(shared.suppresses_key_binding(56, Mods::ALT));
+        shared.replace_key_bindings(&[(Mods::ALT | Mods::CAPS, b'c' as KeySym)]);
+        assert!(!shared.suppresses_key_binding(56, Mods::ALT));
+        assert!(shared.suppresses_key_binding(57, Mods::ALT));
+        assert!(shared.suppressed_keycodes.contains(&56));
+        shared.replace_key_bindings(&[]);
+        assert!(!shared.suppresses_key_binding(57, Mods::ALT));
+    }
+
+    #[test]
+    fn input_suppression_is_seeded_from_the_same_keymap_as_policy() {
+        let source = include_str!("backend.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(source.contains("backend.key_ops.keysym_from_keycode(keycode)?"));
+        assert!(source.contains("wayland_key_ops::BindingAwareKeyOps::new("));
+        assert!(
+            source.contains("move |bindings| shared.lock_safe().replace_key_bindings(bindings)")
+        );
+        assert!(source.contains("s.suppresses_key_binding(xkb_keycode_u8, clean_mods)"));
+        assert!(source.contains("let detail_btn = pointer_button_detail(button_code);"));
+        let input = source
+            .split("fn process_input_event_windowed")
+            .nth(1)
+            .unwrap();
+        assert!(!input.contains("modified_sym()"));
+        assert!(!input.contains("raw_latin_sym_or_raw_current_sym()"));
     }
 }

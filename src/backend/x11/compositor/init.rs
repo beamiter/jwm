@@ -1,7 +1,6 @@
 // Compositor::new() constructor
 use super::*;
 use crate::backend::compositor_common::effects::finite_clamp;
-use crate::backend::x11::compositor_common::BootstrapState;
 use glow::HasContext;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -84,12 +83,13 @@ impl<C: CompositorConnection> Compositor<C> {
             active: true,
         };
 
-        // 3-5. Bootstrap X11 compositor state shared across X11 backends.
-        let BootstrapState {
-            damage_event_base,
-            overlay_window,
-        } = conn.bootstrap_state(root)?;
+        // Acquire in stages so every fallible operation after obtaining the
+        // overlay is covered by the rollback guard, including shape setup.
+        let damage_event_base = conn.query_damage_event_base()?;
+        let overlay_window = conn.get_overlay_window(root)?;
         guard.overlay = Some(overlay_window);
+        conn.set_overlay_input_passthrough(overlay_window)?;
+        conn.set_overlay_window_type_notification(overlay_window)?;
 
         // Select the shared X11 graphics platform. JWM_COMPOSITOR_API
         // overrides config for diagnostics and recovery without editing files.
@@ -1531,9 +1531,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 return Err(format!("vertex shader: {info}"));
             }
 
-            let fs = gl
-                .create_shader(glow::FRAGMENT_SHADER)
-                .map_err(|e| format!("create fs: {e}"))?;
+            let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| {
+                gl.delete_shader(vs);
+                format!("create fs: {e}")
+            })?;
             gl.shader_source(fs, fs_src);
             gl.compile_shader(fs);
             if !gl.get_shader_compile_status(fs) {
@@ -1543,9 +1544,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 return Err(format!("fragment shader: {info}"));
             }
 
-            let program = gl
-                .create_program()
-                .map_err(|e| format!("create program: {e}"))?;
+            let program = gl.create_program().map_err(|e| {
+                gl.delete_shader(vs);
+                gl.delete_shader(fs);
+                format!("create program: {e}")
+            })?;
             gl.attach_shader(program, vs);
             gl.attach_shader(program, fs);
             gl.link_program(program);

@@ -737,7 +737,12 @@ impl Watcher {
             }) {
                 return;
             }
-            if !handled && self.wait_for_work(wake, Some(deadline)).is_err() {
+            let poll_deadline = clipboard::x11_handoff_poll_deadline(
+                deadline,
+                provisional_failure,
+                protocol_activity,
+            );
+            if !handled && self.wait_for_work(wake, Some(poll_deadline)).is_err() {
                 return;
             }
         }

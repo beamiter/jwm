@@ -13,6 +13,64 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
+fn popup_key_delivery_candidate(known: bool, forwarded: bool, pressed: bool, locked: bool) -> bool {
+    known && forwarded && pressed && !locked
+}
+
+fn popup_chain_serial_authorized(
+    nested: bool,
+    current_serial: Option<u32>,
+    requested: u32,
+) -> bool {
+    nested && current_serial == Some(requested)
+}
+
+fn popup_input_authorized(continuation: bool, pointer: bool, touch: bool, keyboard: bool) -> bool {
+    continuation || pointer || touch || keyboard
+}
+
+// A serial is authority only for a recent key actually forwarded to this client.
+// A live nested popup chain has its own, separately bounded grab lifetime.
+struct RecentPopupKeys<C> {
+    entries: std::collections::VecDeque<(u32, C, Instant)>,
+}
+
+impl<C> Default for RecentPopupKeys<C> {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+        }
+    }
+}
+
+impl<C: PartialEq> RecentPopupKeys<C> {
+    const MAX_ENTRIES: usize = 16;
+    const MAX_AGE: Duration = Duration::from_secs(5);
+
+    fn record(&mut self, serial: u32, client: C, now: Instant) {
+        self.entries
+            .retain(|(_, _, at)| now.saturating_duration_since(*at) <= Self::MAX_AGE);
+        while self.entries.len() >= Self::MAX_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((serial, client, now));
+    }
+
+    fn consume(&mut self, serial: u32, client: &C, now: Instant) -> bool {
+        self.entries
+            .retain(|(_, _, at)| now.saturating_duration_since(*at) <= Self::MAX_AGE);
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|(s, c, _)| *s == serial && c == client)
+        else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
+    }
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
@@ -39,7 +97,7 @@ use smithay::utils::{
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
     utils::under_from_surface_tree, LayerSurface as DesktopLayerSurface, PopupKind,
-    WindowSurfaceType,
+    WindowSurfaceType, PopupManager, PopupGrab, PopupKeyboardGrab, PopupUngrabStrategy,
 };
 use smithay::output::Output;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
@@ -380,6 +438,9 @@ pub struct JwmWaylandState {
     /// When input last arrived, for the session idle policy. Kept beside the
     /// idle notifier because both are fed from the same libinput callback.
     pub last_input: std::time::Instant,
+    /// Whether this backend can verify a locked frame before acknowledging a lock.
+    /// Nested X11 disables this until host Present completion preserves serial/mode.
+    pub(crate) session_lock_supported: bool,
     pub session_locked: bool,
     /// Monotonic lock generation. A repeat armed before a fast lock/unlock
     /// cycle must not resume after the lock disappears.
@@ -467,6 +528,9 @@ pub struct JwmWaylandState {
 
     pub popups: HashMap<ObjectId, PopupSurface>,
     pub popup_order: Vec<ObjectId>,
+    popup_manager: PopupManager,
+    active_popup_grab: Option<PopupGrab<Self>>,
+    recent_popup_keys: RecentPopupKeys<ClientId>,
 
     pub im_popups: Vec<ImPopupSurface>,
     pub im_client_id: Option<ObjectId>,
@@ -1303,6 +1367,12 @@ impl SessionLockHandler for JwmWaylandState {
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
+        // Dropping an unconfirmed SessionLocker sends `finished` and marks its
+        // surfaces done. Refuse before touching an existing owner's state.
+        if !self.session_lock_supported {
+            warn!("[wayland] refused session lock: backend cannot verify locked presentation");
+            return;
+        }
         info!("[udev/wayland] session lock requested");
         // Smithay hands over every request, even while another client holds
         // the lock. Confirming it would make this client the owner, whose
@@ -1412,6 +1482,10 @@ impl JwmWaylandState {
     /// Drop pre-lock input ownership before accepting any more input. A
     /// missing or crashed locker surface must leave the seat unfocused.
     fn revoke_unlocked_input(&mut self) {
+        self.recent_popup_keys.entries.clear();
+        if let Some(mut grab) = self.active_popup_grab.take() {
+            grab.ungrab(PopupUngrabStrategy::All);
+        }
         let serial = SCOUNTER.next_serial();
         let time = smithay::backend::input::InputTime::from_millis(0);
         self.popup_grab_toplevel = None;
@@ -1475,6 +1549,72 @@ impl JwmWaylandState {
         }
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, focus, serial);
+        }
+    }
+
+    /// Wrap only real backend key deliveries, never focus/enter or synthetic
+    /// releases. Smithay may absorb a duplicate without running the filter.
+    pub(crate) fn keyboard_input_for_popup<F>(
+        &mut self,
+        keycode: smithay::input::keyboard::Keycode,
+        key_state: smithay::backend::input::KeyState,
+        serial: Serial,
+        time: smithay::backend::input::InputTime,
+        filter: F,
+    ) where
+        F: FnOnce(
+            &mut Self,
+            &smithay::input::keyboard::ModifiersState,
+            smithay::input::keyboard::KeysymHandle<'_>,
+        ) -> smithay::input::keyboard::FilterResult<()>,
+    {
+        use smithay::input::keyboard::FilterResult;
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let known_delivery = !keyboard.is_grabbed()
+            || self
+                .active_popup_grab
+                .as_ref()
+                .is_some_and(|grab| keyboard.has_grab(grab.serial()));
+        let mut forwarded = false;
+        keyboard.input(
+            self,
+            keycode,
+            key_state,
+            serial,
+            time,
+            |state, mods, key| {
+                let result = filter(state, mods, key);
+                forwarded = matches!(result, FilterResult::Forward);
+                result
+            },
+        );
+        if !popup_key_delivery_candidate(
+            known_delivery,
+            forwarded,
+            key_state == smithay::backend::input::KeyState::Pressed,
+            self.session_locked,
+        ) {
+            return;
+        }
+        // Only the default handler and our PopupKeyboardGrab are known to
+        // forward to current_focus. A third-party grab is not delivery proof.
+        if keyboard.is_grabbed()
+            && !self
+                .active_popup_grab
+                .as_ref()
+                .is_some_and(|grab| keyboard.has_grab(grab.serial()))
+        {
+            return;
+        }
+        let Some(focus) = keyboard.current_focus() else {
+            return;
+        };
+        let Some(client) = focus.client() else { return };
+        if keyboard.client_keyboards(&client).next().is_some() {
+            self.recent_popup_keys
+                .record(serial.into(), client.id(), Instant::now());
         }
     }
 
@@ -1744,7 +1884,7 @@ impl JwmWaylandState {
     }
 
     /// Ask the backend to flush client connections.
-    fn request_client_flush(&self) {
+    pub(crate) fn request_client_flush(&self) {
         if !self.client_flush_pending.swap(true, Ordering::SeqCst) {
             let _ = self.client_flush_tx.send(());
         }
@@ -3144,6 +3284,7 @@ impl JwmWaylandState {
 
                 idle_inhibiting_surfaces: HashMap::new(),
                 last_input: std::time::Instant::now(),
+                session_lock_supported: true,
                 session_locked: false,
                 session_lock_epoch: 0,
                 lock_surfaces: HashMap::new(),
@@ -3177,6 +3318,9 @@ impl JwmWaylandState {
 
                 popups: HashMap::new(),
                 popup_order: Vec::new(),
+                popup_manager: PopupManager::default(),
+                active_popup_grab: None,
+                recent_popup_keys: RecentPopupKeys::default(),
 
                 im_popups: Vec::new(),
                 im_client_id: None,
@@ -3629,6 +3773,13 @@ impl JwmWaylandState {
     }
 
     pub fn dismiss_popups_for_toplevel(&mut self, win: WindowId) {
+        if self.popup_grab_toplevel == Some(win)
+            && let Some(grab) = self.active_popup_grab.as_mut()
+        {
+            // PopupManager dismisses the tree in reverse nesting order.
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
         // Send popup_done for all popups that belong to this toplevel grab.
         // Clients will unmap/destroy them asynchronously.
         let ids: Vec<ObjectId> = self
@@ -3642,7 +3793,7 @@ impl JwmWaylandState {
             .cloned()
             .collect();
 
-        for id in ids {
+        for id in ids.into_iter().rev() {
             if let Some(popup) = self.popups.get(&id) {
                 popup.send_popup_done();
             }
@@ -4122,6 +4273,8 @@ impl CompositorHandler for JwmWaylandState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        self.popup_manager.commit(surface);
+        self.popup_manager.cleanup();
         // wp-color-management double-buffer latch: move the image description
         // staged by set/unset_image_description into the committed snapshot the
         // render path reads. Smithay invokes this hook when the surface's
@@ -5190,36 +5343,114 @@ impl XdgShellHandler for JwmWaylandState {
 
         let id = surface.wl_surface().id();
         self.popup_order.push(id.clone());
+        let _ = self
+            .popup_manager
+            .track_popup(PopupKind::Xdg(surface.clone()));
         self.popups.insert(id, surface);
         self.needs_redraw = true;
     }
 
     fn grab(
         &mut self,
-        _surface: PopupSurface,
-        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
-        _serial: Serial,
+        surface: PopupSurface,
+        seat_resource: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        serial: Serial,
     ) {
-        if self.session_locked {
-            _surface.send_popup_done();
+        let popup = PopupKind::Xdg(surface.clone());
+        let seat = self.seat.clone();
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            surface.send_popup_done();
+            return;
+        };
+        let Some(client) = surface.wl_surface().client() else {
+            return;
+        };
+        if self.session_locked
+            || Seat::<Self>::from_resource(&seat_resource).as_ref() != Some(&seat)
+            || !seat_resource
+                .id()
+                .same_client_as(&surface.wl_surface().id())
+            || !root.id().same_client_as(&surface.wl_surface().id())
+        {
+            surface.send_popup_done();
             return;
         }
-        // Record the toplevel this grab belongs to, and remember current keyboard focus.
-        if self.popup_grab_prev_kbd_focus.is_none() {
-            self.popup_grab_prev_kbd_focus =
-                self.seat.get_keyboard().and_then(|k| k.current_focus());
+        let parent = surface.get_parent_surface();
+        let nested = self.active_popup_grab.as_ref().is_some_and(|grab| {
+            !grab.has_ended()
+                && grab.current_grab() == parent
+                && parent
+                    .as_ref()
+                    .is_some_and(|p| p.id().same_client_as(&root.id()))
+        });
+        // A popup without an explicit parent grab cannot start a new chain.
+        if parent.as_ref() != Some(&root) && !nested {
+            surface.send_popup_done();
+            return;
         }
-
-        let toplevel = if let Some(existing) = self.popups.get(&_surface.wl_surface().id()) {
-            self.popup_root_toplevel(existing, 0)
-        } else {
-            self.popup_root_toplevel(&_surface, 0)
+        let continuation = popup_chain_serial_authorized(
+            nested,
+            self.active_popup_grab
+                .as_ref()
+                .filter(|grab| !grab.has_ended())
+                .map(|grab| grab.serial().into()),
+            serial.into(),
+        );
+        let pointer = seat.get_pointer();
+        let touch = seat.get_touch();
+        let keyboard = seat.get_keyboard();
+        let pointer_input = pointer.as_ref().is_some_and(|pointer| {
+            pointer.has_grab(serial)
+                && pointer.client_pointers(&client).next().is_some()
+                && pointer
+                    .grab_start_data()
+                    .and_then(|data| data.focus)
+                    .is_some_and(|(focus, _)| focus.id().same_client_as(&root.id()))
+        });
+        let touch_input = touch.as_ref().is_some_and(|touch| {
+            touch.has_grab(serial)
+                && touch.client_touch(&client).next().is_some()
+                && touch
+                    .grab_start_data()
+                    .and_then(|data| data.focus)
+                    .is_some_and(|(focus, _)| focus.id().same_client_as(&root.id()))
+        });
+        let keyboard_input =
+            self.recent_popup_keys
+                .consume(serial.into(), &client.id(), Instant::now());
+        if !popup_input_authorized(continuation, pointer_input, touch_input, keyboard_input) {
+            surface.send_popup_done();
+            return;
+        }
+        let previous = self
+            .active_popup_grab
+            .as_ref()
+            .filter(|grab| !grab.has_ended())
+            .map(|grab| grab.serial());
+        if keyboard.as_ref().is_some_and(|kbd| {
+            kbd.is_grabbed()
+                && !kbd.has_grab(serial)
+                && !previous.is_some_and(|old| kbd.has_grab(old))
+        }) {
+            surface.send_popup_done();
+            return;
+        }
+        let Ok(grab) = self.popup_manager.grab_popup(root, popup, &seat, serial) else {
+            return;
         };
-        self.popup_grab_toplevel = toplevel;
-
-        // Give the popup keyboard focus (menus often need this), while we remember the previous focus
-        // for restoration when the grab ends.
-        self.set_keyboard_focus(Some(_surface.wl_surface().clone()), SCOUNTER.next_serial());
+        if self.popup_grab_prev_kbd_focus.is_none() {
+            self.popup_grab_prev_kbd_focus = keyboard.as_ref().and_then(|kbd| kbd.current_focus());
+        }
+        self.popup_grab_toplevel = self.popup_root_toplevel(&surface, 0);
+        if let Some(keyboard) = keyboard {
+            keyboard.set_focus(self, grab.current_grab(), serial);
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        // Keep the backend's implicit pointer/touch grabs. They retain the
+        // actual down serial and expire on release; replacing them with a
+        // long-lived popup pointer grab would make stale serials look current
+        // and lose later button serials needed by legitimate child popups.
+        self.active_popup_grab = Some(grab);
     }
 
     fn reposition_request(
@@ -5347,6 +5578,17 @@ impl XdgShellHandler for JwmWaylandState {
     }
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
+        self.popup_manager.cleanup();
+        if let Some(grab) = self.active_popup_grab.clone() {
+            if grab.has_ended() {
+                self.active_popup_grab = None;
+            }
+            // The grab accepts this focus: a destroyed child hands back to
+            // its still-live parent, and an ended chain hands back to root.
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.set_focus(self, grab.current_grab(), SCOUNTER.next_serial());
+            }
+        }
         let id = surface.wl_surface().id();
         self.popups.remove(&id);
         self.popup_order.retain(|x| *x != id);
@@ -7172,6 +7414,89 @@ mod protocol_hardening_tests {
         (server, client, manager)
     }
 
+    #[test]
+    fn unsupported_session_locks_finish_and_can_be_retried_without_locking() {
+        let (mut server, mut client, manager) = locked_server(&["LOCK-1"]);
+        server.state.session_lock_supported = false;
+        for _ in 0..3 {
+            let lock = request_lock(&mut server, &mut client, manager);
+            assert_eq!(
+                opcodes_for(&mut server, &mut client, lock),
+                [FINISHED_EVENT]
+            );
+            assert!(!server.state.session_locked);
+            assert_eq!(server.state.session_lock_epoch, 0);
+            assert!(!server.state.session_lock_confirmation_pending());
+            assert!(server.state.active_session_lock.is_none());
+            assert!(server.state.lock_surfaces.is_empty());
+            server.state.note_locked_frame_presented("LOCK-1", 0);
+            assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+            client.request(lock, LOCK_DESTROY, &[]);
+            server.roundtrip();
+        }
+    }
+
+    #[test]
+    fn refusing_new_locks_does_not_modify_an_existing_owner() {
+        let (mut server, mut client, manager) = locked_server(&["LOCK-1"]);
+        let first = request_lock(&mut server, &mut client, manager);
+        let epoch = server.state.session_lock_epoch;
+        server.state.session_lock_supported = false;
+        let second = request_lock(&mut server, &mut client, manager);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, second),
+            [FINISHED_EVENT]
+        );
+        assert!(server.state.session_locked);
+        assert_eq!(server.state.session_lock_epoch, epoch);
+        assert!(server.state.session_lock_confirmation_pending());
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        assert_eq!(opcodes_for(&mut server, &mut client, first), [LOCKED_EVENT]);
+        let third = request_lock(&mut server, &mut client, manager);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, third),
+            [FINISHED_EVENT]
+        );
+        assert!(server.state.session_locked);
+        assert_eq!(server.state.session_lock_epoch, epoch);
+        client.request(first, UNLOCK_AND_DESTROY, &[]);
+        server.roundtrip();
+        assert!(
+            !server.state.session_locked,
+            "the existing owner can still unlock"
+        );
+    }
+
+    #[test]
+    fn a_refused_locker_cannot_register_a_lock_surface() {
+        let mut server = Server::new();
+        let output = test_output("LOCK-1");
+        output.create_global::<JwmWaylandState>(&server.display.handle());
+        server.state.outputs = vec![output];
+        server.state.session_lock_supported = false;
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let wl_output = client.bind("wl_output", 4);
+        let manager = client.bind("ext_session_lock_manager_v1", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, lock),
+            [FINISHED_EVENT]
+        );
+        let role = client.new_id();
+        client.request(lock, GET_LOCK_SURFACE, &[role, surface, wl_output]);
+        server.roundtrip();
+        assert!(server.state.lock_surfaces.is_empty());
+        assert!(!server.state.session_locked);
+        client.request(role, 0, &[]);
+        client.request(surface, 0, &[]);
+        client.request(lock, LOCK_DESTROY, &[]);
+        server.roundtrip();
+        assert!(!server.state.session_lock_confirmation_pending());
+    }
+
     /// Make a synthetic client with a wl_surface and wl_keyboard. No real
     /// seat, framebuffer, session lock or desktop is used by these tests.
     fn input_test_client(server: &mut Server) -> (RawClient, WlSurface, u32) {
@@ -7963,5 +8288,96 @@ mod protocol_hardening_tests {
         );
         server.state.refresh_output_dependent_state();
         assert_eq!(configures(&mut server, &mut client), [(128, 96)]);
+    }
+}
+
+#[cfg(test)]
+mod popup_input_authority_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_delivered_client_can_consume_a_key_serial() {
+        let now = Instant::now();
+        let mut keys = RecentPopupKeys::default();
+        keys.record(7, 1u8, now);
+        assert!(!keys.consume(7, &2, now));
+        assert!(!keys.consume(8, &1, now));
+        assert!(keys.consume(7, &1, now));
+    }
+
+    #[test]
+    fn a_key_serial_cannot_reopen_an_ended_popup_chain() {
+        let now = Instant::now();
+        let mut keys = RecentPopupKeys::default();
+        keys.record(7, 1u8, now);
+        assert!(keys.consume(7, &1, now));
+        assert!(!keys.consume(7, &1, now));
+        assert!(!popup_input_authorized(false, false, false, false));
+    }
+
+    #[test]
+    fn stale_and_capacity_evicted_serials_are_not_authority() {
+        let now = Instant::now();
+        let mut keys = RecentPopupKeys::default();
+        keys.record(7, 1u8, now);
+        assert!(!keys.consume(
+            7,
+            &1,
+            now + RecentPopupKeys::<u8>::MAX_AGE + Duration::from_nanos(1)
+        ));
+        for serial in 0..=16 {
+            keys.record(serial, 1, now);
+        }
+        assert_eq!(keys.entries.len(), 16);
+        assert!(!keys.consume(0, &1, now));
+        assert!(keys.consume(16, &1, now));
+    }
+
+    #[test]
+    fn intercepted_absorbed_release_locked_or_unknown_grab_cannot_authorize() {
+        assert!(popup_key_delivery_candidate(true, true, true, false));
+        for (known, forwarded, pressed, locked) in [
+            (false, true, true, false),
+            (true, false, true, false),
+            (true, true, false, false),
+            (true, true, true, true),
+        ] {
+            assert!(!popup_key_delivery_candidate(
+                known, forwarded, pressed, locked
+            ));
+        }
+    }
+
+    #[test]
+    fn pointer_touch_keyboard_and_live_nested_chain_are_supported() {
+        assert!(popup_input_authorized(false, true, false, false));
+        assert!(popup_input_authorized(false, false, true, false));
+        assert!(popup_input_authorized(false, false, false, true));
+        assert!(popup_input_authorized(true, false, false, false));
+        assert!(!popup_input_authorized(false, false, false, false));
+    }
+
+    #[test]
+    fn all_three_real_backend_key_paths_record_delivery() {
+        for (source, count) in [
+            (include_str!("backend.rs"), 2),
+            (include_str!("../wayland_winit/backend.rs"), 1),
+            (include_str!("../wayland_x11/backend.rs"), 1),
+        ] {
+            assert_eq!(
+                source.matches("state.keyboard_input_for_popup(").count(),
+                count
+            );
+        }
+    }
+    #[test]
+    fn only_the_current_live_nested_chain_can_reuse_its_serial() {
+        // Implicit pointer authority expires on release (real PointerHandle
+        // regression in tests/smithay_touch_cancel.rs). A live explicit child
+        // chain may nevertheless continue its own current interaction.
+        assert!(popup_chain_serial_authorized(true, Some(7), 7));
+        assert!(!popup_chain_serial_authorized(false, Some(7), 7));
+        assert!(!popup_chain_serial_authorized(true, None, 7));
+        assert!(!popup_chain_serial_authorized(true, Some(8), 7));
     }
 }

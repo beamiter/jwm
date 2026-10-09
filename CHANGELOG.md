@@ -5,6 +5,20 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Audit follow-up
+
+- Preserve the built-in Wayland lock overlay across compositor reconstruction,
+  reject unearned popup grabs, and revoke touch sequences across modal ownership
+  changes. A narrowly patched, fixed Smithay snapshot accompanies the touch fix.
+- The experimental nested-X11 backend now declines new session-lock requests
+  until host presentation can be verified; see `docs/compatibility.md`.
+- Correct nested mouse/shifted-key bindings and successful binding reloads;
+  preserve per-tag bar settings and multiline configuration command values.
+- Bound icon worker admission and X11 property reads, preserve typed WM_HINTS
+  and unrelated cursor resources, and clean up initialization failures.
+- Make daemon restart ownership conservative, retain quit acknowledgements,
+  respect clipboard refusal deadlines, and strengthen capture/perf test gates.
+
 ### Added
 
 - Compositor overlays (X11 and Wayland, shared `compositor_common` geometry)

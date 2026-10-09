@@ -1354,11 +1354,7 @@ impl XcbBackend {
             pending: false,
         });
         let reply = self.conn.wait_for_reply(cookie).ok()?;
-        let data = reply.data::<u8>();
-        if data.len() < 128 {
-            return None;
-        }
-        crate::backend::edid::parse_edid_hdr_from_bytes(data)
+        crate::backend::edid::parse_edid_hdr_from_bytes(xcb_edid_bytes(&reply)?)
     }
 
     fn replay_compositor_desired_state(&mut self, compositor: &mut XcbSharedCompositor) {
@@ -3604,23 +3600,32 @@ impl PropertyOps for XcbPropertyOps {
     }
 
     fn set_urgent_hint(&self, win: WindowId, urgent: bool) -> XcbResult<()> {
-        const X_URGENCY_HINT: u32 = 1 << 8;
         let w = self.win(win)?;
-        let mut data = get_u32s_with_length(
-            &self.conn,
-            w,
-            self.atoms.wm_hints,
-            self.atoms.wm_hints,
-            MAX_WM_HINTS_ITEMS,
-        );
-        if data.is_empty() {
-            data.push(0);
-        }
-        if urgent {
-            data[0] |= X_URGENCY_HINT;
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: w,
+            property: self.atoms.wm_hints,
+            r#type: self.atoms.wm_hints,
+            long_offset: 0,
+            long_length: MAX_WM_HINTS_ITEMS,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let values = if reply.format() == 32 {
+            reply.value::<u32>()
         } else {
-            data[0] &= !X_URGENCY_HINT;
-        }
+            &[]
+        };
+        let data = crate::backend::x11::wm::wm_hints_with_urgency(
+            reply.r#type().resource_id(),
+            self.atoms.wm_hints.resource_id(),
+            reply.format(),
+            reply.bytes_after(),
+            values,
+            urgent,
+        )
+        .ok_or_else(|| {
+            BackendError::Message("incomplete or malformed WM_HINTS; refusing replacement".into())
+        })?;
         change_u32s(
             &self.conn,
             w,
@@ -4178,6 +4183,16 @@ impl PropertyOps for XcbPropertyOps {
     }
 }
 
+fn xcb_edid_bytes(reply: &xcb::randr::GetOutputPropertyReply) -> Option<&[u8]> {
+    // The typed XCB accessor panics for a nonempty 16/32-bit property.
+    // A malformed connector property is unavailable metadata, never a crash.
+    if reply.format() != 8 || reply.bytes_after() != 0 {
+        return None;
+    }
+    let data = reply.data::<u8>();
+    (data.len() >= 128).then_some(data)
+}
+
 struct XcbOutputOps {
     conn: Arc<xcb::Connection>,
     root: x::Window,
@@ -4245,11 +4260,7 @@ impl XcbOutputOps {
             pending: false,
         });
         let reply = self.conn.wait_for_reply(cookie).ok()?;
-        let data = reply.data::<u8>();
-        if data.len() < 128 {
-            return None;
-        }
-        crate::backend::edid::parse_edid_hdr_from_bytes(data)
+        crate::backend::edid::parse_edid_hdr_from_bytes(xcb_edid_bytes(&reply)?)
     }
 
     fn get_cached_or_query(&self) -> Vec<OutputInfo> {
@@ -5697,6 +5708,116 @@ fn change_bytes(
     .map_err(xcb_err)
 }
 
+/// The X resource database is small in ordinary sessions. Refuse a truncated
+/// read rather than overwriting unrelated client resources with a prefix.
+const MAX_RESOURCE_MANAGER_BYTES: usize = 1024 * 1024;
+
+fn complete_resource_manager(
+    actual_type: u32,
+    string_type: u32,
+    format: u8,
+    bytes_after: u32,
+    bytes: &[u8],
+) -> Option<&[u8]> {
+    if bytes_after != 0 || bytes.len() > MAX_RESOURCE_MANAGER_BYTES {
+        return None;
+    }
+    if actual_type == 0 && format == 0 && bytes.is_empty() {
+        return Some(bytes);
+    }
+    (actual_type == string_type && format == 8).then_some(bytes)
+}
+
+/// Preserve unrelated resources byte-for-byte, including Latin-1 and logical
+/// continuation lines. Only complete, top-level Xcursor assignments are replaced.
+fn merge_xcursor_resources(existing: &[u8], theme: &str, size: u32) -> Option<Vec<u8>> {
+    if existing.len() > MAX_RESOURCE_MANAGER_BYTES
+        || theme.len() > 4096
+        || theme
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'\\')
+        || !(1..=512).contains(&size)
+    {
+        return None;
+    }
+    let mut result = Vec::with_capacity(existing.len().saturating_add(theme.len() + 64));
+    let mut continued = false;
+    let mut replacing = false;
+    for line in existing.split_inclusive(|byte| *byte == b'\n') {
+        let body = line.strip_suffix(b"\n").unwrap_or(line);
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        if !continued {
+            let key = body.split(|byte| *byte == b':').next().unwrap_or_default();
+            let key = key.trim_ascii();
+            replacing = key == b"Xcursor.theme" || key == b"Xcursor.size";
+        }
+        if !replacing {
+            result.extend_from_slice(line);
+        }
+        continued = body.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 1;
+    }
+    // A dangling continuation would consume our first appended assignment.
+    // Do not repair a malformed external database by guessing its intent.
+    if continued {
+        return None;
+    }
+    if !result.is_empty() && !result.ends_with(b"\n") {
+        result.push(b'\n');
+    }
+    result
+        .extend_from_slice(format!("Xcursor.theme:\t{theme}\nXcursor.size:\t{size}\n").as_bytes());
+    (result.len() <= MAX_RESOURCE_MANAGER_BYTES).then_some(result)
+}
+
+#[cfg(test)]
+mod cursor_resource_rewrite_tests {
+    use super::*;
+
+    #[test]
+    fn resource_reply_rejects_incomplete_or_wrongly_typed_data() {
+        assert_eq!(complete_resource_manager(0, 31, 0, 0, b""), Some(&b""[..]));
+        assert_eq!(
+            complete_resource_manager(31, 31, 8, 0, b"a"),
+            Some(&b"a"[..])
+        );
+        assert!(complete_resource_manager(31, 31, 8, 4, b"a").is_none());
+        assert!(complete_resource_manager(31, 31, 32, 0, b"a").is_none());
+        assert!(complete_resource_manager(99, 31, 8, 0, b"a").is_none());
+        assert!(complete_resource_manager(0, 31, 0, 0, b"a").is_none());
+        assert!(
+            complete_resource_manager(31, 31, 8, 0, &vec![0; MAX_RESOURCE_MANAGER_BYTES + 1])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_bytes_and_continuations_are_preserved() {
+        let original = b"! comment\n\nXft.label:\t\xff\nOther.value: first\\\nXcursor.theme: part of Other.value\nXcursor.theme: old\\\n theme continuation\nXcursor.size: 16\nLast.resource: yes";
+        let next = merge_xcursor_resources(original, "NewTheme", 32).unwrap();
+        assert_eq!(next, b"! comment\n\nXft.label:\t\xff\nOther.value: first\\\nXcursor.theme: part of Other.value\nLast.resource: yes\nXcursor.theme:\tNewTheme\nXcursor.size:\t32\n");
+    }
+
+    #[test]
+    fn cursor_values_cannot_add_resources_or_escape_the_record() {
+        for theme in [
+            "bad\nXft.dpi: 1",
+            "bad\rvalue",
+            "bad\0value",
+            "bad\\",
+            "bad\tvalue",
+        ] {
+            assert!(merge_xcursor_resources(b"Xft.dpi: 96\n", theme, 24).is_none());
+        }
+        assert!(merge_xcursor_resources(b"Other: trailing\\", "default", 24).is_none());
+        assert!(merge_xcursor_resources(b"", "default", 0).is_none());
+        assert!(merge_xcursor_resources(b"", "default", 513).is_none());
+        assert!(
+            merge_xcursor_resources(&vec![b'x'; MAX_RESOURCE_MANAGER_BYTES], "default", 24)
+                .is_none()
+        );
+    }
+}
+
 /// Merge the resolved Xcursor `theme`/`size` into the root window's
 /// `RESOURCE_MANAGER` (the xrdb resource database). X11 cursors are a per-window
 /// attribute the WM cannot override on a client's own content window; instead
@@ -5705,44 +5826,43 @@ fn change_bytes(
 /// application windows. Every other resource line is preserved — only the two
 /// `Xcursor.*` entries are rewritten.
 fn sync_xcursor_resources(conn: &xcb::Connection, root: x::Window, theme: &str, size: u32) {
-    // RESOURCE_MANAGER is a STRING of newline-separated "Key:\tvalue" lines.
     let cookie = conn.send_request(&x::GetProperty {
         delete: false,
         window: root,
         property: x::ATOM_RESOURCE_MANAGER,
         r#type: x::ATOM_STRING,
         long_offset: 0,
-        long_length: u32::MAX / 4,
+        long_length: (MAX_RESOURCE_MANAGER_BYTES / 4) as u32,
     });
-    let existing = conn
-        .wait_for_reply(cookie)
-        .ok()
-        .filter(|r| r.format() == 8)
-        .map(|r| String::from_utf8_lossy(r.value::<u8>()).into_owned())
-        .unwrap_or_default();
-
-    let mut out = String::new();
-    for line in existing.lines() {
-        if line.is_empty() {
-            continue;
+    let reply = match conn.wait_for_reply(cookie) {
+        Ok(reply) => reply,
+        Err(error) => {
+            log::warn!("[cursor] leaving RESOURCE_MANAGER unchanged after read failure: {error}");
+            return;
         }
-        let key = line.split(':').next().unwrap_or("").trim();
-        if key == "Xcursor.theme" || key == "Xcursor.size" {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(&format!("Xcursor.theme:\t{theme}\n"));
-    out.push_str(&format!("Xcursor.size:\t{size}\n"));
-
-    if let Err(e) = change_bytes(
-        conn,
-        root,
-        x::ATOM_RESOURCE_MANAGER,
-        x::ATOM_STRING,
-        out.as_bytes(),
-    ) {
+    };
+    let bytes = if reply.format() == 8 {
+        reply.value::<u8>()
+    } else {
+        &[]
+    };
+    let Some(existing) = complete_resource_manager(
+        reply.r#type().resource_id(),
+        x::ATOM_STRING.resource_id(),
+        reply.format(),
+        reply.bytes_after(),
+        bytes,
+    ) else {
+        log::warn!("[cursor] leaving malformed or oversized RESOURCE_MANAGER unchanged");
+        return;
+    };
+    let Some(out) = merge_xcursor_resources(existing, theme, size) else {
+        log::warn!(
+            "[cursor] leaving RESOURCE_MANAGER unchanged: unsafe cursor value or resource size"
+        );
+        return;
+    };
+    if let Err(e) = change_bytes(conn, root, x::ATOM_RESOURCE_MANAGER, x::ATOM_STRING, &out) {
         log::warn!("[cursor] failed to publish Xcursor.* to RESOURCE_MANAGER: {e}");
     } else {
         log::info!("[cursor] published Xcursor.theme={theme:?} size={size}px to RESOURCE_MANAGER");
@@ -8048,5 +8168,36 @@ mod output_refresh_tests {
             };
             assert_eq!(XcbOutputOps::calc_refresh_mhz(&mode), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod edid_format_tests {
+    use super::*;
+    use xcb::Reply;
+
+    fn reply(format: u8, bytes_after: u32) -> xcb::randr::GetOutputPropertyReply {
+        // SAFETY: an aligned calloc-owned, complete 32+128 byte reply matching
+        // libxcb's native-endian layout; Reply::drop frees it once.
+        unsafe {
+            let raw = libc::calloc(1, 160).cast::<u8>();
+            assert!(!raw.is_null());
+            *raw = 1;
+            *raw.add(1) = format;
+            raw.add(4).cast::<u32>().write(32);
+            raw.add(12).cast::<u32>().write(bytes_after);
+            raw.add(16)
+                .cast::<u32>()
+                .write(128 / (u32::from(format) / 8));
+            xcb::randr::GetOutputPropertyReply::from_raw(raw)
+        }
+    }
+
+    #[test]
+    fn edid_property_format_is_checked_before_typed_access() {
+        assert_eq!(xcb_edid_bytes(&reply(8, 0)).unwrap().len(), 128);
+        assert!(xcb_edid_bytes(&reply(8, 4)).is_none());
+        assert!(xcb_edid_bytes(&reply(16, 0)).is_none());
+        assert!(xcb_edid_bytes(&reply(32, 0)).is_none());
     }
 }

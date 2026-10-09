@@ -5486,7 +5486,7 @@ mod property_ops {
                 self.atoms._NET_WM_WINDOW_TYPE,
                 AtomEnum::ATOM,
                 0,
-                u32::MAX,
+                MAX_ATOM_LIST_ITEMS,
             ) {
                 if let Ok(rep) = reply.reply() {
                     if rep.format == 32 {
@@ -5540,33 +5540,34 @@ mod property_ops {
         }
 
         fn set_urgent_hint(&self, win: WindowId, urgent: bool) -> Result<(), BackendError> {
-            const X_URGENCY_HINT: u32 = 1 << 8;
             let w = self.ids.x11(win)?;
-            let cookie =
-                self.conn
-                    .get_property(false, w, AtomEnum::WM_HINTS, AtomEnum::WM_HINTS, 0, 20)?;
-
-            let mut data = Vec::new();
-            if let Ok(reply) = cookie.reply() {
-                data = reply.value32().into_iter().flatten().collect();
-            }
-            if data.is_empty() {
-                data.push(0);
-            }
-
-            if urgent {
-                data[0] |= X_URGENCY_HINT;
-            } else {
-                data[0] &= !X_URGENCY_HINT;
-            }
-
-            self.conn.change_property32(
-                PropMode::REPLACE,
-                w,
-                AtomEnum::WM_HINTS,
-                AtomEnum::WM_HINTS,
-                &data,
-            )?;
+            let reply = self
+                .conn
+                .get_property(false, w, AtomEnum::WM_HINTS, AtomEnum::WM_HINTS, 0, 20)?
+                .reply()?;
+            let values: Vec<u32> = reply.value32().into_iter().flatten().collect();
+            let data = crate::backend::x11::wm::wm_hints_with_urgency(
+                reply.type_,
+                AtomEnum::WM_HINTS.into(),
+                reply.format,
+                reply.bytes_after,
+                &values,
+                urgent,
+            )
+            .ok_or_else(|| {
+                BackendError::Message(
+                    "incomplete or malformed WM_HINTS; refusing replacement".into(),
+                )
+            })?;
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    w,
+                    AtomEnum::WM_HINTS,
+                    AtomEnum::WM_HINTS,
+                    &data,
+                )?
+                .check()?;
             Ok(())
         }
 
@@ -6957,5 +6958,63 @@ mod tests {
                 && !fullscreen.contains("read_net_wm_state_list("),
             "is_fullscreen must answer through has_net_wm_state_flag"
         );
+    }
+}
+
+#[cfg(test)]
+mod window_type_limit_tests {
+    use super::*;
+    use crate::backend::api::PropertyOps;
+    use x11rb::protocol::xproto::{
+        AtomEnum, ConnectionExt, CreateWindowAux, PropMode, WindowClass,
+    };
+    use x11rb::wrapper::ConnectionExt as _;
+
+    #[test]
+    fn client_window_type_lists_use_the_existing_atom_budget() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let (conn, screen) = x11rb::connect(Some(x11.name())).unwrap();
+        let root = conn.setup().roots[screen].root;
+        let conn = Arc::new(conn);
+        let atoms = Atoms::new(&*conn).unwrap().reply().unwrap();
+        let window = conn.generate_id().unwrap();
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            40,
+            30,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        let ids = ids::X11IdRegistry::new(1);
+        let window_id = ids.intern(window);
+        let ops = property_ops::X11PropertyOps::new(conn.clone(), atoms, ids);
+        let limit = property_ops::MAX_ATOM_LIST_ITEMS as usize;
+        conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            &vec![atoms._NET_WM_WINDOW_TYPE_DIALOG; limit + 1],
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        let types = ops.get_window_types(window_id);
+        assert_eq!(types.len(), limit);
+        assert!(
+            types
+                .iter()
+                .all(|kind| *kind == crate::backend::api::WindowType::Dialog)
+        );
+        conn.destroy_window(window).unwrap().check().unwrap();
     }
 }

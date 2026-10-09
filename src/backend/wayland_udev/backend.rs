@@ -379,6 +379,93 @@ impl<T> std::ops::DerefMut for SendWrapper<T> {
     }
 }
 
+/// Physical contacts outlive a modal transition. Cancel their client sequence,
+/// but do not let its motion/up resume when the modal closes mid-contact.
+#[derive(Debug, Default)]
+struct TouchRoutes {
+    slots: HashMap<smithay::backend::input::TouchSlot, bool>,
+    modal: bool,
+    owner_epoch: (bool, u64),
+    cancel_pending: bool,
+    frame_pending: bool,
+}
+
+impl TouchRoutes {
+    fn cancel_delivered(&mut self) {
+        self.cancel_pending |= self.frame_pending || self.slots.values().any(|sent| *sent);
+        for sent in self.slots.values_mut() {
+            *sent = false;
+        }
+        self.frame_pending = false;
+    }
+
+    fn set_modal(&mut self, modal: bool) {
+        if modal && !self.modal {
+            self.cancel_delivered();
+        }
+        self.modal = modal;
+    }
+
+    fn set_owner_epoch(&mut self, epoch: (bool, u64)) {
+        if self.owner_epoch != epoch {
+            self.cancel_delivered();
+        }
+        self.owner_epoch = epoch;
+    }
+
+    fn down(&mut self, slot: smithay::backend::input::TouchSlot) -> bool {
+        if self.slots.contains_key(&slot) {
+            return false;
+        }
+        let sent = !self.modal;
+        self.slots.insert(slot, sent);
+        self.frame_pending |= sent;
+        sent
+    }
+
+    fn motion(&mut self, slot: smithay::backend::input::TouchSlot) -> bool {
+        let sent = self.slots.get(&slot).copied().unwrap_or(false);
+        self.frame_pending |= sent;
+        sent
+    }
+
+    fn up(&mut self, slot: smithay::backend::input::TouchSlot) -> bool {
+        let sent = self.slots.remove(&slot).unwrap_or(false);
+        self.frame_pending |= sent;
+        sent
+    }
+
+    fn frame(&mut self) -> bool {
+        std::mem::take(&mut self.frame_pending)
+    }
+
+    fn cancel(&mut self) {
+        self.slots.clear();
+        self.cancel_pending = false;
+        self.frame_pending = false;
+    }
+}
+
+fn reconcile_touch_routes(state: &mut JwmWaylandState, shared: &Arc<Mutex<SharedState>>) {
+    let cancel = {
+        let mut shared = shared.lock_safe();
+        let modal =
+            shared.screenshot_grab_active || shared.system_ui_grab_active || !shared.session_active;
+        shared.touch_routes.set_modal(modal);
+        shared
+            .touch_routes
+            .set_owner_epoch((state.session_locked, state.session_lock_epoch));
+        std::mem::take(&mut shared.touch_routes.cancel_pending)
+    };
+    if cancel && let Some(touch) = state.seat.get_touch() {
+        touch.unset_grab(state);
+        // Requires the pinned Smithay cancel backport: cancellation must work
+        // after frame and retire up-pending owners without fabricated input.
+        touch.cancel(state);
+        state.request_client_flush();
+    }
+}
+
 struct SharedState {
     pointer_x: f64,
     pointer_y: f64,
@@ -416,6 +503,7 @@ struct SharedState {
     screenshot_grab_active: bool,
     /// True while JWM's built-in launcher or lock screen owns all input.
     system_ui_grab_active: bool,
+    touch_routes: TouchRoutes,
     /// Fractional vertical wheel rotation, in clicks, not yet reported to
     /// the WM. While one of the grabs above owns the pointer, rotation is
     /// converted into synthetic button 4/5 presses one whole click at a
@@ -454,6 +542,7 @@ impl Default for SharedState {
             session_active: true,
             screenshot_grab_active: false,
             system_ui_grab_active: false,
+            touch_routes: TouchRoutes::default(),
             wheel_remainder: 0.0,
             toast_rects: Vec::new(),
         }
@@ -668,6 +757,7 @@ impl InputOps for UdevInputOps {
                 shared.wheel_remainder = 0.0;
             }
             shared.screenshot_grab_active = true;
+            shared.touch_routes.set_modal(true);
         }
         Ok(true)
     }
@@ -675,6 +765,8 @@ impl InputOps for UdevInputOps {
     fn ungrab_pointer(&self) -> Result<(), BackendError> {
         let mut shared = self.shared.lock_safe();
         shared.screenshot_grab_active = false;
+        let modal = shared.system_ui_grab_active || !shared.session_active;
+        shared.touch_routes.set_modal(modal);
         if shared.cursor_kind != StdCursorKind::LeftPtr {
             shared.cursor_kind = StdCursorKind::LeftPtr;
             shared.cursor_dirty = true;
@@ -1196,9 +1288,42 @@ struct CompositorDesiredState {
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
     minimized_windows: HashSet<u64>,
     dock_targets: HashMap<u64, CompositorRect>,
+    // Policy snapshots outlive GPU owners, including failed reconstruction.
+    system_ui: Option<SystemUiOverlay>,
+    restore_after_reinit: bool,
+    system_ui_needs_frame: bool,
 }
 
 impl CompositorDesiredState {
+    fn set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
+        self.system_ui = overlay;
+        self.system_ui_needs_frame = self.builtin_session_locked();
+    }
+
+    fn begin_rebuild(&mut self, compositor_present: bool) -> bool {
+        self.restore_after_reinit |= compositor_present;
+        self.restore_after_reinit
+    }
+
+    fn installed(&mut self) {
+        self.restore_after_reinit = false;
+        self.system_ui_needs_frame = self.builtin_session_locked();
+    }
+
+    fn frame_completed(&mut self) {
+        self.system_ui_needs_frame = false;
+    }
+
+    fn needs_lock_shield(&self, compositor_present: bool) -> bool {
+        self.builtin_session_locked() && (!compositor_present || self.system_ui_needs_frame)
+    }
+
+    fn builtin_session_locked(&self) -> bool {
+        self.system_ui
+            .as_ref()
+            .is_some_and(|overlay| overlay.locked && !overlay.monitor_lock)
+    }
+
     fn set_minimized(&mut self, window_id: u64, minimized: bool) {
         if minimized {
             self.minimized_windows.insert(window_id);
@@ -1671,6 +1796,8 @@ impl UdevBackend {
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
+        // Restore the opaque session UI before the first render is scheduled.
+        compositor.set_system_ui(self.compositor_desired.system_ui.clone());
         compositor.set_monitors(&monitors);
         compositor.apply_per_monitor_refresh_rates(&refresh_rates);
         // Recreated compositors have no trustworthy live source geometry.
@@ -1709,6 +1836,7 @@ impl UdevBackend {
         self.retire_queued_compositor_dead_windows();
         self.minimized_capture_attempts.clear();
         self.compositor = Some(compositor);
+        self.compositor_desired.installed();
         self.replay_compositor_desired_state();
         if let Some(kms) = self.kms.as_ref() {
             kms.borrow_mut().reload_cursor_config();
@@ -1935,18 +2063,20 @@ impl UdevBackend {
         }
     }
 
-    fn recreate_compositor_for_current_kms(&mut self) {
+    fn recreate_compositor_for_current_kms(&mut self) -> bool {
         // These backend-owned textures were allocated by the same old EGL
         // context as the compositor. Reusing a same-sized offscreen entry with
         // the fresh renderer would make late minimized capture fail forever.
         self.scratch_tex_updates.clear();
         self.offscreen_window_textures.clear();
         self.minimized_capture_attempts.clear();
-        let Some(mut old_compositor) = self.compositor.take() else {
-            return;
-        };
-        let benchmark = old_compositor.take_benchmark();
-        drop(old_compositor);
+        if !self
+            .compositor_desired
+            .begin_rebuild(self.compositor.is_some())
+        {
+            return true;
+        }
+        let benchmark = self.compositor.take().map(|mut old| old.take_benchmark());
         self.publish_toast_hit_rects();
         let recreated = if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
@@ -1968,8 +2098,13 @@ impl UdevBackend {
             None
         };
         if let Some(mut compositor) = recreated {
-            compositor.adopt_benchmark(benchmark);
+            if let Some(benchmark) = benchmark {
+                compositor.adopt_benchmark(benchmark);
+            }
             self.install_compositor(compositor);
+            true
+        } else {
+            false
         }
     }
 
@@ -2037,7 +2172,6 @@ impl UdevBackend {
             self.event_loop.handle(),
         ) {
             Ok(new_kms) => {
-                self.kms_reinit_retry.reset();
                 // Remove old notifier after new one is registered.
                 self.drop_kms();
 
@@ -2060,7 +2194,13 @@ impl UdevBackend {
                 // The rebuilt KMS state carries a fresh EGL context, so every GL
                 // object the compositor created in the previous context (shaders,
                 // textures, FBOs) is now dangling.
-                self.recreate_compositor_for_current_kms();
+                if self.recreate_compositor_for_current_kms() {
+                    self.kms_reinit_retry.reset();
+                } else if let Some(delay) = self.kms_reinit_retry.on_failure() {
+                    // Keep policy and reconstruction intent while the temporary
+                    // renderer-less path presents the built-in lock shield.
+                    self.schedule_kms_reinit_retry(delay);
+                }
 
                 // The rebuild replays positions and scales applied through
                 // wlr-output-management, which the DRM rescan just reset in
@@ -2594,6 +2734,7 @@ impl UdevBackend {
             event_loop
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
+                    reconcile_touch_routes(state, &shared);
                     // Notify idle tracker on any input activity
                     state.idle_notifier_state.notify_activity(&state.seat);
                     state.last_input = std::time::Instant::now();
@@ -3101,8 +3242,7 @@ impl UdevBackend {
                                         }
                                         kbd.set_focus(state, Some(surface), serial);
 
-                                        let _ = kbd.input::<(), _>(
-                                            state,
+                                        state.keyboard_input_for_popup(
                                             keycode,
                                             state_key,
                                             serial,
@@ -3156,8 +3296,7 @@ impl UdevBackend {
                                         }
                                     }
 
-                                    let _ = kbd.input::<(), _>(
-                                        state,
+                                    state.keyboard_input_for_popup(
                                         keycode,
                                         state_key,
                                         serial,
@@ -3475,6 +3614,7 @@ impl UdevBackend {
                         InputEvent::TouchDown { event, .. } => {
                             let time = event.time();
                             let slot = event.slot();
+                            if !shared.lock_safe().touch_routes.down(slot) { return; }
                             let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
                                 output_bounds(&s.outputs)
@@ -3499,6 +3639,7 @@ impl UdevBackend {
                         InputEvent::TouchMotion { event, .. } => {
                             let time = event.time();
                             let slot = event.slot();
+                            if !shared.lock_safe().touch_routes.motion(slot) { return; }
                             let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
                                 output_bounds(&s.outputs)
@@ -3522,6 +3663,7 @@ impl UdevBackend {
                         InputEvent::TouchUp { event, .. } => {
                             let time = event.time();
                             let slot = event.slot();
+                            if !shared.lock_safe().touch_routes.up(slot) { return; }
                             if let Some(touch) = state.seat.get_touch() {
                                 touch.up(
                                     state,
@@ -3533,8 +3675,16 @@ impl UdevBackend {
                                 );
                             }
                         }
-                        InputEvent::TouchFrame { .. } => {
+                        InputEvent::TouchCancel { .. } => {
+                            shared.lock_safe().touch_routes.cancel();
                             if let Some(touch) = state.seat.get_touch() {
+                                touch.unset_grab(state);
+                                touch.cancel(state);
+                            }
+                        }
+                        InputEvent::TouchFrame { .. } => {
+                            if shared.lock_safe().touch_routes.frame()
+                                && let Some(touch) = state.seat.get_touch() {
                                 touch.frame(state);
                             }
                         }
@@ -4579,6 +4729,7 @@ impl CompositorMedia for UdevBackend {
 
 impl CompositorWorkspaceEffects for UdevBackend {
     fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
+        self.compositor_desired.set_system_ui(overlay.clone());
         let locked = overlay.as_ref().is_some_and(|overlay| overlay.locked);
         if locked {
             cancel_key_repeat_timer(&self.state.loop_handle, &self.shared);
@@ -4595,7 +4746,12 @@ impl CompositorWorkspaceEffects for UdevBackend {
                 shared.wheel_remainder = 0.0;
             }
             shared.system_ui_grab_active = overlay.is_some();
+            let modal = shared.system_ui_grab_active
+                || shared.screenshot_grab_active
+                || !shared.session_active;
+            shared.touch_routes.set_modal(modal);
         }
+        reconcile_touch_routes(&mut self.state, &self.shared);
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_system_ui(overlay);
         }
@@ -5431,6 +5587,12 @@ impl Backend for UdevBackend {
             } else {
                 Ok(false)
             }
+        } else if !enabled && self.compositor.is_none() {
+            // A deliberate disable cancels a failed reconstruction, but does
+            // not discard a lock snapshot or its fail-closed KMS shield.
+            Ok(std::mem::take(
+                &mut self.compositor_desired.restore_after_reinit,
+            ))
         } else if !enabled && self.compositor.is_some() {
             // A runtime toggle leaves KMS and its EGL context alive. Acquire
             // that exact context before mutating any owner; if acquisition
@@ -5511,6 +5673,7 @@ impl Backend for UdevBackend {
                 "live compositor GPU resources were already released"
             );
             self.compositor = None;
+            self.compositor_desired.restore_after_reinit = false;
             self.publish_toast_hit_rects();
             self.minimized_capture_attempts.clear();
             self.scratch_tex_updates.clear();
@@ -6564,6 +6727,11 @@ impl Backend for UdevBackend {
             }
         };
 
+        if result {
+            // Only a completed compositor pass may replace the fallback shield.
+            self.compositor_desired.frame_completed();
+        }
+
         // The cards this frame drew are the ones a click must be resolved
         // against, so the dispatcher is fed from the same pass that drew them.
         self.publish_toast_hit_rects();
@@ -7066,6 +7234,8 @@ impl Backend for UdevBackend {
                         &*self.state,
                         cursor_kind,
                         self.compositor.as_ref(),
+                        self.compositor_desired
+                            .needs_lock_shield(self.compositor.is_some()),
                     );
                     // A locked frame with nothing to queue is already on
                     // screen; flipped ones are reported by the vblank.
@@ -7164,6 +7334,9 @@ impl Backend for UdevBackend {
                 compositor_wakeup,
                 frame_watchdog_wakeup,
             );
+            // Policy may have opened (and even closed) a modal while handling
+            // queued input. Flush cancellation before blocking for new input.
+            reconcile_touch_routes(&mut self.state, &self.shared);
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -7403,6 +7576,103 @@ pub(super) use self::kms::composite_scaled_buffer_for_tests;
 
 #[cfg(test)]
 mod udev_backend_selection_tests {
+    #[cfg(test)]
+    mod builtin_lock_recovery_tests {
+        use super::*;
+
+        fn locked() -> SystemUiOverlay {
+            SystemUiOverlay {
+                locked: true,
+                title: "Lock snapshot".into(),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn full_lock_snapshot_survives_rebuild_until_completed_frame() {
+            let mut desired = CompositorDesiredState::default();
+            desired.set_system_ui(Some(locked()));
+            desired.frame_completed();
+            assert!(desired.begin_rebuild(true));
+            assert!(desired.needs_lock_shield(false));
+            desired.installed();
+            assert_eq!(desired.system_ui, Some(locked()));
+            assert!(desired.needs_lock_shield(true));
+            desired.frame_completed();
+            assert!(!desired.needs_lock_shield(true));
+        }
+
+        #[test]
+        fn consecutive_failed_constructions_keep_intent_and_shield() {
+            let mut desired = CompositorDesiredState::default();
+            desired.set_system_ui(Some(locked()));
+            assert!(desired.begin_rebuild(true));
+            for _ in 0..3 {
+                assert!(desired.begin_rebuild(false));
+                assert!(desired.needs_lock_shield(false));
+                assert_eq!(desired.system_ui, Some(locked()));
+            }
+            desired.installed();
+            assert!(!desired.restore_after_reinit);
+            assert!(desired.needs_lock_shield(true));
+            desired.frame_completed();
+            assert!(!desired.needs_lock_shield(true));
+        }
+
+        #[test]
+        fn updates_and_unlock_while_renderer_missing_replace_saved_snapshot() {
+            let mut desired = CompositorDesiredState::default();
+            desired.set_system_ui(Some(locked()));
+            desired.begin_rebuild(true);
+            let mut updated = locked();
+            updated.hint = "Try again".into();
+            desired.set_system_ui(Some(updated.clone()));
+            desired.installed();
+            assert_eq!(desired.system_ui, Some(updated));
+            desired.set_system_ui(None);
+            assert!(!desired.needs_lock_shield(false));
+        }
+
+        #[test]
+        fn monitor_prompt_does_not_black_every_output() {
+            let mut desired = CompositorDesiredState::default();
+            let mut overlay = locked();
+            overlay.monitor_lock = true;
+            desired.set_system_ui(Some(overlay));
+            desired.begin_rebuild(true);
+            assert!(!desired.needs_lock_shield(false));
+            desired.installed();
+            assert!(!desired.needs_lock_shield(true));
+        }
+
+        #[test]
+        fn deliberate_disable_cancels_rebuild_without_unlocking() {
+            let mut desired = CompositorDesiredState::default();
+            desired.set_system_ui(Some(locked()));
+            desired.begin_rebuild(true);
+            assert!(std::mem::take(&mut desired.restore_after_reinit));
+            assert!(!desired.begin_rebuild(false));
+            assert!(desired.needs_lock_shield(false));
+        }
+
+        #[test]
+        fn retry_budget_exhaustion_preserves_lock_and_allows_later_recovery() {
+            let mut desired = CompositorDesiredState::default();
+            let mut retry = KmsReinitRetry::default();
+            desired.set_system_ui(Some(locked()));
+            desired.begin_rebuild(true);
+            for _ in 0..KmsReinitRetry::MAX_RETRIES {
+                assert!(retry.on_failure().is_some());
+            }
+            assert!(retry.on_failure().is_none());
+            assert!(desired.needs_lock_shield(false));
+            assert!(desired.begin_rebuild(false));
+            desired.installed();
+            desired.frame_completed();
+            assert!(!desired.needs_lock_shield(true));
+        }
+    }
+
     use super::*;
     use crate::config::{ArgumentConfig, GestureSwipeConfig};
 
@@ -8775,6 +9045,79 @@ mod udev_backend_selection_tests {
         assert!(gate.windows.is_empty());
         assert!(gate.begin_attempt(1, Some(1), 3));
         assert!(gate.begin_attempt(2, None, 3));
+    }
+    #[cfg(test)]
+    mod modal_touch_route_tests {
+        use super::*;
+        fn slot(n: u32) -> smithay::backend::input::TouchSlot {
+            Some(n).into()
+        }
+
+        #[test]
+        fn modal_blocks_down_motion_up_and_empty_frame() {
+            let mut routes = TouchRoutes::default();
+            routes.set_modal(true);
+            assert!(!routes.down(slot(0)));
+            assert!(!routes.motion(slot(0)));
+            assert!(!routes.up(slot(0)));
+            assert!(!routes.frame());
+        }
+        #[test]
+        fn modal_entered_after_down_frame_cancels_and_does_not_resume() {
+            let mut routes = TouchRoutes::default();
+            assert!(routes.down(slot(0)));
+            assert!(routes.frame());
+            routes.set_modal(true);
+            assert!(std::mem::take(&mut routes.cancel_pending));
+            routes.set_modal(false);
+            assert!(!routes.motion(slot(0)));
+            assert!(!routes.up(slot(0)));
+            assert!(!routes.frame());
+            assert!(routes.down(slot(0)));
+        }
+        #[test]
+        fn up_pending_frame_is_included_in_cancellation() {
+            let mut routes = TouchRoutes::default();
+            assert!(routes.down(slot(0)));
+            assert!(routes.up(slot(0)));
+            routes.set_modal(true);
+            assert!(routes.cancel_pending);
+            assert!(!routes.frame());
+            assert!(routes.slots.is_empty());
+        }
+        #[test]
+        fn device_cancel_releases_suppressed_physical_slots() {
+            let mut routes = TouchRoutes::default();
+            routes.set_modal(true);
+            assert!(!routes.down(slot(4)));
+            routes.cancel();
+            routes.set_modal(false);
+            assert!(routes.down(slot(4)));
+            assert!(routes.up(slot(4)));
+            assert!(routes.frame());
+            assert!(routes.slots.is_empty());
+        }
+        #[test]
+        fn brief_modal_between_event_batches_still_cancels() {
+            let mut routes = TouchRoutes::default();
+            assert!(routes.down(slot(0)));
+            routes.set_modal(true);
+            routes.set_modal(false);
+            assert!(routes.cancel_pending);
+            assert!(!routes.motion(slot(0)));
+            assert!(routes.down(slot(1)));
+        }
+        #[test]
+        fn native_lock_and_unlock_change_contact_ownership() {
+            let mut routes = TouchRoutes::default();
+            assert!(routes.down(slot(0)));
+            routes.set_owner_epoch((true, 1));
+            assert!(routes.cancel_pending);
+            assert!(!routes.up(slot(0)));
+            assert!(routes.down(slot(1)));
+            routes.set_owner_epoch((false, 1));
+            assert!(!routes.motion(slot(1)));
+        }
     }
 }
 
