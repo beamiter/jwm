@@ -6648,6 +6648,12 @@ impl Jwm {
     // IPC event broadcast helper
     // =========================================================================
 
+    pub(crate) fn has_ipc_subscribers(&self, event_type: &str) -> bool {
+        self.ipc_server
+            .as_ref()
+            .is_some_and(|ipc| ipc.has_subscribers(event_type))
+    }
+
     pub(crate) fn broadcast_ipc_event(&mut self, event_type: &str, payload: serde_json::Value) {
         if let Some(ipc) = self.ipc_server.as_mut() {
             ipc.broadcast(&IpcEvent {
@@ -6666,6 +6672,10 @@ impl Jwm {
         backend: &dyn Backend,
         client_key: ClientKey,
     ) {
+        if !self.has_ipc_subscribers("window/state") {
+            return;
+        }
+
         let focused = self.get_selected_client_key() == Some(client_key);
         let Some(info) = self.window_info(backend, client_key, focused) else {
             return;
@@ -6684,6 +6694,10 @@ impl Jwm {
         backend: &dyn Backend,
         mon: MonitorKey,
     ) {
+        if !self.has_ipc_subscribers("window/state") {
+            return;
+        }
+
         let keys: Vec<_> = self
             .state
             .monitor_clients
@@ -6701,6 +6715,10 @@ impl Jwm {
     /// monitor — used after a global `arrange(None)` from strut / topology
     /// changes that rewrite work areas on all outputs.
     pub(crate) fn broadcast_visible_window_states_all_monitors(&mut self, backend: &dyn Backend) {
+        if !self.has_ipc_subscribers("window/state") {
+            return;
+        }
+
         let monitors: Vec<_> = self.state.monitor_order.clone();
         for mon in monitors {
             self.broadcast_visible_window_states_on_monitor(backend, mon);
@@ -8699,9 +8717,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unobserved_window_state_skips_backend_queries() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.ipc_server = None;
+        let mut client = WMClient::new(WindowId::from_raw(0x991));
+        client.mon = jwm.state.sel_mon;
+        let key = jwm.state.clients.insert(client);
+        backend.property_reads.set(0);
+        jwm.broadcast_window_state_ipc(&backend, key);
+        assert_eq!(
+            backend.property_reads.get(),
+            0,
+            "an event with no server queried live window properties"
+        );
+        let info = jwm
+            .window_info(&backend, key, false)
+            .expect("query still works");
+        assert_eq!(info.id, 0x991);
+        assert_eq!(
+            backend.property_reads.get(),
+            1,
+            "explicit queries must still read current properties"
+        );
+    }
+
     /// A backend built from the shared dummy ops, so the pairing IPC arms can
     /// be driven end to end without a display.
     struct PairingIpcBackend {
+        property_reads: std::cell::Cell<usize>,
         window_ops: DummyWindowOps,
         input_ops: DummyInputOps,
         property_ops: DummyPropertyOps,
@@ -8724,6 +8769,7 @@ mod tests {
     impl PairingIpcBackend {
         fn new() -> Self {
             Self {
+                property_reads: std::cell::Cell::new(0),
                 window_ops: DummyWindowOps,
                 input_ops: DummyInputOps,
                 property_ops: DummyPropertyOps,
@@ -8804,6 +8850,7 @@ mod tests {
         }
 
         fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            self.property_reads.set(self.property_reads.get() + 1);
             &self.property_ops
         }
 

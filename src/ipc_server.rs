@@ -1110,6 +1110,15 @@ impl IpcServer {
         outcome
     }
 
+    /// Whether a currently registered subscription can receive this topic.
+    /// Registration and broadcasts run on the same event loop; check this
+    /// immediately before constructing an otherwise unused event payload.
+    pub fn has_subscribers(&self, event_type: &str) -> bool {
+        self.clients
+            .values()
+            .any(|client| client.is_subscribed(event_type))
+    }
+
     /// Broadcast an event to all subscribed clients.
     pub fn broadcast(&mut self, event: &IpcEvent) {
         let mut dead = Vec::new();
@@ -1994,6 +2003,7 @@ mod tests {
     fn broadcast_to_subscriber() {
         let mut server = make_test_server();
         let path = server.socket_path.clone();
+        assert!(!server.has_subscribers("window/new"));
 
         let mut c1 = UnixStream::connect(&path).unwrap();
         c1.set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -2009,6 +2019,8 @@ mod tests {
 
         server.accept_connections();
         let msgs = server.poll_clients();
+        // A connection or queued subscribe request is not yet a subscription.
+        assert!(!server.has_subscribers("window/new"));
 
         // Process subscribe
         for msg in &msgs {
@@ -2017,6 +2029,10 @@ mod tests {
                 server.respond(*client_id, &crate::ipc::IpcResponse::ok(None));
             }
         }
+
+        assert!(server.has_subscribers("window/new"));
+        assert!(!server.has_subscribers("windowing/new"));
+        assert!(!server.has_subscribers("monitor/new"));
 
         // Read the subscribe confirmation from c1
         let mut buf = [0u8; 1024];
@@ -2040,6 +2056,25 @@ mod tests {
             .unwrap();
         let result = std::io::Read::read(&mut c2, &mut [0u8; 1024]);
         assert!(result.is_err() || result.unwrap() == 0);
+
+        let subscribed_id = msgs
+            .iter()
+            .find_map(|msg| match msg {
+                IncomingIpc::Subscribe { client_id, .. } => Some(*client_id),
+                _ => None,
+            })
+            .expect("registered subscriber");
+        server.subscribe(subscribed_id, vec!["window/state".into()]);
+        assert!(!server.has_subscribers("window/new"));
+        assert!(server.has_subscribers("window/state"));
+        server.subscribe(subscribed_id, vec!["*".into()]);
+        assert!(server.has_subscribers("window/state"));
+        assert!(server.has_subscribers("monitor/new"));
+        server.subscribe(subscribed_id, Vec::new());
+        assert!(!server.has_subscribers("window/state"));
+        server.subscribe(subscribed_id, vec!["window".into()]);
+        server.clients.remove(&subscribed_id);
+        assert!(!server.has_subscribers("window/state"));
     }
 
     #[test]

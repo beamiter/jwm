@@ -917,8 +917,10 @@ impl Jwm {
         // remains the retry path when a bar is not ready yet.
         self.flush_pending_bar_updates();
 
-        // Broadcast focus event
-        if let Some(ck) = client_key_opt {
+        // Build the focus payload only when a registered observer can receive it.
+        if self.has_ipc_subscribers("window/focus")
+            && let Some(ck) = client_key_opt
+        {
             let event_data = self
                 .state
                 .clients
