@@ -3614,6 +3614,37 @@ mod event_source {
                     .unwrap();
                 check("Fallback");
             }
+            // An empty decoded preferred name uses the legacy fallback,
+            // including a single NUL byte. Keep whitespace and the shared
+            // decoder's exactly-one-trailing-NUL behavior unchanged.
+            let preferred_cases: &[(&[u8], &str)] = &[
+                (b"", ""),
+                (b"\0", ""),
+                ("Café 東京".as_bytes(), "Café 東京"),
+                ("Café 東京\0".as_bytes(), "Café 東京"),
+                (b" \t ", " \t "),
+                (b"  \0", "  "),
+                (b"\0\0", "\0"),
+                (b"\0\0\0", "\0\0"),
+                (b"tail\0\0", "tail\0"),
+            ];
+            for &(raw, decoded) in preferred_cases {
+                conn.change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    atoms._NET_WM_NAME,
+                    atoms.UTF8_STRING,
+                    raw,
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+                check(if decoded.is_empty() {
+                    "Fallback"
+                } else {
+                    decoded
+                });
+            }
             conn.change_property8(
                 PropMode::REPLACE,
                 window,
@@ -3630,6 +3661,19 @@ mod event_source {
                 .check()
                 .unwrap();
             check("");
+            for &(raw, decoded) in preferred_cases {
+                conn.change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    atoms._NET_WM_NAME,
+                    atoms.UTF8_STRING,
+                    raw,
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+                check(decoded);
+            }
             conn.delete_property(window, atoms._NET_WM_NAME)
                 .unwrap()
                 .check()
@@ -5376,7 +5420,12 @@ mod property_ops {
 
     impl<C: Connection + Send + Sync + 'static> PropertyOpsTrait for X11PropertyOps<C> {
         fn get_title(&self, win: WindowId) -> String {
-            if let Some(title) = self.get_text_property(win, self.atoms._NET_WM_NAME) {
+            // A terminator-only UTF8_STRING is empty after decoding, just
+            // like a zero-byte property. Match XCB's legacy-name fallback.
+            if let Some(title) = self
+                .get_text_property(win, self.atoms._NET_WM_NAME)
+                .filter(|title| !title.is_empty())
+            {
                 return title;
             }
             if let Some(title) = self.get_text_property(win, AtomEnum::WM_NAME.into()) {

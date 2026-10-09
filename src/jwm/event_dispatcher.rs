@@ -3168,6 +3168,135 @@ mod tests {
         assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
     }
 
+    fn settled_policy_tick_fixture() -> (Jwm, RenderSpyBackend) {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        // Consume startup maintenance without scheduling compositor work or
+        // its connectivity worker. This is the same settled state as the
+        // ordinary headless-deadline regression above.
+        backend.compositor_enabled = false;
+        EventHandler::update(&mut jwm, &mut backend).unwrap();
+        assert!(<Jwm as EventHandler>::next_wakeup(&jwm).is_some_and(|delay| !delay.is_zero()));
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+        (jwm, backend)
+    }
+
+    #[test]
+    fn settled_expose_does_not_request_continuous_policy_ticks() {
+        let (mut jwm, _backend) = settled_policy_tick_fixture();
+        for active in [true, false, true, false] {
+            jwm.features.expose_active = active;
+            assert!(
+                !<Jwm as EventHandler>::needs_tick(&jwm),
+                "Expose presence alone must not keep the policy loop at frame cadence"
+            );
+            assert!(<Jwm as EventHandler>::next_wakeup(&jwm).is_some_and(|delay| !delay.is_zero()));
+        }
+    }
+
+    #[test]
+    fn settled_expose_preserves_independent_policy_tick_demands() {
+        use crate::core::animation::{AnimationKind, Easing};
+        use crate::core::layout::LayoutEnum;
+        use crate::core::models::WMClient;
+        use crate::core::types::Rect;
+        use crate::jwm::features::deferred_grab::{DeferredGrab, DeferredGrabAction};
+        use crate::jwm::features::{LayoutPickerState, SystemUiState};
+
+        let (mut jwm, _backend) = settled_policy_tick_fixture();
+        jwm.features.expose_active = true;
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+
+        jwm.features.overview.active = true;
+        assert!(
+            <Jwm as EventHandler>::needs_tick(&jwm),
+            "overview stays animated"
+        );
+        jwm.features.overview.deactivate();
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+
+        jwm.features.system_ui =
+            SystemUiState::LayoutPicker(LayoutPickerState::new(&LayoutEnum::TILE));
+        assert!(
+            <Jwm as EventHandler>::needs_tick(&jwm),
+            "layout picker keeps ticking"
+        );
+        jwm.features.system_ui.cancel();
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+
+        let client = jwm
+            .state
+            .clients
+            .insert(WMClient::new(WindowId::from_raw(0xe001)));
+        jwm.animations.start(
+            client,
+            Rect::new(0, 0, 100, 100),
+            Rect::new(20, 10, 100, 100),
+            std::time::Duration::from_secs(1),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
+        assert!(
+            <Jwm as EventHandler>::needs_tick(&jwm),
+            "layout animations keep ticking"
+        );
+        jwm.animations.remove(client);
+        jwm.state.clients.remove(client);
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+
+        jwm.features.deferred_grab = Some(DeferredGrab::new(
+            DeferredGrabAction::Screenshot {
+                output_path: "unused.png".into(),
+            },
+            std::time::Instant::now(),
+        ));
+        assert!(
+            <Jwm as EventHandler>::needs_tick(&jwm),
+            "a pending grab keeps retrying"
+        );
+        jwm.features.deferred_grab = None;
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+
+        let last_battery_poll = jwm.last_battery_poll.take();
+        assert!(
+            <Jwm as EventHandler>::needs_tick(&jwm),
+            "due maintenance still wakes"
+        );
+        assert_eq!(
+            <Jwm as EventHandler>::next_wakeup(&jwm),
+            Some(std::time::Duration::ZERO)
+        );
+        jwm.last_battery_poll = last_battery_poll;
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+    }
+
+    #[test]
+    fn settled_expose_renders_compositor_demand_without_policy_ticks() {
+        let (mut jwm, mut backend) = settled_policy_tick_fixture();
+        jwm.features.expose_active = true;
+        backend.compositor_enabled = true;
+        backend.needs_render = false;
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+
+        EventHandler::render_compositor_immediate(&mut jwm, &mut backend);
+        assert_eq!(backend.rendered_frames, 0);
+
+        // Expose entry/exit, hover, selection and client damage belong to
+        // compositor demand. Each can request a frame without a policy tick.
+        for expected in 1..=3 {
+            backend.needs_render = true;
+            assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+            EventHandler::render_compositor_immediate(&mut jwm, &mut backend);
+            assert_eq!(backend.rendered_frames, expected);
+
+            // The spy does not advance real effects, so settle its flag by
+            // hand as the compositor does after completing those frames.
+            backend.needs_render = false;
+            EventHandler::render_compositor_immediate(&mut jwm, &mut backend);
+            assert_eq!(backend.rendered_frames, expected);
+        }
+    }
+
     #[test]
     fn event_handler_trait_object_delegates_immediate_render_to_jwm() {
         let mut jwm = empty_jwm();
@@ -11054,9 +11183,10 @@ impl EventHandler for Jwm {
 
     fn needs_tick(&self) -> bool {
         let now = std::time::Instant::now();
+        // Expose animations and content damage request compositor frames;
+        // its settled presence alone needs no continuous policy updates.
         self.animations.has_active()
             || self.features.overview.active
-            || self.features.expose_active
             || self.features.system_ui.is_layout_picker()
             || self.has_deferred_grab()
             || self.maintenance_next_wakeup_at(now).is_zero()

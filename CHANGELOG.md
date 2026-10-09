@@ -2404,6 +2404,10 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Settled Exposé no longer forces 16 ms window-management updates. Animation,
+  input and live client-content changes still request compositor rendering.
+- X11RB falls back to the legacy window title when the preferred title decodes
+  to an empty string, matching XCB without discarding whitespace-only titles.
 - Screenshot crop nudges keep visible and undone annotations attached to the
   crop, including when movement is clamped at a screen edge. Redo and the
   saved PNG preserve each mark's position within the selection.
