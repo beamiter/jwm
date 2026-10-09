@@ -217,13 +217,13 @@ pub(crate) fn compose_native_root(
             image.width,
             image.height,
         );
-        blit_nearest(&mut canvas, stride, root_w, root_h, image, dest);
+        blit_nearest(&mut canvas, stride, root_w, root_h, image, dest, monitor);
     }
     Some(canvas)
 }
 
 /// Copy tightly packed RGBA8 onto a root-sized canvas at `(dx, dy)`, clipping
-/// to the canvas. Used after a high-quality resize so compositor-off wallpaper
+/// to the canvas and the assigned output rectangle. Used after a high-quality resize so compositor-off wallpaper
 /// is not nearest-neighbour sampled from the original photo.
 pub(crate) fn blit_rgba_clipped(
     canvas: &mut [u8],
@@ -234,6 +234,7 @@ pub(crate) fn blit_rgba_clipped(
     src_h: u32,
     dx: i32,
     dy: i32,
+    clip: (i32, i32, u32, u32),
 ) {
     if src_w == 0 || src_h == 0 {
         return;
@@ -245,17 +246,21 @@ pub(crate) fn blit_rgba_clipped(
     {
         return;
     }
-    for row in 0..src_h {
-        let dest_y = dy.saturating_add(row as i32);
-        if dest_y < 0 || dest_y >= root_h as i32 {
-            continue;
-        }
-        for col in 0..src_w {
-            let dest_x = dx.saturating_add(col as i32);
-            if dest_x < 0 || dest_x >= root_w as i32 {
-                continue;
-            }
-            let src = row as usize * src_stride + col as usize * 4;
+    // Crop before iterating, including monitors partly outside the root.
+    // Wide intermediates prevent signed/unsigned edge arithmetic wrapping.
+    let (cx, cy, cw, ch) = clip;
+    let left = i64::from(dx).max(i64::from(cx)).max(0);
+    let top = i64::from(dy).max(i64::from(cy)).max(0);
+    let right = (i64::from(dx) + i64::from(src_w))
+        .min(i64::from(cx) + i64::from(cw))
+        .min(i64::from(root_w));
+    let bottom = (i64::from(dy) + i64::from(src_h))
+        .min(i64::from(cy) + i64::from(ch))
+        .min(i64::from(root_h));
+    for dest_y in top..bottom {
+        for dest_x in left..right {
+            let src = (dest_y - i64::from(dy)) as usize * src_stride
+                + (dest_x - i64::from(dx)) as usize * 4;
             let dst = dest_y as usize * dst_stride + dest_x as usize * 4;
             let alpha = rgba[src + 3];
             if alpha == 0 {
@@ -283,6 +288,7 @@ fn blit_nearest(
     root_h: u32,
     image: &NativeWallpaperImage,
     dest: (f32, f32, f32, f32),
+    monitor: &NativeMonitorBlit,
 ) {
     let (dx, dy, dw, dh) = dest;
     if !dx.is_finite() || !dy.is_finite() || !dw.is_finite() || !dh.is_finite() {
@@ -295,10 +301,14 @@ fn blit_nearest(
     let top = dy.floor() as i32;
     let right = (dx + dw).ceil() as i32;
     let bottom = (dy + dh).ceil() as i32;
-    let clip_left = left.max(0);
-    let clip_top = top.max(0);
-    let clip_right = right.min(root_w as i32);
-    let clip_bottom = bottom.min(root_h as i32);
+    let clip_left = i64::from(left).max(i64::from(monitor.x)).max(0);
+    let clip_top = i64::from(top).max(i64::from(monitor.y)).max(0);
+    let clip_right = i64::from(right)
+        .min(i64::from(monitor.x) + i64::from(monitor.w))
+        .min(i64::from(root_w));
+    let clip_bottom = i64::from(bottom)
+        .min(i64::from(monitor.y) + i64::from(monitor.h))
+        .min(i64::from(root_h));
     if clip_left >= clip_right || clip_top >= clip_bottom {
         return;
     }
@@ -463,17 +473,170 @@ mod tests {
     #[test]
     fn blit_rgba_clipped_copies_inside_the_canvas_and_ignores_overflow() {
         let mut canvas = vec![0u8; 2 * 2 * 4];
-        blit_rgba_clipped(&mut canvas, 2, 2, &[9, 8, 7, 255], 1, 1, 1, 1);
+        blit_rgba_clipped(&mut canvas, 2, 2, &[9, 8, 7, 255], 1, 1, 1, 1, (0, 0, 2, 2));
         assert_eq!(&canvas[12..16], &[9, 8, 7, 255]);
-        blit_rgba_clipped(&mut canvas, 2, 2, &[1, 2, 3, 255], 1, 1, -1, 0);
+        blit_rgba_clipped(
+            &mut canvas,
+            2,
+            2,
+            &[1, 2, 3, 255],
+            1,
+            1,
+            -1,
+            0,
+            (0, 0, 2, 2),
+        );
         assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
     }
 
     #[test]
     fn blit_rgba_clipped_blends_translucent_pixels_over_the_letterbox() {
         let mut canvas = vec![0, 0, 0, 255];
-        blit_rgba_clipped(&mut canvas, 1, 1, &[255, 0, 0, 128], 1, 1, 0, 0);
+        blit_rgba_clipped(
+            &mut canvas,
+            1,
+            1,
+            &[255, 0, 0, 128],
+            1,
+            1,
+            0,
+            0,
+            (0, 0, 1, 1),
+        );
         assert_eq!(canvas[0], 128);
         assert_eq!(canvas[3], 255);
+    }
+    #[test]
+    fn fill_and_center_never_overpaint_the_adjacent_monitor() {
+        for mode in [WallpaperMode::Fill, WallpaperMode::Center] {
+            let images = [
+                NativeWallpaperImage {
+                    rgba: [255, 0, 0, 255].repeat(4),
+                    width: 2,
+                    height: 2,
+                },
+                NativeWallpaperImage {
+                    rgba: [0, 0, 255, 255].repeat(8),
+                    width: 4,
+                    height: 2,
+                },
+            ];
+            let monitors = [
+                NativeMonitorBlit {
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    image: 0,
+                    mode,
+                },
+                NativeMonitorBlit {
+                    x: 2,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    image: 1,
+                    mode,
+                },
+            ];
+            let canvas = compose_native_root(4, 2, [0, 0, 0], &images, &monitors).unwrap();
+            for y in 0..2 {
+                for x in 0..4 {
+                    let at = (y * 4 + x) * 4;
+                    assert_eq!(
+                        &canvas[at..at + 4],
+                        if x < 2 {
+                            &[255, 0, 0, 255]
+                        } else {
+                            &[0, 0, 255, 255]
+                        },
+                        "mode={mode:?},x={x},y={y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resized_blit_intersects_monitor_source_and_root_rectangles() {
+        let source = [7, 8, 9, 255].repeat(8);
+        for (dx, dy, clip) in [
+            (1, 0, (2, 0, 2, 2)),
+            (-1, -1, (-1, -1, 2, 3)),
+            (2, 0, (3, 0, 9, 9)),
+            (0, 0, (0, 0, 0, 2)),
+            (0, 0, (1, 0, 2, 2)),
+            (0, 0, (i32::MAX, i32::MAX, u32::MAX, u32::MAX)),
+        ] {
+            let mut canvas = [255, 0, 0, 255].repeat(8);
+            blit_rgba_clipped(&mut canvas, 4, 2, &source, 4, 2, dx, dy, clip);
+            for y in 0..2i64 {
+                for x in 0..4i64 {
+                    let in_source = x >= i64::from(dx)
+                        && x < i64::from(dx) + 4
+                        && y >= i64::from(dy)
+                        && y < i64::from(dy) + 2;
+                    let in_monitor = x >= i64::from(clip.0)
+                        && x < i64::from(clip.0) + i64::from(clip.2)
+                        && y >= i64::from(clip.1)
+                        && y < i64::from(clip.1) + i64::from(clip.3);
+                    let offset = ((y * 4 + x) * 4) as usize;
+                    let expected = if in_source && in_monitor {
+                        [7, 8, 9, 255]
+                    } else {
+                        [255, 0, 0, 255]
+                    };
+                    assert_eq!(
+                        &canvas[offset..offset + 4],
+                        &expected,
+                        "{dx},{dy},{clip:?}: {x},{y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_monitors_keep_the_existing_last_writer_order() {
+        let images = [
+            NativeWallpaperImage {
+                rgba: [255, 0, 0, 255].repeat(4),
+                width: 2,
+                height: 2,
+            },
+            NativeWallpaperImage {
+                rgba: [0, 0, 255, 255].repeat(4),
+                width: 2,
+                height: 2,
+            },
+        ];
+        let canvas = compose_native_root(
+            3,
+            2,
+            [0, 0, 0],
+            &images,
+            &[
+                NativeMonitorBlit {
+                    x: 0,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    image: 0,
+                    mode: WallpaperMode::Stretch,
+                },
+                NativeMonitorBlit {
+                    x: 1,
+                    y: 0,
+                    w: 2,
+                    h: 2,
+                    image: 1,
+                    mode: WallpaperMode::Stretch,
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(&canvas[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&canvas[4..8], &[0, 0, 255, 255]);
+        assert_eq!(&canvas[8..12], &[0, 0, 255, 255]);
     }
 }

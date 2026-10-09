@@ -734,18 +734,22 @@ pub(crate) fn side_preview_frame(panel: Rect, viewport: [f32; 4]) -> Option<Rect
 }
 
 /// The square one row's icon letterboxes into: left of the (already shifted)
-/// items text by [`ROW_ICON_SLOT`], vertically centred in its row. The row
+/// items text by the actual icon slot, vertically centred in its row. The row
 /// height comes from the painted layout, so the column tracks the same rows
 /// the selection pill covers. A row shorter than the slot — a very small
 /// panel font — shrinks the frame rather than bleeding into the next row.
 #[must_use]
-pub(crate) fn row_icon_frame(items: [f32; 2], row_height: f32, row: usize) -> Rect {
-    let edge = ROW_ICON_PX.min((row_height - 2.0 * ROW_ICON_PAD_Y).max(1.0));
-    let slot = ROW_ICON_SLOT.min(items[0].max(0.0));
+pub(crate) fn row_icon_frame(items: [f32; 2], row_height: f32, row: usize, slot: f32) -> Rect {
+    // The layout's actual icon slot can shrink on a narrow output. Origins
+    // remain in global coordinates, including monitors left of the origin.
+    let slot = if slot.is_finite() { slot.max(0.0) } else { 0.0 };
+    let edge = ROW_ICON_PX
+        .min((row_height - 2.0 * ROW_ICON_PAD_Y).max(0.0))
+        .min(slot);
     [
-        (items[0] - slot).max(0.0),
+        items[0] - slot,
         items[1] + row as f32 * row_height + (row_height - edge) * 0.5,
-        edge.min(slot.max(1.0)),
+        edge,
         edge,
     ]
 }
@@ -1422,7 +1426,7 @@ mod tests {
     fn the_row_icon_frame_sits_left_of_the_text_centered_in_its_row() {
         let items = [130.0 + ROW_ICON_SLOT, 200.0];
         let row_h = 28.0;
-        let frame = row_icon_frame(items, row_h, 3);
+        let frame = row_icon_frame(items, row_h, 3, ROW_ICON_SLOT);
         assert_eq!(frame[0], 130.0, "the column starts at the content edge");
         assert_eq!(frame[2], ROW_ICON_PX);
         assert_eq!(frame[3], ROW_ICON_PX);
@@ -1430,15 +1434,28 @@ mod tests {
         assert_eq!(frame[1], 200.0 + 3.0 * row_h + (row_h - ROW_ICON_PX) * 0.5);
 
         // A row shorter than the slot shrinks the frame instead of bleeding.
-        let tiny = row_icon_frame(items, 12.0, 0);
+        let tiny = row_icon_frame(items, 12.0, 0, ROW_ICON_SLOT);
         assert_eq!(tiny[2], 12.0 - 2.0 * ROW_ICON_PAD_Y);
         assert_eq!(tiny[1], 200.0 + ROW_ICON_PAD_Y);
-        let flush = row_icon_frame([10.0, 0.0], 28.0, 0);
+        let flush = row_icon_frame([10.0, 0.0], 28.0, 0, 10.0);
         assert!(flush[0] >= 0.0);
         assert!(flush[0] + flush[2] <= 10.0 + ROW_ICON_PX);
         assert_eq!(row_icon_slot(1920.0), ROW_ICON_SLOT);
         assert!(row_icon_slot(80.0) < ROW_ICON_SLOT);
         assert!(row_icon_slot(80.0) >= 0.0);
+    }
+
+    #[test]
+    fn row_icon_columns_follow_actual_slot_and_global_coordinates() {
+        for slot in [0.0, 8.0, 12.0, ROW_ICON_SLOT] {
+            let base = row_icon_frame([164.0, 200.0], 28.0, 2, slot);
+            let shifted = row_icon_frame([-836.0, 200.0], 28.0, 2, slot);
+            assert_eq!(base[0], 164.0 - slot);
+            assert_eq!(shifted[0], base[0] - 1000.0);
+            assert_eq!(&shifted[1..], &base[1..]);
+            assert!(base[2] <= slot);
+            assert!(base[0] + base[2] <= 164.0);
+        }
     }
 
     #[test]

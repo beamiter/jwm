@@ -404,10 +404,10 @@ pub fn classify_client_message(
             };
         }
     }
-    if type_ == atoms.net_active_window {
+    if type_ == atoms.net_active_window && format == 32 {
         return ClientMessageKind::ActiveWindow;
     }
-    if type_ == atoms.net_close_window {
+    if type_ == atoms.net_close_window && format == 32 {
         return ClientMessageKind::CloseWindow;
     }
     if type_ == atoms.net_wm_moveresize && format == 32 {
@@ -1313,6 +1313,34 @@ fn decode_latin1(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn activation_and_close_require_the_ewmh_word_format() {
+        for atom in [
+            MESSAGE_ATOMS.net_active_window,
+            MESSAGE_ATOMS.net_close_window,
+        ] {
+            for format in [0, 8, 16, 31, 33, 255] {
+                assert!(
+                    matches!(
+                        classify_client_message(atom, format, [0; 5], MESSAGE_ATOMS),
+                        ClientMessageKind::Other
+                    ),
+                    "atom={atom} format={format}"
+                );
+            }
+        }
+        for data in [[0; 5], [u32::MAX; 5]] {
+            assert!(matches!(
+                classify_client_message(MESSAGE_ATOMS.net_active_window, 32, data, MESSAGE_ATOMS),
+                ClientMessageKind::ActiveWindow
+            ));
+            assert!(matches!(
+                classify_client_message(MESSAGE_ATOMS.net_close_window, 32, data, MESSAGE_ATOMS),
+                ClientMessageKind::CloseWindow
+            ));
+        }
+    }
     use super::{
         CONFIGURE_WINDOW_OPCODE, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
         ICCCM_ICONIC_STATE, NetWmStateAtoms, ProtocolErrorClass, SET_INPUT_FOCUS_OPCODE,

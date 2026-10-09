@@ -192,8 +192,8 @@ impl MotionTrail {
         let x = finite_clamp(x, i32::MIN as f32, i32::MAX as f32, 0.0).round() as i32;
         let y = finite_clamp(y, i32::MIN as f32, i32::MAX as f32, 0.0).round() as i32;
         if let Some(last) = self.samples.back() {
-            let dx = (x - last.x) as f32;
-            let dy = (y - last.y) as f32;
+            let dx = (i64::from(x) - i64::from(last.x)) as f32;
+            let dy = (i64::from(y) - i64::from(last.y)) as f32;
             if dx * dx + dy * dy < params.spacing * params.spacing {
                 return;
             }
@@ -373,6 +373,23 @@ pub fn effect_noise(mut seed: u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn motion_trail_spacing_handles_opposite_integer_extremes() {
+        let params = MotionTrailParams::new(8, 0.5, 100.0, 100.0);
+        let mut trail = MotionTrail::default();
+        trail.begin_drag(i32::MIN as f32, i32::MAX as f32);
+        trail.record_position(0.0, 0.0, &params);
+        trail.record_position(i32::MAX as f32, i32::MIN as f32, &params);
+        trail.record_position(0.0, 0.0, &params);
+        assert_eq!(trail.samples.len(), 3);
+        trail.clear();
+        trail.push_spaced(0.0, 0.0, &params);
+        trail.push_spaced(1.0, 1.0, &params);
+        assert_eq!(trail.samples.len(), 1);
+        trail.push_spaced(100.0, 100.0, &params);
+        assert_eq!(trail.samples.len(), 2);
+    }
     use super::*;
 
     #[test]

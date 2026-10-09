@@ -290,6 +290,7 @@ fn decode_native_root(request: NativeRootRequest) -> Option<NativeRootPixels> {
                 placed.height(),
                 dx.round() as i32,
                 dy.round() as i32,
+                (slot.x, slot.y, slot.w, slot.h),
             );
             continue;
         };
@@ -302,6 +303,7 @@ fn decode_native_root(request: NativeRootRequest) -> Option<NativeRootPixels> {
             height,
             dx.round() as i32,
             dy.round() as i32,
+            (slot.x, slot.y, slot.w, slot.h),
         );
     }
     Some(NativeRootPixels {

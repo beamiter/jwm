@@ -12,9 +12,37 @@ use std::io::Read as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const FONT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+// A title can contain hundreds of unrelated missing glyphs. Resolve those
+// best-effort, within one shared budget across all fitting measurements.
+const MAX_FALLBACK_QUERIES_PER_TEXT: usize = 8;
+const FALLBACK_QUERY_BUDGET: Duration = Duration::from_millis(250);
+
+struct FontLookupBudget {
+    remaining: usize,
+    deadline: Instant,
+}
+
+impl FontLookupBudget {
+    fn new() -> Self {
+        Self {
+            remaining: MAX_FALLBACK_QUERIES_PER_TEXT,
+            deadline: Instant::now() + FALLBACK_QUERY_BUDGET,
+        }
+    }
+
+    fn next_timeout(&mut self) -> Option<Duration> {
+        let timeout = self.deadline.saturating_duration_since(Instant::now());
+        if self.remaining == 0 || timeout.is_zero() {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(timeout.min(FONT_QUERY_TIMEOUT))
+    }
+}
+
 const MAX_FONT_QUERY_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_FONT_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONT_DESCRIPTION_BYTES: usize = 1024;
@@ -40,23 +68,29 @@ static FALLBACK_MISSES: LazyLock<Mutex<HashSet<u32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn query_font_path(args: &[&str]) -> Option<String> {
+    query_font_path_with_timeout(args, FONT_QUERY_TIMEOUT)
+        .ok()
+        .flatten()
+}
+
+fn query_font_path_with_timeout(args: &[&str], timeout: Duration) -> Result<Option<String>, ()> {
     let output = crate::external_command::output_with_limits(
         "fc-match",
         args,
-        FONT_QUERY_TIMEOUT,
+        timeout,
         MAX_FONT_QUERY_OUTPUT_BYTES,
     )
-    .ok()?;
+    .map_err(|_| ())?;
     if !output.status.success() {
-        return None;
+        return Err(());
     }
-    std::str::from_utf8(&output.stdout)
-        .ok()?
+    Ok(std::str::from_utf8(&output.stdout)
+        .map_err(|_| ())?
         .lines()
         .next()
         .map(str::trim)
         .filter(|path| !path.is_empty())
-        .map(str::to_owned)
+        .map(str::to_owned))
 }
 
 fn read_regular_file_bounded(path: &Path, limit: usize) -> Option<Vec<u8>> {
@@ -126,13 +160,15 @@ fn charset_pattern(ch: char) -> String {
 }
 
 /// Load a font covering `ch`, if fontconfig can find one.
-fn load_fallback_font(ch: char) -> Option<FontArc> {
+fn load_fallback_font(ch: char, timeout: Duration) -> Result<Option<FontArc>, ()> {
     let pattern = charset_pattern(ch);
-    let path = query_font_path(&["-f", "%{file}\n", &pattern])?;
-    let font = load_font_file(Path::new(&path))?;
+    let Some(path) = query_font_path_with_timeout(&["-f", "%{file}\n", &pattern], timeout)? else {
+        return Ok(None);
+    };
+    let font = load_font_file(Path::new(&path)).ok_or(())?;
     // fc-match always answers with *something*; only keep it if it actually
     // covers the character we asked about.
-    (font.glyph_id(ch).0 != 0).then_some(font)
+    Ok((font.glyph_id(ch).0 != 0).then_some(font))
 }
 
 /// Which font draws a character.
@@ -148,7 +184,7 @@ enum GlyphSource {
 
 /// Decide which font draws `ch`, pulling in a fallback the first time a
 /// script turns up.
-fn source_for_char(primary: &FontArc, ch: char) -> GlyphSource {
+fn source_for_char(primary: &FontArc, ch: char, budget: &mut FontLookupBudget) -> GlyphSource {
     if primary.glyph_id(ch).0 != 0 {
         return GlyphSource::Primary;
     }
@@ -175,9 +211,19 @@ fn source_for_char(primary: &FontArc, ch: char) -> GlyphSource {
         remember_fallback_miss(ch);
         return GlyphSource::Missing;
     }
-    let Some(font) = load_fallback_font(ch) else {
-        remember_fallback_miss(ch);
+    // Budget exhaustion is not evidence that no installed font covers this
+    // character. Do not poison the persistent miss cache for later labels.
+    let Some(timeout) = budget.next_timeout() else {
         return GlyphSource::Missing;
+    };
+    let font = match load_fallback_font(ch, timeout) {
+        Ok(Some(font)) => font,
+        Ok(None) => {
+            remember_fallback_miss(ch);
+            return GlyphSource::Missing;
+        }
+        // A helper timeout / transient file error is not a persistent miss.
+        Err(()) => return GlyphSource::Missing,
     };
     let Ok(mut fonts) = FALLBACK_FONTS.lock() else {
         return GlyphSource::Missing;
@@ -217,10 +263,11 @@ fn resolve_line(
     sources: &mut Vec<GlyphSource>,
     primary: &FontArc,
     line: &str,
+    budget: &mut FontLookupBudget,
 ) -> ResolvedLine {
     let mut glyphs = Vec::with_capacity(line.chars().count());
     for ch in line.chars() {
-        let source = source_for_char(primary, ch);
+        let source = source_for_char(primary, ch, budget);
         // Sources are compared, not font handles: `FontArc` has no pointer
         // identity to compare, and the source *is* the identity.
         let index = if let Some(index) = sources.iter().position(|known| *known == source) {
@@ -252,6 +299,7 @@ pub(crate) fn ui_font_pixel_size(description: &str) -> f32 {
         .split_whitespace()
         .next_back()
         .and_then(|s| s.parse::<f32>().ok())
+        .filter(|pt| pt.is_finite())
         .map(|pt| (pt * 1.6).clamp(14.0, 32.0))
         .unwrap_or(18.0)
 }
@@ -328,6 +376,20 @@ fn resolved_line_width(fonts: &[FontArc], line: &ResolvedLine, pixel_size: f32) 
 /// candidate after another, and outlining every glyph of each would cost far
 /// more than the search.
 pub(crate) fn measure_ui_text_width(text: &str, font_description: &str, pixel_size: f32) -> u32 {
+    measure_ui_text_width_with_budget(
+        text,
+        font_description,
+        pixel_size,
+        &mut FontLookupBudget::new(),
+    )
+}
+
+fn measure_ui_text_width_with_budget(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    budget: &mut FontLookupBudget,
+) -> u32 {
     if text.is_empty() {
         return 0;
     }
@@ -337,7 +399,7 @@ pub(crate) fn measure_ui_text_width(text: &str, font_description: &str, pixel_si
     };
     let mut fonts: Vec<FontArc> = Vec::with_capacity(2);
     let mut sources: Vec<GlyphSource> = Vec::with_capacity(2);
-    let line = resolve_line(&mut fonts, &mut sources, &font, text);
+    let line = resolve_line(&mut fonts, &mut sources, &font, text, budget);
     (resolved_line_width(&fonts, &line, pixel_size).ceil() as u32).saturating_add(TEXT_PAD * 2)
 }
 
@@ -380,6 +442,7 @@ pub(crate) fn fit_ui_text(
         pixel_size,
         max_width,
         false,
+        &mut FontLookupBudget::new(),
     )
 }
 
@@ -416,6 +479,7 @@ pub(crate) fn fit_ui_text_tail(
         pixel_size,
         max_width,
         true,
+        &mut FontLookupBudget::new(),
     )
 }
 
@@ -431,6 +495,7 @@ pub(crate) fn fit_ui_text_lines(
     pixel_size: f32,
     max_width: u32,
 ) -> String {
+    let mut budget = FontLookupBudget::new();
     let mut fitted = String::with_capacity(text.len().min(max_width as usize));
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
@@ -449,6 +514,7 @@ pub(crate) fn fit_ui_text_lines(
             pixel_size,
             max_width,
             false,
+            &mut budget,
         ));
     }
     fitted
@@ -462,13 +528,14 @@ fn fit_ui_line(
     pixel_size: f32,
     max_width: u32,
     keep_tail: bool,
+    budget: &mut FontLookupBudget,
 ) -> String {
     const ELLIPSIS: char = '…';
 
     if text.is_empty() || max_width == 0 {
         return String::new();
     }
-    if measure_ui_text_width(text, font_description, pixel_size) <= max_width {
+    if measure_ui_text_width_with_budget(text, font_description, pixel_size, budget) <= max_width {
         return text.to_owned();
     }
 
@@ -480,7 +547,10 @@ fn fit_ui_line(
     // converges in a handful of measurements.
     let mut low = 0usize;
     let mut high = characters;
-    let mut best = String::new();
+    let mut best = ELLIPSIS.to_string();
+    if measure_ui_text_width_with_budget(&best, font_description, pixel_size, budget) > max_width {
+        return String::new();
+    }
     while low < high {
         let middle = (low + high).div_ceil(2);
         if middle == 0 {
@@ -495,7 +565,9 @@ fn fit_ui_line(
             candidate.push_str(text[..end].trim_end());
             candidate.push(ELLIPSIS);
         }
-        if measure_ui_text_width(&candidate, font_description, pixel_size) <= max_width {
+        if measure_ui_text_width_with_budget(&candidate, font_description, pixel_size, budget)
+            <= max_width
+        {
             best = candidate;
             low = middle;
         } else {
@@ -534,9 +606,10 @@ pub(crate) fn render_ui_text_to_rgba(
     let lines: Vec<&str> = text.lines().collect();
     let mut fonts: Vec<FontArc> = Vec::with_capacity(2);
     let mut sources: Vec<GlyphSource> = Vec::with_capacity(2);
+    let mut budget = FontLookupBudget::new();
     let resolved: Vec<ResolvedLine> = lines
         .iter()
-        .map(|line| resolve_line(&mut fonts, &mut sources, &font, line))
+        .map(|line| resolve_line(&mut fonts, &mut sources, &font, line, &mut budget))
         .collect();
 
     let advance =
@@ -882,6 +955,43 @@ pub(crate) fn render_text_to_rgba(text: &str, scale: u32, fg: [u8; 4]) -> (Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_lookup_budget_caps_queries_and_respects_expiry() {
+        let mut budget = FontLookupBudget::new();
+        for _ in 0..MAX_FALLBACK_QUERIES_PER_TEXT {
+            assert!(
+                budget
+                    .next_timeout()
+                    .is_some_and(|timeout| timeout <= FALLBACK_QUERY_BUDGET)
+            );
+        }
+        assert!(budget.next_timeout().is_none());
+        let mut expired = FontLookupBudget {
+            remaining: MAX_FALLBACK_QUERIES_PER_TEXT,
+            deadline: Instant::now(),
+        };
+        assert!(expired.next_timeout().is_none());
+        assert_eq!(expired.remaining, MAX_FALLBACK_QUERIES_PER_TEXT);
+    }
+
+    #[test]
+    fn nonfinite_font_sizes_use_the_default() {
+        for size in ["NaN", "inf", "-inf"] {
+            assert_eq!(ui_font_pixel_size(&format!("monospace {size}")), 18.0);
+        }
+    }
+
+    #[test]
+    fn ellipsis_alone_remains_visible_when_no_character_fits() {
+        // The overlong description selects the deterministic bitmap fallback
+        // without consulting the host's fontconfig or mutating global caches.
+        let font = "x".repeat(MAX_FONT_DESCRIPTION_BYTES + 1);
+        let width = measure_ui_text_width("…", &font, 18.0);
+        assert_eq!(fit_ui_text("long title", &font, 18.0, width), "…");
+        assert_eq!(fit_ui_text_tail("long query", &font, 18.0, width), "…");
+        assert_eq!(fit_ui_text("long title", &font, 18.0, width - 1), "");
+    }
 
     #[test]
     fn empty_string_yields_no_pixels() {

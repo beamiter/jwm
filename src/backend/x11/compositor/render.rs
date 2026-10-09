@@ -3341,7 +3341,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     let Some(&(tex, img_w, img_h)) = self.system_ui_row_icon_cache.get(path) else {
                         continue;
                     };
-                    let frame = panel::row_icon_frame(items_pos, layout.row_height, row);
+                    let frame =
+                        panel::row_icon_frame(items_pos, layout.row_height, row, layout.row_icons);
                     let Some([ix, iy, iw, ih]) =
                         panel::letterbox(frame, img_w as f32, img_h as f32)
                     else {

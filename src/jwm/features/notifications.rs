@@ -217,11 +217,11 @@ fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
     sanitize_action_iter(actions.iter())
 }
 
-/// Whether a sender's key can be kept: trimmed, non-empty, and short enough
+/// Whether a sender's opaque key can be kept: non-blank and short enough
 /// to persist. Shared by the flat-list decoder and the record sanitizer so
 /// both count the same entries against the cap and the `default` rescue.
-fn action_key_is_usable(trimmed_key: &str) -> bool {
-    !trimmed_key.is_empty() && trimmed_key.chars().nth(MAX_ACTION_KEY_CHARS).is_none()
+fn action_key_is_usable(key: &str) -> bool {
+    !key.trim().is_empty() && key.chars().nth(MAX_ACTION_KEY_CHARS).is_none()
 }
 
 fn sanitize_action_iter<'a>(
@@ -229,7 +229,7 @@ fn sanitize_action_iter<'a>(
 ) -> Vec<NotificationAction> {
     let mut kept = Vec::with_capacity(MAX_ACTIONS);
     for action in actions {
-        let key = action.key.trim();
+        let key = action.key.as_str();
         if !action_key_is_usable(key) {
             continue;
         }
@@ -304,11 +304,10 @@ fn parse_flat_actions(items: &[serde_json::Value]) -> Vec<NotificationAction> {
     let mut kept = Vec::with_capacity(MAX_ACTIONS);
     for pair in items.chunks(2) {
         let key = pair[0].as_str().unwrap_or_default();
-        let trimmed_key = key.trim();
-        if !action_key_is_usable(trimmed_key) {
+        if !action_key_is_usable(key) {
             continue;
         }
-        if kept.len() == MAX_ACTIONS && trimmed_key != DEFAULT_KEY {
+        if kept.len() == MAX_ACTIONS && key != DEFAULT_KEY {
             continue;
         }
         let action = NotificationAction {
@@ -320,10 +319,10 @@ fn parse_flat_actions(items: &[serde_json::Value]) -> Vec<NotificationAction> {
                 .to_string(),
         };
         if kept.len() < MAX_ACTIONS {
-            let is_default = trimmed_key == DEFAULT_KEY;
+            let is_default = key == DEFAULT_KEY;
             kept.push(action);
             if kept.len() == MAX_ACTIONS
-                && (is_default || kept.iter().any(|action| action.key.trim() == DEFAULT_KEY))
+                && (is_default || kept.iter().any(|action| action.key == DEFAULT_KEY))
             {
                 return kept;
             }
@@ -1458,6 +1457,49 @@ mod tests {
     }
 
     #[test]
+    fn opaque_action_keys_survive_parsing_and_history_without_aliases() {
+        let args = serde_json::json!({
+            "actions": [" open ", "Padded", "open", "Plain", " default ", "Padded default", "default", "Activate", " \t ", "Blank"]
+        });
+        let parsed = parse_action_args(&args);
+        let mut center = NotificationCenter::new();
+        let id = center.push(
+            &NotificationRequest {
+                actions: parsed,
+                ..request("keys")
+            },
+            1_000,
+            false,
+        );
+        let kept = &center.get(id).unwrap().actions;
+        assert_eq!(
+            kept.iter().map(|a| a.key.as_str()).collect::<Vec<_>>(),
+            [" open ", "open", " default ", "default"]
+        );
+        assert_eq!(default_action_index(kept), 3);
+    }
+
+    #[test]
+    fn only_literal_default_is_rescued_and_raw_key_length_is_bounded() {
+        let mut offered: Vec<_> = (0..MAX_ACTIONS)
+            .map(|i| action(&format!("k{i}"), "Label"))
+            .collect();
+        offered.push(action(" default ", "Not reserved"));
+        assert_eq!(sanitize_actions(&offered), offered[..MAX_ACTIONS]);
+        let flat: Vec<_> = offered
+            .iter()
+            .flat_map(|a| [serde_json::json!(a.key), serde_json::json!(a.label)])
+            .collect();
+        assert_eq!(parse_flat_actions(&flat), offered[..MAX_ACTIONS]);
+        let oversized = format!(" {} ", "k".repeat(MAX_ACTION_KEY_CHARS - 1));
+        assert!(!action_key_is_usable(&oversized));
+        assert!(sanitize_actions(&[action(&oversized, "Too long")]).is_empty());
+        assert!(
+            parse_action_args(&serde_json::json!({"actions": [oversized, "Too long"]})).is_empty()
+        );
+    }
+
+    #[test]
     fn an_action_with_no_key_is_dropped_and_duplicates_are_kept() {
         let kept = sanitize_actions(&[
             action("", "Nowhere"),
@@ -1519,11 +1561,11 @@ mod tests {
     }
 
     #[test]
-    fn blank_action_labels_use_a_sanitized_bounded_key() {
+    fn blank_action_labels_use_a_sanitized_bounded_copy_of_the_key() {
         let key = format!("  open\n{}  ", "界".repeat(MAX_LABEL_CHARS + 8));
         let kept = sanitize_actions(&[action(&key, " \n ")]);
 
-        assert_eq!(kept[0].key, key.trim());
+        assert_eq!(kept[0].key, key);
         assert_eq!(kept[0].label.chars().count(), MAX_LABEL_CHARS);
         assert!(kept[0].label.ends_with('\u{2026}'));
         assert!(!kept[0].label.chars().any(char::is_control));

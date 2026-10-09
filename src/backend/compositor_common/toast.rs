@@ -401,8 +401,8 @@ fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
     actions
         .iter()
         .filter_map(|action| {
-            let key = action.key.trim();
-            (!key.is_empty()).then_some((key, action))
+            let key = action.key.as_str();
+            (!key.trim().is_empty()).then_some((key, action))
         })
         .take(MAX_TOAST_ACTIONS)
         .map(|(key, action)| {
@@ -1558,6 +1558,50 @@ mod tests {
         );
         assert_eq!(stack.prune(click + Duration::from_millis(120)), vec![1]);
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn action_click_returns_the_exact_opaque_key_once() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                notification_id: 42,
+                actions: vec![
+                    NotificationAction {
+                        key: " \t ".into(),
+                        label: "Rejected".into(),
+                    },
+                    NotificationAction {
+                        key: " open ".into(),
+                        label: " Open\nignored ".into(),
+                    },
+                    NotificationAction {
+                        key: "open".into(),
+                        label: "Plain".into(),
+                    },
+                ],
+                ..toast("keys", 4000)
+            },
+            now,
+        );
+        let kept = &stack.iter().next().unwrap().notification.actions;
+        assert_eq!(kept[0].key, " open ");
+        assert_eq!(kept[0].label, " Open");
+        assert_eq!(kept[1].key, "open");
+        let rects = [ToastRects {
+            id: 0,
+            card: [0.0, 0.0, 300.0, 100.0],
+            buttons: vec![[10.0, 10.0, 80.0, 24.0], [100.0, 10.0, 80.0, 24.0]],
+        }];
+        assert_eq!(
+            stack.click(&rects, 20.0, 20.0, now),
+            ToastClick::Action {
+                notification_id: 42,
+                action_key: " open ".into()
+            }
+        );
+        assert_eq!(stack.click(&rects, 20.0, 20.0, now), ToastClick::Dismissed);
     }
 
     #[test]
