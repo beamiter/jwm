@@ -652,6 +652,15 @@ impl WMController for Jwm {
         // Screenshot region selection: on mouse release, commit the selection
         // and wait for the user to choose save action (Enter=file, c=clipboard).
         if self.features.screenshot.active && self.features.screenshot.drawing_annotation {
+            // Button coordinates can be newer than the last motion event.
+            // Keep the final segment without adding a duplicate freehand
+            // point (or turning an unmoved click into a stroke).
+            let endpoint = (self.last_mouse_root.0 as f32, self.last_mouse_root.1 as f32);
+            if self.features.screenshot.annotation_end != endpoint {
+                self.features
+                    .screenshot
+                    .update_annotation(endpoint.0, endpoint.1);
+            }
             self.features.screenshot.commit_annotation();
             if backend.has_compositor() {
                 backend.compositor_set_snap_preview(
@@ -5400,6 +5409,123 @@ mod tests {
             jwm.features.screenshot.get_selection_rect(),
             Some(Rect::new(-251, 20, 151, 81))
         );
+    }
+
+    #[test]
+    fn capture_annotation_uses_release_endpoint_after_missing_or_stale_motion() {
+        use crate::core::types::Rect;
+        use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        for tool in [
+            ScreenshotTool::Line,
+            ScreenshotTool::Pencil,
+            ScreenshotTool::Rectangle,
+        ] {
+            for deliver_motion in [false, true] {
+                jwm.features.screenshot.start();
+                jwm.features
+                    .screenshot
+                    .select_rect(Rect::new(100, 100, 400, 300));
+                jwm.features.screenshot.set_tool(tool);
+                capture_press(&mut jwm, &mut backend, 150.25, 170.5);
+                if deliver_motion {
+                    jwm.handle_event(
+                        &mut backend,
+                        BackendEvent::MotionNotify {
+                            target: HitTarget::Background { output: None },
+                            root_x: 200.0,
+                            root_y: 210.0,
+                            time: 1050,
+                        },
+                    )
+                    .unwrap();
+                }
+                capture_release(&mut jwm, &mut backend, 250.5, 260.25);
+
+                assert!(!jwm.features.screenshot.drawing_annotation);
+                assert_eq!(jwm.features.screenshot.annotations.len(), 1, "{tool:?}");
+                match &jwm.features.screenshot.annotations[0] {
+                    ScreenshotAnnotation::Line { from, to, .. }
+                    | ScreenshotAnnotation::Rectangle { from, to, .. } => {
+                        assert_eq!(*from, (150.25, 170.5));
+                        assert_eq!(*to, (250.5, 260.25));
+                    }
+                    ScreenshotAnnotation::Freehand { points, .. } => {
+                        let expected = if deliver_motion {
+                            vec![(150.25, 170.5), (200.0, 210.0), (250.5, 260.25)]
+                        } else {
+                            vec![(150.25, 170.5), (250.5, 260.25)]
+                        };
+                        assert_eq!(*points, expected);
+                    }
+                    other => panic!("unexpected {tool:?} annotation: {other:?}"),
+                }
+
+                // Each case reopens a cancelled editor, so stale points or a
+                // drawing flag must not carry over into the next gesture.
+                jwm.cancel_screenshot_select(&mut backend);
+                assert!(!jwm.features.screenshot.active);
+                assert!(jwm.features.screenshot.annotations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn capture_annotation_release_does_not_duplicate_points_or_revive_cancellation() {
+        use crate::core::types::Rect;
+        use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        for cancel_before_release in [false, true] {
+            jwm.features.screenshot.start();
+            jwm.features
+                .screenshot
+                .select_rect(Rect::new(100, 100, 400, 300));
+            jwm.features.screenshot.set_tool(ScreenshotTool::Pencil);
+            capture_press(&mut jwm, &mut backend, 150.0, 170.0);
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::MotionNotify {
+                    target: HitTarget::Background { output: None },
+                    root_x: 250.0,
+                    root_y: 260.0,
+                    time: 1050,
+                },
+            )
+            .unwrap();
+            if cancel_before_release {
+                jwm.cancel_screenshot_select(&mut backend);
+            }
+            capture_release(&mut jwm, &mut backend, 250.0, 260.0);
+            if cancel_before_release {
+                assert!(!jwm.features.screenshot.active);
+                assert!(jwm.features.screenshot.annotations.is_empty());
+                assert!(!jwm.features.screenshot.drawing_annotation);
+            } else {
+                let ScreenshotAnnotation::Freehand { points, .. } =
+                    &jwm.features.screenshot.annotations[0]
+                else {
+                    panic!("expected freehand annotation");
+                };
+                assert_eq!(*points, [(150.0, 170.0), (250.0, 260.0)]);
+                jwm.cancel_screenshot_select(&mut backend);
+            }
+        }
+
+        // Preserve the existing no-stroke behavior of an unmoved pencil
+        // click, including when this is the first gesture after reopening.
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(100, 100, 400, 300));
+        jwm.features.screenshot.set_tool(ScreenshotTool::Pencil);
+        capture_press(&mut jwm, &mut backend, 150.0, 170.0);
+        capture_release(&mut jwm, &mut backend, 150.0, 170.0);
+        assert!(jwm.features.screenshot.annotations.is_empty());
+        assert!(!jwm.features.screenshot.drawing_annotation);
     }
 
     #[test]

@@ -3032,7 +3032,9 @@ impl Jwm {
                                 .get_selection_rect()
                                 .map(|r| (r.x as f32, r.y as f32, r.w as f32, r.h as f32)),
                         );
-                        backend.compositor_force_full_redraw();
+                        // The crop and its marks move together. A redraw
+                        // alone would still paint the old overlay geometry.
+                        self.sync_screenshot_annotation_overlay(backend, true);
                     }
                     // The strip follows the selection it belongs to.
                     self.sync_screenshot_toolbar(backend);
@@ -5027,7 +5029,7 @@ mod tests {
         input_ops: DummyInputOps,
         property_ops: ConfigureReplyPropertyOps,
         output_ops: DummyOutputOps,
-        key_ops: DummyKeyOps,
+        key_ops: Box<dyn crate::backend::api::KeyOps>,
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
         /// Every OSD card the session asked for, in order.
@@ -5040,6 +5042,9 @@ mod tests {
         expose_selected: Option<WindowId>,
         /// What the next expose click hit-test answers.
         expose_click_hit: Option<WindowId>,
+        /// The screenshot editor's current rendered stroke points.
+        annotation_points: Vec<(f32, f32)>,
+        compositor_enabled: bool,
     }
 
     impl ConfigureReplyBackend {
@@ -5049,7 +5054,7 @@ mod tests {
                 input_ops: DummyInputOps,
                 property_ops: ConfigureReplyPropertyOps::default(),
                 output_ops: DummyOutputOps,
-                key_ops: DummyKeyOps,
+                key_ops: Box::new(DummyKeyOps),
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 osd_log: std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -5057,6 +5062,8 @@ mod tests {
                 expose_windows: Vec::new(),
                 expose_selected: None,
                 expose_click_hit: None,
+                annotation_points: Vec::new(),
+                compositor_enabled: false,
             }
         }
     }
@@ -5109,9 +5116,23 @@ mod tests {
         }
     }
     impl CompositorWindowEffects for ConfigureReplyBackend {}
-    impl CompositorAnnotation for ConfigureReplyBackend {}
+    impl CompositorAnnotation for ConfigureReplyBackend {
+        fn compositor_set_annotation_mode(&mut self, active: bool) {
+            if !active {
+                self.annotation_points.clear();
+            }
+        }
+
+        fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
+            self.annotation_points.push((x, y));
+        }
+    }
     impl DisplayControl for ConfigureReplyBackend {}
-    impl RenderScheduler for ConfigureReplyBackend {}
+    impl RenderScheduler for ConfigureReplyBackend {
+        fn has_compositor(&self) -> bool {
+            self.compositor_enabled
+        }
+    }
 
     impl Backend for ConfigureReplyBackend {
         fn capabilities(&self) -> Capabilities {
@@ -5147,11 +5168,11 @@ mod tests {
         }
 
         fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
-            &self.key_ops
+            self.key_ops.as_ref()
         }
 
         fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
-            &mut self.key_ops
+            self.key_ops.as_mut()
         }
 
         fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
@@ -5165,6 +5186,78 @@ mod tests {
         fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn screenshot_nudges_republish_annotation_points_without_pointer_motion() {
+        use crate::backend::api::KeyOps;
+        use crate::backend::common_define::{KeySym, Mods, keys};
+        use crate::jwm::features::screenshot::ScreenshotTool;
+
+        struct NudgeKeys;
+        impl KeyOps for NudgeKeys {
+            fn grab_keys(
+                &self,
+                root: WindowId,
+                bindings: &[(Mods, KeySym)],
+            ) -> Result<(), BackendError> {
+                DummyKeyOps.grab_keys(root, bindings)
+            }
+
+            fn clear_key_grabs(&self, root: WindowId) -> Result<(), BackendError> {
+                DummyKeyOps.clear_key_grabs(root)
+            }
+
+            fn clean_mods(&self, raw: u16) -> Mods {
+                Mods::from_bits_truncate(raw)
+            }
+
+            fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
+                Ok(if keycode == 1 {
+                    keys::KEY_Right
+                } else {
+                    keys::KEY_Up
+                })
+            }
+
+            fn clear_cache(&mut self) {}
+        }
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend.compositor_enabled = true;
+        backend.key_ops = Box::new(NudgeKeys);
+        jwm.s_w = 200;
+        jwm.s_h = 200;
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(115, 100, 80, 80));
+        jwm.features.screenshot.set_tool(ScreenshotTool::Line);
+        jwm.features.screenshot.begin_annotation(125.0, 120.0);
+        jwm.features.screenshot.update_annotation(165.0, 150.0);
+        jwm.features.screenshot.commit_annotation();
+        jwm.sync_screenshot_annotation_overlay(&mut backend, false);
+        assert_eq!(backend.annotation_points, [(125.0, 120.0), (165.0, 150.0)]);
+
+        for _ in 0..2 {
+            // Shift+Right requests ten pixels: five fit on the first press,
+            // then none. The scene must follow the crop on each key alone.
+            jwm.on_key_press_internal(&mut backend, 1, Mods::SHIFT.bits())
+                .unwrap();
+            assert_eq!(
+                jwm.features.screenshot.get_selection_rect(),
+                Some(Rect::new(120, 100, 80, 80))
+            );
+            assert_eq!(backend.annotation_points, [(130.0, 120.0), (170.0, 150.0)]);
+        }
+
+        jwm.on_key_press_internal(&mut backend, 2, 0).unwrap();
+        assert_eq!(
+            jwm.features.screenshot.get_selection_rect(),
+            Some(Rect::new(120, 99, 80, 80))
+        );
+        assert_eq!(backend.annotation_points, [(130.0, 119.0), (170.0, 149.0)]);
     }
 
     fn add_floating_configure_client(

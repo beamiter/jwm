@@ -2404,6 +2404,13 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Screenshot crop nudges keep visible and undone annotations attached to the
+  crop, including when movement is clamped at a screen edge. Redo and the
+  saved PNG preserve each mark's position within the selection.
+- Screenshot annotation drags include the button-release endpoint even when
+  the final pointer-motion event was coalesced or never delivered.
+- Removing an X11 window's preferred or legacy title refreshes JWM's cached
+  title, revealing the remaining fallback or clearing the previous name.
 - Compositor benchmarks now keep final-frame metadata, exclude warmup metadata,
   and count only fresh input-latency samples instead of replaying old HUD
   history on every frame. Workload window counts are captured on the first

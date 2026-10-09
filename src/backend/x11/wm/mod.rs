@@ -506,7 +506,9 @@ pub fn unclassified_client_message_event(
 /// transient-for is re-read by its handler, a withdrawn bypass request
 /// must redirect the window again, the remote-capture marker going away
 /// ends the capture, and a withdrawn Motif or GTK frame hint must restore
-/// the JWM border (the decoration reconcile re-reads both hints). Deletions
+/// the JWM border (the decoration reconcile re-reads both hints). A removed
+/// title must reveal the remaining WM_NAME fallback, or clear the cached
+/// title when neither name remains. Deletions
 /// of other kinds stay ignored, as they always have been.
 ///
 /// Both X11 transports filter through this one list: a private copy per
@@ -523,6 +525,7 @@ pub fn forwards_property_notify(deleted: bool, kind: PropertyKind) -> bool {
                 | PropertyKind::RemoteCapture
                 | PropertyKind::MotifHints
                 | PropertyKind::GtkFrameExtents
+                | PropertyKind::Title
         )
 }
 
@@ -1523,14 +1526,13 @@ mod tests {
             // `no_decorations` and a zero border until it was remanaged.
             PropertyKind::MotifHints,
             PropertyKind::GtkFrameExtents,
+            // _NET_WM_NAME deletion exposes WM_NAME; deleting the last
+            // title clears the client name instead of leaving stale text.
+            PropertyKind::Title,
         ] {
             assert!(forwards_property_notify(true, kind), "{kind:?}");
         }
-        for kind in [
-            PropertyKind::Title,
-            PropertyKind::Class,
-            PropertyKind::Other,
-        ] {
+        for kind in [PropertyKind::Class, PropertyKind::Other] {
             assert!(!forwards_property_notify(true, kind), "{kind:?}");
             assert!(forwards_property_notify(false, kind), "{kind:?}");
         }

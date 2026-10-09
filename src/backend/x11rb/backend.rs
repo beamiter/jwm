@@ -3489,6 +3489,7 @@ mod event_source {
                 // shared filter forwards both since that fix.
                 PropertyKind::MotifHints,
                 PropertyKind::GtkFrameExtents,
+                PropertyKind::Title,
             ] {
                 assert!(
                     forwards_property_notify(true, kind),
@@ -3496,7 +3497,6 @@ mod event_source {
                 );
             }
             for kind in [
-                PropertyKind::Title,
                 PropertyKind::Class,
                 PropertyKind::Urgency,
                 PropertyKind::WindowType,
@@ -3515,6 +3515,127 @@ mod event_source {
                     "a new {kind:?} value always reaches policy"
                 );
             }
+        }
+
+        /// Both title properties are mutable while a window is managed. A
+        /// delete must reach policy so its cached title follows the same
+        /// preference and empty-value fallback as the property reader.
+        #[test]
+        fn native_title_deletions_forward_and_reveal_the_remaining_name() {
+            use super::super::ids::X11IdRegistry;
+            use super::super::property_ops::X11PropertyOps;
+            use super::{Atoms, BackendEvent, X11EventSource, XEvent};
+            use crate::backend::api::PropertyOps;
+            use std::sync::Arc;
+            use x11rb::connection::Connection;
+            use x11rb::protocol::xproto::{
+                AtomEnum, ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass,
+            };
+            use x11rb::wrapper::ConnectionExt as _;
+
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let (conn, screen) = x11rb::connect(Some(x11.name())).unwrap();
+            let conn = Arc::new(conn);
+            let root = conn.setup().roots[screen].root;
+            let atoms = Atoms::new(&*conn).unwrap().reply().unwrap();
+            let ids = X11IdRegistry::new(1);
+            let window = conn.generate_id().unwrap();
+            conn.create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                window,
+                root,
+                0,
+                0,
+                40,
+                30,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let window_id = ids.intern(window);
+            let ops = X11PropertyOps::new(Arc::clone(&conn), atoms, ids.clone());
+            let mut events = X11EventSource::new(
+                Arc::clone(&conn),
+                atoms,
+                root,
+                Arc::new(AtomicU32::new(0)),
+                ids,
+                Default::default(),
+            );
+
+            let mut check = |expected: &str| {
+                let mut forwarded = false;
+                while let Some(event) = conn.poll_for_event().unwrap() {
+                    if let XEvent::PropertyNotify(ref property) = event {
+                        assert_eq!(property.window, window);
+                        assert!(matches!(
+                            events.map_event(event),
+                            Some(BackendEvent::PropertyChanged {
+                                window: changed,
+                                kind: PropertyKind::Title,
+                            }) if changed == window_id
+                        ));
+                        forwarded = true;
+                    }
+                }
+                assert!(forwarded, "no title event for {expected:?}");
+                assert_eq!(ops.get_title(window_id), expected);
+            };
+            conn.change_property8(
+                PropMode::REPLACE,
+                window,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                b"Fallback",
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            check("Fallback");
+            for _ in 0..2 {
+                conn.change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    atoms._NET_WM_NAME,
+                    atoms.UTF8_STRING,
+                    b"Preferred",
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+                check("Preferred");
+                conn.delete_property(window, atoms._NET_WM_NAME)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                check("Fallback");
+            }
+            conn.change_property8(
+                PropMode::REPLACE,
+                window,
+                atoms._NET_WM_NAME,
+                atoms.UTF8_STRING,
+                b"",
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            check("Fallback");
+            conn.delete_property(window, AtomEnum::WM_NAME.into())
+                .unwrap()
+                .check()
+                .unwrap();
+            check("");
+            conn.delete_property(window, atoms._NET_WM_NAME)
+                .unwrap()
+                .check()
+                .unwrap();
+            check("");
+            conn.destroy_window(window).unwrap().check().unwrap();
         }
 
         fn protocol_error(error_kind: ErrorKind, major_opcode: u8) -> X11Error {

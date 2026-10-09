@@ -590,7 +590,9 @@ impl ScreenshotState {
 
         let dx = dx as f32;
         let dy = dy as f32;
-        for annotation in &mut self.annotations {
+        // Redo marks belong to the crop too. Leaving them in desktop space
+        // would resurrect them at the old position after a selection nudge.
+        for annotation in self.annotations.iter_mut().chain(&mut self.undone) {
             annotation.translate(dx, dy);
         }
         if self.drawing_annotation {
@@ -3143,6 +3145,48 @@ mod tests {
             ScreenshotAnnotation::Arrow { from, to, .. } => {
                 assert_eq!(*from, (82.0, 24.0));
                 assert_eq!(*to, (96.0, 42.0));
+            }
+            other => panic!("expected arrow annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn moving_selection_keeps_redo_annotations_attached() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.select_rect(Rect::new(70, 20, 20, 30));
+        state.set_tool(ScreenshotTool::Arrow);
+        state.begin_annotation(72.0, 24.0);
+        state.update_annotation(86.0, 42.0);
+        state.commit_annotation();
+        state.undo_annotation();
+
+        // Only ten of the requested fifty pixels fit. Redo must follow the
+        // actual crop movement, including repeated nudges against its edge.
+        state.move_selection_within(50.0, 0.0, Rect::new(0, 0, 100, 100));
+        state.move_selection_within(50.0, 0.0, Rect::new(0, 0, 100, 100));
+        assert!(state.annotations.is_empty());
+        assert!(state.can_redo());
+        state.redo_annotation();
+
+        assert_eq!(state.get_selection_rect(), Some(Rect::new(80, 20, 20, 30)));
+        match &state.annotations[0] {
+            ScreenshotAnnotation::Arrow { from, to, .. } => {
+                assert_eq!(*from, (82.0, 24.0));
+                assert_eq!(*to, (96.0, 42.0));
+            }
+            other => panic!("expected arrow annotation, got {other:?}"),
+        }
+
+        // Undoing again must retain the already moved geometry, so another
+        // crop move does not restore the original desktop-space endpoints.
+        state.undo_annotation();
+        state.move_selection(-5.0, -3.0);
+        state.redo_annotation();
+        match &state.annotations[0] {
+            ScreenshotAnnotation::Arrow { from, to, .. } => {
+                assert_eq!(*from, (77.0, 21.0));
+                assert_eq!(*to, (91.0, 39.0));
             }
             other => panic!("expected arrow annotation, got {other:?}"),
         }
