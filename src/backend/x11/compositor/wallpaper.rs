@@ -1,9 +1,9 @@
 // Wallpaper loading and monitor setup
 use super::*;
 use glow::HasContext;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use crate::backend::x11::compositor_common::wallpaper::{PREVIEW_THUMB_EDGE, parse_wallpaper_mode};
 
@@ -58,7 +58,17 @@ impl DecodeGate {
         self.available.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn try_acquire(&self) -> Option<DecodePermit<'_>> {
+        let mut available = self.lock();
+        if *available == 0 {
+            return None;
+        }
+        *available -= 1;
+        Some(DecodePermit { gate: self })
+    }
+
     /// Block until a permit is free.
+    #[cfg(test)]
     fn acquire(&self) -> DecodePermit<'_> {
         let mut available = self.lock();
         while *available == 0 {
@@ -200,29 +210,112 @@ fn decode_side_preview(
     })
 }
 
+type WallpaperDecode = Box<dyn FnOnce(&AtomicBool) -> Option<WallpaperImageData> + Send>;
+type DecodeWorker = Box<dyn FnOnce() + Send>;
+
+enum WallpaperLoadState {
+    Queued(WallpaperDecode),
+    Running(mpsc::Receiver<WallpaperImageData>),
+    Failed,
+}
+
+/// A per-request CPU decode queue slot. Polling starts a worker only after a
+/// permit is available, so replaced requests never leave threads waiting on
+/// the gate. Each monitor retains its own slot and result; no global latest-
+/// request policy is applied to real wallpapers.
+pub(super) struct DeferredWallpaperLoad {
+    state: Mutex<WallpaperLoadState>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl DeferredWallpaperLoad {
+    fn new(
+        decode: impl FnOnce(&AtomicBool) -> Option<WallpaperImageData> + Send + 'static,
+    ) -> Self {
+        Self {
+            state: Mutex::new(WallpaperLoadState::Queued(Box::new(decode))),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(super) fn try_recv(&self) -> Result<WallpaperImageData, mpsc::TryRecvError> {
+        self.try_recv_with(decode_gate(), |worker| {
+            std::thread::Builder::new()
+                .name("jwm-wallpaper".into())
+                .spawn(worker)
+                .map(|_| ())
+        })
+    }
+
+    fn try_recv_with(
+        &self,
+        gate: &'static DecodeGate,
+        spawn: impl FnOnce(DecodeWorker) -> std::io::Result<()>,
+    ) -> Result<WallpaperImageData, mpsc::TryRecvError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*state, WallpaperLoadState::Queued(_)) {
+            let Some(permit) = gate.try_acquire() else {
+                return Err(mpsc::TryRecvError::Empty);
+            };
+            let WallpaperLoadState::Queued(decode) =
+                std::mem::replace(&mut *state, WallpaperLoadState::Failed)
+            else {
+                unreachable!();
+            };
+            let (tx, rx) = mpsc::channel();
+            let cancelled = Arc::clone(&self.cancelled);
+            let worker = Box::new(move || {
+                let _permit = permit;
+                if !cancelled.load(Ordering::Acquire)
+                    && let Some(image) = decode(&cancelled)
+                    && !cancelled.load(Ordering::Acquire)
+                {
+                    let _ = tx.send(image);
+                }
+            });
+            match spawn(worker) {
+                Ok(()) => *state = WallpaperLoadState::Running(rx),
+                Err(error) => log::warn!("compositor: could not start wallpaper decoder: {error}"),
+            }
+        }
+        match &*state {
+            WallpaperLoadState::Running(rx) => rx.try_recv(),
+            WallpaperLoadState::Failed => Err(mpsc::TryRecvError::Disconnected),
+            WallpaperLoadState::Queued(_) => unreachable!(),
+        }
+    }
+}
+
+impl Drop for DeferredWallpaperLoad {
+    fn drop(&mut self) {
+        // A running file decode cannot be interrupted; it still owns its
+        // permit until it exits. Queued work is dropped without spawning.
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
 impl<C: CompositorConnection> Compositor<C> {
-    /// Decode a wallpaper image on a background thread.
-    /// Returns a receiver that will deliver the decoded RGBA data.
+    /// Queue a wallpaper decode. The first poll with an available permit starts
+    /// its background worker; pending slots keep the compositor tick armed.
     pub(super) fn load_wallpaper_async(
         path: &str,
         max_w: u32,
         max_h: u32,
         mode: WallpaperMode,
-    ) -> mpsc::Receiver<WallpaperImageData> {
-        let (tx, rx) = mpsc::channel();
+    ) -> DeferredWallpaperLoad {
         let path = path.to_string();
-        std::thread::spawn(move || {
-            // Bound concurrent decodes; released when this thread exits.
-            let _permit = decode_gate().acquire();
+        DeferredWallpaperLoad::new(move |cancelled| {
             let img =
                 match crate::backend::compositor_common::image_source::open_regular_image(&path) {
                     Ok(img) => img,
                     Err(e) => {
                         log::warn!("compositor: failed to load wallpaper '{}': {}", path, e);
-                        return;
+                        return None;
                     }
                 };
-
+            if cancelled.load(Ordering::Acquire) {
+                return None;
+            }
             let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
                 log::info!(
                     "compositor: downscaling wallpaper '{}' from {}x{} to fit {}x{}",
@@ -236,19 +329,19 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 img
             };
-
+            if cancelled.load(Ordering::Acquire) {
+                return None;
+            }
             let rgba = img.to_rgba8();
             let (w, h) = (rgba.width(), rgba.height());
             log::info!("compositor: decoded wallpaper '{}' ({}x{})", path, w, h);
-
-            let _ = tx.send(WallpaperImageData {
+            Some(WallpaperImageData {
                 rgba: rgba.into_raw(),
                 width: w,
                 height: h,
                 mode,
-            });
-        });
-        rx
+            })
+        })
     }
 
     /// Upload decoded wallpaper RGBA data to a GL texture.
@@ -632,5 +725,189 @@ mod tests {
             "global.png",
             WallpaperMode::Fill,
         ));
+    }
+}
+
+#[cfg(test)]
+mod deferred_load_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+
+    // Leaked tiny gates give injected worker closures the same 'static permit
+    // lifetime as the process-wide production gate, without shared test state.
+    fn gate(permits: usize) -> &'static DecodeGate {
+        Box::leak(Box::new(DecodeGate::new(permits)))
+    }
+
+    fn image(id: u32) -> WallpaperImageData {
+        WallpaperImageData {
+            rgba: vec![id as u8; 4],
+            width: id,
+            height: 1,
+            mode: WallpaperMode::Fit,
+        }
+    }
+
+    #[test]
+    fn saturated_loads_wait_in_slots_and_all_monitors_eventually_complete() {
+        let gate = gate(4);
+        let loads: Vec<_> = (1..=16)
+            .map(|id| DeferredWallpaperLoad::new(move |_| Some(image(id))))
+            .collect();
+        let mut workers = VecDeque::new();
+        let mut completed = vec![false; loads.len()];
+        for (i, load) in loads.iter().enumerate() {
+            assert!(matches!(
+                load.try_recv_with(gate, |worker| {
+                    workers.push_back(worker);
+                    Ok(())
+                }),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert!(
+                workers.len() <= 4,
+                "request {i} must not spawn a waiting thread"
+            );
+        }
+        assert_eq!(workers.len(), 4);
+        assert_eq!(*gate.lock(), 0);
+        for _ in 0..16 {
+            workers.pop_front().expect("a worker can make progress")();
+            for (i, load) in loads.iter().enumerate() {
+                if completed[i] {
+                    continue;
+                }
+                match load.try_recv_with(gate, |worker| {
+                    workers.push_back(worker);
+                    Ok(())
+                }) {
+                    Ok(data) => {
+                        assert_eq!(data.width, i as u32 + 1);
+                        assert_eq!(data.rgba, vec![i as u8 + 1; 4]);
+                        completed[i] = true;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => panic!("lost monitor {i}"),
+                }
+                assert!(workers.len() <= 4);
+            }
+        }
+        assert!(completed.into_iter().all(|done| done));
+        assert!(workers.is_empty());
+        assert_eq!(*gate.lock(), 4);
+    }
+
+    #[test]
+    fn replacing_or_dropping_a_queued_load_does_not_spawn_or_cancel_other_monitors() {
+        let gate = gate(1);
+        let held = gate.try_acquire().unwrap();
+        let marker = Arc::new(());
+        let weak = Arc::downgrade(&marker);
+        let mut slot = Some(DeferredWallpaperLoad::new(move |_| {
+            drop(marker);
+            panic!("replaced decode ran")
+        }));
+        let independent = DeferredWallpaperLoad::new(|_| Some(image(2)));
+        assert!(matches!(
+            slot.as_ref()
+                .unwrap()
+                .try_recv_with(gate, |_| panic!("no permit")),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        slot = Some(DeferredWallpaperLoad::new(|_| Some(image(3))));
+        assert!(weak.upgrade().is_none());
+        drop(slot);
+        drop(held);
+        let result = independent
+            .try_recv_with(gate, |worker| {
+                worker();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(result.width, 2);
+        assert_eq!(*gate.lock(), 1);
+    }
+
+    #[test]
+    fn spawn_failure_disconnects_and_returns_the_permit() {
+        let gate = gate(1);
+        let load = DeferredWallpaperLoad::new(|_| panic!("failed spawn must not decode"));
+        assert!(matches!(
+            load.try_recv_with(gate, |_| Err(std::io::Error::other(
+                "injected spawn failure"
+            ))),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        assert_eq!(*gate.lock(), 1);
+        assert!(matches!(
+            load.try_recv_with(gate, |_| panic!("failed request must not retry")),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        let next = DeferredWallpaperLoad::new(|_| Some(image(4)));
+        assert_eq!(
+            next.try_recv_with(gate, |worker| {
+                worker();
+                Ok(())
+            })
+            .unwrap()
+            .width,
+            4
+        );
+    }
+
+    #[test]
+    fn dropping_a_started_request_cancels_only_it_and_keeps_its_permit_until_exit() {
+        let gate = gate(1);
+        let decoded = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&decoded);
+        let load = DeferredWallpaperLoad::new(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+            Some(image(1))
+        });
+        let mut worker = None;
+        assert!(matches!(
+            load.try_recv_with(gate, |job| {
+                worker = Some(job);
+                Ok(())
+            }),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(load);
+        assert_eq!(*gate.lock(), 0);
+        worker.take().unwrap()();
+        assert_eq!(decoded.load(Ordering::Relaxed), 0);
+        assert_eq!(*gate.lock(), 1);
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let load = DeferredWallpaperLoad::new(move |cancelled| {
+            started_tx.send(()).unwrap();
+            continue_rx.recv().unwrap();
+            cancel_tx.send(cancelled.load(Ordering::Acquire)).unwrap();
+            Some(image(2))
+        });
+        let mut thread = None;
+        assert!(matches!(
+            load.try_recv_with(gate, |job| {
+                thread = Some(std::thread::spawn(job));
+                Ok(())
+            }),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(load);
+        assert_eq!(*gate.lock(), 0);
+        continue_tx.send(()).unwrap();
+        assert!(
+            cancel_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
+        thread.take().unwrap().join().unwrap();
+        assert_eq!(*gate.lock(), 1);
     }
 }

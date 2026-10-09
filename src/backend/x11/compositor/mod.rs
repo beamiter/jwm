@@ -1055,11 +1055,11 @@ where
     wallpaper_transition_start: Option<std::time::Instant>,
 
     // --- Async wallpaper loading ---
-    /// Receiver for the default wallpaper decoded on a background thread.
-    pending_wallpaper: Option<mpsc::Receiver<WallpaperImageData>>,
-    /// Receivers for per-monitor wallpapers decoded on background threads.
+    /// Pending default wallpaper decode; starts when a CPU permit is available.
+    pending_wallpaper: Option<wallpaper::DeferredWallpaperLoad>,
+    /// Independent pending CPU decode slots for per-monitor wallpapers.
     /// Each entry: (mon_index_in_vec, receiver).
-    pending_monitor_wallpapers: Vec<(usize, mpsc::Receiver<WallpaperImageData>)>,
+    pending_monitor_wallpapers: Vec<(usize, wallpaper::DeferredWallpaperLoad)>,
 
     // --- Shader hot-reload ---
     shader_hot_reload_enabled: bool,

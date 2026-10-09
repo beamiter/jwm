@@ -116,13 +116,14 @@ impl GLStateTracker {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BatchKey {
     pub program: u32,
     pub texture: u32,
     pub blend_enabled: bool,
 }
 
+#[derive(Debug)]
 pub(crate) struct QuadInstance {
     pub x: f32,
     pub y: f32,
@@ -152,24 +153,22 @@ impl RenderBatcher {
         }
     }
 
-    /// Add a quad to the current batch. If the key differs from the current batch key,
-    /// returns true indicating the caller should flush the previous batch first.
-    /// Stores the new key and pushes the quad.
-    pub(crate) fn batch_quad(&mut self, key: BatchKey, quad: QuadInstance) -> bool {
-        let needs_flush = match &self.current_key {
-            Some(current) => current != &key,
-            None => false,
-        };
-
-        if needs_flush {
-            self.batches_flushed += 1;
+    /// Queue a compatible quad, or return it unchanged when a flush is needed.
+    /// Render and clear the previous batch, then retry the returned item.
+    pub(crate) fn batch_quad(
+        &mut self,
+        key: BatchKey,
+        quad: QuadInstance,
+    ) -> Result<(), (BatchKey, QuadInstance)> {
+        if self.should_flush(&key) {
+            return Err((key, quad));
         }
 
         self.current_key = Some(key);
         self.batch.push(quad);
         self.quads_batched += 1;
 
-        needs_flush
+        Ok(())
     }
 
     /// Get the current batch of quads.
@@ -179,15 +178,17 @@ impl RenderBatcher {
 
     /// Clear the current batch after flushing.
     pub(crate) fn clear_batch(&mut self) {
-        self.batch.clear();
+        if !self.batch.is_empty() {
+            self.batches_flushed += 1;
+            self.batch.clear();
+        }
+        self.current_key = None;
     }
 
     /// Check if the given key would require a flush of the current batch.
     pub(crate) fn should_flush(&self, key: &BatchKey) -> bool {
-        match &self.current_key {
-            Some(current) => current != key,
-            None => false,
-        }
+        !self.batch.is_empty()
+            && (self.current_key.as_ref() != Some(key) || self.batch.len() >= self.max_batch_size)
     }
 
     /// Returns the batch efficiency ratio: quads_batched / (batches_flushed * max_batch_size).
@@ -202,5 +203,73 @@ impl RenderBatcher {
     pub(crate) fn reset_stats(&mut self) {
         self.batches_flushed = 0;
         self.quads_batched = 0;
+    }
+}
+
+#[cfg(test)]
+mod batch_contract_tests {
+    use super::*;
+    fn key(program: u32) -> BatchKey {
+        BatchKey {
+            program,
+            texture: 1,
+            blend_enabled: true,
+        }
+    }
+    fn quad(marker: f32) -> QuadInstance {
+        QuadInstance {
+            x: marker,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            uv: [0.0, 0.0, 1.0, 1.0],
+        }
+    }
+    #[test]
+    fn rejected_key_change_preserves_both_batches_for_retry() {
+        let mut b = RenderBatcher::new();
+        b.batch_quad(key(1), quad(1.0)).unwrap();
+        let (new_key, new_quad) = b.batch_quad(key(2), quad(2.0)).unwrap_err();
+        assert_eq!(new_key.program, 2);
+        assert_eq!(new_quad.x, 2.0);
+        assert_eq!(b.current_batch().len(), 1);
+        assert_eq!(b.current_batch()[0].x, 1.0);
+        assert_eq!(b.current_key.as_ref().unwrap().program, 1);
+        b.clear_batch();
+        b.batch_quad(new_key, new_quad).unwrap();
+        assert_eq!(b.current_batch().len(), 1);
+        assert_eq!(b.current_batch()[0].x, 2.0);
+        assert_eq!(b.current_key.as_ref().unwrap().program, 2);
+    }
+    #[test]
+    fn capacity_boundary_rejects_without_losing_or_duplicating_quad() {
+        let mut b = RenderBatcher::new();
+        for _ in 0..256 {
+            b.batch_quad(key(1), quad(1.0)).unwrap();
+        }
+        assert!(b.should_flush(&key(1)));
+        let (k, q) = b.batch_quad(key(1), quad(2.0)).unwrap_err();
+        assert_eq!(b.current_batch().len(), 256);
+        b.clear_batch();
+        b.batch_quad(k, q).unwrap();
+        assert_eq!(b.current_batch().len(), 1);
+        assert_eq!(b.current_batch()[0].x, 2.0);
+    }
+    #[test]
+    fn clearing_empty_batch_does_not_flush_or_count_again() {
+        let mut b = RenderBatcher::new();
+        b.batch_quad(key(1), quad(1.0)).unwrap();
+        b.clear_batch();
+        assert!(b.current_key.is_none());
+        assert!(!b.should_flush(&key(2)));
+        let completed = b.batches_flushed;
+        b.clear_batch();
+        assert_eq!(b.batches_flushed, completed);
+        b.batch_quad(key(2), quad(2.0)).unwrap();
+        assert_eq!(b.current_batch().len(), 1);
+        b.reset_stats();
+        assert_eq!(b.batches_flushed, 0);
     }
 }
