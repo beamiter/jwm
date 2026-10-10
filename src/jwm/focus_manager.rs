@@ -1372,6 +1372,51 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn monitor_switch_keeps_remembered_target_focus_and_handles_empty_target() {
+        let (mut jwm, first, _) = jwm_with_two_tiled_windows();
+        let original_monitor = jwm.state.sel_mon.unwrap();
+        jwm.add_monitor(output(2, 1920));
+        let target_monitor = jwm.state.monitor_order[1];
+        let mut client = WMClient::new(WindowId::from_raw(0x903));
+        client.mon = Some(target_monitor);
+        client.state.tags = 1;
+        let target = jwm.insert_client(client);
+        jwm.attach_to_monitor(target, target_monitor);
+        jwm.state.monitors[target_monitor].set_selected_client_for_current_tag(Some(target));
+        let mut backend = ScratchpadBackend::new();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        assert!(jwm.ipc_server.is_none());
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+
+        jwm.handle_monitor_switch_by_key(&mut backend, Some(target_monitor))
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(target));
+        assert_eq!(jwm.state.monitors[original_monitor].sel, Some(first));
+        jwm.handle_monitor_switch_by_key(&mut backend, Some(target_monitor))
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(target));
+
+        jwm.handle_monitor_switch_by_key(&mut backend, Some(original_monitor))
+            .unwrap();
+        backend.fail_focus_for = Some(WindowId::from_raw(0x903));
+        let error = jwm
+            .handle_monitor_switch_by_key(&mut backend, Some(target_monitor))
+            .unwrap_err();
+        assert!(error.to_string().contains("injected focus failure"));
+        assert_eq!(backend.fail_focus_for, None);
+        assert_eq!(backend.focused.last(), Some(&None));
+
+        jwm.state.clients.remove(target);
+        jwm.handle_monitor_switch_by_key(&mut backend, Some(original_monitor))
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+        jwm.handle_monitor_switch_by_key(&mut backend, Some(target_monitor))
+            .unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(target_monitor));
+        assert_eq!(jwm.get_selected_client_key(), None);
+    }
+
+    #[test]
     fn focus_tab_selects_the_cell_on_the_named_monitor() {
         let (mut jwm, first, second) = jwm_with_two_tiled_windows();
         assert_eq!(jwm.tab_group_clients(jwm.state.monitor_order[0]).len(), 2);

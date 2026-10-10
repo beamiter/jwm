@@ -36,6 +36,30 @@ fn initial_maximize_axis(property_ops: &dyn PropertyOps, win: WindowId, state: N
         })
 }
 
+/// Supplement focus() after sel_mon changes: it only saw the target monitor's
+/// remembered selection, not the client that previously held global focus.
+fn missing_monitor_focus_updates<K: Copy + Eq>(
+    previous_global: Option<K>,
+    previous_target: Option<K>,
+    current: Option<K>,
+) -> [Option<K>; 2] {
+    if previous_global == current {
+        return [None, None];
+    }
+    [
+        if previous_global != previous_target {
+            previous_global
+        } else {
+            None
+        },
+        if previous_target == current {
+            current
+        } else {
+            None
+        },
+    ]
+}
+
 impl Jwm {
     pub(crate) fn manage(
         &mut self,
@@ -1632,6 +1656,9 @@ impl Jwm {
         }
 
         let current_sel = self.get_selected_client_key();
+        let previous_target = new_monitor_key
+            .and_then(|key| self.state.monitors.get(key))
+            .and_then(|monitor| monitor.sel);
         if let Some(sel_key) = current_sel {
             self.unfocus_client(backend, sel_key, true)?;
         }
@@ -1656,6 +1683,17 @@ impl Jwm {
                 );
             }
             self.broadcast_monitor_bar_ipc(backend, monitor_key);
+        }
+
+        for client_key in missing_monitor_focus_updates(
+            current_sel,
+            previous_target,
+            self.get_selected_client_key(),
+        )
+        .into_iter()
+        .flatten()
+        {
+            self.broadcast_window_state_ipc(backend, client_key);
         }
 
         Ok(())
@@ -6703,5 +6741,74 @@ mod unmanage_minimized_tests {
         );
         jwm.reconcile_closed_placement_config(false);
         assert!(jwm.closed_placements.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod monitor_focus_notification_tests {
+    use super::missing_monitor_focus_updates;
+
+    #[test]
+    fn monitor_focus_supplement_follows_successful_focus_and_bar_notifications() {
+        let body = include_str!("client.rs")
+            .split_once("pub(crate) fn handle_monitor_switch_by_key(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn unmanage(")
+            .unwrap()
+            .0;
+        let capture = body.find("let previous_target =").unwrap();
+        let switch = body
+            .find("self.state.sel_mon = new_monitor_key")
+            .unwrap();
+        let focus = body
+            .find("self.focus(backend, None)?")
+            .unwrap();
+        let bar = body
+            .find("self.broadcast_monitor_bar_ipc(backend, monitor_key)")
+            .unwrap();
+        let supplement = body
+            .find("for client_key in missing_monitor_focus_updates(")
+            .unwrap();
+        let dispatch = body
+            .find("self.broadcast_window_state_ipc(backend, client_key)")
+            .unwrap();
+        assert!(capture < switch && switch < focus && focus < bar);
+        assert!(bar < supplement && supplement < dispatch);
+    }
+
+    #[test]
+    fn monitor_focus_updates_complete_global_changes_without_duplicates() {
+        let choices = [None, Some(1), Some(2), Some(3)];
+        for previous_global in choices {
+            for previous_target in choices {
+                for current in choices {
+                    let already_sent: Vec<_> = if previous_target != current {
+                        [previous_target, current].into_iter().flatten().collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let additional: Vec<_> = missing_monitor_focus_updates(
+                        previous_global,
+                        previous_target,
+                        current,
+                    )
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    assert!(additional.iter().all(|key| !already_sent.contains(key)));
+                    assert!(additional.len() < 2 || additional[0] != additional[1]);
+                    if previous_global == current {
+                        assert!(additional.is_empty());
+                    } else {
+                        for changed in [previous_global, current].into_iter().flatten() {
+                            assert!(
+                                already_sent.contains(&changed) || additional.contains(&changed)
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
