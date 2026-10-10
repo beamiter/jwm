@@ -967,6 +967,8 @@ pub fn calculate_tatami<K: Copy>(
         return calculate_grid(params, clients);
     }
 
+    // Preserve the outer inset. Interior splits fit their own gap budget;
+    // genuinely sub-pixel cells still use client_rect's one-pixel fallback.
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
@@ -982,6 +984,7 @@ pub fn calculate_tatami<K: Copy>(
             2 => {
                 // The right window absorbs the division remainder so the pair
                 // reaches the right work-area edge, as in the 3-window pattern.
+                let gap = fitting_inner_gap(ww, 2, gap);
                 let lw = (ww - gap) / 2;
                 let rw = ww - lw - gap;
                 results.push(LayoutResult {
@@ -994,43 +997,47 @@ pub fn calculate_tatami<K: Copy>(
                 });
             }
             3 => {
-                let lw = (ww - gap) / 2;
-                let rw = ww - lw - gap;
-                let rh = (wh - gap) / 2;
+                let column_gap = fitting_inner_gap(ww, 2, gap);
+                let row_gap = fitting_inner_gap(wh, 2, gap);
+                let lw = (ww - column_gap) / 2;
+                let rw = ww - lw - column_gap;
+                let rh = (wh - row_gap) / 2;
                 results.push(LayoutResult {
                     key: clients[0].key,
                     rect: client_rect(wx, wy, lw, wh, clients[0].border_w),
                 });
                 results.push(LayoutResult {
                     key: clients[1].key,
-                    rect: client_rect(wx + lw + gap, wy, rw, rh, clients[1].border_w),
+                    rect: client_rect(wx + lw + column_gap, wy, rw, rh, clients[1].border_w),
                 });
                 results.push(LayoutResult {
                     key: clients[2].key,
                     rect: client_rect(
-                        wx + lw + gap,
-                        wy + rh + gap,
+                        wx + lw + column_gap,
+                        wy + rh + row_gap,
                         rw,
-                        wh - rh - gap,
+                        wh - rh - row_gap,
                         clients[2].border_w,
                     ),
                 });
             }
             4 => {
-                let cw = (ww - gap) / 2;
-                let ch = (wh - gap) / 2;
+                let column_gap = fitting_inner_gap(ww, 2, gap);
+                let row_gap = fitting_inner_gap(wh, 2, gap);
+                let cw = (ww - column_gap) / 2;
+                let ch = (wh - row_gap) / 2;
                 // The right column and bottom row absorb the division
                 // remainder so the 2x2 pattern stays flush with the work area.
-                let last_w = ww - cw - gap;
-                let last_h = wh - ch - gap;
+                let last_w = ww - cw - column_gap;
+                let last_h = wh - ch - row_gap;
                 for (i, c) in clients.iter().enumerate() {
                     let col = i as i32 % 2;
                     let row = i as i32 / 2;
                     results.push(LayoutResult {
                         key: c.key,
                         rect: client_rect(
-                            wx + col * (cw + gap),
-                            wy + row * (ch + gap),
+                            wx + col * (cw + column_gap),
+                            wy + row * (ch + row_gap),
                             if col == 1 { last_w } else { cw },
                             if row == 1 { last_h } else { ch },
                             c.border_w,
@@ -1044,15 +1051,16 @@ pub fn calculate_tatami<K: Copy>(
         // 5+ 窗口：分组，每组 5 个，交替使用两种榻榻米图案
         let mut idx = 0;
         let groups = (n + 4) / 5;
-        let row_h = (wh - (groups as i32 - 1) * gap) / groups as i32;
+        let group_gap = fitting_inner_gap(wh, groups, gap);
+        let row_h = (wh - (groups as i32 - 1) * group_gap) / groups as i32;
 
         for g in 0..groups {
             let remaining = n - idx;
             let count = remaining.min(5);
-            let gy = wy + g as i32 * (row_h + gap);
+            let gy = wy + g as i32 * (row_h + group_gap);
             // 末组吸收整除余数，与工作区底边齐平
             let row_h = if g == groups - 1 {
-                (wh - g as i32 * (row_h + gap)).max(1)
+                (wh - g as i32 * (row_h + group_gap)).max(1)
             } else {
                 row_h
             };
@@ -1060,6 +1068,7 @@ pub fn calculate_tatami<K: Copy>(
             if count < 5 {
                 // 不足 5 个的尾部组用 grid 方式铺
                 let cols = count as i32;
+                let gap = fitting_inner_gap(ww, count, gap);
                 let cw = (ww - (cols - 1) * gap) / cols;
                 for j in 0..count {
                     let actual_w = if j as i32 == cols - 1 {
@@ -1080,27 +1089,36 @@ pub fn calculate_tatami<K: Copy>(
                 }
             } else {
                 // 5 个窗口：经典榻榻米
-                let top_h = (row_h - gap) / 2;
-                let bot_h = row_h - top_h - gap;
+                let row_gap = fitting_inner_gap(row_h, 2, gap);
+                let top_h = (row_h - row_gap) / 2;
+                let bot_h = row_h - top_h - row_gap;
 
                 if g % 2 == 0 {
                     // 图案 A: 上 3 下 2
-                    let tw = (ww - 2 * gap) / 3;
-                    let tw_last = ww - 2 * (tw + gap);
-                    let bw = (ww - gap) / 2;
-                    let bw_last = ww - bw - gap;
+                    let top_gap = fitting_inner_gap(ww, 3, gap);
+                    let bottom_gap = fitting_inner_gap(ww, 2, gap);
+                    let tw = (ww - 2 * top_gap) / 3;
+                    let tw_last = ww - 2 * (tw + top_gap);
+                    let bw = (ww - bottom_gap) / 2;
+                    let bw_last = ww - bw - bottom_gap;
                     results.push(LayoutResult {
                         key: clients[idx].key,
                         rect: client_rect(wx, gy, tw, top_h, clients[idx].border_w),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 1].key,
-                        rect: client_rect(wx + tw + gap, gy, tw, top_h, clients[idx + 1].border_w),
+                        rect: client_rect(
+                            wx + tw + top_gap,
+                            gy,
+                            tw,
+                            top_h,
+                            clients[idx + 1].border_w,
+                        ),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 2].key,
                         rect: client_rect(
-                            wx + 2 * (tw + gap),
+                            wx + 2 * (tw + top_gap),
                             gy,
                             tw_last,
                             top_h,
@@ -1111,7 +1129,7 @@ pub fn calculate_tatami<K: Copy>(
                         key: clients[idx + 3].key,
                         rect: client_rect(
                             wx,
-                            gy + top_h + gap,
+                            gy + top_h + row_gap,
                             bw,
                             bot_h,
                             clients[idx + 3].border_w,
@@ -1120,8 +1138,8 @@ pub fn calculate_tatami<K: Copy>(
                     results.push(LayoutResult {
                         key: clients[idx + 4].key,
                         rect: client_rect(
-                            wx + bw + gap,
-                            gy + top_h + gap,
+                            wx + bw + bottom_gap,
+                            gy + top_h + row_gap,
                             bw_last,
                             bot_h,
                             clients[idx + 4].border_w,
@@ -1129,10 +1147,12 @@ pub fn calculate_tatami<K: Copy>(
                     });
                 } else {
                     // 图案 B: 上 2 下 3
-                    let tw = (ww - gap) / 2;
-                    let tw_last = ww - tw - gap;
-                    let bw = (ww - 2 * gap) / 3;
-                    let bw_last = ww - 2 * (bw + gap);
+                    let top_gap = fitting_inner_gap(ww, 2, gap);
+                    let bottom_gap = fitting_inner_gap(ww, 3, gap);
+                    let tw = (ww - top_gap) / 2;
+                    let tw_last = ww - tw - top_gap;
+                    let bw = (ww - 2 * bottom_gap) / 3;
+                    let bw_last = ww - 2 * (bw + bottom_gap);
                     results.push(LayoutResult {
                         key: clients[idx].key,
                         rect: client_rect(wx, gy, tw, top_h, clients[idx].border_w),
@@ -1140,7 +1160,7 @@ pub fn calculate_tatami<K: Copy>(
                     results.push(LayoutResult {
                         key: clients[idx + 1].key,
                         rect: client_rect(
-                            wx + tw + gap,
+                            wx + tw + top_gap,
                             gy,
                             tw_last,
                             top_h,
@@ -1151,7 +1171,7 @@ pub fn calculate_tatami<K: Copy>(
                         key: clients[idx + 2].key,
                         rect: client_rect(
                             wx,
-                            gy + top_h + gap,
+                            gy + top_h + row_gap,
                             bw,
                             bot_h,
                             clients[idx + 2].border_w,
@@ -1160,8 +1180,8 @@ pub fn calculate_tatami<K: Copy>(
                     results.push(LayoutResult {
                         key: clients[idx + 3].key,
                         rect: client_rect(
-                            wx + bw + gap,
-                            gy + top_h + gap,
+                            wx + bw + bottom_gap,
+                            gy + top_h + row_gap,
                             bw,
                             bot_h,
                             clients[idx + 3].border_w,
@@ -1170,8 +1190,8 @@ pub fn calculate_tatami<K: Copy>(
                     results.push(LayoutResult {
                         key: clients[idx + 4].key,
                         rect: client_rect(
-                            wx + 2 * (bw + gap),
-                            gy + top_h + gap,
+                            wx + 2 * (bw + bottom_gap),
+                            gy + top_h + row_gap,
                             bw_last,
                             bot_h,
                             clients[idx + 4].border_w,
@@ -1814,6 +1834,41 @@ mod tests {
             let bottom = result.iter().map(|r| r.rect.y + r.rect.h).max().unwrap();
             assert_eq!(right, 1601 - 28, "n={} right edge should be flush", n);
             assert_eq!(bottom, 999 - 28, "n={} bottom edge should be flush", n);
+        }
+    }
+
+    #[test]
+    fn tatami_fits_inner_gaps_for_every_small_pattern() {
+        for (screen, gap) in [
+            (Rect::new(0, 0, 100, 100), 30),
+            (Rect::new(-200, 150, 110, 90), 25),
+            (Rect::new(10, -50, 120, 120), 55),
+        ] {
+            let params = LayoutParams {
+                screen_area: screen,
+                n_master: 1,
+                m_fact: 0.55,
+                gap,
+            };
+            let area = usable_area(screen, gap);
+            for count in 1..=10 {
+                let clients: Vec<_> = (0..count)
+                    .map(|key| LayoutClient {
+                        key,
+                        factor: 1.0,
+                        border_w: 0,
+                    })
+                    .collect();
+                let result = calculate_tatami(&params, &clients);
+                assert_eq!(result.len(), clients.len());
+                for item in result {
+                    let rect = item.rect;
+                    assert!(rect.w > 0 && rect.h > 0);
+                    assert!(rect.x >= area.x && rect.y >= area.y);
+                    assert!(rect.x + rect.w <= area.x + area.w, "count={count}: {rect:?}");
+                    assert!(rect.y + rect.h <= area.y + area.h, "count={count}: {rect:?}");
+                }
+            }
         }
     }
 
