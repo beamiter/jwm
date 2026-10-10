@@ -3874,7 +3874,10 @@ mod tests {
         }
         state.cancel_text_draft();
         state.hovered_button = None;
-        assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+        assert_eq!(
+            state.editor_hint_label(),
+            screenshot_editor_hint_label(false)
+        );
     }
 
     #[test]
@@ -3898,11 +3901,17 @@ mod tests {
         state.hovered_button = Some(undo);
         assert_eq!(state.editor_hint_label(), ToolbarCommand::Undo.hint());
         state.undo_annotation();
-        assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+        assert_eq!(
+            state.editor_hint_label(),
+            screenshot_editor_hint_label(false)
+        );
         state.hovered_button = Some(redo);
         assert_eq!(state.editor_hint_label(), ToolbarCommand::Redo.hint());
         state.redo_annotation();
-        assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+        assert_eq!(
+            state.editor_hint_label(),
+            screenshot_editor_hint_label(false)
+        );
         assert_eq!(index(&state, ToolbarCommand::Undo), undo);
         assert_eq!(index(&state, ToolbarCommand::Redo), redo);
         for (command, width) in [
@@ -3911,7 +3920,10 @@ mod tests {
         ] {
             state.line_width = width;
             state.hovered_button = Some(index(&state, command));
-            assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+            assert_eq!(
+                state.editor_hint_label(),
+                screenshot_editor_hint_label(false)
+            );
         }
     }
 }

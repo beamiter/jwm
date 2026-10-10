@@ -5308,7 +5308,11 @@ mod tests {
             let hint = command.hint();
             let shortcuts = hint.split(" · ").nth(1).unwrap();
             let key_label = char::from(key).to_ascii_uppercase().to_string();
-            assert!(shortcuts.split(" / ").any(|part| part == key_label.as_str()));
+            assert!(
+                shortcuts
+                    .split(" / ")
+                    .any(|part| part == key_label.as_str())
+            );
             let index = jwm
                 .features
                 .screenshot
@@ -5322,7 +5326,13 @@ mod tests {
         }
         jwm.features.screenshot.hovered_button = None;
         jwm.sync_screenshot_toolbar(&mut backend);
-        assert!(backend.capture_hint.as_deref().unwrap().contains("Enter / Space save"));
+        assert!(
+            backend
+                .capture_hint
+                .as_deref()
+                .unwrap()
+                .contains("Enter / Space save")
+        );
     }
 
     #[test]
