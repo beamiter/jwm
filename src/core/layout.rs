@@ -1865,8 +1865,14 @@ mod tests {
                     let rect = item.rect;
                     assert!(rect.w > 0 && rect.h > 0);
                     assert!(rect.x >= area.x && rect.y >= area.y);
-                    assert!(rect.x + rect.w <= area.x + area.w, "count={count}: {rect:?}");
-                    assert!(rect.y + rect.h <= area.y + area.h, "count={count}: {rect:?}");
+                    assert!(
+                        rect.x + rect.w <= area.x + area.w,
+                        "count={count}: {rect:?}"
+                    );
+                    assert!(
+                        rect.y + rect.h <= area.y + area.h,
+                        "count={count}: {rect:?}"
+                    );
                 }
             }
         }
