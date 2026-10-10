@@ -117,11 +117,6 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // In scrolling layout, Alt+j/k navigates within column
-        if self.is_scrolling_layout() {
-            return self.scrolling_focus_window(backend, arg);
-        }
-
         let direction = match *arg {
             WMArgEnum::Int(i) => i,
             _ => return Ok(()),
@@ -129,6 +124,12 @@ impl Jwm {
 
         if direction == 0 {
             return Ok(());
+        }
+
+        // The zero-direction no-op is shared by every layout. Only delegate
+        // after validating it; scrolling treats non-positive steps as "up".
+        if self.is_scrolling_layout() {
+            return self.scrolling_focus_window(backend, arg);
         }
 
         if !self.can_focus_switch()? {

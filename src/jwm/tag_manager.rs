@@ -1058,6 +1058,40 @@ mod tests {
     }
 
     #[test]
+    fn zero_focusstack_keeps_the_selected_scrolling_window() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        jwm.state.monitors[mon].lt = Rc::new(LayoutEnum::SCROLLING);
+        let first = visible_client(&mut jwm, mon, 0x420, Rect::new(100, 80, 300, 200));
+        let second = visible_client(&mut jwm, mon, 0x421, Rect::new(100, 300, 300, 200));
+        let state = jwm.scrolling_state_for_monitor_mut_or_default(mon).unwrap();
+        state.columns = vec![vec![first, second]];
+        state.remember_focus(second);
+        jwm.focus(&mut backend, Some(second)).unwrap();
+        backend.window_ops.configurations.lock().unwrap().clear();
+        backend.window_ops.positions.lock().unwrap().clear();
+
+        jwm.focusstack(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+        let state = jwm.scrolling_state_for_monitor(mon).unwrap();
+        assert_eq!(state.target_for_column(0), Some(second));
+        assert!(backend.window_ops.configurations.lock().unwrap().is_empty());
+        assert!(backend.window_ops.positions.lock().unwrap().is_empty());
+
+        // The fixture has a real neighboring target; zero must not be mistaken
+        // for the negative step, while normal navigation must still work.
+        jwm.focusstack(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+        jwm.focusstack(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+    }
+
+    #[test]
     fn loopview_switches_tags_through_the_view_path() {
         use crate::jwm::WMArgEnum;
 
