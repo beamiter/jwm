@@ -1967,11 +1967,23 @@ mod tests {
         let plain_rect = Rect::new(work.x + 700, work.y + 200, 400, 300);
         let plain = floating_client(&mut jwm, mon, 0x413, plain_rect);
 
+        // A strut inside the configured bar's reserved strip is not an
+        // additional reservation. Cover that overlap before extending past it.
+        let bar_strip = work.y - jwm.state.monitors[mon].geometry.w_y;
+        assert!(bar_strip > 0, "the default bar reserves a top strip");
+        shrink_work_area_top(&mut jwm, mon, bar_strip);
+        jwm.arrange(&mut backend, Some(mon));
+        assert_eq!(jwm.maximize_work_area(mon).unwrap(), work);
+        assert_eq!(
+            live_rect(&jwm.state.clients[maximized]),
+            maximize_target(restore, work, MaximizeAxes::BOTH, 0)
+        );
+
         shrink_work_area_top(&mut jwm, mon, 40);
         jwm.arrange(&mut backend, Some(mon));
 
         let new_work = jwm.maximize_work_area(mon).unwrap();
-        assert_ne!(new_work, work, "the strut moved the work area");
+        assert_eq!(new_work, Rect::new(work.x, work.y + 40, work.w, work.h - 40));
         let target = maximize_target(restore, new_work, MaximizeAxes::BOTH, 0);
         let client = &jwm.state.clients[maximized];
         assert_eq!(live_rect(client), target);
