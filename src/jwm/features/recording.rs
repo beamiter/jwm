@@ -324,10 +324,7 @@ impl RecordingState {
 
         if edges != 0 {
             RecordingPointerIntent::Resize(edges)
-        } else if pointer_x >= left
-            && pointer_x <= right
-            && pointer_y >= top
-            && pointer_y <= bottom
+        } else if pointer_x >= left && pointer_x <= right && pointer_y >= top && pointer_y <= bottom
         {
             RecordingPointerIntent::Move
         } else {
@@ -706,7 +703,10 @@ mod tests {
                 (100, 100 + height, EDGE_LEFT | EDGE_BOTTOM),
                 (100 + width, 100 + height, EDGE_RIGHT | EDGE_BOTTOM),
             ] {
-                assert_eq!(state.pointer_intent(x, y), RecordingPointerIntent::Resize(edges));
+                assert_eq!(
+                    state.pointer_intent(x, y),
+                    RecordingPointerIntent::Resize(edges)
+                );
             }
         }
     }
@@ -729,7 +729,10 @@ mod tests {
             let mut state = RecordingState::new();
             state.selecting_region = true;
             state.set_region(original);
-            assert!(matches!(state.pointer_intent(x, y), RecordingPointerIntent::Resize(_)));
+            assert!(matches!(
+                state.pointer_intent(x, y),
+                RecordingPointerIntent::Resize(_)
+            ));
             state.begin_region_drag(x, y);
             assert_eq!(state.update_region_drag(x, y, 1920, 1080), Some(original));
             state.end_region_drag();
@@ -748,7 +751,10 @@ mod tests {
             state.update_region_drag(-100, -100, 1920, 1080),
             Some(Rect::new(100, 100, 16, 16))
         );
-        assert_eq!(state.update_region_drag(295, 245, 1920, 1080), Some(original));
+        assert_eq!(
+            state.update_region_drag(295, 245, 1920, 1080),
+            Some(original)
+        );
         assert_eq!(
             state.update_region_drag(310, 265, 1920, 1080),
             Some(Rect::new(100, 100, 215, 170))
@@ -761,7 +767,10 @@ mod tests {
             state.update_region_drag(-200, -200, 1920, 1080),
             Some(Rect::new(0, 0, 300, 250))
         );
-        assert_eq!(state.update_region_drag(95, 105, 1920, 1080), Some(original));
+        assert_eq!(
+            state.update_region_drag(95, 105, 1920, 1080),
+            Some(original)
+        );
         assert_eq!(
             state.update_region_drag(105, 115, 1920, 1080),
             Some(Rect::new(110, 110, 190, 140))
@@ -772,13 +781,22 @@ mod tests {
     fn resize_hit_testing_handles_negative_and_extreme_coordinates() {
         let mut state = RecordingState::new();
         state.set_region(Rect::new(-200, -100, 100, 80));
-        assert_eq!(state.pointer_intent(-150, -60), RecordingPointerIntent::Move);
+        assert_eq!(
+            state.pointer_intent(-150, -60),
+            RecordingPointerIntent::Move
+        );
         assert_eq!(
             state.pointer_intent(-200, -100),
             RecordingPointerIntent::Resize(EDGE_LEFT | EDGE_TOP)
         );
         state.set_region(Rect::new(i32::MAX - 8, i32::MAX - 8, 16, 16));
-        assert_eq!(state.pointer_intent(i32::MAX, i32::MAX), RecordingPointerIntent::Move);
-        assert_eq!(state.pointer_intent(i32::MIN, i32::MIN), RecordingPointerIntent::New);
+        assert_eq!(
+            state.pointer_intent(i32::MAX, i32::MAX),
+            RecordingPointerIntent::Move
+        );
+        assert_eq!(
+            state.pointer_intent(i32::MIN, i32::MIN),
+            RecordingPointerIntent::New
+        );
     }
 }
