@@ -8,6 +8,7 @@
 // resulting rect contains the pointer. Fibonacci's bottom-right spiral cell,
 // grid cells, bstack columns … all fall out of the same mechanism.
 
+use super::helpers::tiled_client_border_width;
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction};
 use crate::config::CONFIG;
 use crate::core::layout::{
@@ -18,6 +19,29 @@ use crate::core::models::{ClientKey, MonitorKey};
 use crate::core::types::Rect;
 use crate::jwm::{Jwm, WMArgEnum};
 use log::{error, info};
+
+/// FULLSCREEN layout alone uses the physical output, just like its live arrange.
+fn layout_attach_area(layout: &LayoutEnum, work: Rect, physical: Option<Rect>) -> Rect {
+    if *layout == LayoutEnum::FULLSCREEN {
+        physical.unwrap_or(work)
+    } else {
+        work
+    }
+}
+
+/// Match apply's removal of the dragged key and cleanup of empty columns.
+/// Read the first remaining client's live span, without reflowing the strip.
+fn scrolling_spans_after_removal<K: Copy + PartialEq>(
+    columns: &[Vec<K>],
+    drag_key: K,
+    span_of: impl FnMut(K) -> Option<(i32, i32)>,
+) -> Vec<(i32, i32)> {
+    columns
+        .iter()
+        .filter_map(|column| column.iter().copied().find(|&key| key != drag_key))
+        .filter_map(span_of)
+        .collect()
+}
 
 /// Edge-snap targets shared by the mouse drop below and the bindable
 /// `snap_window` command: left/right halves, top-edge maximize, and the four
@@ -303,7 +327,7 @@ impl Jwm {
                 return None;
             }
             if layout == LayoutEnum::SCROLLING {
-                return self.plan_scrolling_attach(mon_key, px);
+                return self.plan_scrolling_attach(mon_key, drag_key, px);
             }
             return self.plan_layout_attach(mon_key, drag_key, &layout, px, py);
         }
@@ -379,7 +403,7 @@ impl Jwm {
             return None;
         }
         if layout == LayoutEnum::SCROLLING {
-            return self.plan_scrolling_attach(mon_key, px);
+            return self.plan_scrolling_attach(mon_key, drag_key, px);
         }
         self.plan_layout_attach(mon_key, drag_key, &layout, px, py)
     }
@@ -407,14 +431,25 @@ impl Jwm {
         let count = tiled.len() + 1;
 
         let (wx, wy, ww, wh, m_fact, n_master, _, _) = self.get_monitor_info(mon_key);
-        let screen_area = self
+        let work_area = self
             .monitor_work_area(mon_key)
             .unwrap_or(Rect::new(wx, wy, ww, wh));
+        let physical_area = self.state.monitors.get(mon_key).map(|monitor| {
+            let geometry = &monitor.geometry;
+            Rect::new(geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h)
+        });
+        let screen_area = layout_attach_area(layout, work_area, physical_area);
 
         // Mirror apply_smart_borders: a lone window keeps both the ring and
         // the outer gap so decorations are not clipped at the output edge.
         let cfg = CONFIG.load();
-        let border_w = cfg.border_px() as i32;
+        let configured_border = cfg.border_px() as i32;
+        let border_for = |key| {
+            tiled_client_border_width(
+                configured_border,
+                self.state.clients.get(key).is_some_and(|c| c.state.no_decorations),
+            )
+        };
         let monitor_gap = self
             .state
             .monitors
@@ -450,7 +485,7 @@ impl Jwm {
                 sim.push(LayoutClient {
                     key,
                     factor,
-                    border_w,
+                    border_w: border_for(key),
                 });
             }
             sim.insert(
@@ -458,7 +493,7 @@ impl Jwm {
                 LayoutClient {
                     key: drag_key,
                     factor: drag_factor,
-                    border_w,
+                    border_w: border_for(drag_key),
                 },
             );
             if let Some(result) = calc(&params, &sim).into_iter().find(|r| r.key == drag_key) {
@@ -475,23 +510,26 @@ impl Jwm {
 
     /// Scrolling layout: the drop point picks a column boundary; the window
     /// becomes its own column there.
-    fn plan_scrolling_attach(&self, mon_key: MonitorKey, px: i32) -> Option<DragSnapPlan> {
+    fn plan_scrolling_attach(
+        &self,
+        mon_key: MonitorKey,
+        drag_key: ClientKey,
+        px: i32,
+    ) -> Option<DragSnapPlan> {
         let (wx, wy, ww, wh, m_fact, _, _, _) = self.get_monitor_info(mon_key);
         let area = self
             .monitor_work_area(mon_key)
             .unwrap_or(Rect::new(wx, wy, ww, wh));
 
-        // Visible x-span of each column, from its first client's live geometry.
+        // Keep surviving columns' live coordinates, including CSD content widths.
+        // A standalone dragged column disappears before the insertion index applies.
         let spans: Vec<(i32, i32)> = self
             .scrolling_state_for_monitor(mon_key)
             .map(|state| {
-                state
-                    .columns
-                    .iter()
-                    .filter_map(|col| col.first())
-                    .filter_map(|&key| self.state.clients.get(key))
-                    .map(|c| (c.geometry.x, c.geometry.x + c.geometry.w))
-                    .collect()
+                scrolling_spans_after_removal(&state.columns, drag_key, |key| {
+                    self.state.clients.get(key)
+                        .map(|c| (c.geometry.x, c.geometry.x + c.geometry.w))
+                })
             })
             .unwrap_or_default();
 
@@ -826,6 +864,40 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_area_uses_physical_output_only_for_fullscreen_layout() {
+        let work = Rect::new(-1920, 38, 1920, 1022);
+        let physical = Rect::new(-1920, 0, 1920, 1080);
+        for id in 0..=13 {
+            let layout = LayoutEnum::from(id);
+            let expected = if layout == LayoutEnum::FULLSCREEN { physical } else { work };
+            assert_eq!(layout_attach_area(&layout, work, Some(physical)), expected);
+            assert_eq!(layout_attach_area(&layout, work, None), work);
+        }
+    }
+
+    #[test]
+    fn scrolling_attach_removes_only_dragged_keys_and_preserves_live_spans() {
+        let span_of = |key| match key {
+            1 => Some((-800, -100)),
+            2 => Some((20, 720)),
+            3 => Some((20, 710)), // Same column, different decoration/content width.
+            4 => Some((750, 1450)),
+            _ => None,
+        };
+        let columns = vec![vec![1], vec![2, 3], vec![4]];
+        assert_eq!(scrolling_spans_after_removal(&columns, 1, span_of), vec![(20, 720), (750, 1450)]);
+        assert_eq!(scrolling_spans_after_removal(&columns, 2, span_of), vec![(-800, -100), (20, 710), (750, 1450)]);
+        assert_eq!(scrolling_spans_after_removal(&columns, 3, span_of), vec![(-800, -100), (20, 720), (750, 1450)]);
+        assert_eq!(scrolling_spans_after_removal(&columns, 4, span_of), vec![(-800, -100), (20, 720)]);
+        assert_eq!(scrolling_spans_after_removal(&columns, 99, span_of), vec![(-800, -100), (20, 720), (750, 1450)]);
+        assert!(scrolling_spans_after_removal(&[vec![1]], 1, span_of).is_empty());
+        assert!(scrolling_spans_after_removal(&[vec![], vec![99]], 1, span_of).is_empty());
+        // A removed leading column cannot shift the insertion slot to the right.
+        let spans = scrolling_spans_after_removal(&columns, 1, span_of);
+        assert_eq!(spans.iter().filter(|&&(left, right)| (left + right) / 2 < 500).count(), 1);
+    }
 
     #[test]
     fn pointer_inside_a_slot_wins_over_nearer_centers() {

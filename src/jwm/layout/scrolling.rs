@@ -89,6 +89,7 @@ impl Jwm {
             }
             self.focus(backend, Some(target))?;
             self.arrange(backend, Some(mon_key));
+            self.broadcast_visible_window_states_on_monitor(backend, mon_key);
             self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
         Ok(())
@@ -283,6 +284,7 @@ impl Jwm {
         state.retain_non_empty_columns();
 
         self.arrange(backend, Some(mon_key));
+        self.broadcast_visible_window_states_on_monitor(backend, mon_key);
         self.broadcast_monitor_bar_ipc(backend, mon_key);
         Ok(())
     }
@@ -347,6 +349,7 @@ impl Jwm {
         state.set_focused_column(insert_idx);
 
         self.arrange(backend, Some(mon_key));
+        self.broadcast_visible_window_states_on_monitor(backend, mon_key);
         self.broadcast_monitor_bar_ipc(backend, mon_key);
         Ok(())
     }

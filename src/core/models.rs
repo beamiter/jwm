@@ -470,9 +470,10 @@ impl WMClient {
     }
 
     pub fn is_status_bar(&self, status_bar_name: &str) -> bool {
-        self.name == status_bar_name
-            || self.class == status_bar_name
-            || self.instance == status_bar_name
+        !status_bar_name.is_empty()
+            && (self.name == status_bar_name
+                || self.class == status_bar_name
+                || self.instance == status_bar_name)
     }
 
     pub fn rect(&self) -> (i32, i32, i32, i32) {
@@ -853,6 +854,22 @@ impl WMMonitor {
                 self.tag_set[idx] = 1;
             }
         }
+        if let Some(ref mut pertag) = self.pertag {
+            let active = self.tag_set[idx];
+            if pertag.is_all_tags(active) {
+                pertag.cur_tag = 0;
+            } else {
+                let current_bit = pertag
+                    .cur_tag
+                    .checked_sub(1)
+                    .and_then(|tag| u32::try_from(tag).ok())
+                    .and_then(|tag| 1u32.checked_shl(tag))
+                    .unwrap_or(0);
+                if active & current_bit == 0 {
+                    pertag.cur_tag = pertag.slot_for_mask(active);
+                }
+            }
+        }
         self.reload_current_tag_context();
     }
 
@@ -949,6 +966,19 @@ mod tests {
         c.geometry.border_w = 0;
         assert_eq!(c.total_width(), 1920);
         assert_eq!(c.total_height(), 1080);
+    }
+
+    #[test]
+    fn an_empty_status_bar_name_disables_matching_without_trimming() {
+        let mut c = WMClient::new(win(1));
+        assert!(!c.is_status_bar(""));
+        c.name = "bar".into();
+        assert!(!c.is_status_bar(""));
+        assert!(!c.is_status_bar(" bar "));
+        c.class = " bar ".into();
+        assert!(c.is_status_bar(" bar "));
+        c.instance = " ".into();
+        assert!(c.is_status_bar(" "));
     }
 
     #[test]
@@ -1281,6 +1311,34 @@ mod tests {
         assert_eq!(m.pertag.as_ref().unwrap().sel.len(), 10);
         assert_eq!(m.pertag.as_ref().unwrap().cur_tag, 9);
         assert_eq!(m.get_active_tags(), 1 << 8);
+    }
+
+    #[test]
+    fn sync_tag_slots_reconciles_the_current_slot_with_the_surviving_mask() {
+        for (old_count, old_slot, active, new_count, expected_mask, expected_slot) in [
+            (12, 12, (1 << 11) | 1, 9, 1, 1),
+            (12, 12, 1 << 11, 9, 1 << 8, 9),
+            (12, 3, 0b101, 9, 0b101, 3),
+            (9, 0, 511, 12, 511, 1),
+            (12, 3, 511, 9, 511, 0),
+        ] {
+            let mut m = WMMonitor::new();
+            let mut pertag = Pertag::new(true, old_count);
+            pertag.cur_tag = old_slot;
+            pertag.prev_tag = 2;
+            for (slot, n_master) in pertag.n_masters.iter_mut().enumerate() {
+                *n_master = slot as u32;
+            }
+            m.pertag = Some(pertag);
+            m.tag_set = [active, 0b10];
+            m.sync_tag_slots(new_count, (1 << new_count) - 1);
+            let pertag = m.pertag.as_ref().unwrap();
+            assert_eq!(m.get_active_tags(), expected_mask);
+            assert_eq!(m.tag_set[1], 0b10);
+            assert_eq!(pertag.cur_tag, expected_slot);
+            assert_eq!(pertag.prev_tag, expected_slot);
+            assert_eq!(m.layout.n_master, expected_slot as u32);
+        }
     }
 
     // -----------------------------------------------------------------------

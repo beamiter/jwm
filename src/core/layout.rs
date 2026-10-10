@@ -87,6 +87,19 @@ fn choose_grid_dimensions(n: usize, area: Rect) -> (i32, i32) {
     best
 }
 
+// Keep one content pixel per client where the extent permits it. Outer gaps
+// and the separation between master and stack areas are intentionally separate.
+fn fitting_inner_gap(extent: i32, count: usize, requested: i32) -> i32 {
+    if count <= 1 {
+        return 0;
+    }
+    let Ok(count) = i32::try_from(count) else {
+        return 0;
+    };
+    let spare = extent.saturating_sub(count).max(0);
+    requested.max(0).min(spare / (count - 1))
+}
+
 fn distribute_length(
     total: i32,
     gap: i32,
@@ -96,14 +109,17 @@ fn distribute_length(
     factor: f32,
     remaining_factor: f32,
 ) -> i32 {
-    let available = (total - (count - 1).max(0) * gap).max(1);
-    let remaining = (available - used).max(1);
-    if remaining_factor > 0.001 {
+    let inner_gaps = count.saturating_sub(1).max(0).saturating_mul(gap.max(0));
+    let available = total.saturating_sub(inner_gaps).max(1);
+    let remaining = available.saturating_sub(used).max(1);
+    let later_count = count.saturating_sub(index).saturating_sub(1).max(0);
+    let maximum = remaining.saturating_sub(later_count).max(1);
+    let proportional = if remaining_factor > 0.001 {
         (remaining as f32 * (factor.max(0.0) / remaining_factor)) as i32
     } else {
-        remaining / (count - index).max(1)
-    }
-    .max(1)
+        remaining / count.saturating_sub(index).max(1)
+    };
+    proportional.clamp(1, maximum)
 }
 
 fn push_factor_row<K: Copy>(
@@ -120,6 +136,7 @@ fn push_factor_row<K: Copy>(
         return;
     }
 
+    let gap = fitting_inner_gap(w, clients.len(), gap);
     let mut used_w = 0;
     let mut remaining_factor: f32 = clients.iter().map(|c| c.factor.max(0.0)).sum();
 
@@ -148,6 +165,7 @@ fn push_factor_column<K: Copy>(
         return;
     }
 
+    let gap = fitting_inner_gap(h, clients.len(), gap);
     let mut used_h = 0;
     let mut remaining_factor: f32 = clients.iter().map(|c| c.factor.max(0.0)).sum();
 
@@ -172,8 +190,9 @@ fn push_deck_previews<K: Copy>(
     gap: i32,
 ) {
     let preview_step = gap.clamp(6, 16);
+    let maximum_offset = w.min(h).saturating_sub(1).max(0);
     for (i, c) in clients.iter().enumerate() {
-        let preview_offset = (i as i32).min(5) * preview_step;
+        let preview_offset = (i.min(5) as i32 * preview_step).min(maximum_offset);
         results.push(LayoutResult {
             key: c.key,
             rect: client_rect(
@@ -553,6 +572,7 @@ pub fn calculate_fibonacci<K: Copy>(
     };
 
     let n_master_count = n.min(*n_master) as i32;
+    let master_gap = fitting_inner_gap(wh, clients.len().min(*n_master as usize), gap);
     let total_m_fact: f32 = clients
         .iter()
         .take(*n_master as usize)
@@ -567,13 +587,16 @@ pub fn calculate_fibonacci<K: Copy>(
     let mut sy = wy;
     let mut sw = if *n_master > 0 { ww - mw - gap } else { ww };
     let mut sh = wh;
+    let mut splitting_stopped = false;
 
     for (i, c) in clients.iter().enumerate() {
         let is_master = (i as u32) < *n_master;
         if is_master {
-            let h = distribute_length(wh, gap, my, mi, n_master_count, c.factor, remaining_m_fact);
+            let h = distribute_length(
+                wh, master_gap, my, mi, n_master_count, c.factor, remaining_m_fact,
+            );
 
-            let res_y = wy + my + mi * gap;
+            let res_y = wy + my + mi * master_gap;
             my += h;
             mi += 1;
             remaining_m_fact -= c.factor.max(0.0);
@@ -586,7 +609,11 @@ pub fn calculate_fibonacci<K: Copy>(
             let stack_idx = (i as u32) - *n_master;
             let stack_count = n - *n_master;
 
-            if stack_idx == stack_count - 1 {
+            // Once a split cannot leave a positive pixel on both sides,
+            // overlap all remaining clients in this last usable area.
+            let split_extent = if stack_idx % 2 == 0 { sh } else { sw };
+            splitting_stopped |= split_extent < gap.saturating_add(2);
+            if splitting_stopped || stack_idx == stack_count - 1 {
                 results.push(LayoutResult {
                     key: c.key,
                     rect: client_rect(sx, sy, sw, sh, c.border_w),
@@ -1229,25 +1256,19 @@ pub fn calculate_scrolling<K: Copy>(
         // 右侧的列偏移 1px。
         let screen_x = (strip_x as f32 - new_viewport_x + screen.x as f32).round();
 
-        let inner_gap_count = i32::try_from(col.len().saturating_sub(1)).unwrap_or(i32::MAX);
-        let inner_gaps = inner_gap_count.saturating_mul(gap);
-        let avail_col_h = avail_h.saturating_sub(inner_gaps).max(0);
+        let column_gap = fitting_inner_gap(avail_h, col.len(), gap);
+        let count = i32::try_from(col.len()).unwrap_or(i32::MAX);
         let mut remaining_fact: f32 = col.iter().map(|client| client.factor.max(0.0)).sum();
 
         let mut y_cursor = 0;
         for (win_idx, client) in col.iter().enumerate() {
-            let remaining = i32::try_from(col.len() - win_idx).unwrap_or(i32::MAX);
-            let remaining_h = avail_col_h.saturating_sub(y_cursor).max(0);
+            let index = i32::try_from(win_idx).unwrap_or(i32::MAX);
             let client_fact = client.factor.max(0.0);
-            let h = if remaining_fact > 0.001 {
-                (remaining_h as f32 * (client_fact / remaining_fact)) as i32
-            } else {
-                remaining_h / remaining.max(1)
-            };
+            let h = distribute_length(
+                avail_h, column_gap, y_cursor, index, count, client_fact, remaining_fact,
+            );
 
-            let window_offset = i32::try_from(win_idx)
-                .unwrap_or(i32::MAX)
-                .saturating_mul(gap);
+            let window_offset = index.saturating_mul(column_gap);
             let win_y = screen
                 .y
                 .saturating_add(outer_gap)
@@ -2425,4 +2446,279 @@ mod tests {
             result.rect.y == i32::MAX && result.rect.w == 1 && result.rect.h == 1
         }));
     }
+
+    fn borderless_clients(count: u32) -> Vec<LayoutClient<u32>> {
+        (0..count)
+            .map(|key| LayoutClient {
+                key,
+                factor: 1.0,
+                border_w: 0,
+            })
+            .collect()
+    }
+
+    fn assert_inside(rect: Rect, area: Rect) {
+        assert!(rect.w > 0 && rect.h > 0, "{rect:?}");
+        assert!(rect.x >= area.x && rect.y >= area.y, "{rect:?} in {area:?}");
+        assert!(
+            i64::from(rect.x) + i64::from(rect.w) <= i64::from(area.x) + i64::from(area.w),
+            "{rect:?} in {area:?}"
+        );
+        assert!(
+            i64::from(rect.y) + i64::from(rect.h) <= i64::from(area.y) + i64::from(area.h),
+            "{rect:?} in {area:?}"
+        );
+    }
+
+    #[test]
+    fn fitting_inner_gap_reserves_content_and_handles_extremes() {
+        assert_eq!(fitting_inner_gap(880, 14, 100), 66);
+        assert_eq!(fitting_inner_gap(100, 3, 8), 8);
+        assert_eq!(fitting_inner_gap(3, 3, 100), 0);
+        assert_eq!(fitting_inner_gap(2, 3, 100), 0);
+        assert_eq!(fitting_inner_gap(100, 0, 8), 0);
+        assert_eq!(fitting_inner_gap(100, 1, 8), 0);
+        assert_eq!(fitting_inner_gap(100, 3, -8), 0);
+        assert_eq!(fitting_inner_gap(i32::MIN, 3, i32::MAX), 0);
+        assert_eq!(fitting_inner_gap(i32::MAX, usize::MAX, i32::MAX), 0);
+        assert_eq!(fitting_inner_gap(i32::MAX, 2, i32::MAX), i32::MAX - 2);
+    }
+
+    #[test]
+    fn factor_rows_and_columns_fit_dense_inner_gaps() {
+        // A 1920x1080 work area with 100px outer gaps leaves 880px vertically.
+        // Rotate that extent too, so both helper cursors exercise fitted gaps.
+        let clients = borderless_clients(14);
+        let mut row = Vec::new();
+        let mut column = Vec::new();
+        push_factor_row(&mut row, &clients, -900, -200, 880, 1720, 100);
+        push_factor_column(&mut column, &clients, -900, -200, 1720, 880, 100);
+        for (i, (r, c)) in row.iter().zip(&column).enumerate() {
+            assert_eq!(r.key, i as u32);
+            assert_eq!(c.key, i as u32);
+            assert_inside(r.rect, Rect::new(-900, -200, 880, 1720));
+            assert_inside(c.rect, Rect::new(-900, -200, 1720, 880));
+            if i > 0 {
+                assert_eq!(r.rect.x - row[i - 1].rect.x - row[i - 1].rect.w, 66);
+                assert_eq!(c.rect.y - column[i - 1].rect.y - column[i - 1].rect.h, 66);
+            }
+        }
+        assert_eq!(row.last().unwrap().rect.x + row.last().unwrap().rect.w, -20);
+        assert_eq!(column.last().unwrap().rect.y + column.last().unwrap().rect.h, 680);
+    }
+
+    #[test]
+    fn proportional_allocation_reserves_pixels_for_later_clients() {
+        let clients: Vec<_> = [4.0, 0.25, 0.25]
+            .into_iter()
+            .enumerate()
+            .map(|(key, factor)| LayoutClient { key, factor, border_w: 0 })
+            .collect();
+        let mut row = Vec::new();
+        let mut column = Vec::new();
+        push_factor_row(&mut row, &clients, 0, 0, 3, 10, 100);
+        push_factor_column(&mut column, &clients, 0, 0, 10, 3, 100);
+        for i in 0..3 {
+            assert_eq!(row[i].rect, Rect::new(i as i32, 0, 1, 10));
+            assert_eq!(column[i].rect, Rect::new(0, i as i32, 10, 1));
+        }
+    }
+
+    #[test]
+    fn factor_row_and_column_normal_geometry_is_unchanged() {
+        let clients: Vec<_> = [2.0, 1.0, 1.0]
+            .into_iter()
+            .enumerate()
+            .map(|(key, factor)| LayoutClient { key, factor, border_w: 0 })
+            .collect();
+        let mut row = Vec::new();
+        let mut column = Vec::new();
+        push_factor_row(&mut row, &clients, -100, -80, 100, 100, 8);
+        push_factor_column(&mut column, &clients, -100, -80, 100, 100, 8);
+        assert_eq!(row.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
+            Rect::new(-100, -80, 42, 100),
+            Rect::new(-50, -80, 21, 100),
+            Rect::new(-21, -80, 21, 100),
+        ]);
+        assert_eq!(column.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
+            Rect::new(-100, -80, 100, 42),
+            Rect::new(-100, -30, 100, 21),
+            Rect::new(-100, -1, 100, 21),
+        ]);
+    }
+
+    #[test]
+    fn tile_and_fibonacci_master_columns_fit_fourteen_clients() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1920, 1080),
+            n_master: 14,
+            m_fact: 0.55,
+            gap: 100,
+        };
+        let clients = borderless_clients(14);
+        let tile = calculate_tile(&p, &clients);
+        let fibonacci = calculate_fibonacci(&p, &clients);
+        for results in [&tile, &fibonacci] {
+            assert_eq!(results.len(), 14);
+            for (i, result) in results.iter().enumerate() {
+                assert_eq!(result.key, i as u32);
+                assert_inside(result.rect, Rect::new(100, 100, 1720, 880));
+                if i > 0 {
+                    let previous = results[i - 1].rect;
+                    assert_eq!(result.rect.y - previous.y - previous.h, 66);
+                }
+            }
+            let last = results.last().unwrap().rect;
+            assert_eq!(last.y + last.h, 980);
+        }
+    }
+
+    #[test]
+    fn fibonacci_overlaps_remaining_clients_when_splits_run_out() {
+        let p = LayoutParams { gap: 8, ..params(1920, 1080) };
+        let clients = borderless_clients(30);
+        let results = calculate_fibonacci(&p, &clients);
+        assert_eq!(results.len(), 30);
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result.key, i as u32);
+            assert_inside(result.rect, Rect::new(8, 8, 1904, 1064));
+        }
+        let overlap_start = results.windows(2)
+            .position(|pair| pair[0].rect == pair[1].rect)
+            .expect("exhausted splits should leave overlapping clients");
+        assert!(results[overlap_start..].iter().all(|r| r.rect == results[overlap_start].rect));
+    }
+
+    #[test]
+    fn fibonacci_stops_permanently_at_an_unsplittable_axis() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 100, 9),
+            n_master: 0,
+            m_fact: 0.5,
+            gap: 3,
+        };
+        let results = calculate_fibonacci(&p, &borderless_clients(5));
+        // Height 3 cannot fit gap 3 plus two pixels; width 94 could split,
+        // but must not restart splitting on the next iteration's other axis.
+        assert!(results.iter().all(|r| r.rect == Rect::new(3, 3, 94, 3)));
+    }
+
+    #[test]
+    fn fibonacci_normal_geometry_is_unchanged() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 200, 120),
+            n_master: 1,
+            m_fact: 0.5,
+            gap: 8,
+        };
+        let results = calculate_fibonacci(&p, &borderless_clients(4));
+        assert_eq!(results.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
+            Rect::new(8, 8, 88, 104),
+            Rect::new(104, 8, 88, 48),
+            Rect::new(104, 64, 40, 48),
+            Rect::new(152, 64, 40, 48),
+        ]);
+    }
+
+    #[test]
+    fn deck_previews_stay_inside_tiny_positive_areas() {
+        for n_master in [0, 1] {
+            let p = LayoutParams { n_master, gap: 8, ..params(32, 24) };
+            let results = calculate_deck(&p, &borderless_clients(12));
+            assert_eq!(results.len(), 12);
+            for result in &results {
+                assert_inside(result.rect, Rect::new(8, 8, 16, 8));
+            }
+            let stack = &results[n_master as usize..];
+            let first = stack[0].rect;
+            for result in stack {
+                assert_inside(result.rect, first);
+                assert_eq!(result.rect.x + result.rect.w, first.x + first.w);
+                assert_eq!(result.rect.y + result.rect.h, first.y + first.h);
+            }
+            assert_eq!(stack[stack.len() - 1].rect, stack[stack.len() - 2].rect);
+        }
+    }
+
+    #[test]
+    fn deck_normal_preview_offsets_are_unchanged() {
+        let mut results = Vec::new();
+        push_deck_previews(&mut results, &borderless_clients(7), 10, 20, 200, 120, 8);
+        for (i, result) in results.iter().enumerate() {
+            let offset = i.min(5) as i32 * 8;
+            assert_eq!(result.rect, Rect::new(10 + offset, 20 + offset, 200 - offset, 120 - offset));
+        }
+    }
+
+    #[test]
+    fn scrolling_fits_each_columns_gap_without_changing_horizontal_geometry() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(-1920, -500, 1920, 1080),
+            column_width_ratio: 0.5,
+            column_width_factors: vec![1.0, 1.5, 0.5],
+            gap: 100,
+            viewport_x: -999.0,
+        };
+        let columns = vec![borderless_clients(14), borderless_clients(2), borderless_clients(3)];
+        let (results, viewport) = calculate_scrolling(&p, &columns, 1);
+        assert_eq!(results.len(), 19);
+        assert_eq!(viewport, 820.0);
+        let mut start = 0;
+        for (column, (x, width, fitted_gap)) in columns.iter().zip([
+            (-2740, 960, 66), (-1680, 1440, 100), (-140, 480, 100),
+        ]) {
+            let column_results = &results[start..start + column.len()];
+            for (i, result) in column_results.iter().enumerate() {
+                assert_eq!(result.key, column[i].key);
+                assert_eq!((result.rect.x, result.rect.w), (x, width));
+                assert_inside(result.rect, Rect::new(x, -400, width, 880));
+                if i > 0 {
+                    let previous = column_results[i - 1].rect;
+                    assert_eq!(result.rect.y - previous.y - previous.h, fitted_gap);
+                }
+            }
+            let last = column_results.last().unwrap().rect;
+            assert_eq!(last.y + last.h, 480);
+            start += column.len();
+        }
+    }
+
+    #[test]
+    fn scrolling_reserves_later_clients_in_three_pixels() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(-100, -20, 100, 3),
+            column_width_ratio: 0.5,
+            column_width_factors: Vec::new(),
+            gap: 0,
+            viewport_x: 0.0,
+        };
+        let column = [4.0, 0.25, 0.25].into_iter().enumerate()
+            .map(|(key, factor)| LayoutClient { key, factor, border_w: 0 }).collect();
+        let (results, viewport) = calculate_scrolling(&p, &[column], 0);
+        assert_eq!(viewport, -25.0);
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result.rect, Rect::new(-75, -20 + i as i32, 50, 1));
+        }
+    }
+
+    #[test]
+    fn scrolling_normal_vertical_geometry_is_unchanged() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(-200, -50, 200, 120),
+            column_width_ratio: 0.5,
+            column_width_factors: Vec::new(),
+            gap: 8,
+            viewport_x: 0.0,
+        };
+        let mut clients = borderless_clients(3);
+        clients[0].factor = 2.0;
+        let (results, viewport) = calculate_scrolling(&p, &[clients], 0);
+        assert_eq!(viewport, -50.0);
+        assert_eq!(results.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
+            Rect::new(-150, -42, 100, 44),
+            Rect::new(-150, 10, 100, 22),
+            Rect::new(-150, 40, 100, 22),
+        ]);
+    }
+
 }

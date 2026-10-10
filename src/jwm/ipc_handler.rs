@@ -3708,10 +3708,10 @@ impl Jwm {
             None => return IpcResponse::err("set_config: missing 'value'".to_string()),
         };
 
-        let mut new_cfg = (**CONFIG.load()).clone();
-        if let Err(e) = new_cfg.set_value(&key, &value) {
-            return IpcResponse::err(e);
-        }
+        let new_cfg = match CONFIG.load().with_validated_value(&key, &value) {
+            Ok(config) => config,
+            Err(e) => return IpcResponse::err(e),
+        };
         CONFIG.store(std::sync::Arc::new(new_cfg));
 
         self.apply_config_changes(backend);

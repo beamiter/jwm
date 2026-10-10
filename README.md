@@ -112,6 +112,12 @@ Supported backend names are `x11rb`, `xcb`, `wayland-udev`, `wayland-x11`, and
 `wayland-winit`. See [startup and configuration](docs/startup.md) for aliases,
 logging, benchmarking, restart behavior, and doctor output.
 
+IPC `set_config` and `set_config_batch` apply the same whole-configuration
+semantic validation before publishing hot-tunable values. A single update also
+fails if an unrelated validation error would remain. Use a batch for correlated
+hot-tunable changes that must become valid together; non-hot-tunable values must
+be edited in the configuration file.
+
 The installation helper builds JWM and the **official status bar**
 (`tao_glow_bar` by default; other crates under `bars/` are examples), installs
 the session files (Wayland session recommended), and keeps existing

@@ -45,7 +45,7 @@ impl Jwm {
     }
 
     /// Absolute master-count set (`setnmaster` / `set_nmaster`). Clamps to at
-    /// least 0; twin of [`Self::incnmaster`]'s relative step.
+    /// least 0 and at most MAX_N_MASTER; twin of [`Self::incnmaster`]'s relative step.
     pub(crate) fn setnmaster(
         &mut self,
         backend: &mut dyn Backend,
@@ -54,7 +54,7 @@ impl Jwm {
         if let WMArgEnum::Int(i) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_n = u32::try_from(i.max(0)).unwrap_or(u32::MAX);
+                let new_n = adjusted_n_master(0, i);
                 monitor.layout.n_master = new_n;
                 monitor.update_current_tag_layout_params();
                 info!("[setnmaster] Updated n_master to {new_n}");
@@ -262,6 +262,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(arg, WMArgEnum::Layout(layout) if **layout == LayoutEnum::ANY) {
+            return Ok(());
+        }
         info!("[setlayout]");
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
 
@@ -488,6 +491,13 @@ mod tests {
     use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
     use crate::jwm::types::WMArgEnum;
     use std::rc::Rc;
+
+    #[test]
+    fn absolute_master_count_preserves_zero_and_caps_extreme_inputs() {
+        for (input, expected) in [(i32::MIN, 0), (-1, 0), (0, 0), (1, 1), (32, 32), (33, 32), (i32::MAX, 32)] {
+            assert_eq!(adjusted_n_master(0, input), expected);
+        }
+    }
 
     #[test]
     fn adjusted_n_master_preserves_normal_adjustments() {

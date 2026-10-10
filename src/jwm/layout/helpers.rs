@@ -38,6 +38,71 @@ fn bounded_dock_reservation(depth: i64, pad: i32, extent: i32) -> i32 {
     depth.saturating_add(i64::from(pad.max(0))).clamp(0, limit) as i32
 }
 
+/// Widen before both coordinate addition and subtraction: negative outputs
+/// and parked client coordinates must not overflow while classifying an edge.
+fn dock_edge_distances(dock: Rect, work: Rect) -> (i64, i64, i64, i64) {
+    let (dx, dy, dw, dh) = (
+        i64::from(dock.x),
+        i64::from(dock.y),
+        i64::from(dock.w),
+        i64::from(dock.h),
+    );
+    let (wx, wy, ww, wh) = (
+        i64::from(work.x),
+        i64::from(work.y),
+        i64::from(work.w),
+        i64::from(work.h),
+    );
+    (
+        (dy - wy).abs(),
+        ((wy + wh) - (dy + dh)).abs(),
+        (dx - wx).abs(),
+        ((wx + ww) - (dx + dw)).abs(),
+    )
+}
+
+/// A dock must overlap this physical output before its edge reservation counts.
+/// Padding extends only the edge-normal axis, never the panel's long axis.
+fn dock_reaches_output_edge(dock: Rect, physical: Rect, edge: &str, pad: i32) -> bool {
+    if dock.w <= 0 || dock.h <= 0 || physical.w <= 0 || physical.h <= 0 {
+        return false;
+    }
+    let (dx, dy, dw, dh) = (
+        i64::from(dock.x),
+        i64::from(dock.y),
+        i64::from(dock.w),
+        i64::from(dock.h),
+    );
+    let (mx, my, mw, mh) = (
+        i64::from(physical.x),
+        i64::from(physical.y),
+        i64::from(physical.w),
+        i64::from(physical.h),
+    );
+    let pad = i64::from(pad.max(0));
+    match edge {
+        "top" | "bottom" => dx < mx + mw && dx + dw > mx && dy - pad < my + mh && dy + dh + pad > my,
+        "left" | "right" => dy < my + mh && dy + dh > my && dx - pad < mx + mw && dx + dw + pad > mx,
+        _ => false,
+    }
+}
+
+/// The configured bar starts at the physical top plus padding. Work-area
+/// struts may already reserve that strip; only its uncovered remainder counts.
+fn unreserved_top_fallback(offset: i32, m_y: i32, w_y: i32) -> i32 {
+    let reserved = (i64::from(w_y) - i64::from(m_y)).max(0);
+    (i64::from(offset.max(0)) - reserved).max(0) as i32
+}
+
+/// Share the decoration policy between live layout and drag simulation.
+pub(super) fn tiled_client_border_width(configured: i32, no_decorations: bool) -> i32 {
+    if no_decorations {
+        0
+    } else {
+        configured
+    }
+}
+
 impl Jwm {
     pub(crate) fn nexttiled(
         &self,
@@ -112,11 +177,8 @@ impl Jwm {
             if let Some(client) = self.state.clients.get_mut(key) {
                 // A client-side frame owns the decoration permanently. The
                 // layout ring must never be added back onto a CSD client.
-                client.geometry.border_w = if client.state.no_decorations {
-                    0
-                } else {
-                    effective_border
-                };
+                client.geometry.border_w =
+                    tiled_client_border_width(effective_border, client.state.no_decorations);
             }
         }
         (effective_border, effective_gap)
@@ -221,9 +283,8 @@ impl Jwm {
             .unwrap_or(true);
 
         if show_bar {
-            // Prefer the actual status bar geometry if we have it.
-            // This is important for Wayland, where the bar may be a layer-shell surface
-            // and its real size/position comes from the compositor arrangement.
+            // Config-only fallback; observed dock geometry is handled by the
+            // work-area calculation before this offset is used.
             let cfg = CONFIG.load();
             let fallback = cfg.status_bar_height() + cfg.status_bar_padding() * 2;
 
@@ -275,7 +336,7 @@ impl Jwm {
         let mut right = 0i32;
 
         let pad = CONFIG.load().status_bar_padding().max(0);
-        let threshold = pad.max(8);
+        let threshold = i64::from(pad.max(8));
 
         if let Some(client_keys) = self.state.monitor_clients.get(mon_key) {
             for &client_key in client_keys {
@@ -288,11 +349,6 @@ impl Jwm {
                     continue;
                 }
                 if !self.is_client_visible_on_monitor(client_key, mon_key) {
-                    continue;
-                }
-
-                // Hidden bars use negative coordinates.
-                if client.geometry.x <= -900 || client.geometry.y <= -900 {
                     continue;
                 }
 
@@ -320,11 +376,10 @@ impl Jwm {
                     continue;
                 }
 
-                // Distances to edges (clamped).
-                let dist_top = (dy - wy).abs();
-                let dist_bottom = ((wy + wh) - (dy + dh)).abs();
-                let dist_left = (dx - wx).abs();
-                let dist_right = ((wx + ww) - (dx + dw)).abs();
+                let (dist_top, dist_bottom, dist_left, dist_right) = dock_edge_distances(
+                    Rect::new(dx, dy, dw, dh),
+                    Rect::new(wx, wy, ww, wh),
+                );
 
                 // Heuristic classification: prefer horizontal vs vertical panels.
                 let is_horizontal = dw >= (ww * 2 / 3) && dh <= (wh / 2).max(1);
@@ -355,6 +410,16 @@ impl Jwm {
                         "right"
                     }
                 };
+
+                let physical = Rect::new(
+                    monitor.geometry.m_x,
+                    monitor.geometry.m_y,
+                    monitor.geometry.m_w,
+                    monitor.geometry.m_h,
+                );
+                if !dock_reaches_output_edge(Rect::new(dx, dy, dw, dh), physical, edge, pad) {
+                    continue;
+                }
 
                 let exclusive_zone = client
                     .state
@@ -462,9 +527,14 @@ impl Jwm {
             }
         }
 
-        // If we didn't observe any dock window yet, keep the historical top offset.
+        // Only the config fallback discounts a strip already covered by struts.
+        // Observed docks can be stacked and keep their full reservation above.
         if top == 0 && bottom == 0 && left == 0 && right == 0 {
-            top = self.get_client_y_offset(monitor);
+            top = unreserved_top_fallback(
+                self.get_client_y_offset(monitor),
+                monitor.geometry.m_y,
+                wy,
+            );
         }
 
         // Every reservation above came from a client. As with X11 struts,
@@ -557,8 +627,83 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::bounded_dock_reservation;
+    use super::{
+        bounded_dock_reservation, dock_edge_distances, dock_reaches_output_edge,
+        tiled_client_border_width,
+        unreserved_top_fallback,
+    };
+    use crate::core::types::Rect;
     use crate::jwm::strut_manager::clamp_opposing_edges;
+
+    #[test]
+    fn dock_distances_widen_before_add_subtract_and_abs() {
+        let work = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(
+            dock_edge_distances(Rect::new(10, 20, 100, 30), work),
+            (20, 1030, 10, 1810),
+        );
+        assert_eq!(
+            dock_edge_distances(Rect::new(i32::MIN, 10, 30, 20), work),
+            (10, 1050, 2_147_483_648, 2_147_485_538),
+        );
+        assert_eq!(
+            dock_edge_distances(
+                Rect::new(i32::MIN, i32::MAX, i32::MAX, i32::MAX),
+                Rect::new(i32::MAX, i32::MIN, i32::MAX, i32::MAX),
+            ),
+            (4_294_967_295, 4_294_967_295, 4_294_967_295, 4_294_967_295),
+        );
+        assert_eq!(
+            dock_edge_distances(
+                Rect::new(-1920, -1080, 1920, 30),
+                Rect::new(-1920, -1080, 1920, 1080),
+            ),
+            (0, 1050, 0, 0),
+        );
+    }
+
+    #[test]
+    fn tiled_borders_preserve_configured_width_unless_client_decorates() {
+        for configured in [i32::MIN, -1, 0, 1, 5, i32::MAX] {
+            assert_eq!(tiled_client_border_width(configured, false), configured);
+            assert_eq!(tiled_client_border_width(configured, true), 0);
+        }
+    }
+
+    #[test]
+    fn dock_overlap_uses_physical_output_and_edge_normal_padding() {
+        let output = Rect::new(-1920, -1080, 1920, 1080);
+        for (dock, edge, pad, expected) in [
+            (Rect::new(-1920, -1080, 1920, 30), "top", 0, true),
+            (Rect::new(-3840, -1080, 1920, 30), "top", 8, false),
+            (Rect::new(-1920, -1110, 1920, 30), "top", 0, false),
+            (Rect::new(-1920, -1110, 1920, 30), "top", 1, true),
+            (Rect::new(-1920, 0, 1920, 30), "bottom", 1, true),
+            (Rect::new(-1950, -1080, 30, 1080), "left", 0, false),
+            (Rect::new(-1950, -1080, 30, 1080), "left", 1, true),
+            (Rect::new(0, -1080, 30, 1080), "right", 1, true),
+            (Rect::new(-1920, -2160, 30, 1080), "left", 8, false),
+            (Rect::new(-1920, -1080, 0, 30), "top", 8, false),
+        ] {
+            assert_eq!(dock_reaches_output_edge(dock, output, edge, pad), expected);
+        }
+        assert!(!dock_reaches_output_edge(output, Rect::new(0, 0, 0, 100), "top", 8));
+        let extreme = Rect::new(i32::MAX - 4, i32::MIN, 100, 100);
+        assert!(dock_reaches_output_edge(extreme, extreme, "top", i32::MAX));
+    }
+
+    #[test]
+    fn config_fallback_only_reserves_the_uncovered_physical_top_strip() {
+        for (offset, physical_y, work_y, expected) in [
+            (38, 0, 0, 38), (38, 0, 30, 8), (38, 0, 38, 0),
+            (38, 0, 50, 0), (38, -1080, -1050, 8),
+            (38, 30, 0, 38), (-1, 0, 0, 0),
+            (i32::MAX, i32::MIN, i32::MAX, 0),
+            (i32::MAX, i32::MAX, i32::MIN, i32::MAX),
+        ] {
+            assert_eq!(unreserved_top_fallback(offset, physical_y, work_y), expected);
+        }
+    }
 
     #[test]
     fn a_dock_reservation_is_bounded_by_the_output_and_never_overflows() {

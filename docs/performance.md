@@ -36,6 +36,14 @@ jwm-tool perf compare baseline.json candidate.json   # exit 1 on regression
 jwm-tool perf budgets                                # print the budget table
 ```
 
+Default baseline names include bounded readable backend/API/GPU prefixes and a
+versioned stable fingerprint of all eight exact label fields. Different CPU,
+driver, kernel, resolution or configuration labels therefore no longer share a
+name merely because their backend and GPU prefix match. The fingerprint is not
+a security identifier or a guarantee against collisions. Explicit `--out`
+paths and comparisons using existing JSON paths are unchanged; old files are
+not automatically renamed.
+
 Configuration labels and baseline files accept regular files up to 4 MiB,
 including symlinks to regular files. FIFOs, oversized files and invalid baseline
 JSON are rejected. An unreadable configuration produces an `unknown` fingerprint,

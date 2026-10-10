@@ -353,17 +353,45 @@ fn create_config_temporary(
     ))
 }
 
+/// The revision belongs to the inode we wrote, even if another writer replaces
+/// the final pathname before the caller acknowledges this save. Revision lookup
+/// failure does not undo a successful publication; only acknowledgement needs it.
+#[derive(Debug)]
+struct ConfigWriteOutcome {
+    revision: std::io::Result<std::time::SystemTime>,
+}
+
 fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    atomic_write_with_outcome(path, contents).map(|_| ())
+}
+
+fn atomic_write_with_outcome(path: &Path, contents: &[u8]) -> std::io::Result<ConfigWriteOutcome> {
     atomic_write_with_sequence(path, contents, || {
         CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
     })
+}
+
+/// A fixed-size basename keeps valid long destination names writable. Compare
+/// filename bytes, not whole path spellings: `name` and `./name` may be aliases.
+fn config_temporary_path(destination: &Path, process_id: u32, sequence: u64) -> std::path::PathBuf {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let primary = format!(".jwm-config.tmp-{process_id}-{sequence}");
+    let name = if destination.file_name() == Some(OsStr::new(&primary)) {
+        format!(".jwm-config-save-{process_id}-{sequence}")
+    } else {
+        primary
+    };
+    parent.join(name)
 }
 
 fn atomic_write_with_sequence(
     path: &Path,
     contents: &[u8],
     mut next_sequence: impl FnMut() -> u64,
-) -> std::io::Result<()> {
+) -> std::io::Result<ConfigWriteOutcome> {
     // Preserve symlink-based dotfile setups. Renaming over `path` itself would
     // replace the link; resolving the complete chain lets us atomically
     // replace its target while leaving every user-managed link intact. The
@@ -375,24 +403,20 @@ fn atomic_write_with_sequence(
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
-    let file_name = destination
-        .file_name()
-        .map_or_else(|| "config".into(), |name| name.to_string_lossy());
     let (temporary, mut file) = create_config_temporary(|| {
-        let sequence = next_sequence();
-        parent.join(format!(
-            ".{file_name}.tmp-{}-{sequence}",
-            std::process::id()
-        ))
+        config_temporary_path(&destination, std::process::id(), next_sequence())
     })?;
-    let result: std::io::Result<()> = (|| {
+    let result: std::io::Result<ConfigWriteOutcome> = (|| {
         if let Ok(metadata) = fs::metadata(&destination) {
             file.set_permissions(metadata.permissions())?;
         }
         file.write_all(contents)?;
         file.sync_all()?;
+        // Capture from the owned descriptor before publishing. A pathname stat
+        // after rename could instead acknowledge a subsequent external edit.
+        let revision = file.metadata().and_then(|metadata| metadata.modified());
         fs::rename(&temporary, &destination)?;
-        Ok(())
+        Ok(ConfigWriteOutcome { revision })
     })();
 
     if result.is_err() {
@@ -401,8 +425,9 @@ fn atomic_write_with_sequence(
     // Once rename publishes the inode, this invocation no longer owns the
     // temporary pathname. A later directory-sync error must not remove a
     // different writer's newly created file at the same pathname.
-    result?;
-    fs::File::open(parent)?.sync_all()
+    let outcome = result?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -3847,11 +3872,17 @@ impl Config {
     }
 
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
+        self.save_to_file_with_outcome(path).map(|_| ())
+    }
+
+    fn save_to_file_with_outcome<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<ConfigWriteOutcome, ConfigError> {
         let toml_string =
             toml::to_string_pretty(&self.inner).map_err(|e| ConfigError::Serialize(e))?;
         let toml_string = Self::add_option_comments(&toml_string);
-        atomic_write(path.as_ref(), toml_string.as_bytes())?;
-        Ok(())
+        Ok(atomic_write_with_outcome(path.as_ref(), toml_string.as_bytes())?)
     }
 
     /// The comment header above the block JWM owns, so a reader can see which
@@ -3874,8 +3905,9 @@ impl Config {
     /// is small and always at the end, so it is cut out and re-appended as
     /// text instead — the rest of the file is never re-serialized.
     ///
-    /// Returns the file's new modification time, which the caller records so
-    /// the config watcher does not treat JWM's own write as an edit to reload.
+    /// Returns the modification time captured from JWM's own file descriptor
+    /// before publication, so a later replacement is not acknowledged as ours.
+    /// This does not prevent pre-publication lost updates or equal-mtime edits.
     pub fn persist_layout_tags(
         &self,
         entries: &[LayoutTagConfig],
@@ -3892,8 +3924,9 @@ impl Config {
     /// the file. When no config file exists yet, the whole config is written
     /// once (as on first start) with the theme applied.
     ///
-    /// Returns the file's new modification time, which the caller records so
-    /// the config watcher does not treat JWM's own write as an edit to reload.
+    /// Returns the modification time captured from JWM's own file descriptor
+    /// before publication, so a later replacement is not acknowledged as ours.
+    /// This does not prevent pre-publication lost updates or equal-mtime edits.
     pub fn persist_ui_theme(&self, theme: &str) -> Result<std::time::SystemTime, ConfigError> {
         self.persist_ui_theme_to(Self::resolve_load_path(), theme)
     }
@@ -3919,16 +3952,14 @@ impl Config {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut whole = self.clone();
                 whole.inner.appearance.ui_theme = normalized.to_string();
-                whole.save_to_file(&path)?;
-                return Ok(fs::metadata(&path)?.modified()?);
+                return Ok(whole.save_to_file_with_outcome(path)?.revision?);
             }
             Err(error) => return Err(error.into()),
         };
 
         let text = Self::surgical_set_ui_theme(&existing, normalized);
         Self::verify_surgical_ui_theme_edit(path, &existing, &text, normalized)?;
-        atomic_write(&path, text.as_bytes())?;
-        Ok(fs::metadata(&path)?.modified()?)
+        Ok(atomic_write_with_outcome(path, text.as_bytes())?.revision?)
     }
 
     /// Refuse a surgical theme edit that would break a file TOML accepts
@@ -4083,8 +4114,7 @@ impl Config {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut whole = self.clone();
                 whole.set_layout_tags(entries.to_vec());
-                whole.save_to_file(&path)?;
-                return Ok(fs::metadata(&path)?.modified()?);
+                return Ok(whole.save_to_file_with_outcome(path)?.revision?);
             }
             Err(error) => return Err(error.into()),
         };
@@ -4099,8 +4129,7 @@ impl Config {
             text.push_str(&block);
         }
         Self::verify_surgical_layout_tags_edit(path, &existing, &text)?;
-        atomic_write(&path, text.as_bytes())?;
-        Ok(fs::metadata(&path)?.modified()?)
+        Ok(atomic_write_with_outcome(path, text.as_bytes())?.revision?)
     }
 
     /// Refuse a per-tag layout edit that would break a file TOML accepts
@@ -4697,6 +4726,18 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Build a single hot override with the same whole-config validation as a
+    /// one-entry batch. Existing unrelated errors also prevent publication.
+    pub(crate) fn with_validated_value(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<Self, String> {
+        let mut candidate = self.clone();
+        candidate.set_values(&[(key.to_string(), value.clone())])?;
+        Ok(candidate)
     }
 
     /// Atomically apply a batch of hot-tunable in-memory overrides. The
@@ -6150,6 +6191,57 @@ border_px = 3
         std::fs::remove_file(path).unwrap();
     }
 
+    // Pure pathname tests: no filesystem calls, default Config or backend setup.
+    #[test]
+    fn config_temporary_names_are_bounded_for_long_destination_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        use std::path::PathBuf;
+
+        for name in [
+            OsString::from("a".repeat(255)),
+            OsString::from("界".repeat(85)),
+            OsString::from_vec(vec![0xff; 255]),
+        ] {
+            let destination = PathBuf::from("subdir").join(name);
+            let candidate = super::config_temporary_path(&destination, u32::MAX, u64::MAX);
+            assert_eq!(candidate.parent(), destination.parent());
+            assert_eq!(
+                candidate.file_name().unwrap(),
+                ".jwm-config.tmp-4294967295-18446744073709551615"
+            );
+            assert!(candidate.file_name().unwrap().as_bytes().len() < 255);
+            assert_ne!(candidate.file_name(), destination.file_name());
+        }
+    }
+
+    #[test]
+    fn config_temporary_names_avoid_destination_aliases_and_preserve_nonce() {
+        use std::path::Path;
+
+        for parent in ["", "./", "subdir/"] {
+            for (destination_name, temporary_name) in [
+                ("config.toml", ".jwm-config.tmp-17-23"),
+                (".jwm-config.tmp-17-23", ".jwm-config-save-17-23"),
+                (".jwm-config-save-17-23", ".jwm-config.tmp-17-23"),
+            ] {
+                let destination = format!("{parent}{destination_name}");
+                let candidate = super::config_temporary_path(Path::new(&destination), 17, 23);
+                let expected_parent = if parent.is_empty() { "." } else { parent };
+                assert_eq!(candidate, Path::new(expected_parent).join(temporary_name));
+                assert_ne!(candidate.file_name(), Path::new(&destination).file_name());
+                assert_ne!(
+                    candidate,
+                    super::config_temporary_path(Path::new(&destination), 17, 24)
+                );
+                assert_ne!(
+                    candidate,
+                    super::config_temporary_path(Path::new(&destination), 18, 23)
+                );
+            }
+        }
+    }
+
     #[test]
     fn failed_config_publish_preserves_destination_and_removes_owned_temporary() {
         let directory = temporary_config_path("failed-publish");
@@ -6169,7 +6261,7 @@ border_px = 3
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("config.toml");
         std::fs::write(&path, b"old").unwrap();
-        let occupied = directory.join(format!(".config.toml.tmp-{}-0", std::process::id()));
+        let occupied = super::config_temporary_path(&path, std::process::id(), 0);
         std::fs::write(&occupied, b"other writer").unwrap();
         let mut sequence = 0;
         super::atomic_write_with_sequence(&path, b"new", || {
@@ -7043,6 +7135,98 @@ border_px = 3
         assert!(loaded.get_buttons().is_empty());
         assert!(loaded.compile_chord().unwrap().bindings.is_empty());
         std::fs::remove_file(path).unwrap();
+    }
+
+    // Explicit data-only adapter: avoid Config::default(), whose default keys
+    // may probe the environment. This exercises real setters and diagnostics,
+    // but not CONFIG publication, IPC, backend application, events or replies.
+    fn validated_value_fixture(height: i32) -> Config {
+        let inner: TomlConfig = serde_json::from_value(serde_json::json!({
+            "appearance": {
+                "border_px": 3, "gap_px": 5, "snap": 32,
+                "system_ui_font": "sans 11", "status_bar_padding": 5,
+                "status_bar_height": height
+            },
+            "behavior": {
+                "focus_follows_new_window": false,
+                "resize_hints": true, "lock_fullscreen": true
+            },
+            "status_bar": { "name": "fixture", "show_bar": false },
+            "colors": {
+                "dark_sea_green1": "#afffd7", "dark_sea_green2": "#afffaf",
+                "pale_turquoise1": "#afffff", "light_sky_blue1": "#afd7ff",
+                "grey84": "#d7d7d7", "cyan": "#00ffd7",
+                "white": "#ffffff", "black": "#000000",
+                "transparent": 0, "opaque": 255
+            },
+            "keybindings": { "modkey": "Mod1", "keys": [] },
+            "mouse_bindings": { "buttons": [] },
+            "rules": [],
+            "layout": { "m_fact": 0.55, "n_master": 1, "tags_length": 9 }
+        }))
+        .unwrap();
+        let config = Config { inner };
+        let diagnostics = config.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+        config
+    }
+
+    #[test]
+    fn validated_value_rejects_enabling_bar_with_nonpositive_height() {
+        for height in [0, -1] {
+            let source = validated_value_fixture(height);
+            let before = serde_json::to_value(&source.inner).unwrap();
+            let error = source
+                .with_validated_value("status_bar.show_bar", &serde_json::json!(true))
+                .err()
+                .expect("enabling a zero/negative-height bar must be rejected");
+            assert!(error.contains("appearance.status_bar_height"));
+            assert_eq!(serde_json::to_value(&source.inner).unwrap(), before);
+
+            let mut batch = source.clone();
+            let batch_error = batch
+                .set_values(&[("status_bar.show_bar".into(), serde_json::json!(true))])
+                .unwrap_err();
+            assert_eq!(error, batch_error);
+            assert_eq!(serde_json::to_value(&batch.inner).unwrap(), before);
+            let disabled = source
+                .with_validated_value("status_bar.show_bar", &serde_json::json!(false))
+                .unwrap();
+            assert_eq!(serde_json::to_value(&disabled.inner).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn validated_value_accepts_enabling_bar_with_positive_height() {
+        for height in [1, 42] {
+            let source = validated_value_fixture(height);
+            let before = serde_json::to_value(&source.inner).unwrap();
+            let updated = source
+                .with_validated_value("status_bar.show_bar", &serde_json::json!(true))
+                .unwrap();
+            assert!(updated.inner.status_bar.show_bar);
+            assert_eq!(updated.inner.appearance.status_bar_height, height);
+            assert_eq!(serde_json::to_value(&source.inner).unwrap(), before);
+            let mut batch = source.clone();
+            batch
+                .set_values(&[("status_bar.show_bar".into(), serde_json::json!(true))])
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&updated.inner).unwrap(),
+                serde_json::to_value(&batch.inner).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn validated_value_rejects_an_unrelated_existing_semantic_error() {
+        let mut source = validated_value_fixture(42);
+        source.inner.layout.m_fact = 9.0;
+        let before = serde_json::to_value(&source.inner).unwrap();
+        assert!(source
+            .with_validated_value("appearance.gap_px", &serde_json::json!(12))
+            .is_err());
+        assert_eq!(serde_json::to_value(&source.inner).unwrap(), before);
     }
 
     #[test]

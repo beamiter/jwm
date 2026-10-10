@@ -88,7 +88,8 @@ impl SystemLabel {
         differs
     }
 
-    /// Short filesystem-safe identifier for baseline file names.
+    /// Bounded, filesystem-safe name that identifies all exact label fields.
+    /// The versioned FNV-1a suffix is stable, not a security or collision proof.
     #[must_use]
     pub fn slug(&self) -> String {
         let sanitize = |value: &str| {
@@ -106,14 +107,39 @@ impl SystemLabel {
                 .filter(|part| !part.is_empty())
                 .collect::<Vec<_>>()
                 .join("-")
+                .chars()
+                .take(24)
+                .collect::<String>()
+                .trim_end_matches('-')
+                .to_string()
         };
-        let gpu = sanitize(&self.gpu);
-        let gpu_short: String = gpu.chars().take(24).collect();
+        let mut fingerprint = 0xcbf29ce484222325u64;
+        for field in [
+            &self.cpu,
+            &self.gpu,
+            &self.driver,
+            &self.kernel,
+            &self.backend,
+            &self.renderer_api,
+            &self.resolution,
+            &self.config_fingerprint,
+        ] {
+            // Length framing distinguishes e.g. ("ab", "c") from ("a", "bc").
+            // Bytes, case and field order are part of the comparison identity.
+            for byte in (field.len() as u64)
+                .to_le_bytes()
+                .into_iter()
+                .chain(field.bytes())
+            {
+                fingerprint ^= u64::from(byte);
+                fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+            }
+        }
         format!(
-            "{}-{}-{}",
+            "{}-{}-{}-v1-{fingerprint:016x}",
             sanitize(&self.backend),
             sanitize(&self.renderer_api),
-            gpu_short.trim_end_matches('-')
+            sanitize(&self.gpu)
         )
     }
 }
@@ -1011,10 +1037,79 @@ mod tests {
     #[test]
     fn slugs_are_filesystem_safe() {
         let slug = label().slug();
-        assert_eq!(slug, "xcb-glx-opengl-test-gpu");
+        assert_eq!(slug, "xcb-glx-opengl-test-gpu-v1-eae0d9d2ea2e5ae5");
         assert!(
             slug.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         );
+    }
+
+    #[test]
+    fn every_exact_label_field_contributes_to_the_baseline_name() {
+        let original = label();
+        for field in 0..8 {
+            let mut changed = original.clone();
+            let target = match field {
+                0 => &mut changed.cpu,
+                1 => &mut changed.gpu,
+                2 => &mut changed.driver,
+                3 => &mut changed.kernel,
+                4 => &mut changed.backend,
+                5 => &mut changed.renderer_api,
+                6 => &mut changed.resolution,
+                _ => &mut changed.config_fingerprint,
+            };
+            target.push('X');
+            assert_ne!(original.slug(), changed.slug());
+        }
+        let mut long_gpu = original.clone();
+        long_gpu.gpu = "a".repeat(80);
+        let mut tail = long_gpu.clone();
+        tail.gpu.push('b');
+        assert_ne!(long_gpu.slug(), tail.slug());
+        let mut case = original.clone();
+        case.backend = original.backend.to_uppercase();
+        assert_ne!(original.slug(), case.slug());
+    }
+
+    #[test]
+    fn label_fingerprint_frames_field_boundaries() {
+        let mut left = label();
+        left.cpu = "ab".into();
+        left.gpu = "c".into();
+        let mut right = left.clone();
+        right.cpu = "a".into();
+        right.gpu = "bc".into();
+        // Compare just the fingerprint: readable prefixes also differ here.
+        let a = left.slug();
+        let b = right.slug();
+        assert_ne!(a.rsplit('-').next(), b.rsplit('-').next());
+    }
+
+    #[test]
+    fn label_fingerprint_uses_utf8_bytes_and_byte_lengths() {
+        let mut unicode = label();
+        unicode.cpu = "处理器 Ω".into();
+        unicode.gpu = "显卡🙂".into();
+        unicode.driver = "驱动".into();
+        assert_eq!(unicode.slug(), "xcb-glx-opengl--v1-f28a794c63bc9d17");
+    }
+
+    #[test]
+    fn readable_slug_prefixes_are_bounded_and_cannot_form_paths() {
+        let mut unusual = label();
+        unusual.backend = "/../a B_".repeat(100);
+        unusual.renderer_api = "\\\\x/y/中文".repeat(100);
+        unusual.gpu = "long GPU name".repeat(100);
+        let slug = unusual.slug();
+        assert!(slug.len() <= 94);
+        assert!(
+            slug.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        );
+        unusual.backend.clear();
+        unusual.renderer_api.clear();
+        unusual.gpu.clear();
+        assert_eq!(unusual.slug(), "---v1-0c1fc7a66cd4ff80");
     }
 }

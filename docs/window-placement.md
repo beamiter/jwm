@@ -378,3 +378,23 @@ rectangle. A minimized promoted window is saved tiled, the state it rests
 in, so it comes back like a visible one.
 
 `jwm-tool health` prints compact `closed_placement` for window placement operators.
+
+## Layout drag previews and reserved edges
+
+Tiled drag previews use each client's decoration policy: a client with its
+own decorations keeps zero compositor border, while other clients keep the
+configured border. The FULLSCREEN layout previews the physical output;
+other layouts preview the work area. This layout choice is separate from a
+window's fullscreen state.
+
+Scrolling insertion is calculated after excluding the dragged window and
+removing columns that would become empty. A column containing other windows
+remains, using its first remaining window's current coordinates rather than
+reflowing the strip before the drop.
+
+Dock reservations require overlap with the physical output, so negative
+monitor coordinates are valid and parked docks outside that output do not
+reserve space. Padding extends the overlap test only perpendicular to the
+chosen edge. If all four observed dock reservations are zero, the configured
+bar offset is used only for the part not already reserved above the work
+area by a strut. Observed stacked docks retain their reservation.
