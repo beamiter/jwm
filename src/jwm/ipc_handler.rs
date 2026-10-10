@@ -2082,6 +2082,11 @@ impl Jwm {
         name: &str,
         args: &serde_json::Value,
     ) -> IpcResponse {
+        // A prior command in this same IPC poll or batch may have accepted
+        // quit/restart. Do not admit more mutations while teardown is pending.
+        if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
+            return IpcResponse::err("session is shutting down");
+        }
         // This remains a dispatch command so it can be bound to a key, but IPC
         // callers need the asynchronous submission contract and destination
         // rather than a bare success bit that could be mistaken for a saved PNG.
@@ -7928,6 +7933,101 @@ mod tests {
             parse_config_batch_changes(&serde_json::json!({ "values": values })).unwrap_err();
         assert!(error.contains("too many changes"));
         assert!(error.contains(&MAX_CONFIG_BATCH_CHANGES.to_string()));
+    }
+
+    #[test]
+    fn shutdown_rejects_special_and_dispatched_ipc_commands() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        for shutdown in ["quit", "restart"] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            assert!(
+                jwm.handle_ipc_command(&mut backend, shutdown, &serde_json::json!({}))
+                    .success
+            );
+            for (command, args) in [
+                ("toggle_magnifier", serde_json::json!({})),
+                (
+                    "notify",
+                    serde_json::json!({ "title": "must not be posted" }),
+                ),
+            ] {
+                let response = jwm.handle_ipc_command(&mut backend, command, &args);
+                assert!(!response.success, "{shutdown}: {command}");
+                assert_eq!(response.error.as_deref(), Some("session is shutting down"));
+            }
+            assert!(!jwm.features.magnifier.enabled);
+        }
+    }
+
+    #[test]
+    fn command_batches_do_not_mutate_after_quit_under_either_error_policy() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        for stop_on_error in [true, false] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let response = jwm.handle_ipc_command(
+                &mut backend,
+                "command_batch",
+                &serde_json::json!({
+                    "stop_on_error": stop_on_error,
+                    "commands": [
+                        { "command": "quit" },
+                        { "command": "toggle_magnifier" },
+                        { "command": "mag" }
+                    ]
+                }),
+            );
+            assert!(!response.success);
+            assert!(!jwm.features.magnifier.enabled);
+            let data = response.data.unwrap();
+            assert_eq!(data["requested"], 3);
+            assert_eq!(data["executed"], if stop_on_error { 2 } else { 3 });
+            assert_eq!(data["results"][0]["success"], true);
+            for result in data["results"].as_array().unwrap().iter().skip(1) {
+                assert_eq!(result["success"], false);
+                assert_eq!(result["response"]["error"], "session is shutting down");
+            }
+        }
+    }
+
+    #[test]
+    fn running_command_batches_keep_the_existing_ordered_behavior() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "batch",
+            &serde_json::json!({
+                "commands": [
+                    { "command": "toggle_magnifier" },
+                    { "command": "mag" }
+                ]
+            }),
+        );
+        assert!(response.success);
+        assert_eq!(response.data.unwrap()["executed"], 2);
+        assert!(!jwm.features.magnifier.enabled);
+        assert!(jwm.running.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn shutdown_does_not_disable_read_only_ipc_queries() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        assert!(
+            jwm.handle_ipc_command(&mut backend, "quit", &serde_json::json!({}))
+                .success
+        );
+        let response = jwm.handle_ipc_query("get_magnifier", &serde_json::json!({}), &backend);
+        assert!(response.success);
+        assert!(response.data.is_some());
     }
 
     #[test]
