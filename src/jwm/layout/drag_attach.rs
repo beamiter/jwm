@@ -447,7 +447,10 @@ impl Jwm {
         let border_for = |key| {
             tiled_client_border_width(
                 configured_border,
-                self.state.clients.get(key).is_some_and(|c| c.state.no_decorations),
+                self.state
+                    .clients
+                    .get(key)
+                    .is_some_and(|c| c.state.no_decorations),
             )
         };
         let monitor_gap = self
@@ -527,7 +530,9 @@ impl Jwm {
             .scrolling_state_for_monitor(mon_key)
             .map(|state| {
                 scrolling_spans_after_removal(&state.columns, drag_key, |key| {
-                    self.state.clients.get(key)
+                    self.state
+                        .clients
+                        .get(key)
                         .map(|c| (c.geometry.x, c.geometry.x + c.geometry.w))
                 })
             })
@@ -871,7 +876,11 @@ mod tests {
         let physical = Rect::new(-1920, 0, 1920, 1080);
         for id in 0..=13 {
             let layout = LayoutEnum::from(id);
-            let expected = if layout == LayoutEnum::FULLSCREEN { physical } else { work };
+            let expected = if layout == LayoutEnum::FULLSCREEN {
+                physical
+            } else {
+                work
+            };
             assert_eq!(layout_attach_area(&layout, work, Some(physical)), expected);
             assert_eq!(layout_attach_area(&layout, work, None), work);
         }
@@ -887,16 +896,37 @@ mod tests {
             _ => None,
         };
         let columns = vec![vec![1], vec![2, 3], vec![4]];
-        assert_eq!(scrolling_spans_after_removal(&columns, 1, span_of), vec![(20, 720), (750, 1450)]);
-        assert_eq!(scrolling_spans_after_removal(&columns, 2, span_of), vec![(-800, -100), (20, 710), (750, 1450)]);
-        assert_eq!(scrolling_spans_after_removal(&columns, 3, span_of), vec![(-800, -100), (20, 720), (750, 1450)]);
-        assert_eq!(scrolling_spans_after_removal(&columns, 4, span_of), vec![(-800, -100), (20, 720)]);
-        assert_eq!(scrolling_spans_after_removal(&columns, 99, span_of), vec![(-800, -100), (20, 720), (750, 1450)]);
+        assert_eq!(
+            scrolling_spans_after_removal(&columns, 1, span_of),
+            vec![(20, 720), (750, 1450)]
+        );
+        assert_eq!(
+            scrolling_spans_after_removal(&columns, 2, span_of),
+            vec![(-800, -100), (20, 710), (750, 1450)]
+        );
+        assert_eq!(
+            scrolling_spans_after_removal(&columns, 3, span_of),
+            vec![(-800, -100), (20, 720), (750, 1450)]
+        );
+        assert_eq!(
+            scrolling_spans_after_removal(&columns, 4, span_of),
+            vec![(-800, -100), (20, 720)]
+        );
+        assert_eq!(
+            scrolling_spans_after_removal(&columns, 99, span_of),
+            vec![(-800, -100), (20, 720), (750, 1450)]
+        );
         assert!(scrolling_spans_after_removal(&[vec![1]], 1, span_of).is_empty());
         assert!(scrolling_spans_after_removal(&[vec![], vec![99]], 1, span_of).is_empty());
         // A removed leading column cannot shift the insertion slot to the right.
         let spans = scrolling_spans_after_removal(&columns, 1, span_of);
-        assert_eq!(spans.iter().filter(|&&(left, right)| (left + right) / 2 < 500).count(), 1);
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|&&(left, right)| (left + right) / 2 < 500)
+                .count(),
+            1
+        );
     }
 
     #[test]

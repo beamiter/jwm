@@ -593,7 +593,13 @@ pub fn calculate_fibonacci<K: Copy>(
         let is_master = (i as u32) < *n_master;
         if is_master {
             let h = distribute_length(
-                wh, master_gap, my, mi, n_master_count, c.factor, remaining_m_fact,
+                wh,
+                master_gap,
+                my,
+                mi,
+                n_master_count,
+                c.factor,
+                remaining_m_fact,
             );
 
             let res_y = wy + my + mi * master_gap;
@@ -1265,7 +1271,13 @@ pub fn calculate_scrolling<K: Copy>(
             let index = i32::try_from(win_idx).unwrap_or(i32::MAX);
             let client_fact = client.factor.max(0.0);
             let h = distribute_length(
-                avail_h, column_gap, y_cursor, index, count, client_fact, remaining_fact,
+                avail_h,
+                column_gap,
+                y_cursor,
+                index,
+                count,
+                client_fact,
+                remaining_fact,
             );
 
             let window_offset = index.saturating_mul(column_gap);
@@ -2504,7 +2516,10 @@ mod tests {
             }
         }
         assert_eq!(row.last().unwrap().rect.x + row.last().unwrap().rect.w, -20);
-        assert_eq!(column.last().unwrap().rect.y + column.last().unwrap().rect.h, 680);
+        assert_eq!(
+            column.last().unwrap().rect.y + column.last().unwrap().rect.h,
+            680
+        );
     }
 
     #[test]
@@ -2512,7 +2527,11 @@ mod tests {
         let clients: Vec<_> = [4.0, 0.25, 0.25]
             .into_iter()
             .enumerate()
-            .map(|(key, factor)| LayoutClient { key, factor, border_w: 0 })
+            .map(|(key, factor)| LayoutClient {
+                key,
+                factor,
+                border_w: 0,
+            })
             .collect();
         let mut row = Vec::new();
         let mut column = Vec::new();
@@ -2529,22 +2548,32 @@ mod tests {
         let clients: Vec<_> = [2.0, 1.0, 1.0]
             .into_iter()
             .enumerate()
-            .map(|(key, factor)| LayoutClient { key, factor, border_w: 0 })
+            .map(|(key, factor)| LayoutClient {
+                key,
+                factor,
+                border_w: 0,
+            })
             .collect();
         let mut row = Vec::new();
         let mut column = Vec::new();
         push_factor_row(&mut row, &clients, -100, -80, 100, 100, 8);
         push_factor_column(&mut column, &clients, -100, -80, 100, 100, 8);
-        assert_eq!(row.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
-            Rect::new(-100, -80, 42, 100),
-            Rect::new(-50, -80, 21, 100),
-            Rect::new(-21, -80, 21, 100),
-        ]);
-        assert_eq!(column.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
-            Rect::new(-100, -80, 100, 42),
-            Rect::new(-100, -30, 100, 21),
-            Rect::new(-100, -1, 100, 21),
-        ]);
+        assert_eq!(
+            row.iter().map(|r| r.rect).collect::<Vec<_>>(),
+            vec![
+                Rect::new(-100, -80, 42, 100),
+                Rect::new(-50, -80, 21, 100),
+                Rect::new(-21, -80, 21, 100),
+            ]
+        );
+        assert_eq!(
+            column.iter().map(|r| r.rect).collect::<Vec<_>>(),
+            vec![
+                Rect::new(-100, -80, 100, 42),
+                Rect::new(-100, -30, 100, 21),
+                Rect::new(-100, -1, 100, 21),
+            ]
+        );
     }
 
     #[test]
@@ -2575,7 +2604,10 @@ mod tests {
 
     #[test]
     fn fibonacci_overlaps_remaining_clients_when_splits_run_out() {
-        let p = LayoutParams { gap: 8, ..params(1920, 1080) };
+        let p = LayoutParams {
+            gap: 8,
+            ..params(1920, 1080)
+        };
         let clients = borderless_clients(30);
         let results = calculate_fibonacci(&p, &clients);
         assert_eq!(results.len(), 30);
@@ -2583,10 +2615,15 @@ mod tests {
             assert_eq!(result.key, i as u32);
             assert_inside(result.rect, Rect::new(8, 8, 1904, 1064));
         }
-        let overlap_start = results.windows(2)
+        let overlap_start = results
+            .windows(2)
             .position(|pair| pair[0].rect == pair[1].rect)
             .expect("exhausted splits should leave overlapping clients");
-        assert!(results[overlap_start..].iter().all(|r| r.rect == results[overlap_start].rect));
+        assert!(
+            results[overlap_start..]
+                .iter()
+                .all(|r| r.rect == results[overlap_start].rect)
+        );
     }
 
     #[test]
@@ -2612,18 +2649,25 @@ mod tests {
             gap: 8,
         };
         let results = calculate_fibonacci(&p, &borderless_clients(4));
-        assert_eq!(results.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
-            Rect::new(8, 8, 88, 104),
-            Rect::new(104, 8, 88, 48),
-            Rect::new(104, 64, 40, 48),
-            Rect::new(152, 64, 40, 48),
-        ]);
+        assert_eq!(
+            results.iter().map(|r| r.rect).collect::<Vec<_>>(),
+            vec![
+                Rect::new(8, 8, 88, 104),
+                Rect::new(104, 8, 88, 48),
+                Rect::new(104, 64, 40, 48),
+                Rect::new(152, 64, 40, 48),
+            ]
+        );
     }
 
     #[test]
     fn deck_previews_stay_inside_tiny_positive_areas() {
         for n_master in [0, 1] {
-            let p = LayoutParams { n_master, gap: 8, ..params(32, 24) };
+            let p = LayoutParams {
+                n_master,
+                gap: 8,
+                ..params(32, 24)
+            };
             let results = calculate_deck(&p, &borderless_clients(12));
             assert_eq!(results.len(), 12);
             for result in &results {
@@ -2646,7 +2690,10 @@ mod tests {
         push_deck_previews(&mut results, &borderless_clients(7), 10, 20, 200, 120, 8);
         for (i, result) in results.iter().enumerate() {
             let offset = i.min(5) as i32 * 8;
-            assert_eq!(result.rect, Rect::new(10 + offset, 20 + offset, 200 - offset, 120 - offset));
+            assert_eq!(
+                result.rect,
+                Rect::new(10 + offset, 20 + offset, 200 - offset, 120 - offset)
+            );
         }
     }
 
@@ -2659,14 +2706,20 @@ mod tests {
             gap: 100,
             viewport_x: -999.0,
         };
-        let columns = vec![borderless_clients(14), borderless_clients(2), borderless_clients(3)];
+        let columns = vec![
+            borderless_clients(14),
+            borderless_clients(2),
+            borderless_clients(3),
+        ];
         let (results, viewport) = calculate_scrolling(&p, &columns, 1);
         assert_eq!(results.len(), 19);
         assert_eq!(viewport, 820.0);
         let mut start = 0;
-        for (column, (x, width, fitted_gap)) in columns.iter().zip([
-            (-2740, 960, 66), (-1680, 1440, 100), (-140, 480, 100),
-        ]) {
+        for (column, (x, width, fitted_gap)) in
+            columns
+                .iter()
+                .zip([(-2740, 960, 66), (-1680, 1440, 100), (-140, 480, 100)])
+        {
             let column_results = &results[start..start + column.len()];
             for (i, result) in column_results.iter().enumerate() {
                 assert_eq!(result.key, column[i].key);
@@ -2692,8 +2745,15 @@ mod tests {
             gap: 0,
             viewport_x: 0.0,
         };
-        let column = [4.0, 0.25, 0.25].into_iter().enumerate()
-            .map(|(key, factor)| LayoutClient { key, factor, border_w: 0 }).collect();
+        let column = [4.0, 0.25, 0.25]
+            .into_iter()
+            .enumerate()
+            .map(|(key, factor)| LayoutClient {
+                key,
+                factor,
+                border_w: 0,
+            })
+            .collect();
         let (results, viewport) = calculate_scrolling(&p, &[column], 0);
         assert_eq!(viewport, -25.0);
         for (i, result) in results.iter().enumerate() {
@@ -2714,11 +2774,13 @@ mod tests {
         clients[0].factor = 2.0;
         let (results, viewport) = calculate_scrolling(&p, &[clients], 0);
         assert_eq!(viewport, -50.0);
-        assert_eq!(results.iter().map(|r| r.rect).collect::<Vec<_>>(), vec![
-            Rect::new(-150, -42, 100, 44),
-            Rect::new(-150, 10, 100, 22),
-            Rect::new(-150, 40, 100, 22),
-        ]);
+        assert_eq!(
+            results.iter().map(|r| r.rect).collect::<Vec<_>>(),
+            vec![
+                Rect::new(-150, -42, 100, 44),
+                Rect::new(-150, 10, 100, 22),
+                Rect::new(-150, 40, 100, 22),
+            ]
+        );
     }
-
 }

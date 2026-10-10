@@ -81,8 +81,12 @@ fn dock_reaches_output_edge(dock: Rect, physical: Rect, edge: &str, pad: i32) ->
     );
     let pad = i64::from(pad.max(0));
     match edge {
-        "top" | "bottom" => dx < mx + mw && dx + dw > mx && dy - pad < my + mh && dy + dh + pad > my,
-        "left" | "right" => dy < my + mh && dy + dh > my && dx - pad < mx + mw && dx + dw + pad > mx,
+        "top" | "bottom" => {
+            dx < mx + mw && dx + dw > mx && dy - pad < my + mh && dy + dh + pad > my
+        }
+        "left" | "right" => {
+            dy < my + mh && dy + dh > my && dx - pad < mx + mw && dx + dw + pad > mx
+        }
         _ => false,
     }
 }
@@ -96,11 +100,7 @@ fn unreserved_top_fallback(offset: i32, m_y: i32, w_y: i32) -> i32 {
 
 /// Share the decoration policy between live layout and drag simulation.
 pub(super) fn tiled_client_border_width(configured: i32, no_decorations: bool) -> i32 {
-    if no_decorations {
-        0
-    } else {
-        configured
-    }
+    if no_decorations { 0 } else { configured }
 }
 
 impl Jwm {
@@ -376,10 +376,8 @@ impl Jwm {
                     continue;
                 }
 
-                let (dist_top, dist_bottom, dist_left, dist_right) = dock_edge_distances(
-                    Rect::new(dx, dy, dw, dh),
-                    Rect::new(wx, wy, ww, wh),
-                );
+                let (dist_top, dist_bottom, dist_left, dist_right) =
+                    dock_edge_distances(Rect::new(dx, dy, dw, dh), Rect::new(wx, wy, ww, wh));
 
                 // Heuristic classification: prefer horizontal vs vertical panels.
                 let is_horizontal = dw >= (ww * 2 / 3) && dh <= (wh / 2).max(1);
@@ -629,8 +627,7 @@ impl Jwm {
 mod tests {
     use super::{
         bounded_dock_reservation, dock_edge_distances, dock_reaches_output_edge,
-        tiled_client_border_width,
-        unreserved_top_fallback,
+        tiled_client_border_width, unreserved_top_fallback,
     };
     use crate::core::types::Rect;
     use crate::jwm::strut_manager::clamp_opposing_edges;
@@ -687,7 +684,12 @@ mod tests {
         ] {
             assert_eq!(dock_reaches_output_edge(dock, output, edge, pad), expected);
         }
-        assert!(!dock_reaches_output_edge(output, Rect::new(0, 0, 0, 100), "top", 8));
+        assert!(!dock_reaches_output_edge(
+            output,
+            Rect::new(0, 0, 0, 100),
+            "top",
+            8
+        ));
         let extreme = Rect::new(i32::MAX - 4, i32::MIN, 100, 100);
         assert!(dock_reaches_output_edge(extreme, extreme, "top", i32::MAX));
     }
@@ -695,13 +697,20 @@ mod tests {
     #[test]
     fn config_fallback_only_reserves_the_uncovered_physical_top_strip() {
         for (offset, physical_y, work_y, expected) in [
-            (38, 0, 0, 38), (38, 0, 30, 8), (38, 0, 38, 0),
-            (38, 0, 50, 0), (38, -1080, -1050, 8),
-            (38, 30, 0, 38), (-1, 0, 0, 0),
+            (38, 0, 0, 38),
+            (38, 0, 30, 8),
+            (38, 0, 38, 0),
+            (38, 0, 50, 0),
+            (38, -1080, -1050, 8),
+            (38, 30, 0, 38),
+            (-1, 0, 0, 0),
             (i32::MAX, i32::MIN, i32::MAX, 0),
             (i32::MAX, i32::MAX, i32::MIN, i32::MAX),
         ] {
-            assert_eq!(unreserved_top_fallback(offset, physical_y, work_y), expected);
+            assert_eq!(
+                unreserved_top_fallback(offset, physical_y, work_y),
+                expected
+            );
         }
     }
 

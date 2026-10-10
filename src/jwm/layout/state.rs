@@ -494,7 +494,15 @@ mod tests {
 
     #[test]
     fn absolute_master_count_preserves_zero_and_caps_extreme_inputs() {
-        for (input, expected) in [(i32::MIN, 0), (-1, 0), (0, 0), (1, 1), (32, 32), (33, 32), (i32::MAX, 32)] {
+        for (input, expected) in [
+            (i32::MIN, 0),
+            (-1, 0),
+            (0, 0),
+            (1, 1),
+            (32, 32),
+            (33, 32),
+            (i32::MAX, 32),
+        ] {
             assert_eq!(adjusted_n_master(0, input), expected);
         }
     }

@@ -3882,7 +3882,10 @@ impl Config {
         let toml_string =
             toml::to_string_pretty(&self.inner).map_err(|e| ConfigError::Serialize(e))?;
         let toml_string = Self::add_option_comments(&toml_string);
-        Ok(atomic_write_with_outcome(path.as_ref(), toml_string.as_bytes())?)
+        Ok(atomic_write_with_outcome(
+            path.as_ref(),
+            toml_string.as_bytes(),
+        )?)
     }
 
     /// The comment header above the block JWM owns, so a reader can see which
@@ -7223,9 +7226,11 @@ border_px = 3
         let mut source = validated_value_fixture(42);
         source.inner.layout.m_fact = 9.0;
         let before = serde_json::to_value(&source.inner).unwrap();
-        assert!(source
-            .with_validated_value("appearance.gap_px", &serde_json::json!(12))
-            .is_err());
+        assert!(
+            source
+                .with_validated_value("appearance.gap_px", &serde_json::json!(12))
+                .is_err()
+        );
         assert_eq!(serde_json::to_value(&source.inner).unwrap(), before);
     }
 
