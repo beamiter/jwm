@@ -58,6 +58,34 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("fixture contents", self.output.read_text())
 
+    def test_directory_symlink_loop_keeps_collecting_readable_files(self):
+        (self.source / "loop.rs").symlink_to("loop.rs")
+        result = self.run_collector("-s", self.source, "-o", self.output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.output.exists(), result.stderr)
+        self.assertIn("fixture contents", self.output.read_text())
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_explicit_symlink_loop_keeps_collecting_readable_files(self):
+        loop = self.root / "loop.rs"
+        loop.symlink_to(loop.name)
+        result = self.run_collector(
+            "-F", loop, self.source / "example.rs", "-o", self.output,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.output.exists(), result.stderr)
+        self.assertIn("fixture contents", self.output.read_text())
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_source_symlink_loop_keeps_other_sources(self):
+        loop = self.root / "loop"
+        loop.symlink_to(loop.name)
+        result = self.run_collector("-s", loop, self.source, "-o", self.output)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.output.exists(), result.stderr)
+        self.assertIn("fixture contents", self.output.read_text())
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_nonregular_rejection_closes_descriptor(self):
         spec = importlib.util.spec_from_file_location("collector_under_test", SCRIPT)
         module = importlib.util.module_from_spec(spec)

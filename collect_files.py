@@ -84,12 +84,12 @@ def collect_from_directory(
         relative_path = _display_path(file_path, source_path, multiple_sources)
 
         # 跳过重复路径（如多个源目录有重叠）
-        resolved_path = file_path.resolve()
-        if resolved_path in seen_files:
-            print(f"✗ 跳过(目录): {relative_path} (重复文件)")
-            continue
-
         try:
+            resolved_path = file_path.resolve()
+            if resolved_path in seen_files:
+                print(f"✗ 跳过(目录): {relative_path} (重复文件)")
+                continue
+
             content = read_regular_text(file_path)
 
             files_content.append(f"{relative_path}\n{content}")
@@ -140,7 +140,12 @@ def collect_from_file_list(
     print("-" * 60)
     print("开始收集指定文件列表:")
     for fp in files:
-        file_path = Path(fp).expanduser().resolve()
+        try:
+            file_path = Path(fp).expanduser().resolve()
+        except (OSError, RuntimeError) as error:
+            error_count += 1
+            print(f"✗ 跳过(指定文件): {fp} (原因: {error})")
+            continue
 
         # 不存在或非文件则跳过
         if not file_path.exists() or not file_path.is_file():
@@ -228,7 +233,12 @@ def collect_files(
         source_paths = []
         seen_source = set()
         for source_dir in source_dirs:
-            source_path = Path(source_dir).resolve()
+            try:
+                source_path = Path(source_dir).resolve()
+            except (OSError, RuntimeError) as error:
+                print(f"错误: 无法解析目录 '{source_dir}' (原因: {error})")
+                invalid_sources += 1
+                continue
             if not source_path.exists():
                 print(f"错误: 目录 '{source_dir}' 不存在")
                 invalid_sources += 1
