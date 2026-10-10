@@ -2425,12 +2425,7 @@ mod tests {
             .unwrap();
         assert!(region.find("ungrab_keyboard()").unwrap() < admission);
         assert!(region.find("ungrab_pointer()").unwrap() < admission);
-        assert!(
-            admission
-                < region
-                    .find("let execution = execute_capture_plan")
-                    .unwrap()
-        );
+        assert!(admission < region.find("let execution = execute_capture_plan").unwrap());
         let track = shipped
             .split_once("fn track_screenshot_completion")
             .unwrap()
