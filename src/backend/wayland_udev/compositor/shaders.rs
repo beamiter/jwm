@@ -360,6 +360,7 @@ uniform vec2  u_size;          // outline quad size, or inner window size in glo
 uniform float u_radius;        // corner radius (0 = sharp)
 uniform float u_radius_top;    // radius of the top two corners
 uniform float u_border_width;  // >=0: border width, <0: directional glow radius
+uniform bool  u_solid_fill;    // capture scrim tiles: no AA at internal seams
 uniform int   u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
@@ -384,6 +385,15 @@ void main() {
     vec3 rgb = u_scene_linear == 1
         ? srgb_inverse(u_border_color.rgb)
         : u_border_color.rgb;
+
+    // Adjacent translucent scrim tiles must keep full coverage at their
+    // shared edges. Rasterization already gives those edges one owner;
+    // applying the border SDF's AA here would expose bright desktop seams.
+    // Uniforms initialize to false, preserving every ordinary border draw.
+    if (u_solid_fill) {
+        frag_color = vec4(rgb * u_border_color.a, u_border_color.a);
+        return;
+    }
 
     if (u_border_width < 0.0) {
         float spread = max(-u_border_width, 0.001);

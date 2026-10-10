@@ -269,4 +269,137 @@ mod tests {
             assert!(w >= 2.0 && h >= 2.0);
         }
     }
+
+    fn scrim_covers(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+        let (rx, ry, rw, rh) = rect;
+        x >= rx && x < rx + rw && y >= ry && y < ry + rh
+    }
+
+    #[test]
+    fn scrim_tiles_cover_wide_desktops_once_at_fractional_and_clipped_seams() {
+        let screen_w = 7680.0;
+        let screen_h = 2160.0;
+        for hole in [
+            (2200.0, 300.0, 1200.0, 900.0),
+            (2200.25, 300.5, 1200.5, 900.25),
+            (-200.25, 300.5, 1200.5, 900.25),
+            (7000.25, -100.5, 1200.5, 900.25),
+            (2200.25, 1900.5, 1200.5, 900.25),
+            (8000.0, 300.0, 1200.0, 900.0),
+            (-100.0, -100.0, 8000.0, 2400.0),
+        ] {
+            let tiles = outside_dim_rects(screen_w, screen_h, hole);
+            for y in [
+                0.5,
+                screen_h - 0.5,
+                hole.1 - 0.5,
+                hole.1,
+                hole.1 + 0.5,
+                hole.1 + hole.3 - 0.5,
+                hole.1 + hole.3,
+                hole.1 + hole.3 + 0.5,
+            ] {
+                if !(0.0..screen_h).contains(&y) {
+                    continue;
+                }
+                for pixel_x in 0..screen_w as u32 {
+                    let x = pixel_x as f32 + 0.5;
+                    let owners = tiles
+                        .iter()
+                        .filter(|&&rect| scrim_covers(rect, x, y))
+                        .count();
+                    let expected = usize::from(!scrim_covers(hole, x, y));
+                    assert_eq!(owners, expected, "hole={hole:?}, sample=({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn border_aa_explains_the_bright_scrim_seams() {
+        // At the last/first pixel centre of adjacent integer-aligned tiles,
+        // radius-zero SDF distance is -0.5. The old border shader therefore
+        // reduced scrim alpha even though raster coverage has exactly one
+        // owner. Fractional edges can bring a sample even closer to zero.
+        let scrim_alpha = 0.52_f32;
+        for distance in [-0.5_f32, -0.25, 0.0] {
+            let t = ((distance + 1.0) * 0.5).clamp(0.0, 1.0);
+            let border_mask = 1.0 - t * t * (3.0 - 2.0 * t);
+            let old_alpha = scrim_alpha * border_mask;
+            let solid_alpha = scrim_alpha;
+            assert!(old_alpha < solid_alpha);
+            // On a white desktop a black scrim's missing alpha appears as
+            // a bright line, even when the scrim rectangles do not overlap.
+            assert!(1.0 - old_alpha > 1.0 - solid_alpha);
+        }
+    }
+
+    #[test]
+    fn both_scrim_shaders_have_an_explicit_solid_path_before_unchanged_border_aa() {
+        for (source, rgb) in [
+            (
+                include_str!("../x11/compositor/common/shaders.rs"),
+                "u_border_color.rgb",
+            ),
+            (
+                include_str!("../wayland_udev/compositor/shaders.rs"),
+                "rgb",
+            ),
+        ] {
+            let shader = source
+                .split("pub const BORDER_FRAGMENT_SHADER")
+                .nth(1)
+                .unwrap()
+                .split("\"#;")
+                .next()
+                .unwrap();
+            assert!(shader.contains("uniform bool  u_solid_fill;"));
+            let solid = shader.find("if (u_solid_fill) {").unwrap();
+            let glow = shader.find("if (u_border_width < 0.0)").unwrap();
+            assert!(solid < glow);
+            assert!(shader[solid..glow].contains(&format!(
+                "frag_color = vec4({rgb} * u_border_color.a, u_border_color.a);"
+            )));
+            assert!(shader[solid..glow].contains("return;"));
+            assert!(shader[glow..].contains("float outer = 1.0 - smoothstep(-1.0, 1.0, dist);"));
+            assert!(shader[glow..].contains(
+                "float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);"
+            ));
+        }
+    }
+
+    #[test]
+    fn capture_veil_restores_border_aa_before_hole_outline_and_later_draws() {
+        for (source, enable, disable) in [
+            (
+                include_str!("../x11/compositor/expose.rs"),
+                "uniform_1_i32(self.border_uniforms.solid_fill.as_ref(),1)",
+                "uniform_1_i32(self.border_uniforms.solid_fill.as_ref(),0)",
+            ),
+            (
+                include_str!("../wayland_udev/compositor/expose.rs"),
+                "Uniform1i(self.border_uniforms.solid_fill,1)",
+                "Uniform1i(self.border_uniforms.solid_fill,0)",
+            ),
+        ] {
+            let veil = source
+                .split("fn render_capture_veil(")
+                .nth(1)
+                .unwrap()
+                .split("\n    ///")
+                .next()
+                .unwrap();
+            let compact: String = veil.chars().filter(|c| !c.is_whitespace()).collect();
+            let enabled = compact.find(enable).unwrap();
+            let tiles = compact.find("inoutside_dim_rects(").unwrap();
+            let disabled = compact.find(disable).unwrap();
+            let hole = compact.find("::hole_radius(").unwrap();
+            let outline = compact.find("::outline_width(").unwrap();
+            assert!(enabled < tiles && tiles < disabled);
+            assert!(disabled < hole && hole < outline);
+            assert!(!compact[enabled..disabled].contains("return;"));
+            assert_eq!(compact.matches(enable).count(), 1);
+            assert_eq!(compact.matches(disable).count(), 1);
+        }
+    }
 }

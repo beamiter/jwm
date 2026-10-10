@@ -620,6 +620,10 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.set_border_radii(0.0, 0.0);
 
+            // These non-overlapping tiles form one continuous veil. Only
+            // their rasterized coverage may clip them, not per-tile SDF AA.
+            self.gl
+                .uniform_1_i32(self.border_uniforms.solid_fill.as_ref(), 1);
             for (rx, ry, rw, rh) in outside_dim_rects(screen_w, screen_h, (x, y, width, height)) {
                 if rw <= 0.0 || rh <= 0.0 {
                     continue;
@@ -639,6 +643,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
+
+            // Restore the normal AA path before the hole, outline and any
+            // later border-program users. No early return crosses this scope.
+            self.gl
+                .uniform_1_i32(self.border_uniforms.solid_fill.as_ref(), 0);
 
             // Soft wash inside the pick so it still reads as selected.
             let hole_r =

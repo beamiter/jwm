@@ -778,6 +778,9 @@ impl WaylandCompositor {
             gl.Uniform1f(self.border_uniforms.radius, 0.0);
             gl.Uniform1f(self.border_uniforms.radius_top, 0.0);
 
+            // These non-overlapping tiles form one continuous veil. Only
+            // their rasterized coverage may clip them, not per-tile SDF AA.
+            gl.Uniform1i(self.border_uniforms.solid_fill, 1);
             for (rx, ry, rw, rh) in outside_dim_rects(screen_w, screen_h, (x, y, width, height)) {
                 if rw <= 0.0 || rh <= 0.0 {
                     continue;
@@ -789,6 +792,9 @@ impl WaylandCompositor {
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
+            // Restore the normal AA path before the hole, outline and any
+            // later border-program users. No early return crosses this scope.
+            gl.Uniform1i(self.border_uniforms.solid_fill, 0);
             gl.Uniform1f(
                 self.border_uniforms.radius,
                 crate::backend::compositor_common::capture_veil::hole_radius(width, height),

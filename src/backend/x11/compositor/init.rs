@@ -249,6 +249,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 projection: gl.get_uniform_location(border_program, "u_projection"),
                 rect: gl.get_uniform_location(border_program, "u_rect"),
                 border_color: gl.get_uniform_location(border_program, "u_border_color"),
+                solid_fill: gl.get_uniform_location(border_program, "u_solid_fill"),
                 size: gl.get_uniform_location(border_program, "u_size"),
                 radius: gl.get_uniform_location(border_program, "u_radius"),
                 radius_top: gl.get_uniform_location(border_program, "u_radius_top"),

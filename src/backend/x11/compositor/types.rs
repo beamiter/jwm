@@ -637,6 +637,7 @@ pub(super) struct BorderUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) border_color: Option<glow::UniformLocation>,
+    pub(super) solid_fill: Option<glow::UniformLocation>,
     pub(super) size: Option<glow::UniformLocation>,
     pub(super) radius: Option<glow::UniformLocation>,
     pub(super) radius_top: Option<glow::UniformLocation>,
