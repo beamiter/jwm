@@ -1165,6 +1165,7 @@ impl Jwm {
         if self.state.output_map.values().any(|&id| id == info.id) {
             return Ok(());
         }
+        self.cancel_capture_selection_for_layout_change(backend);
         self.add_monitor(info);
         self.repark_all_hidden_clients(backend);
 
@@ -1259,6 +1260,7 @@ impl Jwm {
             .map(|(k, _)| k);
 
         if let Some(mon_key) = mon_key_opt {
+            self.cancel_capture_selection_for_layout_change(backend);
             let retired_bar_client = if let Some(monitor_num) =
                 self.state.monitors.get(mon_key).map(|monitor| monitor.num)
             {
@@ -1318,6 +1320,7 @@ impl Jwm {
             let Some((old_monitor, old_work)) = self.monitor_migration_areas(mon_key) else {
                 return Ok(());
             };
+            self.cancel_capture_selection_for_layout_change(backend);
             let new_monitor = Rect::new(info.x, info.y, info.width.max(1), info.height.max(1));
             let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
             let owned_clients = clients_owned_by_monitor(&self.state, mon_key);

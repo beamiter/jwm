@@ -139,6 +139,31 @@ fn intersect_rect(rect: Rect, bounds: Rect) -> Option<Rect> {
 }
 
 impl Jwm {
+    /// A crop and its annotations belong to the desktop layout where they
+    /// were selected. Do not silently submit a different crop after hotplug.
+    pub(crate) fn cancel_capture_selection_for_layout_change(&mut self, backend: &mut dyn Backend) {
+        use crate::jwm::features::DeferredGrabAction;
+
+        if self
+            .features
+            .deferred_grab
+            .as_ref()
+            .is_some_and(|parked| matches!(parked.action, DeferredGrabAction::Screenshot { .. }))
+        {
+            self.features.deferred_grab = None;
+        }
+        // Only selectors own these grabs. An ordinary layout notification
+        // must not release another modal UI's input or stop a recording.
+        if self.features.screenshot.active {
+            self.cancel_screenshot_select(backend);
+        }
+        if self.features.recording.selecting_region {
+            // An active recording adjustment restores its original source
+            // through ordinary cancel semantics; the recording keeps running.
+            self.cancel_recording_region_interaction(backend);
+        }
+    }
+
     fn desktop_capture_rect(&self) -> Option<Rect> {
         (self.s_w > 0 && self.s_h > 0).then(|| Rect::new(0, 0, self.s_w, self.s_h))
     }
@@ -806,6 +831,169 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_change_cancels_screenshot_and_its_pending_retry() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+        use crate::jwm::features::screenshot::{ScreenshotTool, TextDraft};
+        use crate::jwm::features::{DeferredGrab, DeferredGrabAction};
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(2500, 100, 640, 360));
+        jwm.features.screenshot.set_tool(ScreenshotTool::Text);
+        jwm.features.screenshot.text_draft = Some(TextDraft {
+            at: (2510.0, 110.0),
+            buffer: "unfinished".into(),
+        });
+        jwm.features
+            .screenshot
+            .set_output_path("/unused/capture.png".into());
+        jwm.features.deferred_grab = Some(DeferredGrab::new(
+            DeferredGrabAction::Screenshot {
+                output_path: "/unused/retry.png".into(),
+            },
+            std::time::Instant::now(),
+        ));
+        jwm.cancel_capture_selection_for_layout_change(&mut backend);
+        assert!(!jwm.features.screenshot.active);
+        assert!(!jwm.features.screenshot.committed);
+        assert!(jwm.features.screenshot.text_draft.is_none());
+        assert!(jwm.features.screenshot.output_path.is_none());
+        assert!(jwm.features.deferred_grab.is_none());
+        assert!(jwm.features.screenshot_completions.is_empty());
+        jwm.cancel_capture_selection_for_layout_change(&mut backend);
+        assert!(!jwm.features.screenshot.active);
+    }
+
+    #[test]
+    fn layout_change_discards_only_capture_retries() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+        use crate::jwm::features::{DeferredGrab, DeferredGrabAction};
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.deferred_grab = Some(DeferredGrab::new(
+            DeferredGrabAction::Screenshot {
+                output_path: "/unused/retry.png".into(),
+            },
+            std::time::Instant::now(),
+        ));
+        jwm.cancel_capture_selection_for_layout_change(&mut backend);
+        assert!(jwm.features.deferred_grab.is_none());
+        let shell = DeferredGrab::new(
+            DeferredGrabAction::ShellHub { route: None },
+            std::time::Instant::now(),
+        );
+        jwm.features.deferred_grab = Some(shell.clone());
+        jwm.features.overview.active = true;
+        jwm.cancel_capture_selection_for_layout_change(&mut backend);
+        assert_eq!(jwm.features.deferred_grab, Some(shell));
+        assert!(jwm.features.overview.active);
+        assert!(backend.overview_modes.is_empty());
+    }
+
+    #[test]
+    fn layout_change_discards_initial_recording_selection() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features
+            .recording
+            .begin_initial_region_selection("/unused/capture.mp4".into());
+        jwm.features
+            .recording
+            .set_region(Rect::new(2500, 100, 640, 360));
+        jwm.cancel_capture_selection_for_layout_change(&mut backend);
+        assert!(!jwm.features.recording.active);
+        assert!(!jwm.features.recording.selecting_region);
+        assert!(jwm.features.recording.region.is_none());
+        assert!(jwm.features.recording.pending_output_path.is_none());
+    }
+
+    #[test]
+    fn layout_change_preserves_running_recording_and_cancels_only_adjustment() {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let original = Rect::new(2500, 100, 640, 360);
+        let recording = &mut jwm.features.recording;
+        recording.start("/unused/capture.mp4".into());
+        recording.start_segment("/unused/segment.mp4".into());
+        recording.set_region(original);
+        recording.set_output_size_from_region();
+        for adjusting in [false, true] {
+            if adjusting {
+                assert!(jwm.features.recording.begin_region_adjustment());
+                jwm.features
+                    .recording
+                    .set_region(Rect::new(20, 20, 320, 180));
+            }
+            jwm.cancel_capture_selection_for_layout_change(&mut backend);
+            let recording = &jwm.features.recording;
+            assert!(recording.active);
+            assert!(!recording.selecting_region);
+            assert!(!recording.adjusting_region);
+            assert_eq!(recording.region, Some(original));
+            assert_eq!(recording.output_size, Some((640, 360)));
+            assert_eq!(
+                recording.output_path.as_deref(),
+                Some("/unused/capture.mp4")
+            );
+            assert_eq!(
+                recording.current_segment.as_deref(),
+                Some("/unused/segment.mp4")
+            );
+            assert!(recording.segments.is_empty());
+        }
+    }
+
+    #[test]
+    fn layout_cancellation_hooks_follow_output_identity_guards() {
+        let monitors = include_str!("../monitor.rs");
+        for (method, guard, mutation) in [
+            (
+                "fn handle_output_added(",
+                "return Ok(())",
+                "self.add_monitor(info)",
+            ),
+            (
+                "fn handle_output_removed(",
+                "if let Some(mon_key) = mon_key_opt",
+                "self.retire_secondary_bar",
+            ),
+            (
+                "fn handle_output_changed(",
+                "return Ok(())",
+                "m.geometry.m_x = info.x",
+            ),
+        ] {
+            let body = monitors.split_once(method).unwrap().1;
+            let hook = body
+                .find("self.cancel_capture_selection_for_layout_change(backend)")
+                .unwrap();
+            assert!(body.find(guard).unwrap() < hook, "{method}");
+            assert!(hook < body.find(mutation).unwrap(), "{method}");
+        }
+        let root = include_str!("../../jwm.rs");
+        let handler = root
+            .split_once("fn handle_screen_geometry_change(")
+            .unwrap()
+            .1;
+        assert!(
+            handler
+                .find("self.cancel_capture_selection_for_layout_change(backend)")
+                .unwrap()
+                < handler
+                    .find("self.update_fullscreen_clients_on_monitor")
+                    .unwrap()
+        );
+    }
 
     #[test]
     fn capture_target_cycles_in_both_directions() {

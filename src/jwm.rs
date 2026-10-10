@@ -1889,7 +1889,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // info!("[handle_screen_geometry_change]");
+        self.cancel_capture_selection_for_layout_change(backend);
         let monitors: Vec<_> = self.state.monitor_order.to_vec();
         for mon_key in monitors {
             self.update_fullscreen_clients_on_monitor(backend, mon_key)?;

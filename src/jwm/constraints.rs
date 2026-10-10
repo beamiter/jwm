@@ -86,6 +86,12 @@ impl Jwm {
         };
         self.apply_boundary_constraints(client_key, x, y, w, h, interact)?;
         let geometry_changed = self.apply_size_hints_constraints(backend, client_key, w, h)?;
+        if geometry_changed {
+            // The first clamp kept a pixel of the requested size visible.
+            // Hints can shrink that size, moving its far edge wholly outside
+            // the output. Recheck with the dimensions we will configure.
+            self.apply_boundary_constraints(client_key, x, y, w, h, interact)?;
+        }
         Ok(geometry_changed
             || *x != original_geometry.0
             || *y != original_geometry.1
@@ -311,5 +317,135 @@ mod tests {
             "property invalidation did not re-fetch once"
         );
         assert!(client.size_hints.hints_valid);
+    }
+
+    fn apply_cached_hints(
+        hints: SizeHints,
+        origin: (i32, i32),
+        border: i32,
+        input: (i32, i32, i32, i32),
+        interact: bool,
+    ) -> ((i32, i32, i32, i32), bool) {
+        use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
+
+        // Existing CPU-only backend; the test build's constructor explicitly
+        // uses ControlSocketSource::Detached and never binds a session socket.
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.s_w = 200;
+        jwm.s_h = 100;
+        let monitor = jwm.state.sel_mon.unwrap();
+        let geometry = &mut jwm.state.monitors[monitor].geometry;
+        geometry.w_x = origin.0;
+        geometry.w_y = origin.1;
+        geometry.w_w = 200;
+        geometry.w_h = 100;
+        let mut client = WMClient::new(WindowId::from_raw(42));
+        client.mon = Some(monitor);
+        client.state.is_floating = true;
+        client.size_hints = SizeHints {
+            hints_valid: true,
+            ..hints
+        };
+        client.geometry.x = input.0;
+        client.geometry.y = input.1;
+        client.geometry.w = input.2;
+        client.geometry.h = input.3;
+        client.geometry.border_w = border;
+        let key = jwm.insert_client(client);
+        let (mut x, mut y, mut w, mut h) = input;
+        let changed = jwm
+            .applysizehints(&mut backend, key, &mut x, &mut y, &mut w, &mut h, interact)
+            .unwrap();
+        ((x, y, w, h), changed)
+    }
+
+    #[test]
+    fn shrinking_size_hints_keep_a_pixel_on_screen() {
+        let hints = SizeHints {
+            max_w: 10,
+            max_h: 10,
+            ..SizeHints::default()
+        };
+        let input = (-90, -90, 100, 100);
+        let (rect, changed) = apply_cached_hints(hints, (0, 0), 0, input, true);
+        assert_eq!(rect, (-9, -9, 10, 10));
+        assert!(changed);
+        assert!(rect.0 + rect.2 > 0 && rect.1 + rect.3 > 0);
+    }
+
+    #[test]
+    fn final_hint_boundary_includes_borders_and_negative_monitor_origins() {
+        let hints = SizeHints {
+            max_w: 10,
+            max_h: 10,
+            ..SizeHints::default()
+        };
+        let origin = (-1920, -1080);
+        let input = (-2010, -1170, 100, 100);
+        let (rect, _) = apply_cached_hints(hints, origin, 2, input, false);
+        assert_eq!(rect, (-1933, -1093, 10, 10));
+        assert_eq!(rect.0 + rect.2 + 4, -1919);
+        assert_eq!(rect.1 + rect.3 + 4, -1079);
+    }
+
+    #[test]
+    fn aspect_and_increment_shrink_recheck_the_visible_edge() {
+        for (hints, expected) in [
+            (
+                SizeHints {
+                    inc_w: 16,
+                    inc_h: 16,
+                    ..SizeHints::default()
+                },
+                (-95, -95, 96, 96),
+            ),
+            (
+                SizeHints {
+                    min_aspect: 0.5,
+                    max_aspect: 0.5,
+                    ..SizeHints::default()
+                },
+                (-49, -99, 50, 100),
+            ),
+        ] {
+            let input = (-99, -99, 100, 100);
+            let (rect, _) = apply_cached_hints(hints, (0, 0), 0, input, true);
+            assert_eq!(rect, expected);
+        }
+    }
+
+    #[test]
+    fn unchanged_and_growing_hints_preserve_existing_positioning() {
+        let input = (20, 30, 80, 40);
+        assert_eq!(
+            apply_cached_hints(SizeHints::default(), (0, 0), 3, input, true),
+            (input, false)
+        );
+        let hints = SizeHints {
+            min_w: 100,
+            min_h: 100,
+            ..SizeHints::default()
+        };
+        let input = (-9, -9, 10, 10);
+        let (rect, changed) = apply_cached_hints(hints.clone(), (0, 0), 0, input, true);
+        assert_eq!(rect, (-9, -9, 100, 100));
+        assert!(changed);
+        assert_eq!(
+            apply_cached_hints(hints, (0, 0), 0, rect, true),
+            (rect, false)
+        );
+    }
+
+    #[test]
+    fn shrinking_hints_do_not_displace_right_or_bottom_edge_windows() {
+        let hints = SizeHints {
+            max_w: 10,
+            max_h: 10,
+            ..SizeHints::default()
+        };
+        let input = (199, 99, 100, 100);
+        let (rect, _) = apply_cached_hints(hints, (0, 0), 0, input, true);
+        assert_eq!(rect, (199, 99, 10, 10));
     }
 }
