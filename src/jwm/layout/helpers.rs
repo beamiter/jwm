@@ -98,6 +98,13 @@ fn unreserved_top_fallback(offset: i32, m_y: i32, w_y: i32) -> i32 {
     (i64::from(offset.max(0)) - reserved).max(0) as i32
 }
 
+/// Preserve signed padding while widening the complete sum before clamping.
+/// Saturating the multiplication first would lose valid cancellation by height.
+fn padded_status_bar_offset(height: i32, padding: i32) -> i32 {
+    let offset = i64::from(height) + i64::from(padding) * 2;
+    offset.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
 /// Share the decoration policy between live layout and drag simulation.
 pub(super) fn tiled_client_border_width(configured: i32, no_decorations: bool) -> i32 {
     if no_decorations { 0 } else { configured }
@@ -286,9 +293,7 @@ impl Jwm {
             // Config-only fallback; observed dock geometry is handled by the
             // work-area calculation before this offset is used.
             let cfg = CONFIG.load();
-            let fallback = cfg.status_bar_height() + cfg.status_bar_padding() * 2;
-
-            fallback
+            padded_status_bar_offset(cfg.status_bar_height(), cfg.status_bar_padding())
         } else {
             0
         }
@@ -627,10 +632,27 @@ impl Jwm {
 mod tests {
     use super::{
         bounded_dock_reservation, dock_edge_distances, dock_reaches_output_edge,
-        tiled_client_border_width, unreserved_top_fallback,
+        padded_status_bar_offset, tiled_client_border_width, unreserved_top_fallback,
     };
     use crate::core::types::Rect;
     use crate::jwm::strut_manager::clamp_opposing_edges;
+
+    #[test]
+    fn status_bar_offset_widens_before_clamping_the_complete_sum() {
+        for (height, padding, expected) in [
+            (42, 5, 52),
+            (10, -10, -10),
+            (i32::MAX, 1, i32::MAX),
+            (i32::MIN, -1, i32::MIN),
+            (i32::MAX, i32::MAX, i32::MAX),
+            (i32::MIN, i32::MIN, i32::MIN),
+            (i32::MIN, 1_073_741_824, 0),
+            (i32::MAX, i32::MIN, i32::MIN),
+            (i32::MIN, i32::MAX, i32::MAX - 1),
+        ] {
+            assert_eq!(padded_status_bar_offset(height, padding), expected);
+        }
+    }
 
     #[test]
     fn dock_distances_widen_before_add_subtract_and_abs() {
