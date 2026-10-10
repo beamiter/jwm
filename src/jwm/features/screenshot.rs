@@ -3700,9 +3700,7 @@ mod tests {
         ];
         for origin in [(0, 0), (-1920, -1080), (3840, 2160)] {
             for (from, to) in segments {
-                let global = |p: (f32, f32)| {
-                    (p.0 + origin.0 as f32, p.1 + origin.1 as f32)
-                };
+                let global = |p: (f32, f32)| (p.0 + origin.0 as f32, p.1 + origin.1 as f32);
                 for (from, to) in [(global(from), global(to)), (global(to), global(from))] {
                     for width in [0, 1, 2, 3, MAX_LINE_WIDTH, MAX_LINE_WIDTH * 4] {
                         for alpha in [0, 127, 255] {
