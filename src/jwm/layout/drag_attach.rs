@@ -220,16 +220,22 @@ impl DragSnapPlan {
 /// bounding area, deck stacks previews), otherwise nearest center wins.
 fn pick_best_candidate(candidates: &[(usize, Rect)], px: i32, py: i32) -> Option<(usize, Rect)> {
     candidates.iter().copied().min_by_key(|&(_, r)| {
-        let contains = px >= r.x && px < r.x + r.w.max(1) && py >= r.y && py < r.y + r.h.max(1);
+        let (px, py) = (i64::from(px), i64::from(py));
+        let (x, y) = (i64::from(r.x), i64::from(r.y));
+        let contains = px >= x
+            && px < x + i64::from(r.w.max(1))
+            && py >= y
+            && py < y + i64::from(r.h.max(1));
         if contains {
-            (r.w as i64) * (r.h as i64)
+            (false, i128::from(r.w) * i128::from(r.h))
         } else {
-            let cx = r.x + r.w / 2;
-            let cy = r.y + r.h / 2;
-            let dx = (px - cx) as i64;
-            let dy = (py - cy) as i64;
-            // Never let a far center beat any containing rect.
-            i64::MAX / 2 + dx * dx + dy * dy
+            let cx = x + i64::from(r.w / 2);
+            let cy = y + i64::from(r.h / 2);
+            let dx = i128::from(px - cx);
+            let dy = i128::from(py - cy);
+            // Keep priority separate from distance: even squared differences
+            // across the full coordinate range cannot outrank containment.
+            (true, dx * dx + dy * dy)
         }
     })
 }
@@ -961,6 +967,58 @@ mod tests {
         ];
         let best = pick_best_candidate(&candidates, 490, 490).unwrap();
         assert_eq!(best.0, 1);
+    }
+
+    #[test]
+    fn containing_slot_near_coordinate_limit_beats_distant_candidates() {
+        let candidates = [
+            (0usize, Rect::new(i32::MIN, i32::MIN, 10, 10)),
+            (1usize, Rect::new(i32::MAX - 10, i32::MAX - 10, 100, 100)),
+        ];
+        assert_eq!(
+            pick_best_candidate(&candidates, i32::MAX, i32::MAX).unwrap().0,
+            1
+        );
+    }
+
+    #[test]
+    fn nearest_slot_comparison_preserves_full_coordinate_distances() {
+        let candidates = [
+            (0usize, Rect::new(i32::MAX - 10, i32::MAX - 10, 100, 100)),
+            (1usize, Rect::new(0, 0, 10, 10)),
+        ];
+        assert_eq!(
+            pick_best_candidate(&candidates, i32::MIN, i32::MIN).unwrap().0,
+            1
+        );
+    }
+
+    #[test]
+    fn containing_slot_wins_when_distant_squared_score_exceeds_i64() {
+        let candidates = [
+            (0usize, Rect::new(-2_000_000_000, -2_000_000_000, 10, 10)),
+            (1usize, Rect::new(0, 0, 100, 100)),
+        ];
+        assert_eq!(pick_best_candidate(&candidates, 1, 1).unwrap().0, 1);
+    }
+
+    #[test]
+    fn candidate_ranking_preserves_ties_and_nonpositive_extent_fallbacks() {
+        let same_slot = [
+            (7usize, Rect::new(0, 0, 10, 10)),
+            (2, Rect::new(0, 0, 10, 10)),
+        ];
+        assert_eq!(pick_best_candidate(&same_slot, 5, 5).unwrap().0, 7);
+        assert_eq!(pick_best_candidate(&same_slot, 20, 20).unwrap().0, 7);
+
+        for width in [0, -1, i32::MIN] {
+            let candidates = [
+                (0usize, Rect::new(0, 0, 10, 10)),
+                (1, Rect::new(0, 0, width, 1)),
+            ];
+            assert_eq!(pick_best_candidate(&candidates, 0, 0).unwrap().0, 1);
+            assert_eq!(pick_best_candidate(&candidates, 1, 0).unwrap().0, 0);
+        }
     }
 
     #[test]
