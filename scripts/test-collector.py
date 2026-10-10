@@ -86,6 +86,35 @@ class CollectorTests(unittest.TestCase):
         self.assertIn("fixture contents", self.output.read_text())
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_output_basename_does_not_exclude_unrelated_input(self):
+        matching_name = self.source / self.output.name
+        matching_name.write_text("same basename must be collected\n")
+        for input_args in (("-s", self.source), ("-F", matching_name)):
+            with self.subTest(input_args=input_args):
+                result = self.run_collector(*input_args, "-o", self.output)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("same basename must be collected", self.output.read_text())
+
+    def test_existing_output_and_its_symlink_alias_are_excluded(self):
+        output = self.source / "output.txt"
+        output.write_text("previous output must not be collected\n")
+        (self.source / "alias.txt").symlink_to(output.name)
+        nested = self.source / "nested"
+        nested.mkdir()
+        (nested / output.name).write_text("distinct nested input\n")
+        result = self.run_collector("-s", self.source, "-o", output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("fixture contents", output.read_text())
+        self.assertIn("distinct nested input", output.read_text())
+        self.assertNotIn("previous output must not be collected", output.read_text())
+
+    def test_explicit_filename_exclusions_still_apply(self):
+        result = self.run_collector(
+            "-s", self.source, "-f", "example.rs", "-o", self.output,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("fixture contents", self.output.read_text())
+
     def test_nonregular_rejection_closes_descriptor(self):
         spec = importlib.util.spec_from_file_location("collector_under_test", SCRIPT)
         module = importlib.util.module_from_spec(spec)

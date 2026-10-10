@@ -220,8 +220,12 @@ def collect_files(
     if exclude_files is None:
         exclude_files = set()
 
-    # 添加输出文件到排除列表（避免把自己收进去）
-    exclude_files.add(os.path.basename(output_file))
+    # 仅排除实际输出路径；其他目录中的同名文件仍然需要收集。
+    try:
+        output_path = Path(output_file).resolve()
+    except (OSError, RuntimeError) as error:
+        print(f"错误: 无法解析输出文件 '{output_file}' (原因: {error})")
+        return False
 
     source_paths: Optional[List[Path]] = None
     invalid_sources = 0
@@ -271,7 +275,7 @@ def collect_files(
     all_contents: List[str] = []
     total_files = 0
     total_errors = invalid_sources
-    seen_files: Set[Path] = set()
+    seen_files: Set[Path] = {output_path}
 
     # 1) 目录递归收集（可选）
     if enable_dir_scan and source_paths is not None:
