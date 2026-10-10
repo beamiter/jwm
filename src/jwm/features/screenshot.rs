@@ -1523,38 +1523,36 @@ impl Jwm {
             return;
         }
         let (x, y, width, height) = plan.region;
-        let captured = match execute_capture_plan(backend, &plan) {
+        let execution = execute_capture_plan(backend, &plan);
+        let region_origin = execution.annotation_origin((x, y));
+        match execution {
             CaptureExecution::CapturedRegion => {
                 info!(
                     "[take_screenshot] region screenshot queued → {} ({width}x{height} at {x},{y})",
                     plan.save_path
                 );
-                true
             }
             CaptureExecution::CapturedFullFallback => {
                 info!(
                     "[take_screenshot] backend doesn't support region screenshots; full-screen fallback queued"
                 );
-                true
             }
             CaptureExecution::Unavailable => {
                 info!(
                     "[take_screenshot] backend supports neither region nor full-screen screenshots"
                 );
-                false
             }
             CaptureExecution::Failed(e) => {
                 error!("[take_screenshot] region screenshot failed: {e}");
-                false
             }
-        };
+        }
 
-        if captured {
+        if let Some(region_origin) = region_origin {
             self.track_screenshot_completion(
                 backend,
                 plan.save_path,
                 annotations,
-                (x, y),
+                region_origin,
                 plan.to_clipboard,
                 plan.bake_annotations,
             );
@@ -2430,7 +2428,7 @@ mod tests {
         assert!(
             admission
                 < region
-                    .find("let captured = match execute_capture_plan")
+                    .find("let execution = execute_capture_plan")
                     .unwrap()
         );
         let track = shipped
@@ -3755,6 +3753,31 @@ mod tests {
             let mut image = RgbaImage::new(w, h);
             Jwm::draw_line(&mut image, (0, 0), (-2.0, -2.0), (18.0, 18.0), [255; 4], 24);
             assert!(image.as_raw().is_empty());
+        }
+    }
+
+    #[test]
+    fn fallback_annotations_use_the_full_image_origin() {
+        use crate::jwm::features::capture_plan::CaptureExecution;
+
+        let color = [200, 80, 40, 255];
+        let annotation = ScreenshotAnnotation::FilledRectangle {
+            from: (20.0, 15.0),
+            to: (24.0, 19.0),
+            color,
+        };
+        for (execution, size, expected) in [
+            (CaptureExecution::CapturedRegion, (40, 30), (10, 5)),
+            (CaptureExecution::CapturedFullFallback, (80, 60), (20, 15)),
+        ] {
+            let origin = execution.annotation_origin((10, 10)).unwrap();
+            let mut image = RgbaImage::new(size.0, size.1);
+            Jwm::draw_annotation(&mut image, origin, &annotation);
+            for (x, y, pixel) in image.enumerate_pixels() {
+                let inside = (expected.0..expected.0 + 4).contains(&x)
+                    && (expected.1..expected.1 + 4).contains(&y);
+                assert_eq!(*pixel, if inside { Rgba(color) } else { Rgba([0; 4]) });
+            }
         }
     }
 }

@@ -95,6 +95,18 @@ pub enum CaptureExecution {
 }
 
 impl CaptureExecution {
+    /// Coordinate origin for annotations on the accepted image. A backend
+    /// that falls back to a full screenshot no longer returns a cropped PNG.
+    /// Region captures retain their existing requested-origin contract here.
+    #[must_use]
+    pub fn annotation_origin(&self, requested: (i32, i32)) -> Option<(i32, i32)> {
+        match self {
+            Self::CapturedRegion => Some(requested),
+            Self::CapturedFullFallback => Some((0, 0)),
+            Self::Unavailable | Self::Failed(_) => None,
+        }
+    }
+
     /// 后端是否接受了捕获请求（不代表异步文件已经产生）。
     #[must_use]
     pub fn captured(&self) -> bool {
@@ -284,6 +296,7 @@ mod tests {
         assert!(outcome.captured());
         assert_eq!(media.region_calls, vec![(1, 2, 30, 40)]);
         assert_eq!(media.full_calls, 0);
+        assert_eq!(outcome.annotation_origin((1, 2)), Some((1, 2)));
     }
 
     #[test]
@@ -293,7 +306,9 @@ mod tests {
             full_result: Some(Ok(true)),
             ..Default::default()
         };
-        assert!(execute_capture_plan(&mut media, &plan()).captured());
+        let outcome = execute_capture_plan(&mut media, &plan());
+        assert!(outcome.captured());
+        assert_eq!(outcome.annotation_origin((1, 2)), Some((0, 0)));
         assert_eq!(media.full_calls, 1);
 
         let mut media = FakeMedia {
@@ -304,6 +319,7 @@ mod tests {
         let outcome = execute_capture_plan(&mut media, &plan());
         assert!(matches!(outcome, CaptureExecution::Unavailable));
         assert!(!outcome.captured());
+        assert_eq!(outcome.annotation_origin((1, 2)), None);
     }
 
     #[test]
@@ -315,6 +331,7 @@ mod tests {
         let outcome = execute_capture_plan(&mut media, &plan());
         assert!(matches!(outcome, CaptureExecution::Failed(_)));
         assert_eq!(media.full_calls, 0);
+        assert_eq!(outcome.annotation_origin((1, 2)), None);
     }
 
     #[test]
