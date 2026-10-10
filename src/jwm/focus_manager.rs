@@ -238,12 +238,13 @@ impl Jwm {
         // `focus(None)` means "pick the best client", which just re-focused
         // the current window. Drop focus to the root instead, the way
         // `refocus` does before focusing back.
+        let previous_focus = self.get_selected_client_key();
         let monitor_num = self
             .state
             .sel_mon
             .and_then(|mon_key| self.state.monitors.get(mon_key))
             .map(|monitor| monitor.num);
-        if let Some(client_key) = self.get_selected_client_key() {
+        if let Some(client_key) = previous_focus {
             self.unfocus_client(backend, client_key, true)?;
         }
         self.set_root_focus(backend)?;
@@ -254,6 +255,11 @@ impl Jwm {
         self.flush_pending_bar_updates();
         if let Some(mk) = self.state.sel_mon {
             self.broadcast_monitor_bar_ipc(backend, mk);
+        }
+        // Publish after selection is authoritative and the existing bar
+        // notifications are complete. Missing clients are ignored by the helper.
+        if let Some(client_key) = previous_focus {
+            self.broadcast_window_state_ipc(backend, client_key);
         }
         Ok(())
     }
@@ -1305,6 +1311,64 @@ mod scratchpad_reveal_tests {
         }
         jwm.state.monitors[monitor_key].set_selected_client_for_current_tag(Some(keys[0]));
         (jwm, keys[0], keys[1])
+    }
+
+    #[test]
+    fn focus_none_clears_selection_and_tolerates_repeated_or_stale_focus() {
+        let (mut jwm, first, second) = jwm_with_two_tiled_windows();
+        let monitor = jwm.state.sel_mon.unwrap();
+        let mut backend = ScratchpadBackend::new();
+        assert!(jwm.ipc_server.is_none());
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+
+        jwm.focus_none(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), None);
+        assert_eq!(
+            jwm.state.monitors[monitor].get_selected_client_for_current_tag(),
+            None
+        );
+        assert!(jwm.state.clients.contains_key(second));
+        assert!(backend.focused.iter().all(Option::is_none));
+
+        jwm.focus_none(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), None);
+
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(first));
+        jwm.state.clients.remove(first);
+        jwm.focus_none(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), None);
+        assert!(jwm.state.clients.contains_key(second));
+        assert!(backend.focused.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn focus_none_publishes_previous_state_only_after_selection_and_bar_updates() {
+        // This pins dispatch and ordering without constructing a socket server;
+        // transport delivery is deliberately outside this source-level test.
+        let body = include_str!("focus_manager.rs")
+            .split_once("pub fn focus_none(")
+            .unwrap()
+            .1
+            .split_once("pub fn focus_window(")
+            .unwrap()
+            .0;
+        let capture = body
+            .find("let previous_focus = self.get_selected_client_key()")
+            .unwrap();
+        let clear = body
+            .find("self.update_monitor_selection_by_key(None)")
+            .unwrap();
+        let bar = body
+            .find("self.broadcast_monitor_bar_ipc(backend, mk)")
+            .unwrap();
+        let guard = body
+            .rfind("if let Some(client_key) = previous_focus")
+            .unwrap();
+        let state = body
+            .find("self.broadcast_window_state_ipc(backend, client_key)")
+            .unwrap();
+        assert!(capture < clear && clear < bar && bar < guard && guard < state);
+        assert_eq!(body.matches("self.broadcast_window_state_ipc(").count(), 1);
     }
 
     #[test]
