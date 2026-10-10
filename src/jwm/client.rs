@@ -6758,12 +6758,8 @@ mod monitor_focus_notification_tests {
             .unwrap()
             .0;
         let capture = body.find("let previous_target =").unwrap();
-        let switch = body
-            .find("self.state.sel_mon = new_monitor_key")
-            .unwrap();
-        let focus = body
-            .find("self.focus(backend, None)?")
-            .unwrap();
+        let switch = body.find("self.state.sel_mon = new_monitor_key").unwrap();
+        let focus = body.find("self.focus(backend, None)?").unwrap();
         let bar = body
             .find("self.broadcast_monitor_bar_ipc(backend, monitor_key)")
             .unwrap();
@@ -6788,14 +6784,11 @@ mod monitor_focus_notification_tests {
                     } else {
                         Vec::new()
                     };
-                    let additional: Vec<_> = missing_monitor_focus_updates(
-                        previous_global,
-                        previous_target,
-                        current,
-                    )
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                    let additional: Vec<_> =
+                        missing_monitor_focus_updates(previous_global, previous_target, current)
+                            .into_iter()
+                            .flatten()
+                            .collect();
                     assert!(additional.iter().all(|key| !already_sent.contains(key)));
                     assert!(additional.len() < 2 || additional[0] != additional[1]);
                     if previous_global == current {
