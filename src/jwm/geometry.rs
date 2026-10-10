@@ -237,12 +237,12 @@ impl GeometryConstraints {
         height: i32,
         boundary: &Rect,
     ) {
-        let min_x = boundary.x;
-        let max_x = boundary.x + boundary.w - width;
+        let min_x = i64::from(boundary.x);
+        let max_x = min_x + i64::from(boundary.w) - i64::from(width);
         if min_x <= max_x {
-            *x = (*x).clamp(min_x, max_x);
+            *x = i64::from(*x).clamp(min_x, max_x) as i32;
         } else {
-            *x = min_x;
+            *x = boundary.x;
             log::warn!(
                 "Skip X clamp because max_x({}) < min_x({}); width={}, boundary.w={}",
                 max_x,
@@ -252,12 +252,12 @@ impl GeometryConstraints {
             );
         }
 
-        let min_y = boundary.y;
-        let max_y = boundary.y + boundary.h - height;
+        let min_y = i64::from(boundary.y);
+        let max_y = min_y + i64::from(boundary.h) - i64::from(height);
         if min_y <= max_y {
-            *y = (*y).clamp(min_y, max_y);
+            *y = i64::from(*y).clamp(min_y, max_y) as i32;
         } else {
-            *y = min_y;
+            *y = boundary.y;
             log::warn!(
                 "Skip Y clamp because max_y({}) < min_y({}); height={}, boundary.h={}",
                 max_y,
@@ -295,14 +295,17 @@ impl GeometryConstraints {
     pub fn rect_intersection(rect1: &Rect, rect2: &Rect) -> Option<Rect> {
         let left = rect1.x.max(rect2.x);
         let top = rect1.y.max(rect2.y);
-        let right = (rect1.x + rect1.w).min(rect2.x + rect2.w);
-        let bottom = (rect1.y + rect1.h).min(rect2.y + rect2.h);
+        let right = (i64::from(rect1.x) + i64::from(rect1.w))
+            .min(i64::from(rect2.x) + i64::from(rect2.w));
+        let bottom = (i64::from(rect1.y) + i64::from(rect1.h))
+            .min(i64::from(rect2.y) + i64::from(rect2.h));
 
-        let w = (right - left).max(0);
-        let h = (bottom - top).max(0);
+        let w = right - i64::from(left);
+        let h = bottom - i64::from(top);
 
         if w > 0 && h > 0 {
-            Some(Rect::new(left, top, w, h))
+            // A positive intersection is no larger than either input extent.
+            Some(Rect::new(left, top, w as i32, h as i32))
         } else {
             None
         }
@@ -635,6 +638,51 @@ mod tests {
         // y 应该被约束到 boundary.y + boundary.h - height = 100 + 600 - 150 = 550
         assert_eq!(x, 700);
         assert_eq!(y, 550);
+    }
+
+    #[test]
+    fn boundary_clamping_widens_far_edges_before_subtracting_window_size() {
+        for (origin, extent, size, coordinate, expected) in [
+            (i32::MAX - 10, 100, 100, i32::MAX, i32::MAX - 10),
+            (i32::MAX - 10, 100, 1, i32::MAX, i32::MAX),
+            (i32::MIN, 10, 100, i32::MAX, i32::MIN),
+            (i32::MIN, i32::MAX, 1, i32::MAX, -2),
+            (-1920, 1920, 800, 100, -800),
+            (-1920, 1920, 800, -3000, -1920),
+            (100, 0, 1, i32::MAX, 100),
+            (100, -10, 1, i32::MIN, 100),
+            (i32::MIN, i32::MIN, i32::MAX, i32::MAX, i32::MIN),
+        ] {
+            let boundary = Rect::new(origin, origin, extent, extent);
+            let (mut x, mut y) = (coordinate, coordinate);
+            GeometryConstraints::clamp_rect_to_boundary(&mut x, &mut y, size, size, &boundary);
+            assert_eq!((x, y), (expected, expected));
+        }
+    }
+
+    #[test]
+    fn intersection_widens_edges_and_rejects_extremely_separated_rectangles() {
+        let low = Rect::new(i32::MIN, i32::MIN, 100, 100);
+        let high = Rect::new(i32::MAX - 50, i32::MAX - 50, 100, 100);
+        assert_eq!(GeometryConstraints::rect_intersection(&low, &high), None);
+        assert_eq!(GeometryConstraints::rect_intersection(&high, &low), None);
+        assert_eq!(
+            GeometryConstraints::rect_intersection(&high, &high),
+            Some(high)
+        );
+        let inner = Rect::new(i32::MAX - 25, i32::MAX - 25, 25, 25);
+        assert_eq!(
+            GeometryConstraints::rect_intersection(&high, &inner),
+            Some(inner)
+        );
+        assert_eq!(
+            GeometryConstraints::rect_intersection(&inner, &high),
+            Some(inner)
+        );
+        for size in [0, -1, i32::MIN] {
+            let empty = Rect::new(i32::MAX, i32::MAX, size, size);
+            assert_eq!(GeometryConstraints::rect_intersection(&high, &empty), None);
+        }
     }
 
     #[test]
