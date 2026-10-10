@@ -222,10 +222,8 @@ fn pick_best_candidate(candidates: &[(usize, Rect)], px: i32, py: i32) -> Option
     candidates.iter().copied().min_by_key(|&(_, r)| {
         let (px, py) = (i64::from(px), i64::from(py));
         let (x, y) = (i64::from(r.x), i64::from(r.y));
-        let contains = px >= x
-            && px < x + i64::from(r.w.max(1))
-            && py >= y
-            && py < y + i64::from(r.h.max(1));
+        let contains =
+            px >= x && px < x + i64::from(r.w.max(1)) && py >= y && py < y + i64::from(r.h.max(1));
         if contains {
             (false, i128::from(r.w) * i128::from(r.h))
         } else {
@@ -976,7 +974,9 @@ mod tests {
             (1usize, Rect::new(i32::MAX - 10, i32::MAX - 10, 100, 100)),
         ];
         assert_eq!(
-            pick_best_candidate(&candidates, i32::MAX, i32::MAX).unwrap().0,
+            pick_best_candidate(&candidates, i32::MAX, i32::MAX)
+                .unwrap()
+                .0,
             1
         );
     }
@@ -988,7 +988,9 @@ mod tests {
             (1usize, Rect::new(0, 0, 10, 10)),
         ];
         assert_eq!(
-            pick_best_candidate(&candidates, i32::MIN, i32::MIN).unwrap().0,
+            pick_best_candidate(&candidates, i32::MIN, i32::MIN)
+                .unwrap()
+                .0,
             1
         );
     }
