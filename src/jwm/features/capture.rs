@@ -362,9 +362,7 @@ impl Jwm {
 
     /// Push / clear the bottom-center selection hint chip.
     pub(crate) fn sync_capture_hint(&mut self, backend: &mut dyn Backend) {
-        use crate::backend::compositor_common::capture_hint::{
-            capture_hint_label, screenshot_editor_hint_label,
-        };
+        use crate::backend::compositor_common::capture_hint::capture_hint_label;
 
         if self.features.screenshot.active && !self.features.screenshot.committed {
             let probe = self.probed_capture_hint_title(self.last_mouse_root);
@@ -375,7 +373,7 @@ impl Jwm {
         }
         if self.features.screenshot.active && self.features.screenshot.committed {
             backend.compositor_set_capture_hint(Some(
-                screenshot_editor_hint_label(self.features.screenshot.is_typing()).into(),
+                self.features.screenshot.editor_hint_label().into(),
             ));
             return;
         }

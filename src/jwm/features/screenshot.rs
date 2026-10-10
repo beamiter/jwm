@@ -291,6 +291,38 @@ pub enum ToolbarCommand {
     Cancel,
 }
 
+impl ToolbarCommand {
+    /// Names and shortcuts for the icon-only toolbar. Text-entry context is
+    /// resolved before these hints, since it owns the printable keys.
+    #[must_use]
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::SelectTool(tool) => match tool {
+                ScreenshotTool::Select => "Screenshot · Select a region",
+                ScreenshotTool::Pencil => "Pencil · P / F · drag to draw",
+                ScreenshotTool::Line => "Line · L · drag between endpoints",
+                ScreenshotTool::Arrow => "Arrow · A · drag toward the tip",
+                ScreenshotTool::Rectangle => "Rectangle · R · drag to outline",
+                ScreenshotTool::FilledRectangle => "Filled rectangle · B · drag to fill",
+                ScreenshotTool::Ellipse => "Ellipse · C / O · drag to outline",
+                ScreenshotTool::Marker => "Highlighter · H · drag to mark",
+                ScreenshotTool::Text => "Text · T · click to type a label",
+                ScreenshotTool::Counter => "Number · N · click to place",
+                ScreenshotTool::Pixelate => "Pixelate · X · drag over a region",
+                ScreenshotTool::Invert => "Invert colors · I · drag over a region",
+            },
+            Self::Thinner => "Thinner stroke · Minus / Ctrl+Down",
+            Self::Thicker => "Thicker stroke · Plus / Ctrl+Up",
+            Self::NextColor => "Next ink color · 1–8 choose a color",
+            Self::Undo => "Undo · Ctrl+Z / Backspace / Delete",
+            Self::Redo => "Redo · Ctrl+Y / Ctrl+Shift+Z",
+            Self::Copy => "Copy screenshot · Ctrl+C",
+            Self::Save => "Save screenshot · Enter / Space / Ctrl+S",
+            Self::Cancel => "Cancel screenshot · Esc / right-click",
+        }
+    }
+}
+
 /// One toolbar cell: what it looks like, and what it does. Built together so
 /// the index a click resolves to cannot drift from the index that was painted.
 #[derive(Debug, Clone, PartialEq)]
@@ -957,6 +989,27 @@ impl ScreenshotState {
     #[must_use]
     pub fn toolbar_command(&self, index: usize) -> Option<ToolbarCommand> {
         self.toolbar_entries().get(index)?.command
+    }
+
+    /// Keyboard ownership outranks hover. A stale/disabled/read-only toolbar
+    /// cell must never advertise an action that cannot currently run.
+    #[must_use]
+    pub fn editor_hint_label(&self) -> &'static str {
+        use crate::backend::compositor_common::capture_hint::screenshot_editor_hint_label;
+
+        if self.is_typing() {
+            return screenshot_editor_hint_label(true);
+        }
+        if let Some(index) = self.hovered_button {
+            let entries = self.toolbar_entries();
+            if let Some(entry) = entries.get(index)
+                && entry.button.enabled
+                && let Some(command) = entry.command
+            {
+                return command.hint();
+            }
+        }
+        screenshot_editor_hint_label(false)
     }
 
     /// 获取选择区域矩形
@@ -3773,6 +3826,92 @@ mod tests {
                     && (expected.1..expected.1 + 4).contains(&y);
                 assert_eq!(*pixel, if inside { Rgba(color) } else { Rgba([0; 4]) });
             }
+        }
+    }
+
+    #[test]
+    fn toolbar_hint_priority_is_text_then_enabled_hover_then_editor() {
+        use crate::backend::compositor_common::capture_hint::screenshot_editor_hint_label;
+
+        let mut state = editing(300, 200);
+        let entries = state.toolbar_entries();
+        let index = |command| {
+            entries
+                .iter()
+                .position(|entry| entry.command == Some(command))
+                .unwrap()
+        };
+        let pencil = index(ToolbarCommand::SelectTool(ScreenshotTool::Pencil));
+        let undo = index(ToolbarCommand::Undo);
+        let readout = entries
+            .iter()
+            .position(|entry| entry.command.is_none())
+            .unwrap();
+        for typing in [false, true] {
+            if typing {
+                state.set_tool(ScreenshotTool::Text);
+                state.begin_annotation(110.0, 110.0);
+                state.text_input('x');
+            }
+            for (hovered, hint) in [
+                (None, screenshot_editor_hint_label(false)),
+                (
+                    Some(pencil),
+                    ToolbarCommand::SelectTool(ScreenshotTool::Pencil).hint(),
+                ),
+                (Some(undo), screenshot_editor_hint_label(false)),
+                (Some(readout), screenshot_editor_hint_label(false)),
+                (Some(usize::MAX), screenshot_editor_hint_label(false)),
+            ] {
+                state.hovered_button = hovered;
+                let expected = if typing {
+                    screenshot_editor_hint_label(true)
+                } else {
+                    hint
+                };
+                assert_eq!(state.editor_hint_label(), expected);
+            }
+        }
+        state.cancel_text_draft();
+        state.hovered_button = None;
+        assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+    }
+
+    #[test]
+    fn toolbar_hints_recheck_current_action_availability() {
+        use crate::backend::compositor_common::capture_hint::screenshot_editor_hint_label;
+
+        let mut state = editing(300, 200);
+        let index = |state: &ScreenshotState, command| {
+            state
+                .toolbar_entries()
+                .iter()
+                .position(|entry| entry.command == Some(command))
+                .unwrap()
+        };
+        let undo = index(&state, ToolbarCommand::Undo);
+        let redo = index(&state, ToolbarCommand::Redo);
+        state.set_tool(ScreenshotTool::Line);
+        state.begin_annotation(110.0, 110.0);
+        state.update_annotation(120.0, 120.0);
+        state.commit_annotation();
+        state.hovered_button = Some(undo);
+        assert_eq!(state.editor_hint_label(), ToolbarCommand::Undo.hint());
+        state.undo_annotation();
+        assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+        state.hovered_button = Some(redo);
+        assert_eq!(state.editor_hint_label(), ToolbarCommand::Redo.hint());
+        state.redo_annotation();
+        assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
+        assert_eq!(index(&state, ToolbarCommand::Undo), undo);
+        assert_eq!(index(&state, ToolbarCommand::Redo), redo);
+        for (command, width) in [
+            (ToolbarCommand::Thinner, MIN_LINE_WIDTH),
+            (ToolbarCommand::Thicker, MAX_LINE_WIDTH),
+        ] {
+            state.line_width = width;
+            state.hovered_button = Some(index(&state, command));
+            assert_eq!(state.editor_hint_label(), screenshot_editor_hint_label(false));
         }
     }
 }

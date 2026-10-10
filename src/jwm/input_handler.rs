@@ -5247,6 +5247,85 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_toolbar_tool_hints_match_keyboard_actions() {
+        use crate::backend::api::KeyOps;
+        use crate::backend::common_define::{KeySym, Mods};
+        use crate::jwm::features::screenshot::{ScreenshotTool, ToolbarCommand};
+
+        struct ToolKeys;
+        impl KeyOps for ToolKeys {
+            fn grab_keys(
+                &self,
+                root: WindowId,
+                bindings: &[(Mods, KeySym)],
+            ) -> Result<(), BackendError> {
+                DummyKeyOps.grab_keys(root, bindings)
+            }
+
+            fn clear_key_grabs(&self, root: WindowId) -> Result<(), BackendError> {
+                DummyKeyOps.clear_key_grabs(root)
+            }
+
+            fn clean_mods(&self, raw: u16) -> Mods {
+                Mods::from_bits_truncate(raw)
+            }
+
+            fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
+                Ok(u32::from(keycode))
+            }
+
+            fn clear_cache(&mut self) {}
+        }
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend.key_ops = Box::new(ToolKeys);
+        jwm.s_w = 800;
+        jwm.s_h = 600;
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(100, 100, 200, 100));
+        for (key, tool) in [
+            (b'p', ScreenshotTool::Pencil),
+            (b'f', ScreenshotTool::Pencil),
+            (b'l', ScreenshotTool::Line),
+            (b'a', ScreenshotTool::Arrow),
+            (b'r', ScreenshotTool::Rectangle),
+            (b'b', ScreenshotTool::FilledRectangle),
+            (b'c', ScreenshotTool::Ellipse),
+            (b'o', ScreenshotTool::Ellipse),
+            (b'h', ScreenshotTool::Marker),
+            (b't', ScreenshotTool::Text),
+            (b'n', ScreenshotTool::Counter),
+            (b'x', ScreenshotTool::Pixelate),
+            (b'i', ScreenshotTool::Invert),
+        ] {
+            jwm.features.screenshot.set_tool(ScreenshotTool::Select);
+            jwm.on_key_press_internal(&mut backend, key, 0).unwrap();
+            assert_eq!(jwm.features.screenshot.tool, tool);
+            let command = ToolbarCommand::SelectTool(tool);
+            let hint = command.hint();
+            let shortcuts = hint.split(" · ").nth(1).unwrap();
+            let key_label = char::from(key).to_ascii_uppercase().to_string();
+            assert!(shortcuts.split(" / ").any(|part| part == key_label.as_str()));
+            let index = jwm
+                .features
+                .screenshot
+                .toolbar_entries()
+                .iter()
+                .position(|entry| entry.command == Some(command))
+                .unwrap();
+            jwm.features.screenshot.hovered_button = Some(index);
+            jwm.sync_screenshot_toolbar(&mut backend);
+            assert_eq!(backend.capture_hint.as_deref(), Some(hint));
+        }
+        jwm.features.screenshot.hovered_button = None;
+        jwm.sync_screenshot_toolbar(&mut backend);
+        assert!(backend.capture_hint.as_deref().unwrap().contains("Enter / Space save"));
+    }
+
+    #[test]
     fn screenshot_text_hints_follow_keyboard_and_toolbar_context() {
         use crate::backend::api::KeyOps;
         use crate::backend::common_define::{KeySym, Mods, keys};
