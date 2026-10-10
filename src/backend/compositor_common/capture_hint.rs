@@ -63,6 +63,17 @@ pub(crate) fn capture_hint_label(
     }
 }
 
+/// Text entry owns the keyboard until the label is committed or discarded.
+/// Keep its guidance separate from the screenshot's save/copy shortcuts.
+#[must_use]
+pub(crate) fn screenshot_editor_hint_label(typing: bool) -> &'static str {
+    if typing {
+        "Screenshot text · Enter finish label · Esc discard label · Backspace erase"
+    } else {
+        "Screenshot · Enter / Space save · double-click veil · Ctrl+C copy · Esc"
+    }
+}
+
 fn hint_pad_x(chip_w: f32) -> f32 {
     if !(chip_w.is_finite() && chip_w > 0.0) {
         return 0.0;
@@ -170,6 +181,19 @@ mod tests {
         let probed = capture_hint_label(true, "window", false, Some("Firefox"));
         assert!(probed.contains("Firefox"));
         assert!(probed.contains("click to pick"));
+    }
+
+    #[test]
+    fn text_hint_names_label_actions_instead_of_capture_shortcuts() {
+        let typing = screenshot_editor_hint_label(true);
+        assert!(typing.contains("Enter finish label"));
+        assert!(typing.contains("Esc discard label"));
+        assert!(typing.contains("Backspace erase"));
+        assert!(!typing.contains("save"));
+        assert!(!typing.contains("Ctrl+C"));
+        let editing = screenshot_editor_hint_label(false);
+        assert!(editing.contains("Enter / Space save"));
+        assert!(editing.contains("Ctrl+C copy"));
     }
 
     #[test]

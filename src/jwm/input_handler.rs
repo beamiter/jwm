@@ -838,6 +838,9 @@ impl Jwm {
             return;
         };
 
+        // Entering or leaving a text draft can keep the same toolbar model.
+        // Publish the keyboard context before the unchanged-toolbar fast path.
+        self.sync_capture_hint(backend);
         let entries = self.features.screenshot.toolbar_entries();
         let hovered = self.features.screenshot.hovered_button;
         let mut buttons: Vec<ToolbarButton> = entries.into_iter().map(|e| e.button).collect();
@@ -5093,6 +5096,7 @@ mod tests {
         expose_click_hit: Option<WindowId>,
         /// The screenshot editor's current rendered stroke points.
         annotation_points: Vec<(f32, f32)>,
+        capture_hint: Option<String>,
         compositor_enabled: bool,
     }
 
@@ -5112,6 +5116,7 @@ mod tests {
                 expose_selected: None,
                 expose_click_hit: None,
                 annotation_points: Vec::new(),
+                capture_hint: None,
                 compositor_enabled: false,
             }
         }
@@ -5120,7 +5125,11 @@ mod tests {
     impl CompositorBenchmark for ConfigureReplyBackend {}
     impl BackendDiagnostics for ConfigureReplyBackend {}
     impl CompositorControl for ConfigureReplyBackend {}
-    impl CompositorMedia for ConfigureReplyBackend {}
+    impl CompositorMedia for ConfigureReplyBackend {
+        fn compositor_set_capture_hint(&mut self, hint: Option<String>) {
+            self.capture_hint = hint;
+        }
+    }
     impl CompositorWorkspaceEffects for ConfigureReplyBackend {
         fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
             self.osd_log
@@ -5235,6 +5244,107 @@ mod tests {
         fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn screenshot_text_hints_follow_keyboard_and_toolbar_context() {
+        use crate::backend::api::KeyOps;
+        use crate::backend::common_define::KeySym;
+        use crate::backend::compositor_common::capture_hint::screenshot_editor_hint_label;
+
+        struct TextKeys;
+        impl KeyOps for TextKeys {
+            fn grab_keys(
+                &self,
+                root: WindowId,
+                bindings: &[(Mods, KeySym)],
+            ) -> Result<(), BackendError> {
+                DummyKeyOps.grab_keys(root, bindings)
+            }
+
+            fn clear_key_grabs(&self, root: WindowId) -> Result<(), BackendError> {
+                DummyKeyOps.clear_key_grabs(root)
+            }
+
+            fn clean_mods(&self, raw: u16) -> Mods {
+                Mods::from_bits_truncate(raw)
+            }
+
+            fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
+                Ok(match keycode {
+                    1 => keys::KEY_Return,
+                    2 => keys::KEY_Escape,
+                    _ => keys::KEY_space,
+                })
+            }
+
+            fn clear_cache(&mut self) {}
+        }
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend.key_ops = Box::new(TextKeys);
+        jwm.s_w = 800;
+        jwm.s_h = 600;
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(100, 100, 200, 100));
+        jwm.features.screenshot.set_tool(ScreenshotTool::Text);
+        jwm.sync_screenshot_toolbar(&mut backend);
+        assert_eq!(
+            backend.capture_hint.as_deref(),
+            Some(screenshot_editor_hint_label(false))
+        );
+
+        jwm.features.screenshot.begin_annotation(120.0, 120.0);
+        jwm.sync_screenshot_toolbar(&mut backend);
+        assert_eq!(
+            backend.capture_hint.as_deref(),
+            Some(screenshot_editor_hint_label(true))
+        );
+        // Space remains text, even though the editor outside a label uses it
+        // to save. The hint never embeds the draft's potentially private text.
+        jwm.features.screenshot.text_input('x');
+        jwm.on_key_press_internal(&mut backend, 3, 0).unwrap();
+        assert!(jwm.features.screenshot.is_typing());
+        assert_eq!(
+            backend.capture_hint.as_deref(),
+            Some(screenshot_editor_hint_label(true))
+        );
+        jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        assert!(jwm.features.screenshot.active);
+        assert!(!jwm.features.screenshot.is_typing());
+        assert_eq!(
+            backend.capture_hint.as_deref(),
+            Some(screenshot_editor_hint_label(false))
+        );
+
+        jwm.features.screenshot.begin_annotation(120.0, 120.0);
+        jwm.sync_screenshot_toolbar(&mut backend);
+        jwm.on_key_press_internal(&mut backend, 2, 0).unwrap();
+        assert!(jwm.features.screenshot.active);
+        assert_eq!(
+            backend.capture_hint.as_deref(),
+            Some(screenshot_editor_hint_label(false))
+        );
+
+        jwm.features.screenshot.begin_annotation(120.0, 120.0);
+        jwm.sync_screenshot_toolbar(&mut backend);
+        jwm.apply_screenshot_toolbar_command(
+            &mut backend,
+            ToolbarCommand::SelectTool(ScreenshotTool::Pencil),
+        );
+        assert!(!jwm.features.screenshot.is_typing());
+        assert_eq!(
+            backend.capture_hint.as_deref(),
+            Some(screenshot_editor_hint_label(false))
+        );
+        jwm.on_key_press_internal(&mut backend, 2, 0).unwrap();
+        assert!(!jwm.features.screenshot.active);
+        assert_eq!(backend.capture_hint, None);
+        jwm.sync_screenshot_toolbar(&mut backend);
+        assert_eq!(backend.capture_hint, None);
     }
 
     #[test]
