@@ -341,10 +341,7 @@ mod tests {
                 include_str!("../x11/compositor/common/shaders.rs"),
                 "u_border_color.rgb",
             ),
-            (
-                include_str!("../wayland_udev/compositor/shaders.rs"),
-                "rgb",
-            ),
+            (include_str!("../wayland_udev/compositor/shaders.rs"), "rgb"),
         ] {
             let shader = source
                 .split("pub const BORDER_FRAGMENT_SHADER")
@@ -362,9 +359,10 @@ mod tests {
             )));
             assert!(shader[solid..glow].contains("return;"));
             assert!(shader[glow..].contains("float outer = 1.0 - smoothstep(-1.0, 1.0, dist);"));
-            assert!(shader[glow..].contains(
-                "float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);"
-            ));
+            assert!(
+                shader[glow..]
+                    .contains("float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);")
+            );
         }
     }
 
