@@ -3917,6 +3917,22 @@ impl Jwm {
         Ok(())
     }
 
+    /// Candidate geometry may be smaller than the allowed recording source
+    /// while drawing. Keep it visible, but never publish it to the encoder.
+    pub(crate) fn sync_recording_region_source(&mut self, backend: &mut dyn Backend) {
+        if !self.features.recording.adjusting_region {
+            return;
+        }
+        if let Some(region) = self.features.recording.region.filter(|region| {
+            crate::jwm::features::recording::RecordingState::valid_source_region(*region)
+        }) {
+            if let Some(source) = Self::recording_region_tuple(region) {
+                backend.compositor_set_recording_region(source);
+                self.features.recording.note_applied_region(region);
+            }
+        }
+    }
+
     pub(crate) fn sync_recording_region_overlay(&mut self, backend: &mut dyn Backend) {
         let region = self
             .features
@@ -3935,6 +3951,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.features.recording.end_region_drag();
         let Some(region) = self.features.recording.region else {
             self.push_system_toast(
                 backend,

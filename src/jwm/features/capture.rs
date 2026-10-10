@@ -687,11 +687,7 @@ impl Jwm {
         }
 
         self.features.recording.set_region(rect);
-        if self.features.recording.adjusting_region {
-            if let Some(region) = Self::recording_region_tuple(rect) {
-                backend.compositor_set_recording_region(region);
-            }
-        }
+        self.sync_recording_region_source(backend);
         self.sync_recording_region_overlay(backend);
         true
     }
@@ -704,10 +700,14 @@ impl Jwm {
         self.features.capture.clear_recording_double_click();
         self.features.capture.recording = target;
         self.features.recording.end_region_drag();
+        self.sync_recording_region_source(backend);
 
         match target {
             CaptureTarget::Region => {
-                if !self.features.recording.adjusting_region {
+                if self.features.recording.adjusting_region {
+                    self.features.recording.restore_applied_region();
+                    self.sync_recording_region_overlay(backend);
+                } else {
                     self.features.recording.region = None;
                 }
                 self.preview_recording_capture_target(

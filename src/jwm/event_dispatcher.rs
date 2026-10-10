@@ -635,16 +635,7 @@ impl WMController for Jwm {
             {
                 let _ = self.commit_probed_window_recording(backend, pointer);
             }
-            if self.features.recording.adjusting_region {
-                if let Some(region) = self
-                    .features
-                    .recording
-                    .region
-                    .and_then(Self::recording_region_tuple)
-                {
-                    backend.compositor_set_recording_region(region);
-                }
-            }
+            self.sync_recording_region_source(backend);
             self.sync_recording_region_overlay(backend);
             return;
         }
@@ -960,17 +951,13 @@ impl WMController for Jwm {
             if self.features.capture.recording == CaptureTarget::Region
                 && self.features.recording.is_region_dragging()
             {
-                let region = self.features.recording.update_region_drag(
+                self.features.recording.update_region_drag(
                     root_x.round() as i32,
                     root_y.round() as i32,
                     self.s_w,
                     self.s_h,
                 );
-                if self.features.recording.adjusting_region {
-                    if let Some(region) = region.and_then(Self::recording_region_tuple) {
-                        backend.compositor_set_recording_region(region);
-                    }
-                }
+                self.sync_recording_region_source(backend);
                 self.sync_recording_region_overlay(backend);
             } else {
                 self.preview_recording_capture_target(backend, target, (root_x, root_y));
@@ -2746,6 +2733,7 @@ mod tests {
     }
 
     struct RenderSpyBackend {
+        recording_region_updates: Vec<(i32, i32, u32, u32)>,
         window_ops: MapRestoreWindowOps,
         input_ops: GrabSpyInputOps,
         property_ops: MapRestorePropertyOps,
@@ -2797,6 +2785,7 @@ mod tests {
                 key_ops: GrabSpyKeyOps::default(),
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
+                recording_region_updates: Vec::new(),
                 rendered_frames: 0,
                 needs_render: true,
                 compositor_enabled: true,
@@ -2837,7 +2826,11 @@ mod tests {
             self.compositor_brightness.push(brightness);
         }
     }
-    impl CompositorMedia for RenderSpyBackend {}
+    impl CompositorMedia for RenderSpyBackend {
+        fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
+            self.recording_region_updates.push(region);
+        }
+    }
     impl CompositorWorkspaceEffects for RenderSpyBackend {
         fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {
             self.compositor_monitor_updates += 1;
@@ -5655,6 +5648,172 @@ mod tests {
         capture_release(&mut jwm, &mut backend, 150.0, 170.0);
         assert!(jwm.features.screenshot.annotations.is_empty());
         assert!(!jwm.features.screenshot.drawing_annotation);
+    }
+
+    fn recording_adjustment_fixture() -> (Jwm, RenderSpyBackend) {
+        let mut jwm = empty_jwm();
+        let backend = RenderSpyBackend::new();
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        jwm.features.recording.start("unused.mp4".into());
+        jwm.features
+            .recording
+            .set_region(crate::core::types::Rect::new(100, 100, 200, 150));
+        assert!(jwm.features.recording.begin_region_adjustment());
+        (jwm, backend)
+    }
+
+    fn recording_motion(jwm: &mut Jwm, backend: &mut RenderSpyBackend, x: f64, y: f64) {
+        jwm.handle_event(
+            backend,
+            BackendEvent::MotionNotify {
+                target: HitTarget::Background { output: None },
+                root_x: x,
+                root_y: y,
+                time: 1050,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn recording_adjustment_never_publishes_tiny_candidates_and_restores_gesture_source() {
+        use crate::core::types::Rect;
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        // Accept a move before drawing a replacement; rejection must restore
+        // this position, not the whole adjustment's original position.
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        capture_release(&mut jwm, &mut backend, 230.0, 210.0);
+        let previous = Rect::new(150, 150, 200, 150);
+        assert_eq!(backend.recording_region_updates, vec![(150, 150, 200, 150)]);
+        backend.recording_region_updates.clear();
+        capture_press(&mut jwm, &mut backend, 600.0, 500.0);
+        recording_motion(&mut jwm, &mut backend, 605.0, 505.0);
+        assert!(backend.recording_region_updates.is_empty());
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(600, 500, 5, 5))
+        );
+        recording_motion(&mut jwm, &mut backend, 650.0, 540.0);
+        assert_eq!(backend.recording_region_updates, vec![(600, 500, 50, 40)]);
+        recording_motion(&mut jwm, &mut backend, 605.0, 505.0);
+        assert_eq!(backend.recording_region_updates.len(), 1);
+        capture_release(&mut jwm, &mut backend, 605.0, 505.0);
+        assert_eq!(jwm.features.recording.region, Some(previous));
+        assert_eq!(
+            backend.recording_region_updates,
+            vec![(600, 500, 50, 40), (150, 150, 200, 150)]
+        );
+        assert!(jwm.features.recording.active);
+        assert!(jwm.features.recording.selecting_region);
+        jwm.cancel_recording_region_interaction(&mut backend);
+        assert_eq!(
+            backend.recording_region_updates.last(),
+            Some(&(100, 100, 200, 150))
+        );
+        assert!(jwm.features.recording.active);
+    }
+
+    #[test]
+    fn recording_adjustment_window_round_trip_restores_latest_applied_source() {
+        use crate::core::types::Rect;
+        use crate::jwm::features::capture::CaptureTarget;
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        capture_press(&mut jwm, &mut backend, 600.0, 500.0);
+        capture_release(&mut jwm, &mut backend, 650.0, 540.0);
+        jwm.set_recording_capture_target(&mut backend, CaptureTarget::Window);
+        assert!(jwm.features.recording.region.is_none());
+        jwm.set_recording_capture_target(&mut backend, CaptureTarget::Region);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(600, 500, 50, 40))
+        );
+        assert_eq!(
+            backend.recording_region_updates.last(),
+            Some(&(600, 500, 50, 40))
+        );
+        // Switching target while a valid-then-tiny replacement is still held
+        // settles that gesture before Window hides the candidate.
+        capture_press(&mut jwm, &mut backend, 800.0, 700.0);
+        recording_motion(&mut jwm, &mut backend, 850.0, 740.0);
+        recording_motion(&mut jwm, &mut backend, 805.0, 705.0);
+        jwm.set_recording_capture_target(&mut backend, CaptureTarget::Window);
+        assert_eq!(
+            backend.recording_region_updates.last(),
+            Some(&(600, 500, 50, 40))
+        );
+        jwm.set_recording_capture_target(&mut backend, CaptureTarget::Region);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(600, 500, 50, 40))
+        );
+    }
+
+    #[test]
+    fn recording_adjustment_confirm_resolves_tiny_inflight_replacement() {
+        use crate::core::types::Rect;
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        capture_press(&mut jwm, &mut backend, 600.0, 500.0);
+        recording_motion(&mut jwm, &mut backend, 650.0, 540.0);
+        recording_motion(&mut jwm, &mut backend, 605.0, 505.0);
+        jwm.finish_recording_region_interaction(&mut backend)
+            .unwrap();
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(100, 100, 200, 150))
+        );
+        assert_eq!(
+            backend.recording_region_updates,
+            vec![(600, 500, 50, 40), (100, 100, 200, 150)]
+        );
+        assert!(jwm.features.recording.active);
+        assert!(!jwm.features.recording.selecting_region);
+    }
+
+    #[test]
+    fn recording_adjustment_source_keeps_move_resize_and_minimum_size_rules() {
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        recording_motion(&mut jwm, &mut backend, 230.0, 210.0);
+        capture_release(&mut jwm, &mut backend, 230.0, 210.0);
+        capture_press(&mut jwm, &mut backend, 350.0, 300.0);
+        recording_motion(&mut jwm, &mut backend, 400.0, 350.0);
+        capture_release(&mut jwm, &mut backend, 400.0, 350.0);
+        assert_eq!(
+            backend.recording_region_updates,
+            vec![
+                (150, 150, 200, 150),
+                (150, 150, 200, 150),
+                (150, 150, 250, 200),
+                (150, 150, 250, 200),
+            ]
+        );
+        backend.recording_region_updates.clear();
+        capture_press(&mut jwm, &mut backend, 600.0, 500.0);
+        for (x, y) in [(600.0, 500.0), (615.0, 550.0), (650.0, 515.0)] {
+            recording_motion(&mut jwm, &mut backend, x, y);
+            assert!(backend.recording_region_updates.is_empty());
+        }
+        recording_motion(&mut jwm, &mut backend, 616.0, 516.0);
+        assert_eq!(backend.recording_region_updates, vec![(600, 500, 16, 16)]);
+    }
+
+    #[test]
+    fn initial_recording_tiny_drag_keeps_probe_behavior_without_source_updates() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        jwm.features
+            .recording
+            .begin_initial_region_selection("unused.mp4".into());
+        capture_press(&mut jwm, &mut backend, 600.0, 500.0);
+        recording_motion(&mut jwm, &mut backend, 605.0, 505.0);
+        capture_release(&mut jwm, &mut backend, 605.0, 505.0);
+        assert!(backend.recording_region_updates.is_empty());
+        assert!(jwm.features.recording.region.is_none());
+        assert!(jwm.features.recording.selecting_region);
+        assert!(!jwm.features.recording.active);
     }
 
     #[test]

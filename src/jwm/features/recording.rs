@@ -58,6 +58,7 @@ enum RecordingRegionDrag {
     New {
         anchor_x: i32,
         anchor_y: i32,
+        previous_region: Option<Rect>,
     },
     Move {
         pointer_x: i32,
@@ -141,6 +142,8 @@ pub struct RecordingState {
     pub last_error: Option<String>,
     /// Region restored when an active adjustment is cancelled.
     original_region: Option<Rect>,
+    /// Last valid crop actually sent during the current adjustment.
+    last_applied_region: Option<Rect>,
     drag: RecordingRegionDrag,
 }
 
@@ -165,6 +168,7 @@ impl RecordingState {
         self.pending_output_path = None;
         self.last_error = None;
         self.original_region = None;
+        self.last_applied_region = None;
         self.drag = RecordingRegionDrag::None;
     }
 
@@ -183,6 +187,7 @@ impl RecordingState {
         self.adjusting_region = false;
         self.pending_output_path = None;
         self.original_region = None;
+        self.last_applied_region = None;
         self.drag = RecordingRegionDrag::None;
     }
 
@@ -240,6 +245,7 @@ impl RecordingState {
         self.adjusting_region = false;
         self.pending_output_path = Some(output_path);
         self.original_region = None;
+        self.last_applied_region = None;
         self.region = None;
         self.output_size = None;
         self.drag = RecordingRegionDrag::None;
@@ -252,6 +258,7 @@ impl RecordingState {
         self.selecting_region = true;
         self.adjusting_region = true;
         self.original_region = self.region;
+        self.last_applied_region = self.region;
         self.drag = RecordingRegionDrag::None;
         true
     }
@@ -267,6 +274,7 @@ impl RecordingState {
         self.selecting_region = false;
         self.adjusting_region = false;
         self.original_region = None;
+        self.last_applied_region = None;
         self.drag = RecordingRegionDrag::None;
         self.region
     }
@@ -275,6 +283,7 @@ impl RecordingState {
         self.selecting_region = false;
         self.adjusting_region = false;
         self.original_region = None;
+        self.last_applied_region = None;
         self.drag = RecordingRegionDrag::None;
     }
 
@@ -340,6 +349,7 @@ impl RecordingState {
             self.drag = RecordingRegionDrag::New {
                 anchor_x: pointer_x,
                 anchor_y: pointer_y,
+                previous_region: self.last_applied_region,
             };
             return;
         };
@@ -359,6 +369,7 @@ impl RecordingState {
             RecordingPointerIntent::New => RecordingRegionDrag::New {
                 anchor_x: pointer_x,
                 anchor_y: pointer_y,
+                previous_region: self.last_applied_region,
             },
         };
     }
@@ -386,7 +397,9 @@ impl RecordingState {
         };
         let updated = match self.drag {
             RecordingRegionDrag::None => return self.region,
-            RecordingRegionDrag::New { anchor_x, anchor_y } => {
+            RecordingRegionDrag::New {
+                anchor_x, anchor_y, ..
+            } => {
                 let x1 = anchor_x.clamp(0, screen_width);
                 let y1 = anchor_y.clamp(0, screen_height);
                 let x2 = pointer_x.clamp(0, screen_width);
@@ -458,11 +471,33 @@ impl RecordingState {
     }
 
     pub fn end_region_drag(&mut self) {
+        if self
+            .region
+            .is_some_and(|region| !Self::valid_source_region(region))
+        {
+            self.region = match self.drag {
+                RecordingRegionDrag::New {
+                    previous_region, ..
+                } if self.adjusting_region => previous_region,
+                _ => None,
+            };
+        }
         self.drag = RecordingRegionDrag::None;
-        if self.region.is_some_and(|region| {
-            region.w < MIN_RECORDING_REGION_SIZE || region.h < MIN_RECORDING_REGION_SIZE
-        }) {
-            self.region = None;
+    }
+
+    pub(crate) fn valid_source_region(region: Rect) -> bool {
+        region.w >= MIN_RECORDING_REGION_SIZE && region.h >= MIN_RECORDING_REGION_SIZE
+    }
+
+    pub(crate) fn note_applied_region(&mut self, region: Rect) {
+        if self.adjusting_region && Self::valid_source_region(region) {
+            self.last_applied_region = Some(region);
+        }
+    }
+
+    pub(crate) fn restore_applied_region(&mut self) {
+        if self.adjusting_region && self.region.is_none() {
+            self.region = self.last_applied_region;
         }
     }
 
