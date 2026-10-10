@@ -2155,15 +2155,13 @@ impl Jwm {
     ) {
         let (w, h) = (image.width() as i32, image.height() as i32);
         let rgba = Rgba(color);
-        let mut writes = Vec::new();
+        // Repeated brush hits write the same color. Paint immediately rather
+        // than retaining every overlapping hit in a line-length-sized buffer.
         Self::trace_line(region_origin, from, to, width, |x, y| {
             if x >= 0 && y >= 0 && x < w && y < h {
-                writes.push((x as u32, y as u32));
+                image.put_pixel(x as u32, y as u32, rgba);
             }
         });
-        for (x, y) in writes {
-            image.put_pixel(x, y, rgba);
-        }
     }
 
     fn draw_arrow(
@@ -3687,5 +3685,78 @@ mod tests {
         state.commit();
 
         assert_eq!(state.get_selection_rect(), Some(Rect::new(10, 12, 11, 19)));
+    }
+
+    #[test]
+    fn streamed_annotation_lines_match_buffered_pixels() {
+        let segments = [
+            ((-8.0, 8.0), (24.0, 8.0)),
+            ((8.0, -8.0), (8.0, 24.0)),
+            ((-8.0, -8.0), (24.0, 24.0)),
+            ((24.0, -8.0), (-8.0, 24.0)),
+            ((2.25, 3.75), (13.75, 9.25)),
+            ((7.0, 7.0), (7.0, 7.0)),
+            ((-40.0, -40.0), (-30.0, -30.0)),
+        ];
+        for origin in [(0, 0), (-1920, -1080), (3840, 2160)] {
+            for (from, to) in segments {
+                let global = |p: (f32, f32)| {
+                    (p.0 + origin.0 as f32, p.1 + origin.1 as f32)
+                };
+                for (from, to) in [(global(from), global(to)), (global(to), global(from))] {
+                    for width in [0, 1, 2, 3, MAX_LINE_WIDTH, MAX_LINE_WIDTH * 4] {
+                        for alpha in [0, 127, 255] {
+                            let color = [200, 80, 40, alpha];
+                            let mut expected = RgbaImage::from_pixel(16, 16, Rgba([7, 9, 11, 81]));
+                            let mut actual = expected.clone();
+                            // The former implementation deferred these exact
+                            // overwrite operations; it never alpha-blended them.
+                            let mut writes = Vec::new();
+                            Jwm::trace_line(origin, from, to, width, |x, y| {
+                                if (0..16).contains(&x) && (0..16).contains(&y) {
+                                    writes.push((x as u32, y as u32));
+                                }
+                            });
+                            for (x, y) in writes {
+                                expected.put_pixel(x, y, Rgba(color));
+                            }
+                            Jwm::draw_line(&mut actual, origin, from, to, color, width);
+                            assert_eq!(actual, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_annotation_strokes_keep_the_same_clipped_coverage() {
+        let mut image = RgbaImage::new(7680, 32);
+        let color = [200, 80, 40, 127];
+        Jwm::draw_line(
+            &mut image,
+            (-3840, 0),
+            (-3840.0, 16.0),
+            (3839.0, 16.0),
+            color,
+            MAX_LINE_WIDTH,
+        );
+        for (x, y, pixel) in image.enumerate_pixels() {
+            let expected = if (4..=28).contains(&y) {
+                Rgba(color)
+            } else {
+                Rgba([0; 4])
+            };
+            assert_eq!(*pixel, expected, "pixel {x},{y}");
+        }
+    }
+
+    #[test]
+    fn annotation_lines_accept_empty_images() {
+        for (w, h) in [(0, 0), (0, 16), (16, 0)] {
+            let mut image = RgbaImage::new(w, h);
+            Jwm::draw_line(&mut image, (0, 0), (-2.0, -2.0), (18.0, 18.0), [255; 4], 24);
+            assert!(image.as_raw().is_empty());
+        }
     }
 }
