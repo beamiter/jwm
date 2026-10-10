@@ -66,6 +66,8 @@ enum RecordingRegionDrag {
     },
     Resize {
         edges: u8,
+        pointer_x: i32,
+        pointer_y: i32,
         initial: Rect,
     },
 }
@@ -290,31 +292,41 @@ impl RecordingState {
             return RecordingPointerIntent::New;
         };
 
-        let right = region.x + region.w;
-        let bottom = region.y + region.h;
-        let within_horizontal = pointer_x >= region.x - RESIZE_HANDLE_RADIUS
-            && pointer_x <= right + RESIZE_HANDLE_RADIUS;
-        let within_vertical = pointer_y >= region.y - RESIZE_HANDLE_RADIUS
-            && pointer_y <= bottom + RESIZE_HANDLE_RADIUS;
+        if region.w <= 0 || region.h <= 0 {
+            return RecordingPointerIntent::New;
+        }
+        // Leave an interior for moving/confirming even on the minimum 16px
+        // crop. Fixed 10px bands overlapped there and selected opposite edges
+        // at once. Fit each axis independently for long, narrow selections.
+        let radius_x = i64::from((region.w / 4).min(RESIZE_HANDLE_RADIUS));
+        let radius_y = i64::from((region.h / 4).min(RESIZE_HANDLE_RADIUS));
+        let left = i64::from(region.x);
+        let top = i64::from(region.y);
+        let right = left + i64::from(region.w);
+        let bottom = top + i64::from(region.h);
+        let pointer_x = i64::from(pointer_x);
+        let pointer_y = i64::from(pointer_y);
+        let within_horizontal = pointer_x >= left - radius_x && pointer_x <= right + radius_x;
+        let within_vertical = pointer_y >= top - radius_y && pointer_y <= bottom + radius_y;
         let mut edges = 0;
-        if within_vertical && (pointer_x - region.x).abs() <= RESIZE_HANDLE_RADIUS {
+        if within_vertical && (pointer_x - left).abs() <= radius_x {
             edges |= EDGE_LEFT;
         }
-        if within_vertical && (pointer_x - right).abs() <= RESIZE_HANDLE_RADIUS {
+        if within_vertical && (pointer_x - right).abs() <= radius_x {
             edges |= EDGE_RIGHT;
         }
-        if within_horizontal && (pointer_y - region.y).abs() <= RESIZE_HANDLE_RADIUS {
+        if within_horizontal && (pointer_y - top).abs() <= radius_y {
             edges |= EDGE_TOP;
         }
-        if within_horizontal && (pointer_y - bottom).abs() <= RESIZE_HANDLE_RADIUS {
+        if within_horizontal && (pointer_y - bottom).abs() <= radius_y {
             edges |= EDGE_BOTTOM;
         }
 
         if edges != 0 {
             RecordingPointerIntent::Resize(edges)
-        } else if pointer_x >= region.x
+        } else if pointer_x >= left
             && pointer_x <= right
-            && pointer_y >= region.y
+            && pointer_y >= top
             && pointer_y <= bottom
         {
             RecordingPointerIntent::Move
@@ -338,6 +350,8 @@ impl RecordingState {
         self.drag = match self.pointer_intent(pointer_x, pointer_y) {
             RecordingPointerIntent::Resize(edges) => RecordingRegionDrag::Resize {
                 edges,
+                pointer_x,
+                pointer_y,
                 initial: region,
             },
             RecordingPointerIntent::Move => RecordingRegionDrag::Move {
@@ -403,23 +417,41 @@ impl RecordingState {
                     initial.h.min(screen_height),
                 )
             }
-            RecordingRegionDrag::Resize { edges, initial } => {
+            RecordingRegionDrag::Resize {
+                edges,
+                pointer_x: start_x,
+                pointer_y: start_y,
+                initial,
+            } => {
                 let initial = fit_initial(initial);
+                // The press may be anywhere in a handle's hit band. Resize
+                // by its displacement so a plain click never snaps the edge
+                // to the pointer, and keep the same anchor after clamping.
+                let dx = pointer_x.saturating_sub(start_x);
+                let dy = pointer_y.saturating_sub(start_y);
                 let mut left = initial.x;
                 let mut top = initial.y;
                 let mut right = initial.x + initial.w;
                 let mut bottom = initial.y + initial.h;
                 if edges & EDGE_LEFT != 0 {
-                    left = pointer_x.clamp(0, right - MIN_RECORDING_REGION_SIZE);
+                    left = left
+                        .saturating_add(dx)
+                        .clamp(0, right - MIN_RECORDING_REGION_SIZE);
                 }
                 if edges & EDGE_RIGHT != 0 {
-                    right = pointer_x.clamp(left + MIN_RECORDING_REGION_SIZE, screen_width);
+                    right = right
+                        .saturating_add(dx)
+                        .clamp(left + MIN_RECORDING_REGION_SIZE, screen_width);
                 }
                 if edges & EDGE_TOP != 0 {
-                    top = pointer_y.clamp(0, bottom - MIN_RECORDING_REGION_SIZE);
+                    top = top
+                        .saturating_add(dy)
+                        .clamp(0, bottom - MIN_RECORDING_REGION_SIZE);
                 }
                 if edges & EDGE_BOTTOM != 0 {
-                    bottom = pointer_y.clamp(top + MIN_RECORDING_REGION_SIZE, screen_height);
+                    bottom = bottom
+                        .saturating_add(dy)
+                        .clamp(top + MIN_RECORDING_REGION_SIZE, screen_height);
                 }
                 Rect::new(left, top, right - left, bottom - top)
             }
@@ -635,5 +667,118 @@ mod tests {
             RecordingPointerIntent::Move.cursor(),
             crate::backend::common_define::StdCursorKind::Fleur
         );
+    }
+
+    #[test]
+    fn minimum_and_narrow_crops_keep_a_movable_confirmable_interior() {
+        for (width, height) in [(16, 16), (16, 200), (200, 16), (20, 20), (40, 40)] {
+            let mut state = RecordingState::new();
+            state.selecting_region = true;
+            let original = Rect::new(100, 100, width, height);
+            state.set_region(original);
+            let (cx, cy) = (100 + width / 2, 100 + height / 2);
+            // The double-click confirmation gate uses this same Move intent.
+            assert_eq!(state.pointer_intent(cx, cy), RecordingPointerIntent::Move);
+            state.begin_region_drag(cx, cy);
+            assert_eq!(
+                state.update_region_drag(cx + 15, cy + 12, 1000, 1000),
+                Some(Rect::new(115, 112, width, height))
+            );
+        }
+    }
+
+    #[test]
+    fn resize_hit_bands_never_choose_opposite_edges() {
+        for (width, height) in [(16, 16), (16, 200), (200, 16), (200, 150)] {
+            let mut state = RecordingState::new();
+            state.set_region(Rect::new(100, 100, width, height));
+            for x in 89..=111 + width {
+                for y in 89..=111 + height {
+                    if let RecordingPointerIntent::Resize(edges) = state.pointer_intent(x, y) {
+                        assert_ne!(edges & (EDGE_LEFT | EDGE_RIGHT), EDGE_LEFT | EDGE_RIGHT);
+                        assert_ne!(edges & (EDGE_TOP | EDGE_BOTTOM), EDGE_TOP | EDGE_BOTTOM);
+                    }
+                }
+            }
+            for (x, y, edges) in [
+                (100, 100, EDGE_LEFT | EDGE_TOP),
+                (100 + width, 100, EDGE_RIGHT | EDGE_TOP),
+                (100, 100 + height, EDGE_LEFT | EDGE_BOTTOM),
+                (100 + width, 100 + height, EDGE_RIGHT | EDGE_BOTTOM),
+            ] {
+                assert_eq!(state.pointer_intent(x, y), RecordingPointerIntent::Resize(edges));
+            }
+        }
+    }
+
+    #[test]
+    fn resize_handle_click_without_motion_preserves_the_crop() {
+        let original = Rect::new(100, 100, 200, 150);
+        for (x, y) in [
+            (95, 175),
+            (105, 175),
+            (295, 175),
+            (305, 175),
+            (200, 95),
+            (200, 105),
+            (200, 245),
+            (200, 255),
+            (95, 105),
+            (305, 245),
+        ] {
+            let mut state = RecordingState::new();
+            state.selecting_region = true;
+            state.set_region(original);
+            assert!(matches!(state.pointer_intent(x, y), RecordingPointerIntent::Resize(_)));
+            state.begin_region_drag(x, y);
+            assert_eq!(state.update_region_drag(x, y, 1920, 1080), Some(original));
+            state.end_region_drag();
+            assert_eq!(state.region, Some(original));
+        }
+    }
+
+    #[test]
+    fn resize_preserves_grab_offset_after_minimum_and_output_clamps() {
+        let original = Rect::new(100, 100, 200, 150);
+        let mut state = RecordingState::new();
+        state.selecting_region = true;
+        state.set_region(original);
+        state.begin_region_drag(295, 245);
+        assert_eq!(
+            state.update_region_drag(-100, -100, 1920, 1080),
+            Some(Rect::new(100, 100, 16, 16))
+        );
+        assert_eq!(state.update_region_drag(295, 245, 1920, 1080), Some(original));
+        assert_eq!(
+            state.update_region_drag(310, 265, 1920, 1080),
+            Some(Rect::new(100, 100, 215, 170))
+        );
+        state.end_region_drag();
+
+        state.set_region(original);
+        state.begin_region_drag(95, 105);
+        assert_eq!(
+            state.update_region_drag(-200, -200, 1920, 1080),
+            Some(Rect::new(0, 0, 300, 250))
+        );
+        assert_eq!(state.update_region_drag(95, 105, 1920, 1080), Some(original));
+        assert_eq!(
+            state.update_region_drag(105, 115, 1920, 1080),
+            Some(Rect::new(110, 110, 190, 140))
+        );
+    }
+
+    #[test]
+    fn resize_hit_testing_handles_negative_and_extreme_coordinates() {
+        let mut state = RecordingState::new();
+        state.set_region(Rect::new(-200, -100, 100, 80));
+        assert_eq!(state.pointer_intent(-150, -60), RecordingPointerIntent::Move);
+        assert_eq!(
+            state.pointer_intent(-200, -100),
+            RecordingPointerIntent::Resize(EDGE_LEFT | EDGE_TOP)
+        );
+        state.set_region(Rect::new(i32::MAX - 8, i32::MAX - 8, 16, 16));
+        assert_eq!(state.pointer_intent(i32::MAX, i32::MAX), RecordingPointerIntent::Move);
+        assert_eq!(state.pointer_intent(i32::MIN, i32::MIN), RecordingPointerIntent::New);
     }
 }
