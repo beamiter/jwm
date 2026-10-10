@@ -846,7 +846,8 @@ pub fn calculate_grid<K: Copy>(
 
     let (cols, rows) = choose_grid_dimensions(n, area);
 
-    let cell_h = (wh - (rows - 1) * gap) / rows;
+    let row_gap = fitting_inner_gap(wh, rows as usize, gap);
+    let cell_h = (wh - (rows - 1) * row_gap) / rows;
 
     for (i, c) in clients.iter().enumerate() {
         let row = i as i32 / cols;
@@ -857,11 +858,12 @@ pub fn calculate_grid<K: Copy>(
         } else {
             cols
         };
-        let cell_w = (ww - (row_cols - 1) * gap) / row_cols;
+        let column_gap = fitting_inner_gap(ww, row_cols as usize, gap);
+        let cell_w = (ww - (row_cols - 1) * column_gap) / row_cols;
 
         // 行尾 / 底行吸收整除余数，让网格与工作区边缘齐平
-        let x_off = col * (cell_w + gap);
-        let y_off = row * (cell_h + gap);
+        let x_off = col * (cell_w + column_gap);
+        let y_off = row * (cell_h + row_gap);
         let w = if col == row_cols - 1 {
             ww - x_off
         } else {
@@ -1834,6 +1836,48 @@ mod tests {
             let bottom = result.iter().map(|r| r.rect.y + r.rect.h).max().unwrap();
             assert_eq!(right, 1601 - 28, "n={} right edge should be flush", n);
             assert_eq!(bottom, 999 - 28, "n={} bottom edge should be flush", n);
+        }
+    }
+
+    #[test]
+    fn grid_fits_inner_gaps_for_dense_and_incomplete_rows() {
+        for (screen, gap) in [
+            (Rect::new(0, 0, 100, 100), 30),
+            (Rect::new(-200, 150, 110, 90), 25),
+            (Rect::new(10, -50, 120, 120), 55),
+        ] {
+            let params = LayoutParams {
+                screen_area: screen,
+                n_master: 1,
+                m_fact: 0.55,
+                gap,
+            };
+            let area = usable_area(screen, gap);
+            for count in 1..=50 {
+                let clients: Vec<_> = (0..count)
+                    .map(|key| LayoutClient {
+                        key,
+                        factor: 1.0,
+                        border_w: 0,
+                    })
+                    .collect();
+                let result = calculate_grid(&params, &clients);
+                assert_eq!(result.len(), clients.len());
+                for (index, item) in result.iter().enumerate() {
+                    assert_eq!(item.key, index);
+                    let rect = item.rect;
+                    assert!(rect.w > 0 && rect.h > 0);
+                    assert!(rect.x >= area.x && rect.y >= area.y);
+                    assert!(
+                        rect.x + rect.w <= area.x + area.w,
+                        "count={count}: {rect:?}"
+                    );
+                    assert!(
+                        rect.y + rect.h <= area.y + area.h,
+                        "count={count}: {rect:?}"
+                    );
+                }
+            }
         }
     }
 
