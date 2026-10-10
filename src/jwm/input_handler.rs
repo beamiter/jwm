@@ -5249,8 +5249,9 @@ mod tests {
     #[test]
     fn screenshot_text_hints_follow_keyboard_and_toolbar_context() {
         use crate::backend::api::KeyOps;
-        use crate::backend::common_define::KeySym;
+        use crate::backend::common_define::{KeySym, Mods, keys};
         use crate::backend::compositor_common::capture_hint::screenshot_editor_hint_label;
+        use crate::jwm::features::screenshot::{ScreenshotTool, ToolbarCommand};
 
         struct TextKeys;
         impl KeyOps for TextKeys {
