@@ -1983,7 +1983,10 @@ mod tests {
         jwm.arrange(&mut backend, Some(mon));
 
         let new_work = jwm.maximize_work_area(mon).unwrap();
-        assert_eq!(new_work, Rect::new(work.x, work.y + 40, work.w, work.h - 40));
+        assert_eq!(
+            new_work,
+            Rect::new(work.x, work.y + 40, work.w, work.h - 40)
+        );
         let target = maximize_target(restore, new_work, MaximizeAxes::BOTH, 0);
         let client = &jwm.state.clients[maximized];
         assert_eq!(live_rect(client), target);
