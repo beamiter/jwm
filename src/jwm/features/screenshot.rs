@@ -1318,6 +1318,12 @@ impl Jwm {
         let Some(parked) = self.features.deferred_grab.as_ref() else {
             return;
         };
+        // IPC can accept quit earlier in this same update. Do not acquire
+        // fresh input grabs or open a deferred surface on the way out.
+        if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
+            self.features.deferred_grab = None;
+            return;
+        }
         // Something else claimed the screen meanwhile; the request is stale.
         // A parked selector is refused over every grab-holding mode, as
         // `take_screenshot` refuses it, not just over a panel.
@@ -2620,6 +2626,57 @@ mod tests {
             assert!(!jwm.features.screenshot.active, "{mode}");
             assert!(jwm.features.deferred_grab.is_none(), "{mode}");
         }
+    }
+
+    #[test]
+    fn quit_discards_deferred_surfaces_before_the_next_retry() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+
+        for action in [
+            DeferredGrabAction::Screenshot {
+                output_path: "/nonexistent/parked.png".into(),
+            },
+            DeferredGrabAction::ShellHub { route: None },
+        ] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            let now = std::time::Instant::now();
+            jwm.features.deferred_grab = Some(DeferredGrab::new(action, now));
+            jwm.quit(&mut backend, &WMArgEnum::Int(0)).unwrap();
+            jwm.tick_deferred_grab(&mut backend, now);
+            assert!(jwm.features.deferred_grab.is_none());
+            assert!(!jwm.features.screenshot.active);
+            assert!(!jwm.features.system_ui.is_active());
+            // The discarded request cannot replay on a later tick.
+            jwm.tick_deferred_grab(&mut backend, now);
+            assert!(!jwm.features.screenshot.active);
+            assert!(!jwm.features.system_ui.is_active());
+        }
+    }
+
+    #[test]
+    fn dropping_a_deferred_surface_on_exit_preserves_submitted_capture_jobs() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features
+            .screenshot_completions
+            .push(connectivity::BackgroundJob::refused());
+        jwm.features.deferred_grab = Some(DeferredGrab::new(
+            DeferredGrabAction::Screenshot {
+                output_path: "/nonexistent/parked.png".into(),
+            },
+            std::time::Instant::now(),
+        ));
+        jwm.quit(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.tick_deferred_grab(&mut backend, std::time::Instant::now());
+        assert!(jwm.features.deferred_grab.is_none());
+        assert_eq!(jwm.features.screenshot_completions.len(), 1);
     }
 
     #[test]
