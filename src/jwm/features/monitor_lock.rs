@@ -597,7 +597,7 @@ impl Jwm {
 /// policy's tests: the dummy ops, a compositor that really switches on and
 /// off, and a record of the mode and shade pushes a lock should cause.
 #[cfg(test)]
-pub(super) mod test_support {
+pub(in crate::jwm) mod test_support {
     use crate::backend::api::{
         Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
