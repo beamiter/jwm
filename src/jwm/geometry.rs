@@ -295,10 +295,10 @@ impl GeometryConstraints {
     pub fn rect_intersection(rect1: &Rect, rect2: &Rect) -> Option<Rect> {
         let left = rect1.x.max(rect2.x);
         let top = rect1.y.max(rect2.y);
-        let right = (i64::from(rect1.x) + i64::from(rect1.w))
-            .min(i64::from(rect2.x) + i64::from(rect2.w));
-        let bottom = (i64::from(rect1.y) + i64::from(rect1.h))
-            .min(i64::from(rect2.y) + i64::from(rect2.h));
+        let right =
+            (i64::from(rect1.x) + i64::from(rect1.w)).min(i64::from(rect2.x) + i64::from(rect2.w));
+        let bottom =
+            (i64::from(rect1.y) + i64::from(rect1.h)).min(i64::from(rect2.y) + i64::from(rect2.h));
 
         let w = right - i64::from(left);
         let h = bottom - i64::from(top);
