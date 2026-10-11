@@ -4389,10 +4389,52 @@ impl Jwm {
         }
         let region = self.normalize_initial_recording_region(region)?;
 
-        self.free_microphone_for_screen_recording(
+        let captures_audio = CONFIG.load().behavior().recording_audio_enabled;
+        let stopped_standalone_audio = captures_audio
+            && (self.features.audio_recording.active
+                || self.features.audio_recording.is_finalizing());
+        self.free_microphone_for_screen_recording(backend, captures_audio)?;
+        self.submit_preflighted_recording_region(
             backend,
-            CONFIG.load().behavior().recording_audio_enabled,
-        )?;
+            output_path,
+            region,
+            stopped_standalone_audio,
+        )
+    }
+
+    /// Submit only after runtime/path/geometry checks and microphone handoff.
+    /// A rejection must not create a WM session or a segment to finalize.
+    fn submit_preflighted_recording_region(
+        &mut self,
+        backend: &mut dyn Backend,
+        output_path: &str,
+        region: Rect,
+        stopped_standalone_audio: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.recording.active {
+            return Err("recording is already active".into());
+        }
+        let region_tuple = Self::recording_region_tuple(region)
+            .ok_or("recording region dimensions are invalid")?;
+        if let Err(error) = backend.compositor_request_recording_region(output_path, region_tuple) {
+            error!("[recording] start request rejected: {error}");
+            self.push_system_toast(
+                backend,
+                crate::backend::api::ToastNotification {
+                    title: "\u{f03d}  Recording could not start".into(),
+                    body: if stopped_standalone_audio {
+                        "The backend rejected this request. Standalone audio remains stopped after microphone handoff. See the log for details."
+                    } else {
+                        "The backend rejected this request. See the log for details."
+                    }
+                    .into(),
+                    urgency: 2,
+                    timeout_ms: 8000,
+                    ..Default::default()
+                },
+            );
+            return Err(error.into());
+        }
 
         self.features.recording.start(output_path.to_string());
         self.features.recording.set_region(region);
@@ -4400,13 +4442,10 @@ impl Jwm {
         self.features
             .recording
             .start_segment(output_path.to_string());
-        let region_tuple = Self::recording_region_tuple(region)
-            .ok_or("recording region dimensions are invalid")?;
         info!(
             "[recording] start → {output_path} ({}x{}+{}+{})",
             region.w, region.h, region.x, region.y
         );
-        backend.compositor_start_recording_region(output_path, region_tuple);
         // Mirror the stop toast: the request was accepted, and the persistent
         // REC chip (compositor-drawn while frames flow) confirms the rest.
         self.push_system_toast(
@@ -6524,6 +6563,8 @@ mod keyboard_grab_tests {
         expose_modes: Vec<bool>,
         audio_live: Vec<bool>,
         audio_statuses: Vec<crate::backend::api::AudioRecordingIndicator>,
+        recording_requests: Vec<(String, (i32, i32, u32, u32))>,
+        recording_start_error: Option<&'static str>,
     }
 
     impl GrabSpyBackend {
@@ -6542,6 +6583,8 @@ mod keyboard_grab_tests {
                 expose_modes: Vec::new(),
                 audio_live: Vec::new(),
                 audio_statuses: Vec::new(),
+                recording_requests: Vec::new(),
+                recording_start_error: None,
             }
         }
 
@@ -6561,6 +6604,18 @@ mod keyboard_grab_tests {
     impl BackendDiagnostics for GrabSpyBackend {}
     impl CompositorControl for GrabSpyBackend {}
     impl CompositorMedia for GrabSpyBackend {
+        fn compositor_request_recording_region(
+            &mut self,
+            path: &str,
+            region: (i32, i32, u32, u32),
+        ) -> Result<(), crate::backend::error::BackendError> {
+            self.recording_requests.push((path.into(), region));
+            match self.recording_start_error {
+                Some(error) => Err(crate::backend::error::BackendError::Message(error.into())),
+                None => Ok(()),
+            }
+        }
+
         fn compositor_set_mic_indicator(&mut self, active: bool) {
             self.audio_live.push(active);
         }
@@ -7279,6 +7334,111 @@ mod keyboard_grab_tests {
         );
         jwm.poll_audio_recording(&mut backend);
         assert_eq!(backend.toasts.len(), 1, "reported once");
+    }
+
+    #[test]
+    fn a_rejected_recording_request_does_not_create_a_session_or_success_toast() {
+        let mut backend = GrabSpyBackend::new();
+        backend.recording_start_error = Some("private encoder diagnostic");
+        let mut jwm = jwm(&mut backend);
+        let error = jwm
+            .submit_preflighted_recording_region(
+                &mut backend,
+                "not-created.mp4",
+                crate::core::types::Rect::new(0, 0, 640, 480),
+                false,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("private encoder diagnostic"));
+        let recording = &jwm.features.recording;
+        assert!(!recording.active);
+        assert!(recording.current_segment.is_none());
+        assert!(recording.segments.is_empty());
+        assert!(recording.output_path.is_none());
+        assert_eq!(backend.recording_requests.len(), 1);
+        assert_eq!(backend.toasts.len(), 1);
+        assert!(
+            backend.toasts[0]
+                .title
+                .ends_with("Recording could not start")
+        );
+        assert_eq!(backend.toasts[0].urgency, 2);
+        assert!(
+            !backend.toasts[0]
+                .body
+                .contains("private encoder diagnostic")
+        );
+    }
+
+    #[test]
+    fn an_accepted_request_creates_state_but_only_claims_requested() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let region = crate::core::types::Rect::new(10, 20, 640, 480);
+        jwm.submit_preflighted_recording_region(&mut backend, "requested.mp4", region, false)
+            .unwrap();
+        let recording = &jwm.features.recording;
+        assert!(recording.active);
+        assert_eq!(recording.current_segment.as_deref(), Some("requested.mp4"));
+        assert_eq!(recording.output_path.as_deref(), Some("requested.mp4"));
+        assert_eq!(recording.region, Some(region));
+        assert_eq!(
+            backend.recording_requests,
+            [("requested.mp4".into(), (10, 20, 640, 480))]
+        );
+        assert_eq!(backend.toasts.len(), 1);
+        assert!(backend.toasts[0].title.ends_with("Recording requested"));
+        assert!(backend.compositor_recording_stats().is_none());
+    }
+
+    #[test]
+    fn a_duplicate_request_preserves_the_existing_recording_and_segment() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let region = crate::core::types::Rect::new(10, 20, 640, 480);
+        jwm.submit_preflighted_recording_region(&mut backend, "existing.mp4", region, false)
+            .unwrap();
+        backend.recording_start_error = Some("must not be called");
+        assert!(
+            jwm.submit_preflighted_recording_region(&mut backend, "rejected.mp4", region, false)
+                .is_err()
+        );
+        assert!(jwm.features.recording.active);
+        assert_eq!(
+            jwm.features.recording.current_segment.as_deref(),
+            Some("existing.mp4")
+        );
+        assert_eq!(
+            jwm.features.recording.output_path.as_deref(),
+            Some("existing.mp4")
+        );
+        assert_eq!(jwm.features.recording.region, Some(region));
+        assert_eq!(backend.recording_requests.len(), 1);
+        assert_eq!(backend.toasts.len(), 1);
+    }
+
+    #[test]
+    fn a_rejection_discloses_prior_audio_handoff_without_restarting_audio() {
+        let mut backend = GrabSpyBackend::new();
+        backend.recording_start_error = Some("encoder rejected");
+        let mut jwm = jwm(&mut backend);
+        assert!(
+            jwm.submit_preflighted_recording_region(
+                &mut backend,
+                "not-created.mp4",
+                crate::core::types::Rect::new(0, 0, 640, 480),
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            backend.toasts[0]
+                .body
+                .contains("Standalone audio remains stopped")
+        );
+        assert!(!jwm.features.audio_recording.active);
+        assert!(backend.audio_live.is_empty());
+        assert!(backend.audio_statuses.is_empty());
     }
 
     /// A theme the config file refused to take is live only until the next

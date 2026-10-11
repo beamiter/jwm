@@ -518,8 +518,23 @@ macro_rules! delegate_compositor_capabilities {
                 region: (i32, i32, u32, u32),
             ) {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.start_recording_region(path, region);
+                    let _ = compositor.start_recording_region(path, region);
                 }
+            }
+
+            fn compositor_request_recording_region(
+                &mut self,
+                path: &str,
+                region: (i32, i32, u32, u32),
+            ) -> Result<(), crate::backend::error::BackendError> {
+                let compositor = self.compositor.as_mut().ok_or_else(|| {
+                    crate::backend::error::BackendError::Message(
+                        "screen recording requires an active compositor".into(),
+                    )
+                })?;
+                compositor.start_recording_region(path, region).map_err(|error| {
+                    crate::backend::error::BackendError::Message(error.into())
+                })
             }
 
             fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {

@@ -3201,6 +3201,19 @@ pub trait CompositorMedia: Send {
         self.compositor_set_recording_region(region);
         self.compositor_start_recording(path);
     }
+    /// Submit a start request, returning a known synchronous rejection when
+    /// supported. `Ok` means only submitted: deferred initialization, frame
+    /// capture and encoder finalization can still fail. The default preserves
+    /// legacy backends that cannot report a synchronous result.
+    fn compositor_request_recording_region(
+        &mut self,
+        path: &str,
+        region: (i32, i32, u32, u32),
+    ) -> Result<(), BackendError> {
+        self.compositor_start_recording_region(path, region);
+        Ok(())
+    }
+
     fn compositor_set_recording_region(&mut self, _region: (i32, i32, u32, u32)) {}
     fn compositor_set_recording_region_overlay(&mut self, _region: Option<(i32, i32, u32, u32)>) {}
     /// Whether the recording crop cue shows resize handles. Soft hover-probe
@@ -3239,6 +3252,36 @@ pub trait CompositorMedia: Send {
         _fps: f32,
         _buffer_latency_ms: u32,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod recording_request_api_tests {
+    use super::CompositorMedia;
+
+    #[test]
+    fn legacy_recording_submission_remains_compatible_without_claiming_active() {
+        #[derive(Default)]
+        struct Legacy {
+            paths: Vec<String>,
+            regions: Vec<(i32, i32, u32, u32)>,
+        }
+        impl CompositorMedia for Legacy {
+            fn compositor_start_recording(&mut self, path: &str) {
+                self.paths.push(path.into());
+            }
+            fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
+                self.regions.push(region);
+            }
+        }
+        let mut legacy = Legacy::default();
+        let region = (10, 20, 640, 480);
+        legacy
+            .compositor_request_recording_region("not-opened.mp4", region)
+            .unwrap();
+        assert_eq!(legacy.paths, ["not-opened.mp4"]);
+        assert_eq!(legacy.regions, [region]);
+        assert!(legacy.compositor_recording_stats().is_none());
     }
 }
 

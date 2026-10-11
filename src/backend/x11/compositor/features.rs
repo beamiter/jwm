@@ -1723,16 +1723,16 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn start_recording(&mut self, output_path: &str) {
-        self.start_recording_region(output_path, (0, 0, self.screen_w, self.screen_h));
+        let _ = self.start_recording_region(output_path, (0, 0, self.screen_w, self.screen_h));
     }
 
     pub(crate) fn start_recording_region(
         &mut self,
         output_path: &str,
         region: (i32, i32, u32, u32),
-    ) {
+    ) -> Result<(), &'static str> {
         if self.recording_active {
-            return;
+            return Err("recording is already active");
         }
         self.set_recording_region(region);
         let (_, _, region_w, region_h) = self.recording_region;
@@ -1743,7 +1743,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let (w, h) = recording_output_size(region_w, region_h, self.recording_max_height);
         if w == 0 || h == 0 {
             log::warn!("compositor: recording region {region_w}x{region_h} is too small to encode");
-            return;
+            return Err("recording region is too small to encode");
         }
         self.recording_output_size = (w, h);
         let fps = self.recording_fps.clamp(1, 240);
@@ -1752,7 +1752,7 @@ impl<C: CompositorConnection> Compositor<C> {
             Ok(fbo) => fbo,
             Err(error) => {
                 log::warn!("compositor: failed to create recording framebuffer: {error}");
-                return;
+                return Err("could not create the recording framebuffer");
             }
         };
         if !self.build_recording_programs() {
@@ -1760,7 +1760,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.delete_framebuffer(recording_fbo.0);
                 self.gl.delete_texture(recording_fbo.1);
             }
-            return;
+            return Err("could not initialize recording shaders");
         }
         // Convert on the GPU when the driver can hold the packed target, which
         // every real desktop driver can. The plain RGBA readback stays as the
@@ -1969,7 +1969,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 self.release_recording_gpu();
                 self.recording_nv12 = false;
-                return;
+                return Err("could not start the recording encoder");
             }
         };
 
@@ -2016,6 +2016,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 "off"
             }
         );
+        Ok(())
     }
 
     pub(crate) fn set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
@@ -2945,6 +2946,33 @@ mod minimized_recapture_tests {
 
 #[cfg(test)]
 mod recording_output_ownership_tests {
+    #[test]
+    fn known_synchronous_start_failures_return_without_claiming_admission() {
+        let source = include_str!("features.rs");
+        let launch = source
+            .split_once("pub(crate) fn start_recording_region(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn set_recording_region(")
+            .unwrap()
+            .0;
+        assert_eq!(launch.matches("return Err(").count(), 5);
+        assert!(!launch.contains("return;"));
+        let active = launch.find("self.recording_active = true;").unwrap();
+        let accepted = launch.rfind("Ok(())").unwrap();
+        assert!(active < accepted);
+        let delegation = include_str!("../wm/compositor_delegation.rs");
+        let request = delegation
+            .split_once("fn compositor_request_recording_region(")
+            .unwrap()
+            .1
+            .split_once("fn compositor_set_recording_region(")
+            .unwrap()
+            .0;
+        assert!(request.contains(".ok_or_else(||"));
+        assert!(request.contains(".map_err(|error|"));
+    }
+
     #[test]
     fn screen_recording_preserves_a_destination_created_after_preflight() {
         // No GL or encoder is started: pin the production argv contract.
