@@ -1997,6 +1997,40 @@ impl Jwm {
         }
     }
 
+    /// Conservative half-open bounds of the brushed polyline, clipped to
+    /// the image. Bresenham centers stay inside each endpoint pair's bounds;
+    /// the round brush never visits outside its integer radius.
+    fn marker_mask_bounds(
+        image_size: (u32, u32),
+        region_origin: (i32, i32),
+        points: &[(f32, f32)],
+        width: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let radius = i64::from((width as i32).max(1) / 2);
+        let mut left = i64::MAX;
+        let mut top = i64::MAX;
+        let mut right = i64::MIN;
+        let mut bottom = i64::MIN;
+        for &(x, y) in points {
+            // Match local_point's rounding, while keeping bound arithmetic
+            // wide even for an off-image point or a negative crop origin.
+            let x = i64::from(x.round() as i32) - i64::from(region_origin.0);
+            let y = i64::from(y.round() as i32) - i64::from(region_origin.1);
+            left = left.min(x - radius);
+            top = top.min(y - radius);
+            right = right.max(x + radius + 1);
+            bottom = bottom.max(y + radius + 1);
+        }
+        let left = left.max(0);
+        let top = top.max(0);
+        let right = right.min(i64::from(image_size.0));
+        let bottom = bottom.min(i64::from(image_size.1));
+        if left >= right || top >= bottom {
+            return None;
+        }
+        Some((left as u32, top as u32, right as u32, bottom as u32))
+    }
+
     /// Lay a translucent stroke down exactly once per pixel.
     ///
     /// Compositing segment by segment would darken every place the stroke
@@ -2012,19 +2046,40 @@ impl Jwm {
         if points.len() < 2 {
             return;
         }
-        let (w, h) = (image.width(), image.height());
-        let mut mask = vec![false; (w as usize) * (h as usize)];
+        let Some((x0, y0, x1, y1)) = Self::marker_mask_bounds(
+            (image.width(), image.height()),
+            region_origin,
+            points,
+            width,
+        ) else {
+            return;
+        };
+        let (Ok(mask_width), Ok(mask_height)) =
+            (usize::try_from(x1 - x0), usize::try_from(y1 - y0))
+        else {
+            return;
+        };
+        let Some(mask_len) = mask_width.checked_mul(mask_height) else {
+            return;
+        };
+        // This rectangle is a subset of the already allocated RGBA image.
+        // One mask covers the entire stroke, so self-intersections still
+        // blend once rather than once per segment or brush hit.
+        let mut mask = vec![false; mask_len];
         for pair in points.windows(2) {
             Self::trace_line(region_origin, pair[0], pair[1], width, |x, y| {
-                if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
-                    mask[y as usize * w as usize + x as usize] = true;
+                if x >= 0 && y >= 0 {
+                    let (x, y) = (x as u32, y as u32);
+                    if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                        mask[(y - y0) as usize * mask_width + (x - x0) as usize] = true;
+                    }
                 }
             });
         }
         let alpha = f32::from(color[3]) / 255.0;
-        for y in 0..h {
-            for x in 0..w {
-                if !mask[y as usize * w as usize + x as usize] {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if !mask[(y - y0) as usize * mask_width + (x - x0) as usize] {
                     continue;
                 }
                 let pixel = image.get_pixel_mut(x, y);
@@ -3788,6 +3843,176 @@ mod tests {
         state.commit();
 
         assert_eq!(state.get_selection_rect(), Some(Rect::new(10, 12, 11, 19)));
+    }
+
+    fn full_frame_marker_reference(
+        image: &mut RgbaImage,
+        origin: (i32, i32),
+        points: &[(f32, f32)],
+        color: [u8; 4],
+        width: u32,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        let (w, h) = (image.width(), image.height());
+        let mut mask = vec![false; w as usize * h as usize];
+        for pair in points.windows(2) {
+            Jwm::trace_line(origin, pair[0], pair[1], width, |x, y| {
+                if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                    mask[y as usize * w as usize + x as usize] = true;
+                }
+            });
+        }
+        let alpha = f32::from(color[3]) / 255.0;
+        for y in 0..h {
+            for x in 0..w {
+                if mask[y as usize * w as usize + x as usize] {
+                    let pixel = image.get_pixel_mut(x, y);
+                    for c in 0..3 {
+                        pixel[c] = (f32::from(pixel[c]) * (1.0 - alpha)
+                            + f32::from(color[c]) * alpha)
+                            .round()
+                            .clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cropped_marker_mask_matches_full_frame_pixels() {
+        let strokes = [
+            vec![(2.0, 3.0), (12.0, 3.0)],
+            vec![(12.0, 3.0), (2.0, 3.0)],
+            vec![(5.0, 5.0), (5.0, 5.0)],
+            vec![(-8.0, 6.0), (28.0, 6.0)],
+            vec![(-10.0, -10.0), (-5.0, -5.0)],
+            vec![(-0.5, 0.5), (14.5, 8.5)],
+            vec![(1.0, 1.0), (15.0, 11.0), (1.0, 11.0), (15.0, 1.0)],
+            vec![(1.0, 4.0), (15.0, 4.0), (1.0, 4.0), (15.0, 4.0)],
+        ];
+        for origin in [(0, 0), (-20, 7), (19, -12)] {
+            for width in [0, 1, 2, 3, 8, 17] {
+                for alpha in [0, 1, 96, 255] {
+                    for points in &strokes {
+                        let global: Vec<_> = points
+                            .iter()
+                            .map(|&(x, y)| (x + origin.0 as f32, y + origin.1 as f32))
+                            .collect();
+                        let mut actual = RgbaImage::from_fn(17, 13, |x, y| {
+                            Rgba([x as u8 * 7, y as u8 * 11, 173, (x + y) as u8 * 5])
+                        });
+                        let mut expected = actual.clone();
+                        let color = [233, 71, 18, alpha];
+                        full_frame_marker_reference(&mut expected, origin, &global, color, width);
+                        Jwm::draw_translucent_polyline(&mut actual, origin, &global, color, width);
+                        assert_eq!(
+                            actual, expected,
+                            "origin={origin:?} width={width} alpha={alpha} points={points:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cropped_marker_mask_matches_seeded_random_polylines() {
+        let mut seed = 0x91d8_7443_u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as u32
+        };
+        for _ in 0..256 {
+            let w = next() % 24 + 1;
+            let h = next() % 24 + 1;
+            let origin = ((next() % 41) as i32 - 20, (next() % 41) as i32 - 20);
+            let count = next() % 6;
+            let points: Vec<_> = (0..count)
+                .map(|_| {
+                    (
+                        ((next() % 61) as i32 - 20 + origin.0) as f32 + 0.25,
+                        ((next() % 61) as i32 - 20 + origin.1) as f32 - 0.25,
+                    )
+                })
+                .collect();
+            let width = next() % 12;
+            let color = [next() as u8, next() as u8, next() as u8, next() as u8];
+            let mut actual = RgbaImage::from_fn(w, h, |x, y| Rgba([x as u8, y as u8, 97, 255]));
+            let mut expected = actual.clone();
+            full_frame_marker_reference(&mut expected, origin, &points, color, width);
+            Jwm::draw_translucent_polyline(&mut actual, origin, &points, color, width);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn marker_mask_bounds_are_clipped_and_small_on_an_8k_capture() {
+        let bounds =
+            Jwm::marker_mask_bounds((7680, 4320), (0, 0), &[(100.0, 100.0), (200.0, 120.0)], 16)
+                .unwrap();
+        assert_eq!(bounds, (92, 92, 209, 129));
+        let mask_pixels = u64::from(bounds.2 - bounds.0) * u64::from(bounds.3 - bounds.1);
+        assert_eq!(mask_pixels, 4329);
+        assert_eq!(7680_u64 * 4320, 33_177_600);
+        assert!(Jwm::marker_mask_bounds((0, 10), (0, 0), &[(0.0, 0.0)], 16).is_none());
+        assert!(Jwm::marker_mask_bounds((10, 0), (0, 0), &[(0.0, 0.0)], 16).is_none());
+        assert!(Jwm::marker_mask_bounds((10, 10), (0, 0), &[], 16).is_none());
+        // Wide bound arithmetic only: these do not claim that trace_line
+        // supports extreme coordinate deltas or impractically huge brushes.
+        assert!(
+            Jwm::marker_mask_bounds(
+                (10, 10),
+                (i32::MIN, i32::MIN),
+                &[(i32::MAX as f32, i32::MAX as f32)],
+                16
+            )
+            .is_none()
+        );
+        assert_eq!(
+            Jwm::marker_mask_bounds(
+                (10, 10),
+                (i32::MIN, i32::MIN),
+                &[(i32::MIN as f32, i32::MIN as f32)],
+                1
+            ),
+            Some((0, 0, 1, 1))
+        );
+        assert_eq!(
+            Jwm::marker_mask_bounds((10, 10), (0, 0), &[(-100.0, -100.0), (100.0, 100.0)], 2),
+            Some((0, 0, 10, 10))
+        );
+    }
+
+    #[test]
+    fn cropped_marker_self_overlap_blends_once_and_keeps_destination_alpha() {
+        let mut single = RgbaImage::from_pixel(20, 12, Rgba([20, 80, 160, 71]));
+        let mut retraced = single.clone();
+        Jwm::draw_translucent_polyline(
+            &mut single,
+            (0, 0),
+            &[(2.0, 6.0), (17.0, 6.0)],
+            [240, 30, 10, 96],
+            4,
+        );
+        Jwm::draw_translucent_polyline(
+            &mut retraced,
+            (0, 0),
+            &[(2.0, 6.0), (17.0, 6.0), (2.0, 6.0), (17.0, 6.0)],
+            [240, 30, 10, 96],
+            4,
+        );
+        assert_eq!(single, retraced);
+        assert_eq!(single.get_pixel(8, 6)[3], 71);
+        let mut empty = RgbaImage::new(0, 0);
+        Jwm::draw_translucent_polyline(
+            &mut empty,
+            (0, 0),
+            &[(0.0, 0.0), (1.0, 1.0)],
+            [240, 30, 10, 96],
+            4,
+        );
     }
 
     #[test]
