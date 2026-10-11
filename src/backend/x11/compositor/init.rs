@@ -1068,6 +1068,7 @@ impl<C: CompositorConnection> Compositor<C> {
             osd_texture: None,
             recording_indicator_texture: None,
             mic_indicator_active: false,
+            mic_indicator_status: crate::backend::api::AudioRecordingIndicator::Hidden,
             mic_indicator_texture: None,
             hud_text_cache: String::new(),
             monitor_shades: Vec::new(),

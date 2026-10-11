@@ -27,6 +27,19 @@ const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16)
 const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn audio_recording_maintenance_interval(
+    active: bool,
+    finalizing: bool,
+) -> Option<std::time::Duration> {
+    if finalizing {
+        Some(FRAME_INTERVAL)
+    } else if active {
+        Some(std::time::Duration::from_secs(1))
+    } else {
+        None
+    }
+}
+
 fn min_optional_duration(
     left: Option<std::time::Duration>,
     right: Option<std::time::Duration>,
@@ -8040,6 +8053,38 @@ mod tests {
     }
 
     #[test]
+    fn an_active_audio_clock_gets_a_one_second_maintenance_deadline() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        let now = std::time::Instant::now();
+        EventHandler::update(&mut jwm, &mut backend).unwrap();
+        let idle_deadline = jwm.maintenance_next_wakeup_at(now);
+        assert_eq!(audio_recording_maintenance_interval(false, false), None);
+        assert_eq!(
+            audio_recording_maintenance_interval(true, false),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            audio_recording_maintenance_interval(false, true),
+            Some(FRAME_INTERVAL)
+        );
+        assert_eq!(
+            audio_recording_maintenance_interval(true, true),
+            Some(FRAME_INTERVAL)
+        );
+        jwm.features.audio_recording.active = true;
+        jwm.features.audio_recording.started_at = Some(now);
+        assert_eq!(
+            jwm.maintenance_next_wakeup_at(now),
+            idle_deadline.min(std::time::Duration::from_secs(1))
+        );
+        jwm.features.audio_recording.active = false;
+        assert!(!jwm.features.audio_recording.is_finalizing());
+        assert_eq!(jwm.maintenance_next_wakeup_at(now), idle_deadline);
+    }
+
+    #[test]
     fn a_finalizing_audio_recording_keeps_the_maintenance_tick_scheduled() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -11316,9 +11361,13 @@ impl Jwm {
         // A key-stopped microphone recording finishes its file on a worker
         // with no readiness fd; only the tick's `poll_audio_recording` sees
         // it return, so keep ticking at frame rate until it has.
-        if self.features.audio_recording.is_finalizing() {
-            next = min_optional_duration(next, Some(FRAME_INTERVAL));
-        }
+        next = min_optional_duration(
+            next,
+            audio_recording_maintenance_interval(
+                self.features.audio_recording.active,
+                self.features.audio_recording.is_finalizing(),
+            ),
+        );
         next.expect("config reload always supplies a maintenance deadline")
     }
 }

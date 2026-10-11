@@ -4036,8 +4036,8 @@ impl Jwm {
 
     /// Toggle the built-in microphone recorder (Alt+Ctrl+M by default).
     ///
-    /// The stop half does not wait for the file: the MIC chip clears at
-    /// once, and the stopped (or failed) toast follows from the frame tick
+    /// The stop half does not wait for the file: the live cue becomes saving
+    /// at once, and the stopped (or failed) toast follows from the frame tick
     /// when the recorder has finished writing — see
     /// [`Self::begin_stopping_audio_recording`].
     pub fn toggle_audio_recording(
@@ -4048,6 +4048,24 @@ impl Jwm {
         self.features.audio_recording.refresh();
         if self.features.audio_recording.active {
             self.begin_stopping_audio_recording(backend)?;
+        } else if self.features.audio_recording.is_finalizing() {
+            // This key still belongs to the previous recording. Even if
+            // polling collects it now, do not reopen the microphone until
+            // a separate, subsequent start gesture.
+            self.poll_audio_recording(backend);
+            if self.features.audio_recording.is_finalizing() {
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "Audio recording saving".into(),
+                        body: "Finishing the previous recording; press again after it completes."
+                            .into(),
+                        urgency: 1,
+                        timeout_ms: 3000,
+                        ..Default::default()
+                    },
+                );
+            }
         } else {
             let behavior = CONFIG.load().behavior().clone();
             let output_dir = if !behavior.audio_recording_output_dir.is_empty() {
@@ -4132,6 +4150,7 @@ impl Jwm {
         // derive this the way it derives the REC chip — the audio recorder
         // lives WM-side — so the state is pushed through the backend.
         backend.compositor_set_mic_indicator(true);
+        self.sync_audio_recording_indicator(backend);
         info!(
             "[audio-recording] start → {} (backend={}, format={}, device={}, {} Hz, {} channel(s))",
             output_path.display(),
@@ -4147,8 +4166,7 @@ impl Jwm {
         );
         // Mirror the screen recorder's start toast: the request was
         // accepted, and the persistent MIC chip pushed above confirms the
-        // rest — deliberately a static label, unlike the REC chip's running
-        // clock.
+        // rest. The richer status adds elapsed time from this worker.
         self.push_system_toast(
             backend,
             crate::backend::api::ToastNotification {
@@ -4187,7 +4205,7 @@ impl Jwm {
     ///
     /// Joining here blocked the event thread for as long as the recorder took
     /// to finish its file — a WAV header rewrite and sync, or up to ffmpeg's
-    /// stop grace. The microphone session ends now (the chip clears, and the
+    /// stop grace. The microphone session ends now (the cue becomes saving, and the
     /// recorder reads inactive to idle and the effect queries); the stopped
     /// or failed toast and the `audio_recording/stopped` or `/error` event
     /// follow from [`Self::poll_audio_recording`] once the thread returns.
@@ -4199,6 +4217,7 @@ impl Jwm {
         let path = self.features.audio_recording.output_path.clone();
         let Some(stopped) = self.features.audio_recording.begin_stop() else {
             backend.compositor_set_mic_indicator(false);
+            self.sync_audio_recording_indicator(backend);
             info!(
                 "[audio-recording] stopping → {} (finalizing off the event thread)",
                 path.as_deref().unwrap_or("(unset)")
@@ -4232,6 +4251,22 @@ impl Jwm {
         if self.features.audio_recording.refresh() {
             let _ = self.stop_audio_recording(backend);
         }
+        self.sync_audio_recording_indicator(backend);
+    }
+
+    fn sync_audio_recording_indicator(&self, backend: &mut dyn Backend) {
+        use crate::backend::api::AudioRecordingIndicator;
+        let audio = &self.features.audio_recording;
+        let status = if audio.is_finalizing() {
+            AudioRecordingIndicator::Finalizing
+        } else if audio.active {
+            AudioRecordingIndicator::Recording {
+                elapsed_secs: audio.elapsed().as_secs(),
+            }
+        } else {
+            AudioRecordingIndicator::Hidden
+        };
+        backend.compositor_set_audio_recording_indicator(status);
     }
 
     /// Report a stop whose outcome is known: clear the MIC chip, publish the
@@ -4249,6 +4284,7 @@ impl Jwm {
         // thread could not be joined (it panicked — it is not still
         // recording), and the urgency-2 toast below covers the file.
         backend.compositor_set_mic_indicator(false);
+        self.sync_audio_recording_indicator(backend);
         if let Err(error) = stopped {
             // Subscribers heard `audio_recording/started`; a session that
             // ended in a failure must not end silently for them.
@@ -6462,6 +6498,8 @@ mod keyboard_grab_tests {
         overview_windows: Vec<Vec<WindowId>>,
         overview_selection: Option<WindowId>,
         expose_modes: Vec<bool>,
+        audio_live: Vec<bool>,
+        audio_statuses: Vec<crate::backend::api::AudioRecordingIndicator>,
     }
 
     impl GrabSpyBackend {
@@ -6478,6 +6516,8 @@ mod keyboard_grab_tests {
                 overview_windows: Vec::new(),
                 overview_selection: None,
                 expose_modes: Vec::new(),
+                audio_live: Vec::new(),
+                audio_statuses: Vec::new(),
             }
         }
 
@@ -6496,7 +6536,18 @@ mod keyboard_grab_tests {
     impl CompositorBenchmark for GrabSpyBackend {}
     impl BackendDiagnostics for GrabSpyBackend {}
     impl CompositorControl for GrabSpyBackend {}
-    impl CompositorMedia for GrabSpyBackend {}
+    impl CompositorMedia for GrabSpyBackend {
+        fn compositor_set_mic_indicator(&mut self, active: bool) {
+            self.audio_live.push(active);
+        }
+
+        fn compositor_set_audio_recording_indicator(
+            &mut self,
+            status: crate::backend::api::AudioRecordingIndicator,
+        ) {
+            self.audio_statuses.push(status);
+        }
+    }
     impl CompositorWorkspaceEffects for GrabSpyBackend {
         fn compositor_set_overview_mode(
             &mut self,
@@ -7007,6 +7058,156 @@ mod keyboard_grab_tests {
         jwm.adjust_recording_region(&mut backend, &NO_ARG)
             .expect("the adjustment starts over an empty screen");
         assert!(jwm.features.recording.adjusting_region);
+    }
+
+    #[test]
+    fn audio_status_tracks_elapsed_and_saving_without_restarting_on_completion() {
+        use crate::backend::api::AudioRecordingIndicator;
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let (release, finalize) = std::sync::mpsc::channel::<()>();
+        jwm.features.audio_recording =
+            AudioRecordingState::recording_for_test("/tmp/status-only-no-file.wav", move |_stop| {
+                finalize
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            });
+        jwm.features.audio_recording.started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(125));
+        let before = jwm.features.audio_recording.elapsed().as_secs();
+        jwm.sync_audio_recording_indicator(&mut backend);
+        let after = jwm.features.audio_recording.elapsed().as_secs();
+        assert!(matches!(
+            backend.audio_statuses.last(),
+            Some(AudioRecordingIndicator::Recording { elapsed_secs })
+                if (before..=after).contains(elapsed_secs)
+        ));
+        jwm.toggle_audio_recording(&mut backend, &NO_ARG).unwrap();
+        assert_eq!(
+            backend.audio_live,
+            vec![false],
+            "legacy live cue clears exactly once at the stop"
+        );
+        assert_eq!(
+            backend.audio_statuses.last(),
+            Some(&AudioRecordingIndicator::Finalizing)
+        );
+        jwm.toggle_audio_recording(&mut backend, &NO_ARG).unwrap();
+        assert!(jwm.features.audio_recording.is_finalizing());
+        assert!(!jwm.features.audio_recording.active);
+        assert_eq!(backend.toast_titles(), vec!["Audio recording saving"]);
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while jwm.features.audio_recording.is_finalizing() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "key polling did not collect the released audio worker"
+            );
+            backend.toasts.clear();
+            backend.audio_statuses.clear();
+            jwm.toggle_audio_recording(&mut backend, &NO_ARG).unwrap();
+            assert!(
+                !jwm.features.audio_recording.active,
+                "the completion gesture must never start capture"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            backend.audio_statuses.last(),
+            Some(&AudioRecordingIndicator::Hidden)
+        );
+        assert!(backend.audio_live.iter().all(|active| !active));
+        assert_eq!(
+            backend.toast_titles().last(),
+            Some(&"\u{f130}  Audio recording stopped")
+        );
+        assert_eq!(
+            jwm.features.audio_recording.output_path.as_deref(),
+            Some("/tmp/status-only-no-file.wav")
+        );
+    }
+
+    #[test]
+    fn an_unexpected_audio_exit_stop_key_does_not_reopen_the_microphone() {
+        use crate::backend::api::AudioRecordingIndicator;
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.features.audio_recording = AudioRecordingState::recording_for_test(
+            "/tmp/failed-status-only-no-file.wav",
+            |_stop| Err("fake microphone disconnected".into()),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !jwm.features.audio_recording.refresh() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fake failed audio worker did not exit"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            jwm.features.audio_recording.active,
+            "exit is latched for the stop gesture"
+        );
+        let error = jwm
+            .toggle_audio_recording(&mut backend, &NO_ARG)
+            .unwrap_err();
+        assert!(error.to_string().contains("fake microphone disconnected"));
+        assert!(!jwm.features.audio_recording.active);
+        assert!(!jwm.features.audio_recording.is_finalizing());
+        assert_eq!(backend.audio_live, vec![false]);
+        assert_eq!(
+            backend.audio_statuses.last(),
+            Some(&AudioRecordingIndicator::Hidden)
+        );
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording failed"]
+        );
+    }
+
+    #[test]
+    fn failed_audio_finalization_clears_saving_and_reports_failure() {
+        use crate::backend::api::AudioRecordingIndicator;
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let (release, finalize) = std::sync::mpsc::channel::<()>();
+        jwm.features.audio_recording = AudioRecordingState::recording_for_test(
+            "/tmp/finalize-status-only-no-file.wav",
+            move |_stop| {
+                let _ = finalize.recv_timeout(std::time::Duration::from_secs(30));
+                Err("fake container finalization failed".into())
+            },
+        );
+        jwm.toggle_audio_recording(&mut backend, &NO_ARG).unwrap();
+        assert_eq!(
+            backend.audio_statuses.last(),
+            Some(&AudioRecordingIndicator::Finalizing)
+        );
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while jwm.features.audio_recording.is_finalizing() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the failed finalization was not collected"
+            );
+            backend.audio_statuses.clear();
+            jwm.poll_audio_recording(&mut backend);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            backend.audio_statuses.last(),
+            Some(&AudioRecordingIndicator::Hidden)
+        );
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording failed"]
+        );
+        assert_eq!(backend.toasts[0].urgency, 2);
+        assert_eq!(
+            jwm.features.audio_recording.last_error.as_deref(),
+            Some("fake container finalization failed")
+        );
     }
 
     /// The key stops the microphone without waiting for its file, so the

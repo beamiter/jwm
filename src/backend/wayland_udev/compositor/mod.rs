@@ -1696,9 +1696,11 @@ pub(crate) struct WaylandCompositor {
     /// Standalone audio recording in progress, pushed by the WM (the recorder
     /// lives there, so unlike the REC chip this cannot be derived from the
     /// compositor's own pipeline). Drawn in the same post-delivery slot.
+    // Visibility includes finalization; this is not microphone ownership.
     mic_indicator_active: bool,
-    /// Cached MIC-chip label texture keyed by its text (always "MIC"): the
-    /// static label rasterizes once per chip appearance, never per frame.
+    mic_indicator_status: crate::backend::api::AudioRecordingIndicator,
+    /// Cached MIC label keyed by elapsed second or finalization text.
+    /// Unchanged state never rasterizes again.
     mic_indicator_texture: Option<(String, u32, u32, u32)>,
     /// Toast ids evicted outside the render pass; their textures are freed
     /// on the next frame while a GL context is current.
@@ -3163,6 +3165,7 @@ impl WaylandCompositor {
                 osd_texture: None,
                 recording_indicator_texture: None,
                 mic_indicator_active: false,
+                mic_indicator_status: crate::backend::api::AudioRecordingIndicator::Hidden,
                 mic_indicator_texture: None,
                 hud_text_cache: String::new(),
                 monitor_shades: Vec::new(),
@@ -4582,16 +4585,36 @@ impl WaylandCompositor {
 
     /// The standalone-audio-recording cue, pushed by the WM: the recorder
     /// lives WM-side, so unlike the REC chip this state cannot be derived
-    /// from the compositor's own capture pipeline. The static `MIC` label
-    /// rasterizes once per chip appearance — the flag flip below requests
-    /// the only frame the chip ever needs.
+    /// from the compositor's own capture pipeline. Legacy callers still set
+    /// the live flag; the richer status method supplies elapsed time or saving.
+    /// Clearing this flag also retires any richer status during teardown.
     pub(crate) fn set_mic_indicator(&mut self, active: bool) {
-        if self.mic_indicator_active == active {
+        let status = if active {
+            crate::backend::api::AudioRecordingIndicator::Recording { elapsed_secs: 0 }
+        } else {
+            crate::backend::api::AudioRecordingIndicator::Hidden
+        };
+        if self.mic_indicator_active == active && self.mic_indicator_status == status {
             return;
         }
         self.mic_indicator_active = active;
+        self.mic_indicator_status = status;
         self.needs_render = true;
         self.force_full_damage_next = true;
+    }
+
+    pub(crate) fn set_audio_recording_indicator(
+        &mut self,
+        status: crate::backend::api::AudioRecordingIndicator,
+    ) -> bool {
+        if self.mic_indicator_status == status {
+            return false;
+        }
+        self.mic_indicator_status = status;
+        self.mic_indicator_active = status.is_visible();
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+        true
     }
 
     fn clamp_recording_region(&self, region: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {

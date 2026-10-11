@@ -561,6 +561,15 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_set_audio_recording_indicator(
+                &mut self,
+                status: $crate::backend::api::AudioRecordingIndicator,
+            ) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_audio_recording_indicator(status);
+                }
+            }
+
             fn compositor_stop_recording(&mut self) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.stop_recording();

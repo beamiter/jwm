@@ -3073,6 +3073,28 @@ pub trait CompositorControl: Send {
     fn compositor_apply_config(&mut self) {}
 }
 
+/// Presentation state of the WM-owned standalone audio worker. Recording
+/// is shown only after initialization; finalizing does not imply a saved file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioRecordingIndicator {
+    #[default]
+    Hidden,
+    Recording {
+        elapsed_secs: u64,
+    },
+    Finalizing,
+}
+
+impl AudioRecordingIndicator {
+    pub(crate) fn is_visible(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+
+    pub(crate) fn is_recording(self) -> bool {
+        matches!(self, Self::Recording { .. })
+    }
+}
+
 /// What a recording in progress is actually achieving, as opposed to what it
 /// was asked for.
 ///
@@ -3205,6 +3227,11 @@ pub trait CompositorMedia: Send {
     /// keeps test mocks and the panel-less nested backends unchanged.
     fn compositor_set_mic_indicator(&mut self, _active: bool) {}
 
+    /// Rich standalone-audio status supplied by the WM after worker
+    /// initialization or finalization checks. Legacy live-MIC calls remain
+    /// separate; backends without this UI extension keep their old behavior.
+    fn compositor_set_audio_recording_indicator(&mut self, _status: AudioRecordingIndicator) {}
+
     fn compositor_notify_audio_timing(
         &mut self,
         _window: WindowId,
@@ -3229,6 +3256,11 @@ mod mic_indicator_api_tests {
         let mut stub = Stub;
         stub.compositor_set_mic_indicator(true);
         stub.compositor_set_mic_indicator(false);
+        stub.compositor_set_audio_recording_indicator(super::AudioRecordingIndicator::Recording {
+            elapsed_secs: 7,
+        });
+        stub.compositor_set_audio_recording_indicator(super::AudioRecordingIndicator::Finalizing);
+        stub.compositor_set_audio_recording_indicator(super::AudioRecordingIndicator::Hidden);
     }
 }
 

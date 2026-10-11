@@ -4105,9 +4105,7 @@ impl<C: CompositorConnection> Compositor<C> {
         drawn_height
     }
 
-    /// Rasterize (and cache) the MIC-chip label texture. The label is static
-    /// ("MIC"), so the text-keyed cache re-renders once per chip appearance —
-    /// no per-second re-raster, no frame pump.
+    /// Cache the MIC label texture; redraw only when elapsed seconds or phase change.
     fn update_mic_indicator_texture(&mut self, text: &str) {
         if self
             .mic_indicator_texture
@@ -4155,8 +4153,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// The persistent "microphone in use" chip for standalone audio
-    /// recording: a red dot and a static `MIC` label, parked in the REC
+    /// The persistent capture/finalization status chip for standalone audio
+    /// recording: elapsed time with a live dot, or neutral saving status,
+    /// parked in the REC
     /// chip's bottom-right slot — directly above the REC chip (`rec_chip_h`
     /// is the height it drew this frame) when both recordings run together.
     /// Shares the REC chip's ordinary post-capture draw stage. Cached
@@ -4164,14 +4163,14 @@ impl<C: CompositorConnection> Compositor<C> {
     fn render_mic_indicator(&mut self, proj: &[f32; 16], rec_chip_h: Option<f32>) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
-        let Some(label) = indicator::mic_indicator_label(self.mic_indicator_active) else {
+        let Some(label) = indicator::mic_indicator_label(self.mic_indicator_status) else {
             // Standalone audio stopped: the label texture goes with the chip.
             if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
                 unsafe { self.gl.delete_texture(tex) };
             }
             return None;
         };
-        self.update_mic_indicator_texture(label);
+        self.update_mic_indicator_texture(&label);
         let Some((tex, text_w, text_h)) = self
             .mic_indicator_texture
             .as_ref()
@@ -4218,7 +4217,11 @@ impl<C: CompositorConnection> Compositor<C> {
                     layout.dot[2],
                     layout.dot[3],
                     layout.dot[2].min(layout.dot[3]) * 0.5,
-                    indicator::dot_color(),
+                    if self.mic_indicator_status.is_recording() {
+                        indicator::dot_color()
+                    } else {
+                        ui.osd_ink
+                    },
                 );
 
                 self.gl.use_program(Some(self.hud_text_program));

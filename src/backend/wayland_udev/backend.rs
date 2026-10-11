@@ -4674,6 +4674,19 @@ impl CompositorMedia for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_set_audio_recording_indicator(
+        &mut self,
+        status: crate::backend::api::AudioRecordingIndicator,
+    ) {
+        if self
+            .compositor
+            .as_mut()
+            .is_some_and(|compositor| compositor.set_audio_recording_indicator(status))
+        {
+            self.request_render();
+        }
+    }
+
     fn compositor_stop_recording(&mut self) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.stop_recording();

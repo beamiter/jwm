@@ -6,9 +6,9 @@
 //! running clock parked in each visible output’s bottom-right corner while
 //! the capture pipeline reports itself active. The MIC chip is the same cue for
 //! standalone audio recording: the recorder lives WM-side, so the compositor
-//! cannot derive its state the way it derives the REC chip's — the WM pushes
-//! it, and the chip carries a static `MIC` label (no clock, one raster per
-//! state change, no frame pump). When both recordings run together the MIC
+//! cannot derive its state the way it derives the REC chip's. The WM pushes
+//! actual elapsed seconds or a distinct saving state; unchanged labels reuse
+//! their texture. When both recordings run together the MIC
 //! chip parks directly above the REC chip so the two never overlap.
 //!
 //! Both compositors draw the chips *after* the frame's screenshot and
@@ -18,6 +18,7 @@
 //! guarantee that every cached-transition capture excludes the chips. The
 //! label text and chip geometry live here so the compositors cannot drift.
 
+use crate::backend::api::AudioRecordingIndicator;
 use std::time::Duration;
 
 /// Gap between the chip and the screen corner.
@@ -320,16 +321,17 @@ pub(crate) fn recording_indicator_layout(
     }
 }
 
-/// The standalone-audio-recording chip's label: `MIC` while the WM-side
-/// recorder runs, `None` otherwise — the renderer draws nothing and frees
-/// the label texture.
-///
-/// The label is deliberately static. The REC chip re-rasterizes because its
-/// `m:ss` clock flips the shown second; a fixed label rasterizes once per
-/// state change and needs no frame pump, so this function takes no elapsed
-/// time by construction.
-pub(crate) fn mic_indicator_label(active: bool) -> Option<&'static str> {
-    active.then_some("MIC")
+/// The WM supplies elapsed time only while the worker is actually active.
+/// Finalization is a separate, untimed status, never a saved-file receipt.
+pub(crate) fn mic_indicator_label(status: AudioRecordingIndicator) -> Option<String> {
+    match status {
+        AudioRecordingIndicator::Hidden => None,
+        AudioRecordingIndicator::Recording { elapsed_secs } => Some(format!(
+            "MIC {}",
+            format_elapsed(Duration::from_secs(elapsed_secs))
+        )),
+        AudioRecordingIndicator::Finalizing => Some("MIC saving".to_owned()),
+    }
 }
 
 /// Lay the MIC chip out for a rasterized label of `text_w` × `text_h`. The
@@ -638,12 +640,20 @@ mod tests {
     }
 
     #[test]
-    fn the_mic_label_is_static() {
-        // No recording, no chip — the same transition rule as the REC chip.
-        assert_eq!(mic_indicator_label(false), None);
-        // The label never carries a clock: one raster per state change, and
-        // nothing ever repumps frames for the digits.
-        assert_eq!(mic_indicator_label(true), Some("MIC"));
+    fn the_mic_label_tracks_the_actual_recording_phase() {
+        assert_eq!(mic_indicator_label(AudioRecordingIndicator::Hidden), None);
+        for (elapsed_secs, expected) in [(0, "MIC 0:00"), (65, "MIC 1:05"), (3661, "MIC 1:01:01")] {
+            let status = AudioRecordingIndicator::Recording { elapsed_secs };
+            assert_eq!(mic_indicator_label(status).as_deref(), Some(expected));
+            assert!(status.is_recording());
+        }
+        assert_eq!(
+            mic_indicator_label(AudioRecordingIndicator::Finalizing).as_deref(),
+            Some("MIC saving")
+        );
+        assert!(!AudioRecordingIndicator::Finalizing.is_recording());
+        assert!(AudioRecordingIndicator::Finalizing.is_visible());
+        assert!(!AudioRecordingIndicator::Hidden.is_visible());
     }
 
     #[test]

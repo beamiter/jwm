@@ -538,9 +538,11 @@ where
     /// Standalone audio recording in progress, pushed by the WM (the recorder
     /// lives there, so unlike the REC chip this cannot be derived from the
     /// compositor's own pipeline). Drawn in the same post-capture slot.
+    // Visibility includes finalization; this is not microphone ownership.
     mic_indicator_active: bool,
-    /// Cached MIC-chip label texture keyed by its text (always "MIC"): the
-    /// static label rasterizes once per chip appearance, never per frame.
+    mic_indicator_status: crate::backend::api::AudioRecordingIndicator,
+    /// Cached MIC label keyed by elapsed second or finalization text.
+    /// Unchanged state never rasterizes again.
     mic_indicator_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_cache: String,
     /// Outputs covered by a per-monitor lock shade, in global coordinates.

@@ -2062,15 +2062,34 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// The standalone-audio-recording cue, pushed by the WM: the recorder
     /// lives WM-side, so unlike the REC chip this state cannot be derived
-    /// from the compositor's own capture pipeline. The static `MIC` label
-    /// rasterizes once per chip appearance — the flag flip below requests
-    /// the only frame the chip ever needs.
+    /// from the compositor's own capture pipeline. Legacy callers still set
+    /// the live flag; the richer status method supplies elapsed time or saving.
+    /// Clearing this flag also retires any richer status during teardown.
     pub(crate) fn set_mic_indicator(&mut self, active: bool) {
-        if self.mic_indicator_active == active {
+        let status = if active {
+            crate::backend::api::AudioRecordingIndicator::Recording { elapsed_secs: 0 }
+        } else {
+            crate::backend::api::AudioRecordingIndicator::Hidden
+        };
+        if self.mic_indicator_active == active && self.mic_indicator_status == status {
             return;
         }
         self.mic_indicator_active = active;
+        self.mic_indicator_status = status;
         self.force_full_redraw();
+    }
+
+    pub(crate) fn set_audio_recording_indicator(
+        &mut self,
+        status: crate::backend::api::AudioRecordingIndicator,
+    ) -> bool {
+        if self.mic_indicator_status == status {
+            return false;
+        }
+        self.mic_indicator_status = status;
+        self.mic_indicator_active = status.is_visible();
+        self.force_full_redraw();
+        true
     }
 
     pub(crate) fn stop_recording(&mut self) {

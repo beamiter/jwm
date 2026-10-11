@@ -8526,9 +8526,7 @@ impl WaylandCompositor {
         drawn_height
     }
 
-    /// Rasterize (and cache) the MIC-chip label texture. The label is static
-    /// ("MIC"), so the text-keyed cache re-renders once per chip appearance —
-    /// no per-second re-raster, no frame pump.
+    /// Cache the MIC label texture; redraw only when elapsed seconds or phase change.
     unsafe fn update_mic_indicator_texture(&mut self, gl: &ffi::Gles2, text: &str) {
         if self
             .mic_indicator_texture
@@ -8573,8 +8571,9 @@ impl WaylandCompositor {
         }
     }
 
-    /// The persistent "microphone in use" chip for standalone audio
-    /// recording: a red dot and a static `MIC` label, parked in the REC
+    /// The persistent capture/finalization status chip for standalone audio
+    /// recording: elapsed time with a live dot, or neutral saving status,
+    /// parked in the REC
     /// chip's bottom-right slot — directly above the REC chip (`rec_chip_h`
     /// is the height it drew this frame) when both recordings run together.
     /// Shares the REC chip's ordinary post-delivery draw stage.
@@ -8586,7 +8585,7 @@ impl WaylandCompositor {
     ) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
-        let Some(label) = indicator::mic_indicator_label(self.mic_indicator_active) else {
+        let Some(label) = indicator::mic_indicator_label(self.mic_indicator_status) else {
             // Standalone audio stopped: the label texture goes with the chip.
             // The merged post-delivery block keeps running for one more frame
             // (its condition holds while the texture is still cached) so this
@@ -8598,7 +8597,7 @@ impl WaylandCompositor {
             }
             return None;
         };
-        unsafe { self.update_mic_indicator_texture(gl, label) };
+        unsafe { self.update_mic_indicator_texture(gl, &label) };
         let Some((tex, text_w, text_h)) = self
             .mic_indicator_texture
             .as_ref()
@@ -8645,7 +8644,11 @@ impl WaylandCompositor {
                     layout.dot[2],
                     layout.dot[3],
                     layout.dot[2].min(layout.dot[3]) * 0.5,
-                    indicator::dot_color(),
+                    if self.mic_indicator_status.is_recording() {
+                        indicator::dot_color()
+                    } else {
+                        ui.osd_ink
+                    },
                 );
 
                 self.use_sysui_text_program(gl, false);
