@@ -11656,6 +11656,9 @@ impl EventHandler for Jwm {
         self.tick_layout_picker(backend, now);
 
         self.tick_animations(backend);
+        // Deferred Wayland starts complete inside the render above. Collect
+        // their owned outcomes in this update without a new polling timer.
+        self.poll_recording_start(backend);
 
         // A request the pointer was busy for retries here rather than from a
         // sleep, so waiting for a status bar's click to end costs no frames.

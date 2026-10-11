@@ -3,6 +3,8 @@
 //! A stop cancels earlier, unconsumed starts. A later start keeps the stop
 //! barrier so the old pipeline is retired before the new one is initialized.
 
+use crate::backend::recording_admission::RecordingStartReporter;
+
 type Region = (i32, i32, u32, u32);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -11,15 +13,27 @@ pub(super) enum RecordingCommand {
     Start { path: String, region: Region },
 }
 
+type PendingStart = (String, Region, Option<RecordingStartReporter>);
+type ReadyCommand = (RecordingCommand, Option<RecordingStartReporter>);
+
 #[derive(Default)]
 pub(super) struct PendingRecordingCommands {
     stop: bool,
-    start: Option<(String, Region)>,
+    start: Option<PendingStart>,
 }
 
 impl PendingRecordingCommands {
     pub(super) fn start(&mut self, path: String, region: Region) {
-        self.start = Some((path, region));
+        self.start_tracked(path, region, None);
+    }
+
+    pub(super) fn start_tracked(
+        &mut self,
+        path: String,
+        region: Region,
+        reporter: Option<RecordingStartReporter>,
+    ) {
+        self.start = Some((path, region, reporter));
     }
 
     pub(super) fn stop(&mut self) {
@@ -28,7 +42,7 @@ impl PendingRecordingCommands {
     }
 
     pub(super) fn set_region(&mut self, region: Region) {
-        if let Some((_, pending_region)) = self.start.as_mut() {
+        if let Some((_, pending_region, _)) = self.start.as_mut() {
             *pending_region = region;
         }
     }
@@ -42,12 +56,12 @@ impl PendingRecordingCommands {
     }
 
     /// At most two commands, always retiring an old pipeline before starting one.
-    pub(super) fn take(&mut self) -> [Option<RecordingCommand>; 2] {
+    pub(super) fn take(&mut self) -> [Option<ReadyCommand>; 2] {
         [
-            std::mem::take(&mut self.stop).then_some(RecordingCommand::Stop),
-            self.start
-                .take()
-                .map(|(path, region)| RecordingCommand::Start { path, region }),
+            std::mem::take(&mut self.stop).then_some((RecordingCommand::Stop, None)),
+            self.start.take().map(|(path, region, reporter)| {
+                (RecordingCommand::Start { path, region }, reporter)
+            }),
         ]
     }
 }
@@ -66,7 +80,15 @@ mod tests {
     }
 
     fn drain(pending: &mut PendingRecordingCommands) -> Vec<RecordingCommand> {
-        pending.take().into_iter().flatten().collect()
+        pending
+            .take()
+            .into_iter()
+            .flatten()
+            .map(|(command, reporter)| {
+                assert!(reporter.is_none());
+                command
+            })
+            .collect()
     }
 
     #[test]
@@ -123,7 +145,8 @@ mod tests {
         pending.start("new.mp4".into(), REGION);
         let mut active = Some("old.mp4".to_string());
         let mut events = vec![format!("capture:{}", active.as_ref().unwrap())];
-        for command in pending.take().into_iter().flatten() {
+        for (command, reporter) in pending.take().into_iter().flatten() {
+            assert!(reporter.is_none());
             match command {
                 RecordingCommand::Stop => {
                     events.push(format!("stop:{}", active.take().unwrap()));
@@ -190,6 +213,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn canceled_or_replaced_pending_starts_drop_only_their_reporter() {
+        use crate::backend::recording_admission::{RecordingStartOutcome, recording_start_channel};
+        for stop in [false, true] {
+            let mut pending = PendingRecordingCommands::default();
+            let (old, mut old_receipt) = recording_start_channel();
+            pending.start_tracked("old.mp4".into(), REGION, Some(old));
+            if stop {
+                pending.stop();
+            }
+            let (new, mut new_receipt) = recording_start_channel();
+            pending.start_tracked("new.mp4".into(), REGION, Some(new));
+            assert_eq!(old_receipt.poll(), Some(RecordingStartOutcome::Unavailable));
+            assert_eq!(new_receipt.poll(), None);
+            pending.set_region((20, 30, 800, 600));
+            let commands: Vec<_> = pending.take().into_iter().flatten().collect();
+            assert_eq!(commands.len(), if stop { 2 } else { 1 });
+            for (command, reporter) in commands {
+                match command {
+                    RecordingCommand::Stop => assert!(reporter.is_none()),
+                    RecordingCommand::Start { path, region } => {
+                        assert_eq!(path, "new.mp4");
+                        assert_eq!(region, (20, 30, 800, 600));
+                        reporter.unwrap().complete(true);
+                    }
+                }
+            }
+            assert_eq!(new_receipt.poll(), Some(RecordingStartOutcome::Accepted));
+            assert!(pending.take().iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn compositor_queue_destruction_leaves_admission_unknown() {
+        use crate::backend::recording_admission::{RecordingStartOutcome, recording_start_channel};
+        let (reporter, mut receipt) = recording_start_channel();
+        let mut pending = PendingRecordingCommands::default();
+        pending.start_tracked("not-opened.mp4".into(), REGION, Some(reporter));
+        drop(pending);
+        assert_eq!(receipt.poll(), Some(RecordingStartOutcome::Unavailable));
+    }
+
+    #[test]
+    fn renderer_reports_the_actual_start_result_after_initialization() {
+        let source = include_str!("render.rs");
+        let start = source
+            .split_once("RecordingCommand::Start { path, region } =>")
+            .unwrap()
+            .1;
+        assert!(
+            start.find("let result = self.recording.start(").unwrap()
+                < start.find("reporter.complete(result.is_ok())").unwrap()
+        );
+        let backend = include_str!("../backend.rs");
+        let tracked = backend
+            .split_once("fn compositor_request_recording_region_tracked(")
+            .unwrap()
+            .1
+            .split_once("fn compositor_set_recording_region(")
+            .unwrap()
+            .0;
+        assert!(tracked.contains("recording_start_channel()"));
+        assert!(tracked.contains("start_recording_region_tracked(path, region, reporter)"));
+        assert!(tracked.contains("self.request_render()"));
+        assert!(tracked.contains("Ok(Some(receipt))"));
     }
 
     #[test]

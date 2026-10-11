@@ -3214,6 +3214,19 @@ pub trait CompositorMedia: Send {
         Ok(())
     }
 
+    /// Optional request-owned completion for deferred initialization. Backends
+    /// without this extension retain synchronous rejection handling and return
+    /// no receipt; neither form of submission proves encoded frames or a saved file.
+    fn compositor_request_recording_region_tracked(
+        &mut self,
+        path: &str,
+        region: (i32, i32, u32, u32),
+    ) -> Result<Option<crate::backend::recording_admission::RecordingStartReceipt>, BackendError>
+    {
+        self.compositor_request_recording_region(path, region)?;
+        Ok(None)
+    }
+
     fn compositor_set_recording_region(&mut self, _region: (i32, i32, u32, u32)) {}
     fn compositor_set_recording_region_overlay(&mut self, _region: Option<(i32, i32, u32, u32)>) {}
     /// Whether the recording crop cue shows resize handles. Soft hover-probe
@@ -3282,6 +3295,44 @@ mod recording_request_api_tests {
         assert_eq!(legacy.paths, ["not-opened.mp4"]);
         assert_eq!(legacy.regions, [region]);
         assert!(legacy.compositor_recording_stats().is_none());
+    }
+    #[test]
+    fn tracked_extension_preserves_synchronous_acceptance_and_rejection() {
+        struct SyncBackend {
+            reject: bool,
+            calls: usize,
+        }
+        impl CompositorMedia for SyncBackend {
+            fn compositor_request_recording_region(
+                &mut self,
+                _path: &str,
+                _region: (i32, i32, u32, u32),
+            ) -> Result<(), super::BackendError> {
+                self.calls += 1;
+                if self.reject {
+                    Err(super::BackendError::Message("known rejection".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let mut backend = SyncBackend {
+            reject: false,
+            calls: 0,
+        };
+        assert!(
+            backend
+                .compositor_request_recording_region_tracked("not-opened.mp4", (0, 0, 640, 480),)
+                .unwrap()
+                .is_none()
+        );
+        backend.reject = true;
+        assert!(
+            backend
+                .compositor_request_recording_region_tracked("not-opened.mp4", (0, 0, 640, 480),)
+                .is_err()
+        );
+        assert_eq!(backend.calls, 2);
     }
 }
 

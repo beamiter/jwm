@@ -5080,7 +5080,7 @@ impl WaylandCompositor {
         // This frame's capture view and deadline belong to the old pipeline.
         // Finish its capture before applying a stop/start barrier; a new
         // pipeline gets its own snapshot on the next frame.
-        for command in self.pending_recording.take().into_iter().flatten() {
+        for (command, reporter) in self.pending_recording.take().into_iter().flatten() {
             match command {
                 super::recording_commands::RecordingCommand::Stop => {
                     unsafe {
@@ -5094,7 +5094,7 @@ impl WaylandCompositor {
                     }
                 }
                 super::recording_commands::RecordingCommand::Start { path, region } => unsafe {
-                    if let Err(e) = self.recording.start(
+                    let result = self.recording.start(
                         gl,
                         self.screen_w,
                         self.screen_h,
@@ -5104,8 +5104,12 @@ impl WaylandCompositor {
                         frame_behavior.recording_quality,
                         &frame_behavior.recording_encoder,
                         region,
-                    ) {
+                    );
+                    if let Err(e) = &result {
                         log::error!("[compositor] Failed to start recording: {}", e);
+                    }
+                    if let Some(reporter) = reporter {
+                        reporter.complete(result.is_ok());
                     }
                 },
             }

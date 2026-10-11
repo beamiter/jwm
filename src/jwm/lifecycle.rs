@@ -1060,6 +1060,8 @@ impl Jwm {
     ) -> Result<(), Box<dyn Error>> {
         info!("[cleanup_x11_resources] Cleaning X11 resources");
 
+        self.features.recording_start = None;
+
         // Stop recording on shutdown. We do NOT cross-restart resume: previously
         // that caused silent runaway recordings spanning many restarts. The
         // compositor now writes directly to the final Videos path, so no

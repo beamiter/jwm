@@ -3993,6 +3993,7 @@ impl Jwm {
         };
         if let Err(error) = self.start_recording_region(backend, &output_path, region) {
             let message = error.to_string();
+            self.features.recording_start = None;
             self.features.recording.cancel();
             self.features.recording.note_error(message);
             backend.compositor_force_full_redraw();
@@ -4416,25 +4417,22 @@ impl Jwm {
         }
         let region_tuple = Self::recording_region_tuple(region)
             .ok_or("recording region dimensions are invalid")?;
-        if let Err(error) = backend.compositor_request_recording_region(output_path, region_tuple) {
-            error!("[recording] start request rejected: {error}");
-            self.push_system_toast(
-                backend,
-                crate::backend::api::ToastNotification {
-                    title: "\u{f03d}  Recording could not start".into(),
-                    body: if stopped_standalone_audio {
-                        "The backend rejected this request. Standalone audio remains stopped after microphone handoff. See the log for details."
-                    } else {
-                        "The backend rejected this request. See the log for details."
-                    }
-                    .into(),
-                    urgency: 2,
-                    timeout_ms: 8000,
-                    ..Default::default()
-                },
-            );
-            return Err(error.into());
-        }
+        let receipt =
+            match backend.compositor_request_recording_region_tracked(output_path, region_tuple) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    error!("[recording] start request rejected: {error}");
+                    self.notify_recording_start_rejected(backend, stopped_standalone_audio);
+                    return Err(error.into());
+                }
+            };
+        // Replacing this unique receiver also retires an older observation.
+        // Legacy success deliberately installs None rather than retaining it.
+        self.features.recording_start =
+            receipt.map(|receipt| crate::jwm::features::PendingRecordingStart {
+                receipt,
+                stopped_standalone_audio,
+            });
 
         self.features.recording.start(output_path.to_string());
         self.features.recording.set_region(region);
@@ -4461,6 +4459,89 @@ impl Jwm {
         Ok(())
     }
 
+    fn notify_recording_start_rejected(
+        &mut self,
+        backend: &mut dyn Backend,
+        stopped_standalone_audio: bool,
+    ) {
+        self.push_system_toast(
+            backend,
+            crate::backend::api::ToastNotification {
+                title: "\u{f03d}  Recording could not start".into(),
+                body: if stopped_standalone_audio {
+                    "The backend rejected this request. Standalone audio remains stopped after microphone handoff. See the log for details."
+                } else {
+                    "The backend rejected this request. See the log for details."
+                }
+                .into(),
+                urgency: 2,
+                timeout_ms: 8000,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Collect only this session's owned initialization result. Called after
+    /// rendering, where Wayland applies its deferred start synchronously.
+    pub(crate) fn poll_recording_start(&mut self, backend: &mut dyn Backend) {
+        use crate::backend::recording_admission::RecordingStartOutcome;
+
+        if !self.running.load(std::sync::atomic::Ordering::SeqCst)
+            || !self.features.recording.active
+        {
+            self.features.recording_start = None;
+            return;
+        }
+        let Some(pending) = self.features.recording_start.as_mut() else {
+            return;
+        };
+        let Some(outcome) = pending.receipt.poll() else {
+            return;
+        };
+        let stopped_standalone_audio = pending.stopped_standalone_audio;
+        self.features.recording_start = None;
+        match outcome {
+            RecordingStartOutcome::Accepted => {}
+            RecordingStartOutcome::Rejected => {
+                // Do not use cancel_recording_region_interaction: adjustment
+                // cancellation restores a crop into a potentially different
+                // live backend pipeline, which may be why this start failed.
+                if self.grab_holding_mode_on_screen() == Some("recording region selection") {
+                    self.release_recording_region_input(backend);
+                    self.features.capture.clear_recording_double_click();
+                    backend.compositor_set_capture_selection_active(false);
+                    backend.compositor_set_capture_hint(None);
+                }
+                backend.compositor_set_recording_region_overlay(None);
+                self.features.recording.cancel();
+                let message = "The backend rejected recording initialization";
+                self.features.recording.note_error(message);
+                self.broadcast_ipc_event(
+                    "recording/error",
+                    serde_json::json!({"operation": "start", "error": message}),
+                );
+                self.notify_recording_start_rejected(backend, stopped_standalone_audio);
+                backend.compositor_force_full_redraw();
+            }
+            RecordingStartOutcome::Unavailable => {
+                // A missing producer does not prove that a pipeline stopped.
+                // Keep the requested session stoppable and never auto-retry.
+                let message = "Unable to confirm recording initialization; check the REC indicator";
+                self.features.recording.note_error(message);
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f03d}  Recording start unconfirmed".into(),
+                        body: message.into(),
+                        urgency: 2,
+                        timeout_ms: 8000,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
     pub(crate) fn normalize_initial_recording_region(
         &self,
         region: Rect,
@@ -4474,24 +4555,9 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.features.recording.active {
-            if self.features.recording.selecting_region {
-                self.cancel_recording_region_interaction(backend);
-            }
+        let Some((segments, output_path)) = self.stop_recording_session(backend) else {
             return Ok(());
-        }
-        if self.features.recording.selecting_region {
-            self.cancel_recording_region_interaction(backend);
-        }
-        backend.compositor_stop_recording();
-        self.features.recording.stop();
-        let segments = std::mem::take(&mut self.features.recording.segments);
-        let output_path = self
-            .features
-            .recording
-            .output_path
-            .clone()
-            .unwrap_or_default();
+        };
         info!(
             "[recording] stop → {output_path} ({} segments)",
             segments.len()
@@ -4508,6 +4574,34 @@ impl Jwm {
         );
         Self::finalize_recording(segments, output_path);
         Ok(())
+    }
+
+    /// Submit stop and retire logical state; the caller owns the returned
+    /// segments/path and performs the existing notification/finalization once.
+    fn stop_recording_session(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Option<(Vec<String>, String)> {
+        self.features.recording_start = None;
+        if !self.features.recording.active {
+            if self.features.recording.selecting_region {
+                self.cancel_recording_region_interaction(backend);
+            }
+            return None;
+        }
+        if self.features.recording.selecting_region {
+            self.cancel_recording_region_interaction(backend);
+        }
+        backend.compositor_stop_recording();
+        self.features.recording.stop();
+        let segments = std::mem::take(&mut self.features.recording.segments);
+        let output_path = self
+            .features
+            .recording
+            .output_path
+            .clone()
+            .unwrap_or_default();
+        Some((segments, output_path))
     }
 
     /// Validate direct output, or concatenate legacy multi-segment recordings.
@@ -6565,6 +6659,13 @@ mod keyboard_grab_tests {
         audio_statuses: Vec<crate::backend::api::AudioRecordingIndicator>,
         recording_requests: Vec<(String, (i32, i32, u32, u32))>,
         recording_start_error: Option<&'static str>,
+        recording_deferred: bool,
+        recording_reporters: Vec<crate::backend::recording_admission::RecordingStartReporter>,
+        recording_stop_calls: usize,
+        recording_crop_updates: Vec<(i32, i32, u32, u32)>,
+        recording_overlays: Vec<Option<(i32, i32, u32, u32)>>,
+        capture_selection_updates: Vec<bool>,
+        capture_hints: Vec<Option<String>>,
     }
 
     impl GrabSpyBackend {
@@ -6585,6 +6686,13 @@ mod keyboard_grab_tests {
                 audio_statuses: Vec::new(),
                 recording_requests: Vec::new(),
                 recording_start_error: None,
+                recording_deferred: false,
+                recording_reporters: Vec::new(),
+                recording_stop_calls: 0,
+                recording_crop_updates: Vec::new(),
+                recording_overlays: Vec::new(),
+                capture_selection_updates: Vec::new(),
+                capture_hints: Vec::new(),
             }
         }
 
@@ -6614,6 +6722,46 @@ mod keyboard_grab_tests {
                 Some(error) => Err(crate::backend::error::BackendError::Message(error.into())),
                 None => Ok(()),
             }
+        }
+
+        fn compositor_request_recording_region_tracked(
+            &mut self,
+            path: &str,
+            region: (i32, i32, u32, u32),
+        ) -> Result<Option<crate::backend::recording_admission::RecordingStartReceipt>, BackendError>
+        {
+            self.compositor_request_recording_region(path, region)?;
+            if self.recording_deferred {
+                let (reporter, receipt) =
+                    crate::backend::recording_admission::recording_start_channel();
+                self.recording_reporters.push(reporter);
+                Ok(Some(receipt))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn compositor_stop_recording(&mut self) {
+            self.recording_stop_calls += 1;
+        }
+
+        fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
+            self.recording_crop_updates.push(region);
+        }
+
+        fn compositor_set_recording_region_overlay(
+            &mut self,
+            region: Option<(i32, i32, u32, u32)>,
+        ) {
+            self.recording_overlays.push(region);
+        }
+
+        fn compositor_set_capture_selection_active(&mut self, active: bool) {
+            self.capture_selection_updates.push(active);
+        }
+
+        fn compositor_set_capture_hint(&mut self, hint: Option<String>) {
+            self.capture_hints.push(hint);
         }
 
         fn compositor_set_mic_indicator(&mut self, active: bool) {
@@ -7439,6 +7587,330 @@ mod keyboard_grab_tests {
         assert!(!jwm.features.audio_recording.active);
         assert!(backend.audio_live.is_empty());
         assert!(backend.audio_statuses.is_empty());
+    }
+
+    fn submit_deferred_recording(
+        jwm: &mut Jwm,
+        backend: &mut GrabSpyBackend,
+        path: &str,
+    ) -> crate::backend::recording_admission::RecordingStartReporter {
+        backend.recording_deferred = true;
+        jwm.submit_preflighted_recording_region(backend, path, Rect::new(10, 20, 640, 480), false)
+            .unwrap();
+        backend.recording_reporters.pop().unwrap()
+    }
+
+    #[test]
+    fn deferred_acceptance_is_consumed_once_without_claiming_frames_or_saved() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let reporter = submit_deferred_recording(&mut jwm, &mut backend, "requested.mp4");
+        jwm.poll_recording_start(&mut backend);
+        assert!(jwm.features.recording_start.is_some());
+        assert!(jwm.features.recording.active);
+        reporter.complete(true);
+        jwm.poll_recording_start(&mut backend);
+        jwm.poll_recording_start(&mut backend);
+        assert!(jwm.features.recording_start.is_none());
+        assert!(jwm.features.recording.active);
+        assert_eq!(
+            jwm.features.recording.current_segment.as_deref(),
+            Some("requested.mp4")
+        );
+        assert_eq!(backend.toasts.len(), 1);
+        assert!(backend.toasts[0].title.ends_with("Recording requested"));
+        assert_eq!(backend.recording_stop_calls, 0);
+    }
+
+    #[test]
+    fn deferred_rejection_retires_only_its_selector_without_stopping_or_restoring_a_crop() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let reporter = submit_deferred_recording(&mut jwm, &mut backend, "rejected.mp4");
+        jwm.features
+            .recording_start
+            .as_mut()
+            .unwrap()
+            .stopped_standalone_audio = true;
+        jwm.adjust_recording_region(&mut backend, &NO_ARG).unwrap();
+        assert!(backend.keyboard_held());
+        assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        assert!(jwm.features.recording.adjusting_region);
+        backend.recording_crop_updates.clear();
+        backend.recording_overlays.clear();
+        backend.capture_selection_updates.clear();
+        backend.capture_hints.clear();
+        reporter.complete(false);
+        jwm.poll_recording_start(&mut backend);
+        jwm.poll_recording_start(&mut backend);
+        assert!(!jwm.features.recording.active);
+        assert!(!jwm.features.recording.selecting_region);
+        assert!(!jwm.features.recording.has_segments());
+        assert!(jwm.features.recording.output_path.is_none());
+        assert!(jwm.features.recording.last_error.is_some());
+        assert!(!backend.keyboard_held());
+        assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        assert_eq!(backend.recording_stop_calls, 0);
+        assert!(backend.recording_crop_updates.is_empty());
+        assert_eq!(backend.recording_overlays, [None]);
+        assert_eq!(backend.capture_selection_updates, [false]);
+        assert_eq!(backend.capture_hints, [None]);
+        assert_eq!(backend.toasts.len(), 2);
+        assert!(
+            backend.toasts[1]
+                .title
+                .ends_with("Recording could not start")
+        );
+        assert!(
+            backend.toasts[1]
+                .body
+                .contains("Standalone audio remains stopped")
+        );
+    }
+
+    #[test]
+    fn deferred_rejection_preserves_screenshot_and_shell_hub_input_ownership() {
+        for screenshot in [true, false] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            let reporter = submit_deferred_recording(&mut jwm, &mut backend, "rejected.mp4");
+            // Also exercise a stale recording-selector flag: the current
+            // owner's higher-priority state must protect the shared grabs.
+            jwm.features.recording.begin_region_adjustment();
+            if screenshot {
+                jwm.features.screenshot.start();
+            } else {
+                jwm.features.system_ui = jwm.build_shell_hub_state();
+            }
+            backend.key_ops.held.store(true, Ordering::Relaxed);
+            backend.input_ops.held.store(true, Ordering::Relaxed);
+            reporter.complete(false);
+            jwm.poll_recording_start(&mut backend);
+            assert!(!jwm.features.recording.active);
+            assert!(backend.keyboard_held());
+            assert!(backend.input_ops.held.load(Ordering::Relaxed));
+            assert!(backend.capture_selection_updates.is_empty());
+            assert!(backend.capture_hints.is_empty());
+            assert!(backend.recording_crop_updates.is_empty());
+            assert_eq!(backend.recording_stop_calls, 0);
+            if screenshot {
+                assert!(jwm.features.screenshot.active);
+            } else {
+                assert!(jwm.features.system_ui.is_control_center());
+            }
+        }
+    }
+
+    #[test]
+    fn stop_retires_old_success_and_failure_before_a_new_capture_owner() {
+        for accepted in [true, false] {
+            for next in ["screenshot", "shell", "recording"] {
+                let mut backend = GrabSpyBackend::new();
+                let mut jwm = jwm(&mut backend);
+                let old = submit_deferred_recording(&mut jwm, &mut backend, "old.mp4");
+                // This is the actual synchronous phase of stop_recording.
+                // Keep its owned finalization payload in the test: no files,
+                // finalizer thread, encoder or ffprobe are invoked here.
+                let payload = jwm.stop_recording_session(&mut backend).unwrap();
+                assert_eq!(payload, (vec!["old.mp4".into()], "old.mp4".into()));
+                assert!(jwm.features.recording_start.is_none());
+                let new = match next {
+                    "screenshot" => {
+                        jwm.features.screenshot.start();
+                        None
+                    }
+                    "shell" => {
+                        jwm.features.system_ui = jwm.build_shell_hub_state();
+                        None
+                    }
+                    _ => Some(submit_deferred_recording(&mut jwm, &mut backend, "new.mp4")),
+                };
+                backend.key_ops.held.store(true, Ordering::Relaxed);
+                backend.input_ops.held.store(true, Ordering::Relaxed);
+                let toast_count = backend.toasts.len();
+                old.complete(accepted);
+                jwm.poll_recording_start(&mut backend);
+                assert_eq!(backend.toasts.len(), toast_count);
+                assert!(backend.keyboard_held());
+                assert!(backend.input_ops.held.load(Ordering::Relaxed));
+                assert!(backend.capture_hints.is_empty());
+                assert!(backend.recording_overlays.is_empty());
+                assert_eq!(backend.recording_stop_calls, 1);
+                if let Some(new) = new {
+                    assert!(jwm.features.recording_start.is_some());
+                    assert_eq!(
+                        jwm.features.recording.current_segment.as_deref(),
+                        Some("new.mp4")
+                    );
+                    new.complete(true);
+                    jwm.poll_recording_start(&mut backend);
+                    assert!(jwm.features.recording.active);
+                } else if next == "screenshot" {
+                    assert!(jwm.features.screenshot.active);
+                } else {
+                    assert!(jwm.features.system_ui.is_control_center());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disconnected_admission_warns_once_and_keeps_the_request_stoppable() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let reporter = submit_deferred_recording(&mut jwm, &mut backend, "unknown.mp4");
+        drop(reporter);
+        jwm.poll_recording_start(&mut backend);
+        jwm.poll_recording_start(&mut backend);
+        assert!(jwm.features.recording.active);
+        assert!(jwm.features.recording_start.is_none());
+        assert_eq!(
+            jwm.features.recording.current_segment.as_deref(),
+            Some("unknown.mp4")
+        );
+        assert_eq!(backend.recording_requests.len(), 1);
+        assert_eq!(backend.recording_stop_calls, 0);
+        assert_eq!(backend.toasts.len(), 2);
+        assert!(
+            backend.toasts[1]
+                .title
+                .ends_with("Recording start unconfirmed")
+        );
+        assert!(jwm.stop_recording_session(&mut backend).is_some());
+        assert_eq!(backend.recording_stop_calls, 1);
+        assert!(!jwm.features.recording.active);
+    }
+
+    #[test]
+    fn duplicate_submission_retains_receipt_but_legacy_replacement_retires_it() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let old = submit_deferred_recording(&mut jwm, &mut backend, "old.mp4");
+        assert!(
+            jwm.submit_preflighted_recording_region(
+                &mut backend,
+                "duplicate.mp4",
+                Rect::new(0, 0, 640, 480),
+                false,
+            )
+            .is_err()
+        );
+        assert!(jwm.features.recording_start.is_some());
+        assert_eq!(backend.recording_requests.len(), 1);
+        // A defensive replacement of a stale observation must also work for
+        // a backend that does not implement the optional receipt extension.
+        jwm.features.recording.stop();
+        backend.recording_deferred = false;
+        jwm.submit_preflighted_recording_region(
+            &mut backend,
+            "legacy.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+        )
+        .unwrap();
+        assert!(jwm.features.recording_start.is_none());
+        old.complete(false);
+        jwm.poll_recording_start(&mut backend);
+        assert!(jwm.features.recording.active);
+        assert_eq!(
+            jwm.features.recording.current_segment.as_deref(),
+            Some("legacy.mp4")
+        );
+        assert_eq!(backend.toasts.len(), 2);
+    }
+
+    #[test]
+    fn feature_reset_and_shutdown_retire_admission_without_late_ui_changes() {
+        for reset_features in [true, false] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            let reporter = submit_deferred_recording(&mut jwm, &mut backend, "old.mp4");
+            if reset_features {
+                jwm.features.disable_all();
+            } else {
+                jwm.running.store(false, Ordering::SeqCst);
+                jwm.poll_recording_start(&mut backend);
+            }
+            assert!(jwm.features.recording_start.is_none());
+            reporter.complete(false);
+            jwm.poll_recording_start(&mut backend);
+            assert_eq!(backend.toasts.len(), 1);
+            assert!(backend.capture_hints.is_empty());
+            assert_eq!(backend.recording_stop_calls, 0);
+        }
+    }
+
+    #[test]
+    fn admission_collection_and_retirement_stay_on_the_real_lifecycle_paths() {
+        let update = include_str!("../event_dispatcher.rs");
+        let after_render = update
+            .split_once("self.tick_animations(backend);")
+            .unwrap()
+            .1;
+        assert!(
+            after_render
+                .trim_start()
+                .starts_with("// Deferred Wayland starts complete")
+        );
+        let collection = format!("self.{}(backend);", "poll_recording_start");
+        assert!(
+            after_render
+                .split_once("self.tick_deferred_grab")
+                .unwrap()
+                .0
+                .contains(&collection)
+        );
+        let lifecycle = include_str!("../lifecycle.rs");
+        let cleanup = lifecycle
+            .split_once("fn cleanup_x11_resources_after_handoff")
+            .unwrap()
+            .1;
+        let retire = format!("self.features.{} = None;", "recording_start");
+        assert!(
+            cleanup.find(&retire).unwrap()
+                < cleanup.find("if self.features.recording.active").unwrap()
+        );
+        let shipped = include_str!("toggles.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        let stop = shipped
+            .split_once("pub(crate) fn stop_recording(")
+            .unwrap()
+            .1
+            .split_once("/// Validate direct output")
+            .unwrap()
+            .0;
+        assert!(
+            stop.find("self.stop_recording_session(backend)").unwrap()
+                < stop
+                    .find("Self::finalize_recording(segments, output_path)")
+                    .unwrap()
+        );
+        let phase = stop.split_once("fn stop_recording_session(").unwrap().1;
+        assert!(
+            phase.find(&retire).unwrap()
+                < phase.find("backend.compositor_stop_recording()").unwrap()
+        );
+        assert!(
+            phase.find("backend.compositor_stop_recording()").unwrap()
+                < phase.find("self.features.recording.stop()").unwrap()
+        );
+        let rejection = shipped
+            .split_once("RecordingStartOutcome::Rejected =>")
+            .unwrap()
+            .1
+            .split_once("RecordingStartOutcome::Unavailable =>")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "backend.compositor_stop_recording(",
+            "backend.compositor_set_recording_region(",
+            "Self::finalize_recording(",
+            "std::fs::",
+        ] {
+            assert!(!rejection.contains(forbidden));
+        }
     }
 
     /// A theme the config file refused to take is live only until the next

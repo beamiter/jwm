@@ -113,6 +113,14 @@ impl CompositorTransitionState {
     }
 }
 
+/// The unique observation capability for this logical recording request.
+/// Kept outside clonable RecordingState so snapshots cannot consume its result.
+#[derive(Debug)]
+pub(crate) struct PendingRecordingStart {
+    pub(crate) receipt: crate::backend::recording_admission::RecordingStartReceipt,
+    pub(crate) stopped_standalone_audio: bool,
+}
+
 /// 所有特性的组合状态
 #[derive(Debug, Default)]
 pub struct FeatureStates {
@@ -131,6 +139,7 @@ pub struct FeatureStates {
     pub screenshot_completions: Vec<connectivity::BackgroundJob<screenshot::ScreenshotCompletion>>,
     pub overview: OverviewState,
     pub recording: RecordingState,
+    pub(crate) recording_start: Option<PendingRecordingStart>,
     pub magnifier: MagnifierState,
     /// Last known MPRIS player, pushed in by the bridge. Not a mode.
     pub media: MediaStatus,
@@ -276,6 +285,7 @@ impl FeatureStates {
         self.system_ui.cancel();
         self.system_ui_return_to_hub = false;
         self.overview.deactivate();
+        self.recording_start = None;
         self.recording.cancel();
         let _ = self.audio_recording.stop();
         self.magnifier.disable();
