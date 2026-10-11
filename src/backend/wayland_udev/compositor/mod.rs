@@ -42,6 +42,7 @@ mod presentation_timing;
 mod profiler;
 #[allow(dead_code, unreachable_pub)]
 mod recording;
+mod recording_commands;
 mod render;
 #[allow(dead_code, unreachable_pub)]
 mod render_batcher;
@@ -1646,8 +1647,7 @@ pub(crate) struct WaylandCompositor {
     screenshot_readback: screenshot_readback::ScreenshotReadback,
 
     // --- Recording control ---
-    pending_recording_start: Option<(String, (i32, i32, u32, u32))>,
-    pending_recording_stop: bool,
+    pending_recording: recording_commands::PendingRecordingCommands,
     recording_region_overlay: Option<(i32, i32, u32, u32)>,
     /// Resize handles for an armed / adjustable recording crop. Soft
     /// hover-probe keeps this false so the pick does not look editable.
@@ -3140,8 +3140,7 @@ impl WaylandCompositor {
                 screenshot_readback: screenshot_readback::ScreenshotReadback::new(),
 
                 // Recording control
-                pending_recording_start: None,
-                pending_recording_stop: false,
+                pending_recording: recording_commands::PendingRecordingCommands::default(),
                 recording_region_overlay: None,
                 recording_region_interactive: false,
                 capture_selection_active: false,
@@ -4398,8 +4397,7 @@ impl WaylandCompositor {
             // is current. Without this a stop requested after the encoder pipe
             // broke — which clears the active flag, and with it `frame_due` —
             // would never reach a frame, stranding ffmpeg on an open stdin.
-            || self.pending_recording_stop
-            || self.pending_recording_start.is_some()
+            || self.pending_recording.has_pending()
             || self.dock_preview.as_ref().is_some_and(|preview| {
                 !preview.awaiting_source
                     && crate::backend::compositor_common::genie::preview_lease_timeout(
@@ -4528,14 +4526,12 @@ impl WaylandCompositor {
 
     pub(crate) fn start_recording_region(&mut self, path: &str, region: (i32, i32, u32, u32)) {
         let region = self.clamp_recording_region(region);
-        self.pending_recording_start = Some((path.to_string(), region));
+        self.pending_recording.start(path.to_string(), region);
     }
 
     pub(crate) fn set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
         let region = self.clamp_recording_region(region);
-        if let Some((_, pending_region)) = self.pending_recording_start.as_mut() {
-            *pending_region = region;
-        }
+        self.pending_recording.set_region(region);
         self.recording.set_region(region);
         self.needs_render = true;
     }
@@ -4578,8 +4574,7 @@ impl WaylandCompositor {
 
     pub(crate) fn recording_requires_composition(&self) -> bool {
         self.recording.is_active()
-            || self.pending_recording_start.is_some()
-            || self.pending_recording_stop
+            || self.pending_recording.has_pending()
             || self.recording_region_overlay.is_some()
     }
 
@@ -4628,7 +4623,7 @@ impl WaylandCompositor {
 
     /// Request recording stop — deferred until next render_frame when GL is active.
     pub(crate) fn stop_recording(&mut self) {
-        self.pending_recording_stop = true;
+        self.pending_recording.stop();
     }
 
     pub(crate) fn set_window_override_redirect(&mut self, window_id: u64, override_redirect: bool) {

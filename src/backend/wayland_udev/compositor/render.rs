@@ -2943,8 +2943,7 @@ impl WaylandCompositor {
         // those are useful only when a frame can actually be produced.  The
         // animation check keeps time-based effects live without relying on a
         // separate caller to keep `needs_render` armed.
-        let recording_transition_pending =
-            self.pending_recording_start.is_some() || self.pending_recording_stop;
+        let recording_transition_pending = self.pending_recording.has_pending();
         // Static post-processing is damage-driven. Magnifier pointer changes
         // explicitly dirty the compositor in set_mouse_position, so no current
         // post-process input advances merely because time passes.
@@ -4941,7 +4940,7 @@ impl WaylandCompositor {
             capture_view_required,
             self.screenshot_requests.has_pending(),
             recording_frame_due,
-            self.pending_recording_start.is_some(),
+            self.pending_recording.has_start(),
         );
         if tail_draws_linear && derive_capture_view {
             self.encode_capture_view(gl, &projection);
@@ -5042,23 +5041,6 @@ impl WaylandCompositor {
         // =================================================================
         // 21. Recording capture (async PBO readback to ffmpeg)
         // =================================================================
-        if let Some((path, region)) = self.pending_recording_start.take() {
-            unsafe {
-                if let Err(e) = self.recording.start(
-                    gl,
-                    self.screen_w,
-                    self.screen_h,
-                    &path,
-                    frame_behavior.recording_fps.clamp(1, 240),
-                    &frame_behavior.recording_bitrate,
-                    frame_behavior.recording_quality,
-                    &frame_behavior.recording_encoder,
-                    region,
-                ) {
-                    log::error!("[compositor] Failed to start recording: {}", e);
-                }
-            }
-        }
         // Gated on the same `recording_frame_due` snapshot that decided
         // whether section 18c derived the capture view: a deadline that
         // expires mid-frame waits for the next frame (`needs_render` keeps
@@ -5095,17 +5077,37 @@ impl WaylandCompositor {
                 }
             }
         }
-        if self.pending_recording_stop {
-            self.pending_recording_stop = false;
-            unsafe {
-                self.recording.stop(gl);
-            }
-            // The REC chip stops drawing from this frame on (`is_active`
-            // cleared above); its label texture goes with the pipeline.
-            if let Some((_, texture, _, _)) = self.recording_indicator_texture.take()
-                && texture != 0
-            {
-                unsafe { gl.DeleteTextures(1, &texture) };
+        // This frame's capture view and deadline belong to the old pipeline.
+        // Finish its capture before applying a stop/start barrier; a new
+        // pipeline gets its own snapshot on the next frame.
+        for command in self.pending_recording.take().into_iter().flatten() {
+            match command {
+                super::recording_commands::RecordingCommand::Stop => {
+                    unsafe {
+                        self.recording.stop(gl);
+                    }
+                    // Retire the old session's cue before a new session starts.
+                    if let Some((_, texture, _, _)) = self.recording_indicator_texture.take()
+                        && texture != 0
+                    {
+                        unsafe { gl.DeleteTextures(1, &texture) };
+                    }
+                }
+                super::recording_commands::RecordingCommand::Start { path, region } => unsafe {
+                    if let Err(e) = self.recording.start(
+                        gl,
+                        self.screen_w,
+                        self.screen_h,
+                        &path,
+                        frame_behavior.recording_fps.clamp(1, 240),
+                        &frame_behavior.recording_bitrate,
+                        frame_behavior.recording_quality,
+                        &frame_behavior.recording_encoder,
+                        region,
+                    ) {
+                        log::error!("[compositor] Failed to start recording: {}", e);
+                    }
+                },
             }
         }
 
