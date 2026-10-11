@@ -96,7 +96,7 @@ pub struct RecordingStopReceipt {
 }
 
 impl RecordingStopReceipt {
-    #[cfg(any(feature = "x11-backends", feature = "backend-wayland-udev", test))]
+    #[cfg(any(feature = "x11-backends", test))]
     pub(crate) fn from_writer(writer: Option<WriterCompletionReceipt>) -> Self {
         Self {
             stop: None,
