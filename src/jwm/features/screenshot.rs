@@ -2161,28 +2161,50 @@ impl Jwm {
         Self::blend_rgba(image, pixels.as_slice(), w, h, x, y);
     }
 
+    /// Visible half-open source coordinates for an RGBA image placed at a
+    /// signed destination origin. Wide arithmetic also handles origins far
+    /// outside the target without overflowing before clipping.
+    fn rgba_blend_bounds(
+        target: (u32, u32),
+        source: (u32, u32),
+        origin: (i32, i32),
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (w, h) = (i64::from(source.0), i64::from(source.1));
+        let (ox, oy) = (i64::from(origin.0), i64::from(origin.1));
+        let x0 = (-ox).clamp(0, w);
+        let y0 = (-oy).clamp(0, h);
+        let x1 = (i64::from(target.0) - ox).clamp(0, w);
+        let y1 = (i64::from(target.1) - oy).clamp(0, h);
+        (x0 < x1 && y0 < y1).then_some((x0 as u32, y0 as u32, x1 as u32, y1 as u32))
+    }
+
     /// Source-over composite of a straight-alpha RGBA buffer at `(ox, oy)`,
     /// clipped to the image.
     fn blend_rgba(image: &mut RgbaImage, pixels: &[u8], w: u32, h: u32, ox: i32, oy: i32) {
-        if w == 0 || h == 0 || pixels.len() < (w * h * 4) as usize {
+        let Some(stride) = usize::try_from(w).ok().and_then(|w| w.checked_mul(4)) else {
+            return;
+        };
+        let Some(required) = usize::try_from(h).ok().and_then(|h| stride.checked_mul(h)) else {
+            return;
+        };
+        if pixels.len() < required {
             return;
         }
-        for y in 0..h {
-            let ty = oy + y as i32;
-            if ty < 0 || ty as u32 >= image.height() {
-                continue;
-            }
-            for x in 0..w {
-                let tx = ox + x as i32;
-                if tx < 0 || tx as u32 >= image.width() {
-                    continue;
-                }
-                let offset = ((y * w + x) * 4) as usize;
+        let Some((x0, y0, x1, y1)) =
+            Self::rgba_blend_bounds((image.width(), image.height()), (w, h), (ox, oy))
+        else {
+            return;
+        };
+        for y in y0..y1 {
+            let ty = (i64::from(oy) + i64::from(y)) as u32;
+            for x in x0..x1 {
+                let tx = (i64::from(ox) + i64::from(x)) as u32;
+                let offset = y as usize * stride + x as usize * 4;
                 let alpha = f32::from(pixels[offset + 3]) / 255.0;
                 if alpha <= 0.0 {
                     continue;
                 }
-                let pixel = image.get_pixel_mut(tx as u32, ty as u32);
+                let pixel = image.get_pixel_mut(tx, ty);
                 for c in 0..3 {
                     pixel[c] = (f32::from(pixel[c]) * (1.0 - alpha)
                         + f32::from(pixels[offset + c]) * alpha)
@@ -3843,6 +3865,143 @@ mod tests {
         state.commit();
 
         assert_eq!(state.get_selection_rect(), Some(Rect::new(10, 12, 11, 19)));
+    }
+
+    fn full_source_blend_reference(
+        image: &mut RgbaImage,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+        ox: i32,
+        oy: i32,
+    ) {
+        if w == 0 || h == 0 || pixels.len() < (w * h * 4) as usize {
+            return;
+        }
+        for y in 0..h {
+            let ty = oy + y as i32;
+            if ty < 0 || ty as u32 >= image.height() {
+                continue;
+            }
+            for x in 0..w {
+                let tx = ox + x as i32;
+                if tx < 0 || tx as u32 >= image.width() {
+                    continue;
+                }
+                let offset = ((y * w + x) * 4) as usize;
+                let alpha = f32::from(pixels[offset + 3]) / 255.0;
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let pixel = image.get_pixel_mut(tx as u32, ty as u32);
+                for c in 0..3 {
+                    pixel[c] = (f32::from(pixel[c]) * (1.0 - alpha)
+                        + f32::from(pixels[offset + c]) * alpha)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_rgba_blend_matches_full_source_scan() {
+        for (w, h) in [(0, 0), (0, 3), (3, 0), (1, 1), (3, 5), (9, 7)] {
+            for target in [(0, 0), (1, 1), (7, 5), (13, 9)] {
+                for (ox, oy) in [
+                    (-20, -20),
+                    (-8, -2),
+                    (-1, -1),
+                    (0, 0),
+                    (1, 2),
+                    (6, 4),
+                    (12, 8),
+                    (20, 20),
+                ] {
+                    for alpha in [0, 1, 96, 255] {
+                        let pixels: Vec<u8> =
+                            (0..w * h).flat_map(|i| [i as u8, 173, 91, alpha]).collect();
+                        let mut actual = RgbaImage::from_fn(target.0, target.1, |x, y| {
+                            Rgba([31, x as u8 * 7, y as u8 * 11, (x + y) as u8])
+                        });
+                        let mut expected = actual.clone();
+                        full_source_blend_reference(&mut expected, &pixels, w, h, ox, oy);
+                        Jwm::blend_rgba(&mut actual, &pixels, w, h, ox, oy);
+                        assert_eq!(
+                            actual, expected,
+                            "source={w}x{h} target={target:?} offset=({ox},{oy}) alpha={alpha}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_rgba_blend_rejects_short_input_and_preserves_trailing_bytes() {
+        let original = RgbaImage::from_pixel(5, 5, Rgba([21, 52, 97, 43]));
+        for len in [0, 1, 15, 35] {
+            let mut actual = original.clone();
+            Jwm::blend_rgba(&mut actual, &vec![255; len], 3, 3, -1, -1);
+            assert_eq!(actual, original);
+        }
+        let mut pixels = vec![255; 36];
+        let mut expected = original.clone();
+        Jwm::blend_rgba(&mut expected, &pixels, 3, 3, -1, -1);
+        pixels.extend_from_slice(&[2, 7, 13, 19, 23]);
+        let mut actual = original.clone();
+        Jwm::blend_rgba(&mut actual, &pixels, 3, 3, -1, -1);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.get_pixel(0, 0)[3], 43);
+        for (w, h) in [(u32::MAX, u32::MAX), (u32::MAX, 1), (1, u32::MAX)] {
+            let mut actual = original.clone();
+            Jwm::blend_rgba(&mut actual, &[], w, h, i32::MIN, i32::MAX);
+            assert_eq!(actual, original);
+        }
+    }
+
+    #[test]
+    fn rgba_blend_intersection_handles_extreme_origins_and_single_pixels() {
+        assert_eq!(
+            Jwm::rgba_blend_bounds((5, 5), (3, 3), (-2, -2)),
+            Some((2, 2, 3, 3))
+        );
+        assert_eq!(
+            Jwm::rgba_blend_bounds((5, 5), (3, 3), (4, 4)),
+            Some((0, 0, 1, 1))
+        );
+        for origin in [(i32::MIN, 0), (i32::MAX, 0), (0, i32::MIN), (0, i32::MAX)] {
+            assert!(Jwm::rgba_blend_bounds((5, 5), (3, 3), origin).is_none());
+            let mut actual = RgbaImage::from_pixel(5, 5, Rgba([2, 3, 4, 5]));
+            let expected = actual.clone();
+            Jwm::blend_rgba(&mut actual, &[255; 36], 3, 3, origin.0, origin.1);
+            assert_eq!(actual, expected);
+        }
+        // Bounds only: no impossible multi-gigabyte source allocation.
+        assert_eq!(
+            Jwm::rgba_blend_bounds((10, 10), (u32::MAX, 10), (i32::MIN, 0)),
+            Some((2_147_483_648, 0, 2_147_483_658, 10))
+        );
+    }
+
+    #[test]
+    fn mostly_clipped_label_scans_only_its_visible_columns() {
+        let (w, h) = (16_384, 32);
+        let bounds = Jwm::rgba_blend_bounds((80, 32), (w, h), (-16_304, 0)).unwrap();
+        assert_eq!(bounds, (16_304, 0, 16_384, 32));
+        assert_eq!(
+            u64::from(bounds.2 - bounds.0) * u64::from(bounds.3 - bounds.1),
+            2560
+        );
+        assert_eq!(u64::from(w) * u64::from(h), 524_288);
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, 61, 109, (i % 256) as u8])
+            .collect();
+        let mut actual = RgbaImage::from_pixel(80, 32, Rgba([11, 27, 93, 255]));
+        let mut expected = actual.clone();
+        full_source_blend_reference(&mut expected, &pixels, w, h, -16_304, 0);
+        Jwm::blend_rgba(&mut actual, &pixels, w, h, -16_304, 0);
+        assert_eq!(actual, expected);
     }
 
     fn full_frame_marker_reference(
