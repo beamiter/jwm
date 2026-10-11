@@ -2729,9 +2729,16 @@ impl Jwm {
                 Ok(region) => region,
                 Err(error) => return IpcResponse::err(error.to_string()),
             };
-            self.features.recording.set_region(region);
-            if let Some(region_tuple) = Self::recording_region_tuple(region) {
-                backend.compositor_set_recording_region(region_tuple);
+            let Some(region_tuple) = Self::recording_region_tuple(region) else {
+                return IpcResponse::err("set_recording_region: invalid normalized region");
+            };
+            backend.compositor_set_recording_region(region_tuple);
+            self.features
+                .recording
+                .accept_submitted_external_region(region);
+            if self.features.recording.adjusting_region {
+                self.sync_recording_region_overlay(backend);
+            } else {
                 backend.compositor_force_full_redraw();
             }
             self.broadcast_ipc_event(

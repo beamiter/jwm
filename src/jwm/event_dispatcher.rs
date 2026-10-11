@@ -2747,6 +2747,8 @@ mod tests {
 
     struct RenderSpyBackend {
         recording_region_updates: Vec<(i32, i32, u32, u32)>,
+        recording_overlay_updates: Vec<Option<(i32, i32, u32, u32)>>,
+        capture_hint_updates: Vec<Option<String>>,
         window_ops: MapRestoreWindowOps,
         input_ops: GrabSpyInputOps,
         property_ops: MapRestorePropertyOps,
@@ -2799,6 +2801,8 @@ mod tests {
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 recording_region_updates: Vec::new(),
+                recording_overlay_updates: Vec::new(),
+                capture_hint_updates: Vec::new(),
                 rendered_frames: 0,
                 needs_render: true,
                 compositor_enabled: true,
@@ -2840,6 +2844,17 @@ mod tests {
         }
     }
     impl CompositorMedia for RenderSpyBackend {
+        fn compositor_set_recording_region_overlay(
+            &mut self,
+            region: Option<(i32, i32, u32, u32)>,
+        ) {
+            self.recording_overlay_updates.push(region);
+        }
+
+        fn compositor_set_capture_hint(&mut self, hint: Option<String>) {
+            self.capture_hint_updates.push(hint);
+        }
+
         fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
             self.recording_region_updates.push(region);
         }
@@ -5687,6 +5702,203 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    fn submit_recording_crop(jwm: &mut Jwm, backend: &mut RenderSpyBackend) {
+        let response = jwm.handle_ipc_command(
+            backend,
+            "set_recording_region",
+            &serde_json::json!({"x": 400, "y": 300, "width": 320, "height": 240}),
+        );
+        assert!(response.success, "{:?}", response.error);
+    }
+
+    #[test]
+    fn ipc_recording_crop_becomes_the_next_gestures_rollback_source() {
+        use crate::core::types::Rect;
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        submit_recording_crop(&mut jwm, &mut backend);
+        assert_eq!(backend.recording_region_updates, vec![(400, 300, 320, 240)]);
+        assert_eq!(
+            backend.recording_overlay_updates.last(),
+            Some(&Some((400, 300, 320, 240)))
+        );
+        capture_press(&mut jwm, &mut backend, 900.0, 700.0);
+        recording_motion(&mut jwm, &mut backend, 905.0, 705.0);
+        assert_eq!(backend.recording_region_updates.len(), 1);
+        capture_release(&mut jwm, &mut backend, 905.0, 705.0);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(400, 300, 320, 240))
+        );
+        assert_eq!(
+            backend.recording_region_updates.last(),
+            Some(&(400, 300, 320, 240))
+        );
+        assert_eq!(
+            backend.recording_overlay_updates.last(),
+            Some(&Some((400, 300, 320, 240)))
+        );
+        // Cancelling the whole adjustment still restores its original A.
+        jwm.cancel_recording_region_interaction(&mut backend);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(100, 100, 200, 150))
+        );
+        assert_eq!(
+            backend.recording_region_updates.last(),
+            Some(&(100, 100, 200, 150))
+        );
+        assert!(jwm.features.recording.active);
+    }
+
+    #[test]
+    fn ipc_recording_crop_retires_old_new_move_and_resize_gestures() {
+        use crate::core::types::Rect;
+        for (x, y) in [(900.0, 700.0), (180.0, 160.0), (100.0, 100.0)] {
+            let (mut jwm, mut backend) = recording_adjustment_fixture();
+            capture_press(&mut jwm, &mut backend, x, y);
+            assert!(jwm.features.recording.is_region_dragging());
+            submit_recording_crop(&mut jwm, &mut backend);
+            assert!(!jwm.features.recording.is_region_dragging());
+            recording_motion(&mut jwm, &mut backend, x + 30.0, y + 30.0);
+            capture_release(&mut jwm, &mut backend, x + 30.0, y + 30.0);
+            assert_eq!(
+                jwm.features.recording.region,
+                Some(Rect::new(400, 300, 320, 240))
+            );
+            assert!(
+                backend
+                    .recording_region_updates
+                    .iter()
+                    .all(|r| *r == (400, 300, 320, 240))
+            );
+            // A fresh press can immediately start a normal move of B.
+            capture_press(&mut jwm, &mut backend, 550.0, 400.0);
+            assert!(jwm.features.recording.is_region_dragging());
+            capture_release(&mut jwm, &mut backend, 570.0, 430.0);
+            assert_eq!(
+                jwm.features.recording.region,
+                Some(Rect::new(420, 330, 320, 240))
+            );
+            assert_eq!(
+                backend.recording_region_updates.last(),
+                Some(&(420, 330, 320, 240))
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_ipc_recording_crops_leave_the_current_gesture_untouched() {
+        for (args, screen_width) in [
+            (
+                serde_json::json!({"x": 400, "y": 300, "width": -1, "height": 240}),
+                1920,
+            ),
+            (
+                serde_json::json!({"x": 400, "y": 300, "width": "320", "height": 240}),
+                1920,
+            ),
+            (
+                serde_json::json!({"x": 400, "y": 300, "width": 2147483648u64, "height": 240}),
+                1920,
+            ),
+            (
+                serde_json::json!({"x": 400, "y": 300, "width": 320, "height": 240}),
+                8,
+            ),
+        ] {
+            let (mut jwm, mut backend) = recording_adjustment_fixture();
+            capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+            jwm.s_w = screen_width;
+            let before = format!("{:?}", jwm.features.recording);
+            backend.recording_region_updates.clear();
+            backend.recording_overlay_updates.clear();
+            backend.capture_hint_updates.clear();
+            let response = jwm.handle_ipc_command(&mut backend, "set_recording_region", &args);
+            assert!(!response.success);
+            assert_eq!(format!("{:?}", jwm.features.recording), before);
+            assert!(jwm.features.recording.is_region_dragging());
+            assert!(backend.recording_region_updates.is_empty());
+            assert!(backend.recording_overlay_updates.is_empty());
+            assert!(backend.capture_hint_updates.is_empty());
+        }
+    }
+
+    #[test]
+    fn small_valid_ipc_crops_keep_the_existing_minimum_normalization() {
+        use crate::core::types::Rect;
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        capture_press(&mut jwm, &mut backend, 180.0, 160.0);
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_recording_region",
+            &serde_json::json!({"x": 400, "y": 300, "width": 0, "height": 1}),
+        );
+        assert!(response.success);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(400, 300, 16, 16))
+        );
+        assert!(!jwm.features.recording.is_region_dragging());
+        assert_eq!(
+            backend.recording_region_updates.last(),
+            Some(&(400, 300, 16, 16))
+        );
+        capture_press(&mut jwm, &mut backend, 900.0, 700.0);
+        capture_release(&mut jwm, &mut backend, 902.0, 702.0);
+        assert_eq!(
+            jwm.features.recording.region,
+            Some(Rect::new(400, 300, 16, 16))
+        );
+    }
+
+    #[test]
+    fn ipc_crop_outside_recording_adjustment_preserves_the_screenshot_surface() {
+        use crate::core::types::Rect;
+        let (mut jwm, mut backend) = recording_adjustment_fixture();
+        jwm.features.recording.finish_region_selection();
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(20, 30, 300, 200));
+        let selection = jwm.features.screenshot.get_selection_rect();
+        let path = jwm.features.recording.output_path.clone();
+        submit_recording_crop(&mut jwm, &mut backend);
+        assert!(jwm.features.screenshot.active);
+        assert_eq!(jwm.features.screenshot.get_selection_rect(), selection);
+        assert!(backend.recording_overlay_updates.is_empty());
+        assert!(backend.capture_hint_updates.is_empty());
+        assert!(backend.snap_previews.is_empty());
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend.key_ops.keyboard_grabs.load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert!(jwm.features.recording.active);
+        assert!(!jwm.features.recording.selecting_region);
+        assert_eq!(jwm.features.recording.output_path, path);
+        assert_eq!(backend.recording_region_updates, vec![(400, 300, 320, 240)]);
     }
 
     #[test]

@@ -505,6 +505,17 @@ impl RecordingState {
         self.region = Some(region);
     }
 
+    /// Accept a normalized crop already submitted by the IPC setter. Retire
+    /// only the current gesture: Esc still restores the adjustment's original
+    /// crop, while a later invalid replacement returns to this latest source.
+    pub(crate) fn accept_submitted_external_region(&mut self, region: Rect) {
+        self.region = Some(region);
+        if self.adjusting_region {
+            self.note_applied_region(region);
+            self.drag = RecordingRegionDrag::None;
+        }
+    }
+
     pub fn set_output_size_from_region(&mut self) {
         self.output_size = self.region.and_then(|region| {
             Some((u32::try_from(region.w).ok()?, u32::try_from(region.h).ok()?))
