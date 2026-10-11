@@ -591,6 +591,15 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_stop_recording_tracked(
+                &mut self,
+            ) -> Option<$crate::backend::recording_completion::RecordingStopReceipt> {
+                let compositor = self.compositor.as_mut()?;
+                Some($crate::backend::recording_completion::RecordingStopReceipt::from_writer(
+                    compositor.stop_recording_tracked(),
+                ))
+            }
+
             fn compositor_recording_stats(
                 &self,
             ) -> Option<$crate::backend::api::RecordingStats> {

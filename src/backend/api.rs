@@ -3240,6 +3240,16 @@ pub trait CompositorMedia: Send {
     /// `None` clears the chip (cancel / editor commit / recording start).
     fn compositor_set_capture_hint(&mut self, _hint: Option<String>) {}
     fn compositor_stop_recording(&mut self) {}
+    /// Stop without waiting. An optional observation belongs to the exact
+    /// stopped writer; its successful exit is not a saved-file receipt.
+    /// Legacy backends still stop, but cannot confirm a writer outcome.
+    fn compositor_stop_recording_tracked(
+        &mut self,
+    ) -> Option<crate::backend::recording_completion::RecordingStopReceipt> {
+        self.compositor_stop_recording();
+        None
+    }
+
     /// How the recording in progress is actually going, or `None` when none is.
     fn compositor_recording_stats(&self) -> Option<RecordingStats> {
         None
@@ -3333,6 +3343,20 @@ mod recording_request_api_tests {
                 .is_err()
         );
         assert_eq!(backend.calls, 2);
+    }
+    #[test]
+    fn legacy_stop_is_submitted_without_inventing_a_writer_receipt() {
+        struct Legacy {
+            stops: usize,
+        }
+        impl CompositorMedia for Legacy {
+            fn compositor_stop_recording(&mut self) {
+                self.stops += 1;
+            }
+        }
+        let mut legacy = Legacy { stops: 0 };
+        assert!(legacy.compositor_stop_recording_tracked().is_none());
+        assert_eq!(legacy.stops, 1);
     }
 }
 

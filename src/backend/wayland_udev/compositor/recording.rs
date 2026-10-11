@@ -704,6 +704,13 @@ impl RecordingState {
     }
 
     pub(crate) unsafe fn stop(&mut self, gl: &ffi::Gles2) {
+        let _ = unsafe { self.stop_tracked(gl) };
+    }
+
+    pub(crate) unsafe fn stop_tracked(
+        &mut self,
+        gl: &ffi::Gles2,
+    ) -> Option<crate::backend::recording_completion::WriterCompletionReceipt> {
         // The most recent ReadPixels has no subsequent capture to trigger its
         // readback. Drain it before closing stdin so the file is complete.
         // Skipped once the encoder pipe has already failed — there is nothing
@@ -726,15 +733,18 @@ impl RecordingState {
         // with `+faststart`, rewrites the whole MP4 to move the moov atom to the
         // front; on a long recording that is seconds during which this thread
         // would render nothing and answer no input. The writer thread reaps it.
-        if let Some(sink) = self.sink.take() {
-            log::info!("[recording] stopped ({})", sink.finish());
-        }
+        let receipt = self.sink.take().map(|sink| {
+            let (stats, receipt) = sink.finish_tracked();
+            log::info!("[recording] stopped ({})", stats);
+            receipt
+        });
 
         // Also heals a partially-initialized state from a start that failed
         // after raw allocation.
         unsafe { self.release_gpu_resources(gl) };
 
         self.active = false;
+        receipt
     }
 
     /// Release raw recording objects regardless of the business-level

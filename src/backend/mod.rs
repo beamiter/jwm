@@ -16,6 +16,7 @@ pub mod edid;
 pub mod error;
 pub mod hdr_metadata;
 pub mod recording_admission;
+pub mod recording_completion;
 
 // Protocol-independent compositor helpers shared by Wayland and X11 backends.
 // Slim build profiles compile only a subset of the consumers, so dead-code

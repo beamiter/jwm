@@ -140,6 +140,7 @@ pub struct FeatureStates {
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub(crate) recording_start: Option<PendingRecordingStart>,
+    pub(crate) recording_stops: crate::backend::recording_completion::RecordingStopObservations,
     pub magnifier: MagnifierState,
     /// Last known MPRIS player, pushed in by the bridge. Not a mode.
     pub media: MediaStatus,
@@ -286,6 +287,7 @@ impl FeatureStates {
         self.system_ui_return_to_hub = false;
         self.overview.deactivate();
         self.recording_start = None;
+        self.recording_stops.clear();
         self.recording.cancel();
         let _ = self.audio_recording.stop();
         self.magnifier.disable();

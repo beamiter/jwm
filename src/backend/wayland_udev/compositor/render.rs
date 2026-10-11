@@ -5080,11 +5080,12 @@ impl WaylandCompositor {
         // This frame's capture view and deadline belong to the old pipeline.
         // Finish its capture before applying a stop/start barrier; a new
         // pipeline gets its own snapshot on the next frame.
-        for (command, reporter) in self.pending_recording.take().into_iter().flatten() {
-            match command {
+        for ready in self.pending_recording.take().into_iter().flatten() {
+            match ready.command {
                 super::recording_commands::RecordingCommand::Stop => {
-                    unsafe {
-                        self.recording.stop(gl);
+                    let writer = unsafe { self.recording.stop_tracked(gl) };
+                    if let Some(reporter) = ready.stop_reporter {
+                        reporter.complete(writer);
                     }
                     // Retire the old session's cue before a new session starts.
                     if let Some((_, texture, _, _)) = self.recording_indicator_texture.take()
@@ -5108,7 +5109,7 @@ impl WaylandCompositor {
                     if let Err(e) = &result {
                         log::error!("[compositor] Failed to start recording: {}", e);
                     }
-                    if let Some(reporter) = reporter {
+                    if let Some(reporter) = ready.start_reporter {
                         reporter.complete(result.is_ok());
                     }
                 },

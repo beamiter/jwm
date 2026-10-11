@@ -13,6 +13,11 @@
 //! degrades to a lower effective capture rate under load, which is what the
 //! user wants; the compositor never waits on the encoder.
 
+use crate::backend::recording_completion::{
+    EncoderWaitOutcome, WriterCompletionReceipt, WriterCompletionReporter, WriterFailure,
+    writer_completion_channel,
+};
+
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd as _, RawFd};
 use std::process::{Child, ExitStatus};
@@ -140,16 +145,29 @@ fn write_frame_with_timeout(
     Ok(())
 }
 
-fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
+struct EncoderWaitResult {
+    result: io::Result<ExitStatus>,
+    timed_out: bool,
+}
+
+fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> EncoderWaitResult {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
+            Ok(Some(status)) => {
+                return EncoderWaitResult {
+                    result: Ok(status),
+                    timed_out: false,
+                };
+            }
             Ok(None) => {}
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(error);
+                return EncoderWaitResult {
+                    result: Err(error),
+                    timed_out: false,
+                };
             }
         }
         let now = Instant::now();
@@ -167,7 +185,10 @@ fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> io::Re
         .err()
         .filter(|error| error.kind() != io::ErrorKind::InvalidInput);
     let status = child.wait();
-    kill_error.map_or(status, Err)
+    EncoderWaitResult {
+        result: kill_error.map_or(status, Err),
+        timed_out: true,
+    }
 }
 
 /// Owns the encoder child process and the thread that feeds it.
@@ -180,6 +201,7 @@ pub struct RecordingSink {
     dropped: Arc<AtomicU64>,
     submitted: u64,
     writer: Option<JoinHandle<()>>,
+    completion: WriterCompletionReceipt,
 }
 
 impl RecordingSink {
@@ -212,13 +234,14 @@ impl RecordingSink {
         // the closure instead would move it into a closure that a failed spawn
         // drops — and dropping a `Child` neither kills nor reaps it, leaving an
         // ffmpeg behind that waits forever on a pipe nobody will ever write to.
-        let (child_tx, child_rx) = std::sync::mpsc::channel::<Child>();
+        let (completion_reporter, completion) = writer_completion_channel();
+        let (child_tx, child_rx) = std::sync::mpsc::channel::<(Child, WriterCompletionReporter)>();
 
         let writer_broken = Arc::clone(&broken);
         let writer = std::thread::Builder::new()
             .name("jwm-recording-writer".into())
             .spawn(move || {
-                let Ok(mut child) = child_rx.recv() else {
+                let Ok((mut child, completion_reporter)) = child_rx.recv() else {
                     return;
                 };
                 let Some(mut stdin) = child.stdin.take() else {
@@ -226,6 +249,7 @@ impl RecordingSink {
                     writer_broken.store(true, Ordering::Relaxed);
                     let _ = child.kill();
                     let _ = child.wait();
+                    completion_reporter.finish(Some(WriterFailure::MissingStdin), None);
                     return;
                 };
                 widen_pipe(&stdin, label);
@@ -234,6 +258,7 @@ impl RecordingSink {
                     writer_broken.store(true, Ordering::Relaxed);
                     let _ = child.kill();
                     let _ = child.wait();
+                    completion_reporter.finish(Some(WriterFailure::PipeSetup), None);
                     return;
                 }
                 let mut write_failed = false;
@@ -258,24 +283,38 @@ impl RecordingSink {
                 if write_failed {
                     let _ = child.kill();
                 }
-                match wait_for_encoder_with_timeout(&mut child, finalize_timeout) {
+                let waited = wait_for_encoder_with_timeout(&mut child, finalize_timeout);
+                let outcome = if waited.timed_out {
+                    EncoderWaitOutcome::TimedOut
+                } else {
+                    match &waited.result {
+                        Ok(status) => EncoderWaitOutcome::Exited(status.success()),
+                        Err(_) => EncoderWaitOutcome::Failed,
+                    }
+                };
+                match waited.result {
                     Ok(status) if !status.success() => {
                         log::warn!("{label}: ffmpeg exited with {status}");
                     }
                     Err(error) => log::warn!("{label}: failed waiting for ffmpeg: {error}"),
                     Ok(_) => {}
                 }
+                completion_reporter.finish(
+                    write_failed.then_some(WriterFailure::FrameWrite),
+                    Some(outcome),
+                );
             });
 
         let writer = match writer {
             Ok(handle) => {
-                if let Err(error) = child_tx.send(child) {
+                if let Err(error) = child_tx.send((child, completion_reporter)) {
                     // The writer exited before accepting ownership. Recover
                     // the Child from SendError instead of dropping it alive.
-                    let mut child = error.0;
+                    let (mut child, completion_reporter) = error.0;
                     let _ = child.kill();
                     let _ = child.wait();
                     broken.store(true, Ordering::Relaxed);
+                    completion_reporter.finish(Some(WriterFailure::Handoff), None);
                 }
                 Some(handle)
             }
@@ -288,6 +327,7 @@ impl RecordingSink {
                 let _ = child.kill();
                 let _ = child.wait();
                 broken.store(true, Ordering::Relaxed);
+                completion_reporter.finish(Some(WriterFailure::Spawn), None);
                 None
             }
         };
@@ -301,6 +341,7 @@ impl RecordingSink {
             dropped,
             submitted: 0,
             writer,
+            completion,
         }
     }
 
@@ -392,11 +433,17 @@ impl RecordingSink {
     /// second stall this type exists to keep off that thread. Detaching is safe:
     /// the writer finalizes on its own, and if the process exits first the
     /// kernel closes ffmpeg's stdin, which it reads as EOF just the same.
-    pub fn finish(mut self) -> RecordingSinkStats {
+    pub fn finish(self) -> RecordingSinkStats {
+        self.finish_tracked().0
+    }
+
+    /// The same non-blocking stop, with an owned observation of this writer.
+    /// Successful exit is not authority over a file at its former pathname.
+    pub(crate) fn finish_tracked(mut self) -> (RecordingSinkStats, WriterCompletionReceipt) {
         let stats = self.stats();
         self.frames = None;
         drop(self.writer.take());
-        stats
+        (stats, self.completion)
     }
 
     fn stats(&self) -> RecordingSinkStats {

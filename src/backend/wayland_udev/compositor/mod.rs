@@ -4637,6 +4637,13 @@ impl WaylandCompositor {
         self.pending_recording.stop();
     }
 
+    pub(crate) fn stop_recording_tracked(
+        &mut self,
+        reporter: crate::backend::recording_completion::RecordingStopReporter,
+    ) {
+        self.pending_recording.stop_tracked(reporter);
+    }
+
     pub(crate) fn set_window_override_redirect(&mut self, window_id: u64, override_redirect: bool) {
         if override_redirect {
             self.override_redirect_windows.insert(window_id);

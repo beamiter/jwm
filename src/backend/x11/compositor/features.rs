@@ -2094,11 +2094,17 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn stop_recording(&mut self) {
+        let _ = self.stop_recording_tracked();
+    }
+
+    pub(crate) fn stop_recording_tracked(
+        &mut self,
+    ) -> Option<crate::backend::recording_completion::WriterCompletionReceipt> {
         // `capture_recording_frame` clears recording_active when the ffmpeg
         // pipe breaks.  The child and PBOs still need cleanup in that case;
         // returning solely on the flag leaks a zombie ffmpeg process.
         if !self.recording_active && self.recording_sink.is_none() {
-            return;
+            return None;
         }
         let was_active = self.recording_active;
         self.recording_active = false;
@@ -2143,9 +2149,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // during which the compositor would render and accept input for nobody.
         // The writer thread reaps the child; failures surface in the log.
         if let Some(sink) = self.recording_sink.take() {
-            log::info!("compositor: recording stopped ({})", sink.finish());
+            let (stats, receipt) = sink.finish_tracked();
+            log::info!("compositor: recording stopped ({})", stats);
+            Some(receipt)
         } else {
             log::info!("compositor: recording stopped");
+            None
         }
     }
 

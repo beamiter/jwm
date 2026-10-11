@@ -4711,6 +4711,16 @@ impl CompositorMedia for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_stop_recording_tracked(
+        &mut self,
+    ) -> Option<crate::backend::recording_completion::RecordingStopReceipt> {
+        let compositor = self.compositor.as_mut()?;
+        let (reporter, receipt) = crate::backend::recording_completion::recording_stop_channel();
+        compositor.stop_recording_tracked(reporter);
+        self.request_render();
+        Some(receipt)
+    }
+
     fn compositor_recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {
         self.compositor.as_ref()?.recording_stats()
     }

@@ -4,6 +4,7 @@
 //! barrier so the old pipeline is retired before the new one is initialized.
 
 use crate::backend::recording_admission::RecordingStartReporter;
+use crate::backend::recording_completion::RecordingStopReporter;
 
 type Region = (i32, i32, u32, u32);
 
@@ -14,11 +15,16 @@ pub(super) enum RecordingCommand {
 }
 
 type PendingStart = (String, Region, Option<RecordingStartReporter>);
-type ReadyCommand = (RecordingCommand, Option<RecordingStartReporter>);
+pub(super) struct ReadyCommand {
+    pub(super) command: RecordingCommand,
+    pub(super) start_reporter: Option<RecordingStartReporter>,
+    pub(super) stop_reporter: Option<RecordingStopReporter>,
+}
 
 #[derive(Default)]
 pub(super) struct PendingRecordingCommands {
     stop: bool,
+    stop_reporter: Option<RecordingStopReporter>,
     start: Option<PendingStart>,
 }
 
@@ -41,6 +47,17 @@ impl PendingRecordingCommands {
         self.stop = true;
     }
 
+    pub(super) fn stop_tracked(&mut self, reporter: RecordingStopReporter) {
+        self.stop();
+        if self.stop_reporter.is_some() {
+            // The first tracked Stop owns the actual stopped sink. A repeated
+            // request cannot adopt or clone that writer's completion.
+            reporter.complete(None);
+        } else {
+            self.stop_reporter = Some(reporter);
+        }
+    }
+
     pub(super) fn set_region(&mut self, region: Region) {
         if let Some((_, pending_region, _)) = self.start.as_mut() {
             *pending_region = region;
@@ -57,12 +74,20 @@ impl PendingRecordingCommands {
 
     /// At most two commands, always retiring an old pipeline before starting one.
     pub(super) fn take(&mut self) -> [Option<ReadyCommand>; 2] {
-        [
-            std::mem::take(&mut self.stop).then_some((RecordingCommand::Stop, None)),
-            self.start.take().map(|(path, region, reporter)| {
-                (RecordingCommand::Start { path, region }, reporter)
-            }),
-        ]
+        let stop = std::mem::take(&mut self.stop).then(|| ReadyCommand {
+            command: RecordingCommand::Stop,
+            start_reporter: None,
+            stop_reporter: self.stop_reporter.take(),
+        });
+        let start = self
+            .start
+            .take()
+            .map(|(path, region, reporter)| ReadyCommand {
+                command: RecordingCommand::Start { path, region },
+                start_reporter: reporter,
+                stop_reporter: None,
+            });
+        [stop, start]
     }
 }
 
@@ -84,9 +109,10 @@ mod tests {
             .take()
             .into_iter()
             .flatten()
-            .map(|(command, reporter)| {
-                assert!(reporter.is_none());
-                command
+            .map(|ready| {
+                assert!(ready.start_reporter.is_none());
+                assert!(ready.stop_reporter.is_none());
+                ready.command
             })
             .collect()
     }
@@ -145,9 +171,10 @@ mod tests {
         pending.start("new.mp4".into(), REGION);
         let mut active = Some("old.mp4".to_string());
         let mut events = vec![format!("capture:{}", active.as_ref().unwrap())];
-        for (command, reporter) in pending.take().into_iter().flatten() {
-            assert!(reporter.is_none());
-            match command {
+        for ready in pending.take().into_iter().flatten() {
+            assert!(ready.start_reporter.is_none());
+            assert!(ready.stop_reporter.is_none());
+            match ready.command {
                 RecordingCommand::Stop => {
                     events.push(format!("stop:{}", active.take().unwrap()));
                 }
@@ -232,8 +259,10 @@ mod tests {
             pending.set_region((20, 30, 800, 600));
             let commands: Vec<_> = pending.take().into_iter().flatten().collect();
             assert_eq!(commands.len(), if stop { 2 } else { 1 });
-            for (command, reporter) in commands {
-                match command {
+            for ready in commands {
+                assert!(ready.stop_reporter.is_none());
+                let reporter = ready.start_reporter;
+                match ready.command {
                     RecordingCommand::Stop => assert!(reporter.is_none()),
                     RecordingCommand::Start { path, region } => {
                         assert_eq!(path, "new.mp4");
@@ -283,6 +312,103 @@ mod tests {
     }
 
     #[test]
+    fn first_tracked_stop_keeps_the_exact_writer_while_duplicates_are_unknown() {
+        use crate::backend::recording_completion::{
+            RecordingStopObservations, WriterFailure, recording_stop_channel,
+            writer_completion_channel,
+        };
+        let mut pending = PendingRecordingCommands::default();
+        let (first, first_receipt) = recording_stop_channel();
+        pending.stop_tracked(first);
+        pending.stop(); // A legacy stop cannot displace the owned observer.
+        let (second, second_receipt) = recording_stop_channel();
+        pending.stop_tracked(second);
+        let mut first_observer = RecordingStopObservations::default();
+        let mut second_observer = RecordingStopObservations::default();
+        first_observer.observe(Some(first_receipt));
+        second_observer.observe(Some(second_receipt));
+        assert!(second_observer.take_notices().unknown);
+        assert!(!first_observer.take_notices().unknown);
+        let mut ready = pending.take().into_iter().flatten();
+        let stop = ready.next().unwrap();
+        assert_eq!(stop.command, RecordingCommand::Stop);
+        assert!(ready.next().is_none());
+        let (writer, completion) = writer_completion_channel();
+        stop.stop_reporter.unwrap().complete(Some(completion));
+        assert!(!first_observer.take_notices().failed);
+        writer.finish(Some(WriterFailure::FrameWrite), None);
+        let notices = first_observer.take_notices();
+        assert!(notices.failed);
+        assert!(!notices.unknown);
+        assert!(!second_observer.take_notices().failed);
+    }
+
+    #[test]
+    fn stop_start_stop_start_keeps_stop_and_start_receipts_with_their_owners() {
+        use crate::backend::recording_admission::{RecordingStartOutcome, recording_start_channel};
+        use crate::backend::recording_completion::{
+            RecordingStopObservations, recording_stop_channel,
+        };
+        let mut pending = PendingRecordingCommands::default();
+        let (first, first_receipt) = recording_stop_channel();
+        pending.stop_tracked(first);
+        let (canceled, mut canceled_receipt) = recording_start_channel();
+        pending.start_tracked("canceled.mp4".into(), REGION, Some(canceled));
+        let (second, second_receipt) = recording_stop_channel();
+        pending.stop_tracked(second);
+        let (new, mut new_receipt) = recording_start_channel();
+        pending.start_tracked("new.mp4".into(), REGION, Some(new));
+        assert_eq!(
+            canceled_receipt.poll(),
+            Some(RecordingStartOutcome::Unavailable)
+        );
+        let mut first_observer = RecordingStopObservations::default();
+        let mut second_observer = RecordingStopObservations::default();
+        first_observer.observe(Some(first_receipt));
+        second_observer.observe(Some(second_receipt));
+        assert!(second_observer.take_notices().unknown);
+        let commands: Vec<_> = pending.take().into_iter().flatten().collect();
+        assert_eq!(commands.len(), 2);
+        for ready in commands {
+            match ready.command {
+                RecordingCommand::Stop => ready.stop_reporter.unwrap().complete(None),
+                RecordingCommand::Start { path, .. } => {
+                    assert_eq!(path, "new.mp4");
+                    assert!(ready.stop_reporter.is_none());
+                    ready.start_reporter.unwrap().complete(true);
+                }
+            }
+        }
+        assert!(first_observer.take_notices().unknown);
+        assert_eq!(new_receipt.poll(), Some(RecordingStartOutcome::Accepted));
+        assert!(pending.take().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn a_dropped_pending_stop_is_unknown_and_render_delivery_uses_the_actual_sink() {
+        use crate::backend::recording_completion::{
+            RecordingStopObservations, recording_stop_channel,
+        };
+        let (reporter, receipt) = recording_stop_channel();
+        let mut pending = PendingRecordingCommands::default();
+        pending.stop_tracked(reporter);
+        drop(pending);
+        let mut observer = RecordingStopObservations::default();
+        observer.observe(Some(receipt));
+        assert!(observer.take_notices().unknown);
+        let render = include_str!("render.rs");
+        let stop = render
+            .split_once("RecordingCommand::Stop =>")
+            .unwrap()
+            .1
+            .split_once("RecordingCommand::Start")
+            .unwrap()
+            .0;
+        assert!(stop.contains("let writer = unsafe { self.recording.stop_tracked(gl) }"));
+        assert!(stop.contains("reporter.complete(writer)"));
+    }
+
+    #[test]
     fn pending_commands_keep_both_render_admission_paths_live() {
         let source = include_str!("mod.rs");
         for (start, end) in [
@@ -324,7 +450,7 @@ mod tests {
             .0;
         let capture = section.find("self.recording.capture_frame(").unwrap();
         let commands = section.find("self.pending_recording.take()").unwrap();
-        let stop = section.find("self.recording.stop(gl)").unwrap();
+        let stop = section.find("self.recording.stop_tracked(gl)").unwrap();
         let start = section.find("self.recording.start(").unwrap();
         assert!(capture < commands && commands < stop && stop < start);
     }

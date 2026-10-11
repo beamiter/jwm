@@ -11659,6 +11659,7 @@ impl EventHandler for Jwm {
         // Deferred Wayland starts complete inside the render above. Collect
         // their owned outcomes in this update without a new polling timer.
         self.poll_recording_start(backend);
+        self.poll_recording_stops(backend);
 
         // A request the pointer was busy for retries here rather than from a
         // sleep, so waiting for a status bar's click to end costs no frames.
