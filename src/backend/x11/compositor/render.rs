@@ -4220,7 +4220,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     if self.mic_indicator_status.is_recording() {
                         indicator::dot_color()
                     } else {
-                        ui.osd_ink
+                        ui_theme::UiPalette::ink(ui.osd_ink, 1.0)
                     },
                 );
 
