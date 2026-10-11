@@ -4412,7 +4412,7 @@ impl Jwm {
         self.push_system_toast(
             backend,
             crate::backend::api::ToastNotification {
-                title: "\u{f03d}  Recording started".into(),
+                title: "\u{f03d}  Recording requested".into(),
                 body: output_path.to_string(),
                 urgency: 1,
                 timeout_ms: 5000,
@@ -5751,6 +5751,30 @@ mod shell_entry_tests {
             !funcs.contains("mic_mute"),
             "the lock-screen media actions must never include the mic-mute toggle"
         );
+    }
+
+    #[test]
+    fn screen_recording_request_does_not_claim_a_backend_start_receipt() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let screen = SOURCE
+            .split_once("pub(crate) fn start_recording_region(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn normalize_initial_recording_region(")
+            .unwrap()
+            .0;
+        assert!(screen.contains(&format!("Recording {}", "requested")));
+        assert!(!screen.contains(&format!("Recording {}", "started")));
+        // The initialized audio worker has a real start response; keep its
+        // distinct, established success wording.
+        let audio = SOURCE
+            .split_once("pub(crate) fn start_audio_recording(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn stop_audio_recording(")
+            .unwrap()
+            .0;
+        assert!(audio.contains(&format!("Audio recording {}", "started")));
     }
 
     /// The audio recorder mirrors the screen recorder's toast contract: a

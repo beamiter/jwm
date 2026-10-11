@@ -3085,6 +3085,7 @@ pub enum AudioRecordingIndicator {
     Finalizing,
 }
 
+#[cfg(any(feature = "x11-backends", feature = "backend-wayland-udev", test))]
 impl AudioRecordingIndicator {
     pub(crate) fn is_visible(self) -> bool {
         !matches!(self, Self::Hidden)
