@@ -3,8 +3,8 @@
 //! A screen recording used to be discoverable only over IPC: nothing on
 //! screen answered "did it actually start?" or warned that every pixel is
 //! still being encoded. The REC chip is the persistent cue — a red dot and a
-//! running clock parked in the bottom-right corner for as long as the capture
-//! pipeline reports itself active. The MIC chip is the same cue for
+//! running clock parked in each visible output’s bottom-right corner while
+//! the capture pipeline reports itself active. The MIC chip is the same cue for
 //! standalone audio recording: the recorder lives WM-side, so the compositor
 //! cannot derive its state the way it derives the REC chip's — the WM pushes
 //! it, and the chip carries a static `MIC` label (no clock, one raster per
@@ -13,9 +13,10 @@
 //!
 //! Both compositors draw the chips *after* the frame's screenshot and
 //! recording readbacks (the same slot the interactive crop outline uses), so
-//! they are visible on the local output but can never leak into a PNG or the
-//! encoded video. Everything that is not GL — the label text and the chip
-//! geometry — lives here so the two compositors cannot drift.
+//! the ordinary frame readbacks precede these local cues. Transition caches
+//! may reuse a previously presented frame, so this ordering alone is not a
+//! guarantee that every cached-transition capture excludes the chips. The
+//! label text and chip geometry live here so the compositors cannot drift.
 
 use std::time::Duration;
 
@@ -113,6 +114,122 @@ pub(crate) struct RecordingIndicatorLayout {
     pub(crate) dot: [f32; 4],
     /// The rasterized label quad, vertically centered after the dot.
     pub(crate) text: [f32; 4],
+}
+
+impl RecordingIndicatorLayout {
+    pub(crate) fn translated(mut self, x: f32, y: f32) -> Self {
+        for rect in [&mut self.chip, &mut self.dot, &mut self.text] {
+            rect[0] += x;
+            rect[1] += y;
+        }
+        self
+    }
+}
+
+/// Actual visible output rectangles in the existing global framebuffer.
+/// A virtual desktop's bottom-right corner can be a hole in an L-shaped
+/// layout. Clip each output independently; do not translate negative origins
+/// into a new coordinate system or draw mirrored outputs twice.
+pub(crate) fn recording_indicator_viewports(
+    screen: (u32, u32),
+    monitors: impl IntoIterator<Item = (i32, i32, u32, u32)>,
+) -> Vec<[f32; 4]> {
+    let mut viewports = Vec::new();
+    let mut has_monitors = false;
+    for (x, y, w, h) in monitors {
+        has_monitors = true;
+        let left = i64::from(x).max(0);
+        let top = i64::from(y).max(0);
+        let right = (i64::from(x) + i64::from(w)).min(i64::from(screen.0));
+        let bottom = (i64::from(y) + i64::from(h)).min(i64::from(screen.1));
+        if left >= right || top >= bottom {
+            continue;
+        }
+        let viewport = [
+            left as f32,
+            top as f32,
+            (right - left) as f32,
+            (bottom - top) as f32,
+        ];
+        if !viewports.contains(&viewport) {
+            viewports.push(viewport);
+        }
+    }
+    // Preserve the single-framebuffer fallback only when output geometry is
+    // not available. Known outputs outside this framebuffer are not a reason
+    // to draw chrome in a desktop hole.
+    if !has_monitors && screen.0 > 0 && screen.1 > 0 {
+        viewports.push([0.0, 0.0, screen.0 as f32, screen.1 as f32]);
+    }
+    viewports
+}
+
+/// A deterministic REC-first placement set. Later intersecting chips are
+/// omitted on partially overlapping outputs; this is not a packing solver.
+#[derive(Debug, Default)]
+pub(crate) struct RecordingIndicatorPlacements {
+    pub(crate) recording: Vec<RecordingIndicatorLayout>,
+    pub(crate) microphone: Vec<RecordingIndicatorLayout>,
+}
+
+impl RecordingIndicatorPlacements {
+    pub(crate) fn chips(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
+        self.recording
+            .iter()
+            .chain(&self.microphone)
+            .map(|layout| layout.chip)
+    }
+}
+
+fn rects_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
+pub(crate) fn recording_indicator_placements(
+    viewports: &[[f32; 4]],
+    recording_text: Option<(f32, f32)>,
+    microphone_text: Option<(f32, f32)>,
+) -> RecordingIndicatorPlacements {
+    let mut placed = RecordingIndicatorPlacements::default();
+    if let Some((tw, th)) = recording_text {
+        for &[x, y, w, h] in viewports {
+            let layout = recording_indicator_layout(w, h, tw, th).translated(x, y);
+            if !placed.chips().any(|chip| rects_overlap(chip, layout.chip)) {
+                placed.recording.push(layout);
+            }
+        }
+    }
+    if let Some((tw, th)) = microphone_text {
+        for &[x, y, w, h] in viewports {
+            let rec_h =
+                recording_text.map(|(rw, rh)| recording_indicator_layout(w, h, rw, rh).chip[3]);
+            let layout = mic_indicator_layout(w, h, tw, th, rec_h);
+            if !mic_indicator_fits(&layout, h, rec_h) {
+                continue;
+            }
+            let layout = layout.translated(x, y);
+            if !placed.chips().any(|chip| rects_overlap(chip, layout.chip)) {
+                placed.microphone.push(layout);
+            }
+        }
+    }
+    placed
+}
+
+/// Test the actual tooltip candidate against the final chip set, including
+/// neighboring outputs. Try the existing alternative placement; hide the
+/// tooltip if neither candidate is clear instead of covering a live cue.
+pub(crate) fn tooltip_avoiding_recording_chips(
+    placed: &RecordingIndicatorPlacements,
+    mut position: impl FnMut(Option<[f32; 4]>) -> Option<[f32; 4]>,
+) -> Option<[f32; 4]> {
+    let candidate = position(None)?;
+    let collision = placed.chips().find(|&chip| rects_overlap(candidate, chip));
+    let Some(collision) = collision else {
+        return Some(candidate);
+    };
+    let alternative = position(Some(collision))?;
+    (!placed.chips().any(|chip| rects_overlap(alternative, chip))).then_some(alternative)
 }
 
 /// The chip's label while recording: `REC` plus the running clock when the
@@ -230,10 +347,8 @@ pub(crate) fn mic_indicator_layout(
 ) -> RecordingIndicatorLayout {
     let mut layout = recording_indicator_layout(screen_w, screen_h, text_w, text_h);
     if let Some(rec_chip_h) = rec_chip_h {
-        // A screen too short to hold both chips pins the MIC chip to the top
-        // edge rather than pushing it off-screen: the cue staying visible
-        // matters more than the degenerate-case overlap, the same honesty
-        // as the REC chip's origin clamp.
+        // This raw layout clamps to the output. The placement policy below
+        // suppresses it if a short output cannot keep MIC separate from REC.
         let gap = if screen_h.is_finite() && screen_h > 0.0 && screen_h < 8.0 * CHIP_STACK_GAP {
             CHIP_STACK_GAP.min(screen_h * 0.04).max(2.0)
         } else {
@@ -247,57 +362,196 @@ pub(crate) fn mic_indicator_layout(
     layout
 }
 
-/// Conservative union of the live REC / MIC pills, for other chrome that
-/// must not sit on that corner (tab-strip tooltips). Uses a hours-long
-/// label width so a later clock tick cannot grow the chip under the chip
-/// we just avoided.
-#[must_use]
-pub(crate) fn recording_chrome_union(
-    screen_w: f32,
+/// Keep REC readable when an output is too short for both chips. The MIC
+/// cue remains available on other outputs, or alone when REC is inactive.
+pub(crate) fn mic_indicator_fits(
+    layout: &RecordingIndicatorLayout,
     screen_h: f32,
-    rec: bool,
-    mic: bool,
-) -> Option<[f32; 4]> {
-    const TEXT_H: f32 = 14.0;
-    const REC_TEXT_W: f32 = 88.0;
-    const MIC_TEXT_W: f32 = 28.0;
-    let text_h = if screen_h.is_finite() && screen_h > 0.0 && screen_h < 8.0 * TEXT_H {
-        TEXT_H.min(screen_h * 0.12).max(6.0)
-    } else {
-        TEXT_H
-    };
-    let rec_w = if screen_w.is_finite() && screen_w > 0.0 && screen_w < 4.0 * REC_TEXT_W {
-        REC_TEXT_W.min(screen_w * 0.35).max(MIC_TEXT_W)
-    } else {
-        REC_TEXT_W
-    };
-    let mic_w = if screen_w.is_finite() && screen_w > 0.0 && screen_w < 8.0 * MIC_TEXT_W {
-        MIC_TEXT_W.min(screen_w * 0.2).max(8.0)
-    } else {
-        MIC_TEXT_W
-    };
-    let rec_chip = rec.then(|| recording_indicator_layout(screen_w, screen_h, rec_w, text_h).chip);
-    let rec_h = rec_chip.map(|chip| chip[3]);
-    let mic_chip = mic.then(|| mic_indicator_layout(screen_w, screen_h, mic_w, text_h, rec_h).chip);
-    match (rec_chip, mic_chip) {
-        (None, None) => None,
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (Some(a), Some(b)) => Some(union_rect(a, b)),
-    }
-}
-
-fn union_rect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let x0 = a[0].min(b[0]);
-    let y0 = a[1].min(b[1]);
-    let x1 = (a[0] + a[2]).max(b[0] + b[2]);
-    let y1 = (a[1] + a[3]).max(b[1] + b[3]);
-    [x0, y0, x1 - x0, y1 - y0]
+    rec_chip_h: Option<f32>,
+) -> bool {
+    rec_chip_h.is_none_or(|height| {
+        let rec_top = (screen_h - rec_margin(screen_h) - height).max(0.0);
+        layout.chip[1] + layout.chip[3] <= rec_top
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indicators_stay_on_each_real_output_in_an_l_shaped_desktop() {
+        let outputs = recording_indicator_viewports(
+            (3840, 2160),
+            [(0, 0, 1920, 2160), (1920, 0, 1920, 1080)],
+        );
+        assert_eq!(
+            outputs,
+            vec![[0.0, 0.0, 1920.0, 2160.0], [1920.0, 0.0, 1920.0, 1080.0]]
+        );
+        let old = recording_indicator_layout(3840.0, 2160.0, 88.0, 14.0).chip;
+        assert!(
+            old[0] >= 1920.0 && old[1] >= 1080.0,
+            "the root corner is a screen hole"
+        );
+        for [x, y, w, h] in outputs {
+            let rec = recording_indicator_layout(w, h, 88.0, 14.0).translated(x, y);
+            let mic = mic_indicator_layout(w, h, 28.0, 14.0, Some(rec.chip[3])).translated(x, y);
+            for layout in [rec, mic] {
+                for rect in [layout.chip, layout.dot, layout.text] {
+                    assert!(rect[0] >= x && rect[1] >= y);
+                    assert!(rect[0] + rect[2] <= x + w && rect[1] + rect[3] <= y + h);
+                }
+            }
+            assert!(mic.chip[1] + mic.chip[3] <= rec.chip[1]);
+        }
+    }
+
+    #[test]
+    fn indicator_outputs_clip_negative_origins_and_deduplicate_mirrors() {
+        assert_eq!(
+            recording_indicator_viewports(
+                (1920, 1080),
+                [
+                    (-100, -50, 300, 250),
+                    (0, 0, 200, 200),
+                    (1800, 1000, 500, 500),
+                    (i32::MIN, i32::MIN, 1, 1),
+                    (i32::MAX, 0, u32::MAX, 10),
+                    (0, 0, 0, 10),
+                ]
+            ),
+            vec![[0.0, 0.0, 200.0, 200.0], [1800.0, 1000.0, 120.0, 80.0]]
+        );
+        assert_eq!(
+            recording_indicator_viewports((800, 600), []),
+            vec![[0.0, 0.0, 800.0, 600.0]]
+        );
+        assert!(recording_indicator_viewports((800, 600), [(-200, -200, 100, 100)]).is_empty());
+        assert!(recording_indicator_viewports((0, 600), []).is_empty());
+    }
+
+    #[test]
+    fn tiny_outputs_prioritize_rec_without_overlapping_mic() {
+        for height in [1.0, 8.0, 24.0, 50.0, 64.0, 1080.0] {
+            let rec = recording_indicator_layout(200.0, height, 60.0, 19.0);
+            let mic = mic_indicator_layout(200.0, height, 48.0, 19.0, Some(rec.chip[3]));
+            assert_eq!(
+                mic_indicator_fits(&mic, height, Some(rec.chip[3])),
+                mic.chip[1] + mic.chip[3] <= rec.chip[1]
+            );
+            assert!(mic_indicator_fits(&mic, height, None));
+        }
+    }
+
+    #[test]
+    fn tiny_output_indicator_pixels_stay_inside_the_visible_viewport() {
+        for (w, h) in [(1.0, 1.0), (8.0, 12.0), (32.0, 24.0), (80.0, 50.0)] {
+            let rec = recording_indicator_layout(w, h, 200.0, 40.0).translated(100.0, 70.0);
+            let mic =
+                mic_indicator_layout(w, h, 100.0, 40.0, Some(rec.chip[3])).translated(100.0, 70.0);
+            for layout in [rec, mic] {
+                for rect in [layout.chip, layout.dot, layout.text] {
+                    assert!(rect.iter().all(|value| value.is_finite()));
+                    if rect[2] > 0.0 && rect[3] > 0.0 {
+                        assert!(rect[0] >= 100.0 && rect[1] >= 70.0);
+                        assert!(rect[0] + rect[2] <= 100.0 + w + 0.001);
+                        assert!(rect[1] + rect[3] <= 70.0 + h + 0.001);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_outputs_place_rec_first_without_duplicate_pixels() {
+        let views = recording_indicator_viewports(
+            (4000, 2200),
+            [
+                (0, 0, 1920, 1080),
+                (20, 10, 1920, 1080),
+                (0, 0, 1920, 1080),
+                (2000, 0, 1920, 1080),
+            ],
+        );
+        let placed = recording_indicator_placements(&views, Some((60.0, 19.0)), Some((48.0, 19.0)));
+        assert_eq!(placed.recording.len(), 2);
+        assert!(!placed.microphone.is_empty());
+        let chips: Vec<_> = placed.chips().collect();
+        for (i, a) in chips.iter().enumerate() {
+            for b in &chips[i + 1..] {
+                assert!(!rects_overlap(*a, *b));
+            }
+        }
+        let plain = recording_indicator_placements(
+            &[views[0], views[2]],
+            Some((60.0, 19.0)),
+            Some((48.0, 19.0)),
+        );
+        assert_eq!(plain.recording.len(), 2);
+        assert_eq!(plain.microphone.len(), 2);
+        assert_eq!(
+            plain.recording[0],
+            recording_indicator_layout(1920.0, 1080.0, 60.0, 19.0)
+        );
+    }
+
+    #[test]
+    fn tooltip_avoidance_checks_all_final_chips_and_hides_if_blocked() {
+        let views = [[0.0, 0.0, 1920.0, 2160.0], [1920.0, 0.0, 1920.0, 1080.0]];
+        let placed = recording_indicator_placements(&views, Some((60.0, 19.0)), Some((48.0, 19.0)));
+        let hole = [3700.0, 2000.0, 100.0, 30.0];
+        assert_eq!(
+            tooltip_avoiding_recording_chips(&placed, |_| Some(hole)),
+            Some(hole)
+        );
+        let blocked = placed.recording[1].chip;
+        assert_eq!(
+            tooltip_avoiding_recording_chips(&placed, |avoid| Some(if avoid.is_none() {
+                blocked
+            } else {
+                hole
+            })),
+            Some(hole)
+        );
+        assert_eq!(
+            tooltip_avoiding_recording_chips(&placed, |_| Some(blocked)),
+            None
+        );
+        let other = placed.recording[0].chip;
+        assert_eq!(
+            tooltip_avoiding_recording_chips(&placed, |avoid| Some(if avoid.is_none() {
+                blocked
+            } else {
+                other
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn both_renderers_reuse_cached_labels_across_actual_output_layouts() {
+        for source in [
+            include_str!("../x11/compositor/render.rs"),
+            include_str!("../wayland_udev/compositor/render.rs"),
+        ] {
+            for name in ["render_recording_indicator", "render_mic_indicator"] {
+                let signature = format!("fn {name}(");
+                let body = source.split_once(&signature).unwrap().1;
+                let body = body.split_once("        drawn_height\n    }").unwrap().0;
+                let cache = body.find("self.update_").unwrap();
+                let outputs = body
+                    .find("indicator::recording_indicator_viewports(")
+                    .unwrap();
+                let draw_loop = body.find("for layout in placements.").unwrap();
+                assert!(
+                    cache < outputs && outputs < draw_loop,
+                    "one cached label is shared by every output"
+                );
+                assert!(body.contains("indicator::recording_indicator_placements("));
+            }
+        }
+    }
 
     #[test]
     fn no_recording_means_no_chip() {
@@ -453,19 +707,29 @@ mod tests {
     }
 
     #[test]
-    fn recording_chrome_union_covers_both_pills() {
-        assert_eq!(recording_chrome_union(1920.0, 1080.0, false, false), None);
-        let rec = recording_chrome_union(1920.0, 1080.0, true, false).unwrap();
-        let both = recording_chrome_union(1920.0, 1080.0, true, true).unwrap();
-        assert!(both[3] > rec[3], "both pills stack taller than REC alone");
-        assert!(
-            (rec[0] + rec[2] - 1920.0 + CHIP_MARGIN).abs() < 1e-3,
-            "union stays in the bottom-right slot"
+    fn recording_placements_cover_only_the_drawn_pills() {
+        let view = [[0.0, 0.0, 1920.0, 1080.0]];
+        assert_eq!(
+            recording_indicator_placements(&view, None, None)
+                .chips()
+                .count(),
+            0
         );
-        let cramped = recording_chrome_union(80.0, 50.0, true, true).unwrap();
-        assert!(cramped[0] >= 0.0 && cramped[1] >= 0.0);
-        assert!(cramped[0] + cramped[2] <= 80.0 + 0.01);
-        assert!(cramped[1] + cramped[3] <= 50.0 + 0.01);
-        assert!(cramped[2] < rec[2] || cramped[3] < rec[3]);
+        let rec = recording_indicator_placements(&view, Some((88.0, 14.0)), None);
+        let both = recording_indicator_placements(&view, Some((88.0, 14.0)), Some((28.0, 14.0)));
+        assert_eq!(rec.chips().count(), 1);
+        assert_eq!(both.chips().count(), 2);
+        assert_eq!(rec.recording, both.recording);
+        let cramped = recording_indicator_placements(
+            &[[0.0, 0.0, 80.0, 24.0]],
+            Some((88.0, 14.0)),
+            Some((28.0, 14.0)),
+        );
+        assert_eq!(cramped.recording.len(), 1);
+        assert!(cramped.microphone.is_empty());
+        for rect in cramped.chips() {
+            assert!(rect[0] >= 0.0 && rect[1] >= 0.0);
+            assert!(rect[0] + rect[2] <= 80.0 && rect[1] + rect[3] <= 24.0);
+        }
     }
 }

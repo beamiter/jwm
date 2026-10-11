@@ -4007,11 +4007,9 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// The persistent "recording in progress" chip: a red dot and a running
-    /// clock parked in the bottom-right corner of the screen. The call site is
-    /// after the frame's PBO capture, so the cue is visible locally but never
-    /// lands in the encoded video; screenshots read the framebuffer earlier
-    /// still, so it cannot leak into a PNG either. Returns the drawn chip's
-    /// height so the MIC chip can park above it when both recordings run.
+    /// clock in each visible output's bottom-right corner. Ordinary frame
+    /// readbacks precede this draw; cached transitions have separate capture
+    /// semantics. Returns the largest drawn chip height for MIC stacking.
     fn render_recording_indicator(&mut self, proj: &[f32; 16]) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
@@ -4036,66 +4034,75 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         let ui = ui_theme::palette();
-        let layout = indicator::recording_indicator_layout(
-            self.screen_w as f32,
-            self.screen_h as f32,
-            text_w as f32,
-            text_h as f32,
+        let viewports = indicator::recording_indicator_viewports(
+            (self.screen_w, self.screen_h),
+            self.monitor_rects
+                .iter()
+                .map(|&(_, x, y, w, h)| (x, y, w, h)),
         );
-        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+        let placements = indicator::recording_indicator_placements(
+            &viewports,
+            Some((text_w as f32, text_h as f32)),
+            None,
+        );
+        let mut drawn_height = None;
+        for layout in placements.recording {
+            let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
 
-        unsafe {
-            self.gl.use_program(Some(self.border_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.border_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            // Flat pill rather than frosted glass: the chip is up for the
-            // whole recording, and a glass backdrop re-blurs the screen on
-            // every one of those frames.
-            self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
-            let mut rec_dot = indicator::dot_color();
-            rec_dot[3] = indicator::dot_alpha(
-                self.recording_started_at
-                    .map(|started| started.elapsed())
-                    .unwrap_or_default(),
-            );
-            self.sysui_fill_rounded(
-                layout.dot[0],
-                layout.dot[1],
-                layout.dot[2],
-                layout.dot[3],
-                layout.dot[2].min(layout.dot[3]) * 0.5,
-                rec_dot,
-            );
+            unsafe {
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+                // Flat pill rather than frosted glass: the chip is up for the
+                // whole recording, and a glass backdrop re-blurs the screen on
+                // every one of those frames.
+                self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+                let mut rec_dot = indicator::dot_color();
+                rec_dot[3] = indicator::dot_alpha(
+                    self.recording_started_at
+                        .map(|started| started.elapsed())
+                        .unwrap_or_default(),
+                );
+                self.sysui_fill_rounded(
+                    layout.dot[0],
+                    layout.dot[1],
+                    layout.dot[2],
+                    layout.dot[3],
+                    layout.dot[2].min(layout.dot[3]) * 0.5,
+                    rec_dot,
+                );
 
-            self.gl.use_program(Some(self.hud_text_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.hud_text_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
-            self.gl
-                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
-            self.gl
-                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.uniform_4_f32(
-                self.hud_text_uniforms.rect.as_ref(),
-                layout.text[0],
-                layout.text[1],
-                layout.text[2],
-                layout.text[3],
-            );
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.gl.use_program(Some(self.hud_text_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_text_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl
+                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+                self.gl
+                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+                self.gl.active_texture(glow::TEXTURE0);
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    layout.text[0],
+                    layout.text[1],
+                    layout.text[2],
+                    layout.text[3],
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+            drawn_height = Some(drawn_height.map_or(chip_h, |height: f32| height.max(chip_h)));
         }
-        Some(chip_h)
+        drawn_height
     }
 
     /// Rasterize (and cache) the MIC-chip label texture. The label is static
@@ -4152,8 +4159,8 @@ impl<C: CompositorConnection> Compositor<C> {
     /// recording: a red dot and a static `MIC` label, parked in the REC
     /// chip's bottom-right slot — directly above the REC chip (`rec_chip_h`
     /// is the height it drew this frame) when both recordings run together.
-    /// Shares the REC chip's post-capture slot, so the cue is visible locally
-    /// but never lands in the encoded video or a screenshot.
+    /// Shares the REC chip's ordinary post-capture draw stage. Cached
+    /// transitions have separate capture semantics.
     fn render_mic_indicator(&mut self, proj: &[f32; 16], rec_chip_h: Option<f32>) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
@@ -4174,61 +4181,73 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         let ui = ui_theme::palette();
-        let layout = indicator::mic_indicator_layout(
-            self.screen_w as f32,
-            self.screen_h as f32,
-            text_w as f32,
-            text_h as f32,
-            rec_chip_h,
+        let viewports = indicator::recording_indicator_viewports(
+            (self.screen_w, self.screen_h),
+            self.monitor_rects
+                .iter()
+                .map(|&(_, x, y, w, h)| (x, y, w, h)),
         );
-        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+        let placements = indicator::recording_indicator_placements(
+            &viewports,
+            rec_chip_h.and_then(|_| {
+                self.recording_indicator_texture
+                    .as_ref()
+                    .map(|(_, _, w, h)| (*w as f32, *h as f32))
+            }),
+            Some((text_w as f32, text_h as f32)),
+        );
+        let mut drawn_height = None;
+        for layout in placements.microphone {
+            let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
 
-        unsafe {
-            self.gl.use_program(Some(self.border_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.border_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            // Flat pill rather than frosted glass, same as the REC chip: the
-            // chip is up for the whole recording, and a glass backdrop
-            // re-blurs the screen on every one of those frames.
-            self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
-            self.sysui_fill_rounded(
-                layout.dot[0],
-                layout.dot[1],
-                layout.dot[2],
-                layout.dot[3],
-                layout.dot[2].min(layout.dot[3]) * 0.5,
-                indicator::dot_color(),
-            );
+            unsafe {
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+                // Flat pill rather than frosted glass, same as the REC chip: the
+                // chip is up for the whole recording, and a glass backdrop
+                // re-blurs the screen on every one of those frames.
+                self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+                self.sysui_fill_rounded(
+                    layout.dot[0],
+                    layout.dot[1],
+                    layout.dot[2],
+                    layout.dot[3],
+                    layout.dot[2].min(layout.dot[3]) * 0.5,
+                    indicator::dot_color(),
+                );
 
-            self.gl.use_program(Some(self.hud_text_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.hud_text_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
-            self.gl
-                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
-            self.gl
-                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.uniform_4_f32(
-                self.hud_text_uniforms.rect.as_ref(),
-                layout.text[0],
-                layout.text[1],
-                layout.text[2],
-                layout.text[3],
-            );
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.gl.use_program(Some(self.hud_text_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_text_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl
+                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+                self.gl
+                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+                self.gl.active_texture(glow::TEXTURE0);
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    layout.text[0],
+                    layout.text[1],
+                    layout.text[2],
+                    layout.text[3],
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+            drawn_height = Some(drawn_height.map_or(chip_h, |height: f32| height.max(chip_h)));
         }
-        Some(chip_h)
+        drawn_height
     }
 
     fn update_capture_hint_texture(&mut self, text: &str) {
@@ -9065,8 +9084,7 @@ mod tests {
     }
 
     /// The MIC chip mirrors the REC chip's discipline: it draws in the same
-    /// post-capture slot (so it can never leak into the encoded video or a
-    /// screenshot), reads its geometry and label from the shared
+    /// ordinary post-capture slot, reads its geometry and label from the shared
     /// `recording_indicator` module, and frees the label texture the frame
     /// the state clears. Needles are assembled at runtime so this cannot
     /// match its own source.
@@ -9098,7 +9116,7 @@ mod tests {
             "the MIC label must come from the shared module"
         );
         assert!(
-            draw.contains(&format!("indicator::{}(", "mic_indicator_layout")),
+            draw.contains(&format!("indicator::{}(", "recording_indicator_placements")),
             "the MIC geometry must come from the shared module"
         );
         assert!(

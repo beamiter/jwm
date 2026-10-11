@@ -1611,7 +1611,7 @@ mod tests {
             "the MIC label must come from the shared module"
         );
         assert!(
-            draw.contains(&format!("indicator::{}(", "mic_indicator_layout")),
+            draw.contains(&format!("indicator::{}(", "recording_indicator_placements")),
             "the MIC geometry must come from the shared module"
         );
         assert!(
@@ -8435,12 +8435,9 @@ impl WaylandCompositor {
     }
 
     /// The persistent "recording in progress" chip: a red dot and a running
-    /// clock parked in the bottom-right corner of the screen. Drawn into the
-    /// post-delivery encoded target *after* the recording readback (the same
-    /// slot the crop outline uses), so the cue is visible locally but never
-    /// lands in the encoded video; screenshots read the capture view earlier
-    /// still, so it cannot leak into a PNG either. Returns the drawn chip's
-    /// height so the MIC chip can park above it when both recordings run.
+    /// clock in each visible output's bottom-right corner. Ordinary frame
+    /// readbacks precede this post-delivery draw. Returns the largest drawn
+    /// chip height for MIC stacking.
     unsafe fn render_recording_indicator(
         &mut self,
         gl: &ffi::Gles2,
@@ -8464,62 +8461,69 @@ impl WaylandCompositor {
         };
 
         let ui = ui_theme::palette();
-        let layout = indicator::recording_indicator_layout(
-            self.screen_w as f32,
-            self.screen_h as f32,
-            text_w as f32,
-            text_h as f32,
+        let viewports = indicator::recording_indicator_viewports(
+            (self.screen_w, self.screen_h),
+            self.monitors.iter().map(|&(_, x, y, w, h, _)| (x, y, w, h)),
         );
-        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+        let placements = indicator::recording_indicator_placements(
+            &viewports,
+            Some((text_w as f32, text_h as f32)),
+            None,
+        );
+        let mut drawn_height = None;
+        for layout in placements.recording {
+            let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
 
-        unsafe {
-            // The recording capture above restores the frame's blend state as
-            // *disabled*; the pill and the glyph coverage both need the
-            // compositor's canonical premultiplied state back.
-            self.enable_premultiplied_blend(gl);
-            self.bind_quad_vao(gl);
-            gl.UseProgram(self.border_program);
-            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
-            // Flat pill rather than frosted glass: the chip is up for the
-            // whole recording, and a glass backdrop re-blurs the screen on
-            // every one of those frames.
-            self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
-            let mut rec_dot = indicator::dot_color();
-            rec_dot[3] = indicator::dot_alpha(self.recording.elapsed().unwrap_or_default());
-            self.sysui_fill_rounded(
-                gl,
-                layout.dot[0],
-                layout.dot[1],
-                layout.dot[2],
-                layout.dot[3],
-                layout.dot[2].min(layout.dot[3]) * 0.5,
-                rec_dot,
-            );
+            unsafe {
+                // The recording capture above restores the frame's blend state as
+                // *disabled*; the pill and the glyph coverage both need the
+                // compositor's canonical premultiplied state back.
+                self.enable_premultiplied_blend(gl);
+                self.bind_quad_vao(gl);
+                gl.UseProgram(self.border_program);
+                self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                // Flat pill rather than frosted glass: the chip is up for the
+                // whole recording, and a glass backdrop re-blurs the screen on
+                // every one of those frames.
+                self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+                let mut rec_dot = indicator::dot_color();
+                rec_dot[3] = indicator::dot_alpha(self.recording.elapsed().unwrap_or_default());
+                self.sysui_fill_rounded(
+                    gl,
+                    layout.dot[0],
+                    layout.dot[1],
+                    layout.dot[2],
+                    layout.dot[3],
+                    layout.dot[2].min(layout.dot[3]) * 0.5,
+                    rec_dot,
+                );
 
-            self.use_sysui_text_program(gl, false);
-            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
-            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
-            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
-            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
-            gl.Uniform1i(text_tex, 0);
-            gl.Uniform1f(text_opacity, 1.0);
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.Uniform4f(
-                text_rect,
-                layout.text[0],
-                layout.text[1],
-                layout.text[2],
-                layout.text[3],
-            );
-            gl.BindTexture(ffi::TEXTURE_2D, tex);
-            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+                self.use_sysui_text_program(gl, false);
+                let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+                let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+                let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+                let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+                gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+                gl.Uniform1i(text_tex, 0);
+                gl.Uniform1f(text_opacity, 1.0);
+                gl.ActiveTexture(ffi::TEXTURE0);
+                gl.Uniform4f(
+                    text_rect,
+                    layout.text[0],
+                    layout.text[1],
+                    layout.text[2],
+                    layout.text[3],
+                );
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
-            gl.BindVertexArray(0);
-            gl.UseProgram(0);
+                gl.BindVertexArray(0);
+                gl.UseProgram(0);
+            }
+            drawn_height = Some(drawn_height.map_or(chip_h, |height: f32| height.max(chip_h)));
         }
-        Some(chip_h)
+        drawn_height
     }
 
     /// Rasterize (and cache) the MIC-chip label texture. The label is static
@@ -8573,8 +8577,7 @@ impl WaylandCompositor {
     /// recording: a red dot and a static `MIC` label, parked in the REC
     /// chip's bottom-right slot — directly above the REC chip (`rec_chip_h`
     /// is the height it drew this frame) when both recordings run together.
-    /// Shares the REC chip's post-delivery slot, so the cue is visible
-    /// locally but never lands in the encoded video or a screenshot.
+    /// Shares the REC chip's ordinary post-delivery draw stage.
     unsafe fn render_mic_indicator(
         &mut self,
         gl: &ffi::Gles2,
@@ -8605,61 +8608,71 @@ impl WaylandCompositor {
         };
 
         let ui = ui_theme::palette();
-        let layout = indicator::mic_indicator_layout(
-            self.screen_w as f32,
-            self.screen_h as f32,
-            text_w as f32,
-            text_h as f32,
-            rec_chip_h,
+        let viewports = indicator::recording_indicator_viewports(
+            (self.screen_w, self.screen_h),
+            self.monitors.iter().map(|&(_, x, y, w, h, _)| (x, y, w, h)),
         );
-        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+        let placements = indicator::recording_indicator_placements(
+            &viewports,
+            rec_chip_h.and_then(|_| {
+                self.recording_indicator_texture
+                    .as_ref()
+                    .map(|(_, _, w, h)| (*w as f32, *h as f32))
+            }),
+            Some((text_w as f32, text_h as f32)),
+        );
+        let mut drawn_height = None;
+        for layout in placements.microphone {
+            let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
 
-        unsafe {
-            // The recording capture above restores the frame's blend state as
-            // *disabled*; the pill and the glyph coverage both need the
-            // compositor's canonical premultiplied state back.
-            self.enable_premultiplied_blend(gl);
-            self.bind_quad_vao(gl);
-            gl.UseProgram(self.border_program);
-            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
-            // Flat pill rather than frosted glass, same as the REC chip: the
-            // chip is up for the whole recording, and a glass backdrop
-            // re-blurs the screen on every one of those frames.
-            self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
-            self.sysui_fill_rounded(
-                gl,
-                layout.dot[0],
-                layout.dot[1],
-                layout.dot[2],
-                layout.dot[3],
-                layout.dot[2].min(layout.dot[3]) * 0.5,
-                indicator::dot_color(),
-            );
+            unsafe {
+                // The recording capture above restores the frame's blend state as
+                // *disabled*; the pill and the glyph coverage both need the
+                // compositor's canonical premultiplied state back.
+                self.enable_premultiplied_blend(gl);
+                self.bind_quad_vao(gl);
+                gl.UseProgram(self.border_program);
+                self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                // Flat pill rather than frosted glass, same as the REC chip: the
+                // chip is up for the whole recording, and a glass backdrop
+                // re-blurs the screen on every one of those frames.
+                self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+                self.sysui_fill_rounded(
+                    gl,
+                    layout.dot[0],
+                    layout.dot[1],
+                    layout.dot[2],
+                    layout.dot[3],
+                    layout.dot[2].min(layout.dot[3]) * 0.5,
+                    indicator::dot_color(),
+                );
 
-            self.use_sysui_text_program(gl, false);
-            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
-            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
-            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
-            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
-            gl.Uniform1i(text_tex, 0);
-            gl.Uniform1f(text_opacity, 1.0);
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.Uniform4f(
-                text_rect,
-                layout.text[0],
-                layout.text[1],
-                layout.text[2],
-                layout.text[3],
-            );
-            gl.BindTexture(ffi::TEXTURE_2D, tex);
-            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+                self.use_sysui_text_program(gl, false);
+                let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+                let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+                let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+                let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+                gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+                gl.Uniform1i(text_tex, 0);
+                gl.Uniform1f(text_opacity, 1.0);
+                gl.ActiveTexture(ffi::TEXTURE0);
+                gl.Uniform4f(
+                    text_rect,
+                    layout.text[0],
+                    layout.text[1],
+                    layout.text[2],
+                    layout.text[3],
+                );
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
-            gl.BindVertexArray(0);
-            gl.UseProgram(0);
+                gl.BindVertexArray(0);
+                gl.UseProgram(0);
+            }
+            drawn_height = Some(drawn_height.map_or(chip_h, |height: f32| height.max(chip_h)));
         }
-        Some(chip_h)
+        drawn_height
     }
 
     unsafe fn update_capture_hint_texture(&mut self, gl: &ffi::Gles2, text: &str) {

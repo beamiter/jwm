@@ -1208,20 +1208,35 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let chip_w = tw as f32 + 2.0 * window_tabs::TOOLTIP_PAD_X;
         let chip_h = th as f32 + 2.0 * window_tabs::TOOLTIP_PAD_Y;
-        let avoid = crate::backend::compositor_common::recording_indicator::recording_chrome_union(
-            self.screen_w as f32,
-            self.screen_h as f32,
-            self.recording_started_at.is_some(),
-            self.mic_indicator_active,
-        );
-        let Some([x, y, w, h]) = window_tabs::tooltip_rect_avoiding(
-            bar,
-            cell,
-            chip_w,
-            chip_h,
-            self.screen_w as f32,
-            self.screen_h as f32,
-            avoid,
+        let indicator_viewports =
+            crate::backend::compositor_common::recording_indicator::recording_indicator_viewports(
+                (self.screen_w, self.screen_h),
+                self.monitor_rects
+                    .iter()
+                    .map(|&(_, x, y, w, h)| (x, y, w, h)),
+            );
+        // Tab chrome precedes the post-capture indicator texture update.
+        // Use the cached label sizes here; first appearance or a wider clock
+        // can change them later in this frame. Do not reorder GPU work for
+        // tooltip avoidance.
+        let placements =
+            crate::backend::compositor_common::recording_indicator::recording_indicator_placements(
+                &indicator_viewports,
+                self.recording_indicator_texture
+                    .as_ref()
+                    .filter(|_| self.recording_active)
+                    .map(|(_, _, w, h)| (*w as f32, *h as f32)),
+                self.mic_indicator_texture
+                    .as_ref()
+                    .filter(|_| self.mic_indicator_active)
+                    .map(|(_, _, w, h)| (*w as f32, *h as f32)),
+            );
+        let Some([x, y, w, h]) = crate::backend::compositor_common::recording_indicator::tooltip_avoiding_recording_chips(
+            &placements,
+            |avoid| window_tabs::tooltip_rect_avoiding(
+                bar, cell, chip_w, chip_h,
+                self.screen_w as f32, self.screen_h as f32, avoid,
+            ),
         ) else {
             return;
         };
