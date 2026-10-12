@@ -1131,6 +1131,7 @@ mod scratchpad_reveal_tests {
             s_h: 900,
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
+            restart_state: crate::jwm::restart_state::PendingRestartState::default(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
             tab_drag: None,

@@ -5208,7 +5208,8 @@ mod property_ops {
     use super::ids::X11IdRegistry;
     use crate::backend::api::{
         AllowedAction, IconData, MaximizeAxes, MinimizedRestoreState, MotifWmHints, NetWmState,
-        NormalHints, PropertyOps as PropertyOpsTrait, StrutPartial, WindowType, WmHints,
+        NormalHints, PropertyOps as PropertyOpsTrait, RestartProperty, StrutPartial, WindowType,
+        WmHints,
     };
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
@@ -5435,6 +5436,79 @@ mod property_ops {
     }
 
     impl<C: Connection + Send + Sync + 'static> PropertyOpsTrait for X11PropertyOps<C> {
+        fn get_restart_property(
+            &self,
+            win: WindowId,
+            property: RestartProperty,
+        ) -> Result<Option<Vec<u8>>, BackendError> {
+            let atom = match property {
+                RestartProperty::Snapshot => self.atoms._JWM_RESTART_STATE_V1,
+                RestartProperty::ClientGeneration => self.atoms._JWM_RESTART_GENERATION_V1,
+            };
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    self.ids.x11(win)?,
+                    atom,
+                    AtomEnum::STRING,
+                    0,
+                    property.maximum_bytes().div_ceil(4) as u32,
+                )?
+                .reply()?;
+            Ok(property
+                .valid_reply(
+                    reply.type_ == u32::from(AtomEnum::STRING),
+                    reply.format,
+                    reply.length,
+                    reply.bytes_after,
+                    &reply.value,
+                )
+                .then_some(reply.value))
+        }
+
+        fn set_restart_property(
+            &self,
+            win: WindowId,
+            property: RestartProperty,
+            value: &[u8],
+        ) -> Result<(), BackendError> {
+            if !property.valid_write(value, self.conn.maximum_request_bytes()) {
+                return Err(BackendError::Message(
+                    "invalid or oversized X11 restart property".into(),
+                ));
+            }
+            let atom = match property {
+                RestartProperty::Snapshot => self.atoms._JWM_RESTART_STATE_V1,
+                RestartProperty::ClientGeneration => self.atoms._JWM_RESTART_GENERATION_V1,
+            };
+            self.conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    self.ids.x11(win)?,
+                    atom,
+                    AtomEnum::STRING,
+                    value,
+                )?
+                .check()?;
+            Ok(())
+        }
+
+        fn clear_restart_property(
+            &self,
+            win: WindowId,
+            property: RestartProperty,
+        ) -> Result<(), BackendError> {
+            let atom = match property {
+                RestartProperty::Snapshot => self.atoms._JWM_RESTART_STATE_V1,
+                RestartProperty::ClientGeneration => self.atoms._JWM_RESTART_GENERATION_V1,
+            };
+            self.conn
+                .delete_property(self.ids.x11(win)?, atom)?
+                .check()?;
+            Ok(())
+        }
+
         fn get_title(&self, win: WindowId) -> String {
             // A terminator-only UTF8_STRING is empty after decoding, just
             // like a zero-byte property. Match XCB's legacy-name fallback.

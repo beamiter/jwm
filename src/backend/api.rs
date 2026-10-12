@@ -2482,7 +2482,81 @@ pub struct LayerSurfaceInfo {
     pub anchor_right: bool,
 }
 
+/// Private X11 restart properties. Their contents are untrusted correlation data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartProperty {
+    Snapshot,
+    ClientGeneration,
+}
+
+pub const MAX_RESTART_PROPERTY_BYTES: usize = 64 * 1024;
+
+#[cfg(any(feature = "x11-backends", test))]
+impl RestartProperty {
+    pub(crate) const fn maximum_bytes(self) -> usize {
+        match self {
+            Self::Snapshot => MAX_RESTART_PROPERTY_BYTES,
+            Self::ClientGeneration => 32,
+        }
+    }
+
+    pub(crate) fn valid_value(self, value: &[u8]) -> bool {
+        match self {
+            Self::Snapshot => !value.is_empty() && value.len() <= self.maximum_bytes(),
+            Self::ClientGeneration => value.len() == 32 && value.iter().all(u8::is_ascii_hexdigit),
+        }
+    }
+
+    /// Validate every transport header before accepting a complete STRING/8 value.
+    pub(crate) fn valid_reply(
+        self,
+        string_type_matches: bool,
+        format: u8,
+        length_words: u32,
+        bytes_after: u32,
+        value: &[u8],
+    ) -> bool {
+        string_type_matches
+            && format == 8
+            && bytes_after == 0
+            && length_words as usize == value.len().div_ceil(4)
+            && self.valid_value(value)
+    }
+
+    /// ChangeProperty has a 24-byte header and four-byte-aligned data. The
+    /// bounded payload never needs BIG-REQUESTS; reject rather than split it.
+    pub(crate) fn valid_write(self, value: &[u8], maximum_request_bytes: usize) -> bool {
+        self.valid_value(value) && 24 + value.len().div_ceil(4) * 4 <= maximum_request_bytes
+    }
+}
+
 pub trait PropertyOps: Send {
+    /// Missing or malformed X11 properties return None; transport failures remain errors.
+    fn get_restart_property(
+        &self,
+        _win: WindowId,
+        _property: RestartProperty,
+    ) -> Result<Option<Vec<u8>>, BackendError> {
+        Ok(None)
+    }
+
+    fn set_restart_property(
+        &self,
+        _win: WindowId,
+        _property: RestartProperty,
+        _value: &[u8],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("X11 restart properties"))
+    }
+
+    fn clear_restart_property(
+        &self,
+        _win: WindowId,
+        _property: RestartProperty,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("X11 restart properties"))
+    }
+
     fn get_title(&self, win: WindowId) -> String;
     fn get_class(&self, win: WindowId) -> (String, String); // (instance, class)
     fn get_window_types(&self, win: WindowId) -> Vec<WindowType>;
@@ -3951,4 +4025,49 @@ pub enum AllowMode {
     ReplayKeyboard,
     AsyncBoth,
     SyncBoth,
+}
+
+#[cfg(test)]
+mod restart_property_tests {
+    use super::{MAX_RESTART_PROPERTY_BYTES, RestartProperty};
+
+    #[test]
+    fn restart_reply_rejects_missing_wrong_type_format_and_partial_values() {
+        let property = RestartProperty::Snapshot;
+        assert!(property.valid_reply(true, 8, 1, 0, b"{}"));
+        assert!(!property.valid_reply(false, 0, 0, 0, b""));
+        assert!(!property.valid_reply(false, 8, 1, 0, b"{}"));
+        assert!(!property.valid_reply(true, 16, 1, 0, b"{}"));
+        assert!(!property.valid_reply(true, 32, 1, 0, b"{}"));
+        assert!(!property.valid_reply(true, 8, 0, 0, b"{}"));
+        assert!(!property.valid_reply(true, 8, 2, 0, b"{}"));
+        assert!(!property.valid_reply(true, 8, 1, 1, b"{}"));
+        assert!(!property.valid_reply(true, 8, 0, 0, b""));
+    }
+
+    #[test]
+    fn restart_property_checks_exact_bounds_and_request_padding() {
+        let property = RestartProperty::Snapshot;
+        let maximum = vec![b'x'; MAX_RESTART_PROPERTY_BYTES];
+        assert!(property.valid_reply(true, 8, 16384, 0, &maximum));
+        assert!(property.valid_write(&maximum, MAX_RESTART_PROPERTY_BYTES + 24));
+        assert!(!property.valid_write(&maximum, MAX_RESTART_PROPERTY_BYTES + 23));
+        assert!(!property.valid_write(&vec![b'x'; MAX_RESTART_PROPERTY_BYTES + 1], usize::MAX));
+        assert!(!property.valid_write(b"x", 27));
+        assert!(property.valid_write(b"x", 28));
+        assert!(!property.valid_write(b"", usize::MAX));
+    }
+
+    #[test]
+    fn restart_generation_requires_exact_ascii_hex() {
+        let property = RestartProperty::ClientGeneration;
+        assert_eq!(property.maximum_bytes(), 32);
+        assert!(property.valid_reply(true, 8, 8, 0, b"0123456789abcdef0123456789ABCDEF"));
+        assert!(!property.valid_value(b"0123456789abcdef0123456789abcde"));
+        assert!(!property.valid_value(b"0123456789abcdef0123456789abcdef0"));
+        assert!(!property.valid_value(b"0123456789abcdef0123456789abcdeg"));
+        assert!(!property.valid_value(&[0xff; 32]));
+        assert!(property.valid_write(b"0123456789abcdef0123456789ABCDEF", 56));
+        assert!(!property.valid_write(b"0123456789abcdef0123456789ABCDEF", 55));
+    }
 }

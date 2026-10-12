@@ -12,8 +12,8 @@ use crate::backend::api::{
     CompositorBenchmark, CursorProvider, DisplayControl, EventHandler, EwmhFacade, EwmhFeature,
     Geometry, HitTarget, IconData, InputOps, KeyOps, ManagedUnmapReason, MaximizeAxes,
     MinimizedRestoreState, MotifWmHints, NetWmAction, NetWmState, NormalHints, NotifyMode,
-    OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo,
-    StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
+    OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge, RestartProperty,
+    ScreenInfo, StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
     WindowHandoffIdentity, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
@@ -93,6 +93,8 @@ struct XcbAtoms {
     wm_delete_window: x::Atom,
     wm_take_focus: x::Atom,
     wm_state: x::Atom,
+    jwm_restart_state_v1: x::Atom,
+    jwm_restart_generation_v1: x::Atom,
     jwm_minimized_restore_v1: x::Atom,
     jwm_maximize_restore_v1: x::Atom,
     jwm_floating_v1: x::Atom,
@@ -197,6 +199,8 @@ impl XcbAtoms {
             wm_delete_window: Self::intern(conn, b"WM_DELETE_WINDOW")?,
             wm_take_focus: Self::intern(conn, b"WM_TAKE_FOCUS")?,
             wm_state: Self::intern(conn, b"WM_STATE")?,
+            jwm_restart_state_v1: Self::intern(conn, b"_JWM_RESTART_STATE_V1")?,
+            jwm_restart_generation_v1: Self::intern(conn, b"_JWM_RESTART_GENERATION_V1")?,
             jwm_minimized_restore_v1: Self::intern(conn, b"_JWM_MINIMIZED_RESTORE_V1")?,
             jwm_maximize_restore_v1: Self::intern(conn, b"_JWM_MAXIMIZE_RESTORE_V1")?,
             jwm_floating_v1: Self::intern(conn, b"_JWM_FLOATING_V1")?,
@@ -3494,6 +3498,82 @@ impl XcbPropertyOps {
 }
 
 impl PropertyOps for XcbPropertyOps {
+    fn get_restart_property(
+        &self,
+        win: WindowId,
+        property: RestartProperty,
+    ) -> XcbResult<Option<Vec<u8>>> {
+        let atom = match property {
+            RestartProperty::Snapshot => self.atoms.jwm_restart_state_v1,
+            RestartProperty::ClientGeneration => self.atoms.jwm_restart_generation_v1,
+        };
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: self.win(win)?,
+            property: atom,
+            r#type: self.atoms.string,
+            long_offset: 0,
+            long_length: property.maximum_bytes().div_ceil(4) as u32,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let value = if reply.format() == 8 {
+            reply.value::<u8>()
+        } else {
+            &[]
+        };
+        Ok(property
+            .valid_reply(
+                reply.r#type() == self.atoms.string,
+                reply.format(),
+                reply.length(),
+                reply.bytes_after(),
+                value,
+            )
+            .then(|| value.to_vec()))
+    }
+
+    fn set_restart_property(
+        &self,
+        win: WindowId,
+        property: RestartProperty,
+        value: &[u8],
+    ) -> XcbResult<()> {
+        let maximum_bytes = usize::try_from(self.conn.get_maximum_request_length())
+            .unwrap_or(0)
+            .saturating_mul(4);
+        if !property.valid_write(value, maximum_bytes) {
+            return Err(BackendError::Message(
+                "invalid or oversized X11 restart property".into(),
+            ));
+        }
+        let atom = match property {
+            RestartProperty::Snapshot => self.atoms.jwm_restart_state_v1,
+            RestartProperty::ClientGeneration => self.atoms.jwm_restart_generation_v1,
+        };
+        self.conn
+            .send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window: self.win(win)?,
+                property: atom,
+                r#type: self.atoms.string,
+                data: value,
+            })
+            .map_err(xcb_err)
+    }
+
+    fn clear_restart_property(&self, win: WindowId, property: RestartProperty) -> XcbResult<()> {
+        let atom = match property {
+            RestartProperty::Snapshot => self.atoms.jwm_restart_state_v1,
+            RestartProperty::ClientGeneration => self.atoms.jwm_restart_generation_v1,
+        };
+        self.conn
+            .send_and_check_request(&x::DeleteProperty {
+                window: self.win(win)?,
+                property: atom,
+            })
+            .map_err(xcb_err)
+    }
+
     fn get_title(&self, win: WindowId) -> String {
         let title = self.get_string(win, self.atoms.net_wm_name);
         if title.is_empty() {

@@ -21,6 +21,7 @@ use crate::config::{
     BackendFamily, CONFIG, Config, ConfigDiagnostics, ConfigError, set_backend_family,
 };
 use crate::jwm::process::{TRANSIENT_CHILD_HANDOFF_ENV, TransientChildRestartHandoff};
+use crate::jwm::restart_state::{RESTART_STATE_ENV, RestartIntent};
 use crate::jwm::scratchpad_handoff::{
     LEGACY_SCRATCHPAD_HANDOFF_ENV, SCRATCHPAD_HANDOFF_ENV, ScratchpadRestartHandoff,
 };
@@ -422,7 +423,8 @@ fn create_backend(
     )?)
 }
 
-pub(crate) const RESTART_ENV_KEYS: [&str; 4] = [
+pub(crate) const RESTART_ENV_KEYS: [&str; 5] = [
+    RESTART_STATE_ENV,
     RESTART_MARKER_ENV,
     SCRATCHPAD_HANDOFF_ENV,
     LEGACY_SCRATCHPAD_HANDOFF_ENV,
@@ -435,6 +437,7 @@ pub struct StartupContext {
     restarting: bool,
     scratchpads: Option<ScratchpadRestartHandoff>,
     transient_children: Option<TransientChildRestartHandoff>,
+    workspace: Option<RestartIntent>,
 }
 
 impl StartupContext {
@@ -451,6 +454,16 @@ impl StartupContext {
             restarting,
             scratchpads: read_restart_handoff_from_environment(restarting),
             transient_children: read_transient_child_handoff_from_environment(restarting),
+            workspace: restarting
+                .then(|| env::var(RESTART_STATE_ENV).ok())
+                .flatten()
+                .and_then(|value| {
+                    RestartIntent::decode(
+                        &value,
+                        std::process::id(),
+                        crate::jwm::restart_state::now_ms(),
+                    )
+                }),
         }
     }
 
@@ -499,6 +512,7 @@ fn bootstrap_jwm_instance(
     options: ApplicationOptions,
     scratchpad_handoff: Option<&ScratchpadRestartHandoff>,
     transient_child_handoff: Option<&TransientChildRestartHandoff>,
+    workspace_handoff: Option<&RestartIntent>,
     restart_intent: bool,
 ) -> Result<
     (
@@ -548,7 +562,15 @@ fn bootstrap_jwm_instance(
     if let Some(handoff) = transient_child_handoff {
         jwm.install_transient_child_restart_handoff(handoff.clone())?;
     }
+    if let Some(intent) = workspace_handoff {
+        jwm.install_restart_state(&*backend, intent)?;
+        jwm.restore_restart_monitors(&mut *backend);
+    }
     jwm.setup(&mut *backend)?;
+    // Commit consumption only after every fallible setup step and flush.
+    if let Some(intent) = workspace_handoff {
+        jwm.consume_restart_state(&*backend, intent);
+    }
     drop(sigchld_blocked);
     Ok((backend, jwm, environment))
 }
@@ -655,7 +677,8 @@ impl RestartCommand {
             // installed below.
             .env_remove(SCRATCHPAD_HANDOFF_ENV)
             .env_remove(LEGACY_SCRATCHPAD_HANDOFF_ENV)
-            .env_remove(TRANSIENT_CHILD_HANDOFF_ENV);
+            .env_remove(TRANSIENT_CHILD_HANDOFF_ENV)
+            .env_remove(RESTART_STATE_ENV);
         if let Some(payload) = scratchpad_handoff {
             command.env(SCRATCHPAD_HANDOFF_ENV, payload);
         }
@@ -669,9 +692,13 @@ impl RestartCommand {
         &self,
         scratchpad_handoff: Option<&str>,
         transient_child_handoff: Option<&str>,
+        workspace_handoff: Option<&str>,
     ) -> std::io::Error {
-        self.command(scratchpad_handoff, transient_child_handoff)
-            .exec()
+        let mut command = self.command(scratchpad_handoff, transient_child_handoff);
+        if let Some(payload) = workspace_handoff {
+            command.env(RESTART_STATE_ENV, payload);
+        }
+        command.exec()
     }
 }
 
@@ -681,15 +708,17 @@ enum RestartPreparationStage {
     ValidateConfig,
     CaptureScratchpads,
     CaptureTransientChildren,
+    CaptureWorkspace,
     PrepareClients,
 }
 
 impl RestartPreparationStage {
-    const ORDER: [Self; 5] = [
+    const ORDER: [Self; 6] = [
         Self::FlushLayout,
         Self::ValidateConfig,
         Self::CaptureTransientChildren,
         Self::CaptureScratchpads,
+        Self::CaptureWorkspace,
         Self::PrepareClients,
     ];
 
@@ -700,6 +729,7 @@ impl RestartPreparationStage {
             Self::CaptureScratchpads => "scratchpad identity handoff",
             Self::CaptureTransientChildren => "transient-child ownership handoff",
             Self::PrepareClients => "X11 client discovery handoff",
+            Self::CaptureWorkspace => "X11 workspace handoff",
         }
     }
 }
@@ -820,6 +850,7 @@ pub fn run_with_context(
     let mut pending_scratchpad_handoff = startup.scratchpads;
     let mut pending_transient_child_handoff = startup.transient_children;
     let mut restart_bootstrap = startup.restarting;
+    let mut pending_workspace_handoff = startup.workspace;
 
     loop {
         let startup = || {
@@ -827,6 +858,7 @@ pub fn run_with_context(
                 options,
                 pending_scratchpad_handoff.as_ref(),
                 pending_transient_child_handoff.as_ref(),
+                pending_workspace_handoff.as_ref(),
                 restart_bootstrap,
             )
         };
@@ -847,6 +879,7 @@ pub fn run_with_context(
         // during bootstrap. Failed bootstrap attempts leave it available for
         // retry; a successful one consumes the one-shot application copy.
         pending_transient_child_handoff.take();
+        pending_workspace_handoff.take();
         configure_benchmark(&mut *backend, options.benchmark);
 
         // Exit preparation is fail-closed. Keep this JWM and its ClientKeys
@@ -858,6 +891,7 @@ pub fn run_with_context(
             prepared_transient_child_handoff,
             prepared_restart_clients,
             prepared_normal_exit_handoff,
+            prepared_workspace_handoff,
         ) = loop {
             jwm.run(&mut *backend)?;
             let restarting = jwm.is_restarting.load(Ordering::SeqCst);
@@ -865,6 +899,7 @@ pub fn run_with_context(
                 let mut prepared = None;
                 let mut transient_children = None;
                 let mut restart_clients = None;
+                let mut workspace = None;
                 let preparation = run_restart_preparation_steps(
                     |stage| -> Result<(), Box<dyn std::error::Error>> {
                         match stage {
@@ -884,6 +919,9 @@ pub fn run_with_context(
                                 let payload = handoff.encode()?;
                                 transient_children = Some((handoff, payload));
                             }
+                            RestartPreparationStage::CaptureWorkspace => {
+                                workspace = jwm.prepare_restart_state(&*backend)?;
+                            }
                             RestartPreparationStage::PrepareClients => {
                                 restart_clients = Some(jwm.prepare_restart_clients(&mut *backend)?);
                             }
@@ -892,6 +930,21 @@ pub fn run_with_context(
                     },
                 );
                 if let Err((stage, error)) = preparation {
+                    if let Some(intent) = workspace.as_ref() {
+                        jwm.clear_restart_state(&*backend, intent);
+                    }
+                    if matches!(stage, RestartPreparationStage::CaptureWorkspace) {
+                        jwm.push_system_toast(
+                            &mut *backend,
+                            crate::backend::api::ToastNotification {
+                                title: "Restart cancelled".into(),
+                                body: format!("{}: {error}", stage.description()),
+                                urgency: 2,
+                                timeout_ms: 5000,
+                                ..Default::default()
+                            },
+                        );
+                    }
                     error!(
                         "[application] restart cancelled during {}: {error}",
                         stage.description()
@@ -900,11 +953,17 @@ pub fn run_with_context(
                     jwm.running.store(true, Ordering::SeqCst);
                     continue;
                 }
-                break (prepared, transient_children, restart_clients, None);
+                break (
+                    prepared,
+                    transient_children,
+                    restart_clients,
+                    None,
+                    workspace,
+                );
             }
 
             match jwm.prepare_normal_exit_handoff(&mut *backend) {
-                Ok(handoff) => break (None, None, None, Some(handoff)),
+                Ok(handoff) => break (None, None, None, Some(handoff), None),
                 Err(error) => {
                     if error.resume_safe() {
                         // Phase A restored every touched client in reverse
@@ -930,6 +989,9 @@ pub fn run_with_context(
                 }
             }
         };
+        let workspace_payload = prepared_workspace_handoff
+            .as_ref()
+            .map(RestartIntent::encode);
         let restarting = jwm.is_restarting.load(Ordering::SeqCst);
         let cleanup_result = if restarting {
             let _restart_clients = prepared_restart_clients
@@ -954,7 +1016,11 @@ pub fn run_with_context(
             drop(backend);
 
             let error = execute_restart_after_cleanup(cleanup_result, || {
-                restart_command.exec(Some(&payload), Some(&transient_child_payload))
+                restart_command.exec(
+                    Some(&payload),
+                    Some(&transient_child_payload),
+                    workspace_payload.as_deref(),
+                )
             });
             error!("[application] exec failed: {error}; falling back to in-process restart");
             // `exec` failure leaves us in the original process. The old JWM
@@ -965,6 +1031,7 @@ pub fn run_with_context(
             // ordinary startup scan will find them too.
             pending_scratchpad_handoff = Some(handoff);
             pending_transient_child_handoff = Some(transient_child_handoff);
+            pending_workspace_handoff = prepared_workspace_handoff;
             restart_bootstrap = true;
             continue;
         }

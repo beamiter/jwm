@@ -688,8 +688,15 @@ impl Jwm {
             }
         }
 
+        // Exact one-exec placement overrides normal new-window rules and the
+        // legacy minimized snapshot's enumeration-based monitor number.
+        let placed_by_restart = self.restore_restart_client(backend, client_key)?;
         self.adjust_client_position(backend, client_key);
-        if initially_minimized {
+        if initially_minimized
+            || (placed_by_restart && self.restart_client_off_view(backend, client_key))
+        {
+            // An off-view restored window is already mapped on X11. Keep its
+            // first configure parked without inventing an EWMH Hidden state.
             self.stage_initially_minimized_geometry(client_key);
         }
 
@@ -892,6 +899,15 @@ impl Jwm {
                 // fallback remains managed.
                 warn!("[manage] could not iconify adopted client {win:?}: {error}");
             }
+        } else if placed_by_restart {
+            // Initial adoption is not a newly launched app. Never reveal an
+            // off-view tag or steal focus while rebuilding the saved desktop.
+            let monitor = self
+                .state
+                .clients
+                .get(client_key)
+                .and_then(|client| client.mon);
+            self.arrange(backend, monitor);
         } else if placed_by_memory
             && minimized_restore.is_none()
             && !self.shares_focused_view(client_key)
@@ -1032,6 +1048,8 @@ impl Jwm {
             return;
         };
         let rect = state.floating_rect;
+        let restart_parked = self.restart_client_off_view(backend, client_key);
+        let desktop_left = self.desktop_left_edge();
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.is_floating = true;
             client.state.is_drag_floating = false;
@@ -1043,6 +1061,15 @@ impl Jwm {
             client.geometry.y = rect.y;
             client.geometry.w = rect.w;
             client.geometry.h = rect.h;
+            if restart_parked {
+                // The exact floating property supersedes setup's provisional
+                // clamped restore rectangle. Keep input parked until view.
+                client.geometry.hidden_restore_rect =
+                    Some(Rect::new(rect.x, rect.y, rect.w, rect.h));
+                let hidden_x = hidden_x_left_of_desktop(desktop_left, client.total_width());
+                client.geometry.x = hidden_x;
+                client.geometry.hidden_x = Some(hidden_x);
+            }
         }
         // Same regroup togglefloating uses; a no-op before attach_new_client.
         self.reorder_client_in_monitor_groups(client_key);
@@ -2325,7 +2352,7 @@ mod unmanage_minimized_tests {
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
         FloatingRestoreState, InputOps, KeyOps, MaximizeRestoreState, MinimizedRestoreRect,
         MinimizedRestoreState, MotifWmHints, NormalHints, OutputOps, PropertyOps, RenderScheduler,
-        WindowAttributes, WindowOps, WmHints,
+        RestartProperty, WindowAttributes, WindowHandoffIdentity, WindowOps, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -2366,6 +2393,11 @@ mod unmanage_minimized_tests {
 
     #[derive(Default)]
     struct ClientPropertyOps {
+        restart_properties: Mutex<Vec<(WindowId, RestartProperty, Vec<u8>)>>,
+        fail_restart_snapshot_write: AtomicBool,
+        fail_restart_client_write: AtomicBool,
+        corrupt_restart_client_read: AtomicBool,
+        corrupt_restart_snapshot_read: AtomicBool,
         hidden: AtomicBool,
         above: AtomicBool,
         below: AtomicBool,
@@ -2401,6 +2433,67 @@ mod unmanage_minimized_tests {
     }
 
     impl PropertyOps for ClientPropertyOps {
+        fn get_restart_property(
+            &self,
+            win: WindowId,
+            property: RestartProperty,
+        ) -> Result<Option<Vec<u8>>, BackendError> {
+            if property == RestartProperty::ClientGeneration
+                && self
+                    .corrupt_restart_client_read
+                    .swap(false, Ordering::Relaxed)
+            {
+                return Ok(Some(b"ffffffffffffffffffffffffffffffff".to_vec()));
+            }
+            if property == RestartProperty::Snapshot
+                && self.corrupt_restart_snapshot_read.load(Ordering::Relaxed)
+            {
+                return Ok(Some(b"{}".to_vec()));
+            }
+            Ok(self
+                .restart_properties
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(window, kind, _)| *window == win && *kind == property)
+                .map(|(_, _, value)| value.clone()))
+        }
+        fn set_restart_property(
+            &self,
+            win: WindowId,
+            property: RestartProperty,
+            value: &[u8],
+        ) -> Result<(), BackendError> {
+            if property == RestartProperty::ClientGeneration
+                && self.fail_restart_client_write.load(Ordering::Relaxed)
+            {
+                return Err(BackendError::Message(
+                    "injected restart client write failure".into(),
+                ));
+            }
+            if property == RestartProperty::Snapshot
+                && self.fail_restart_snapshot_write.load(Ordering::Relaxed)
+            {
+                return Err(BackendError::Message(
+                    "injected restart snapshot write failure".into(),
+                ));
+            }
+            let mut values = self.restart_properties.lock().unwrap();
+            values.retain(|(window, kind, _)| *window != win || *kind != property);
+            values.push((win, property, value.to_vec()));
+            Ok(())
+        }
+        fn clear_restart_property(
+            &self,
+            win: WindowId,
+            property: RestartProperty,
+        ) -> Result<(), BackendError> {
+            self.restart_properties
+                .lock()
+                .unwrap()
+                .retain(|(window, kind, _)| *window != win || *kind != property);
+            Ok(())
+        }
         fn get_title(&self, _win: WindowId) -> String {
             String::new()
         }
@@ -2694,8 +2787,17 @@ mod unmanage_minimized_tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct RecordedPlacement {
+        window: WindowId,
+        x: Option<i32>,
+        width: Option<u32>,
+        border: Option<u32>,
+    }
+
     #[derive(Default)]
     struct ClientWindowOps {
+        placements: Mutex<Vec<RecordedPlacement>>,
         configures: Mutex<Vec<(WindowId, i32, i32, u32, u32)>>,
         positions: Mutex<Vec<(WindowId, i32, i32)>>,
         maps: Mutex<Vec<WindowId>>,
@@ -2719,6 +2821,12 @@ mod unmanage_minimized_tests {
 
     impl WindowOps for ClientWindowOps {
         fn set_position(&self, win: WindowId, x: i32, y: i32) -> Result<(), BackendError> {
+            self.placements.lock().unwrap().push(RecordedPlacement {
+                window: win,
+                x: Some(x),
+                width: None,
+                border: None,
+            });
             self.positions
                 .lock()
                 .expect("window positions lock")
@@ -2745,6 +2853,12 @@ mod unmanage_minimized_tests {
             h: u32,
             border: u32,
         ) -> Result<(), BackendError> {
+            self.placements.lock().unwrap().push(RecordedPlacement {
+                window: win,
+                x: Some(x),
+                width: Some(w),
+                border: Some(border),
+            });
             self.initial_iconic_operations
                 .lock()
                 .expect("initial Iconic operations lock")
@@ -2789,6 +2903,12 @@ mod unmanage_minimized_tests {
             border_width: u32,
             _border_color: Pixel,
         ) -> Result<(), BackendError> {
+            self.placements.lock().unwrap().push(RecordedPlacement {
+                window: win,
+                x: None,
+                width: None,
+                border: Some(border_width),
+            });
             self.decorations
                 .lock()
                 .expect("window decorations lock")
@@ -2906,6 +3026,12 @@ mod unmanage_minimized_tests {
             win: WindowId,
             changes: WindowChanges,
         ) -> Result<(), BackendError> {
+            self.placements.lock().unwrap().push(RecordedPlacement {
+                window: win,
+                x: changes.x,
+                width: changes.width,
+                border: changes.border_width,
+            });
             self.changes
                 .lock()
                 .expect("window changes lock")
@@ -2924,12 +3050,43 @@ mod unmanage_minimized_tests {
         }
     }
 
+    #[derive(Default)]
+    struct ClientOutputOps {
+        overrides: Option<Vec<crate::backend::api::OutputInfo>>,
+    }
+    impl OutputOps for ClientOutputOps {
+        fn enumerate_outputs(&self) -> Vec<crate::backend::api::OutputInfo> {
+            self.overrides
+                .clone()
+                .unwrap_or_else(|| DummyOutputOps.enumerate_outputs())
+        }
+        fn screen_info(&self) -> crate::backend::api::ScreenInfo {
+            DummyOutputOps.screen_info()
+        }
+        fn output_at(&self, x: i32, y: i32) -> Option<crate::backend::common_define::OutputId> {
+            if let Some(outputs) = &self.overrides {
+                outputs
+                    .iter()
+                    .find(|output| {
+                        x >= output.x
+                            && y >= output.y
+                            && i64::from(x) < i64::from(output.x) + i64::from(output.width)
+                            && i64::from(y) < i64::from(output.y) + i64::from(output.height)
+                    })
+                    .map(|output| output.id)
+            } else {
+                DummyOutputOps.output_at(x, y)
+            }
+        }
+    }
+
     struct ClientSpyBackend {
+        restart_identity: bool,
         focus_changes: Vec<Option<WindowId>>,
         window_ops: ClientWindowOps,
         input_ops: DummyInputOps,
         property_ops: ClientPropertyOps,
-        output_ops: DummyOutputOps,
+        output_ops: ClientOutputOps,
         key_ops: DummyKeyOps,
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
@@ -2949,11 +3106,12 @@ mod unmanage_minimized_tests {
     impl ClientSpyBackend {
         fn new() -> Self {
             Self {
+                restart_identity: false,
                 focus_changes: Vec::new(),
                 window_ops: ClientWindowOps::default(),
                 input_ops: DummyInputOps,
                 property_ops: ClientPropertyOps::default(),
-                output_ops: DummyOutputOps,
+                output_ops: ClientOutputOps::default(),
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
@@ -3063,6 +3221,23 @@ mod unmanage_minimized_tests {
     }
 
     impl Backend for ClientSpyBackend {
+        fn window_handoff_identity(&self, window: WindowId) -> Option<WindowHandoffIdentity> {
+            self.restart_identity
+                .then(|| u32::try_from(window.raw()).ok())
+                .flatten()
+                .map(WindowHandoffIdentity::X11)
+        }
+        fn resolve_window_handoff_identity(
+            &self,
+            identity: WindowHandoffIdentity,
+        ) -> Option<WindowId> {
+            if !self.restart_identity {
+                return None;
+            }
+            match identity {
+                WindowHandoffIdentity::X11(xid) => Some(WindowId::from_raw(u64::from(xid))),
+            }
+        }
         fn on_focused_client_changed(&mut self, win: Option<WindowId>) -> Result<(), BackendError> {
             self.focus_changes.push(win);
             Ok(())
@@ -6741,6 +6916,432 @@ mod unmanage_minimized_tests {
         );
         jwm.reconcile_closed_placement_config(false);
         assert!(jwm.closed_placements.is_empty());
+    }
+    fn restart_fixture() -> (Jwm, ClientSpyBackend, ClientKey) {
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        // An ordinary identified client must exercise the tiled/hand-float
+        // paths, rather than the separate anonymous auto-float policy.
+        set_class(&backend, "RestartFixture", "restart-fixture");
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        old.suppress_layout_animation = true;
+        let key = manage_window(&mut old, &mut backend, 0xab01);
+        old.state.clients[key].state.tags = 0b10;
+        let mon = old.state.clients[key].mon.unwrap();
+        old.state.monitors[mon].tag_set = [1, 1];
+        old.state.monitors[mon].sel_tags = 0;
+        (old, backend, key)
+    }
+
+    #[test]
+    fn x11_restart_off_view_clients_never_configure_onscreen() {
+        for (floating, fullscreen, maximized) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, false, true),
+        ] {
+            for composited in [false, true] {
+                let (old, mut backend, _) = restart_fixture();
+                backend.has_compositor = composited;
+                let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+                if floating {
+                    *backend.property_ops.floating_restore.lock().unwrap() =
+                        Some(FloatingRestoreState {
+                            floating_rect: MinimizedRestoreRect {
+                                x: 140,
+                                y: 90,
+                                w: 700,
+                                h: 500,
+                            },
+                        });
+                }
+                backend
+                    .property_ops
+                    .fullscreen
+                    .store(fullscreen, Ordering::Relaxed);
+                backend
+                    .property_ops
+                    .maximized_vert
+                    .store(maximized, Ordering::Relaxed);
+                backend
+                    .property_ops
+                    .maximized_horz
+                    .store(maximized, Ordering::Relaxed);
+                let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                fresh.suppress_layout_animation = true;
+                fresh.install_restart_state(&backend, &intent).unwrap();
+                fresh.restore_restart_monitors(&mut backend);
+                backend.window_ops.placements.lock().unwrap().clear();
+                let left = fresh.desktop_left_edge();
+                let window = WindowId::from_raw(0xab01);
+                let geometry = Geometry {
+                    x: left - 1280,
+                    y: 90,
+                    w: 640,
+                    h: 480,
+                    border: 0,
+                };
+                fresh.manage(&mut backend, window, &geometry).unwrap();
+                let key = fresh.wintoclient(window).unwrap();
+                let state = &fresh.state.clients[key].state;
+                assert_eq!(state.is_floating, floating || fullscreen);
+                assert_eq!(state.is_fullscreen, fullscreen);
+                assert_eq!(state.is_maximized_vert, maximized);
+                assert_eq!(state.is_maximized_horz, maximized);
+                assert!(!state.is_drag_floating);
+                assert_eq!(fresh.state.clients[key].state.tags, 0b10);
+                assert!(!fresh.state.clients[key].state.is_hidden);
+                assert!(!backend.property_ops.hidden.load(Ordering::Relaxed));
+                let calls = backend.window_ops.placements.lock().unwrap();
+                assert!(!calls.is_empty());
+                let (mut x, mut width, mut border) = (geometry.x, geometry.w, geometry.border);
+                for call in calls.iter().filter(|call| call.window == window) {
+                    x = call.x.unwrap_or(x);
+                    width = call.width.unwrap_or(width);
+                    border = call.border.unwrap_or(border);
+                    assert!(
+                        i64::from(x) + i64::from(width) + 2 * i64::from(border) <= i64::from(left),
+                        "off-view native placement leaked: float={floating} full={fullscreen} max={maximized} compositor={composited} step={call:?} x={x} width={width} border={border}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn x11_restart_anonymous_auto_float_preserves_policy_and_restores_tags() {
+        let (old, mut backend, _) = restart_fixture();
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        set_class(&backend, "", "");
+        *backend.property_ops.floating_restore.lock().unwrap() = Some(FloatingRestoreState {
+            floating_rect: MinimizedRestoreRect {
+                x: 140,
+                y: 90,
+                w: 700,
+                h: 500,
+            },
+        });
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        let key = manage_window(&mut fresh, &mut backend, 0xab01);
+        let client = &fresh.state.clients[key];
+        assert!(client.state.is_floating);
+        assert!(!client.state.is_drag_floating);
+        assert_eq!(client.state.tags, 0b10);
+        assert!(!client.state.is_hidden);
+        let mon = client.mon.unwrap();
+        assert_eq!(fresh.state.monitors[mon].tag_set, [1, 1]);
+        let work_top = fresh.monitor_work_area(mon).unwrap().y;
+        assert_eq!(
+            client.geometry.hidden_restore_rect,
+            Some(Rect::new(10, work_top.max(20), 640, 480)),
+            "anonymous auto-float retains ordinary placement instead of adopting a hand-float property"
+        );
+    }
+
+    #[test]
+    fn x11_restart_off_view_hand_float_keeps_exact_restore_rectangle() {
+        let (old, mut backend, _) = restart_fixture();
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let rect = MinimizedRestoreRect {
+            x: 140,
+            y: 90,
+            w: 700,
+            h: 500,
+        };
+        *backend.property_ops.floating_restore.lock().unwrap() = Some(FloatingRestoreState {
+            floating_rect: rect,
+        });
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        let key = manage_window(&mut fresh, &mut backend, 0xab01);
+        assert_eq!(
+            fresh.state.clients[key].geometry.hidden_restore_rect,
+            Some(Rect::new(140, 90, 700, 500))
+        );
+        fresh.finish_restart_adoption(&mut backend);
+        fresh.consume_restart_state(&backend, &intent);
+        let mon = fresh.state.clients[key].mon.unwrap();
+        fresh.state.monitors[mon].tag_set = [0b10, 1];
+        fresh.show_client(&mut backend, key);
+        let geometry = &fresh.state.clients[key].geometry;
+        assert_eq!(
+            (geometry.x, geometry.y, geometry.w, geometry.h),
+            (140, 90, 700, 500)
+        );
+        assert!(
+            backend
+                .property_ops
+                .restart_properties
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn x11_restart_write_or_readback_failure_rolls_back_client_markers() {
+        for corrupt_read in [false, true] {
+            let (old, backend, _) = restart_fixture();
+            backend
+                .property_ops
+                .fail_restart_snapshot_write
+                .store(!corrupt_read, Ordering::Relaxed);
+            backend
+                .property_ops
+                .corrupt_restart_snapshot_read
+                .store(corrupt_read, Ordering::Relaxed);
+            assert!(old.prepare_restart_state(&backend).is_err());
+            assert!(
+                !backend
+                    .property_ops
+                    .restart_properties
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, kind, _)| *kind == RestartProperty::ClientGeneration)
+            );
+            assert_eq!(old.state.clients.len(), 1);
+        }
+    }
+
+    #[test]
+    fn x11_restart_missing_monitor_fails_before_any_property_write() {
+        let (mut old, backend, key) = restart_fixture();
+        old.state.clients[key].mon = None;
+        assert!(old.prepare_restart_state(&backend).is_err());
+        assert!(
+            backend
+                .property_ops
+                .restart_properties
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn x11_restart_wrong_window_generation_does_not_restore_recycled_xid() {
+        let (old, mut backend, _) = restart_fixture();
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        backend
+            .property_ops
+            .set_restart_property(
+                WindowId::from_raw(0xab01),
+                RestartProperty::ClientGeneration,
+                b"ffffffffffffffffffffffffffffffff",
+            )
+            .unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        let key = manage_window(&mut fresh, &mut backend, 0xab01);
+        assert_eq!(fresh.state.clients[key].state.tags, 1);
+    }
+    #[test]
+    fn x11_restart_exact_tags_override_legacy_minimized_tags_and_keep_sticky() {
+        for minimized in [false, true] {
+            let (old, mut backend, _) = restart_fixture();
+            let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+            backend.property_ops.sticky.store(true, Ordering::Relaxed);
+            if minimized {
+                backend.property_ops.hidden.store(true, Ordering::Relaxed);
+                backend.property_ops.wm_state.store(
+                    i64::from(crate::jwm::types::ICONIC_STATE),
+                    Ordering::Relaxed,
+                );
+                *backend.property_ops.minimized_restore.lock().unwrap() =
+                    Some(MinimizedRestoreState {
+                        tags: 0b100,
+                        monitor_num: 99,
+                        visible_rect: MinimizedRestoreRect {
+                            x: 140,
+                            y: 90,
+                            w: 700,
+                            h: 500,
+                        },
+                        is_floating: true,
+                        is_drag_floating: false,
+                        floating_rect: None,
+                        is_pip: false,
+                        pip_restore_sticky: false,
+                        old_state: false,
+                        fullscreen_restore_rect: None,
+                        minimized_order: 1,
+                    });
+            }
+            let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            fresh.install_restart_state(&backend, &intent).unwrap();
+            fresh.restore_restart_monitors(&mut backend);
+            let key = manage_window(&mut fresh, &mut backend, 0xab01);
+            assert_eq!(fresh.state.clients[key].state.tags, 0b10);
+            assert_eq!(fresh.state.clients[key].state.is_hidden, minimized);
+            assert!(fresh.state.clients[key].state.is_sticky);
+            assert_eq!(
+                fresh.state.clients[key].mon,
+                fresh.state.monitor_order.first().copied()
+            );
+        }
+    }
+
+    #[test]
+    fn x11_restart_layout_snapshot_overrides_stale_config_seed_without_writing_it() {
+        let (mut old, mut backend, _) = restart_fixture();
+        let mon = old.state.monitor_order[0];
+        let saved = old.state.monitors[mon].pertag.as_mut().unwrap();
+        saved.lts[2] = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+        saved.prev_lts[2] = std::rc::Rc::new(crate::core::layout::LayoutEnum::FLOAT);
+        saved.n_masters[2] = 3;
+        saved.m_facts[2] = 0.7;
+        saved.gaps[2] = 17;
+        saved.show_bars[2] = false;
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        let restored = fresh.state.monitors[fresh.state.monitor_order[0]]
+            .pertag
+            .as_ref()
+            .unwrap();
+        assert_eq!(*restored.lts[2], crate::core::layout::LayoutEnum::TILE);
+        assert_eq!(
+            *restored.prev_lts[2],
+            crate::core::layout::LayoutEnum::FLOAT
+        );
+        assert_eq!(
+            (
+                restored.n_masters[2],
+                restored.m_facts[2],
+                restored.gaps[2],
+                restored.show_bars[2]
+            ),
+            (3, 0.7, 17, false)
+        );
+    }
+    #[test]
+    fn x11_restart_client_write_or_readback_failure_rolls_back_before_root_publish() {
+        for corrupt_read in [false, true] {
+            let (old, backend, _) = restart_fixture();
+            backend
+                .property_ops
+                .fail_restart_client_write
+                .store(!corrupt_read, Ordering::Relaxed);
+            backend
+                .property_ops
+                .corrupt_restart_client_read
+                .store(corrupt_read, Ordering::Relaxed);
+            assert!(old.prepare_restart_state(&backend).is_err());
+            assert!(
+                backend
+                    .property_ops
+                    .restart_properties
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn x11_restart_two_monitor_state_roundtrips_after_reversed_enumeration() {
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        set_class(&backend, "RestartFixture", "restart-fixture");
+        let first = DummyOutputOps.enumerate_outputs().remove(0);
+        backend.output_ops.overrides = Some(vec![first.clone(), second_output()]);
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        for (index, mon) in old.state.monitor_order.clone().into_iter().enumerate() {
+            let mut keys = Vec::new();
+            for offset in [2, 1] {
+                let mut client = crate::core::models::WMClient::new(WindowId::from_raw(
+                    100 + index as u64 * 10 + offset,
+                ));
+                client.mon = Some(mon);
+                client.state.tags = 1 << (index * 2);
+                client.class = "RestartFixture".into();
+                let key = old.insert_client(client);
+                keys.push(key);
+            }
+            old.state.monitor_clients.insert(mon, keys.clone());
+            old.state.monitor_stack.insert(mon, keys.clone());
+            let monitor = &mut old.state.monitors[mon];
+            monitor.tag_set = [1 << (index * 2), 1 << (index * 2 + 1)];
+            monitor.sel_tags = 0;
+            let pertag = monitor.pertag.as_mut().unwrap();
+            pertag.cur_tag = index * 2 + 1;
+            pertag.prev_tag = index * 2 + 2;
+            pertag.lts[pertag.cur_tag] = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+            pertag.prev_lts[pertag.cur_tag] =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::FLOAT);
+            pertag.m_facts[pertag.cur_tag] = 0.6 + index as f32 * 0.1;
+            pertag.n_masters[pertag.cur_tag] = 2 + index as u32;
+            pertag.gaps[pertag.cur_tag] = 11 + index as i32;
+            pertag.show_bars[pertag.cur_tag] = index == 0;
+            monitor.set_selected_client_for_current_tag(Some(keys[0]));
+        }
+        old.state.sel_mon = Some(old.state.monitor_order[1]);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        backend.output_ops.overrides = Some(vec![second_output(), first]);
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        for raw in [101, 111, 102, 112] {
+            manage_window(&mut fresh, &mut backend, raw);
+        }
+        fresh.finish_restart_adoption(&mut backend);
+        for (index, name) in ["Virtual-1", "Virtual-2"].into_iter().enumerate() {
+            let mon = fresh
+                .state
+                .monitor_order
+                .iter()
+                .copied()
+                .find(|key| fresh.output_key_for_monitor(&backend, *key).as_deref() == Some(name))
+                .unwrap();
+            let monitor = &fresh.state.monitors[mon];
+            assert_eq!(monitor.tag_set, [1 << (index * 2), 1 << (index * 2 + 1)]);
+            let pertag = monitor.pertag.as_ref().unwrap();
+            assert_eq!(
+                (pertag.cur_tag, pertag.prev_tag),
+                (index * 2 + 1, index * 2 + 2)
+            );
+            assert_eq!(monitor.layout.n_master, 2 + index as u32);
+            assert_eq!(monitor.layout.m_fact, 0.6 + index as f32 * 0.1);
+            assert_eq!(monitor.layout.gap, 11 + index as i32);
+            assert_eq!(pertag.show_bars[pertag.cur_tag], index == 0);
+            assert_eq!(*monitor.lt, crate::core::layout::LayoutEnum::TILE);
+            assert_eq!(*monitor.prev_lt, crate::core::layout::LayoutEnum::FLOAT);
+            let ids: Vec<_> = fresh.state.monitor_clients[mon]
+                .iter()
+                .map(|key| fresh.state.clients[*key].win.raw())
+                .collect();
+            assert_eq!(ids, vec![102 + index as u64 * 10, 101 + index as u64 * 10]);
+            assert_eq!(
+                fresh.state.clients[monitor.sel.unwrap()].win.raw(),
+                102 + index as u64 * 10
+            );
+        }
+        assert_eq!(
+            fresh
+                .output_key_for_monitor(&backend, fresh.state.sel_mon.unwrap())
+                .as_deref(),
+            Some("Virtual-2")
+        );
+        fresh.consume_restart_state(&backend, &intent);
+        let next = fresh.prepare_restart_state(&backend).unwrap().unwrap();
+        assert!(
+            backend
+                .property_ops
+                .get_restart_property(WindowId::from_raw(0), RestartProperty::Snapshot)
+                .unwrap()
+                .is_some()
+        );
+        fresh.clear_restart_state(&backend, &next);
     }
 }
 

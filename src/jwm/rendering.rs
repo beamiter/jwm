@@ -770,9 +770,17 @@ impl Jwm {
                 client.geometry.border_w as u32
             };
 
+            let server_x = if self.restart_client_off_view(backend, client_key) {
+                super::visibility::hidden_x_left_of_desktop(
+                    self.desktop_left_edge(),
+                    client.total_width().max(1),
+                )
+            } else {
+                client.geometry.x
+            };
             backend.window_ops().configure(
                 client.win,
-                client.geometry.x,
+                server_x,
                 client.geometry.y,
                 client.geometry.w as u32,
                 client.geometry.h as u32,

@@ -327,6 +327,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | --- | --- |
 | Alt+Shift+Return | Launch terminal |
 | Alt+R | Application launcher (type `/` for open windows) |
+| Alt+Shift+R | Restart JWM; X11 preserves live windows’ tags, output placement, and [per-tag layouts](docs/restart-state.md) |
 | Alt+Control+Escape | Lock screen |
 | Alt+Control+O | Display layout |
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |

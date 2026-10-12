@@ -972,7 +972,8 @@ impl Jwm {
                 .state
                 .clients
                 .get(client_key)
-                .is_some_and(|client| client.state.is_hidden);
+                .is_some_and(|client| client.state.is_hidden)
+                || self.restart_client_off_view(backend, client_key);
             let fullscreen_rect = self
                 .state
                 .clients

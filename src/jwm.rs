@@ -17,6 +17,7 @@ pub mod mouse_handler;
 pub mod navigation;
 pub mod property_handler;
 pub(crate) mod restart_preflight;
+pub(crate) mod restart_state;
 pub mod rules;
 pub(crate) mod scratchpad_handoff;
 pub(crate) mod scratchpad_pending;
@@ -134,6 +135,7 @@ pub struct Jwm {
     pub s_h: i32,
     pub running: AtomicBool,
     pub is_restarting: AtomicBool,
+    pub(crate) restart_state: restart_state::PendingRestartState,
     pub last_mouse_root: (f64, f64),
 
     /// A pointer drag being watched: armed by a button press or a client
@@ -1310,6 +1312,7 @@ impl Jwm {
             s_h,
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
+            restart_state: restart_state::PendingRestartState::default(),
 
             message: SharedMessage::default(),
 
@@ -1419,6 +1422,7 @@ impl Jwm {
         // turn a failed QueryTree into a successful zero-client restart: the
         // old process may just have left true-Iconic clients unmapped for this
         // exact scan to recover.
+        self.restore_restart_monitors(backend);
         let supports_client_list = backend.capabilities().supports_client_list;
         let windows = {
             let mut queries = BackendInitialWindowAdoptionQueries { backend };
@@ -1437,6 +1441,7 @@ impl Jwm {
                 self.manage(backend, win, &geometry)?;
             }
         }
+        self.finish_restart_adoption(backend);
         Ok(())
     }
 

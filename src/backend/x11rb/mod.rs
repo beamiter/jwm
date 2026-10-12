@@ -15,6 +15,8 @@ x11rb::atom_manager! {
         WM_PROTOCOLS,
         WM_DELETE_WINDOW,
         WM_STATE,
+        _JWM_RESTART_STATE_V1,
+        _JWM_RESTART_GENERATION_V1,
         _JWM_MINIMIZED_RESTORE_V1,
         _JWM_MAXIMIZE_RESTORE_V1,
         _JWM_FLOATING_V1,
