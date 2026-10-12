@@ -23,6 +23,22 @@ impl Jwm {
             debug!("ltsymbol: {:?}", monitor.lt_symbol);
         }
 
+        // Empty layouts return before prepare_layout_resize can synchronize
+        // topology. Retire only an existing current-scope override here, or a
+        // last tile moved away and back could resurrect its stale intention.
+        if *layout_type != LayoutEnum::FLOAT
+            && let Some(scope) = self.layout_resize_scope(mon_key)
+            && self
+                .state
+                .monitors
+                .get(mon_key)
+                .is_some_and(|monitor| monitor.layout_resizes.contains_key(&scope))
+            && self.collect_tileable_clients(mon_key).is_empty()
+            && let Some(monitor) = self.state.monitors.get_mut(mon_key)
+        {
+            monitor.layout_resizes.remove(&scope);
+        }
+
         match *layout_type {
             LayoutEnum::TILE => self.tile(backend, mon_key),
             LayoutEnum::MONOCLE => self.monocle(backend, mon_key),
