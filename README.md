@@ -337,6 +337,10 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Left / Right | Shrink / grow the selected master horizontally (2.5%) |
 | Alt+Control+Up / Down | Shrink / grow it vertically (2.5%) |
 | Alt+Control+Home | Reset layout-local resized dimensions |
+| Alt+H / L | Shrink / grow width (2.5%) |
+| Alt+Shift+H / L | Grow / shrink height (2.5%; preserves the former factor-key signs) |
+| Alt+J / K | Next / previous window; within-column focus in scrolling |
+| Alt+Left / Right | Focus the left / right column in scrolling (no-op in other layouts) |
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor's work area |
 | Alt+Shift+Up | Toggle maximize of the focused floating window (fills the work area; press again to restore) |
 
@@ -344,6 +348,8 @@ Master resizing also works with a single client, in every layout. Alt+right-drag
 keeps a master tiled; larger masters reallocate neighbouring space. See
 [layout resizing](docs/layout-resizing.md) for singleton centering, custom
 bindings, size-hint limits and the explicit floating-resize compatibility action.
+Existing configuration files keep their own key list; upgrading does not rewrite
+old H/L bindings. The linked guide includes replacement TOML and reload steps.
 
 Mouse users get the same geometry: dragging a floating window to a side edge
 snaps it to that half of the work area (bar, docks and tab bar excluded),

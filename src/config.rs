@@ -2525,6 +2525,18 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
+                key: "Left".to_string(),
+                function: "scrolling_focus_column".to_string(),
+                argument: ArgumentConfig::Int(-1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "Right".to_string(),
+                function: "scrolling_focus_column".to_string(),
+                argument: ArgumentConfig::Int(1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
                 key: "i".to_string(),
                 function: "incnmaster".to_string(),
                 argument: ArgumentConfig::Int(1),
@@ -2568,26 +2580,26 @@ impl Config {
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "h".to_string(),
-                function: "setmfact".to_string(),
+                function: "resize_horizontal".to_string(),
                 argument: ArgumentConfig::Float(-0.025),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "l".to_string(),
-                function: "setmfact".to_string(),
+                function: "resize_horizontal".to_string(),
                 argument: ArgumentConfig::Float(0.025),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "h".to_string(),
-                function: "setcfact".to_string(),
-                argument: ArgumentConfig::Float(0.2),
+                function: "resize_vertical".to_string(),
+                argument: ArgumentConfig::Float(0.025),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "l".to_string(),
-                function: "setcfact".to_string(),
-                argument: ArgumentConfig::Float(-0.2),
+                function: "resize_vertical".to_string(),
+                argument: ArgumentConfig::Float(-0.025),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
@@ -7682,7 +7694,7 @@ border_px = 3
         assert!(!cfg.motion_enabled());
     }
     #[test]
-    fn physical_resize_defaults_are_unique_bindable_and_keep_old_factor_keys() {
+    fn physical_resize_defaults_are_unique_bindable_and_keep_legacy_actions() {
         let config = Config::default();
         for (key, function) in [
             ("Left", "resize_horizontal"),
@@ -7710,11 +7722,13 @@ border_px = 3
         assert!(config.parse_function("resizemouse_float").is_some());
         assert!(super::key_function_is_repeatable("resize_horizontal"));
         assert!(super::key_function_is_repeatable("resize_vertical"));
+        assert!(config.parse_function("setmfact").is_some());
+        assert!(config.parse_function("setcfact").is_some());
         for (key, function, shift) in [
-            ("h", "setmfact", false),
-            ("l", "setmfact", false),
-            ("h", "setcfact", true),
-            ("l", "setcfact", true),
+            ("h", "resize_horizontal", false),
+            ("l", "resize_horizontal", false),
+            ("h", "resize_vertical", true),
+            ("l", "resize_vertical", true),
         ] {
             assert!(config.inner.keybindings.keys.iter().any(|b| b.key == key
                 && b.function == function
@@ -7722,5 +7736,156 @@ border_px = 3
                 && b.modifier.iter().any(|m| m == "Mod1")
                 && (!shift || b.modifier.iter().any(|m| m == "Shift"))));
         }
+    }
+    #[test]
+    fn resize_letter_aliases_compile_exact_axes_signs_and_preserve_focus_keys() {
+        use crate::backend::common_define::keys;
+        use crate::jwm::{Jwm, WMArgEnum, WMFuncType};
+        let config = Config::default();
+        let bindings = config.get_keys();
+        for (key, mods, function, arg) in [
+            (
+                keys::KEY_h,
+                Mods::ALT,
+                Jwm::resize_horizontal as WMFuncType,
+                WMArgEnum::Float(-0.025),
+            ),
+            (
+                keys::KEY_l,
+                Mods::ALT,
+                Jwm::resize_horizontal as WMFuncType,
+                WMArgEnum::Float(0.025),
+            ),
+            (
+                keys::KEY_h,
+                Mods::ALT | Mods::SHIFT,
+                Jwm::resize_vertical as WMFuncType,
+                WMArgEnum::Float(0.025),
+            ),
+            (
+                keys::KEY_l,
+                Mods::ALT | Mods::SHIFT,
+                Jwm::resize_vertical as WMFuncType,
+                WMArgEnum::Float(-0.025),
+            ),
+            (
+                keys::KEY_j,
+                Mods::ALT,
+                Jwm::focusstack as WMFuncType,
+                WMArgEnum::Int(1),
+            ),
+            (
+                keys::KEY_k,
+                Mods::ALT,
+                Jwm::focusstack as WMFuncType,
+                WMArgEnum::Int(-1),
+            ),
+            (
+                keys::KEY_Left,
+                Mods::ALT,
+                Jwm::scrolling_focus_column as WMFuncType,
+                WMArgEnum::Int(-1),
+            ),
+            (
+                keys::KEY_Right,
+                Mods::ALT,
+                Jwm::scrolling_focus_column as WMFuncType,
+                WMArgEnum::Int(1),
+            ),
+        ] {
+            let matches: Vec<_> = bindings
+                .iter()
+                .filter(|b| b.key_sym == key && b.mask == mods)
+                .collect();
+            assert_eq!(matches.len(), 1);
+            let binding = matches[0];
+            assert!(
+                binding
+                    .func_opt
+                    .is_some_and(|f| std::ptr::fn_addr_eq(f, function))
+            );
+            assert_eq!(binding.arg, arg);
+            assert!(binding.repeatable);
+        }
+    }
+
+    #[test]
+    fn existing_factor_key_file_loads_without_resize_alias_migration() {
+        use crate::jwm::{Jwm, WMArgEnum, WMFuncType};
+        let path = temporary_config_path("legacy-factor-bindings");
+        let mut legacy = Config::default();
+        // These are the exact previous shipped defaults, not only a custom
+        // variant. Neither stock-looking nor personalized lists are rewritten.
+        for (key, shift, action, value) in [
+            ("h", false, "setmfact", -0.025),
+            ("l", false, "setmfact", 0.025),
+            ("h", true, "setcfact", 0.2),
+            ("l", true, "setcfact", -0.2),
+        ] {
+            let binding = legacy
+                .inner
+                .keybindings
+                .keys
+                .iter_mut()
+                .find(|b| b.key == key && b.modifier.len() == if shift { 2 } else { 1 })
+                .unwrap();
+            binding.function = action.into();
+            binding.argument = ArgumentConfig::Float(value);
+        }
+        legacy
+            .inner
+            .keybindings
+            .keys
+            .retain(|b| !(b.modifier == ["Mod1"] && matches!(b.key.as_str(), "Left" | "Right")));
+        for customized in [false, true] {
+            if customized {
+                let binding = legacy
+                    .inner
+                    .keybindings
+                    .keys
+                    .iter_mut()
+                    .find(|b| b.key == "h" && b.modifier.len() == 1)
+                    .unwrap();
+                binding.argument = ArgumentConfig::Float(-0.071);
+            }
+            legacy.save_to_file(&path).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            // load_from_file is the validated reader used by Config::reload.
+            for _ in 0..2 {
+                let loaded = Config::load_from_file(&path).unwrap();
+                let bindings = loaded.get_keys();
+                for (key, shift, function, value) in [
+                    (
+                        'h',
+                        false,
+                        Jwm::setmfact as WMFuncType,
+                        if customized { -0.071 } else { -0.025 },
+                    ),
+                    ('l', false, Jwm::setmfact as WMFuncType, 0.025),
+                    ('h', true, Jwm::setcfact as WMFuncType, 0.2),
+                    ('l', true, Jwm::setcfact as WMFuncType, -0.2),
+                ] {
+                    let mods = if shift {
+                        Mods::ALT | Mods::SHIFT
+                    } else {
+                        Mods::ALT
+                    };
+                    let binding = bindings
+                        .iter()
+                        .find(|b| b.key_sym == key as u32 && b.mask == mods)
+                        .unwrap();
+                    assert!(
+                        binding
+                            .func_opt
+                            .is_some_and(|f| std::ptr::fn_addr_eq(f, function))
+                    );
+                    assert_eq!(binding.arg, WMArgEnum::Float(value));
+                }
+                assert!(!bindings.iter().any(|b| b.mask == Mods::ALT
+                    && matches!(b.key_sym, super::k::KEY_Left | super::k::KEY_Right)));
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

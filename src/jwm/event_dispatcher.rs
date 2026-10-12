@@ -12303,6 +12303,149 @@ mod tests {
                 .is_some()
         );
     }
+    #[test]
+    fn master_resize_letter_shortcuts_dispatch_physical_axes_without_changing_focus() {
+        use crate::backend::common_define::keys;
+        use crate::core::layout::LayoutEnum;
+        for (sym, shift, horizontal, increase) in [
+            (keys::KEY_h, false, true, false),
+            (keys::KEY_l, false, true, true),
+            (keys::KEY_h, true, false, true),
+            (keys::KEY_l, true, false, false),
+        ] {
+            let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::TILE, 1);
+            jwm.key_bindings = crate::config::Config::default().get_keys();
+            // Leave room to grow on both axes, including a singleton.
+            jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.2))
+                .unwrap();
+            jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.2))
+                .unwrap();
+            let key = clients[0];
+            let before = live_rect(&jwm, key);
+            let factor = jwm.state.clients[key].state.client_fact;
+            let mfact = jwm.state.monitors[mon].layout.m_fact;
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WmKeyboardShortcut {
+                    keysym: sym,
+                    mods: if shift {
+                        Mods::ALT | Mods::SHIFT
+                    } else {
+                        Mods::ALT
+                    },
+                },
+            )
+            .unwrap();
+            let after = live_rect(&jwm, key);
+            let (old, new) = if horizontal {
+                assert_eq!(after.h, before.h);
+                (before.w, after.w)
+            } else {
+                assert_eq!(after.w, before.w);
+                (before.h, after.h)
+            };
+            assert!(if increase { new > old } else { new < old });
+            assert_eq!(jwm.get_selected_client_key(), Some(key));
+            assert_eq!(jwm.state.clients[key].state.client_fact, factor);
+            assert_eq!(jwm.state.monitors[mon].layout.m_fact, mfact);
+            assert!(!jwm.state.clients[key].state.is_floating);
+            for _ in 0..4 {
+                jwm.arrange(&mut backend, Some(mon));
+                assert_eq!(live_rect(&jwm, key), after);
+            }
+        }
+        let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::TILE, 3);
+        jwm.key_bindings = crate::config::Config::default().get_keys();
+        for (sym, target) in [(keys::KEY_j, clients[1]), (keys::KEY_k, clients[0])] {
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WmKeyboardShortcut {
+                    keysym: sym,
+                    mods: Mods::ALT,
+                },
+            )
+            .unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(target));
+            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        }
+    }
+
+    #[test]
+    fn scrolling_column_shortcuts_ignore_cached_columns_after_layout_exit() {
+        use crate::backend::common_define::keys;
+        use crate::core::layout::LayoutEnum;
+        let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::SCROLLING, 3);
+        jwm.key_bindings = crate::config::Config::default().get_keys();
+        jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+            .unwrap();
+        let scope = jwm.layout_resize_scope(mon).unwrap();
+        let intent = jwm.state.monitors[mon].layout_resizes[&scope].intent;
+        for (sym, expected) in [(keys::KEY_Right, clients[1]), (keys::KEY_Left, clients[0])] {
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WmKeyboardShortcut {
+                    keysym: sym,
+                    mods: Mods::ALT,
+                },
+            )
+            .unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(expected));
+            assert_eq!(
+                jwm.state.monitors[mon].layout_resizes[&scope].intent,
+                intent
+            );
+        }
+        jwm.state.monitors[mon].lt = std::rc::Rc::new(LayoutEnum::TILE);
+        jwm.arrange(&mut backend, Some(mon));
+        assert!(
+            jwm.scrolling_state_for_monitor(mon).is_some(),
+            "must retain stale columns for this regression"
+        );
+        let monitor = jwm.state.monitors[mon].clone();
+        let scrolling_snapshot = |jwm: &Jwm| {
+            let state = jwm.scrolling_state_for_monitor(mon).unwrap();
+            (
+                state.columns.clone(),
+                state.column_width_factors.clone(),
+                state.focused_clients.clone(),
+                state.focused_column,
+                state.attach_new_windows_to_focused_column,
+                state.viewport_x,
+            )
+        };
+        let scrolling = scrolling_snapshot(&jwm);
+        let geometry: Vec<_> = clients.iter().map(|k| live_rect(&jwm, *k)).collect();
+        let factors: Vec<_> = clients
+            .iter()
+            .map(|k| jwm.state.clients[*k].state.client_fact)
+            .collect();
+        for sym in [keys::KEY_Right, keys::KEY_Left] {
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WmKeyboardShortcut {
+                    keysym: sym,
+                    mods: Mods::ALT,
+                },
+            )
+            .unwrap();
+            assert_eq!(jwm.state.monitors[mon], monitor);
+            assert_eq!(scrolling_snapshot(&jwm), scrolling);
+            assert_eq!(
+                clients
+                    .iter()
+                    .map(|k| live_rect(&jwm, *k))
+                    .collect::<Vec<_>>(),
+                geometry
+            );
+            assert_eq!(
+                clients
+                    .iter()
+                    .map(|k| jwm.state.clients[*k].state.client_fact)
+                    .collect::<Vec<_>>(),
+                factors
+            );
+        }
+    }
 }
 
 // =================================================================================

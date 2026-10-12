@@ -15,6 +15,10 @@ Default bindings:
 | Alt+Control+Left / Right | Shrink / grow width by 2.5% of usable output width |
 | Alt+Control+Up / Down | Shrink / grow height by 2.5% of usable output height |
 | Alt+Control+Home | Reset the current workspace/layout resize intention |
+| Alt+H / L | Shrink / grow width by 2.5% |
+| Alt+Shift+H / L | Grow / shrink height by 2.5% |
+| Alt+J / K | Next / previous window; focus within the current scrolling column |
+| Alt+Left / Right | Focus the left / right scrolling column; no-op outside scrolling |
 | Alt+right mouse drag on a master | Resize its selected edge/corner in the layout |
 
 A custom keybinding list is not rewritten on upgrade. To add these controls to
@@ -28,10 +32,75 @@ jwm-tool msg resize_vertical --args '{"value":-0.025}'
 jwm-tool msg reset_layout_size
 ```
 
-Alt+h/l (`setmfact`) and Alt+Shift+h/l (`setcfact`) keep their original meanings,
-including orientation changes and scrolling's column-focus bindings. Changing a
-layout factor or master count explicitly clears its physical resize override so
-that an old size intention cannot swallow the factor command.
+The H/L aliases use physical width and height in every layout. Shift+H grows
+height and Shift+L shrinks it, preserving the increase/decrease signs of the old
+client-factor bindings. Alt+J/K still switches focus. Scrolling's former
+Alt+Shift+H/L column navigation is now available on Alt+Left/Right; those two
+keys do nothing in other layouts, even if that workspace previously used
+scrolling.
+
+The `setmfact` and `setcfact` actions and their IPC commands remain available
+with their existing meanings, including scrolling's column-focus interpretation
+of `setcfact`. Existing user bindings to them keep working. Changing an actual
+layout factor or master count clears the physical resize override so that an
+old size intention cannot swallow the factor command.
+
+### Existing configuration files
+
+Upgrading does **not** rewrite or migrate your keybinding list. The new letter
+aliases and column-navigation keys are defaults for newly generated
+configurations. For an existing configuration, edit the file for your session:
+`~/.config/jwm/config_x11.toml` or `~/.config/jwm/config_wayland.toml` (under
+`$XDG_CONFIG_HOME/jwm/` when that variable is set).
+
+Replace the four existing Alt+H/L and Alt+Shift+H/L entries with the first four
+blocks below. Do not append duplicate bindings. Add the final two blocks only
+if Alt+Left/Right are unused, or choose different keys for them if your custom
+configuration already uses those combinations. Leave Alt+J/K and the
+Alt+Control+arrow/Home bindings unchanged.
+
+```toml
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "h"
+function = "resize_horizontal"
+argument = -0.025
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "l"
+function = "resize_horizontal"
+argument = 0.025
+
+[[keybindings.keys]]
+modifier = ["Mod1", "Shift"]
+key = "h"
+function = "resize_vertical"
+argument = 0.025
+
+[[keybindings.keys]]
+modifier = ["Mod1", "Shift"]
+key = "l"
+function = "resize_vertical"
+argument = -0.025
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "Left"
+function = "scrolling_focus_column"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "Right"
+function = "scrolling_focus_column"
+argument = 1
+```
+
+Save the file, then run `jwm-tool msg reload_config` in the running session.
+An invalid configuration is rejected rather than partially replacing bindings.
+To keep the old factor controls instead, leave your existing four entries as
+they are and use the explicit physical resize actions on other keys or over IPC.
 
 Modifier mouse resizing now keeps eligible masters tiled. To retain the former
 float-on-resize behavior for a custom mouse binding, change its action from

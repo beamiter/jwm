@@ -41,6 +41,11 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Column-navigation bindings must not consume a previous scrolling
+        // layout's cached columns after this workspace changes layout.
+        if !self.is_scrolling_layout() {
+            return Ok(());
+        }
         let direction = match *arg {
             WMArgEnum::Int(i) => i,
             _ => return Ok(()),

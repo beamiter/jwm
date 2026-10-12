@@ -263,7 +263,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[setcfact]");
 
-        // In scrolling layout, Alt+Shift+h/l focuses columns
+        // Legacy setcfact bindings retain their scrolling column-focus semantics.
         if self.is_scrolling_layout() {
             if let WMArgEnum::Float(f) = arg {
                 if !f.is_finite() {
