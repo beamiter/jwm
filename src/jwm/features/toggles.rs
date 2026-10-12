@@ -3370,6 +3370,7 @@ impl Jwm {
             backend.compositor_set_overview_mode(false, &[]);
             let _ = backend.key_ops().ungrab_keyboard();
         } else {
+            self.cancel_pointer_drag(backend);
             // Start overview: collect visible windows on current monitor
             let sel_mon_key = match self.state.sel_mon {
                 Some(k) => k,
@@ -3693,6 +3694,7 @@ impl Jwm {
             return Err(format!("screen annotation cannot start while {mode} is active").into());
         }
 
+        self.cancel_pointer_drag(backend);
         let keyboard_grabbed = if let Some(root) = backend.root_window() {
             backend.key_ops().grab_keyboard(root)?;
             true
@@ -3849,6 +3851,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.cancel_pointer_drag(backend);
         if let Some(root) = backend.root_window() {
             backend.key_ops().grab_keyboard(root)?;
         }
@@ -4796,6 +4799,9 @@ impl Jwm {
         {
             return Err(format!("expose cannot open while {mode} is active").into());
         }
+        if !self.features.expose_active {
+            self.cancel_pointer_drag(backend);
+        }
         // Collect windows visible on their monitor; eligibility filtering and
         // the enter/exit decision live in the pure plan.
         let candidates = if self.features.expose_active {
@@ -4862,6 +4868,7 @@ impl Jwm {
         match action {
             expose_plan::ExposeAction::Keep => {}
             expose_plan::ExposeAction::Enter { windows } => {
+                self.cancel_pointer_drag(backend);
                 let keyboard_grabbed = if let Some(root) = backend.root_window() {
                     backend.key_ops().grab_keyboard(root)?;
                     true
@@ -6571,7 +6578,7 @@ mod modal_grab_tests {
 }
 
 #[cfg(test)]
-mod keyboard_grab_tests {
+pub(crate) mod keyboard_grab_tests {
     use crate::backend::api::{
         Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
@@ -6646,6 +6653,7 @@ mod keyboard_grab_tests {
         held: AtomicBool,
         // 0 = success, 1 = busy, 2 = transport error.
         reply: AtomicU8,
+        events: std::sync::Mutex<Vec<&'static str>>,
     }
 
     impl InputOps for PointerGrabInputOps {
@@ -6661,6 +6669,7 @@ mod keyboard_grab_tests {
         }
 
         fn grab_pointer(&self, _mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
+            self.events.lock().unwrap().push("grab");
             match self.reply.load(Ordering::Relaxed) {
                 1 => Ok(false),
                 2 => Err(BackendError::Message("pointer grab failed".into())),
@@ -6672,6 +6681,7 @@ mod keyboard_grab_tests {
         }
 
         fn ungrab_pointer(&self) -> Result<(), BackendError> {
+            self.events.lock().unwrap().push("ungrab");
             self.held.store(false, Ordering::Relaxed);
             Ok(())
         }
@@ -6910,6 +6920,19 @@ mod keyboard_grab_tests {
             &mut self.color_allocator
         }
 
+        fn begin_track(
+            &mut self,
+            _window: WindowId,
+            _intent: crate::backend::api::InteractionAction,
+        ) -> Result<bool, BackendError> {
+            self.input_ops.grab_pointer(0, None)
+        }
+
+        fn handle_button_release(&mut self, _time: u32) -> Result<bool, BackendError> {
+            self.input_ops.ungrab_pointer()?;
+            Ok(true)
+        }
+
         fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
             Ok(())
         }
@@ -6929,6 +6952,106 @@ mod keyboard_grab_tests {
         let key = jwm.insert_client(client);
         jwm.attach_to_monitor(key, monitor);
         key
+    }
+
+    /// Runs the real modal entry and drag cancellation with inert grab state.
+    /// Shared with screenshot tests so the private selector entry is exercised
+    /// without creating files or running its save/encoder path.
+    pub(crate) fn assert_drag_handoff(
+        pointer: bool,
+        enter: impl Fn(&mut Jwm, &mut dyn Backend) -> Result<bool, Box<dyn std::error::Error>>,
+    ) {
+        use crate::jwm::mouse_handler::DragMode;
+        for failure in 0..=3 {
+            for activated in [false, true] {
+                let mut backend = GrabSpyBackend::new();
+                let mut jwm = jwm(&mut backend);
+                let key = overview_window(&mut jwm, 0xb31);
+                let other = overview_window(&mut jwm, 0xb32);
+                // A different floating requester is admissible under the
+                // default policy, so rejection must happen before focus.
+                jwm.state.clients[other].state.is_floating = true;
+                let monitor = jwm.state.clients[key].mon.unwrap();
+                jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(key));
+                jwm.start_pointer_drag(&mut backend, key, DragMode::MoveFloat)
+                    .unwrap();
+                assert!(jwm.drag_ctl.is_some());
+                if activated {
+                    jwm.drag_ctl.as_mut().unwrap().activated = true;
+                    jwm.state.clients[key].state.is_floating = true;
+                    jwm.state.clients[key].state.is_drag_floating = true;
+                }
+                backend.input_ops.events.lock().unwrap().clear();
+                backend
+                    .input_ops
+                    .reply
+                    .store(if failure == 3 { 0 } else { failure }, Ordering::Relaxed);
+                backend
+                    .key_ops
+                    .refuse
+                    .store(failure == 3, Ordering::Relaxed);
+                let result = enter(&mut jwm, &mut backend);
+                let succeeds = failure == 0 || (!pointer && failure < 3);
+                if succeeds {
+                    assert!(result.unwrap());
+                } else {
+                    assert!(!matches!(result, Ok(true)));
+                }
+                assert!(jwm.drag_ctl.is_none());
+                assert!(!jwm.state.clients[key].state.is_floating);
+                assert!(!jwm.state.clients[key].state.is_drag_floating);
+                let events = backend.input_ops.events.lock().unwrap().clone();
+                assert_eq!(events.first(), Some(&"ungrab"), "old owner must end first");
+                let pointer_attempted = pointer && failure != 3;
+                assert_eq!(
+                    events,
+                    if pointer_attempted {
+                        vec!["ungrab", "grab"]
+                    } else {
+                        vec!["ungrab"]
+                    }
+                );
+                assert_eq!(
+                    backend.input_ops.held.load(Ordering::Relaxed),
+                    pointer && succeeds
+                );
+                assert_eq!(backend.keyboard_held(), succeeds);
+                if succeeds {
+                    let events = backend.input_ops.events.lock().unwrap().clone();
+                    let selected = jwm.get_selected_client_key();
+                    jwm.on_moveresize_request(&mut backend, WindowId::from_raw(0xb32), 8);
+                    jwm.start_pointer_drag(&mut backend, other, DragMode::MoveFloat)
+                        .unwrap();
+                    assert!(jwm.drag_ctl.is_none());
+                    assert_eq!(jwm.get_selected_client_key(), selected);
+                    // A stray client CANCEL does not own the modal's grab.
+                    jwm.on_moveresize_request(&mut backend, WindowId::from_raw(0xb31), 11);
+                    assert_eq!(*backend.input_ops.events.lock().unwrap(), events);
+                    assert_eq!(backend.input_ops.held.load(Ordering::Relaxed), pointer);
+                    assert!(backend.keyboard_held());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn annotation_expose_overview_and_recording_take_input_after_drag_cancel() {
+        assert_drag_handoff(true, |jwm, backend| {
+            jwm.toggle_annotation(backend, &NO_ARG)?;
+            Ok(jwm.features.annotation_active)
+        });
+        assert_drag_handoff(true, |jwm, backend| {
+            jwm.toggle_expose(backend, &NO_ARG)?;
+            Ok(jwm.features.expose_active)
+        });
+        assert_drag_handoff(false, |jwm, backend| {
+            jwm.toggle_overview(backend, &NO_ARG)?;
+            Ok(jwm.features.overview.active)
+        });
+        assert_drag_handoff(true, |jwm, backend| {
+            jwm.begin_recording_region_selection(backend, "/unused/handoff.mp4".into())?;
+            Ok(jwm.features.recording.selecting_region)
+        });
     }
 
     #[test]

@@ -1244,6 +1244,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         screenshot_path: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        // End the old pointer owner before this selector acquires its grabs.
+        self.cancel_pointer_drag(backend);
         let keyboard_grabbed = if let Some(root) = backend.root_window() {
             backend.key_ops().grab_keyboard(root)?;
             true
@@ -2490,6 +2492,14 @@ impl Jwm {
 mod tests {
     use super::*;
     use crate::backend::compositor_common::screenshot_toolbar::ButtonFace;
+
+    #[test]
+    fn screenshot_takes_input_only_after_cancelling_the_previous_drag() {
+        crate::jwm::features::toggles::keyboard_grab_tests::assert_drag_handoff(
+            true,
+            |jwm, backend| jwm.begin_interactive_capture(backend, "/unused/handoff.png"),
+        );
+    }
 
     #[test]
     fn screenshot_watcher_admission_refuses_fullscreen_before_path_preflight() {

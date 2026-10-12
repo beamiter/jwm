@@ -169,6 +169,11 @@ impl Jwm {
         client_key: ClientKey,
         mode: DragMode,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // One pointer gesture owns its original geometry and cancel snapshot.
+        // Repeated presses or client requests must not replace that owner.
+        if self.drag_ctl.is_some() || self.grab_holding_mode_on_screen().is_some() {
+            return Ok(());
+        }
         let Some(client) = self.state.clients.get(client_key) else {
             return Ok(());
         };
@@ -271,14 +276,25 @@ impl Jwm {
     /// `_NET_WM_MOVERESIZE_CANCEL` (e.g. Esc during a GTK header-bar drag):
     /// end the grab and put the window back where the drag found it.
     pub(crate) fn cancel_pointer_drag(&mut self, backend: &mut dyn Backend) {
-        let ctl = self.drag_ctl.take();
+        // A client CANCEL without a WM-owned gesture must not release a
+        // screenshot/panel's grab or clear its preview.
+        let Some(ctl) = self.drag_ctl.take() else {
+            return;
+        };
         let _ = backend.handle_button_release(0);
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
-        let Some(ctl) = ctl else {
+        // The window may have disappeared before a modal takes over. End its
+        // owner without reinserting a retired client key into monitor order.
+        if !self.state.clients.contains_key(ctl.client) {
+            if let DragMode::ResizeTiled(_, scope) = ctl.mode
+                && let Some(monitor) = ctl.mon.and_then(|mon| self.state.monitors.get_mut(mon))
+            {
+                monitor.layout_resizes.remove(&scope);
+            }
             return;
-        };
+        }
         if let DragMode::ResizeTiled(_, scope) = ctl.mode {
             self.finish_tiled_resize(backend, ctl.mon, scope, true);
             return;

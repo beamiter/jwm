@@ -1998,6 +1998,11 @@ impl Jwm {
             self.cancel_pointer_drag(backend);
             return;
         }
+        // Reject re-entry before a different requester can change focus or
+        // monitor selection. Explicit cancellation above still ends the owner.
+        if self.drag_ctl.is_some() || self.grab_holding_mode_on_screen().is_some() {
+            return;
+        }
 
         let client_key = match self.wintoclient(win) {
             Some(ck) => ck,
@@ -2853,6 +2858,9 @@ mod tests {
         /// Accept track-only drags and report every motion and release as
         /// part of one; off, the backend has no drag support at all.
         track_drags: bool,
+        track_starts: usize,
+        track_releases: usize,
+        fail_track_start: bool,
         /// Every wobbly move delta, by window.
         move_deltas: Vec<WindowId>,
         /// Every snap-preview push, newest last.
@@ -2897,6 +2905,9 @@ mod tests {
                 monitor_shade_pushes: Vec::new(),
                 x11_client_list: false,
                 track_drags: false,
+                track_starts: 0,
+                track_releases: 0,
+                fail_track_start: false,
                 move_deltas: Vec::new(),
                 snap_previews: Vec::new(),
                 interaction_geometry: None,
@@ -3081,6 +3092,10 @@ mod tests {
             _win: WindowId,
             _intent: InteractionAction,
         ) -> Result<bool, BackendError> {
+            self.track_starts += 1;
+            if self.fail_track_start {
+                return Err(BackendError::Message("injected track start failure".into()));
+            }
             Ok(self.track_drags)
         }
 
@@ -3093,6 +3108,7 @@ mod tests {
         }
 
         fn handle_button_release(&mut self, _time: u32) -> Result<bool, BackendError> {
+            self.track_releases += 1;
             Ok(self.track_drags)
         }
 
@@ -12445,6 +12461,220 @@ mod tests {
                 factors
             );
         }
+    }
+    #[test]
+    fn cancelling_a_removed_drag_owner_never_reinserts_its_client_key() {
+        use crate::core::layout::LayoutEnum;
+        use crate::jwm::mouse_handler::DragMode;
+        for tiled in [false, true] {
+            let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 2);
+            let key = keys[0];
+            let mode = if tiled {
+                jwm.resize_drag_mode(key, crate::backend::api::ResizeEdge::Right)
+            } else {
+                DragMode::MoveFloat
+            };
+            jwm.start_pointer_drag(&mut backend, key, mode).unwrap();
+            jwm.drag_ctl.as_mut().unwrap().activated = true;
+            jwm.state.clients.remove(key);
+            jwm.state
+                .monitor_clients
+                .get_mut(mon)
+                .unwrap()
+                .retain(|&k| k != key);
+            jwm.state
+                .monitor_stack
+                .get_mut(mon)
+                .unwrap()
+                .retain(|&k| k != key);
+            let order = jwm.state.monitor_clients[mon].clone();
+            jwm.cancel_pointer_drag(&mut backend);
+            assert!(jwm.drag_ctl.is_none());
+            assert_eq!(jwm.state.monitor_clients[mon], order);
+            assert!(!jwm.state.clients.contains_key(key));
+            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+            assert_eq!(backend.track_releases, 1);
+            let previews = backend.snap_previews.clone();
+            jwm.cancel_pointer_drag(&mut backend);
+            assert_eq!(backend.track_releases, 1);
+            assert_eq!(backend.snap_previews, previews);
+            jwm.start_pointer_drag(&mut backend, keys[1], DragMode::MoveFloat)
+                .unwrap();
+            assert_eq!(jwm.drag_ctl.unwrap().client, keys[1]);
+            jwm.cancel_pointer_drag(&mut backend);
+        }
+    }
+
+    #[test]
+    fn pointer_drag_reentry_preserves_original_owner_and_cancel_snapshot() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::layout::LayoutEnum;
+        use crate::jwm::mouse_handler::DragMode;
+        for (activated, cancel) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 2);
+            let key = keys[0];
+            let before = live_rect(&jwm, key);
+            let scope = jwm.layout_resize_scope(mon).unwrap();
+            let mode = jwm.resize_drag_mode(key, ResizeEdge::Right);
+            jwm.start_pointer_drag(&mut backend, key, mode).unwrap();
+            if activated {
+                let start = jwm.drag_ctl.unwrap().start_root;
+                master_resize_send_motion(&mut jwm, &mut backend, start.0 - 80.0, start.1);
+                assert_ne!(live_rect(&jwm, key), before);
+            }
+            let ctl = format!("{:?}", jwm.drag_ctl.unwrap());
+            let contexts = jwm.state.monitors[mon].layout_resizes.clone();
+            let current = live_rect(&jwm, key);
+            // A rejected re-entry must not even ask the backend for a grab.
+            backend.fail_track_start = true;
+            for candidate in [key, keys[1]] {
+                for requested in [
+                    mode,
+                    DragMode::MoveFloat,
+                    DragMode::Resize(ResizeEdge::Bottom),
+                    DragMode::Reorder,
+                ] {
+                    jwm.start_pointer_drag(&mut backend, candidate, requested)
+                        .unwrap();
+                    assert_eq!(format!("{:?}", jwm.drag_ctl.unwrap()), ctl);
+                    assert_eq!(jwm.state.monitors[mon].layout_resizes, contexts);
+                    assert_eq!(live_rect(&jwm, key), current);
+                    assert_eq!(backend.track_starts, 1);
+                }
+            }
+            backend.fail_track_start = false;
+            // Refusing the new request must not stall the original motion.
+            let start = jwm.drag_ctl.unwrap().start_root;
+            master_resize_send_motion(&mut jwm, &mut backend, start.0 - 120.0, start.1);
+            let final_rect = live_rect(&jwm, key);
+            assert_ne!(final_rect, current);
+            if cancel {
+                jwm.cancel_pointer_drag(&mut backend);
+                assert_eq!(live_rect(&jwm, key), before);
+                assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
+            } else {
+                master_resize_send_release(&mut jwm, &mut backend);
+                assert_eq!(live_rect(&jwm, key), final_rect);
+                assert!(
+                    jwm.state.monitors[mon].layout_resizes[&scope]
+                        .drag_snapshot
+                        .is_none()
+                );
+            }
+            assert!(jwm.drag_ctl.is_none());
+            // Cancel and ordinary release both leave the next gesture usable.
+            jwm.start_pointer_drag(&mut backend, key, mode).unwrap();
+            master_resize_send_release(&mut jwm, &mut backend);
+            assert!(jwm.drag_ctl.is_none());
+            jwm.start_pointer_drag(&mut backend, key, mode).unwrap();
+            assert_eq!(backend.track_starts, 3);
+            jwm.cancel_pointer_drag(&mut backend);
+        }
+    }
+
+    #[test]
+    fn moveresize_reentry_cannot_select_another_monitor_before_rejection() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::{layout::LayoutEnum, types::Rect};
+        for activated in [false, true] {
+            let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 1);
+            let key = keys[0];
+            let win = jwm.state.clients[key].win;
+            let before = live_rect(&jwm, key);
+            let mut other = jwm.state.monitors[mon].clone();
+            other.num = 1;
+            other.sel = None;
+            other.geometry.m_x = 1920;
+            other.geometry.w_x = 1920;
+            let other = jwm.state.monitors.insert(other);
+            jwm.state.monitor_order.push(other);
+            jwm.state.monitor_clients.insert(other, Vec::new());
+            jwm.state.monitor_stack.insert(other, Vec::new());
+            let other_win = WindowId::from_raw(0x7301);
+            let other_key = add_maximize_test_client(
+                &mut jwm,
+                other,
+                other_win,
+                Rect::new(1950, 60, 640, 480),
+                true,
+            );
+            jwm.state.clients[other_key].size_hints.hints_valid = true;
+            jwm.state.monitors[other].set_selected_client_for_current_tag(Some(other_key));
+            let mode = jwm.resize_drag_mode(key, ResizeEdge::Right);
+            jwm.start_pointer_drag(&mut backend, key, mode).unwrap();
+            if activated {
+                let start = jwm.drag_ctl.unwrap().start_root;
+                master_resize_send_motion(&mut jwm, &mut backend, start.0 - 80.0, start.1);
+            }
+            let owner = format!("{:?}", jwm.drag_ctl.unwrap());
+            let snapshots = [
+                jwm.state.monitors[mon].clone(),
+                jwm.state.monitors[other].clone(),
+            ];
+            let current = live_rect(&jwm, key);
+            for requested_win in [win, other_win] {
+                for direction in [3, 8] {
+                    jwm.handle_event(
+                        &mut backend,
+                        BackendEvent::MoveResizeRequest {
+                            window: requested_win,
+                            direction,
+                            button: 1,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(jwm.state.sel_mon, Some(mon));
+                    assert_eq!(jwm.get_selected_client_key(), Some(key));
+                    assert_eq!(format!("{:?}", jwm.drag_ctl.unwrap()), owner);
+                    assert_eq!(jwm.state.monitors[mon], snapshots[0]);
+                    assert_eq!(jwm.state.monitors[other], snapshots[1]);
+                    assert_eq!(live_rect(&jwm, key), current);
+                    assert_eq!(backend.track_starts, 1);
+                }
+            }
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::MoveResizeRequest {
+                    window: win,
+                    direction: 11,
+                    button: 1,
+                },
+            )
+            .unwrap();
+            assert!(jwm.drag_ctl.is_none());
+            assert_eq!(live_rect(&jwm, key), before);
+            jwm.start_pointer_drag(
+                &mut backend,
+                other_key,
+                crate::jwm::mouse_handler::DragMode::MoveFloat,
+            )
+            .unwrap();
+            assert_eq!(jwm.drag_ctl.unwrap().client, other_key);
+            assert_eq!(backend.track_starts, 2);
+            jwm.cancel_pointer_drag(&mut backend);
+        }
+    }
+
+    #[test]
+    fn pointer_drag_failed_or_unsupported_start_does_not_reserve_an_owner() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::layout::LayoutEnum;
+        let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 1);
+        let mode = jwm.resize_drag_mode(keys[0], ResizeEdge::Right);
+        backend.track_drags = false;
+        jwm.start_pointer_drag(&mut backend, keys[0], mode).unwrap();
+        assert!(jwm.drag_ctl.is_none());
+        assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        backend.track_drags = true;
+        backend.fail_track_start = true;
+        assert!(jwm.start_pointer_drag(&mut backend, keys[0], mode).is_err());
+        assert!(jwm.drag_ctl.is_none());
+        assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        backend.fail_track_start = false;
+        jwm.start_pointer_drag(&mut backend, keys[0], mode).unwrap();
+        assert!(jwm.drag_ctl.is_some());
+        assert_eq!(backend.track_starts, 3);
+        jwm.cancel_pointer_drag(&mut backend);
     }
 }
 
