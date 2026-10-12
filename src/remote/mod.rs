@@ -24,6 +24,7 @@ pub mod key;
 pub mod messages;
 pub mod protocol;
 mod tile;
+pub mod usability;
 pub mod x11_capture;
 pub mod x11_input;
 pub mod x11_keymap;

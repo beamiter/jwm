@@ -4,8 +4,10 @@ use clap::{Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client};
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::generate_key_file;
+use jwm::remote::usability::{default_key_path, key_metadata, normalize_address};
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource};
 use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
+use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPORT_VERSION};
 use std::path::PathBuf;
 
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
@@ -14,7 +16,8 @@ const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
 #[command(
     name = "jwm-remote",
     version,
-    about = "JWM-to-JWM remote viewing and control for trusted X11 LANs"
+    about = "JWM-to-JWM remote viewing and control for trusted X11 LANs",
+    after_help = "Start here: jwm-remote doctor\nCreate a key explicitly: jwm-remote keygen (never overwrites; see keygen --help).\nShare the same private key securely with your other machine.\nHost: jwm-remote host --listen 0.0.0.0:48221 --allow-lan\nViewer: jwm-remote connect HOST --view-only\nInput needs host --allow-input; clipboard requires explicit consent on both ends.\nDefault key: $XDG_CONFIG_HOME/jwm/remote.key, otherwise $HOME/.config/jwm/remote.key.\nNo command silently creates a key, opens LAN access, or enables clipboard sharing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,9 +27,22 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Generate a new private pre-shared key file (never overwrites).
+    #[command(
+        after_help = "First create the private parent directory yourself if needed. For the HOME default:\n  mkdir -p -m 700 \"$HOME/.config/jwm\"\n  jwm-remote keygen\nIf XDG_CONFIG_HOME is set, use \"$XDG_CONFIG_HOME/jwm\" instead.\nExisting directories are not repaired or chmodded. Copy the generated key only through a secure channel."
+    )]
     Keygen {
+        /// Default: the private JWM key path. Parent directory must already exist.
         #[arg(long, value_name = "PATH")]
-        output: PathBuf,
+        output: Option<PathBuf>,
+    },
+    /// Offline checks only: no X11/network connection and no key-content reads.
+    Doctor {
+        /// Private key; defaults to the JWM key path shown in top-level help.
+        #[arg(long, value_name = "PATH")]
+        key_file: Option<PathBuf>,
+        /// Local X11 display (defaults to DISPLAY); presence is not connectivity.
+        #[arg(long, value_name = "DISPLAY")]
+        display: Option<String>,
     },
     /// Share the current JWM X11 desktop.
     Host {
@@ -34,8 +50,9 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:48221", value_name = "ADDRESS:PORT")]
         listen: String,
 
+        /// Private key; defaults to the JWM key path shown in top-level help.
         #[arg(long, value_name = "PATH")]
-        key_file: PathBuf,
+        key_file: Option<PathBuf>,
 
         /// X11 display to share (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
@@ -105,11 +122,13 @@ enum Command {
     },
     /// Open a remote JWM desktop in a window on this JWM X11 session.
     Connect {
-        #[arg(value_name = "HOST:PORT")]
+        /// Hostname/IP, optionally with port (default 48221). Use [IPv6]:PORT.
+        #[arg(value_name = "HOST[:PORT]", value_parser = normalize_address)]
         address: String,
 
+        /// Private key; defaults to the JWM key path shown in top-level help.
         #[arg(long, value_name = "PATH")]
-        key_file: PathBuf,
+        key_file: Option<PathBuf>,
 
         /// Local X11 display for the viewer window (defaults to DISPLAY).
         #[arg(long, value_name = "DISPLAY")]
@@ -137,13 +156,43 @@ enum Command {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match Cli::parse().command {
+fn main() -> std::process::ExitCode {
+    match run(Cli::parse().command) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("jwm-remote: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn resolve_key_path(explicit: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    explicit.map_or_else(
+        || {
+            default_key_path(
+                std::env::var_os("XDG_CONFIG_HOME"),
+                std::env::var_os("HOME"),
+            )
+        },
+        Ok,
+    )
+}
+
+fn run(command: Command) -> RemoteResult<()> {
+    match command {
         Command::Keygen { output } => {
+            let output = resolve_key_path(output)?;
+            if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+                if !parent.is_dir() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::NotFound,
+                        format!("key parent directory does not exist: {:?}. Create a private directory first (see keygen --help); nothing was created", parent)).into());
+                }
+            }
             generate_key_file(&output)?;
-            println!("Generated private remote key: {}", output.display());
+            println!("Generated private remote key: {:?}", output);
             Ok(())
         }
+        Command::Doctor { key_file, display } => run_doctor(resolve_key_path(key_file)?, display),
         Command::Host {
             listen,
             key_file,
@@ -161,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             allow_clipboard,
             once,
         } => {
+            let key_file = resolve_key_path(key_file)?;
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
             let capture_area = match (monitor, region) {
                 (Some(name), _) => CaptureArea::Monitor(name),
@@ -194,13 +244,60 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             escape_key,
         } => run_client(ClientOptions {
             address,
-            key_file,
+            key_file: resolve_key_path(key_file)?,
             display,
             view_only,
             grab_input,
             clipboard,
             escape_key,
         }),
+    }
+}
+
+fn run_doctor(key_file: PathBuf, display: Option<String>) -> RemoteResult<()> {
+    println!(
+        "jwm-remote {} offline preflight (remote-x11 compiled)",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("Local protocol: transport {TRANSPORT_VERSION}, application {APPLICATION_VERSION}");
+    println!("Peer compatibility: NOT probed; update both helpers together");
+    let display = display
+        .or_else(|| std::env::var("DISPLAY").ok())
+        .filter(|value| !value.trim().is_empty());
+    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
+    println!(
+        "Session type: {session:?}; DISPLAY: {:?} (not opened)",
+        display.as_deref().unwrap_or("missing")
+    );
+    let mut blocked = display.is_none() || session.eq_ignore_ascii_case("wayland");
+    if blocked {
+        println!(
+            "FAIL: use a JWM X11 session on both machines; Wayland/Xwayland is outside this MVP"
+        );
+    }
+    println!("Key path: {:?}", key_file);
+    match key_metadata(&key_file, unsafe { libc::geteuid() }) {
+        Ok(summary) => println!("Key metadata: {summary}"),
+        Err(error) => {
+            blocked = true;
+            println!("FAIL: key metadata: {error}");
+            println!(
+                "If setting up for the first time, see keygen --help; use --key-file for an existing private key. No file was changed."
+            );
+        }
+    }
+    println!(
+        "NOT probed: JWM ownership, X11 connectivity, Composite/XTEST/XKB, capture area, network reachability or peer key/version."
+    );
+    println!("Dependencies: this helper loaded; native display extensions remain unverified.");
+    if blocked {
+        Err(std::io::Error::other(
+            "offline preflight found local setup problems; nothing was connected or changed",
+        )
+        .into())
+    } else {
+        println!("Offline checks passed. This is not an end-to-end readiness check.");
+        Ok(())
     }
 }
 
@@ -258,6 +355,87 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_and_short_examples_match_the_parser() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        for command in [
+            vec!["jwm-remote", "--help"],
+            vec!["jwm-remote", "keygen", "--help"],
+            vec!["jwm-remote", "doctor", "--help"],
+            vec!["jwm-remote", "host", "--help"],
+            vec!["jwm-remote", "connect", "--help"],
+        ] {
+            let error = Cli::try_parse_from(command).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
+        for command in [
+            vec!["jwm-remote", "keygen"],
+            vec!["jwm-remote", "doctor"],
+            vec![
+                "jwm-remote",
+                "host",
+                "--listen",
+                "0.0.0.0:48221",
+                "--allow-lan",
+            ],
+            vec!["jwm-remote", "connect", "host", "--view-only"],
+            vec![
+                "jwm-remote",
+                "connect",
+                "[::1]:1234",
+                "--key-file",
+                "private.key",
+                "--grab-input",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(command).is_ok());
+        }
+        let Command::Connect {
+            address, key_file, ..
+        } = Cli::try_parse_from(["jwm-remote", "connect", "host"])
+            .unwrap()
+            .command
+        else {
+            panic!("connect variant expected")
+        };
+        assert_eq!(address, "host:48221");
+        assert!(key_file.is_none());
+        assert_eq!(
+            resolve_key_path(Some(PathBuf::from("explicit.key"))).unwrap(),
+            PathBuf::from("explicit.key")
+        );
+    }
+
+    #[test]
+    fn cli_rejects_conflicting_permissions_and_malformed_addresses() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "connect",
+                "host",
+                "--view-only",
+                "--grab-input"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "connect", "host:99999"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--monitor",
+                "DP-1",
+                "--region",
+                "100x100+0+0"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["jwm-remote", "doctor", "--allow-lan"]).is_err());
+        assert!(Cli::try_parse_from(["jwm-remote", "doctor", "--allow-input"]).is_err());
+        assert!(Cli::try_parse_from(["jwm-remote", "doctor", "--clipboard"]).is_err());
+    }
 
     #[test]
     fn unsafe_ranges_fail_at_cli_boundary() {

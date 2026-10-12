@@ -7,7 +7,7 @@ use super::x11_input::InputEvent;
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-const APPLICATION_VERSION: u16 = 4;
+pub const APPLICATION_VERSION: u16 = 4;
 const SERVER_HELLO_LEN: usize = 11;
 const CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + 32;
 const FLAG_POINTER: u8 = 1 << 0;

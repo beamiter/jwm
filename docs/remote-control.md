@@ -20,6 +20,117 @@ place the helper in `/usr/local/bin`):
 export PATH="/usr/local/lib/jwm/current/bin:$PATH"
 ```
 
+## Quick start: two X11 JWM machines
+
+Start on **both** machines with:
+
+```bash
+jwm-remote doctor
+```
+
+This is an **offline preflight**, not a connection test. It prints the local
+protocol versions, session/display environment and key-file metadata, without
+opening X11 or a socket and without reading key contents. Missing display/key,
+unsafe key metadata (including a missing owner-read bit) or an advertised Wayland session gives a nonzero exit.
+Composite, XTEST, keyboard compatibility, monitor selection and the peer remain
+explicitly **not probed**. A metadata pass does not prove that the key is valid,
+readable or equal on both machines.
+
+All commands now share a default key path: absolute
+`$XDG_CONFIG_HOME/jwm/remote.key`, or `$HOME/.config/jwm/remote.key` when
+`XDG_CONFIG_HOME` is unset/empty. Relative configuration/home paths and a missing
+HOME are errors, never a fallback into the working directory. Environment values and key paths
+are printed with visible escaping so they cannot forge diagnostic lines. Existing explicit
+`--key-file PATH` (and keygen `--output PATH`) still take precedence.
+
+For a first setup, create the private parent directory and generate a key
+**once on one machine**, then copy that same key securely to the other machine
+as described under [First LAN connection](#first-lan-connection). For the HOME
+default (when `XDG_CONFIG_HOME` is not set):
+
+```bash
+mkdir -p -m 700 "$HOME/.config/jwm"
+jwm-remote keygen
+```
+
+If `XDG_CONFIG_HOME` is set, create its `jwm` directory instead; it must be an
+absolute path. `keygen` refuses to overwrite an existing key and reports a
+missing parent. No helper command creates directories or repairs permissions.
+Do not generate two different keys for the same connection. Run `doctor` again
+after copying the key; its output never contains key bytes.
+
+Start with viewing only:
+
+```bash
+# Host: sharing this machine's desktop on your trusted LAN
+jwm-remote host --listen 0.0.0.0:48221 --allow-lan
+
+# Viewer: replace HOST with that machine's actual LAN hostname or IP
+jwm-remote connect HOST --view-only
+```
+
+The default port is 48221: `HOST`, `HOST:48221`, `[::1]`, and `[::1]:48221`
+are accepted. A bare IPv6 address always uses the default port; bracket it to
+specify another port. `host` still binds loopback unless explicitly told
+otherwise; none of these conveniences opens a firewall or enables LAN access.
+Restrict the host firewall to the intended trusted subnet yourself.
+
+To control the machine, stop/restart the host with `--allow-input`, then run:
+
+```bash
+jwm-remote connect HOST --grab-input
+```
+
+Click the viewer to take control. Double-tap F12 quickly to release input;
+close the viewer to disconnect. Use `--escape-key Pause` if needed. Clipboard
+stays off unless the host has `--allow-clipboard` **and** the viewer has
+`--clipboard`.
+
+### Know what is connected
+
+The viewer terminal reports connecting, authentication/negotiation, waiting for
+the first frame, and finally connected **after a frame is drawn and ACKed**. This is the existing viewer draw/ACK
+contract, not a guarantee that a physical display has completed scanout.
+The title shows actual negotiated permissions: view-only, pointer-only when
+keymaps differ, or keyboard + pointer. It also shows clipboard ON/off and,
+with `--grab-input`, whether input is released or grabbed and how to release it.
+An authenticated connection waiting on capture is not reported as a connected
+desktop. View-only and host input denial remain view-only; there is no fallback
+that enables input automatically.
+
+### Recover deliberately
+
+Errors identify the stage (local setup, TCP connect, negotiation, first-frame
+receive/decode, local clipboard setup, local display/draw, first-frame ACK, or active session) and give the corresponding next check. A refused negotiation
+may mean a busy host, wrong key or incompatible helper; it is not blindly
+reported as a firewall problem. Read the specific cause printed with the hint.
+
+There is no automatic reconnect. After a disconnect, inspect both terminals,
+verify the intended host/key and the selected monitor or region, then rerun the
+same `connect` command from shell history. Layout/selection changes and identity
+or authentication failures never silently retry, downgrade or broaden sharing.
+A new connection authenticates and negotiates permissions again. Do not put key
+contents into a shell command or a reconnect script.
+
+### Short real-machine acceptance checklist (not run by offline tests)
+
+1. On both X11 JWM machines, run `doctor`; confirm protocol versions match,
+   metadata is private, and native/peer checks are marked not probed. A missing
+   key or a relative XDG_CONFIG_HOME should fail without creating any file.
+2. Start a view-only LAN host and connect with the short hostname/IP command.
+   Confirm the first desktop appears before the connected line, and input and
+   clipboard remain disabled.
+3. Restart the host with `--allow-input`; connect with `--grab-input`. Confirm
+   click-to-control, the grabbed/released title changes, and double-F12 releases
+   all remotely held input. With differing XKB maps, verify pointer-only status.
+4. Close the viewer normally, then reconnect deliberately. Interrupt the host
+   or network and confirm a clear session-stage reason; no automatic reconnect.
+5. Select a monitor/region, change its position/size, and verify fail-closed
+   disconnect. Recheck the area before rerunning the connection command.
+6. Verify a wrong key, older peer and occupied host fail safely. Enable clipboard
+   on one end only, then both ends using harmless text; confirm its title and
+   actual behavior agree. Restore clipboard-off for normal use if not needed.
+
 ## Security boundary
 
 Remote control is disabled until `jwm-remote host` is started. The host listens

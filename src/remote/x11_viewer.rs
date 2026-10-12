@@ -31,9 +31,9 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::{TryParseFd, X11Error};
 
 use super::frame::{DecodedFrame, RecyclableDecodedFrame};
+use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
 
-const TITLE: &[u8] = b"JWM Remote";
 const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
 /// Default grab-release key, kept for compatibility with earlier releases.
 pub const DEFAULT_ESCAPE_KEY: &str = "F12";
@@ -144,6 +144,9 @@ pub struct Viewer {
     blank_cursor: Cursor,
     wm_protocols: Atom,
     wm_delete_window: Atom,
+    net_wm_name: Atom,
+    utf8_string: Atom,
+    clipboard_enabled: bool,
     depth: u8,
     pixel_layout: PixelLayout,
     native_pixel_writer: NativePixelWriter,
@@ -163,6 +166,7 @@ pub struct Viewer {
     backing_letterbox: Option<Letterbox>,
     grab_input: bool,
     forward_input: bool,
+    pointer_enabled: bool,
     forward_keyboard: bool,
     verified_keymap: Option<[u8; 32]>,
     grabbed: bool,
@@ -184,12 +188,13 @@ impl Viewer {
         display: Option<&str>,
         initial_width: u16,
         initial_height: u16,
-        forward_input: bool,
+        pointer_enabled: bool,
         forward_keyboard: bool,
         verified_keymap: Option<[u8; 32]>,
         grab_input: bool,
         escape_key: &str,
     ) -> RemoteResult<Self> {
+        let forward_input = pointer_enabled || forward_keyboard;
         if initial_width == 0 || initial_height == 0 {
             return Err(invalid_input("remote viewer dimensions must be nonzero").into());
         }
@@ -287,16 +292,30 @@ impl Viewer {
             .check()?;
         render_upscale.attach_backing(&conn, backing)?;
 
+        let title = viewer_title(
+            pointer_enabled,
+            forward_keyboard,
+            grab_input,
+            false,
+            false,
+            escape_key,
+        );
         conn.change_property8(
             PropMode::REPLACE,
             window,
             AtomEnum::WM_NAME,
             AtomEnum::STRING,
-            TITLE,
+            title.as_bytes(),
         )?
         .check()?;
-        conn.change_property8(PropMode::REPLACE, window, net_wm_name, utf8_string, TITLE)?
-            .check()?;
+        conn.change_property8(
+            PropMode::REPLACE,
+            window,
+            net_wm_name,
+            utf8_string,
+            title.as_bytes(),
+        )?
+        .check()?;
         conn.change_property8(
             PropMode::REPLACE,
             window,
@@ -333,6 +352,9 @@ impl Viewer {
             blank_cursor,
             wm_protocols,
             wm_delete_window,
+            net_wm_name,
+            utf8_string,
+            clipboard_enabled: false,
             depth: root_depth,
             pixel_layout,
             native_pixel_writer,
@@ -345,6 +367,7 @@ impl Viewer {
             backing_letterbox: None,
             grab_input,
             forward_input,
+            pointer_enabled,
             forward_keyboard,
             verified_keymap,
             grabbed: false,
@@ -642,6 +665,51 @@ impl Viewer {
         (self.width, self.height)
     }
 
+    /// Keep the visible label tied to the negotiated clipboard capability.
+    pub fn set_clipboard_status(&mut self, enabled: bool) {
+        self.clipboard_enabled = enabled;
+        self.update_title();
+    }
+
+    // Decoration must never interrupt input release or turn a successful grab
+    // into a half-failed operation. Transport/input errors keep their own path.
+    fn update_title(&self) {
+        if let Err(error) = self.try_update_title() {
+            eprintln!("jwm-remote: could not refresh the status title: {error}");
+        }
+    }
+
+    fn try_update_title(&self) -> RemoteResult<()> {
+        let title = viewer_title(
+            self.pointer_enabled,
+            self.forward_keyboard,
+            self.grab_input,
+            self.grabbed,
+            self.clipboard_enabled,
+            &self.escape_name,
+        );
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                self.window,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            )?
+            .check()?;
+        self.conn
+            .change_property8(
+                PropMode::REPLACE,
+                self.window,
+                self.net_wm_name,
+                self.utf8_string,
+                title.as_bytes(),
+            )?
+            .check()?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
     /// Whether `keycode` currently resolves to the escape keysym here.
     #[must_use]
     pub fn is_escape(&self, keycode: u8) -> bool {
@@ -709,6 +777,7 @@ impl Viewer {
         }
 
         self.grabbed = true;
+        self.update_title();
         self.conn.flush()?;
         Ok(true)
     }
@@ -727,6 +796,7 @@ impl Viewer {
         self.grabbed = false;
         keyboard_result?;
         pointer_result?;
+        self.update_title();
         self.conn.flush()?;
         Ok(())
     }

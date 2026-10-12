@@ -61,7 +61,7 @@ const TRANSPORT_MAGIC: &[u8; 5] = b"JWMRT";
 
 /// Transport version. Version 1 was authenticated-but-unencrypted; version 2
 /// encrypts every record and binds the transcript into key derivation.
-const TRANSPORT_VERSION: u16 = 2;
+pub const TRANSPORT_VERSION: u16 = 2;
 
 const TRANSPORT_PREFIX_LEN: usize = TRANSPORT_MAGIC.len() + 2;
 const SERVER_HANDSHAKE_LEN: usize = TRANSPORT_PREFIX_LEN + NONCE_LEN;

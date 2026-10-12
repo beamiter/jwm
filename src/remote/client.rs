@@ -11,10 +11,11 @@ use super::protocol::{
     MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
 };
 use super::tile::TileDecoder;
+use super::usability::{ClientStage, failure_hint, session_mode};
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent, validate_escape_key};
-use super::{RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
+use super::{RemoteError, RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
 use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -56,7 +57,44 @@ pub struct ClientOptions {
     pub escape_key: String,
 }
 
+#[derive(Debug)]
+struct ClientFailure {
+    stage: ClientStage,
+    cause: RemoteError,
+}
+
+impl std::fmt::Display for ClientFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = self.cause.downcast_ref::<io::Error>().map(io::Error::kind);
+        write!(
+            f,
+            "{:?}: {}\n{}",
+            self.stage,
+            self.cause,
+            failure_hint(self.stage, kind)
+        )
+    }
+}
+
+impl std::error::Error for ClientFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
 pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
+    let mut stage = ClientStage::Setup;
+    let result = run_client_session(options, &mut stage);
+    match result {
+        Ok(()) => {
+            eprintln!("jwm-remote: session ended");
+            Ok(())
+        }
+        Err(cause) => Err(Box::new(ClientFailure { stage, cause })),
+    }
+}
+
+fn run_client_session(options: ClientOptions, stage: &mut ClientStage) -> RemoteResult<()> {
     validate_escape_key(&options.escape_key)?;
     let key = load_key_file(&options.key_file)?;
     let request_input = !options.view_only;
@@ -65,7 +103,11 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     } else {
         [0; 32]
     };
+    *stage = ClientStage::Connect;
+    eprintln!("jwm-remote: connecting to {}", options.address);
     let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
+    *stage = ClientStage::Negotiate;
+    eprintln!("jwm-remote: connection opened; authenticating and negotiating permissions");
     let (mut reader, mut writer, hello) = negotiate_session(
         stream,
         &key,
@@ -74,7 +116,9 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         keymap_fingerprint,
         HANDSHAKE_TIMEOUT,
     )?;
-    if request_input && !hello.pointer_enabled {
+    *stage = ClientStage::FirstFrame;
+    eprintln!("jwm-remote: authenticated; waiting for the first desktop frame");
+    if request_input && !(hello.pointer_enabled || hello.keyboard_enabled) {
         eprintln!("jwm-remote: host accepted a view-only session; input will not be forwarded");
     } else if request_input && !hello.keyboard_enabled {
         eprintln!("jwm-remote: X11 keymaps differ; pointer works but keyboard is disabled");
@@ -88,6 +132,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         );
     }
     let (clipboard_captures, receiver_clipboard) = if hello.clipboard_enabled {
+        *stage = ClientStage::LocalClipboard;
         match Clipboard::start(options.display.as_deref()) {
             Ok(clipboard) => {
                 let (captures, setter) = clipboard.split();
@@ -105,6 +150,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         (None, None)
     };
 
+    *stage = ClientStage::FirstFrame;
     let state = Arc::new(ReceiveState::new());
     let mut telemetry_reporter = ClientTelemetryReporter::new(&state.telemetry);
     let payload = read_initial_frame(
@@ -137,19 +183,45 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     let initial_height = u16::try_from(first_frame.frame.image().height())
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
     let last_sequence = first_frame.frame.sequence();
+    *stage = ClientStage::Display;
     let mut viewer = Viewer::connect(
         options.display.as_deref(),
         initial_width,
         initial_height,
-        hello.pointer_enabled || hello.keyboard_enabled,
+        hello.pointer_enabled,
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap_fingerprint),
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
         &options.escape_key,
     )?;
+    viewer.set_clipboard_status(hello.clipboard_enabled);
+    let mut first_frame_presented = false;
     draw_and_ack(&mut writer, first_frame, &state.telemetry, |frame| {
-        viewer.draw_recyclable(frame)
+        first_frame_presented = viewer.draw_recyclable(frame)?;
+        if first_frame_presented {
+            *stage = ClientStage::FirstFrameAck;
+        }
+        Ok(first_frame_presented)
     })?;
+    if !first_frame_presented {
+        return Ok(());
+    }
+
+    *stage = ClientStage::Session;
+    eprintln!(
+        "jwm-remote: connected; {}; clipboard {}",
+        session_mode(
+            hello.pointer_enabled && request_input,
+            hello.keyboard_enabled && request_input
+        ),
+        if hello.clipboard_enabled { "ON" } else { "off" }
+    );
+    if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
+        eprintln!(
+            "jwm-remote: click the viewer to control; double-tap {} to release input",
+            options.escape_key
+        );
+    }
 
     let control = writer.get_ref().try_clone()?;
     let mut cancel = SessionCancel::new(control, Arc::clone(&state));
@@ -1199,6 +1271,29 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    #[test]
+    fn error_reports_keep_display_and_refusal_stages_distinct() {
+        for (stage, expected) in [
+            (ClientStage::Setup, "No remote desktop connection"),
+            (ClientStage::Connect, "listener"),
+            (ClientStage::Negotiate, "another viewer"),
+            (ClientStage::FirstFrame, "receive/decode"),
+            (ClientStage::LocalClipboard, "local clipboard setup failed"),
+            (ClientStage::Display, "local viewer setup or drawing"),
+            (ClientStage::FirstFrameAck, "was drawn"),
+            (ClientStage::Session, "verify the host identity"),
+        ] {
+            let failure = ClientFailure {
+                stage,
+                cause: io::Error::new(io::ErrorKind::ConnectionRefused, "test cause").into(),
+            };
+            let message = failure.to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains("test cause"));
+            assert!(std::error::Error::source(&failure).is_some());
+        }
+    }
 
     #[test]
     fn heartbeats_renew_static_held_input_before_host_safety_release() {
