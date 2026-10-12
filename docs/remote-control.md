@@ -871,6 +871,29 @@ remote release. ReleaseAll clears both key and button tracking. Pointer events
 are converted using the window geometry current at that event, before any
 later resize or deferred rendering can reinterpret them.
 
-This change does not add automatic high-quality refresh of previously sent
-unchanged JPEG tiles. After a quality drop, unchanged regions can retain older
-compression until those tiles change or the session produces a new keyframe.
+When adaptive JPEG quality has recovered, unchanged tiles previously sent at
+lower quality are gradually re-encoded at the **current** quality. After two
+seconds without pixel changes, the host may refine up to 256 tiles per two
+seconds, using the existing idle-capture tick and the same two-frame ACK
+credit. With the default 16-pixel tiles this is at most 65,536 encoded pixels
+(192 KiB of RGB atlas input) per batch; JPEG bytes depend on content. This
+is a conservative background budget, not a rapid full-screen refresh: a
+2560×1600 canvas entirely below the current quality needs about 126 seconds
+for one pass under ideal ACK/capture timing. Slow writes or renewed activity
+can extend that time. Round-robin tile selection avoids starving the tail
+when the current quality rises again during a pass.
+
+Ordinary pixel changes take priority and restart the quiet interval, so
+continuous local changes such as a blinking caret can delay refinement.
+Sharper tiles are never downgraded by a quality-only refresh. Only successful
+record writes and flushes commit tile quality; failed or discarded sends do
+not clear debt. Resizing or reconnecting establishes a fresh keyframe. When
+all debt to the current quality is cleared, the sender returns to unchanged
+frame suppression and the existing four-second empty keepalive.
+
+This does not accelerate the ACK-driven quality controller or send an
+unrequested high-quality probe. A completely static 30-FPS-configured session
+still needs 24 healthy ACK samples to recover one quality point; with only
+four-second keepalives that can take roughly 96 seconds per point. Refinement
+ACKs use the normal quality epoch and congestion rules. Faster idle recovery
+and fairness during continuous local changes remain separate work.

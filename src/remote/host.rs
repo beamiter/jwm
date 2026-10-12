@@ -120,6 +120,10 @@ fn effective_encoded_bounds(configured_width: u16, requested: (u16, u16)) -> (u1
 }
 const ACCEPT_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(200);
 const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
+// 256 default 16x16 tiles = at most 65,536 encoded pixels per refinement.
+// Reuse the existing idle capture ticks instead of starting another producer.
+const STATIC_REFINEMENT_INTERVAL: Duration = Duration::from_secs(2);
+const STATIC_REFINEMENT_TILES: usize = 256;
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
 const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -336,6 +340,10 @@ struct PendingFrame {
 struct FrameSender {
     encoder: TileEncoder,
     committed_at: Option<Instant>,
+    last_content_change: Option<Instant>,
+    last_refinement: Option<Instant>,
+    pending_refinement: bool,
+    pending_refinement_at: Option<Instant>,
 }
 
 impl FrameSender {
@@ -343,6 +351,10 @@ impl FrameSender {
         Self {
             encoder: TileEncoder::new(),
             committed_at: None,
+            last_content_change: None,
+            last_refinement: None,
+            pending_refinement: false,
+            pending_refinement_at: None,
         }
     }
 
@@ -356,19 +368,78 @@ impl FrameSender {
             }
             Some(_) => TileEncodeRequest::Delta,
         };
-        self.encoder.plan(frame, request)
+        self.pending_refinement = false;
+        self.pending_refinement_at = None;
+        let plan = self.encoder.plan(frame, request)?;
+        if plan.dirty_tiles > 0 {
+            self.last_content_change = Some(now);
+        }
+        Ok(plan)
+    }
+
+    fn refinement_due(&self, now: Instant) -> bool {
+        static_refinement_due(self.last_content_change, self.last_refinement, now)
+    }
+
+    fn refine_at(
+        &mut self,
+        frame: &CapturedFrame,
+        quality: u8,
+        now: Instant,
+    ) -> RemoteResult<TilePlan> {
+        let request = if self.committed_at.is_some_and(|committed| {
+            now.saturating_duration_since(committed) >= UNCHANGED_FRAME_KEEPALIVE
+        }) {
+            TileEncodeRequest::Keepalive
+        } else {
+            TileEncodeRequest::Delta
+        };
+        let plan = self.encoder.plan_with_refinement(
+            frame,
+            request,
+            Some((quality, STATIC_REFINEMENT_TILES)),
+        )?;
+        self.pending_refinement = plan.dirty_tiles > 0;
+        self.pending_refinement_at = self.pending_refinement.then_some(now);
+        Ok(plan)
     }
 
     /// Adopt a frame whose authenticated record and flush both succeeded.
     fn commit_at(&mut self, frame: &CapturedFrame, committed_at: Instant) {
         self.encoder.commit(frame);
         self.committed_at = Some(committed_at);
+        if let Some(planned_at) = self.pending_refinement_at.take() {
+            self.last_refinement = Some(refinement_clock_after_commit(planned_at, committed_at));
+        }
+        self.pending_refinement = false;
     }
 
     /// Abandon an encoded-but-unsent frame, leaving the viewer's model intact.
     fn discard(&mut self) {
         self.encoder.discard();
+        self.pending_refinement = false;
+        self.pending_refinement_at = None;
     }
+}
+
+// Ordinary encode/write cost must not turn each existing two-second capture
+// tick into a four-second refinement tick. Commit the start clock only after
+// success. A write that consumed a whole interval starts a fresh cooldown;
+// never replay missed deadlines or burst to catch up after a stalled write.
+fn refinement_clock_after_commit(planned: Instant, committed: Instant) -> Instant {
+    if committed.saturating_duration_since(planned) >= STATIC_REFINEMENT_INTERVAL {
+        committed
+    } else {
+        planned
+    }
+}
+
+fn static_refinement_due(changed: Option<Instant>, refined: Option<Instant>, now: Instant) -> bool {
+    let Some(changed) = changed else {
+        return false;
+    };
+    let last = refined.map_or(changed, |refined| refined.max(changed));
+    now.saturating_duration_since(last) >= STATIC_REFINEMENT_INTERVAL
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -841,6 +912,14 @@ impl JpegQualityController {
             ack,
             observed_at: now,
         });
+    }
+
+    /// Planning must not consume ACK observations or advance quality epochs.
+    fn current_quality(&self) -> u8 {
+        match self.state.lock() {
+            Ok(state) => state.current,
+            Err(poisoned) => poisoned.into_inner().current,
+        }
     }
 
     fn quality_before_encode_at(&self, now: Instant) -> JpegQualityDecision {
@@ -1902,14 +1981,26 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         if !running.load(Ordering::Acquire) {
             break;
         }
-        let plan = sender.plan_at(&pending.frame, Instant::now())?;
+        let planned_at = Instant::now();
+        let mut plan = sender.plan_at(&pending.frame, planned_at)?;
+        if plan.dirty_tiles == 0 && sender.refinement_due(planned_at) {
+            let current = jpeg_quality.current_quality();
+            if sender.encoder.has_quality_debt(current) {
+                plan = sender.refine_at(&pending.frame, current, planned_at)?;
+            }
+        }
         if !plan.emit {
             telemetry.record_unchanged_suppressed();
             continue;
         }
-        let unchanged_keepalive = plan.dirty_tiles == 0;
-
         let quality = jpeg_quality.quality_before_encode_at(Instant::now());
+        if sender.pending_refinement {
+            // Pending ACKs can lower quality after the read-only debt check.
+            // Replan at the actual epoch's quality, never upgrading debt using
+            // a stale pre-congestion target or overwriting a sharper tile.
+            plan = sender.refine_at(&pending.frame, quality.quality, planned_at)?;
+        }
+        let unchanged_keepalive = plan.dirty_tiles == 0;
         if let Some(adjustment) = quality.adjustment {
             let direction = match adjustment {
                 JpegQualityAdjustment::Decreased => "decreased",
@@ -1926,6 +2017,10 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
                 quality.signals.max_outstanding,
                 quality.signals.same_epoch_superseded,
             );
+        }
+        if !plan.emit {
+            telemetry.record_unchanged_suppressed();
+            continue;
         }
         let encode_started = Instant::now();
         sender
@@ -4083,5 +4178,275 @@ mod tests {
             listener_security_notice(IpAddr::V6(Ipv6Addr::LOCALHOST)),
             None
         );
+    }
+    #[test]
+    fn static_refinement_waits_for_quiet_and_commits_its_rate_limit() {
+        let base = Instant::now();
+        let source = test_captured_frame(10);
+        let mut sender = FrameSender::new();
+        accept_frame(&mut sender, &source, base);
+        assert!(
+            !sender.refinement_due(base + STATIC_REFINEMENT_INTERVAL - Duration::from_nanos(1))
+        );
+        assert!(sender.refinement_due(base + STATIC_REFINEMENT_INTERVAL));
+        let at = base + STATIC_REFINEMENT_INTERVAL;
+        assert!(!sender.plan_at(&source, at).unwrap().emit);
+        let plan = sender.refine_at(&source, 85, at).unwrap();
+        assert_eq!(plan.dirty_tiles, 1);
+        let mut payload = Vec::new();
+        sender
+            .encoder
+            .encode_into(&mut payload, 1, &source, 85)
+            .unwrap();
+        sender.discard();
+        assert!(sender.refinement_due(at));
+        assert!(sender.encoder.has_quality_debt(85));
+        sender.refine_at(&source, 85, at).unwrap();
+        sender
+            .encoder
+            .encode_into(&mut payload, 1, &source, 85)
+            .unwrap();
+        sender.commit_at(&source, at);
+        assert!(!sender.refinement_due(at + Duration::from_secs(1)));
+        assert!(!sender.encoder.has_quality_debt(85));
+        assert!(
+            !sender
+                .plan_at(&source, at + Duration::from_secs(2))
+                .unwrap()
+                .emit
+        );
+        let changed = test_captured_frame(20);
+        sender
+            .plan_at(&changed, at + Duration::from_secs(2))
+            .unwrap();
+        assert!(!sender.refinement_due(at + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn refinement_quality_peek_preserves_acks_and_downgrade_cancels_debt() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(85, 40, true, Duration::from_millis(33), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 100, 1, 1, 85, 0),
+            base,
+        );
+        assert_eq!(controller.current_quality(), 85);
+        let state = controller.state.lock().unwrap();
+        assert_eq!(state.pending_acks.len(), 1);
+        assert_eq!(state.last_evaluated_at, base);
+        drop(state);
+        let mut sender = FrameSender::new();
+        let source = test_captured_frame(10);
+        accept_frame(&mut sender, &source, base);
+        let at = base + STATIC_REFINEMENT_INTERVAL;
+        assert!(sender.refine_at(&source, 85, at).unwrap().emit);
+        assert!(sender.pending_refinement);
+        assert!(!sender.refine_at(&source, 60, at).unwrap().emit);
+        assert!(!sender.pending_refinement);
+        assert!(sender.encoder.has_quality_debt(85));
+        let at = base + UNCHANGED_FRAME_KEEPALIVE;
+        let plan = sender.refine_at(&source, 60, at).unwrap();
+        assert!(
+            plan.emit && plan.dirty_tiles == 0,
+            "cancelled debt must not starve keepalive"
+        );
+    }
+    #[test]
+    fn static_refinement_clock_obeys_damage_cooldown_and_session_reset() {
+        let base = Instant::now();
+        let interval = STATIC_REFINEMENT_INTERVAL;
+        assert!(!static_refinement_due(None, None, base + interval));
+        assert!(!static_refinement_due(Some(base), None, base));
+        assert!(!static_refinement_due(
+            Some(base),
+            None,
+            base + interval - Duration::from_nanos(1)
+        ));
+        assert!(static_refinement_due(Some(base), None, base + interval));
+        assert!(!static_refinement_due(
+            Some(base + interval),
+            Some(base),
+            base + interval
+        ));
+        assert!(!static_refinement_due(
+            Some(base),
+            Some(base + interval),
+            base + interval
+        ));
+        assert!(static_refinement_due(
+            Some(base),
+            Some(base + interval),
+            base + interval * 2
+        ));
+        assert!(!static_refinement_due(Some(base + interval), None, base));
+    }
+
+    #[test]
+    fn refinement_flush_failure_preserves_debt_reference_and_cooldown() {
+        let mailbox = Arc::new(LatestMailbox::new());
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let running = AtomicBool::new(true);
+        let credits = FrameCredits::new();
+        let telemetry = HostTelemetry::new();
+        let jpeg_quality =
+            JpegQualityController::new_at(85, 40, true, Duration::from_millis(33), Instant::now())
+                .unwrap();
+        let committed_at = Instant::now()
+            .checked_sub(STATIC_REFINEMENT_INTERVAL + Duration::from_millis(1))
+            .unwrap();
+        let mut sender = FrameSender::new();
+        let source = test_captured_frame(10);
+        accept_frame(&mut sender, &source, committed_at);
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(FlushFailWriter::default(), WRITE_TIMEOUT),
+            [0x42; 32],
+        )));
+        assert!(
+            send_frames_with_encoder(
+                mailbox,
+                writer,
+                &running,
+                &credits,
+                &telemetry,
+                &jpeg_quality,
+                &mut sender
+            )
+            .is_err()
+        );
+        assert_eq!(sender.committed_at, Some(committed_at));
+        assert_eq!(sender.last_refinement, None);
+        assert!(sender.encoder.has_quality_debt(85));
+        assert!(!sender.pending_refinement);
+        assert_eq!(telemetry.state.lock().unwrap().window.sent, 0);
+        assert!(
+            sender
+                .refine_at(&source, 85, Instant::now())
+                .unwrap()
+                .dirty_tiles
+                > 0
+        );
+    }
+    #[test]
+    fn refinement_commit_clock_avoids_double_tick_and_stall_catchup() {
+        let base = Instant::now();
+        let tick = STATIC_REFINEMENT_INTERVAL;
+        let planned = base + tick;
+        let committed = planned + Duration::from_millis(50);
+        let clock = refinement_clock_after_commit(planned, committed);
+        assert_eq!(clock, planned);
+        assert!(static_refinement_due(
+            Some(base),
+            Some(clock),
+            base + tick * 2
+        ));
+        assert!(!static_refinement_due(
+            Some(base),
+            Some(clock),
+            planned + Duration::from_secs(1)
+        ));
+        let stalled = planned + tick * 3;
+        let clock = refinement_clock_after_commit(planned, stalled);
+        assert_eq!(clock, stalled);
+        assert!(!static_refinement_due(Some(base), Some(clock), stalled));
+        assert!(!static_refinement_due(
+            Some(base),
+            Some(clock),
+            stalled + tick - Duration::from_nanos(1)
+        ));
+        assert!(static_refinement_due(
+            Some(base),
+            Some(clock),
+            stalled + tick
+        ));
+    }
+
+    #[test]
+    fn refinement_sender_flushes_decodable_delta_then_resumes_suppression() {
+        let mailbox = Arc::new(LatestMailbox::new());
+        let source = test_captured_frame(10);
+        let mut sender = FrameSender::new();
+        let base = Instant::now()
+            .checked_sub(STATIC_REFINEMENT_INTERVAL + Duration::from_millis(1))
+            .unwrap();
+        sender.plan_at(&source, base).unwrap();
+        let mut baseline = Vec::new();
+        sender
+            .encoder
+            .encode_into(&mut baseline, 0, &source, 70)
+            .unwrap();
+        sender.commit_at(&source, base);
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            [0x43; 32],
+        )));
+        let running = Arc::new(AtomicBool::new(true));
+        let credits = Arc::new(FrameCredits::new());
+        let telemetry = Arc::new(HostTelemetry::new());
+        let jpeg_quality = Arc::new(
+            JpegQualityController::new_at(85, 40, true, Duration::from_millis(33), Instant::now())
+                .unwrap(),
+        );
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let sender_mailbox = Arc::clone(&mailbox);
+        let sender_running = Arc::clone(&running);
+        let sender_credits = Arc::clone(&credits);
+        let sender_telemetry = Arc::clone(&telemetry);
+        let handle = thread::spawn(move || {
+            send_frames_with_encoder(
+                sender_mailbox,
+                writer,
+                &sender_running,
+                &sender_credits,
+                &sender_telemetry,
+                &jpeg_quality,
+                &mut sender,
+            )
+            .unwrap();
+            sender
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while telemetry.state.lock().unwrap().window.sent < 1 {
+            assert!(Instant::now() < deadline, "refinement was not sent");
+            thread::sleep(Duration::from_millis(1));
+        }
+        let ack = credits.acknowledge(0).unwrap().unwrap();
+        assert_eq!((ack.jpeg_quality, ack.quality_epoch), (85, 0));
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while telemetry.state.lock().unwrap().window.unchanged_suppressed < 1 {
+            assert!(
+                Instant::now() < deadline,
+                "debt-free frame was not suppressed"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        running.store(false, Ordering::Release);
+        mailbox.close();
+        credits.close();
+        let mut sender = handle.join().unwrap();
+        assert!(!sender.encoder.has_quality_debt(85));
+        assert!(sender.last_refinement.is_some());
+        let state = gate.0.lock().unwrap();
+        assert_eq!(state.flushes, 1);
+        let mut reader = SessionReader::new(Cursor::new(state.bytes.clone()), [0x43; 32]);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Frame);
+        let mut decoder = TileDecoder::new();
+        decode_wire(&mut decoder, &baseline);
+        let (sequence, image) = decode_wire(&mut decoder, &payload);
+        assert_eq!(sequence, 0);
+        assert_eq!(image.dimensions(), source.image.dimensions());
+        assert_eq!(telemetry.state.lock().unwrap().window.sent, 1);
+        let next_idle = sender.committed_at.unwrap() + UNCHANGED_FRAME_KEEPALIVE;
+        let keepalive = sender.plan_at(&source, next_idle).unwrap();
+        assert!(keepalive.emit && keepalive.dirty_tiles == 0);
     }
 }

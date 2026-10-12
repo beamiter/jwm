@@ -99,6 +99,7 @@ pub(crate) struct TilePlan {
 #[derive(Debug, Clone, Copy)]
 struct PlannedFrame {
     keyframe: bool,
+    refinement_cursor: Option<usize>,
     dirty_tiles: u32,
     encoded: (u16, u16),
     source: (u16, u16),
@@ -115,6 +116,11 @@ pub(crate) struct TileEncoder {
     /// Pixels the viewer has been sent.  `None` until the first commit.
     reference: Option<RgbImage>,
     source: (u16, u16),
+    /// JPEG quality of each successfully transmitted tile, not captured pixels.
+    qualities: Vec<u8>,
+    pending_quality: u8,
+    refinement_cursor: usize,
+    pending_refinement_cursor: Option<usize>,
     grid: (usize, usize),
     bitmap: Vec<u8>,
     dirty: Vec<u32>,
@@ -135,6 +141,10 @@ impl TileEncoder {
             tolerance,
             reference: None,
             source: (0, 0),
+            qualities: Vec::new(),
+            pending_quality: 0,
+            refinement_cursor: 0,
+            pending_refinement_cursor: None,
             grid: (0, 0),
             bitmap: Vec::new(),
             dirty: Vec::new(),
@@ -167,7 +177,21 @@ impl TileEncoder {
         frame: &CapturedFrame,
         request: TileEncodeRequest,
     ) -> RemoteResult<TilePlan> {
+        self.plan_with_refinement(frame, request, None)
+    }
+
+    /// Add a bounded quality-only delta only when there are no pixel changes.
+    /// This uses the existing wire format and leaves the committed debt intact
+    /// until encode, authenticated write and flush all succeed.
+    pub(crate) fn plan_with_refinement(
+        &mut self,
+        frame: &CapturedFrame,
+        request: TileEncodeRequest,
+        refinement: Option<(u8, usize)>,
+    ) -> RemoteResult<TilePlan> {
         self.planned = None;
+        self.pending = false;
+        self.pending_refinement_cursor = None;
         let encoded_width = u16::try_from(frame.image.width())
             .map_err(|_| invalid_data("encoded frame width exceeds protocol range"))?;
         let encoded_height = u16::try_from(frame.image.height())
@@ -208,6 +232,22 @@ impl TileEncoder {
             );
         }
 
+        let mut refinement_cursor = keyframe.then_some(0);
+        if !keyframe
+            && self.dirty.is_empty()
+            && let Some((quality, limit)) = refinement
+        {
+            let (indices, next) =
+                refinement_tiles(&self.qualities, quality, limit, self.refinement_cursor);
+            if !indices.is_empty() {
+                refinement_cursor = Some(next);
+            }
+            for index in indices {
+                self.bitmap[index / 8] |= 1 << (index % 8);
+                self.dirty.push(index as u32);
+            }
+        }
+
         let dirty_tiles = u32::try_from(self.dirty.len())
             .map_err(|_| invalid_data("dirty tile count exceeds protocol range"))?;
         let emit = dirty_tiles > 0 || request == TileEncodeRequest::Keepalive;
@@ -243,6 +283,7 @@ impl TileEncoder {
 
         self.planned = Some(PlannedFrame {
             keyframe,
+            refinement_cursor,
             dirty_tiles,
             encoded: (encoded_width, encoded_height),
             source: (frame.source_width, frame.source_height),
@@ -329,6 +370,8 @@ impl TileEncoder {
         }
 
         self.pending = true;
+        self.pending_quality = quality.clamp(1, 100);
+        self.pending_refinement_cursor = planned.refinement_cursor;
         self.planned = None;
         Ok(())
     }
@@ -342,9 +385,16 @@ impl TileEncoder {
             return;
         }
         self.pending = false;
+        if let Some(cursor) = self.pending_refinement_cursor.take() {
+            self.refinement_cursor = cursor;
+        }
         self.source = (frame.source_width, frame.source_height);
         let tile = self.tile();
-        let (grid_w, _) = self.grid;
+        let (grid_w, grid_h) = self.grid;
+        self.qualities.resize(grid_w * grid_h, 0);
+        for index in &self.dirty {
+            self.qualities[*index as usize] = self.pending_quality;
+        }
         let reference = match self.reference.as_mut() {
             Some(reference) if reference.dimensions() == frame.image.dimensions() => reference,
             _ => {
@@ -374,10 +424,39 @@ impl TileEncoder {
         self.planned = None;
     }
 
+    pub(crate) fn has_quality_debt(&self, quality: u8) -> bool {
+        self.qualities.iter().any(|sent| *sent < quality)
+    }
+
     #[cfg(test)]
     pub(crate) fn reference(&self) -> Option<&RgbImage> {
         self.reference.as_ref()
     }
+}
+
+/// Bounded round-robin selection avoids starving the tail while quality rises.
+/// Return raster order for the wire atlas, and commit the cursor only after a
+/// successful send. Planning itself never pays down debt or changes fairness.
+fn refinement_tiles(
+    qualities: &[u8],
+    target: u8,
+    limit: usize,
+    cursor: usize,
+) -> (Vec<usize>, usize) {
+    if qualities.is_empty() || limit == 0 {
+        return (Vec::new(), 0);
+    }
+    let start = cursor % qualities.len();
+    let mut selected: Vec<_> = (start..qualities.len())
+        .chain(0..start)
+        .filter(|index| qualities[*index] < target)
+        .take(limit)
+        .collect();
+    let next = selected
+        .last()
+        .map_or(start, |last| (last + 1) % qualities.len());
+    selected.sort_unstable();
+    (selected, next)
 }
 
 fn collect_dirty(
@@ -1373,5 +1452,229 @@ mod tests {
             );
             {}
         }
+    }
+    #[test]
+    fn refinement_selection_is_bounded_fair_and_never_downgrades() {
+        let mut qualities = vec![40; 10];
+        let mut cursor = 0;
+        let mut visited = [false; 10];
+        for target in [60, 61, 62, 63] {
+            let (indices, next) = refinement_tiles(&qualities, target, 3, cursor);
+            assert!(indices.len() <= 3);
+            assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+            for index in indices {
+                assert!(qualities[index] < target);
+                qualities[index] = target;
+                visited[index] = true;
+            }
+            cursor = next;
+        }
+        assert!(
+            visited.iter().all(|seen| *seen),
+            "rising quality must not starve the tail"
+        );
+        assert!(refinement_tiles(&qualities, 40, 3, cursor).0.is_empty());
+        assert!(refinement_tiles(&qualities, 85, 0, cursor).0.is_empty());
+        assert_eq!(refinement_tiles(&[], 85, 3, usize::MAX), (vec![], 0));
+        let (wrapped, _) = refinement_tiles(&[40; 5], 85, 3, 4);
+        assert_eq!(
+            wrapped,
+            vec![0, 1, 4],
+            "atlas indices must remain raster sorted"
+        );
+    }
+
+    #[test]
+    fn refinement_codec_converges_then_suppresses_without_a_keyframe() {
+        let source = busy(320, 240);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        let (_, _, low) = roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &source,
+            40,
+            TileEncodeRequest::Keyframe,
+        );
+        let low = low.unwrap();
+        let mut payload = Vec::new();
+        let mut refined = low.clone();
+        let mut rounds = 0;
+        while encoder.has_quality_debt(85) {
+            let plan = encoder
+                .plan_with_refinement(&source, TileEncodeRequest::Delta, Some((85, 256)))
+                .unwrap();
+            assert!(!plan.keyframe && plan.emit && plan.dirty_tiles <= 256);
+            encoder
+                .encode_into(&mut payload, rounds, &source, 85)
+                .unwrap();
+            assert!(
+                payload.len() < 512 * 1024,
+                "bounded production JPEG fixture payload"
+            );
+            eprintln!(
+                "refinement codec: round={rounds} tiles={} bytes={}",
+                plan.dirty_tiles,
+                payload.len()
+            );
+            refined = decoder
+                .decode_into(&payload, new_decode_buffer_pool())
+                .unwrap()
+                .image()
+                .clone();
+            encoder.commit(&source);
+            rounds += 1;
+            assert!(rounds <= 2);
+        }
+        assert_eq!(rounds, 2);
+        let error = |image: &RgbImage| -> u64 {
+            source
+                .image
+                .as_raw()
+                .iter()
+                .zip(image.as_raw())
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum()
+        };
+        assert!(
+            error(&refined) < error(&low),
+            "real JPEG refinement should reduce fixture error"
+        );
+        assert!(
+            !encoder
+                .plan_with_refinement(&source, TileEncodeRequest::Delta, Some((85, 256)))
+                .unwrap()
+                .emit
+        );
+        let keepalive = encoder
+            .plan_with_refinement(&source, TileEncodeRequest::Keepalive, Some((85, 256)))
+            .unwrap();
+        assert!(keepalive.emit && keepalive.dirty_tiles == 0);
+    }
+
+    #[test]
+    fn refinement_discard_and_superseded_plan_never_pay_quality_debt() {
+        let source = busy(64, 64);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &source,
+            40,
+            TileEncodeRequest::Keyframe,
+        );
+        let mut payload = Vec::new();
+        encoder
+            .plan_with_refinement(&source, TileEncodeRequest::Delta, Some((85, 3)))
+            .unwrap();
+        encoder.encode_into(&mut payload, 1, &source, 85).unwrap();
+        assert!(encoder.qualities.iter().all(|q| *q == 40));
+        encoder.discard();
+        encoder.commit(&source);
+        assert!(encoder.qualities.iter().all(|q| *q == 40));
+        assert_eq!(encoder.refinement_cursor, 0);
+        encoder
+            .plan_with_refinement(&source, TileEncodeRequest::Delta, Some((85, 3)))
+            .unwrap();
+        encoder.encode_into(&mut payload, 2, &source, 85).unwrap();
+        encoder.plan(&source, TileEncodeRequest::Delta).unwrap();
+        encoder.commit(&source);
+        assert!(
+            encoder.qualities.iter().all(|q| *q == 40),
+            "a new plan invalidates an older uncommitted encode"
+        );
+        assert_eq!(encoder.refinement_cursor, 0);
+    }
+
+    #[test]
+    fn refinement_damage_and_geometry_changes_replace_quality_state() {
+        let source = flat(64, 64, 20);
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &source,
+            40,
+            TileEncodeRequest::Keyframe,
+        );
+        let mut changed = flat(64, 64, 20);
+        changed.image.put_pixel(0, 0, Rgb([250; 3]));
+        let plan = encoder
+            .plan_with_refinement(&changed, TileEncodeRequest::Delta, Some((85, 256)))
+            .unwrap();
+        assert_eq!(
+            plan.dirty_tiles, 1,
+            "pixel changes take precedence over quality-only debt"
+        );
+        let mut payload = Vec::new();
+        encoder.encode_into(&mut payload, 1, &changed, 70).unwrap();
+        encoder.commit(&changed);
+        assert_eq!(encoder.qualities[0], 70);
+        assert!(encoder.qualities[1..].iter().all(|q| *q == 40));
+        let plan = encoder
+            .plan_with_refinement(&changed, TileEncodeRequest::Delta, Some((50, 256)))
+            .unwrap();
+        assert_eq!(
+            plan.dirty_tiles, 15,
+            "quality decreases cannot downgrade the sharper tile"
+        );
+        encoder.encode_into(&mut payload, 2, &changed, 50).unwrap();
+        encoder.commit(&changed);
+        assert_eq!(encoder.qualities[0], 70);
+        assert!(!encoder.has_quality_debt(50));
+        let resized = flat(16, 16, 20);
+        roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &resized,
+            60,
+            TileEncodeRequest::Delta,
+        );
+        assert_eq!(encoder.qualities, vec![60]);
+        assert_eq!(encoder.refinement_cursor, 0);
+        let mut new_source = resized;
+        new_source.source_width += 1;
+        roundtrip(
+            &mut encoder,
+            &mut decoder,
+            &new_source,
+            45,
+            TileEncodeRequest::Delta,
+        );
+        assert_eq!(encoder.qualities, vec![45]);
+        assert!(TileEncoder::new().qualities.is_empty());
+    }
+    #[test]
+    fn refinement_selection_trace_converges_and_retargets_without_downgrading() {
+        let mut qualities = vec![40; 600];
+        let (first, next) = refinement_tiles(&qualities, 70, 256, 0);
+        assert_eq!(first.len(), 256);
+        // Plan/discard leaves the committed ledger and cursor unchanged.
+        assert_eq!(refinement_tiles(&qualities, 70, 256, 0).0, first);
+        for index in first {
+            qualities[index] = 70;
+        }
+        let mut cursor = next;
+        let mut batches = 0;
+        loop {
+            let (indices, next) = refinement_tiles(&qualities, 50, 256, cursor);
+            if indices.is_empty() {
+                break;
+            }
+            assert!(indices.iter().all(|index| *index >= 256));
+            for index in indices {
+                qualities[index] = 50;
+            }
+            cursor = next;
+            batches += 1;
+        }
+        assert_eq!(batches, 2);
+        assert!(qualities[..256].iter().all(|q| *q == 70));
+        assert!(qualities[256..].iter().all(|q| *q == 50));
+        assert!(refinement_tiles(&qualities, 50, 256, cursor).0.is_empty());
+        let (indices, _) = refinement_tiles(&qualities, 85, usize::MAX, usize::MAX);
+        assert_eq!(indices.len(), qualities.len());
     }
 }
