@@ -1047,6 +1047,14 @@ impl Jwm {
             "setmfact"
         } else if eq!(Jwm::setcfact) {
             "setcfact"
+        } else if eq!(Jwm::resize_horizontal) {
+            "resize_horizontal"
+        } else if eq!(Jwm::resize_vertical) {
+            "resize_vertical"
+        } else if eq!(Jwm::reset_layout_size) {
+            "reset_layout_size"
+        } else if eq!(Jwm::resizemouse_float) {
+            "resizemouse_float"
         } else if eq!(Jwm::incnmaster) {
             "incnmaster"
         } else if eq!(Jwm::movestack) {

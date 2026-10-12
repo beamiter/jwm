@@ -5,7 +5,7 @@ use crate::backend::common_define::WindowId;
 use crate::core::layout::LayoutEnum;
 use crate::core::types::Rect;
 use slotmap::DefaultKey;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -513,6 +513,9 @@ pub struct WMMonitor {
     pub lt: Rc<LayoutEnum>,
     pub prev_lt: Rc<LayoutEnum>,
     pub pertag: Option<Pertag>,
+    /// Session-local, workspace/layout-specific master resize intentions.
+    pub layout_resizes:
+        HashMap<(u32, &'static str), crate::core::master_resize::ResizeContext<ClientKey>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -666,6 +669,7 @@ impl WMMonitor {
             lt: Rc::new(LayoutEnum::FIBONACCI),
             prev_lt: Rc::new(LayoutEnum::TILE),
             pertag: None,
+            layout_resizes: HashMap::new(),
         }
     }
 

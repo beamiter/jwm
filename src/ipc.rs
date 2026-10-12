@@ -257,6 +257,9 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "quit",
         "record",
         "refocus",
+        "resize_horizontal",
+        "resize_vertical",
+        "reset_layout_size",
         "region",
         "reload_wm",
         "restart",
@@ -1583,6 +1586,9 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         }
 
         // --- Layout ---
+        "resize_horizontal" => Ok((Jwm::resize_horizontal, parse_float_arg(args, 0.0)?)),
+        "resize_vertical" => Ok((Jwm::resize_vertical, parse_float_arg(args, 0.0)?)),
+        "reset_layout_size" => Ok((Jwm::reset_layout_size, parse_int_arg(args, 0)?)),
         "setmfact" | "set_mfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
         "setgaps" | "set_gaps" => Ok((Jwm::setgaps, parse_int_arg(args, 1)?)),
         "setcfact" | "set_cfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
@@ -3874,5 +3880,28 @@ mod tests {
         assert_eq!(json["window_count"], 3);
         assert_eq!(json["urgent_count"], 1);
         assert_eq!(json["floating_count"], 2);
+    }
+    #[test]
+    fn physical_resize_commands_dispatch_to_explicit_axes_and_reset() {
+        for (name, expected) in [
+            (
+                "resize_horizontal",
+                Jwm::resize_horizontal as crate::jwm::WMFuncType,
+            ),
+            (
+                "resize_vertical",
+                Jwm::resize_vertical as crate::jwm::WMFuncType,
+            ),
+        ] {
+            let (action, arg) =
+                dispatch_command(name, &serde_json::json!({"value":-0.125})).unwrap();
+            assert!(std::ptr::fn_addr_eq(action, expected));
+            assert_eq!(arg, WMArgEnum::Float(-0.125));
+        }
+        let (action, _) = dispatch_command("reset_layout_size", &serde_json::Value::Null).unwrap();
+        assert!(std::ptr::fn_addr_eq(
+            action,
+            Jwm::reset_layout_size as crate::jwm::WMFuncType
+        ));
     }
 }

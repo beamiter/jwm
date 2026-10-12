@@ -25,6 +25,8 @@ pub(crate) enum DragMode {
     Reorder,
     /// Float the window (keeping its geometry) and resize it from this edge.
     Resize(ResizeEdge),
+    /// Keep a master tiled and resize within its captured workspace/layout.
+    ResizeTiled(ResizeEdge, crate::jwm::layout::resize::ResizeScope),
 }
 
 /// A pointer drag the WM is watching. Armed on button press (or a client's
@@ -69,13 +71,13 @@ impl Jwm {
 
     /// 开始鼠标调整窗口大小（Alt+右键拖动）
     ///
-    /// - 越过拖拽死区后，平铺窗口自动切换为浮动
+    /// - 越过拖拽死区后，master 在布局内调整；其他窗口保留原浮动行为
     /// - 全屏窗口不能调整大小
     /// - 根据鼠标位置智能选择调整边缘/角
     pub fn resizemouse(
         &mut self,
         backend: &mut dyn Backend,
-        _arg: &WMArgEnum,
+        arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let client_key = self.get_selected_client_key().ok_or("No client selected")?;
 
@@ -140,7 +142,21 @@ impl Jwm {
             }
         };
 
-        self.start_pointer_drag(backend, client_key, DragMode::Resize(edge))
+        let mode = if matches!(arg, WMArgEnum::Int(1)) {
+            DragMode::Resize(edge)
+        } else {
+            self.resize_drag_mode(client_key, edge)
+        };
+        self.start_pointer_drag(backend, client_key, mode)
+    }
+
+    /// Explicit compatibility action: a resize drag floats even a master.
+    pub fn resizemouse_float(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.resizemouse(backend, &WMArgEnum::Int(1))
     }
 
     /// Arm a deferred pointer drag on `client_key`: capture the pre-drag
@@ -179,11 +195,16 @@ impl Jwm {
             .get_pointer_position()
             .unwrap_or(self.last_mouse_root);
         let intent = match mode {
-            DragMode::Resize(edge) => InteractionAction::Resize(edge),
+            DragMode::Resize(edge) | DragMode::ResizeTiled(edge, _) => {
+                InteractionAction::Resize(edge)
+            }
             DragMode::MoveFloat | DragMode::Reorder => InteractionAction::Move,
         };
 
         if backend.begin_track(win, intent)? {
+            if let DragMode::ResizeTiled(_, scope) = mode {
+                self.arm_tiled_resize(backend, client_key, scope);
+            }
             debug!("Armed pointer drag for window {:?} as {:?}", win, mode);
             self.drag_ctl = Some(DragCtl {
                 client: client_key,
@@ -242,7 +263,7 @@ impl Jwm {
                 self.enable_floating_keep_geometry(backend, client)?;
                 backend.begin_resize(win, edge)?;
             }
-            DragMode::Reorder => {}
+            DragMode::ResizeTiled(_, _) | DragMode::Reorder => {}
         }
         Ok(())
     }
@@ -258,6 +279,10 @@ impl Jwm {
         let Some(ctl) = ctl else {
             return;
         };
+        if let DragMode::ResizeTiled(_, scope) = ctl.mode {
+            self.finish_tiled_resize(backend, ctl.mon, scope, true);
+            return;
+        }
         if !ctl.activated {
             return;
         }
@@ -265,8 +290,8 @@ impl Jwm {
             backend.compositor_notify_window_move_end(ctl.win);
         }
         match ctl.mode {
-            // The tiling was never touched.
-            DragMode::Reorder => {}
+            // Tiled resize was restored above. Reorder never touched tiling.
+            DragMode::ResizeTiled(_, _) | DragMode::Reorder => {}
             DragMode::MoveFloat | DragMode::Resize(_) => {
                 if ctl.was_floating {
                     let (x, y, w, h) = ctl.orig_geom;

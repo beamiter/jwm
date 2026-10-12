@@ -26,6 +26,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.clear_current_layout_resize();
         if let WMArgEnum::Int(i) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
 
@@ -51,6 +52,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.clear_current_layout_resize();
         if let WMArgEnum::Int(i) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
@@ -112,6 +114,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.clear_current_layout_resize();
         if self.is_scrolling_layout() {
             return self.scrolling_set_column_width(backend, arg);
         }

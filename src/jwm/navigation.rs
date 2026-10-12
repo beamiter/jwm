@@ -274,6 +274,8 @@ impl Jwm {
             }
         }
 
+        self.clear_current_layout_resize();
+
         let client_key = match self.get_selected_client_key() {
             Some(k) => k,
             None => return Ok(()),

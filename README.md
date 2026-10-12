@@ -334,8 +334,16 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
 | XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
+| Alt+Control+Left / Right | Shrink / grow the selected master horizontally (2.5%) |
+| Alt+Control+Up / Down | Shrink / grow it vertically (2.5%) |
+| Alt+Control+Home | Reset layout-local resized dimensions |
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor's work area |
 | Alt+Shift+Up | Toggle maximize of the focused floating window (fills the work area; press again to restore) |
+
+Master resizing also works with a single client, in every layout. Alt+right-drag
+keeps a master tiled; larger masters reallocate neighbouring space. See
+[layout resizing](docs/layout-resizing.md) for singleton centering, custom
+bindings, size-hint limits and the explicit floating-resize compatibility action.
 
 Mouse users get the same geometry: dragging a floating window to a side edge
 snaps it to that half of the work area (bar, docks and tab bar excluded),

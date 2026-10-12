@@ -77,11 +77,18 @@ impl Jwm {
     fn apply_layout_results(
         &mut self,
         backend: &mut dyn Backend,
+        mon_key: MonitorKey,
+        area: Rect,
+        gap: i32,
         results: Vec<LayoutResult<ClientKey>>,
     ) {
+        let (results, preconstrained) =
+            self.prepare_layout_resize(backend, mon_key, area, gap, results);
         for res in results {
             let (mut w, mut h) = (res.rect.w.max(1), res.rect.h.max(1));
-            let _ = self.apply_size_hints_constraints(backend, res.key, &mut w, &mut h);
+            if !preconstrained {
+                let _ = self.apply_size_hints_constraints(backend, res.key, &mut w, &mut h);
+            }
             let _ = self.resizeclient(backend, res.key, res.rect.x, res.rect.y, w, h);
         }
     }
@@ -102,7 +109,7 @@ impl Jwm {
         };
         let layout_clients = self.to_layout_clients(&raw_clients);
         let results = calc_fn(&params, &layout_clients);
-        self.apply_layout_results(backend, results);
+        self.apply_layout_results(backend, mon_key, params.screen_area, params.gap, results);
     }
 
     pub(crate) fn tile(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -171,7 +178,7 @@ impl Jwm {
 
         let layout_clients = self.to_layout_clients(&ordered);
         let results = core_layout::calculate_vstack(&params, &layout_clients);
-        self.apply_layout_results(backend, results);
+        self.apply_layout_results(backend, mon_key, params.screen_area, params.gap, results);
     }
 
     pub(crate) fn scrolling(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -265,7 +272,7 @@ impl Jwm {
             state.viewport_x = new_vp_x;
         }
 
-        self.apply_layout_results(backend, results);
+        self.apply_layout_results(backend, mon_key, params.screen_area, params.gap, results);
     }
 
     pub(crate) fn sync_scrolling_columns(
@@ -341,7 +348,7 @@ impl Jwm {
         };
 
         let results = core_layout::calculate_fullscreen(&params, &layout_clients);
-        self.apply_layout_results(backend, results);
+        self.apply_layout_results(backend, mon_key, params.screen_area, params.gap, results);
     }
 
     pub(crate) fn monocle(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -384,7 +391,7 @@ impl Jwm {
             gap: 0,      // monocle 不使用 gap
         };
         let results = core_layout::calculate_monocle(&params, &layout_clients);
-        self.apply_layout_results(backend, results);
+        self.apply_layout_results(backend, mon_key, params.screen_area, params.gap, results);
     }
 }
 

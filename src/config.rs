@@ -552,7 +552,7 @@ impl NewClientPosition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMoveResize {
     /// Every window: floating windows move/resize, tiled windows reorder
-    /// within the layout on move and float on resize.
+    /// within the layout on move; master resize stays tiled, other resize floats.
     Always,
     /// Only windows that already float (default). A tiled window's layout
     /// slot cannot be disturbed by a client-side drag region.
@@ -607,7 +607,7 @@ pub struct BehaviorConfig {
     /// borders):
     /// - "floating-only" (default): only already-floating windows respond;
     /// - "always": floating windows move/resize; tiled windows reorder
-    ///   within the layout on move, and float on resize;
+    ///   within the layout on move; master resize stays tiled, other resize floats;
     /// - "never": client requests are ignored entirely.
     #[serde(default = "default_client_moveresize")]
     pub client_moveresize: String,
@@ -1936,6 +1936,8 @@ fn key_function_is_repeatable(function: &str) -> bool {
             | "window_switcher"
             | "setmfact"
             | "setcfact"
+            | "resize_horizontal"
+            | "resize_vertical"
             | "incnmaster"
             | "movestack"
             | "volume_adjust"
@@ -2532,6 +2534,36 @@ impl Config {
                 key: "d".to_string(),
                 function: "incnmaster".to_string(),
                 argument: ArgumentConfig::Int(-1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Left".to_string(),
+                function: "resize_horizontal".to_string(),
+                argument: ArgumentConfig::Float(-0.025),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Right".to_string(),
+                function: "resize_horizontal".to_string(),
+                argument: ArgumentConfig::Float(0.025),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Up".to_string(),
+                function: "resize_vertical".to_string(),
+                argument: ArgumentConfig::Float(-0.025),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Down".to_string(),
+                function: "resize_vertical".to_string(),
+                argument: ArgumentConfig::Float(0.025),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Home".to_string(),
+                function: "reset_layout_size".to_string(),
+                argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
@@ -3578,6 +3610,10 @@ impl Config {
 
             "movemouse" => Some(Jwm::movemouse),
             "resizemouse" => Some(Jwm::resizemouse),
+            "resizemouse_float" => Some(Jwm::resizemouse_float),
+            "resize_horizontal" => Some(Jwm::resize_horizontal),
+            "resize_vertical" => Some(Jwm::resize_vertical),
+            "reset_layout_size" => Some(Jwm::reset_layout_size),
             "show_keybindings" => Some(Jwm::show_keybindings),
             "cyclelayout" => Some(Jwm::cyclelayout),
             "layout_picker" => Some(Jwm::layout_picker),
@@ -3776,7 +3812,9 @@ impl Config {
     fn binding_argument_type_is_valid(function: &str, argument: &ArgumentConfig) -> bool {
         match function {
             "incnmaster" | "focusstack" => matches!(argument, ArgumentConfig::Int(_)),
-            "setmfact" => matches!(argument, ArgumentConfig::Float(_)),
+            "setmfact" | "resize_horizontal" | "resize_vertical" => {
+                matches!(argument, ArgumentConfig::Float(_))
+            }
             _ => true,
         }
     }
@@ -7642,5 +7680,47 @@ border_px = 3
 
         cfg.inner.animation.duration_ms = 0;
         assert!(!cfg.motion_enabled());
+    }
+    #[test]
+    fn physical_resize_defaults_are_unique_bindable_and_keep_old_factor_keys() {
+        let config = Config::default();
+        for (key, function) in [
+            ("Left", "resize_horizontal"),
+            ("Right", "resize_horizontal"),
+            ("Up", "resize_vertical"),
+            ("Down", "resize_vertical"),
+            ("Home", "reset_layout_size"),
+        ] {
+            let bindings: Vec<_> = config
+                .inner
+                .keybindings
+                .keys
+                .iter()
+                .filter(|b| {
+                    b.key == key
+                        && b.modifier.len() == 2
+                        && b.modifier.iter().any(|m| m == "Mod1")
+                        && b.modifier.iter().any(|m| m == "Control")
+                })
+                .collect();
+            assert_eq!(bindings.len(), 1, "conflicting resize binding: {key}");
+            assert_eq!(bindings[0].function, function);
+            assert!(config.convert_key_config(bindings[0]).is_some());
+        }
+        assert!(config.parse_function("resizemouse_float").is_some());
+        assert!(super::key_function_is_repeatable("resize_horizontal"));
+        assert!(super::key_function_is_repeatable("resize_vertical"));
+        for (key, function, shift) in [
+            ("h", "setmfact", false),
+            ("l", "setmfact", false),
+            ("h", "setcfact", true),
+            ("l", "setcfact", true),
+        ] {
+            assert!(config.inner.keybindings.keys.iter().any(|b| b.key == key
+                && b.function == function
+                && b.modifier.len() == (if shift { 2 } else { 1 })
+                && b.modifier.iter().any(|m| m == "Mod1")
+                && (!shift || b.modifier.iter().any(|m| m == "Shift"))));
+        }
     }
 }
