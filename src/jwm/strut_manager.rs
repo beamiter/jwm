@@ -1,5 +1,5 @@
-use crate::backend::api::{Backend, StrutPartial};
-use crate::backend::common_define::WindowId;
+use crate::backend::api::{Backend, StrutPartial, WindowType};
+use crate::backend::common_define::{EventMaskBits, WindowId};
 use crate::core::models::MonitorKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
@@ -18,6 +18,17 @@ fn cache_external_strut(
     }
     entries.insert(win, next);
     true
+}
+
+/// New unmanaged observations require at least one active reservation and
+/// ordered spans on active edges. Zero/zero remains the legacy host-only form;
+/// meaningless span fields on inactive edges must not reject a valid panel.
+fn valid_unmanaged_strut(strut: &StrutPartial) -> bool {
+    (strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0)
+        && (strut.left == 0 || strut.left_start_y <= strut.left_end_y)
+        && (strut.right == 0 || strut.right_start_y <= strut.right_end_y)
+        && (strut.top == 0 || strut.top_start_x <= strut.top_end_x)
+        && (strut.bottom == 0 || strut.bottom_start_x <= strut.bottom_end_x)
 }
 
 fn window_center(origin: i32, extent: u32) -> i32 {
@@ -252,16 +263,17 @@ impl Jwm {
     }
 
     /// Re-resolve every host after monitor keys or output rectangles change.
-    /// A failed geometry query intentionally stores `None` instead of keeping
-    /// a slotmap key that may now refer to a retired monitor generation.
+    /// Unmanaged X11 panels fail closed on a lost query. Managed panels keep
+    /// the existing host=None fallback rather than retaining retired keys.
     pub(crate) fn refresh_external_strut_hosts(&mut self, backend: &mut dyn Backend) -> bool {
         let windows: Vec<WindowId> = self.external_struts.keys().copied().collect();
-        let resolved: Vec<(WindowId, Option<MonitorKey>)> = windows
-            .into_iter()
-            .map(|win| (win, self.strut_host_monitor(backend, win)))
-            .collect();
         let mut changed = false;
-        for (win, host) in resolved {
+        for win in windows {
+            if let Some(updated) = self.refresh_unmanaged_x11_strut_cache(backend, win) {
+                changed |= updated;
+                continue;
+            }
+            let host = self.strut_host_monitor(backend, win);
             let Some((strut, _)) = self.external_struts.get(&win).copied() else {
                 continue;
             };
@@ -287,6 +299,96 @@ impl Jwm {
         self.arrange(backend, None);
         self.broadcast_visible_window_states_all_monitors(backend);
         self.broadcast_monitor_bar_all_monitors(backend);
+    }
+
+    /// Reconcile an unmanaged X11 panel without admitting it as a client.
+    /// The cache-only form lets a topology batch arrange once, after every
+    /// panel has been rehosted, rather than recursively arranging per window.
+    pub(crate) fn refresh_unmanaged_x11_strut(
+        &mut self,
+        backend: &mut dyn Backend,
+        win: WindowId,
+    ) -> bool {
+        let Some(changed) = self.refresh_unmanaged_x11_strut_cache(backend, win) else {
+            return false;
+        };
+        if changed {
+            self.apply_strut_reservations();
+            self.arrange(backend, None);
+            self.broadcast_visible_window_states_all_monitors(backend);
+            self.broadcast_monitor_bar_all_monitors(backend);
+        }
+        true
+    }
+
+    /// None delegates to the existing managed/non-X11 policy. Some owns this
+    /// unmanaged observation even when a hidden/failed query clears its cache.
+    fn refresh_unmanaged_x11_strut_cache(
+        &mut self,
+        backend: &mut dyn Backend,
+        win: WindowId,
+    ) -> Option<bool> {
+        if !backend.capabilities().supports_client_list || self.wintoclient(win).is_some() {
+            return None;
+        }
+        if backend.compositor_overlay_window() == Some(win)
+            || self
+                .secondary_bars
+                .values()
+                .any(|bar| bar.window == Some(win))
+        {
+            return Some(false);
+        }
+        let attributes = match backend.window_ops().get_window_attributes(win) {
+            Ok(attributes) => attributes,
+            Err(_) => return Some(self.external_struts.remove(&win).is_some()),
+        };
+        if !attributes.override_redirect {
+            return None;
+        }
+        if !attributes.map_state_viewable {
+            return Some(self.external_struts.remove(&win).is_some());
+        }
+        let strut = backend
+            .property_ops()
+            .get_window_strut_partial(win)
+            .filter(valid_unmanaged_strut);
+        // An explicitly typed dock may publish its first reservation after
+        // mapping. Do not subscribe arbitrary menus/overlays with no strut.
+        let dock = backend
+            .property_ops()
+            .get_window_types(win)
+            .contains(&WindowType::Dock);
+        if strut.is_none() && !dock {
+            return Some(self.external_struts.remove(&win).is_some());
+        }
+        let mask = (EventMaskBits::PROPERTY_CHANGE | EventMaskBits::STRUCTURE_NOTIFY).bits();
+        if let Err(error) = backend.window_ops().add_event_mask(win, mask) {
+            log::warn!("[strut] Could not observe unmanaged panel {win:?}: {error}");
+            return Some(self.external_struts.remove(&win).is_some());
+        }
+        // The qualification read precedes event selection. A dock can publish
+        // or delete its property (or unmap) in that interval, so only a fresh
+        // post-subscription snapshot may become the cached reservation.
+        let Ok(attributes) = backend.window_ops().get_window_attributes(win) else {
+            return Some(self.external_struts.remove(&win).is_some());
+        };
+        if !attributes.override_redirect || !attributes.map_state_viewable {
+            return Some(self.external_struts.remove(&win).is_some());
+        }
+        let Some(strut) = backend
+            .property_ops()
+            .get_window_strut_partial(win)
+            .filter(valid_unmanaged_strut)
+        else {
+            return Some(self.external_struts.remove(&win).is_some());
+        };
+        // A failed geometry query must not turn a panel into a desktop-wide
+        // legacy reservation through host=None.
+        let Some(host) = self.strut_host_monitor(backend, win) else {
+            return Some(self.external_struts.remove(&win).is_some());
+        };
+        Some(self.cache_external_strut(win, strut, Some(host)))
     }
 
     pub fn check_strut_on_manage(&mut self, backend: &mut dyn Backend, win: WindowId) {
@@ -320,6 +422,53 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmanaged_strut_rejects_only_inverted_active_spans() {
+        assert!(!valid_unmanaged_strut(&StrutPartial::default()));
+        for edge in 0..4 {
+            let mut strut = StrutPartial::default();
+            match edge {
+                0 => {
+                    strut.left = 96;
+                    strut.left_start_y = 100;
+                    strut.left_end_y = 50;
+                }
+                1 => {
+                    strut.right = 96;
+                    strut.right_start_y = 100;
+                    strut.right_end_y = 50;
+                }
+                2 => {
+                    strut.top = 96;
+                    strut.top_start_x = 100;
+                    strut.top_end_x = 50;
+                }
+                _ => {
+                    strut.bottom = 96;
+                    strut.bottom_start_x = 100;
+                    strut.bottom_end_x = 50;
+                }
+            }
+            assert!(!valid_unmanaged_strut(&strut), "edge={edge}");
+        }
+        assert!(valid_unmanaged_strut(&StrutPartial {
+            top: 96,
+            left_start_y: 100,
+            left_end_y: 50,
+            ..Default::default()
+        }));
+        assert!(valid_unmanaged_strut(&StrutPartial {
+            top: 96,
+            top_start_x: 1920,
+            top_end_x: 3839,
+            ..Default::default()
+        }));
+        assert!(valid_unmanaged_strut(&StrutPartial {
+            left: 24,
+            ..Default::default()
+        }));
+    }
 
     #[test]
     fn cache_compares_the_complete_strut_and_host_entry() {

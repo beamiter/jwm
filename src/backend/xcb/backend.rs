@@ -3208,6 +3208,19 @@ impl WindowOps for XcbWindowOps {
             .map_err(xcb_err)
     }
 
+    fn add_event_mask(&self, win: WindowId, mask: u32) -> XcbResult<()> {
+        let window = self.win(win)?;
+        let cookie = self.conn.send_request(&x::GetWindowAttributes { window });
+        let attributes = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let events = attributes.your_event_mask() | event_mask_from_bits(mask);
+        self.conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window,
+                value_list: &[x::Cw::EventMask(events)],
+            })
+            .map_err(xcb_err)
+    }
+
     fn get_tree_child(&self, win: WindowId) -> XcbResult<Vec<WindowId>> {
         let cookie = self.conn.send_request(&x::QueryTree {
             window: self.win(win)?,

@@ -415,6 +415,9 @@ impl WMController for Jwm {
     fn on_unmap_notify(&mut self, backend: &mut dyn Backend, win: WindowId, from_configure: bool) {
         self.override_redirect_windows.remove(&win);
         self.or_window_geometries.remove(&win);
+        if backend.capabilities().supports_client_list && self.wintoclient(win).is_none() {
+            self.remove_strut_on_unmanage(backend, win);
+        }
         if let Err(e) = self.unmapnotify(backend, win, from_configure) {
             error!("Error handling UnmapNotify for {:?}: {:?}", win, e);
         }
@@ -1347,6 +1350,9 @@ impl WMController for Jwm {
         // Handle external strut changes (polybar, trayer, etc.) — works for
         // both managed and unmanaged (override-redirect) windows.
         if kind == PropertyKind::Strut {
+            if self.refresh_unmanaged_x11_strut(backend, win) {
+                return;
+            }
             // Skip bar windows managed by jwm (secondary_bars)
             let is_bar_window = self
                 .secondary_bars
@@ -13067,6 +13073,7 @@ impl EventHandler for Jwm {
                 if !is_overlay {
                     if let Ok(attr) = backend.window_ops().get_window_attributes(win) {
                         if attr.override_redirect {
+                            self.refresh_unmanaged_x11_strut(backend, win);
                             self.override_redirect_windows.insert(win);
                             // Cache initial geometry so build_compositor_scene doesn't
                             // need a synchronous GetGeometry round-trip every frame.

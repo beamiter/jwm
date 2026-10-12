@@ -54,3 +54,22 @@ Pure state/codec and mock-backend tests cover identity, hotplug matching,
 write/readback failure ordering, and off-view adoption without creating a
 native connection. Actual Xorg multi-monitor restarts, compositor-on/off
 behavior, and live hotplug still require hardware/session validation.
+
+## External X11 panels and work areas
+
+During startup and restart, mapped override-redirect panels keep their existing
+unmanaged status. A nonzero strut is rediscovered without waiting for the panel
+to rewrite its property. JWM observes later property changes without replacing
+its other event subscriptions. Unmapping or destroying the panel removes its
+reservation; remapping rereads it. Hidden panels cannot reclaim space through
+a property update. Failed attribute, observation or host-geometry queries do
+not create a reservation. Inverted spans on nonzero edges are rejected for
+these unmanaged observations; legacy zero/zero spans retain host attribution.
+
+A mapped override-redirect window explicitly typed as `DOCK` is also observed
+before its first nonzero strut, allowing a panel to publish the property after
+mapping. Untyped windows with no strut at scan/map time are not subscribed: if
+such a window declares both its dock type and first strut only later, a remap is
+needed for this discovery path. Ordinary menus and compositor overlays do not
+become managed clients or receive focus through this handling. Wayland's
+layer-shell exclusive zones retain their existing behavior.

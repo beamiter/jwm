@@ -2360,8 +2360,8 @@ mod unmanage_minimized_tests {
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
     };
     use std::any::Any;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ProtocolWrite {
@@ -2393,6 +2393,8 @@ mod unmanage_minimized_tests {
 
     #[derive(Default)]
     struct ClientPropertyOps {
+        test_struts:
+            Arc<Mutex<std::collections::HashMap<WindowId, crate::backend::api::StrutPartial>>>,
         restart_properties: Mutex<Vec<(WindowId, RestartProperty, Vec<u8>)>>,
         fail_restart_snapshot_write: AtomicBool,
         fail_restart_client_write: AtomicBool,
@@ -2433,6 +2435,13 @@ mod unmanage_minimized_tests {
     }
 
     impl PropertyOps for ClientPropertyOps {
+        fn get_window_strut_partial(
+            &self,
+            win: WindowId,
+        ) -> Option<crate::backend::api::StrutPartial> {
+            self.test_struts.lock().unwrap().get(&win).copied()
+        }
+
         fn get_restart_property(
             &self,
             win: WindowId,
@@ -2797,6 +2806,13 @@ mod unmanage_minimized_tests {
 
     #[derive(Default)]
     struct ClientWindowOps {
+        subscribe_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        hide_on_subscribe: AtomicBool,
+        additive_masks: Mutex<std::collections::HashMap<WindowId, u32>>,
+        additive_calls: Mutex<Vec<WindowId>>,
+        fail_additive_mask: AtomicBool,
+        scanned_windows: Mutex<Vec<WindowId>>,
+        override_redirect_windows: Mutex<Vec<WindowId>>,
         placements: Mutex<Vec<RecordedPlacement>>,
         configures: Mutex<Vec<(WindowId, i32, i32, u32, u32)>>,
         positions: Mutex<Vec<(WindowId, i32, i32)>>,
@@ -2955,7 +2971,7 @@ mod unmanage_minimized_tests {
             Ok(())
         }
 
-        fn get_window_attributes(&self, _win: WindowId) -> Result<WindowAttributes, BackendError> {
+        fn get_window_attributes(&self, win: WindowId) -> Result<WindowAttributes, BackendError> {
             let call = self.attributes_calls.fetch_add(1, Ordering::Relaxed) + 1;
             if self.fail_next_attributes.swap(false, Ordering::Relaxed)
                 || self.fail_attributes_on_call.load(Ordering::Relaxed) == call
@@ -2974,7 +2990,11 @@ mod unmanage_minimized_tests {
                 .expect("initial Iconic operations lock")
                 .push(InitialIconicOperation::Attributes { viewable });
             Ok(WindowAttributes {
-                override_redirect: false,
+                override_redirect: self
+                    .override_redirect_windows
+                    .lock()
+                    .unwrap()
+                    .contains(&win),
                 map_state_viewable: viewable,
             })
         }
@@ -3010,7 +3030,7 @@ mod unmanage_minimized_tests {
         }
 
         fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
-            Ok(Vec::new())
+            Ok(self.scanned_windows.lock().unwrap().clone())
         }
 
         fn flush(&self) -> Result<(), BackendError> {
@@ -3036,6 +3056,24 @@ mod unmanage_minimized_tests {
                 .lock()
                 .expect("window changes lock")
                 .push((win, changes));
+            Ok(())
+        }
+
+        fn add_event_mask(&self, win: WindowId, mask: u32) -> Result<(), BackendError> {
+            self.additive_calls.lock().unwrap().push(win);
+            if self.fail_additive_mask.load(Ordering::Relaxed) {
+                return Err(BackendError::Unsupported(
+                    "injected additive observer failure",
+                ));
+            }
+            *self.additive_masks.lock().unwrap().entry(win).or_default() |= mask;
+            let hook = self.subscribe_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            if self.hide_on_subscribe.swap(false, Ordering::Relaxed) {
+                self.force_unmapped.store(true, Ordering::Relaxed);
+            }
             Ok(())
         }
 
@@ -3081,6 +3119,7 @@ mod unmanage_minimized_tests {
     }
 
     struct ClientSpyBackend {
+        test_overlay: Option<WindowId>,
         restart_identity: bool,
         focus_changes: Vec<Option<WindowId>>,
         window_ops: ClientWindowOps,
@@ -3106,6 +3145,7 @@ mod unmanage_minimized_tests {
     impl ClientSpyBackend {
         fn new() -> Self {
             Self {
+                test_overlay: None,
                 restart_identity: false,
                 focus_changes: Vec::new(),
                 window_ops: ClientWindowOps::default(),
@@ -3215,6 +3255,10 @@ mod unmanage_minimized_tests {
     impl CompositorAnnotation for ClientSpyBackend {}
     impl DisplayControl for ClientSpyBackend {}
     impl RenderScheduler for ClientSpyBackend {
+        fn compositor_overlay_window(&self) -> Option<WindowId> {
+            self.test_overlay
+        }
+
         fn has_compositor(&self) -> bool {
             self.has_compositor
         }
@@ -7245,6 +7289,479 @@ mod unmanage_minimized_tests {
                     .is_empty()
             );
         }
+    }
+
+    fn unmanaged_panel_fixture() -> (Jwm, ClientSpyBackend, WindowId) {
+        let mut backend = ClientSpyBackend::new();
+        backend.supports_client_list = true;
+        let panel = WindowId::from_raw(0xa902);
+        backend
+            .window_ops
+            .scanned_windows
+            .lock()
+            .unwrap()
+            .push(panel);
+        backend
+            .window_ops
+            .override_redirect_windows
+            .lock()
+            .unwrap()
+            .push(panel);
+        let jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        (jwm, backend, panel)
+    }
+
+    fn set_test_panel_strut(backend: &ClientSpyBackend, panel: WindowId, top: u32) {
+        backend.property_ops.test_struts.lock().unwrap().insert(
+            panel,
+            crate::backend::api::StrutPartial {
+                top,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn unmanaged_x11_strut_lifecycle_unmap_remap_property_and_destroy() {
+        use crate::backend::api::{BackendEvent, EventHandler, PropertyKind};
+        let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+        set_test_panel_strut(&backend, panel, 96);
+        jwm.setup_initial_windows(&mut backend).unwrap();
+        let mon = jwm.state.monitor_order[0];
+        assert_eq!(jwm.get_strut_reserved(mon).0, 96);
+        set_test_panel_strut(&backend, panel, 128);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::PropertyChanged {
+                window: panel,
+                kind: PropertyKind::Strut,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.get_strut_reserved(mon).0, 128);
+        backend
+            .window_ops
+            .force_unmapped
+            .store(true, Ordering::Relaxed);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WindowUnmapped {
+                window: panel,
+                from_configure: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+        set_test_panel_strut(&backend, panel, 160);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::PropertyChanged {
+                window: panel,
+                kind: PropertyKind::Strut,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            jwm.get_strut_reserved(mon).0,
+            0,
+            "hidden property changes stay inactive"
+        );
+        backend
+            .window_ops
+            .force_unmapped
+            .store(false, Ordering::Relaxed);
+        jwm.handle_event(&mut backend, BackendEvent::WindowMapped(panel))
+            .unwrap();
+        assert_eq!(jwm.get_strut_reserved(mon).0, 160);
+        jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(panel))
+            .unwrap();
+        assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+        assert!(jwm.wintoclient(panel).is_none());
+        assert!(backend.window_ops.maps.lock().unwrap().is_empty());
+        assert!(backend.focus_changes.is_empty());
+    }
+
+    #[test]
+    fn unmanaged_x11_typed_dock_observes_late_strut_and_preserves_existing_mask() {
+        use crate::backend::api::{BackendEvent, EventHandler, PropertyKind};
+        let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+        backend
+            .property_ops
+            .popup_properties
+            .lock()
+            .unwrap()
+            .insert(panel, (WindowType::Dock, None));
+        let old_mask = EventMaskBits::ENTER_WINDOW.bits() | (1 << 31);
+        backend
+            .window_ops
+            .additive_masks
+            .lock()
+            .unwrap()
+            .insert(panel, old_mask);
+        jwm.setup_initial_windows(&mut backend).unwrap();
+        let mon = jwm.state.monitor_order[0];
+        assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+        let observed = backend.window_ops.additive_masks.lock().unwrap()[&panel];
+        assert_eq!(
+            observed,
+            old_mask
+                | EventMaskBits::PROPERTY_CHANGE.bits()
+                | EventMaskBits::STRUCTURE_NOTIFY.bits()
+        );
+        assert!(
+            backend.window_ops.event_masks.lock().unwrap().is_empty(),
+            "must not use replacement mask API"
+        );
+        set_test_panel_strut(&backend, panel, 72);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::PropertyChanged {
+                window: panel,
+                kind: PropertyKind::Strut,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.get_strut_reserved(mon).0, 72);
+        backend
+            .property_ops
+            .test_struts
+            .lock()
+            .unwrap()
+            .remove(&panel);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::PropertyChanged {
+                window: panel,
+                kind: PropertyKind::Strut,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+        assert!(jwm.wintoclient(panel).is_none());
+    }
+
+    #[test]
+    fn unmanaged_x11_strut_observation_ignores_empty_hidden_overlay_and_wayland() {
+        for case in 0..4 {
+            let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+            if case > 0 {
+                set_test_panel_strut(&backend, panel, 96);
+            }
+            if case == 1 {
+                backend
+                    .window_ops
+                    .force_unmapped
+                    .store(true, Ordering::Relaxed);
+            }
+            if case == 2 {
+                backend.test_overlay = Some(panel);
+            }
+            if case == 3 {
+                backend.supports_client_list = false;
+            }
+            jwm.setup_initial_windows(&mut backend).unwrap();
+            let mon = jwm.state.monitor_order[0];
+            assert_eq!(jwm.get_strut_reserved(mon).0, 0, "case={case}");
+            assert!(
+                backend.window_ops.additive_calls.lock().unwrap().is_empty(),
+                "case={case}"
+            );
+            assert!(jwm.wintoclient(panel).is_none());
+        }
+    }
+
+    #[test]
+    fn unmanaged_x11_strut_query_and_subscription_failures_clear_existing_reservation() {
+        for failure in 0..4 {
+            let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+            set_test_panel_strut(&backend, panel, 96);
+            jwm.setup_initial_windows(&mut backend).unwrap();
+            let mon = jwm.state.monitor_order[0];
+            assert_eq!(jwm.get_strut_reserved(mon).0, 96);
+            match failure {
+                0 => backend
+                    .window_ops
+                    .fail_next_attributes
+                    .store(true, Ordering::Relaxed),
+                1 => backend
+                    .window_ops
+                    .fail_additive_mask
+                    .store(true, Ordering::Relaxed),
+                2 => backend.window_ops.fail_geometry_on_call.store(
+                    backend.window_ops.geometry_calls.load(Ordering::Relaxed) + 1,
+                    Ordering::Relaxed,
+                ),
+                _ => {
+                    backend
+                        .property_ops
+                        .test_struts
+                        .lock()
+                        .unwrap()
+                        .remove(&panel);
+                }
+            }
+            assert!(jwm.refresh_unmanaged_x11_strut(&mut backend, panel));
+            assert_eq!(jwm.get_strut_reserved(mon).0, 0, "failure={failure}");
+        }
+        use crate::backend::wayland_dummy_ops::DummyWindowOps;
+        assert!(matches!(
+            DummyWindowOps.add_event_mask(WindowId::from_raw(1), 1),
+            Err(BackendError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn unmanaged_x11_restart_strut_follows_physical_output_after_reordering() {
+        let mut backend = ClientSpyBackend::new();
+        backend.supports_client_list = true;
+        backend.restart_identity = true;
+        let first = DummyOutputOps.enumerate_outputs().remove(0);
+        let second = second_output();
+        backend.output_ops.overrides = Some(vec![first.clone(), second.clone()]);
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        for (index, mon) in old.state.monitor_order.clone().into_iter().enumerate() {
+            let m = &mut old.state.monitors[mon];
+            m.tag_set = [1 << (index + 1); 2];
+            m.sel_tags = 0;
+            let t = m.pertag.as_mut().unwrap();
+            t.cur_tag = index + 2;
+            t.lts[t.cur_tag] = std::rc::Rc::new(if index == 0 {
+                crate::core::layout::LayoutEnum::GRID
+            } else {
+                crate::core::layout::LayoutEnum::TILE
+            });
+            m.reload_current_tag_context();
+        }
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        backend.output_ops.overrides = Some(vec![second.clone(), first]);
+        let panel = WindowId::from_raw(0xa903);
+        backend
+            .window_ops
+            .scanned_windows
+            .lock()
+            .unwrap()
+            .push(panel);
+        backend
+            .window_ops
+            .override_redirect_windows
+            .lock()
+            .unwrap()
+            .push(panel);
+        *backend.window_ops.reported_geometry.lock().unwrap() = Some(Geometry {
+            x: second.x + 20,
+            y: second.y,
+            w: 100,
+            h: 40,
+            border: 0,
+        });
+        set_test_panel_strut(&backend, panel, 96);
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.setup_initial_windows(&mut backend).unwrap();
+        for mon in fresh.state.monitor_order.clone() {
+            let second =
+                fresh.output_key_for_monitor(&backend, mon).as_deref() == Some("Virtual-2");
+            assert_eq!(fresh.get_strut_reserved(mon).0, if second { 96 } else { 0 });
+            assert_eq!(
+                fresh.state.monitors[mon].get_active_tags(),
+                if second { 4 } else { 2 }
+            );
+            assert_eq!(
+                *fresh.state.monitors[mon].lt,
+                if second {
+                    crate::core::layout::LayoutEnum::TILE
+                } else {
+                    crate::core::layout::LayoutEnum::GRID
+                }
+            );
+        }
+        assert!(fresh.wintoclient(panel).is_none());
+    }
+
+    #[test]
+    fn unmanaged_x11_malformed_strut_never_reserves_and_managed_policy_is_unchanged() {
+        let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+        let malformed = crate::backend::api::StrutPartial {
+            top: 96,
+            top_start_x: 100,
+            top_end_x: 50,
+            ..Default::default()
+        };
+        backend
+            .property_ops
+            .test_struts
+            .lock()
+            .unwrap()
+            .insert(panel, malformed);
+        jwm.setup_initial_windows(&mut backend).unwrap();
+        let mon = jwm.state.monitor_order[0];
+        assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+        assert!(backend.window_ops.additive_calls.lock().unwrap().is_empty());
+        // Existing managed handling is intentionally not redefined here.
+        jwm.check_strut_on_manage(&mut backend, panel);
+        assert_eq!(jwm.get_strut_reserved(mon).0, 96);
+        assert!(jwm.refresh_unmanaged_x11_strut(&mut backend, panel));
+        assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+    }
+
+    #[test]
+    fn unmanaged_x11_topology_refresh_fails_closed_without_per_panel_arrange() {
+        for managed in [false, true] {
+            let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+            set_test_panel_strut(&backend, panel, 96);
+            jwm.setup_initial_windows(&mut backend).unwrap();
+            let mon = jwm.state.monitor_order[0];
+            if managed {
+                let mut client = WMClient::new(panel);
+                client.mon = Some(mon);
+                client.state.tags = 1;
+                let key = jwm.insert_client(client);
+                jwm.attach_to_monitor(key, mon);
+            }
+            let configures = backend.window_ops.configures.lock().unwrap().len();
+            backend.window_ops.fail_geometry_on_call.store(
+                backend.window_ops.geometry_calls.load(Ordering::Relaxed) + 1,
+                Ordering::Relaxed,
+            );
+            assert!(jwm.refresh_external_strut_hosts(&mut backend));
+            assert_eq!(
+                backend.window_ops.configures.lock().unwrap().len(),
+                configures,
+                "cache refresh must not arrange"
+            );
+            if managed {
+                assert_eq!(
+                    jwm.external_struts.get(&panel).unwrap().1,
+                    None,
+                    "existing managed fallback is preserved"
+                );
+                assert_eq!(jwm.get_strut_reserved(mon).0, 96);
+            } else {
+                assert!(!jwm.external_struts.contains_key(&panel));
+                assert_eq!(jwm.get_strut_reserved(mon).0, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn unmanaged_x11_strut_subscription_boundary_rereads_publish_delete_and_unmap() {
+        for change in 0..3 {
+            let (mut jwm, mut backend, panel) = unmanaged_panel_fixture();
+            backend
+                .property_ops
+                .popup_properties
+                .lock()
+                .unwrap()
+                .insert(panel, (WindowType::Dock, None));
+            if change != 0 {
+                set_test_panel_strut(&backend, panel, 96);
+            }
+            let properties = Arc::clone(&backend.property_ops.test_struts);
+            *backend.window_ops.subscribe_hook.lock().unwrap() = Some(Box::new(move || {
+                if change == 0 {
+                    properties.lock().unwrap().insert(
+                        panel,
+                        crate::backend::api::StrutPartial {
+                            top: 144,
+                            ..Default::default()
+                        },
+                    );
+                } else if change == 1 {
+                    properties.lock().unwrap().remove(&panel);
+                }
+            }));
+            backend
+                .window_ops
+                .hide_on_subscribe
+                .store(change == 2, Ordering::Relaxed);
+            jwm.setup_initial_windows(&mut backend).unwrap();
+            let mon = jwm.state.monitor_order[0];
+            assert_eq!(
+                jwm.get_strut_reserved(mon).0,
+                if change == 0 { 144 } else { 0 },
+                "change={change}"
+            );
+            assert!(jwm.wintoclient(panel).is_none());
+            assert_eq!(backend.window_ops.additive_calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn unmanaged_x11_additive_observation_adapters_preserve_native_masks_and_check_writes() {
+        let xcb = include_str!("../backend/xcb/backend.rs");
+        let x11rb = include_str!("../backend/x11rb/backend.rs");
+        fn body(source: &str) -> &str {
+            let source = source.split_once("fn add_event_mask(").unwrap().1;
+            let start = source.find('{').unwrap();
+            let mut depth = 0;
+            for (index, ch) in source[start..].char_indices() {
+                if ch == '{' {
+                    depth += 1;
+                }
+                if ch == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[start..start + index + 1];
+                    }
+                }
+            }
+            panic!("unterminated method")
+        }
+        let xcb = body(xcb);
+        assert!(xcb.contains("attributes.your_event_mask() | event_mask_from_bits(mask)"));
+        assert!(xcb.contains("send_and_check_request"));
+        let x11rb = body(x11rb);
+        assert!(x11rb.contains("attributes.your_event_mask | event_mask_from_generic(mask)"));
+        assert!(x11rb.contains(".check()?"));
+    }
+
+    #[test]
+    fn x11_restart_scan_recovers_an_existing_override_redirect_dock_strut() {
+        use crate::backend::api::StrutPartial;
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        backend.supports_client_list = true;
+        let dock = WindowId::from_raw(0xa901);
+        backend
+            .window_ops
+            .scanned_windows
+            .lock()
+            .unwrap()
+            .push(dock);
+        backend
+            .window_ops
+            .override_redirect_windows
+            .lock()
+            .unwrap()
+            .push(dock);
+        backend.property_ops.test_struts.lock().unwrap().insert(
+            dock,
+            StrutPartial {
+                top: 96,
+                top_start_x: 0,
+                top_end_x: 1919,
+                ..Default::default()
+            },
+        );
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let old_mon = old.state.monitor_order[0];
+        old.check_strut_on_manage(&mut backend, dock);
+        assert_eq!(old.get_strut_reserved(old_mon).0, 96);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.setup_initial_windows(&mut backend).unwrap();
+        assert!(
+            fresh.wintoclient(dock).is_none(),
+            "an OR dock must remain unmanaged"
+        );
+        let mon = fresh.state.monitor_order[0];
+        assert_eq!(
+            fresh.get_strut_reserved(mon).0,
+            96,
+            "startup must rediscover an existing dock without waiting for another property event"
+        );
+        assert!(fresh.monitor_work_area(mon).unwrap().y >= 96);
     }
 
     #[test]

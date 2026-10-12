@@ -6514,6 +6514,19 @@ mod window_ops {
             Ok(())
         }
 
+        fn add_event_mask(&self, win: WindowId, mask: u32) -> Result<(), BackendError> {
+            let window = self.ids.x11(win)?;
+            let attributes = self.conn.get_window_attributes(window)?.reply()?;
+            let events = attributes.your_event_mask | event_mask_from_generic(mask);
+            self.conn
+                .change_window_attributes(
+                    window,
+                    &ChangeWindowAttributesAux::new().event_mask(events),
+                )?
+                .check()?;
+            Ok(())
+        }
+
         fn grab_button_any_anymod(
             &self,
             win: WindowId,

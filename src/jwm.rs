@@ -380,6 +380,9 @@ enum InitialWindowDisposition {
     Gone,
     /// The candidate still exists but is not a managed toplevel.
     Ignore,
+    /// A mapped X11 override-redirect window stays unmanaged, but may own
+    /// an external dock reservation which startup must rediscover.
+    ObserveUnmanaged,
     /// The candidate is viewable or ICCCM Iconic and must be managed.
     Manage(Geometry),
 }
@@ -454,7 +457,11 @@ fn inspect_initial_window(
         return Ok(InitialWindowDisposition::Gone);
     };
     if attributes.override_redirect {
-        return Ok(InitialWindowDisposition::Ignore);
+        return Ok(if attributes.map_state_viewable {
+            InitialWindowDisposition::ObserveUnmanaged
+        } else {
+            InitialWindowDisposition::Ignore
+        });
     }
 
     let Some(wm_state) =
@@ -1437,8 +1444,14 @@ impl Jwm {
                 let mut queries = BackendInitialWindowAdoptionQueries { backend };
                 inspect_initial_window(&mut queries, win)?
             };
-            if let InitialWindowDisposition::Manage(geometry) = disposition {
-                self.manage(backend, win, &geometry)?;
+            match disposition {
+                InitialWindowDisposition::Manage(geometry) => {
+                    self.manage(backend, win, &geometry)?
+                }
+                InitialWindowDisposition::ObserveUnmanaged => {
+                    self.refresh_unmanaged_x11_strut(backend, win);
+                }
+                InitialWindowDisposition::Gone | InitialWindowDisposition::Ignore => {}
             }
         }
         self.finish_restart_adoption(backend);

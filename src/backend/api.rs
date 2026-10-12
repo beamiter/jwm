@@ -2402,6 +2402,12 @@ pub trait WindowOps: Send {
     fn change_event_mask(&self, _win: WindowId, _mask: u32) -> Result<(), BackendError> {
         Ok(())
     }
+    /// Add event observations without replacing this connection's existing
+    /// selection. Unsupported adapters must not pretend an observer exists.
+    fn add_event_mask(&self, _win: WindowId, _mask: u32) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("additive event observation"))
+    }
+
     fn get_tree_child(&self, _win: WindowId) -> Result<Vec<WindowId>, BackendError> {
         Ok(vec![])
     }
