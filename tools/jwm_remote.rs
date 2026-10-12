@@ -4,7 +4,9 @@ use clap::{Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client};
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::generate_key_file;
-use jwm::remote::usability::{default_key_path, key_metadata, normalize_address};
+use jwm::remote::usability::{
+    default_key_path, key_metadata, normalize_address, normalize_listen_address,
+};
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource};
 use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
 use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPORT_VERSION};
@@ -17,7 +19,7 @@ const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
     name = "jwm-remote",
     version,
     about = "JWM-to-JWM remote viewing and control for trusted X11 LANs",
-    after_help = "Start here: jwm-remote doctor\nCreate a key explicitly: jwm-remote keygen (never overwrites; see keygen --help).\nShare the same private key securely with your other machine.\nHost: jwm-remote host --listen 0.0.0.0:48221 --allow-lan\nViewer: jwm-remote connect HOST --view-only\nInput needs host --allow-input; clipboard requires explicit consent on both ends.\nDefault key: $XDG_CONFIG_HOME/jwm/remote.key, otherwise $HOME/.config/jwm/remote.key.\nNo command silently creates a key, opens LAN access, or enables clipboard sharing."
+    after_help = "Start here: jwm-remote doctor\nCreate a key explicitly: jwm-remote keygen (never overwrites; see keygen --help).\nShare the same private key securely with your other machine.\nHost: jwm-remote host --listen 0.0.0.0 --allow-lan\nViewer: jwm-remote connect HOST --view-only\nInput needs host --allow-input; clipboard requires explicit consent on both ends.\nDefault key: $XDG_CONFIG_HOME/jwm/remote.key, otherwise $HOME/.config/jwm/remote.key.\nNo command silently creates a key, opens LAN access, or enables clipboard sharing."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -46,8 +48,17 @@ enum Command {
     },
     /// Share the current JWM X11 desktop.
     Host {
-        /// TCP listener. Non-loopback addresses also require --allow-lan.
-        #[arg(long, default_value = "127.0.0.1:48221", value_name = "ADDRESS:PORT")]
+        /// Local host IP/name, optionally with port (default 48221).
+        ///
+        /// Bare IPv6 uses the default port; use [IPv6]:PORT for another port.
+        /// Non-loopback addresses still require --allow-lan. Explicit port 0
+        /// asks the OS for a free port; use the printed listener port to connect.
+        #[arg(
+            long,
+            default_value = "127.0.0.1:48221",
+            value_name = "LOCAL_HOST[:PORT]",
+            value_parser = normalize_listen_address
+        )]
         listen: String,
 
         /// Private key; defaults to the JWM key path shown in top-level help.
@@ -355,6 +366,78 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_listen_short_forms_preserve_defaults_permissions_and_port_zero() {
+        let Command::Host {
+            listen,
+            allow_lan,
+            allow_input,
+            allow_clipboard,
+            ..
+        } = Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command
+        else {
+            panic!("host variant expected")
+        };
+        assert_eq!(listen, "127.0.0.1:48221");
+        assert!(!allow_lan && !allow_input && !allow_clipboard);
+        for (input, expected) in [
+            ("192.0.2.10", "192.0.2.10:48221"),
+            ("localhost", "localhost:48221"),
+            ("hostname:0", "hostname:0"),
+            ("127.0.0.1:0", "127.0.0.1:0"),
+            ("::1", "[::1]:48221"),
+            ("[::1]", "[::1]:48221"),
+            ("[::1]:0", "[::1]:0"),
+        ] {
+            let Command::Host {
+                listen,
+                allow_lan,
+                allow_input,
+                allow_clipboard,
+                ..
+            } = Cli::try_parse_from(["jwm-remote", "host", "--listen", input])
+                .unwrap()
+                .command
+            else {
+                panic!("host variant expected")
+            };
+            assert_eq!(listen, expected);
+            assert!(!allow_lan && !allow_input && !allow_clipboard);
+        }
+        let Command::Host {
+            listen, allow_lan, ..
+        } = Cli::try_parse_from([
+            "jwm-remote",
+            "host",
+            "--listen",
+            "192.0.2.10",
+            "--allow-lan",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("host variant expected")
+        };
+        assert_eq!(listen, "192.0.2.10:48221");
+        assert!(allow_lan);
+    }
+
+    #[test]
+    fn host_listen_help_matches_parser_and_bad_addresses_fail_before_startup() {
+        for invalid in ["", ":48221", "host:65536", "host:", "[::1]:", "host\x1b"] {
+            let error =
+                Cli::try_parse_from(["jwm-remote", "host", "--listen", invalid]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(error.to_string().contains("host --listen"));
+        }
+        let help = Cli::try_parse_from(["jwm-remote", "host", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = help.to_string();
+        assert!(help.contains("LOCAL_HOST[:PORT]"));
+        assert!(help.contains("default 48221"));
+        assert!(help.contains("port 0"));
+    }
 
     #[test]
     fn help_and_short_examples_match_the_parser() {

@@ -63,16 +63,28 @@ Start with viewing only:
 
 ```bash
 # Host: sharing this machine's desktop on your trusted LAN
-jwm-remote host --listen 0.0.0.0:48221 --allow-lan
+jwm-remote host --listen 0.0.0.0 --allow-lan
 
 # Viewer: replace HOST with that machine's actual LAN hostname or IP
 jwm-remote connect HOST --view-only
 ```
 
 The default port is 48221: `HOST`, `HOST:48221`, `[::1]`, and `[::1]:48221`
-are accepted. A bare IPv6 address always uses the default port; bracket it to
-specify another port. `host` still binds loopback unless explicitly told
-otherwise; none of these conveniences opens a firewall or enables LAN access.
+are accepted. `host --listen` now accepts the same omitted-port convenience:
+`jwm-remote host --listen LOCAL_IP --allow-lan` uses port 48221. `LOCAL_IP` must
+be an address belonging to the **machine running the host**, not the viewer's
+address. A hostname is also accepted; the parser does not look it up, and the
+existing system bind operation resolves it when the host actually starts.
+A bare IPv6 address always uses the default port; bracket it to specify another
+port. Existing explicit ports and IPv6 scope-zone spelling are passed through
+to the system bind. For example, `--listen '[::1]:48221'` is explicit IPv6.
+The host also preserves explicit port `0`: the OS chooses an available port,
+and the viewer must use the actual port printed by the host. `connect` still
+rejects port 0.
+
+`host` still binds `127.0.0.1:48221` by default. A listener resolved to a
+non-loopback address still needs `--allow-lan`; omitted ports never grant that
+permission. None of these conveniences opens a firewall or enables LAN access.
 Restrict the host firewall to the intended trusted subnet yourself.
 
 To control the machine, stop/restart the host with `--allow-input`, then run:
@@ -97,6 +109,29 @@ with `--grab-input`, whether input is released or grabbed and how to release it.
 An authenticated connection waiting on capture is not reported as a connected
 desktop. View-only and host input denial remain view-only; there is no fallback
 that enables input automatically.
+
+### Listener and connection errors
+
+- An invalid `--listen` value fails during argument parsing, with an example
+  of a local IP/name and optional port. Empty hosts, broken IPv6 brackets,
+  invalid ports, whitespace and control characters are rejected before startup.
+- `AddrNotAvailable` means the requested listener address cannot be assigned
+  here. Check the host machine's actual interface address; using the viewer's
+  address on the host is a common cause. No automatic interface probe is made.
+- `AddrInUse` means another listener already uses that address/port. Stop only
+  the intended existing host, or choose another port and use it in `connect`.
+- `PermissionDenied` at bind means the OS denied the operation. Check port
+  privileges or local security policy; `--allow-lan` does not grant OS rights.
+  Do not run the desktop helper as root to bypass the denial.
+- Other bind failures retain the original OS error and are not automatically
+  called firewall failures. A successful SSH connection tests the SSH port,
+  not the remote-desktop listener or its TCP port.
+
+Listener errors, client TCP-connect errors, authentication/negotiation errors
+and negotiated input restrictions remain separate. A non-loopback permission
+refusal still requires an explicit `--allow-lan`; input still needs the host's
+`--allow-input`, and a keymap mismatch still disables the keyboard. No error
+silently opens LAN access, enables control or retries with weaker permissions.
 
 ### Recover deliberately
 

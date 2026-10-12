@@ -82,6 +82,113 @@ pub fn normalize_address(value: &str) -> Result<String, String> {
     }
 }
 
+/// Host listeners keep the system's hostname resolution at bind time and its
+/// explicit port-zero contract. Parsing this option never resolves a name.
+pub fn normalize_listen_address(value: &str) -> Result<String, String> {
+    const HELP: &str = "use a local host IP/name with optional port (default 48221), for example 192.0.2.10 or 192.0.2.10:48221; use [IPv6]:PORT for an explicit IPv6 port";
+    let invalid = || format!("invalid host --listen address: {HELP}");
+    if value.is_empty()
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+        || value.contains(['/', '\\'])
+    {
+        return Err(invalid());
+    }
+    if value.parse::<SocketAddr>().is_ok() {
+        return Ok(value.to_owned());
+    }
+    if let Some(bracketed) = value.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']').ok_or_else(invalid)?;
+        if !is_ipv6_listener_host(host) {
+            return Err(invalid());
+        }
+        if suffix.is_empty() {
+            return Ok(format!("[{host}]:{DEFAULT_PORT}"));
+        }
+        let port = suffix.strip_prefix(':').ok_or_else(invalid)?;
+        port.parse::<u16>().map_err(|_| invalid())?;
+        // Preserve zone spelling and defer any system-specific scope lookup to
+        // the same bind operation that handled explicit endpoints before.
+        return Ok(value.to_owned());
+    }
+    if value.contains(['[', ']']) {
+        return Err(invalid());
+    }
+    if is_ipv6_listener_host(value) {
+        // A bare IPv6 address is always the whole address, never a guessed port.
+        return Ok(format!("[{value}]:{DEFAULT_PORT}"));
+    }
+    if let Some((host, port)) = value.split_once(':') {
+        if host.is_empty() || port.parse::<u16>().is_err() {
+            return Err(invalid());
+        }
+        Ok(value.to_owned())
+    } else {
+        Ok(format!("{value}:{DEFAULT_PORT}"))
+    }
+}
+
+fn is_ipv6_listener_host(value: &str) -> bool {
+    let address = if let Some((address, zone)) = value.split_once('%') {
+        if zone.is_empty() || zone.contains(['%', ':', '[', ']']) {
+            return false;
+        }
+        address
+    } else {
+        value
+    };
+    address.parse::<Ipv6Addr>().is_ok()
+}
+
+/// Keep bind failures separate from capture, authentication and peer errors.
+/// The original I/O error remains available as the diagnostic's source.
+pub fn listener_bind_error(address: &str, error: io::Error) -> io::Error {
+    let hint = match error.kind() {
+        io::ErrorKind::AddrNotAvailable => {
+            "This listener address must belong to this host, not the viewer. Check this machine's interface address; no interface was inspected automatically."
+        }
+        io::ErrorKind::AddrInUse => {
+            "Another listener is using this address/port. Stop only the intended existing host, or choose a different port and use that same port in connect."
+        }
+        io::ErrorKind::PermissionDenied => {
+            "The operating system denied this bind. Check local port privileges and security policy; --allow-lan does not grant OS permission. Do not run the desktop helper as root to bypass this."
+        }
+        _ => {
+            "Check the listener IP/name and port and the original OS error. SSH reachability does not verify the remote-desktop port; this error alone does not establish a firewall problem."
+        }
+    };
+    io::Error::new(
+        error.kind(),
+        ListenerBindFailure {
+            address: address.to_owned(),
+            hint,
+            cause: error,
+        },
+    )
+}
+
+#[derive(Debug)]
+struct ListenerBindFailure {
+    address: String,
+    hint: &'static str,
+    cause: io::Error,
+}
+
+impl std::fmt::Display for ListenerBindFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cannot bind host listener {:?}: {}. {}",
+            self.address, self.cause, self.hint
+        )
+    }
+}
+
+impl std::error::Error for ListenerBindFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 /// Reports metadata only; even plausible length does not validate key bytes.
 pub fn key_metadata(path: &Path, current_uid: u32) -> io::Result<String> {
     let metadata = std::fs::symlink_metadata(path)?;
@@ -205,6 +312,107 @@ pub fn viewer_title(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_addresses_supply_default_port_without_losing_bind_compatibility() {
+        for (input, expected) in [
+            ("192.0.2.10", "192.0.2.10:48221"),
+            ("127.0.0.1", "127.0.0.1:48221"),
+            ("0.0.0.0", "0.0.0.0:48221"),
+            ("localhost", "localhost:48221"),
+            ("host.invalid", "host.invalid:48221"),
+            ("localhost:0", "localhost:0"),
+            ("host.invalid:1234", "host.invalid:1234"),
+            ("127.0.0.1:0", "127.0.0.1:0"),
+            ("192.0.2.10:48221", "192.0.2.10:48221"),
+            ("::1", "[::1]:48221"),
+            ("[::1]", "[::1]:48221"),
+            ("[::1]:0", "[::1]:0"),
+            ("[::1]:65535", "[::1]:65535"),
+            ("2001:db8::1234", "[2001:db8::1234]:48221"),
+            ("[fe80::1%3]:0", "[fe80::1%3]:0"),
+            ("[fe80::1%eth0]:1234", "[fe80::1%eth0]:1234"),
+            ("fe80::1%eth0", "[fe80::1%eth0]:48221"),
+        ] {
+            assert_eq!(
+                normalize_listen_address(input).unwrap(),
+                expected,
+                "{input}"
+            );
+        }
+        // Unlike a local listener, a viewer cannot connect to port zero.
+        assert!(normalize_address("127.0.0.1:0").is_err());
+        assert!(normalize_address("localhost:0").is_err());
+        assert!(normalize_address("[::1]:0").is_err());
+    }
+
+    #[test]
+    fn listener_addresses_reject_missing_hosts_bad_ports_and_controls() {
+        for invalid in [
+            "",
+            ":48221",
+            "host:",
+            "host:65536",
+            "host:-1",
+            "host:no",
+            "bad::address",
+            "[::1]:",
+            "[::1]:48221:4",
+            "[::1",
+            "::1]",
+            "[host]:48221",
+            "[]:48221",
+            "[fe80::1%]:0",
+            "[fe80::1%a%b]:0",
+            "http://host:48221",
+            "host name",
+            " host",
+            "host\n",
+            "host\0",
+            "host\x1b",
+            "host\u{85}",
+        ] {
+            let error = normalize_listen_address(invalid).unwrap_err();
+            assert!(error.contains("host --listen"));
+            assert!(error.contains("local host IP/name"));
+            assert!(!error.chars().any(char::is_control));
+        }
+    }
+
+    #[test]
+    fn listener_bind_diagnostics_preserve_kind_cause_and_correct_next_step() {
+        for (kind, expected) in [
+            (
+                io::ErrorKind::AddrNotAvailable,
+                "belong to this host, not the viewer",
+            ),
+            (io::ErrorKind::AddrInUse, "Another listener"),
+            (
+                io::ErrorKind::PermissionDenied,
+                "--allow-lan does not grant OS permission",
+            ),
+            (io::ErrorKind::InvalidInput, "original OS error"),
+        ] {
+            let error =
+                listener_bind_error("192.0.2.10:48221", io::Error::new(kind, "test OS cause"));
+            assert_eq!(error.kind(), kind);
+            let text = error.to_string();
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("test OS cause"));
+            let cause = error
+                .get_ref()
+                .unwrap()
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap();
+            assert_eq!(cause.kind(), kind);
+        }
+        let escaped =
+            listener_bind_error("host\nFAKE", io::Error::from(io::ErrorKind::Other)).to_string();
+        assert!(escaped.contains("host\\nFAKE"));
+        assert!(!escaped.contains("host\nFAKE"));
+    }
     #[test]
     fn default_paths_never_fall_back_to_working_directory() {
         assert_eq!(

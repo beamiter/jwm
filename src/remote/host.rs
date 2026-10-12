@@ -12,6 +12,7 @@ use super::protocol::{
     server_handshake,
 };
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
+use super::usability::listener_bind_error;
 use super::x11_capture::{
     CaptureArea, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture,
     validate_capture_area,
@@ -1283,7 +1284,8 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     )?;
     let key = load_key_file(&options.key_file)?;
     validate_capture_area(options.display.as_deref(), &options.capture_area)?;
-    let listener = TcpListener::bind(&options.listen)?;
+    let listener = TcpListener::bind(&options.listen)
+        .map_err(|error| listener_bind_error(&options.listen, error))?;
     listener.set_nonblocking(true)?;
     let shutdown = Arc::new(AtomicBool::new(false));
     flag::register(SIGINT, Arc::clone(&shutdown))?;
