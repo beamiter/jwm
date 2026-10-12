@@ -148,9 +148,33 @@ fn write_frame_with_timeout(
 struct EncoderWaitResult {
     result: io::Result<ExitStatus>,
     timed_out: bool,
+    encoder_exited: bool,
 }
 
-fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> EncoderWaitResult {
+// A CPU-only test seam for the exact process-wait decision tree. Production
+// still owns one std::process::Child and executes the same bounded cleanup.
+trait EncoderProcess {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+}
+
+impl EncoderProcess for Child {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Child::try_wait(self)
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        Child::kill(self)
+    }
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        Child::wait(self)
+    }
+}
+
+fn wait_for_encoder_with_timeout(
+    child: &mut impl EncoderProcess,
+    timeout: Duration,
+) -> EncoderWaitResult {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -158,15 +182,17 @@ fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> Encode
                 return EncoderWaitResult {
                     result: Ok(status),
                     timed_out: false,
+                    encoder_exited: true,
                 };
             }
             Ok(None) => {}
             Err(error) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                let encoder_exited = child.wait().is_ok();
                 return EncoderWaitResult {
                     result: Err(error),
                     timed_out: false,
+                    encoder_exited,
                 };
             }
         }
@@ -185,9 +211,11 @@ fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> Encode
         .err()
         .filter(|error| error.kind() != io::ErrorKind::InvalidInput);
     let status = child.wait();
+    let encoder_exited = status.is_ok();
     EncoderWaitResult {
         result: kill_error.map_or(status, Err),
         timed_out: true,
+        encoder_exited,
     }
 }
 
@@ -248,8 +276,12 @@ impl RecordingSink {
                     log::warn!("{label}: recording encoder stdin was not captured");
                     writer_broken.store(true, Ordering::Relaxed);
                     let _ = child.kill();
-                    let _ = child.wait();
-                    completion_reporter.finish(Some(WriterFailure::MissingStdin), None);
+                    let encoder_exited = child.wait().is_ok();
+                    completion_reporter.finish_with_exit(
+                        Some(WriterFailure::MissingStdin),
+                        None,
+                        encoder_exited,
+                    );
                     return;
                 };
                 widen_pipe(&stdin, label);
@@ -257,8 +289,12 @@ impl RecordingSink {
                     log::warn!("{label}: could not make encoder pipe nonblocking: {error}");
                     writer_broken.store(true, Ordering::Relaxed);
                     let _ = child.kill();
-                    let _ = child.wait();
-                    completion_reporter.finish(Some(WriterFailure::PipeSetup), None);
+                    let encoder_exited = child.wait().is_ok();
+                    completion_reporter.finish_with_exit(
+                        Some(WriterFailure::PipeSetup),
+                        None,
+                        encoder_exited,
+                    );
                     return;
                 }
                 let mut write_failed = false;
@@ -299,9 +335,10 @@ impl RecordingSink {
                     Err(error) => log::warn!("{label}: failed waiting for ffmpeg: {error}"),
                     Ok(_) => {}
                 }
-                completion_reporter.finish(
+                completion_reporter.finish_with_exit(
                     write_failed.then_some(WriterFailure::FrameWrite),
                     Some(outcome),
+                    waited.encoder_exited,
                 );
             });
 
@@ -312,9 +349,13 @@ impl RecordingSink {
                     // the Child from SendError instead of dropping it alive.
                     let (mut child, completion_reporter) = error.0;
                     let _ = child.kill();
-                    let _ = child.wait();
+                    let encoder_exited = child.wait().is_ok();
                     broken.store(true, Ordering::Relaxed);
-                    completion_reporter.finish(Some(WriterFailure::Handoff), None);
+                    completion_reporter.finish_with_exit(
+                        Some(WriterFailure::Handoff),
+                        None,
+                        encoder_exited,
+                    );
                 }
                 Some(handle)
             }
@@ -325,9 +366,13 @@ impl RecordingSink {
                 // down rather than feed a process that can never be read.
                 log::warn!("{label}: failed to spawn recording writer thread: {error}");
                 let _ = child.kill();
-                let _ = child.wait();
+                let encoder_exited = child.wait().is_ok();
                 broken.store(true, Ordering::Relaxed);
-                completion_reporter.finish(Some(WriterFailure::Spawn), None);
+                completion_reporter.finish_with_exit(
+                    Some(WriterFailure::Spawn),
+                    None,
+                    encoder_exited,
+                );
                 None
             }
         };
@@ -477,6 +522,65 @@ impl std::fmt::Display for RecordingSinkStats {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn encoder_exit_proof_tracks_reaping_independently_of_cleanup_errors() {
+        use std::os::unix::process::ExitStatusExt;
+        struct FakeChild {
+            probe: u8,
+            kill_ok: bool,
+            wait_ok: bool,
+            kills: usize,
+            waits: usize,
+        }
+        impl EncoderProcess for FakeChild {
+            fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+                match self.probe {
+                    0 => Ok(Some(ExitStatus::from_raw(0))),
+                    1 => Ok(None),
+                    _ => Err(io::Error::other("probe failed")),
+                }
+            }
+            fn kill(&mut self) -> io::Result<()> {
+                self.kills += 1;
+                if self.kill_ok {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("kill failed"))
+                }
+            }
+            fn wait(&mut self) -> io::Result<ExitStatus> {
+                self.waits += 1;
+                if self.wait_ok {
+                    Ok(ExitStatus::from_raw(1 << 8))
+                } else {
+                    Err(io::Error::other("wait failed"))
+                }
+            }
+        }
+        for probe in 0..3 {
+            for kill_ok in [false, true] {
+                for wait_ok in [false, true] {
+                    let mut child = FakeChild {
+                        probe,
+                        kill_ok,
+                        wait_ok,
+                        kills: 0,
+                        waits: 0,
+                    };
+                    let result = wait_for_encoder_with_timeout(&mut child, Duration::ZERO);
+                    assert_eq!(result.encoder_exited, probe == 0 || wait_ok);
+                    assert_eq!(result.timed_out, probe == 1);
+                    assert_eq!(child.kills, usize::from(probe != 0));
+                    assert_eq!(child.waits, usize::from(probe != 0));
+                    assert_eq!(
+                        result.result.is_ok(),
+                        probe == 0 || (probe == 1 && kill_ok && wait_ok)
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
     use std::process::{Command, Stdio};
 

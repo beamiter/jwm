@@ -605,6 +605,8 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_tracks_recording_encoder_exit(&self) -> bool { true }
+
             fn compositor_stop_recording_tracked(
                 &mut self,
             ) -> Option<$crate::backend::recording_completion::RecordingStopReceipt> {

@@ -167,6 +167,27 @@ intent or the standalone recorder's admission check. A requested audio track
 may still fall back to video-only when unavailable. Logical stop does not
 itself certify that the asynchronous encoder has released the device.
 
+With the built-in X11 and Wayland backends, a stopped audio-enabled screen
+recording keeps its audio reservation until its own encoder exit is confirmed.
+During that short finishing period, a new standalone recording or another
+screen recording requesting audio reports that the previous encoder is still
+finishing. Video-only screen recording remains available. A confirmed process
+exit releases the reservation even if encoding or saving failed; it does not
+mean the output file was saved successfully.
+
+If the encoder's exit cannot be confirmed, JWM reports that explicitly rather
+than guessing after a timeout. Check the stopped recording's log and any
+remaining encoder belonging to that recording, close it safely, then restart
+JWM before recording audio again. Do not terminate unrelated encoder processes.
+Legacy backend integrations without release receipts retain their previous
+admission behavior and do not provide this reservation guarantee. A requested
+audio track that fell back to video-only is conservatively reserved until that
+request's encoder exit is confirmed.
+
+Turning off compositing ends the active screen recording through the same
+nonblocking stop path. This includes video-only recording; finalization may
+continue in the background after the REC indicator disappears.
+
 ## Dynamic recording region
 
 - `Alt+Ctrl+R`: select a region and press Enter to start recording; pressing it

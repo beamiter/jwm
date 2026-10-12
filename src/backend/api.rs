@@ -3326,6 +3326,12 @@ pub trait CompositorMedia: Send {
     /// `None` clears the chip (cancel / editor commit / recording start).
     fn compositor_set_capture_hint(&mut self, _hint: Option<String>) {}
     fn compositor_stop_recording(&mut self) {}
+    /// Built-in stopped-writer receipts can prove process exit independently
+    /// of file success. Legacy backends retain their prior admission behavior.
+    fn compositor_tracks_recording_encoder_exit(&self) -> bool {
+        false
+    }
+
     /// Stop without waiting. An optional observation belongs to the exact
     /// stopped writer; its successful exit is not a saved-file receipt.
     /// Legacy backends still stop, but cannot confirm a writer outcome.

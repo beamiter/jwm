@@ -28,12 +28,14 @@ pub(super) struct ReadyCommand {
     pub(super) command: RecordingCommand,
     pub(super) start_reporter: Option<RecordingStartReporter>,
     pub(super) stop_reporter: Option<RecordingStopReporter>,
+    pub(super) cancelled_tracked_start: bool,
 }
 
 #[derive(Default)]
 pub(super) struct PendingRecordingCommands {
     stop: bool,
     stop_reporter: Option<RecordingStopReporter>,
+    cancelled_tracked_start: bool,
     start: Option<PendingStart>,
 }
 
@@ -67,12 +69,24 @@ impl PendingRecordingCommands {
     }
 
     pub(super) fn stop_tracked(&mut self, reporter: RecordingStopReporter) {
-        self.stop();
+        // This proof belongs only to the tracked Start removed by this
+        // exact Stop. A legacy stop or an earlier cancellation cannot lend it.
+        let cancelled_tracked_start = self
+            .start
+            .take()
+            .is_some_and(|(_, _, _, reporter)| reporter.is_some());
+        self.stop = true;
         if self.stop_reporter.is_some() {
-            // The first tracked Stop owns the actual stopped sink. A repeated
-            // request cannot adopt or clone that writer's completion.
-            reporter.complete(None);
+            // The first Stop still owns the old sink. A later Start cancelled
+            // before this render owns no child of its own, independently of
+            // that older writer (which can be video-only).
+            if cancelled_tracked_start {
+                reporter.complete_without_encoder();
+            } else {
+                reporter.complete(None);
+            }
         } else {
+            self.cancelled_tracked_start = cancelled_tracked_start;
             self.stop_reporter = Some(reporter);
         }
     }
@@ -97,6 +111,7 @@ impl PendingRecordingCommands {
             command: RecordingCommand::Stop,
             start_reporter: None,
             stop_reporter: self.stop_reporter.take(),
+            cancelled_tracked_start: std::mem::take(&mut self.cancelled_tracked_start),
         });
         let start = self
             .start
@@ -109,6 +124,7 @@ impl PendingRecordingCommands {
                 },
                 start_reporter: reporter,
                 stop_reporter: None,
+                cancelled_tracked_start: false,
             });
         [stop, start]
     }
@@ -147,6 +163,96 @@ mod tests {
             device: device.into(),
             bitrate: bitrate.into(),
         }
+    }
+
+    #[test]
+    fn cancelled_audio_start_after_video_stop_has_its_own_release_proof() {
+        use crate::backend::recording_admission::recording_start_channel;
+        use crate::backend::recording_completion::{
+            AudioRelease, EncoderWaitOutcome, RecordingStopObservations, recording_stop_channel,
+            writer_completion_channel,
+        };
+        let mut queue = PendingRecordingCommands::default();
+        let (old_stop, old_receipt) = recording_stop_channel();
+        queue.stop_tracked(old_stop);
+        let (start, _start_receipt) = recording_start_channel();
+        queue.start_with_audio_tracked(
+            "new-audio.mp4".into(),
+            REGION,
+            audio(true, "default", "96k"),
+            Some(start),
+        );
+        let (new_stop, new_receipt) = recording_stop_channel();
+        queue.stop_tracked(new_stop);
+        let mut audio_owner = RecordingStopObservations::default();
+        audio_owner.observe_with_audio(Some(new_receipt), true);
+        assert_eq!(audio_owner.audio_release(), AudioRelease::Available);
+        let (old_writer, completion) = writer_completion_channel();
+        let ready = queue.take()[0].take().unwrap();
+        assert!(!ready.cancelled_tracked_start);
+        ready.stop_reporter.unwrap().complete(Some(completion));
+        let mut old_owner = RecordingStopObservations::default();
+        old_owner.observe_with_audio(Some(old_receipt), false);
+        assert_eq!(old_owner.audio_release(), AudioRelease::Available);
+        old_writer.finish(None, Some(EncoderWaitOutcome::Exited(true)));
+        assert_eq!(audio_owner.audio_release(), AudioRelease::Available);
+    }
+
+    #[test]
+    fn cancellation_proof_is_bound_to_tracked_stop_and_not_borrowed_by_legacy_stop() {
+        use crate::backend::recording_admission::recording_start_channel;
+        use crate::backend::recording_completion::{
+            AudioRelease, RecordingStopObservations, recording_stop_channel,
+        };
+        for legacy_start in [false, true] {
+            let mut queue = PendingRecordingCommands::default();
+            let (start, _receipt) = recording_start_channel();
+            queue.start_tracked(
+                "pending.mp4".into(),
+                REGION,
+                (!legacy_start).then_some(start),
+            );
+            if !legacy_start {
+                queue.stop();
+            }
+            let (stop, receipt) = recording_stop_channel();
+            queue.stop_tracked(stop);
+            let ready = queue.take()[0].take().unwrap();
+            assert!(!ready.cancelled_tracked_start);
+            ready.stop_reporter.unwrap().complete(None);
+            let mut owner = RecordingStopObservations::default();
+            owner.observe_with_audio(Some(receipt), true);
+            assert_eq!(owner.audio_release(), AudioRelease::Unconfirmed);
+        }
+    }
+
+    #[test]
+    fn cancellation_proof_moves_once_and_live_writer_still_takes_precedence() {
+        use crate::backend::recording_admission::recording_start_channel;
+        use crate::backend::recording_completion::{
+            AudioRelease, EncoderWaitOutcome, RecordingStopObservations, recording_stop_channel,
+            writer_completion_channel,
+        };
+        let mut queue = PendingRecordingCommands::default();
+        let (start, _receipt) = recording_start_channel();
+        queue.start_tracked("pending.mp4".into(), REGION, Some(start));
+        let (stop, receipt) = recording_stop_channel();
+        queue.stop_tracked(stop);
+        // An unrelated later legacy start/stop cannot replace the first proof.
+        queue.start("legacy.mp4".into(), REGION);
+        queue.stop();
+        let ready = queue.take()[0].take().unwrap();
+        assert!(ready.cancelled_tracked_start);
+        let (writer, completion) = writer_completion_channel();
+        ready.stop_reporter.unwrap().complete(Some(completion));
+        let mut owner = RecordingStopObservations::default();
+        owner.observe_with_audio(Some(receipt), true);
+        assert_eq!(owner.audio_release(), AudioRelease::Pending);
+        writer.finish(None, Some(EncoderWaitOutcome::Exited(true)));
+        assert_eq!(owner.audio_release(), AudioRelease::Available);
+        let (stop, _receipt) = recording_stop_channel();
+        queue.stop_tracked(stop);
+        assert!(!queue.take()[0].take().unwrap().cancelled_tracked_start);
     }
 
     #[test]

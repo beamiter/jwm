@@ -5085,7 +5085,11 @@ impl WaylandCompositor {
                 super::recording_commands::RecordingCommand::Stop => {
                     let writer = unsafe { self.recording.stop_tracked(gl) };
                     if let Some(reporter) = ready.stop_reporter {
-                        reporter.complete(writer);
+                        if writer.is_none() && ready.cancelled_tracked_start {
+                            reporter.complete_without_encoder();
+                        } else {
+                            reporter.complete(writer);
+                        }
                     }
                     // Retire the old session's cue before a new session starts.
                     if let Some((_, texture, _, _)) = self.recording_indicator_texture.take()

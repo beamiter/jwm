@@ -48,15 +48,34 @@ fn terminal_outcome(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WriterCompletion {
+    outcome: WriterOutcome,
+    encoder_exited: bool,
+}
+
+impl WriterCompletion {
+    const UNKNOWN: Self = Self {
+        outcome: WriterOutcome::Unknown,
+        encoder_exited: false,
+    };
+    // This is not a saved-file result: a deferred request was cancelled before
+    // it could create an encoder. Only its owning queue may publish this proof.
+    const NEVER_STARTED: Self = Self {
+        outcome: WriterOutcome::Unknown,
+        encoder_exited: true,
+    };
+}
+
 #[derive(Debug)]
-pub(crate) struct WriterCompletionReceipt(Option<Receiver<WriterOutcome>>);
+pub(crate) struct WriterCompletionReceipt(Option<Receiver<WriterCompletion>>);
 
 impl WriterCompletionReceipt {
-    fn poll(&mut self) -> Option<WriterOutcome> {
+    fn poll_completion(&mut self) -> Option<WriterCompletion> {
         let outcome = match self.0.as_ref()?.try_recv() {
             Ok(outcome) => outcome,
             Err(TryRecvError::Empty) => return None,
-            Err(TryRecvError::Disconnected) => WriterOutcome::Unknown,
+            Err(TryRecvError::Disconnected) => WriterCompletion::UNKNOWN,
         };
         self.0 = None;
         Some(outcome)
@@ -65,15 +84,32 @@ impl WriterCompletionReceipt {
 
 /// The unique capability moves with the encoder Child, including its spawn
 /// handoff. Dropping it never fabricates a successful process result.
-pub(crate) struct WriterCompletionReporter(Sender<WriterOutcome>);
+pub(crate) struct WriterCompletionReporter(Sender<WriterCompletion>);
 
 impl WriterCompletionReporter {
+    #[cfg(test)]
     pub(crate) fn finish(
         self,
         earlier_failure: Option<WriterFailure>,
         waited: Option<EncoderWaitOutcome>,
     ) {
-        let _ = self.0.send(terminal_outcome(earlier_failure, waited));
+        self.finish_with_exit(
+            earlier_failure,
+            waited,
+            matches!(waited, Some(EncoderWaitOutcome::Exited(_))),
+        );
+    }
+
+    pub(crate) fn finish_with_exit(
+        self,
+        earlier_failure: Option<WriterFailure>,
+        waited: Option<EncoderWaitOutcome>,
+        encoder_exited: bool,
+    ) {
+        let _ = self.0.send(WriterCompletion {
+            outcome: terminal_outcome(earlier_failure, waited),
+            encoder_exited,
+        });
     }
 }
 
@@ -90,9 +126,10 @@ pub(crate) fn writer_completion_channel() -> (WriterCompletionReporter, WriterCo
 /// nor successful publication and cannot authorize a Saved notification.
 #[derive(Debug)]
 pub struct RecordingStopReceipt {
-    stop: Option<Receiver<Option<WriterCompletionReceipt>>>,
+    stop: Option<Receiver<StopCompletion>>,
     writer: Option<WriterCompletionReceipt>,
     consumed: bool,
+    never_started: bool,
 }
 
 impl RecordingStopReceipt {
@@ -102,44 +139,67 @@ impl RecordingStopReceipt {
             stop: None,
             writer,
             consumed: false,
+            never_started: false,
         }
     }
 
+    #[cfg(test)]
     fn poll(&mut self) -> Option<WriterOutcome> {
+        self.poll_completion().map(|completion| completion.outcome)
+    }
+
+    fn poll_completion(&mut self) -> Option<WriterCompletion> {
         if self.consumed {
             return None;
         }
         if let Some(stop) = self.stop.as_ref() {
             match stop.try_recv() {
-                Ok(writer) => {
+                Ok(StopCompletion::Writer(writer)) => {
                     self.writer = writer;
+                    self.stop = None;
+                }
+                Ok(StopCompletion::NeverStarted) => {
+                    self.never_started = true;
                     self.stop = None;
                 }
                 Err(TryRecvError::Empty) => return None,
                 Err(TryRecvError::Disconnected) => {
                     self.stop = None;
                     self.consumed = true;
-                    return Some(WriterOutcome::Unknown);
+                    return Some(WriterCompletion::UNKNOWN);
                 }
             }
         }
-        let outcome = match self.writer.as_mut() {
-            Some(writer) => writer.poll()?,
-            None => WriterOutcome::Unknown,
+        let completion = match self.writer.as_mut() {
+            Some(writer) => writer.poll_completion()?,
+            None if self.never_started => WriterCompletion::NEVER_STARTED,
+            None => WriterCompletion::UNKNOWN,
         };
         self.writer = None;
         self.consumed = true;
-        Some(outcome)
+        Some(completion)
     }
 }
 
+#[cfg_attr(not(any(feature = "backend-wayland-udev", test)), allow(dead_code))]
+enum StopCompletion {
+    Writer(Option<WriterCompletionReceipt>),
+    NeverStarted,
+}
+
 #[cfg(any(feature = "backend-wayland-udev", test))]
-pub(crate) struct RecordingStopReporter(Sender<Option<WriterCompletionReceipt>>);
+pub(crate) struct RecordingStopReporter(Sender<StopCompletion>);
 
 #[cfg(any(feature = "backend-wayland-udev", test))]
 impl RecordingStopReporter {
     pub(crate) fn complete(self, writer: Option<WriterCompletionReceipt>) {
-        let _ = self.0.send(writer);
+        let _ = self.0.send(StopCompletion::Writer(writer));
+    }
+
+    /// Only valid when the same tracked, unconsumed start was removed from
+    /// its queue. A missing current sink alone never provides this authority.
+    pub(crate) fn complete_without_encoder(self) {
+        let _ = self.0.send(StopCompletion::NeverStarted);
     }
 }
 
@@ -152,6 +212,7 @@ pub(crate) fn recording_stop_channel() -> (RecordingStopReporter, RecordingStopR
             stop: Some(receiver),
             writer: None,
             consumed: false,
+            never_started: false,
         },
     )
 }
@@ -164,15 +225,41 @@ pub(crate) struct StopNotices {
     pub(crate) unknown: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AudioRelease {
+    Available,
+    Pending,
+    Unconfirmed,
+}
+
+impl AudioRelease {
+    pub(crate) fn refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Available => None,
+            Self::Pending => {
+                Some("The previous recording encoder is still finishing; try again when it exits.")
+            }
+            Self::Unconfirmed => Some(
+                "The previous recording encoder's exit could not be confirmed. Check its log and any remaining recording encoder, close that recording safely, then restart JWM before recording audio again.",
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct RecordingStopObservations {
-    pending: VecDeque<RecordingStopReceipt>,
+    pending: VecDeque<(RecordingStopReceipt, bool)>,
+    audio_unconfirmed: bool,
     notices: StopNotices,
 }
 
 impl RecordingStopObservations {
-    fn record(&mut self, outcome: WriterOutcome) {
-        match outcome {
+    fn record(&mut self, completion: WriterCompletion, protects_audio: bool) {
+        if protects_audio && !completion.encoder_exited {
+            self.audio_unconfirmed = true;
+            self.notices.unknown = true;
+        }
+        match completion.outcome {
             WriterOutcome::Finished => {}
             WriterOutcome::Failed(_) => self.notices.failed = true,
             WriterOutcome::Unknown => self.notices.unknown = true,
@@ -182,31 +269,64 @@ impl RecordingStopObservations {
     fn collect(&mut self) {
         // Each old observation is polled once; pending entries keep their age.
         for _ in 0..self.pending.len() {
-            let mut receipt = self.pending.pop_front().expect("bounded observation count");
-            match receipt.poll() {
-                Some(outcome) => self.record(outcome),
-                None => self.pending.push_back(receipt),
+            let (mut receipt, protects_audio) =
+                self.pending.pop_front().expect("bounded observation count");
+            match receipt.poll_completion() {
+                Some(outcome) => self.record(outcome, protects_audio),
+                None => self.pending.push_back((receipt, protects_audio)),
             }
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn observe(&mut self, receipt: Option<RecordingStopReceipt>) {
+        self.observe_with_audio(receipt, false);
+    }
+
+    pub(crate) fn observe_with_audio(
+        &mut self,
+        receipt: Option<RecordingStopReceipt>,
+        protects_audio: bool,
+    ) {
         self.collect();
         let Some(mut receipt) = receipt else {
             self.notices.unknown = true;
+            self.audio_unconfirmed |= protects_audio;
             return;
         };
-        if let Some(outcome) = receipt.poll() {
-            self.record(outcome);
+        if let Some(outcome) = receipt.poll_completion() {
+            self.record(outcome, protects_audio);
             return;
         }
         if self.pending.len() == MAX_STOP_OBSERVATIONS {
-            // Retire observation only. The writer keeps its Child and works
-            // independently; Stop is never blocked by notification capacity.
-            self.pending.pop_front();
+            // Prefer retiring notification-only work. If every bounded slot
+            // protects audio, retain a conservative unconfirmed reservation;
+            // discarding a receiver does not terminate its encoder.
+            let non_audio = self.pending.iter().position(|(_, audio)| !audio);
+            if non_audio.is_none() && !protects_audio {
+                self.notices.unknown = true;
+                return;
+            }
+            let index = non_audio.unwrap_or(0);
+            let (_, removed_audio) = self
+                .pending
+                .remove(index)
+                .expect("bounded observation count");
+            self.audio_unconfirmed |= removed_audio;
             self.notices.unknown = true;
         }
-        self.pending.push_back(receipt);
+        self.pending.push_back((receipt, protects_audio));
+    }
+
+    pub(crate) fn audio_release(&mut self) -> AudioRelease {
+        self.collect();
+        if self.audio_unconfirmed {
+            AudioRelease::Unconfirmed
+        } else if self.pending.iter().any(|(_, audio)| *audio) {
+            AudioRelease::Pending
+        } else {
+            AudioRelease::Available
+        }
     }
 
     pub(crate) fn take_notices(&mut self) -> StopNotices {
@@ -215,7 +335,10 @@ impl RecordingStopObservations {
     }
 
     pub(crate) fn clear(&mut self) {
-        self.pending.clear();
+        // Reset UI observations without pretending a still-owned encoder was
+        // released. The bounded audio responsibility survives feature resets
+        // and is finally dropped with the WM itself on shutdown.
+        self.pending.retain(|(_, audio)| *audio);
         self.notices = StopNotices::default();
     }
 }
@@ -223,6 +346,134 @@ impl RecordingStopObservations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_release_waits_for_exact_writer_even_when_file_result_failed() {
+        for failure in [
+            None,
+            Some(WriterFailure::FrameWrite),
+            Some(WriterFailure::EncoderExit),
+        ] {
+            let mut observations = RecordingStopObservations::default();
+            let (writer, receipt) = writer_completion_channel();
+            observations
+                .observe_with_audio(Some(RecordingStopReceipt::from_writer(Some(receipt))), true);
+            assert_eq!(observations.audio_release(), AudioRelease::Pending);
+            writer.finish_with_exit(failure, Some(EncoderWaitOutcome::Exited(false)), true);
+            assert_eq!(observations.audio_release(), AudioRelease::Available);
+            assert!(observations.take_notices().failed);
+        }
+    }
+
+    #[test]
+    fn audio_release_unknown_is_sticky_and_never_borrowed_from_another_request() {
+        for missing in 0..3 {
+            let mut observations = RecordingStopObservations::default();
+            let receipt = match missing {
+                0 => None,
+                1 => Some(RecordingStopReceipt::from_writer(None)),
+                _ => {
+                    let (writer, receipt) = writer_completion_channel();
+                    drop(writer);
+                    Some(RecordingStopReceipt::from_writer(Some(receipt)))
+                }
+            };
+            observations.observe_with_audio(receipt, true);
+            assert_eq!(observations.audio_release(), AudioRelease::Unconfirmed);
+            let (writer, receipt) = writer_completion_channel();
+            observations.observe_with_audio(
+                Some(RecordingStopReceipt::from_writer(Some(receipt))),
+                false,
+            );
+            writer.finish_with_exit(None, Some(EncoderWaitOutcome::Exited(true)), true);
+            assert_eq!(observations.audio_release(), AudioRelease::Unconfirmed);
+            assert!(
+                observations
+                    .audio_release()
+                    .refusal()
+                    .unwrap()
+                    .contains("restart JWM")
+            );
+        }
+    }
+
+    #[test]
+    fn never_started_proof_releases_only_its_own_audio_observation() {
+        let mut observations = RecordingStopObservations::default();
+        let (old_writer, old) = writer_completion_channel();
+        observations.observe_with_audio(Some(RecordingStopReceipt::from_writer(Some(old))), true);
+        let (stop, cancelled) = recording_stop_channel();
+        observations.observe_with_audio(Some(cancelled), true);
+        stop.complete_without_encoder();
+        assert_eq!(observations.audio_release(), AudioRelease::Pending);
+        old_writer.finish_with_exit(Some(WriterFailure::FrameWrite), None, true);
+        assert_eq!(observations.audio_release(), AudioRelease::Available);
+    }
+
+    #[test]
+    fn bounded_audio_observations_prefer_non_audio_and_fail_closed_on_forced_overflow() {
+        let mut observations = RecordingStopObservations::default();
+        let (audio_writer, receipt) = writer_completion_channel();
+        observations
+            .observe_with_audio(Some(RecordingStopReceipt::from_writer(Some(receipt))), true);
+        let mut writers = Vec::new();
+        for _ in 0..MAX_STOP_OBSERVATIONS * 3 {
+            let (writer, receipt) = writer_completion_channel();
+            writers.push(writer);
+            observations.observe_with_audio(
+                Some(RecordingStopReceipt::from_writer(Some(receipt))),
+                false,
+            );
+            assert!(observations.pending.len() <= MAX_STOP_OBSERVATIONS);
+            assert_eq!(observations.audio_release(), AudioRelease::Pending);
+        }
+        audio_writer.finish_with_exit(None, Some(EncoderWaitOutcome::Exited(true)), true);
+        assert_eq!(observations.audio_release(), AudioRelease::Available);
+        let mut forced = RecordingStopObservations::default();
+        for _ in 0..MAX_STOP_OBSERVATIONS + 1 {
+            let (writer, receipt) = writer_completion_channel();
+            writers.push(writer);
+            forced.observe_with_audio(Some(RecordingStopReceipt::from_writer(Some(receipt))), true);
+        }
+        assert_eq!(forced.pending.len(), MAX_STOP_OBSERVATIONS);
+        assert_eq!(forced.audio_release(), AudioRelease::Unconfirmed);
+        for writer in writers {
+            writer.finish_with_exit(None, Some(EncoderWaitOutcome::Exited(true)), true);
+        }
+        assert_eq!(forced.audio_release(), AudioRelease::Unconfirmed);
+    }
+
+    #[test]
+    fn incoming_non_audio_cannot_evict_a_full_set_of_audio_owners() {
+        let mut observations = RecordingStopObservations::default();
+        let mut writers = Vec::new();
+        for _ in 0..MAX_STOP_OBSERVATIONS {
+            let (writer, receipt) = writer_completion_channel();
+            writers.push(writer);
+            observations
+                .observe_with_audio(Some(RecordingStopReceipt::from_writer(Some(receipt))), true);
+        }
+        let (_unrelated_writer, receipt) = writer_completion_channel();
+        observations.observe_with_audio(
+            Some(RecordingStopReceipt::from_writer(Some(receipt))),
+            false,
+        );
+        assert_eq!(observations.pending.len(), MAX_STOP_OBSERVATIONS);
+        assert_eq!(observations.audio_release(), AudioRelease::Pending);
+        for writer in writers {
+            writer.finish_with_exit(None, Some(EncoderWaitOutcome::Exited(true)), true);
+        }
+        assert_eq!(observations.audio_release(), AudioRelease::Available);
+    }
+
+    #[test]
+    fn successful_file_outcome_without_exit_proof_does_not_release_audio() {
+        let mut observations = RecordingStopObservations::default();
+        let (writer, receipt) = writer_completion_channel();
+        observations
+            .observe_with_audio(Some(RecordingStopReceipt::from_writer(Some(receipt))), true);
+        writer.finish_with_exit(None, Some(EncoderWaitOutcome::Exited(true)), false);
+        assert_eq!(observations.audio_release(), AudioRelease::Unconfirmed);
+    }
 
     #[test]
     fn earlier_failures_and_timeout_cannot_become_successful_exit() {
@@ -406,9 +657,12 @@ mod tests {
             } else {
                 branch
             };
-            let report = format!("completion_reporter.finish(Some(WriterFailure::{reason}), None)");
+            let report = format!("WriterFailure::{reason}");
             assert!(branch.find("child.kill()").unwrap() < branch.find("child.wait()").unwrap());
             assert!(branch.find("child.wait()").unwrap() < branch.find(&report).unwrap());
+            assert!(branch.contains("let encoder_exited = child.wait().is_ok()"));
+            assert!(branch.contains("completion_reporter.finish_with_exit("));
+            assert!(branch.contains("encoder_exited"));
         }
         let handoff = shipped
             .split_once("let (mut child, completion_reporter) = error.0;")
