@@ -522,16 +522,19 @@ jwm-remote host ... --region 1920x1080+1920+0
 ```
 
 `--monitor` takes a RandR monitor name — `xrandr --listmonitors` lists them —
-and is re-resolved by name whenever the layout changes, so unplugging or
-rearranging displays moves the shared area with them instead of leaving it
-pointing at whatever is now in those pixels. A name that does not exist is an
-error at startup, listing the names that do, rather than a failure discovered
-when someone finally connects. `--region` takes the usual X11 `WxH+X+Y`
-spelling and accepts the negative offsets a left-hand monitor has.
+and is re-resolved by name whenever the layout changes. A name that does not
+exist is an error at startup, listing the names that do, rather than a failure
+discovered when someone finally connects. `--region` takes a fixed rectangle
+in root coordinates using the usual X11 `WxH+X+Y` spelling and accepts the
+negative offsets a left-hand monitor has.
 
-Either way the shared area is clipped to the root, and an area that ends up
-entirely off-screen — what an unplugged monitor looks like — is an error rather
-than a black rectangle.
+Either way the shared area is clipped to the root. During an existing
+connection, a change to the resolved area's position or dimensions ends the
+connection rather than silently reinterpreting the frame and input mapping.
+This also applies when root clipping changes a fixed `--region`. Reconnect
+after verifying the selected area; live monitor/region changes do not move the
+shared area in place. A missing selected monitor or an area entirely outside
+the root is an error rather than a black rectangle.
 
 Input follows the picture. The viewer maps its window onto the shared area, so
 the coordinates it sends are area-relative while XTEST warps in root
