@@ -2202,13 +2202,22 @@ fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
 }
 
 fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
-    mut receive: impl FnMut(Duration) -> Option<String>,
+    mut receive: impl FnMut(Duration) -> Result<Option<String>, std::sync::mpsc::RecvError>,
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
     running: &AtomicBool,
 ) -> RemoteResult<()> {
     while running.load(Ordering::Acquire) {
-        let Some(text) = receive(CLIPBOARD_POLL_INTERVAL) else {
-            continue;
+        let text = match receive(CLIPBOARD_POLL_INTERVAL) {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(_) if !running.load(Ordering::Acquire) => return Ok(()),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "local clipboard capture worker stopped",
+                )
+                .into());
+            }
         };
         let Ok(payload) = encode_clipboard(&text) else {
             eprintln!("jwm-remote: local clipboard text is too large to share; skipping it");
@@ -2739,7 +2748,7 @@ mod tests {
         ));
         let mut text = Some("clipboard text".to_owned());
         let result = run_clipboard_worker(
-            || forward_clipboard_from(|_| text.take(), &writer, &running),
+            || forward_clipboard_from(|_| Ok(text.take()), &writer, &running),
             &running,
             &first_stop,
             || {
@@ -2903,6 +2912,93 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_capture_close_stops_worker_after_queued_text_without_spinning() {
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..Default::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            [0x95; 32],
+        ));
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        let calls = std::cell::Cell::new(0);
+        let stopped = std::cell::Cell::new(false);
+        let result = run_clipboard_worker(
+            || {
+                forward_clipboard_from(
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        match calls.get() {
+                            1 => Ok(None),
+                            2 => Ok(Some("last text".into())),
+                            3 => Err(std::sync::mpsc::RecvError),
+                            _ => panic!("closed capture must not spin"),
+                        }
+                    },
+                    &writer,
+                    &running,
+                )
+            },
+            &running,
+            &first_stop,
+            || {
+                assert!(writer.try_lock().is_ok());
+                stopped.set(true);
+            },
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("capture worker stopped")
+        );
+        assert_eq!(calls.get(), 3);
+        assert!(stopped.get());
+        assert!(!running.load(Ordering::Acquire));
+        assert_eq!(first_stop.cause(), StopCause::Clipboard);
+        assert!(!lock_writer(&writer).get_mut().failed);
+        let bytes = gate.0.lock().unwrap().bytes.clone();
+        let mut reader = SessionReader::new(std::io::Cursor::new(bytes), [0x95; 32]);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Clipboard);
+        assert_eq!(decode_clipboard(&payload).unwrap(), "last text");
+    }
+
+    #[test]
+    fn clipboard_capture_close_after_session_stop_is_graceful() {
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(FailingWriter, WRITE_TIMEOUT),
+            [0x96; 32],
+        ));
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        first_stop.record(StopCause::Graceful);
+        run_clipboard_worker(
+            || {
+                forward_clipboard_from(
+                    |_| {
+                        running.store(false, Ordering::Release);
+                        Err(std::sync::mpsc::RecvError)
+                    },
+                    &writer,
+                    &running,
+                )
+            },
+            &running,
+            &first_stop,
+            || panic!("already stopped"),
+        )
+        .unwrap();
+        assert_eq!(first_stop.cause(), StopCause::Graceful);
+        assert!(!lock_writer(&writer).get_mut().failed);
+    }
+
+    #[test]
     fn clipboard_normal_stop_delivers_text_without_fabricating_a_failure() {
         let state = Arc::new((
             Mutex::new(GateState {
@@ -2925,7 +3021,7 @@ mod tests {
                         if text.is_none() {
                             running.store(false, Ordering::Release);
                         }
-                        text.take()
+                        Ok(text.take())
                     },
                     &writer,
                     &running,

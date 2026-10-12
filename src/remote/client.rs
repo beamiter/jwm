@@ -90,6 +90,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
             eprintln!("jwm-remote: session ended");
             Ok(())
         }
+        Err(cause) if cause.is::<ClientFailure>() => Err(cause),
         Err(cause) => Err(Box::new(ClientFailure { stage, cause })),
     }
 }
@@ -431,18 +432,12 @@ fn viewer_loop(
             wrote = true;
         }
         if let Some(clipboard) = clipboard {
-            // Non-blocking: this loop must stay responsive to input and frames.
-            while let Some(text) = clipboard.recv_timeout(Duration::ZERO) {
-                match encode_clipboard(&text) {
-                    Ok(payload) => {
-                        writer.write_message(MessageKind::Clipboard, payload)?;
-                        wrote = true;
-                    }
-                    Err(_) => eprintln!(
-                        "jwm-remote: local clipboard text is too large to share; skipping it"
-                    ),
-                }
-            }
+            // Closing the viewer wins over a simultaneous local worker exit.
+            wrote |= forward_viewer_clipboard_from(
+                || clipboard.recv_timeout(Duration::ZERO),
+                writer,
+                outcome.close,
+            )?;
         }
         if Instant::now() >= next_heartbeat {
             writer.write_message(MessageKind::Heartbeat, &[])?;
@@ -502,6 +497,42 @@ fn viewer_loop(
                 "local X11 viewer connection closed",
             )
             .into());
+        }
+    }
+}
+
+fn forward_viewer_clipboard_from<W: std::io::Write>(
+    mut receive: impl FnMut() -> Result<Option<String>, std::sync::mpsc::RecvError>,
+    writer: &mut SessionWriter<W>,
+    closing: bool,
+) -> RemoteResult<bool> {
+    if closing {
+        return Ok(false);
+    }
+    let mut wrote = false;
+    loop {
+        let text = match receive() {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok(wrote),
+            Err(_) => {
+                return Err(Box::new(ClientFailure {
+                    stage: ClientStage::LocalClipboard,
+                    cause: io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "local clipboard capture worker stopped",
+                    )
+                    .into(),
+                }));
+            }
+        };
+        match encode_clipboard(&text) {
+            Ok(payload) => {
+                writer.write_message(MessageKind::Clipboard, payload)?;
+                wrote = true;
+            }
+            Err(_) => {
+                eprintln!("jwm-remote: local clipboard text is too large to share; skipping it")
+            }
         }
     }
 }
@@ -1281,7 +1312,10 @@ mod tests {
             (ClientStage::Connect, "listener"),
             (ClientStage::Negotiate, "another viewer"),
             (ClientStage::FirstFrame, "receive/decode"),
-            (ClientStage::LocalClipboard, "local clipboard setup failed"),
+            (
+                ClientStage::LocalClipboard,
+                "local clipboard setup or capture failed",
+            ),
             (ClientStage::Display, "local viewer setup or drawing"),
             (ClientStage::FirstFrameAck, "was drawn"),
             (ClientStage::Session, "verify the host identity"),
@@ -1295,6 +1329,98 @@ mod tests {
             assert!(message.contains("test cause"));
             assert!(std::error::Error::source(&failure).is_some());
         }
+    }
+
+    #[test]
+    fn viewer_clipboard_closed_is_classified_after_queued_protocol_text() {
+        let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+        let mut calls = 0;
+        let error = forward_viewer_clipboard_from(
+            || {
+                calls += 1;
+                match calls {
+                    1 => Ok(Some("queued".into())),
+                    2 => Err(std::sync::mpsc::RecvError),
+                    _ => panic!("closed receiver must not spin"),
+                }
+            },
+            &mut writer,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(calls, 2);
+        let failure = error.downcast_ref::<ClientFailure>().unwrap();
+        assert!(matches!(failure.stage, ClientStage::LocalClipboard));
+        assert!(failure.to_string().contains("setup or capture failed"));
+        let mut reader = SessionReader::new(std::io::Cursor::new(writer.into_inner()), TEST_PSK);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Clipboard);
+        assert_eq!(decode_clipboard(&payload).unwrap(), "queued");
+    }
+
+    #[test]
+    fn viewer_clipboard_idle_and_normal_close_do_not_report_failure() {
+        let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+        assert!(!forward_viewer_clipboard_from(|| Ok(None), &mut writer, false).unwrap());
+        assert!(
+            !forward_viewer_clipboard_from(
+                || panic!("normal close must not poll clipboard"),
+                &mut writer,
+                true
+            )
+            .unwrap()
+        );
+        assert!(writer.into_inner().is_empty());
+    }
+
+    #[test]
+    fn viewer_clipboard_write_failure_keeps_transport_error_classification() {
+        let mut writer = SessionWriter::new(std::io::sink(), TEST_PSK);
+        assert!(!forward_viewer_clipboard_from(|| Ok(None), &mut writer, false).unwrap());
+        struct RejectWrite;
+        impl std::io::Write for RejectWrite {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "transport write failed",
+                ))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = SessionWriter::new(RejectWrite, TEST_PSK);
+        let error = forward_viewer_clipboard_from(|| Ok(Some("text".into())), &mut writer, false)
+            .unwrap_err();
+        assert!(!error.is::<ClientFailure>());
+        assert!(error.to_string().contains("transport write failed"));
+    }
+
+    #[test]
+    fn viewer_clipboard_failure_returns_through_existing_cleanup_before_propagation() {
+        let source = include_str!("client.rs");
+        let body = source
+            .split("fn run_client_session(")
+            .nth(1)
+            .unwrap()
+            .split("fn negotiate_session(")
+            .next()
+            .unwrap();
+        assert!(
+            body.find("let loop_result = viewer_loop(").unwrap()
+                < body.find("let cancel_result = cancel.cancel(").unwrap()
+        );
+        assert!(
+            body.find("let cancel_result = cancel.cancel(").unwrap()
+                < body
+                    .find("let receiver_exit = receiver.join_timeout(")
+                    .unwrap()
+        );
+        assert!(
+            body.find("let receiver_exit = receiver.join_timeout(")
+                .unwrap()
+                < body.find("loop_result?;").unwrap()
+        );
     }
 
     #[test]

@@ -401,28 +401,44 @@ impl ClipboardCaptures {
     /// Returning on a timeout rather than parking forever lets the caller
     /// notice session shutdown without a second wake channel. PNG captures
     /// are skipped so a local image copy cannot stall text forwarding.
-    pub(crate) fn recv_timeout(&self, timeout: std::time::Duration) -> Option<String> {
+    /// `Ok(None)` is a live timeout; `Err` means the worker permanently
+    /// closed its channel after all queued captures were drained.
+    pub(crate) fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<String>, std::sync::mpsc::RecvError> {
         let _keep_worker_alive = &self.worker;
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            let remaining = if timeout.is_zero() {
-                std::time::Duration::ZERO
-            } else {
-                deadline.saturating_duration_since(std::time::Instant::now())
-            };
-            if !timeout.is_zero() && remaining.is_zero() {
-                return None;
-            }
-            match self.captured.recv_timeout(remaining) {
-                Ok(CapturedClipboard::Text(text)) => return Some(text),
-                Ok(CapturedClipboard::Png(_)) => {
-                    if timeout.is_zero() {
-                        continue;
-                    }
+        recv_captured_text(&self.captured, timeout)
+    }
+}
+
+/// Empty-but-live is a timeout; a drained closed channel cannot recover.
+#[cfg(feature = "remote-x11")]
+fn recv_captured_text(
+    captured: &std::sync::mpsc::Receiver<CapturedClipboard>,
+    timeout: std::time::Duration,
+) -> Result<Option<String>, std::sync::mpsc::RecvError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = if timeout.is_zero() {
+            std::time::Duration::ZERO
+        } else {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        };
+        if !timeout.is_zero() && remaining.is_zero() {
+            return Ok(None);
+        }
+        match captured.recv_timeout(remaining) {
+            Ok(CapturedClipboard::Text(text)) => return Ok(Some(text)),
+            Ok(CapturedClipboard::Png(_)) => {
+                if timeout.is_zero() {
                     continue;
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return None,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(std::sync::mpsc::RecvError);
             }
         }
     }
@@ -1807,6 +1823,52 @@ fn publish_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_distinguishes_idle_from_closed_and_drains_text_first() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
+        tx.send(CapturedClipboard::Text("queued".into())).unwrap();
+        drop(tx);
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::ZERO),
+            Ok(Some("queued".into()))
+        );
+        assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
+        assert!(recv_captured_text(&rx, std::time::Duration::from_secs(60)).is_err());
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_skips_png_before_text_and_terminal_close() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(CapturedClipboard::Png(vec![1, 2])).unwrap();
+        tx.send(CapturedClipboard::Text("last text".into()))
+            .unwrap();
+        tx.send(CapturedClipboard::Png(vec![3])).unwrap();
+        drop(tx);
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::ZERO),
+            Ok(Some("last text".into()))
+        );
+        assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_live_timeout_does_not_poison_later_text() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::from_millis(1)),
+            Ok(None)
+        );
+        tx.send(CapturedClipboard::Text("later".into())).unwrap();
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::from_millis(10)),
+            Ok(Some("later".into()))
+        );
+    }
 
     #[cfg(feature = "backend-x11rb")]
     fn wait_for_selection_owner(conn: &RustConnection, selection: Atom) {

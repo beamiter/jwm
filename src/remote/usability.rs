@@ -262,7 +262,7 @@ pub fn failure_hint(stage: ClientStage, kind: Option<io::ErrorKind>) -> &'static
             "Authentication completed, but the first frame was not ready. Check host capture errors and the reported receive/decode failure."
         }
         ClientStage::LocalClipboard => {
-            "Authentication completed; local clipboard setup failed. Check the reported local clipboard/display error. No downgrade was attempted."
+            "Authentication completed; local clipboard setup or capture failed. Check the reported local clipboard/display error. No downgrade was attempted."
         }
         ClientStage::Display => {
             "Authentication completed; local viewer setup or drawing failed. Check the local X11 display and the reported rendering error."
