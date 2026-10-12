@@ -22,6 +22,7 @@ pub mod frame;
 pub mod host;
 pub mod key;
 pub mod messages;
+mod pacing;
 pub mod protocol;
 mod tile;
 pub mod usability;

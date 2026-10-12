@@ -31,6 +31,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::{TryParseFd, X11Error};
 
 use super::frame::{DecodedFrame, RecyclableDecodedFrame};
+use super::pacing::EventPollBudget;
 use super::usability::viewer_title;
 use super::{RemoteError, RemoteResult};
 
@@ -71,6 +72,27 @@ pub enum ViewerEvent {
     },
     /// Release every key and button held by the remote input injector.
     ReleaseAll,
+}
+
+#[derive(Default)]
+struct ForwardedButtons(HashSet<u8>);
+
+impl ForwardedButtons {
+    fn press(&mut self, button: u8, inside_image: bool) -> bool {
+        if !inside_image {
+            return false;
+        }
+        self.0.insert(button);
+        true
+    }
+
+    fn release(&mut self, button: u8) -> bool {
+        self.0.remove(&button)
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -156,6 +178,8 @@ pub struct Viewer {
     width: u16,
     height: u16,
     backing_valid: bool,
+    pending_resize: bool,
+    pending_redraw: bool,
     /// Letterbox the retained backing pixmap was last cleared for.
     ///
     /// The pixmap survives between frames and an upload only ever touches the
@@ -175,6 +199,7 @@ pub struct Viewer {
     escape_name: String,
     escape_taps: EscapeTapDetector,
     held_keycodes: HashSet<u8>,
+    held_buttons: ForwardedButtons,
     pending_key_release: Option<PendingKeyRelease>,
     deferred_events: VecDeque<Event>,
     last_frame: Option<StoredFrame>,
@@ -364,6 +389,8 @@ impl Viewer {
             width: initial_width,
             height: initial_height,
             backing_valid: false,
+            pending_resize: false,
+            pending_redraw: false,
             backing_letterbox: None,
             grab_input,
             forward_input,
@@ -376,6 +403,7 @@ impl Viewer {
             escape_name: escape_key.to_string(),
             escape_taps: EscapeTapDetector::default(),
             held_keycodes: HashSet::new(),
+            held_buttons: ForwardedButtons::default(),
             pending_key_release: None,
             deferred_events: VecDeque::new(),
             last_frame: None,
@@ -384,7 +412,8 @@ impl Viewer {
         })
     }
 
-    /// Drain all currently queued X11 events without blocking.
+    /// Drain a bounded batch of X11 events without blocking.
+    /// The caller sends returned input before servicing deferred rendering.
     ///
     /// With input grabbing enabled, the first button press grabs the local
     /// keyboard and pointer.  Double-tapping the escape key releases both
@@ -399,7 +428,8 @@ impl Viewer {
         let mut redraw = false;
         let backing_dimensions = (self.width, self.height);
 
-        loop {
+        let mut budget = EventPollBudget::new();
+        while budget.take() {
             let event = if let Some(event) = self.deferred_events.pop_front() {
                 event
             } else if let Some(event) = self.conn.poll_for_event()? {
@@ -465,11 +495,16 @@ impl Viewer {
                     }
                 }
                 Event::ButtonPress(event) if event.event == self.window => {
+                    let inside_image = self.pointer_is_inside_image(event.event_x, event.event_y);
+                    if !inside_image {
+                        continue;
+                    }
                     if self.grab_input && !self.grabbed && !self.acquire_local_grab()? {
                         continue;
                     }
                     if self.forwarding_input() {
                         if let Some((x, y)) = self.map_pointer(event.event_x, event.event_y) {
+                            self.held_buttons.press(event.detail, inside_image);
                             push_pointer(&mut result, x, y);
                             result.push(ViewerEvent::Button {
                                 button: event.detail,
@@ -479,15 +514,19 @@ impl Viewer {
                     }
                 }
                 Event::ButtonRelease(event)
-                    if event.event == self.window && self.forwarding_input() =>
+                    if event.event == self.window
+                        && self.forwarding_input()
+                        && self.held_buttons.release(event.detail) =>
                 {
                     if let Some((x, y)) = self.map_pointer(event.event_x, event.event_y) {
                         push_pointer(&mut result, x, y);
-                        result.push(ViewerEvent::Button {
-                            button: event.detail,
-                            pressed: false,
-                        });
                     }
+                    // A drag can finish outside the image. Always release an
+                    // edge we forwarded; a rejected black-bar click has none.
+                    result.push(ViewerEvent::Button {
+                        button: event.detail,
+                        pressed: false,
+                    });
                 }
                 Event::KeyPress(event) if event.event == self.window => {
                     // Release on a double tap only, so a single press still
@@ -564,25 +603,46 @@ impl Viewer {
             }
         }
 
-        if self
-            .pending_key_release
-            .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
+        // At a batch boundary the next unread event may be the paired repeat
+        // KeyPress. Give the next pass its normal lookahead before expiring a
+        // release, even if scheduling/rendering took longer than the defer.
+        if !budget.exhausted()
+            && self
+                .pending_key_release
+                .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
         {
             self.flush_pending_key_release(&mut result);
         }
 
         if (self.width, self.height) != backing_dimensions && !self.closed {
-            // ConfigureNotify commonly arrives as a burst during interactive
-            // resize. Drain the burst first and allocate only its final size.
-            self.resize_backing()?;
+            // Coalesce this batch, but do not allocate/render before its input
+            // reaches the host. Continuous event floods yield at the budget.
+            self.pending_resize = true;
         }
-        if redraw && !self.closed {
-            self.redraw()?;
-        }
+        self.pending_redraw |= redraw;
         if self.closed {
             self.report_close(&mut result)?;
         }
         Ok(result)
+    }
+
+    fn apply_pending_resize(&mut self) -> RemoteResult<()> {
+        if self.pending_resize && !self.closed {
+            self.resize_backing()?;
+            self.pending_resize = false;
+        }
+        Ok(())
+    }
+
+    /// Service Expose/resize only after the client flushes collected input.
+    /// A new frame instead folds this work into its own draw.
+    pub(crate) fn refresh_pending_redraw(&mut self) -> RemoteResult<()> {
+        self.apply_pending_resize()?;
+        if self.pending_redraw && !self.closed {
+            self.redraw()?;
+            self.pending_redraw = false;
+        }
+        Ok(())
     }
 
     /// Flush requests that can cause X11 events before the caller blocks on
@@ -644,6 +704,7 @@ impl Viewer {
             clear_stored_frame(&mut self.last_frame);
             return Ok(false);
         }
+        self.apply_pending_resize()?;
         validate_frame(&frame)?;
         replace_stored_frame(&mut self.last_frame, frame);
         self.backing_valid = false;
@@ -651,6 +712,7 @@ impl Viewer {
             clear_stored_frame(&mut self.last_frame);
             return Err(error);
         }
+        self.pending_redraw = false;
         if self.closed {
             clear_stored_frame(&mut self.last_frame);
         }
@@ -821,7 +883,22 @@ impl Viewer {
     fn release_all_input(&mut self, events: &mut Vec<ViewerEvent>) {
         self.pending_key_release = None;
         self.held_keycodes.clear();
+        self.held_buttons.clear();
         events.push(ViewerEvent::ReleaseAll);
+    }
+
+    fn pointer_is_inside_image(&self, x: i16, y: i16) -> bool {
+        let Some(frame) = self.last_frame.as_ref() else {
+            return false;
+        };
+        let Ok(width) = u16::try_from(frame.image().width()) else {
+            return false;
+        };
+        let Ok(height) = u16::try_from(frame.image().height()) else {
+            return false;
+        };
+        letterbox(self.width, self.height, width, height)
+            .is_some_and(|geometry| pointer_inside_letterbox(x, y, geometry))
     }
 
     fn map_pointer(&self, x: i16, y: i16) -> Option<(u16, u16)> {
@@ -2323,6 +2400,15 @@ struct Letterbox {
     height: u16,
 }
 
+fn pointer_inside_letterbox(x: i16, y: i16, geometry: Letterbox) -> bool {
+    let (x, y) = (i32::from(x), i32::from(y));
+    let (left, top) = (i32::from(geometry.x), i32::from(geometry.y));
+    x >= left
+        && y >= top
+        && x < left + i32::from(geometry.width)
+        && y < top + i32::from(geometry.height)
+}
+
 fn should_use_render_upscale(geometry: Letterbox, image_width: u16, image_height: u16) -> bool {
     geometry.width > image_width && geometry.height > image_height
 }
@@ -2698,6 +2784,101 @@ mod tests {
         assert_eq!(
             map_pointer_to_source(500, 500, args.0, args.1, args.2, args.3, args.4, args.5),
             Some((960, 540))
+        );
+    }
+
+    #[test]
+    fn black_bar_presses_are_rejected_but_forwarded_drag_releases_survive() {
+        let geometry = letterbox(1000, 1000, 1920, 1080).unwrap();
+        assert!(!pointer_inside_letterbox(500, 0, geometry));
+        assert!(!pointer_inside_letterbox(500, 999, geometry));
+        assert!(!pointer_inside_letterbox(-1, 500, geometry));
+        assert!(pointer_inside_letterbox(0, 219, geometry));
+        assert!(pointer_inside_letterbox(999, 780, geometry));
+        let mut buttons = ForwardedButtons::default();
+        assert!(!buttons.press(1, pointer_inside_letterbox(500, 0, geometry)));
+        assert!(
+            !buttons.release(1),
+            "a rejected press cannot inject an unmatched release"
+        );
+        assert!(buttons.press(1, true));
+        assert_eq!(
+            map_pointer_to_source(-1, 0, 1000, 1000, 1920, 1080, 1920, 1080),
+            Some((0, 0))
+        );
+        assert!(
+            buttons.release(1),
+            "a forwarded drag must release outside the image"
+        );
+        assert!(!buttons.release(1));
+    }
+
+    #[test]
+    fn wheel_repeat_and_release_all_keep_button_tracking_balanced() {
+        let mut buttons = ForwardedButtons::default();
+        for button in 4..=7 {
+            for _ in 0..3 {
+                assert!(buttons.press(button, true));
+                assert!(buttons.release(button));
+            }
+            assert!(!buttons.press(button, false));
+            assert!(!buttons.release(button));
+            assert!(buttons.press(button, true));
+            assert!(
+                buttons.press(button, true),
+                "wheel impulses are never deduplicated as a held press"
+            );
+            assert!(buttons.release(button));
+            assert!(!buttons.release(button));
+        }
+        assert!(buttons.press(1, true));
+        assert!(
+            buttons.press(1, true),
+            "duplicate press is not a second held count"
+        );
+        assert!(buttons.release(1));
+        assert!(!buttons.release(1));
+        assert!(buttons.press(2, true));
+        buttons.clear();
+        assert!(
+            !buttons.release(2),
+            "ReleaseAll already discharged this edge"
+        );
+        assert!(
+            !buttons.release(99),
+            "unforwarded buttons must not inject a release"
+        );
+    }
+
+    #[test]
+    fn resize_maps_each_pointer_at_its_event_geometry_before_deferred_draw() {
+        let before = map_pointer_to_source(500, 500, 1000, 1000, 1280, 800, 2560, 1600).unwrap();
+        let after = map_pointer_to_source(500, 500, 800, 1000, 1280, 800, 2560, 1600).unwrap();
+        assert_ne!(before, after);
+        let mut events = vec![
+            ViewerEvent::Pointer {
+                x: before.0,
+                y: before.1,
+            },
+            ViewerEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+        ];
+        push_pointer(&mut events, after.0, after.1);
+        assert_eq!(
+            events[0],
+            ViewerEvent::Pointer {
+                x: before.0,
+                y: before.1
+            }
+        );
+        assert_eq!(
+            events[2],
+            ViewerEvent::Pointer {
+                x: after.0,
+                y: after.1
+            }
         );
     }
 

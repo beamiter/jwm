@@ -469,6 +469,8 @@ fn viewer_loop(
             draw_and_ack(writer, frame, &state.telemetry, |frame| {
                 viewer.draw_recyclable(frame)
             })?;
+        } else {
+            viewer.refresh_pending_redraw()?;
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
@@ -1721,6 +1723,96 @@ mod tests {
         assert_eq!(batches.concat(), expected);
         assert!(outcome.wrote_input);
         assert!(!outcome.close);
+    }
+
+    #[test]
+    fn bounded_event_polls_preserve_edges_wheel_and_close_release_order() {
+        use super::super::pacing::EventPollBudget;
+        let mut events: std::collections::VecDeque<_> = (0..254).map(pointer).collect();
+        events.extend([
+            ViewerEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+            ViewerEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            pointer(254),
+            pointer(255),
+            ViewerEvent::Button {
+                button: 4,
+                pressed: true,
+            },
+            ViewerEvent::Button {
+                button: 4,
+                pressed: false,
+            },
+            pointer(256),
+            ViewerEvent::Button {
+                button: 1,
+                pressed: false,
+            },
+            ViewerEvent::Key {
+                keycode: 38,
+                pressed: false,
+            },
+            ViewerEvent::ReleaseAll,
+            ViewerEvent::Close,
+            pointer(999),
+        ]);
+        let mut emitted = Vec::new();
+        let mut saw_close = false;
+        while !events.is_empty() && !saw_close {
+            let mut budget = EventPollBudget::new();
+            let mut polled = Vec::new();
+            while budget.take() {
+                let Some(event) = events.pop_front() else {
+                    break;
+                };
+                polled.push(event);
+            }
+            let (batches, outcome) = collect_input_batches(polled, true, true);
+            emitted.extend(batches.into_iter().flatten());
+            saw_close = outcome.close;
+            if saw_close {
+                assert!(outcome.wrote_release_all);
+            }
+        }
+        assert!(saw_close);
+        assert_eq!(
+            emitted,
+            [
+                input_pointer(253),
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: true
+                },
+                InputEvent::Button {
+                    button: 1,
+                    pressed: true
+                },
+                input_pointer(255),
+                InputEvent::Button {
+                    button: 4,
+                    pressed: true
+                },
+                InputEvent::Button {
+                    button: 4,
+                    pressed: false
+                },
+                input_pointer(256),
+                InputEvent::Button {
+                    button: 1,
+                    pressed: false
+                },
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: false
+                },
+                InputEvent::ReleaseAll,
+            ]
+        );
     }
 
     #[test]

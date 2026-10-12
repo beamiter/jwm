@@ -135,7 +135,7 @@ fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> RemoteResult<bool> {
         fd,
         PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP,
     )];
-    let timeout = PollTimeout::try_from(timeout.as_millis().min(u128::from(u16::MAX)) as u16)
+    let timeout = PollTimeout::try_from(super::pacing::capture_poll_timeout_millis(timeout))
         .unwrap_or(PollTimeout::MAX);
     loop {
         return match poll(&mut fds, timeout) {
@@ -3963,7 +3963,7 @@ fn find_visual(screen: &Screen, visual_id: u32) -> Option<Visualtype> {
 /// A sub-rectangle of the X root to share.
 ///
 /// The X root spans every monitor, so on a dual 1920x1080 desk it is
-/// 3840x1080 and the default `--max-width 1280` delivers each monitor at
+/// 3840x1080 and an explicit `--max-width 1280` delivers each monitor at
 /// 640x360. Sharing one monitor is what makes that legible again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureRegion {

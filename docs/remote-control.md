@@ -365,9 +365,27 @@ jwm-remote connect 192.168.1.50:48221 \
 
 ## Tuning and troubleshooting
 
-The LAN defaults are a 12 FPS upper limit, adaptive JPEG quality 40–70, and a
-maximum encoded width of 1280 pixels. They favor a reliable first connection
-over maximum fidelity:
+The interactive LAN defaults are a 30 FPS upper limit, adaptive JPEG quality
+40–85, and `--max-width 0`: fit the actual viewer window up to the source's
+native dimensions, with no default 1280-pixel ceiling. A 2560-pixel desktop
+previously became 1280 pixels even when the viewer could show more; enlarging
+that viewer only magnified the lost detail. Explicit width limits still win,
+source dimensions are never upscaled for encoding, and all existing dimension,
+pixel-count and payload safety limits remain. The first frame may use native
+source dimensions before the viewer reports its size, so very large roots can
+cost more at startup; set an explicit ceiling when needed.
+
+The quality floor stays 40 so congested sessions can still shed detail. A
+higher frame/quality ceiling is not a promise to sustain that rate: two-frame
+ACK credit, latest-frame replacement and dirty-tile suppression still bound
+work and backlog. For a constrained link or host, opt back into the previous
+lower-cost settings:
+
+```bash
+jwm-remote host ... --fps 12 --jpeg-quality 70 --max-width 1280
+```
+
+Other explicit ceilings remain available:
 
 ```bash
 jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
@@ -384,8 +402,9 @@ follows that upper bound for backwards compatibility. Use
 quality (it conflicts with an explicit floor). Encoder quality changes do not
 change the remote wire protocol.
 
-`--max-width 0` keeps the native root width. Higher resolution, quality, and
-frame rate increase CPU and bandwidth together. With XRender 0.10+,
+`--max-width 0` permits native width but still fits the negotiated viewer width
+and height; it does not force a native-size stream into a smaller window.
+Higher resolution, quality, and frame rate increase CPU and bandwidth together. With XRender 0.10+,
 `--max-width` also limits the X11 readback size for both overlay and root
 capture. Root mode uses an `IncludeInferiors` graphics context to copy the root
 and its same-depth children into a full-size staging pixmap, and creates a
@@ -658,7 +677,7 @@ session distrusts its caches wholesale.
 ### Sharing one monitor
 
 The X root spans every monitor, so a dual 1920x1080 desk is one 3840x1080
-drawable and the default `--max-width 1280` delivers each display at 640x360.
+drawable; an explicit low-bandwidth `--max-width 1280` delivers each display at 640x360.
 On a triple head it is 426x240. Sharing one monitor is what makes that legible
 again:
 
@@ -757,17 +776,21 @@ frame, encode from 2.2 ms to 0.6 ms, and capture-to-ACK from 4.9 ms to 2.4 ms.
 connection and captures as soon as the server reports something, never more
 often than the requested interval. Capturing on a fixed grid instead made every
 interaction wait for the next grid point — a mean of half an interval, 42 ms at
-the default 12 FPS — for a tick that had nothing to do with it.
+the earlier 12 FPS setting — for a tick that had nothing to do with it.
 
-The wait is bounded by one frame interval, so a missed notification degrades to
-exactly the old fixed-grid cadence rather than stalling. Notifications x11rb
+The wait consumes only the remaining rate-limit interval. Once capture is due,
+it does not wait a second complete interval for an X11 event: cursor movement
+alone need not produce a selected Damage event. The older double wait could
+halve cursor-only update cadence. Early events still cannot exceed `--fps`,
+and mailbox/ACK backpressure remains unchanged. Shutdown is checked between
+wait slices no longer than 20 ms. Notifications x11rb
 already buffered while waiting for a capture's own reply are drained before the
 descriptor is polled, so an event in hand never waits on a socket with nothing
 left to deliver. The damage gate still decides whether a wake is worth a
 readback, including its forced refresh and cursor probing, and an early wake
 still passes through capture-mailbox backpressure.
 
-Measured on a live 3440x1440 session at the default 12 FPS, `scheduled` fell
+Measured on a live 3440x1440 session at the earlier 12 FPS setting, `scheduled` fell
 from a constant 60 per five-second window to 21-51, tracking real screen
 activity instead of the clock. A change arriving while the rate limiter is
 still holding is not lost: it stays pending in the gate and is captured as soon
@@ -827,3 +850,27 @@ version can replace JPEG/TCP with a hardware video path and encrypted transport
 without exposing JWM's local IPC or moving network waits into the compositor.
 
 `jwm-tool health` prints compact `session_lock` for remote control operators.
+
+### Input responsiveness and fitted-image clicks
+
+Each viewer pass consumes at most 256 queued X11 events before forwarding the
+collected input. Continuous motion/Expose traffic therefore cannot indefinitely
+postpone that send. Adjacent motion events still coalesce, but key, button,
+wheel and ReleaseAll edges keep their order, including across pass boundaries.
+Input is flushed before deferred Expose/resize rendering; if a new frame is
+ready, its draw absorbs that repaint instead of first drawing the old frame.
+Rendering still runs on the viewer's main thread, so a slow native draw can
+still delay the next input pass; no claim of measured end-to-end mouse latency
+is made by the offline tests.
+
+Letterbox bars preserve aspect ratio and are not remote desktop content.
+Clicks there neither grab nor send a remote button press. A button pressed
+inside the image is still released if its drag ends outside, with the pointer
+clamped to the source edge; releasing an unforwarded click does not invent a
+remote release. ReleaseAll clears both key and button tracking. Pointer events
+are converted using the window geometry current at that event, before any
+later resize or deferred rendering can reinterpret them.
+
+This change does not add automatic high-quality refresh of previously sent
+unchanged JPEG tiles. After a quality drop, unchanged regions can retain older
+compression until those tiles change or the session produces a new keyframe.

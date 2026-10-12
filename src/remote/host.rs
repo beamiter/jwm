@@ -7,6 +7,7 @@ use super::messages::{
     ClientHello, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello,
     decode_clipboard, decode_frame_ack, decode_input_batch, decode_viewport, encode_clipboard,
 };
+use super::pacing::capture_rate_limit_wait;
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
     server_handshake,
@@ -1727,11 +1728,10 @@ fn stream_frames(
 
     let interval = target_frame_interval(options.fps);
     let backpressure_refresh = backpressure_refresh_interval(interval);
-    // `interval` is a rate limiter, not a schedule. Capturing on a fixed grid
-    // made every interaction wait for the next grid point -- a mean of half an
-    // interval, 42 ms at the default 12 fps -- for a tick that had nothing to
-    // do with it. The loop now waits on the X connection instead and captures
-    // as soon as the server reports something, never faster than `interval`.
+    // One absolute deadline bounds capture starts. X11 activity is consumed
+    // during the remaining wait; once due, poll capture/cursor state without
+    // tacking on a second idle interval. The Damage gate still skips readback
+    // when the surface and composited cursor have not changed.
     let mut next_capture_allowed = Instant::now();
     let mut reported_mode: Option<CaptureMode> = None;
     let capture_result = (|| -> RemoteResult<()> {
@@ -1758,18 +1758,17 @@ fn stream_frames(
                 reported_mode = Some(mode);
             }
             report_host_if_due(telemetry, credits, now);
-            if now < next_capture_allowed {
-                // Rate limited. Damage arriving now stays pending in the gate,
-                // so nothing is lost by sleeping through it.
-                thread::sleep((next_capture_allowed - now).min(CAPTURE_RATE_LIMIT_SLICE));
+            if let Some(wait) = capture_rate_limit_wait(
+                Instant::now(),
+                next_capture_allowed,
+                CAPTURE_RATE_LIMIT_SLICE,
+            ) {
+                // X11 events may wake early, but cannot bypass the rate limit.
+                // Recheck the absolute deadline rather than adding another
+                // full wait after it. Cursor motion need not signal XDamage.
+                capture.wait_for_activity(wait)?;
                 continue;
             }
-            // Bounded by one interval so that even if an event were somehow
-            // missed, this degrades to exactly the old fixed-grid cadence
-            // rather than stalling. The damage gate still decides whether the
-            // wake is worth a readback, including its forced refresh and
-            // cursor probing.
-            capture.wait_for_activity(interval)?;
             if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
                 break;
             }
@@ -2535,6 +2534,36 @@ mod tests {
     }
 
     #[test]
+    fn native_fit_respects_viewer_source_rotation_and_safety_limits() {
+        use super::super::frame::validate_dimensions;
+        use super::super::x11_capture::scaled_dimensions;
+        for (viewport, expected) in [
+            ((1590, 1344), (1590, 993)),
+            ((2560, 1600), (2560, 1600)),
+            ((1600, 2560), (1600, 1000)),
+            ((u16::MAX, u16::MAX), (2560, 1600)),
+            ((0, 0), (320, 200)),
+        ] {
+            let bounds = effective_encoded_bounds(0, viewport);
+            let encoded = scaled_dimensions(2560, 1600, bounds.0, bounds.1);
+            assert_eq!(encoded, expected);
+            assert!(validate_dimensions(encoded.0, encoded.1).is_ok());
+        }
+        let bounds = effective_encoded_bounds(1280, (2560, 1600));
+        assert_eq!(
+            scaled_dimensions(2560, 1600, bounds.0, bounds.1),
+            (1280, 800)
+        );
+        let bounds = effective_encoded_bounds(0, (1600, 900));
+        assert_eq!(
+            scaled_dimensions(1600, 2560, bounds.0, bounds.1),
+            (562, 900)
+        );
+        assert!(validate_dimensions(u16::MAX, 1).is_err());
+        assert!(validate_dimensions(16384, 16384).is_err());
+    }
+
+    #[test]
     fn viewport_requests_are_idempotent_and_consumed_once() {
         let viewport = ViewportRequest::new();
         assert_eq!(viewport.take(), None, "nothing requested yet");
@@ -2627,11 +2656,11 @@ mod tests {
             listen: "127.0.0.1:48221".into(),
             key_file: PathBuf::from("key"),
             display: None,
-            fps: 12,
-            jpeg_quality: 70,
+            fps: 30,
+            jpeg_quality: 85,
             jpeg_quality_floor: 40,
             fixed_jpeg_quality: false,
-            max_width: 1280,
+            max_width: 0,
             capture_source: CaptureSource::Auto,
             capture_area: CaptureArea::Root,
             allow_lan: false,

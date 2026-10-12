@@ -69,10 +69,12 @@ enum Command {
         #[arg(long, value_name = "DISPLAY")]
         display: Option<String>,
 
-        #[arg(long, default_value = "12", value_parser = parse_fps)]
+        /// Interactive upper frame-rate limit; unchanged areas are still suppressed.
+        #[arg(long, default_value = "30", value_parser = parse_fps)]
         fps: u16,
 
-        #[arg(long, default_value = "70", value_parser = parse_quality)]
+        /// Adaptive quality ceiling; the default floor stays 40 for congestion recovery.
+        #[arg(long, default_value = "85", value_parser = parse_quality)]
         jpeg_quality: u8,
 
         /// Lowest quality used by ACK-driven adaptation (defaults to min(40, quality)).
@@ -87,11 +89,11 @@ enum Command {
         #[arg(long)]
         fixed_jpeg_quality: bool,
 
-        /// Ceiling on encoded width; 0 keeps native width.
+        /// Ceiling on encoded width; default 0 fits the viewer up to native width.
         ///
         /// A viewer reports its window size and the host narrows below this
         /// automatically. A peer can never raise it.
-        #[arg(long, default_value = "1280", value_parser = parse_max_width)]
+        #[arg(long, default_value = "0", value_parser = parse_max_width)]
         max_width: u16,
 
         /// auto prefers JWM's Composite overlay and falls back to root.
@@ -366,6 +368,46 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_defaults_keep_native_fit_and_congestion_escape_floor() {
+        let Command::Host {
+            fps,
+            jpeg_quality,
+            jpeg_quality_floor,
+            max_width,
+            ..
+        } = Cli::try_parse_from(["jwm-remote", "host"]).unwrap().command
+        else {
+            panic!("host expected")
+        };
+        assert_eq!((fps, jpeg_quality, max_width), (30, 85, 0));
+        assert_eq!(
+            resolve_quality_floor(jpeg_quality, jpeg_quality_floor).unwrap(),
+            40
+        );
+        let Command::Host {
+            fps,
+            jpeg_quality,
+            max_width,
+            ..
+        } = Cli::try_parse_from([
+            "jwm-remote",
+            "host",
+            "--fps",
+            "12",
+            "--jpeg-quality",
+            "70",
+            "--max-width",
+            "1280",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("host expected")
+        };
+        assert_eq!((fps, jpeg_quality, max_width), (12, 70, 1280));
+    }
 
     #[test]
     fn host_listen_short_forms_preserve_defaults_permissions_and_port_zero() {
