@@ -30,6 +30,8 @@ pub struct ResizeContext<K> {
     pub frames: Vec<ResizeFrame<K>>,
     /// A track-only resize grab owns this snapshot until release/cancel.
     pub drag_snapshot: Option<Option<ResizeIntent<K>>>,
+    /// Only explicit resize commands may prime native slots without an intent.
+    pub preparing: bool,
 }
 
 impl<K> Default for ResizeContext<K> {
@@ -42,6 +44,7 @@ impl<K> Default for ResizeContext<K> {
             gap: 0,
             frames: Vec::new(),
             drag_snapshot: None,
+            preparing: false,
         }
     }
 }

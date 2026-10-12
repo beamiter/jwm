@@ -1913,6 +1913,134 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn failed_cross_monitor_restore_preserves_active_resize_on_both_monitors() {
+        let mut jwm = empty_jwm();
+        jwm.add_monitor(output(1, 0));
+        jwm.add_monitor(output(2, 1200));
+        let source = jwm.state.monitor_order[0];
+        let target = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(source);
+
+        let source_window = WindowId::from_raw(0x710);
+        let mut source_client = WMClient::new(source_window);
+        source_client.mon = Some(source);
+        source_client.state.tags = jwm.state.monitors[source].get_active_tags();
+        source_client.geometry.x = 100;
+        source_client.geometry.y = 100;
+        source_client.geometry.w = 600;
+        source_client.geometry.h = 420;
+        let source_client = jwm.insert_client(source_client);
+        jwm.attach_to_monitor(source_client, source);
+        jwm.state.monitors[source].set_selected_client_for_current_tag(Some(source_client));
+
+        let sticky_window = WindowId::from_raw(0x711);
+        let mut sticky = WMClient::new(sticky_window);
+        sticky.mon = Some(target);
+        sticky.state.tags = jwm.state.monitors[target].get_active_tags();
+        sticky.state.is_sticky = true;
+        sticky.geometry.x = 1300;
+        sticky.geometry.y = 100;
+        sticky.geometry.w = 500;
+        sticky.geometry.h = 360;
+        let sticky = jwm.insert_client(sticky);
+        jwm.attach_to_monitor(sticky, target);
+        jwm.state.monitors[target].set_selected_client_for_current_tag(Some(sticky));
+
+        let target_window = WindowId::from_raw(0x712);
+        let restore_rect = Rect::new(1420, 160, 680, 500);
+        let mut target_client = WMClient::new(target_window);
+        target_client.mon = Some(target);
+        target_client.state.tags = 0b10;
+        target_client.state.is_floating = true;
+        target_client.state.is_hidden = true;
+        target_client.state.minimized_order = 41;
+        target_client.geometry.x = -900;
+        target_client.geometry.y = restore_rect.y;
+        target_client.geometry.w = restore_rect.w;
+        target_client.geometry.h = restore_rect.h;
+        target_client.geometry.hidden_x = Some(-900);
+        target_client.geometry.hidden_restore_rect = Some(restore_rect);
+        let target_client = jwm.insert_client(target_client);
+        jwm.attach_to_monitor(target_client, target);
+
+        // Prime actual resize intentions on both independent contexts before
+        // attempting the failing reveal. Ordinary empty-state rollback remains
+        // covered by the original test, whose full equality is unchanged.
+        for monitor in [source, target] {
+            jwm.state.monitors[monitor].lt =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+        }
+        for key in [source_client, sticky] {
+            jwm.state.clients[key].size_hints.hints_valid = true;
+        }
+        let mut backend = ScratchpadBackend::new();
+        jwm.state.sel_mon = Some(target);
+        jwm.resize_horizontal(&mut backend, &crate::jwm::types::WMArgEnum::Float(-0.15))
+            .unwrap();
+        jwm.resize_vertical(&mut backend, &crate::jwm::types::WMArgEnum::Float(-0.10))
+            .unwrap();
+        jwm.state.sel_mon = Some(source);
+        jwm.resize_horizontal(&mut backend, &crate::jwm::types::WMArgEnum::Float(-0.20))
+            .unwrap();
+        jwm.resize_vertical(&mut backend, &crate::jwm::types::WMArgEnum::Float(-0.05))
+            .unwrap();
+        for monitor in [source, target] {
+            jwm.arrange(&mut backend, Some(monitor));
+            let scope = jwm.layout_resize_scope(monitor).unwrap();
+            let context = &jwm.state.monitors[monitor].layout_resizes[&scope];
+            assert!(
+                context.intent.is_some(),
+                "test requires an active resize on both monitors"
+            );
+            assert!(!context.preparing);
+            assert!(context.drag_snapshot.is_none());
+        }
+        let live_geometry = |jwm: &Jwm, key: ClientKey| {
+            let g = &jwm.state.clients[key].geometry;
+            (Rect::new(g.x, g.y, g.w, g.h), g.border_w)
+        };
+        let source_geometry = live_geometry(&jwm, source_client);
+        let target_geometry = live_geometry(&jwm, sticky);
+        let source_state = jwm.state.monitors[source].clone();
+        let target_state = jwm.state.monitors[target].clone();
+        let target_stack = jwm.state.monitor_stack[target].clone();
+        let sticky_tags = jwm.state.clients[sticky].state.tags;
+        backend.fail_focus_for = Some(target_window);
+
+        assert!(jwm.reveal_and_focus(&mut backend, target_window).is_err());
+        assert_eq!(jwm.state.sel_mon, Some(source));
+        assert_eq!(jwm.get_selected_client_key(), Some(source_client));
+        assert_eq!(jwm.state.monitors[source], source_state);
+        assert_eq!(jwm.state.monitors[target], target_state);
+        assert_eq!(live_geometry(&jwm, source_client), source_geometry);
+        assert_eq!(live_geometry(&jwm, sticky), target_geometry);
+        assert_eq!(jwm.state.monitor_stack[target], target_stack);
+        assert_eq!(jwm.state.clients[sticky].state.tags, sticky_tags);
+        let client = &jwm.state.clients[target_client];
+        assert!(client.state.is_hidden);
+        assert_eq!(client.state.minimized_order, 41);
+        assert_eq!(client.geometry.hidden_restore_rect, Some(restore_rect));
+        assert_eq!(backend.focused.last(), Some(&Some(source_window)));
+        assert!(
+            backend
+                .minimized
+                .iter()
+                .all(|&(window, minimized)| window != target_window || minimized),
+            "failed navigation must not release the retained Dock visual"
+        );
+        // Re-applying layouts after rollback must not create empty caches,
+        // discard active anchors, or gradually change the restored geometry.
+        for _ in 0..10 {
+            jwm.arrange(&mut backend, Some(source));
+            jwm.arrange(&mut backend, Some(target));
+            assert_eq!(jwm.state.monitors[source], source_state);
+            assert_eq!(jwm.state.monitors[target], target_state);
+            assert_eq!(live_geometry(&jwm, source_client), source_geometry);
+            assert_eq!(live_geometry(&jwm, sticky), target_geometry);
+        }
+    }
+
+    #[test]
     fn failed_minimized_scratchpad_restore_keeps_its_committed_target_ownership() {
         let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(true);
         let source = jwm.state.monitor_order[0];

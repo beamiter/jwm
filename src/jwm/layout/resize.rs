@@ -106,6 +106,15 @@ impl Jwm {
         let Some(scope) = self.layout_resize_scope(mon) else {
             return (results, false);
         };
+        // Ordinary arrange must not create observable empty monitor state.
+        if !self
+            .state
+            .monitors
+            .get(mon)
+            .is_some_and(|m| m.layout_resizes.contains_key(&scope))
+        {
+            return (results, false);
+        }
         // Vstack temporarily reorders compute input on focus. The logical tiled
         // order is the topology: focus alone must not reset a resize intention.
         let topology = self
@@ -133,7 +142,7 @@ impl Jwm {
             Vec::new()
         };
         let intent = if let Some(m) = self.state.monitors.get_mut(mon) {
-            let context = m.layout_resizes.entry(scope).or_default();
+            let context = m.layout_resizes.get_mut(&scope).unwrap();
             context.sync(topology, area, gap, frames.clone());
             context.sync_groups(groups);
             context.intent
@@ -141,6 +150,7 @@ impl Jwm {
             None
         };
         let Some(intent) = intent else {
+            self.prune_layout_resize(mon, scope);
             return (results, false);
         };
         let Some(anchor) = frames.iter().find(|f| f.client == intent.client) else {
@@ -190,14 +200,8 @@ impl Jwm {
         } else {
             // A new output/hint set can make even the native layout infeasible.
             // Drop the override and leave that pre-existing layout policy alone.
-            if let Some(c) = self
-                .state
-                .monitors
-                .get_mut(mon)
-                .and_then(|m| m.layout_resizes.get_mut(&scope))
-            {
-                c.intent = None;
-                c.drag_snapshot = None;
+            if let Some(m) = self.state.monitors.get_mut(mon) {
+                m.layout_resizes.remove(&scope);
             }
             (results, false)
         }
@@ -279,6 +283,28 @@ impl Jwm {
         true
     }
 
+    fn prime_layout_resize(
+        &mut self,
+        backend: &mut dyn Backend,
+        mon: MonitorKey,
+        scope: ResizeScope,
+    ) {
+        if let Some(m) = self.state.monitors.get_mut(mon) {
+            m.layout_resizes.entry(scope).or_default().preparing = true;
+        }
+        self.arrange(backend, Some(mon));
+    }
+
+    fn prune_layout_resize(&mut self, mon: MonitorKey, scope: ResizeScope) {
+        if let Some(m) = self.state.monitors.get_mut(mon)
+            && m.layout_resizes
+                .get(&scope)
+                .is_some_and(|c| !c.preparing && c.intent.is_none() && c.drag_snapshot.is_none())
+        {
+            m.layout_resizes.remove(&scope);
+        }
+    }
+
     fn resize_physical_axis(
         &mut self,
         backend: &mut dyn Backend,
@@ -344,7 +370,15 @@ impl Jwm {
         if !self.is_layout_resize_target(key) {
             return Ok(());
         }
-        self.arrange(backend, Some(mon));
+        self.prime_layout_resize(backend, mon, scope);
+        if let Some(context) = self
+            .state
+            .monitors
+            .get_mut(mon)
+            .and_then(|m| m.layout_resizes.get_mut(&scope))
+        {
+            context.preparing = false;
+        }
         let Some(c) = self.state.clients.get(key) else {
             return Ok(());
         };
@@ -366,6 +400,7 @@ impl Jwm {
         if let Some(wanted) = master_resize::adjust_intent(start, horizontal, f64::from(delta)) {
             self.set_layout_resize_intent(backend, mon, scope, wanted);
         }
+        self.prune_layout_resize(mon, scope);
         Ok(())
     }
 
@@ -386,14 +421,9 @@ impl Jwm {
     pub(crate) fn clear_current_layout_resize(&mut self) {
         if let Some(mon) = self.state.sel_mon
             && let Some(scope) = self.layout_resize_scope(mon)
-            && let Some(context) = self
-                .state
-                .monitors
-                .get_mut(mon)
-                .and_then(|m| m.layout_resizes.get_mut(&scope))
+            && let Some(m) = self.state.monitors.get_mut(mon)
         {
-            context.intent = None;
-            context.drag_snapshot = None;
+            m.layout_resizes.remove(&scope);
         }
     }
 
@@ -405,14 +435,8 @@ impl Jwm {
         if let Some(mon) = self.state.sel_mon
             && let Some(scope) = self.layout_resize_scope(mon)
         {
-            if let Some(c) = self
-                .state
-                .monitors
-                .get_mut(mon)
-                .and_then(|m| m.layout_resizes.get_mut(&scope))
-            {
-                c.intent = None;
-                c.drag_snapshot = None;
+            if let Some(m) = self.state.monitors.get_mut(mon) {
+                m.layout_resizes.remove(&scope);
             }
             self.arrange(backend, Some(mon));
             self.broadcast_visible_window_states_on_monitor(backend, mon);
@@ -429,7 +453,7 @@ impl Jwm {
         let Some(mon) = self.state.clients.get(key).and_then(|c| c.mon) else {
             return;
         };
-        self.arrange(backend, Some(mon));
+        self.prime_layout_resize(backend, mon, scope);
         if let Some(c) = self
             .state
             .monitors
@@ -437,6 +461,7 @@ impl Jwm {
             .and_then(|m| m.layout_resizes.get_mut(&scope))
         {
             c.drag_snapshot = Some(c.intent);
+            c.preparing = false;
         }
     }
 
@@ -459,6 +484,7 @@ impl Jwm {
             {
                 c.intent = original;
             }
+            self.prune_layout_resize(mon, scope);
             self.arrange(backend, Some(mon));
             self.broadcast_visible_window_states_on_monitor(backend, mon);
         }

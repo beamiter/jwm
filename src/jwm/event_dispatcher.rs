@@ -11841,19 +11841,11 @@ mod tests {
             keys[1]
         );
         jwm.setmfact(&mut backend, &WMArgEnum::Float(-0.1)).unwrap();
-        assert!(
-            jwm.state.monitors[mon].layout_resizes[&scope]
-                .intent
-                .is_none()
-        );
+        assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
         jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
             .unwrap();
         jwm.setcfact(&mut backend, &WMArgEnum::Float(0.2)).unwrap();
-        assert!(
-            jwm.state.monitors[mon].layout_resizes[&scope]
-                .intent
-                .is_none()
-        );
+        assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
     }
 
     #[test]
@@ -11960,11 +11952,7 @@ mod tests {
                 jwm.state.monitors[mon].lt = std::rc::Rc::new(LayoutEnum::GRID);
                 // No intervening motion: release itself must reject old scope.
                 master_resize_send_release(&mut jwm, &mut backend);
-                assert!(
-                    jwm.state.monitors[mon].layout_resizes[&scope]
-                        .intent
-                        .is_none()
-                );
+                assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
                 jwm.state.monitors[mon].lt = std::rc::Rc::new(LayoutEnum::TILE);
                 jwm.arrange(&mut backend, Some(mon));
             } else {
@@ -11993,9 +11981,10 @@ mod tests {
         assert_eq!(live_rect(&jwm, key), before);
         let scope = jwm.layout_resize_scope(mon).unwrap();
         assert!(
-            jwm.state.monitors[mon].layout_resizes[&scope]
-                .drag_snapshot
-                .is_none()
+            jwm.state.monitors[mon]
+                .layout_resizes
+                .get(&scope)
+                .is_none_or(|c| c.drag_snapshot.is_none())
         );
         for fixed in [false, true] {
             jwm.state.clients[key].state.is_fullscreen = !fixed;
@@ -12068,11 +12057,7 @@ mod tests {
         state.columns = vec![vec![keys[0], keys[1]], vec![keys[2]]];
         state.ensure_column_metadata();
         jwm.arrange(&mut backend, Some(mon));
-        assert!(
-            jwm.state.monitors[mon].layout_resizes[&scope]
-                .intent
-                .is_none()
-        );
+        assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
     }
 
     #[test]
@@ -12152,17 +12137,13 @@ mod tests {
         master_resize_send_release(&mut jwm, &mut backend);
         assert!(jwm.drag_ctl.is_none());
         assert!(!jwm.state.clients[key].state.is_floating);
-        assert!(
-            jwm.state.monitors[mon].layout_resizes[&scope]
-                .intent
-                .is_none()
-        );
+        assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
         jwm.arrange(&mut backend, Some(other));
         let new_scope = jwm.layout_resize_scope(other).unwrap();
         assert!(
-            jwm.state.monitors[other].layout_resizes[&new_scope]
-                .intent
-                .is_none()
+            !jwm.state.monitors[other]
+                .layout_resizes
+                .contains_key(&new_scope)
         );
     }
 
@@ -12231,11 +12212,96 @@ mod tests {
             }
             let scope = jwm.layout_resize_scope(mon).unwrap();
             assert!(
-                jwm.state.monitors[mon].layout_resizes[&scope]
-                    .drag_snapshot
-                    .is_none()
+                jwm.state.monitors[mon]
+                    .layout_resizes
+                    .get(&scope)
+                    .is_none_or(|c| c.drag_snapshot.is_none())
             );
         }
+    }
+    #[test]
+    fn master_resize_runtime_context_is_lazy_and_reset_stays_absent() {
+        use crate::core::layout::LayoutEnum;
+        let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 3);
+        let scope = jwm.layout_resize_scope(mon).unwrap();
+        for _ in 0..4 {
+            jwm.arrange(&mut backend, Some(mon));
+            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        }
+        let native = live_rect(&jwm, keys[0]);
+        jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+            .unwrap();
+        assert!(live_rect(&jwm, keys[0]).w < native.w);
+        let context = &jwm.state.monitors[mon].layout_resizes[&scope];
+        assert!(context.intent.is_some());
+        assert!(!context.preparing);
+        jwm.reset_layout_size(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        for _ in 0..4 {
+            jwm.arrange(&mut backend, Some(mon));
+            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+            assert_eq!(live_rect(&jwm, keys[0]), native);
+        }
+        jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+            .unwrap();
+        assert!(jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
+        jwm.state.monitor_clients.get_mut(mon).unwrap().reverse();
+        for _ in 0..4 {
+            jwm.arrange(&mut backend, Some(mon));
+            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        }
+        jwm.state.monitors[mon].lt = std::rc::Rc::new(LayoutEnum::GRID);
+        jwm.arrange(&mut backend, Some(mon));
+        assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+    }
+
+    #[test]
+    fn master_resize_runtime_first_drag_cancel_and_threshold_release_restore_absence() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::layout::LayoutEnum;
+        for cancel in [false, true] {
+            let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 1);
+            let native = live_rect(&jwm, keys[0]);
+            let scope = jwm.layout_resize_scope(mon).unwrap();
+            let mode = jwm.resize_drag_mode(keys[0], ResizeEdge::Right);
+            jwm.start_pointer_drag(&mut backend, keys[0], mode).unwrap();
+            let context = &jwm.state.monitors[mon].layout_resizes[&scope];
+            assert_eq!(context.drag_snapshot, Some(None));
+            assert!(!context.frames.is_empty());
+            assert!(!context.preparing);
+            if cancel {
+                let start = jwm.drag_ctl.unwrap().start_root;
+                master_resize_send_motion(&mut jwm, &mut backend, start.0 - 100.0, start.1);
+                assert!(live_rect(&jwm, keys[0]).w < native.w);
+                jwm.cancel_pointer_drag(&mut backend);
+            } else {
+                master_resize_send_release(&mut jwm, &mut backend);
+            }
+            for _ in 0..4 {
+                jwm.arrange(&mut backend, Some(mon));
+                assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+                assert_eq!(live_rect(&jwm, keys[0]), native);
+            }
+        }
+        let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 1);
+        jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.2))
+            .unwrap();
+        let scope = jwm.layout_resize_scope(mon).unwrap();
+        let before = live_rect(&jwm, keys[0]);
+        let saved = jwm.state.monitors[mon].layout_resizes.clone();
+        let mode = jwm.resize_drag_mode(keys[0], ResizeEdge::Right);
+        jwm.start_pointer_drag(&mut backend, keys[0], mode).unwrap();
+        let start = jwm.drag_ctl.unwrap().start_root;
+        master_resize_send_motion(&mut jwm, &mut backend, start.0 - 100.0, start.1);
+        assert!(live_rect(&jwm, keys[0]).w < before.w);
+        jwm.cancel_pointer_drag(&mut backend);
+        assert_eq!(jwm.state.monitors[mon].layout_resizes, saved);
+        assert_eq!(live_rect(&jwm, keys[0]), before);
+        assert!(
+            jwm.state.monitors[mon].layout_resizes[&scope]
+                .intent
+                .is_some()
+        );
     }
 }
 
