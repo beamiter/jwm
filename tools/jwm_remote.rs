@@ -182,11 +182,11 @@ fn run(command: Command) -> RemoteResult<()> {
     match command {
         Command::Keygen { output } => {
             let output = resolve_key_path(output)?;
-            if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
-                if !parent.is_dir() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::NotFound,
-                        format!("key parent directory does not exist: {:?}. Create a private directory first (see keygen --help); nothing was created", parent)).into());
-                }
+            if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty())
+                && !parent.is_dir()
+            {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound,
+                    format!("key parent directory does not exist: {:?}. Create a private directory first (see keygen --help); nothing was created", parent)).into());
             }
             generate_key_file(&output)?;
             println!("Generated private remote key: {:?}", output);
