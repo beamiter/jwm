@@ -1275,6 +1275,7 @@ enum StopCause {
     Sender = 3,
     Capture = 4,
     ThreadPanic = 5,
+    Clipboard = 6,
 }
 
 struct FirstStop(AtomicU8);
@@ -1314,6 +1315,7 @@ impl FirstStop {
             value if value == StopCause::Input as u8 => StopCause::Input,
             value if value == StopCause::Sender as u8 => StopCause::Sender,
             value if value == StopCause::Capture as u8 => StopCause::Capture,
+            value if value == StopCause::Clipboard as u8 => StopCause::Clipboard,
             value if value == StopCause::ThreadPanic as u8 => StopCause::ThreadPanic,
             _ => StopCause::None,
         }
@@ -1723,7 +1725,11 @@ fn serve_client(
             }
             stream_result
         }
-        StopCause::Capture | StopCause::Sender | StopCause::ThreadPanic | StopCause::None => {
+        StopCause::Capture
+        | StopCause::Sender
+        | StopCause::Clipboard
+        | StopCause::ThreadPanic
+        | StopCause::None => {
             if let Err(error) = input_result {
                 eprintln!("jwm-remote: input receiver stopped: {error}");
             }
@@ -1796,13 +1802,36 @@ fn stream_frames(
         }
     };
 
-    let clipboard_thread: Option<std::io::Result<thread::JoinHandle<()>>> =
-        clipboard_captures.map(|captures| {
-            let writer = Arc::clone(&writer);
-            let running = Arc::clone(running);
-            thread::Builder::new()
-                .name("jwm-remote-clipboard".into())
-                .spawn(move || forward_clipboard(&captures, &writer, &running))
+    let clipboard_thread = clipboard_captures.map(|captures| {
+        let clipboard_control = control.try_clone()?;
+        let writer = Arc::clone(&writer);
+        let running = Arc::clone(running);
+        let first_stop = Arc::clone(first_stop);
+        let mailbox = Arc::clone(&mailbox);
+        let credits = Arc::clone(credits);
+        thread::Builder::new()
+            .name("jwm-remote-clipboard".into())
+            .spawn(move || {
+                run_clipboard_worker(
+                    || forward_clipboard(&captures, &writer, &running),
+                    &running,
+                    &first_stop,
+                    || {
+                        mailbox.close();
+                        credits.close();
+                        let _ = clipboard_control.shutdown(Shutdown::Both);
+                    },
+                )
+            })
+    });
+    // Negotiation already promised clipboard support. A failed worker start
+    // must enter the ordinary teardown path, joining the video sender that
+    // was started above, rather than leaving a half-working session alive.
+    let (clipboard_thread, clipboard_start_result) =
+        admit_clipboard_worker(clipboard_thread, running, first_stop, || {
+            mailbox.close();
+            credits.close();
+            let _ = control.shutdown(Shutdown::Both);
         });
 
     let interval = target_frame_interval(options.fps);
@@ -1903,16 +1932,33 @@ fn stream_frames(
     };
     // The forwarder holds a reference to the shared writer, so it must not
     // outlive the session. It notices `running` within one poll interval.
-    if let Some(Ok(clipboard_thread)) = clipboard_thread {
-        let _ = clipboard_thread.join();
-    }
+    let clipboard_result = finish_clipboard_worker(
+        clipboard_start_result,
+        clipboard_thread.map(thread::JoinHandle::join),
+        first_stop,
+    );
 
-    match first_stop.cause() {
+    stream_result_for_stop(
+        first_stop.cause(),
+        capture_result,
+        sender_result,
+        clipboard_result,
+    )
+}
+
+fn stream_result_for_stop(
+    cause: StopCause,
+    capture_result: RemoteResult<()>,
+    sender_result: RemoteResult<()>,
+    clipboard_result: RemoteResult<()>,
+) -> RemoteResult<()> {
+    match cause {
         StopCause::Capture => capture_result,
         StopCause::Sender => sender_result,
+        StopCause::Clipboard => clipboard_result,
         StopCause::Input | StopCause::Graceful => Ok(()),
-        StopCause::ThreadPanic => sender_result,
-        StopCause::None => capture_result.and(sender_result),
+        StopCause::ThreadPanic => sender_result.and(clipboard_result),
+        StopCause::None => capture_result.and(sender_result).and(clipboard_result),
     }
 }
 
@@ -2079,13 +2125,89 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
 /// on its capture mailbox, either of which can be seconds long on an idle
 /// desktop; queueing clipboard text behind that would make copy-paste feel
 /// broken rather than merely delayed.
+fn stop_clipboard_session(running: &AtomicBool, first_stop: &FirstStop, shutdown: impl FnOnce()) {
+    // Shutdown can itself make an in-flight write fail. Do not turn that
+    // secondary failure into the cause of an already-stopped session.
+    if running.load(Ordering::Acquire) {
+        // Publish the cause before capture/input can observe stopped state
+        // and race to attribute the resulting transport shutdown.
+        first_stop.record(StopCause::Clipboard);
+        if running.swap(false, Ordering::AcqRel) {
+            shutdown();
+        }
+    }
+}
+
+fn run_clipboard_worker(
+    task: impl FnOnce() -> RemoteResult<()>,
+    running: &Arc<AtomicBool>,
+    first_stop: &FirstStop,
+    shutdown: impl FnOnce(),
+) -> RemoteResult<()> {
+    let _stop_on_exit = StopSessionOnDrop(Arc::clone(running));
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
+        Ok(result) => {
+            if result.is_err() {
+                stop_clipboard_session(running, first_stop, shutdown);
+            }
+            result
+        }
+        Err(panic) => {
+            // Join still observes the panic, but its first cause must become
+            // visible before the drop guard exposes a stopped session.
+            stop_clipboard_session(running, first_stop, shutdown);
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+fn admit_clipboard_worker<T>(
+    worker: Option<io::Result<T>>,
+    running: &AtomicBool,
+    first_stop: &FirstStop,
+    shutdown: impl FnOnce(),
+) -> (Option<T>, RemoteResult<()>) {
+    match worker {
+        Some(Ok(worker)) => (Some(worker), Ok(())),
+        None => (None, Ok(())),
+        Some(Err(error)) => {
+            stop_clipboard_session(running, first_stop, shutdown);
+            (None, Err(error.into()))
+        }
+    }
+}
+
+fn finish_clipboard_worker(
+    started: RemoteResult<()>,
+    joined: Option<thread::Result<RemoteResult<()>>>,
+    first_stop: &FirstStop,
+) -> RemoteResult<()> {
+    match joined {
+        Some(Ok(result)) => started.and(result),
+        Some(Err(_)) => {
+            // Preserve an earlier input/capture/sender/graceful outcome.
+            first_stop.record(StopCause::Clipboard);
+            Err(io::Error::other("remote clipboard thread panicked").into())
+        }
+        None => started,
+    }
+}
+
 fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
     captures: &ClipboardCaptures,
     writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
     running: &AtomicBool,
-) {
+) -> RemoteResult<()> {
+    forward_clipboard_from(|timeout| captures.recv_timeout(timeout), writer, running)
+}
+
+fn forward_clipboard_from<W: std::io::Write + SetWriteTimeout>(
+    mut receive: impl FnMut(Duration) -> Option<String>,
+    writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+    running: &AtomicBool,
+) -> RemoteResult<()> {
     while running.load(Ordering::Acquire) {
-        let Some(text) = captures.recv_timeout(CLIPBOARD_POLL_INTERVAL) else {
+        let Some(text) = receive(CLIPBOARD_POLL_INTERVAL) else {
             continue;
         };
         let Ok(payload) = encode_clipboard(&text) else {
@@ -2102,11 +2224,10 @@ fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
             )
         };
         if let Err(error) = result {
-            // The session owns teardown; stopping here is enough.
-            eprintln!("jwm-remote: clipboard send failed: {error}");
-            return;
+            return Err(error.into());
         }
     }
+    Ok(())
 }
 
 fn lock_writer<W>(
@@ -2458,6 +2579,7 @@ mod tests {
     use image::{Rgb, RgbImage};
     use std::io::{Cursor, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicU64;
 
     #[derive(Default)]
     struct GateState {
@@ -2571,6 +2693,341 @@ mod tests {
                 "injected flush failure",
             ))
         }
+    }
+
+    struct CountedClipboardWriter<W> {
+        inner: W,
+        writes: Arc<AtomicU64>,
+        flushes: Arc<AtomicU64>,
+    }
+
+    impl<W: SetWriteTimeout> SetWriteTimeout for CountedClipboardWriter<W> {
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            self.inner.set_write_timeout(timeout)
+        }
+    }
+
+    impl<W: Write> Write for CountedClipboardWriter<W> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.inner.write(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes.fetch_add(1, Ordering::Relaxed);
+            self.inner.flush()
+        }
+    }
+
+    fn assert_clipboard_failure_stops_session<W: Write + SetWriteTimeout>(inner: W) {
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        let mailbox = LatestMailbox::<PendingFrame>::new();
+        let credits = FrameCredits::new();
+        let stopped = std::cell::Cell::new(false);
+        let writes = Arc::new(AtomicU64::new(0));
+        let flushes = Arc::new(AtomicU64::new(0));
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(
+                CountedClipboardWriter {
+                    inner,
+                    writes: Arc::clone(&writes),
+                    flushes: Arc::clone(&flushes),
+                },
+                WRITE_TIMEOUT,
+            ),
+            [0x93; 32],
+        ));
+        let mut text = Some("clipboard text".to_owned());
+        let result = run_clipboard_worker(
+            || forward_clipboard_from(|_| text.take(), &writer, &running),
+            &running,
+            &first_stop,
+            || {
+                assert!(writer.try_lock().is_ok(), "release writer before teardown");
+                mailbox.close();
+                credits.close();
+                stopped.set(true);
+            },
+        );
+        assert!(result.is_err());
+        assert!(stopped.get());
+        assert_eq!(first_stop.cause(), StopCause::Clipboard);
+        assert!(mailbox.receive().unwrap().is_none());
+        assert!(
+            credits
+                .wait_for_credit(&running, Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        assert!(lock_writer(&writer).get_mut().failed);
+        let before = (
+            writes.load(Ordering::Relaxed),
+            flushes.load(Ordering::Relaxed),
+        );
+        assert!(
+            write_session_record(
+                &mut lock_writer(&writer),
+                MessageKind::Clipboard,
+                &[],
+                FRAME_WRITE_DEADLINE
+            )
+            .is_err()
+        );
+        assert_eq!(
+            (
+                writes.load(Ordering::Relaxed),
+                flushes.load(Ordering::Relaxed)
+            ),
+            before,
+            "a poisoned record cannot touch the underlying writer again"
+        );
+        assert!(
+            !running.load(Ordering::Acquire),
+            "poisoned clipboard record must stop an otherwise static session"
+        );
+    }
+
+    #[test]
+    fn clipboard_write_failure_stops_an_otherwise_static_session() {
+        assert_clipboard_failure_stops_session(FailingWriter);
+    }
+
+    #[test]
+    fn clipboard_flush_failure_stops_an_otherwise_static_session() {
+        assert_clipboard_failure_stops_session(FlushFailWriter::default());
+    }
+
+    #[test]
+    fn clipboard_start_failure_stops_and_preserves_the_actual_error() {
+        let running = AtomicBool::new(true);
+        let first_stop = FirstStop::new();
+        let mailbox = LatestMailbox::<PendingFrame>::new();
+        let credits = FrameCredits::new();
+        let stopped = std::cell::Cell::new(false);
+        let (worker, result) = admit_clipboard_worker::<()>(
+            Some(Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "injected spawn refusal",
+            ))),
+            &running,
+            &first_stop,
+            || {
+                mailbox.close();
+                credits.close();
+                stopped.set(true);
+            },
+        );
+        assert!(worker.is_none());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected spawn refusal")
+        );
+        assert!(stopped.get());
+        assert!(!running.load(Ordering::Acquire));
+        assert_eq!(first_stop.cause(), StopCause::Clipboard);
+        assert!(mailbox.receive().unwrap().is_none());
+        assert!(
+            credits
+                .wait_for_credit(&running, Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn clipboard_disabled_or_started_does_not_stop_the_session() {
+        for candidate in [None, Some(Ok(7_u8))] {
+            let expected = candidate.as_ref().map(|_| 7);
+            let running = AtomicBool::new(true);
+            let first_stop = FirstStop::new();
+            let (worker, result) = admit_clipboard_worker(candidate, &running, &first_stop, || {
+                panic!("a successful or disabled clipboard does not shut down")
+            });
+            assert_eq!(worker, expected);
+            assert!(result.is_ok());
+            assert!(running.load(Ordering::Acquire));
+            assert_eq!(first_stop.cause(), StopCause::None);
+        }
+    }
+
+    #[test]
+    fn clipboard_worker_failure_keeps_first_stop_and_does_not_repeat_shutdown() {
+        for prior in [
+            StopCause::Input,
+            StopCause::Capture,
+            StopCause::Sender,
+            StopCause::Graceful,
+        ] {
+            for was_running in [false, true] {
+                let running = Arc::new(AtomicBool::new(was_running));
+                let first_stop = FirstStop::new();
+                first_stop.record(prior);
+                let calls = std::cell::Cell::new(0);
+                assert!(
+                    run_clipboard_worker(
+                        || Err(io::Error::other("clipboard failure after first outcome").into()),
+                        &running,
+                        &first_stop,
+                        || calls.set(calls.get() + 1),
+                    )
+                    .is_err()
+                );
+                assert_eq!(first_stop.cause(), prior);
+                assert_eq!(calls.get(), usize::from(was_running));
+                assert!(!running.load(Ordering::Acquire));
+            }
+        }
+    }
+
+    #[test]
+    fn clipboard_join_panic_is_reported_without_replacing_a_prior_cause() {
+        for prior in [StopCause::None, StopCause::Input, StopCause::Graceful] {
+            let first_stop = FirstStop::new();
+            if prior != StopCause::None {
+                first_stop.record(prior);
+            }
+            let joined: thread::Result<RemoteResult<()>> = Err(Box::new("injected panic"));
+            let error = finish_clipboard_worker(Ok(()), Some(joined), &first_stop).unwrap_err();
+            assert!(error.to_string().contains("clipboard thread panicked"));
+            assert_eq!(
+                first_stop.cause(),
+                if prior == StopCause::None {
+                    StopCause::Clipboard
+                } else {
+                    prior
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_normal_stop_delivers_text_without_fabricating_a_failure() {
+        let state = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..Default::default()
+            }),
+            Condvar::new(),
+        ));
+        let writer = Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&state)), WRITE_TIMEOUT),
+            [0x94; 32],
+        ));
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        let mut text = Some("normal clipboard".to_owned());
+        run_clipboard_worker(
+            || {
+                forward_clipboard_from(
+                    |_| {
+                        if text.is_none() {
+                            running.store(false, Ordering::Release);
+                        }
+                        text.take()
+                    },
+                    &writer,
+                    &running,
+                )
+            },
+            &running,
+            &first_stop,
+            || panic!("normal stop must not report a worker failure"),
+        )
+        .unwrap();
+        assert_eq!(first_stop.cause(), StopCause::None);
+        assert!(!lock_writer(&writer).get_mut().failed);
+        let wire = state.0.lock().unwrap().bytes.clone();
+        let mut reader = SessionReader::new(Cursor::new(wire), [0x94; 32]);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Clipboard);
+        assert_eq!(decode_clipboard(&payload).unwrap(), "normal clipboard");
+        let stopped = AtomicBool::new(false);
+        forward_clipboard_from(|_| panic!("no receive after stop"), &writer, &stopped).unwrap();
+    }
+
+    #[test]
+    fn clipboard_panic_publishes_its_cause_and_wakes_before_unwind_escapes() {
+        let running = Arc::new(AtomicBool::new(true));
+        let first_stop = FirstStop::new();
+        let stopped = std::cell::Cell::new(false);
+        let mailbox = LatestMailbox::<PendingFrame>::new();
+        let credits = FrameCredits::new();
+        let joined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_clipboard_worker(
+                || panic!("injected clipboard worker panic"),
+                &running,
+                &first_stop,
+                || {
+                    assert_eq!(first_stop.cause(), StopCause::Clipboard);
+                    assert!(!running.load(Ordering::Acquire));
+                    first_stop.record(StopCause::Graceful);
+                    assert_eq!(first_stop.cause(), StopCause::Clipboard);
+                    mailbox.close();
+                    credits.close();
+                    stopped.set(true);
+                },
+            )
+        }));
+        assert!(joined.is_err());
+        assert!(stopped.get());
+        assert!(mailbox.receive().unwrap().is_none());
+        assert!(
+            credits
+                .wait_for_credit(&running, Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
+        let error = finish_clipboard_worker(Ok(()), Some(joined), &first_stop);
+        assert!(stream_result_for_stop(first_stop.cause(), Ok(()), Ok(()), error).is_err());
+    }
+
+    #[test]
+    fn clipboard_failure_cause_precedes_stopped_state_publication() {
+        let body = include_str!("host.rs")
+            .split_once("fn stop_clipboard_session(")
+            .unwrap()
+            .1
+            .split_once("fn run_clipboard_worker(")
+            .unwrap()
+            .0;
+        assert!(
+            body.find("first_stop.record(StopCause::Clipboard)")
+                .unwrap()
+                < body.find("running.swap(false").unwrap()
+        );
+    }
+
+    #[test]
+    fn clipboard_result_selection_preserves_first_failure_and_graceful_stop() {
+        for (cause, expected) in [
+            (StopCause::Capture, Some("capture")),
+            (StopCause::Sender, Some("sender")),
+            (StopCause::Clipboard, Some("clipboard")),
+            (StopCause::Input, None),
+            (StopCause::Graceful, None),
+        ] {
+            let result = stream_result_for_stop(
+                cause,
+                Err(io::Error::other("capture").into()),
+                Err(io::Error::other("sender").into()),
+                Err(io::Error::other("clipboard").into()),
+            );
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap_err().to_string(), expected),
+                None => assert!(result.is_ok()),
+            }
+        }
+        assert!(
+            stream_result_for_stop(
+                StopCause::None,
+                Ok(()),
+                Ok(()),
+                Err(io::Error::other("clipboard").into())
+            )
+            .is_err()
+        );
     }
 
     /// Plan, encode and commit one frame the way the sender loop does.
