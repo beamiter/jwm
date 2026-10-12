@@ -5,6 +5,29 @@
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+/// Audio intent owned by one screen-recording request. Availability fallback
+/// may still produce video-only output; this is not proof of device ownership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingAudioOptions {
+    pub enabled: bool,
+    pub device: String,
+    pub bitrate: String,
+}
+
+impl RecordingAudioOptions {
+    pub(crate) fn from_behavior(behavior: &crate::config::BehaviorConfig) -> Self {
+        Self {
+            enabled: behavior.recording_audio_enabled,
+            device: behavior.recording_audio_device.clone(),
+            bitrate: behavior.recording_audio_bitrate.clone(),
+        }
+    }
+
+    pub(crate) fn snapshot() -> Self {
+        Self::from_behavior(crate::config::CONFIG.load().behavior())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordingStartOutcome {
     Accepted,
@@ -59,6 +82,28 @@ pub(crate) fn recording_start_channel() -> (RecordingStartReporter, RecordingSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_options_own_all_three_fields_from_one_behavior_snapshot() {
+        let mut behavior = crate::config::CONFIG.load().behavior().clone();
+        for enabled in [false, true] {
+            behavior.recording_audio_enabled = enabled;
+            behavior.recording_audio_device = "request-device".into();
+            behavior.recording_audio_bitrate = "96k".into();
+            let audio = RecordingAudioOptions::from_behavior(&behavior);
+            behavior.recording_audio_enabled = !enabled;
+            behavior.recording_audio_device = "next-device".into();
+            behavior.recording_audio_bitrate = "192k".into();
+            assert_eq!(
+                audio,
+                RecordingAudioOptions {
+                    enabled,
+                    device: "request-device".into(),
+                    bitrate: "96k".into()
+                }
+            );
+        }
+    }
 
     #[test]
     fn explicit_outcomes_are_observed_once_without_waiting() {

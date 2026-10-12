@@ -160,6 +160,13 @@ screen recording holds the microphone, the standalone recorder cannot start;
 if the standalone recorder is already running, starting a screen recording
 first stops it safely and saves the current audio file.
 
+The audio-enabled flag, device, and bitrate are snapshotted for each screen
+recording request, including a start queued for the next render. Changing
+these settings affects the next request, not the running session's audio
+intent or the standalone recorder's admission check. A requested audio track
+may still fall back to video-only when unavailable. Logical stop does not
+itself certify that the asynchronous encoder has released the device.
+
 ## Dynamic recording region
 
 - `Alt+Ctrl+R`: select a region and press Enter to start recording; pressing it

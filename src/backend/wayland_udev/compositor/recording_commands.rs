@@ -3,7 +3,7 @@
 //! A stop cancels earlier, unconsumed starts. A later start keeps the stop
 //! barrier so the old pipeline is retired before the new one is initialized.
 
-use crate::backend::recording_admission::RecordingStartReporter;
+use crate::backend::recording_admission::{RecordingAudioOptions, RecordingStartReporter};
 use crate::backend::recording_completion::RecordingStopReporter;
 
 type Region = (i32, i32, u32, u32);
@@ -11,10 +11,19 @@ type Region = (i32, i32, u32, u32);
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RecordingCommand {
     Stop,
-    Start { path: String, region: Region },
+    Start {
+        path: String,
+        region: Region,
+        audio: RecordingAudioOptions,
+    },
 }
 
-type PendingStart = (String, Region, Option<RecordingStartReporter>);
+type PendingStart = (
+    String,
+    Region,
+    RecordingAudioOptions,
+    Option<RecordingStartReporter>,
+);
 pub(super) struct ReadyCommand {
     pub(super) command: RecordingCommand,
     pub(super) start_reporter: Option<RecordingStartReporter>,
@@ -39,7 +48,17 @@ impl PendingRecordingCommands {
         region: Region,
         reporter: Option<RecordingStartReporter>,
     ) {
-        self.start = Some((path, region, reporter));
+        self.start_with_audio_tracked(path, region, RecordingAudioOptions::snapshot(), reporter);
+    }
+
+    pub(super) fn start_with_audio_tracked(
+        &mut self,
+        path: String,
+        region: Region,
+        audio: RecordingAudioOptions,
+        reporter: Option<RecordingStartReporter>,
+    ) {
+        self.start = Some((path, region, audio, reporter));
     }
 
     pub(super) fn stop(&mut self) {
@@ -59,7 +78,7 @@ impl PendingRecordingCommands {
     }
 
     pub(super) fn set_region(&mut self, region: Region) {
-        if let Some((_, pending_region, _)) = self.start.as_mut() {
+        if let Some((_, pending_region, _, _)) = self.start.as_mut() {
             *pending_region = region;
         }
     }
@@ -82,8 +101,12 @@ impl PendingRecordingCommands {
         let start = self
             .start
             .take()
-            .map(|(path, region, reporter)| ReadyCommand {
-                command: RecordingCommand::Start { path, region },
+            .map(|(path, region, audio, reporter)| ReadyCommand {
+                command: RecordingCommand::Start {
+                    path,
+                    region,
+                    audio,
+                },
                 start_reporter: reporter,
                 stop_reporter: None,
             });
@@ -101,6 +124,7 @@ mod tests {
         RecordingCommand::Start {
             path: path.into(),
             region,
+            audio: RecordingAudioOptions::snapshot(),
         }
     }
 
@@ -115,6 +139,80 @@ mod tests {
                 ready.command
             })
             .collect()
+    }
+
+    fn audio(enabled: bool, device: &str, bitrate: &str) -> RecordingAudioOptions {
+        RecordingAudioOptions {
+            enabled,
+            device: device.into(),
+            bitrate: bitrate.into(),
+        }
+    }
+
+    #[test]
+    fn queued_audio_snapshot_survives_config_changes_and_crop_updates() {
+        let mut pending = PendingRecordingCommands::default();
+        for enabled in [false, true] {
+            let mut request = audio(enabled, "request-device", "96k");
+            let expected = request.clone();
+            pending.start_with_audio_tracked("private.mp4".into(), REGION, request.clone(), None);
+            request.enabled = !enabled;
+            request.device = "later-device".into();
+            request.bitrate = "192k".into();
+            let region = (20, 30, 320, 240);
+            pending.set_region(region);
+            assert_eq!(
+                drain(&mut pending),
+                vec![RecordingCommand::Start {
+                    path: "private.mp4".into(),
+                    region,
+                    audio: expected
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn replacement_and_stop_keep_audio_snapshot_with_its_exact_request() {
+        use crate::backend::recording_admission::{RecordingStartOutcome, recording_start_channel};
+        for stop in [false, true] {
+            let mut pending = PendingRecordingCommands::default();
+            let (old_reporter, mut old_receipt) = recording_start_channel();
+            let (new_reporter, mut new_receipt) = recording_start_channel();
+            let old = audio(true, "old", "64k");
+            let new = audio(false, "new", "128k");
+            pending.start_with_audio_tracked("old.mp4".into(), REGION, old, Some(old_reporter));
+            if stop {
+                pending.stop();
+            }
+            pending.start_with_audio_tracked(
+                "new.mp4".into(),
+                REGION,
+                new.clone(),
+                Some(new_reporter),
+            );
+            assert_eq!(old_receipt.poll(), Some(RecordingStartOutcome::Unavailable));
+            let commands: Vec<_> = pending.take().into_iter().flatten().collect();
+            assert_eq!(commands.len(), if stop { 2 } else { 1 });
+            for ready in commands {
+                match ready.command {
+                    RecordingCommand::Stop => assert!(ready.start_reporter.is_none()),
+                    command @ RecordingCommand::Start { .. } => {
+                        assert_eq!(
+                            command,
+                            RecordingCommand::Start {
+                                path: "new.mp4".into(),
+                                region: REGION,
+                                audio: new.clone()
+                            }
+                        );
+                        ready.start_reporter.unwrap().complete(true);
+                    }
+                }
+            }
+            assert_eq!(new_receipt.poll(), Some(RecordingStartOutcome::Accepted));
+            assert!(!pending.has_pending());
+        }
     }
 
     #[test]
@@ -264,7 +362,12 @@ mod tests {
                 let reporter = ready.start_reporter;
                 match ready.command {
                     RecordingCommand::Stop => assert!(reporter.is_none()),
-                    RecordingCommand::Start { path, region } => {
+                    RecordingCommand::Start {
+                        path,
+                        region,
+                        audio,
+                    } => {
+                        assert_eq!(audio, RecordingAudioOptions::snapshot());
                         assert_eq!(path, "new.mp4");
                         assert_eq!(region, (20, 30, 800, 600));
                         reporter.unwrap().complete(true);
@@ -289,10 +392,7 @@ mod tests {
     #[test]
     fn renderer_reports_the_actual_start_result_after_initialization() {
         let source = include_str!("render.rs");
-        let start = source
-            .split_once("RecordingCommand::Start { path, region } =>")
-            .unwrap()
-            .1;
+        let start = source.split_once("RecordingCommand::Start {").unwrap().1;
         assert!(
             start.find("let result = self.recording.start(").unwrap()
                 < start.find("reporter.complete(result.is_ok())").unwrap()

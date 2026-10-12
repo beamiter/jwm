@@ -3301,6 +3301,18 @@ pub trait CompositorMedia: Send {
         Ok(None)
     }
 
+    /// Snapshot-aware extension. Legacy implementations retain their old
+    /// behavior; built-in recording backends explicitly consume these options.
+    fn compositor_request_recording_region_with_audio_tracked(
+        &mut self,
+        path: &str,
+        region: (i32, i32, u32, u32),
+        _audio: &crate::backend::recording_admission::RecordingAudioOptions,
+    ) -> Result<Option<crate::backend::recording_admission::RecordingStartReceipt>, BackendError>
+    {
+        self.compositor_request_recording_region_tracked(path, region)
+    }
+
     fn compositor_set_recording_region(&mut self, _region: (i32, i32, u32, u32)) {}
     fn compositor_set_recording_region_overlay(&mut self, _region: Option<(i32, i32, u32, u32)>) {}
     /// Whether the recording crop cue shows resize handles. Soft hover-probe
@@ -3418,6 +3430,65 @@ mod recording_request_api_tests {
         );
         assert_eq!(backend.calls, 2);
     }
+    #[test]
+    fn audio_snapshot_extension_retains_legacy_tracked_receipt_and_error() {
+        struct Legacy {
+            reject: bool,
+            calls: usize,
+        }
+        impl CompositorMedia for Legacy {
+            fn compositor_request_recording_region_tracked(
+                &mut self,
+                _: &str,
+                _: (i32, i32, u32, u32),
+            ) -> Result<
+                Option<crate::backend::recording_admission::RecordingStartReceipt>,
+                super::BackendError,
+            > {
+                self.calls += 1;
+                if self.reject {
+                    return Err(super::BackendError::Message("legacy refusal".into()));
+                }
+                let (reporter, receipt) =
+                    crate::backend::recording_admission::recording_start_channel();
+                reporter.complete(true);
+                Ok(Some(receipt))
+            }
+        }
+        let mut backend = Legacy {
+            reject: false,
+            calls: 0,
+        };
+        let audio = crate::backend::recording_admission::RecordingAudioOptions {
+            enabled: true,
+            device: "not-opened".into(),
+            bitrate: "96k".into(),
+        };
+        let mut receipt = backend
+            .compositor_request_recording_region_with_audio_tracked(
+                "not-opened.mp4",
+                (0, 0, 640, 480),
+                &audio,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt.poll(),
+            Some(crate::backend::recording_admission::RecordingStartOutcome::Accepted)
+        );
+        backend.reject = true;
+        assert!(
+            backend
+                .compositor_request_recording_region_with_audio_tracked(
+                    "not-opened.mp4",
+                    (0, 0, 640, 480),
+                    &audio
+                )
+                .is_err()
+        );
+        assert_eq!(backend.calls, 2);
+    }
+
     #[test]
     fn legacy_stop_is_submitted_without_inventing_a_writer_receipt() {
         struct Legacy {

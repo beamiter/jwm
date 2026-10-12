@@ -242,6 +242,7 @@ impl RecordingState {
         quality: u32,
         configured_encoder: &str,
         region: (i32, i32, u32, u32),
+        audio: &crate::backend::recording_admission::RecordingAudioOptions,
     ) -> Result<(), String> {
         if self.active {
             return Err("Recording already active".to_string());
@@ -398,16 +399,10 @@ impl RecordingState {
             recording_audio_available, select_recording_encoder,
         };
         let encoder = select_recording_encoder(configured_encoder);
-        let (audio_enabled, audio_device, audio_bitrate) = {
-            let cfg = crate::config::CONFIG.load();
-            let behavior = cfg.behavior();
-            (
-                behavior.recording_audio_enabled,
-                behavior.recording_audio_device.clone(),
-                behavior.recording_audio_bitrate.clone(),
-            )
-        };
-        let with_audio = audio_enabled && recording_audio_available(&audio_device);
+        let audio_enabled = audio.enabled;
+        let audio_device = &audio.device;
+        let audio_bitrate = &audio.bitrate;
+        let with_audio = audio_enabled && recording_audio_available(audio_device);
         if audio_enabled && !with_audio {
             log::warn!(
                 "[recording] microphone '{}' unavailable; continuing video-only",
@@ -438,7 +433,7 @@ impl RecordingState {
             .map(str::to_string),
         );
         if with_audio {
-            append_recording_audio_input(&mut args, &audio_device);
+            append_recording_audio_input(&mut args, audio_device);
         }
         // The packing shader samples the capture target upside down, so on that
         // path the bytes already arrive the right way up. The RGBA fallback
@@ -495,7 +490,7 @@ impl RecordingState {
             );
         }
         if with_audio {
-            append_recording_audio_output(&mut args, &audio_bitrate);
+            append_recording_audio_output(&mut args, audio_bitrate);
         }
         // Software only: libx264 would otherwise negotiate yuv444p from RGBA
         // input, at roughly twice the encoding cost. The hardware encoders

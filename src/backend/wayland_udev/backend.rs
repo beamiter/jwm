@@ -4647,6 +4647,22 @@ impl CompositorMedia for UdevBackend {
         Ok(Some(receipt))
     }
 
+    fn compositor_request_recording_region_with_audio_tracked(
+        &mut self,
+        path: &str,
+        region: (i32, i32, u32, u32),
+        audio: &crate::backend::recording_admission::RecordingAudioOptions,
+    ) -> Result<Option<crate::backend::recording_admission::RecordingStartReceipt>, BackendError>
+    {
+        let compositor = self.compositor.as_mut().ok_or_else(|| {
+            BackendError::Message("screen recording requires an active compositor".into())
+        })?;
+        let (reporter, receipt) = crate::backend::recording_admission::recording_start_channel();
+        compositor.start_recording_region_with_audio_tracked(path, region, audio.clone(), reporter);
+        self.request_render();
+        Ok(Some(receipt))
+    }
+
     fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_recording_region(region);

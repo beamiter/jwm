@@ -4535,9 +4535,24 @@ impl WaylandCompositor {
         region: (i32, i32, u32, u32),
         reporter: crate::backend::recording_admission::RecordingStartReporter,
     ) {
+        let audio = crate::backend::recording_admission::RecordingAudioOptions::snapshot();
+        self.start_recording_region_with_audio_tracked(path, region, audio, reporter);
+    }
+
+    pub(crate) fn start_recording_region_with_audio_tracked(
+        &mut self,
+        path: &str,
+        region: (i32, i32, u32, u32),
+        audio: crate::backend::recording_admission::RecordingAudioOptions,
+        reporter: crate::backend::recording_admission::RecordingStartReporter,
+    ) {
         let region = self.clamp_recording_region(region);
-        self.pending_recording
-            .start_tracked(path.to_string(), region, Some(reporter));
+        self.pending_recording.start_with_audio_tracked(
+            path.to_string(),
+            region,
+            audio,
+            Some(reporter),
+        );
     }
 
     pub(crate) fn set_recording_region(&mut self, region: (i32, i32, u32, u32)) {

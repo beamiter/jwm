@@ -4119,7 +4119,7 @@ impl Jwm {
         // is not lost and the recorder does not refuse a start it could take.
         self.poll_audio_recording(backend);
         let behavior = CONFIG.load().behavior().clone();
-        let started = if self.features.recording.active && behavior.recording_audio_enabled {
+        let started = if self.features.recording.active && self.features.recording.audio_requested {
             Err(
                 "screen recording is already using the configured microphone; stop it first"
                     .to_string(),
@@ -4393,42 +4393,48 @@ impl Jwm {
         }
         let region = self.normalize_initial_recording_region(region)?;
 
-        let captures_audio = CONFIG.load().behavior().recording_audio_enabled;
+        let audio = crate::backend::recording_admission::RecordingAudioOptions::snapshot();
+        let captures_audio = audio.enabled;
         let stopped_standalone_audio = captures_audio
             && (self.features.audio_recording.active
                 || self.features.audio_recording.is_finalizing());
         self.free_microphone_for_screen_recording(backend, captures_audio)?;
-        self.submit_preflighted_recording_region(
+        self.submit_preflighted_recording_region_with_audio(
             backend,
             output_path,
             region,
             stopped_standalone_audio,
+            &audio,
         )
     }
 
     /// Submit only after runtime/path/geometry checks and microphone handoff.
     /// A rejection must not create a WM session or a segment to finalize.
-    fn submit_preflighted_recording_region(
+    fn submit_preflighted_recording_region_with_audio(
         &mut self,
         backend: &mut dyn Backend,
         output_path: &str,
         region: Rect,
         stopped_standalone_audio: bool,
+        audio: &crate::backend::recording_admission::RecordingAudioOptions,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.features.recording.active {
             return Err("recording is already active".into());
         }
         let region_tuple = Self::recording_region_tuple(region)
             .ok_or("recording region dimensions are invalid")?;
-        let receipt =
-            match backend.compositor_request_recording_region_tracked(output_path, region_tuple) {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    error!("[recording] start request rejected: {error}");
-                    self.notify_recording_start_rejected(backend, stopped_standalone_audio);
-                    return Err(error.into());
-                }
-            };
+        let receipt = match backend.compositor_request_recording_region_with_audio_tracked(
+            output_path,
+            region_tuple,
+            audio,
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                error!("[recording] start request rejected: {error}");
+                self.notify_recording_start_rejected(backend, stopped_standalone_audio);
+                return Err(error.into());
+            }
+        };
         // Replacing this unique receiver also retires an older observation.
         // Legacy success deliberately installs None rather than retaining it.
         self.features.recording_start =
@@ -4437,7 +4443,9 @@ impl Jwm {
                 stopped_standalone_audio,
             });
 
-        self.features.recording.start(output_path.to_string());
+        self.features
+            .recording
+            .start_with_audio(output_path.to_string(), audio.enabled);
         self.features.recording.set_region(region);
         self.features.recording.set_output_size_from_region();
         self.features
@@ -6076,7 +6084,7 @@ mod shell_entry_tests {
             .split_once("stopping standalone audio before synchronized capture")
             .expect("the screen recorder's microphone handoff")
             .1
-            .split_once("self.features.recording.start(")
+            .split_once(".start_with_audio(")
             .expect("the end of the handoff")
             .0;
         assert!(
@@ -6102,7 +6110,7 @@ mod shell_entry_tests {
             .split_once("pub(crate) fn start_recording_region")
             .expect("start_recording_region")
             .1
-            .split_once("self.features.recording.start(")
+            .split_once(".start_with_audio(")
             .expect("the screen recording start")
             .0;
         let handoff_call = format!("self.{}(", "free_microphone_for_screen_recording");
@@ -6707,6 +6715,7 @@ pub(crate) mod keyboard_grab_tests {
         audio_live: Vec<bool>,
         audio_statuses: Vec<crate::backend::api::AudioRecordingIndicator>,
         recording_requests: Vec<(String, (i32, i32, u32, u32))>,
+        recording_audio_options: Vec<crate::backend::recording_admission::RecordingAudioOptions>,
         recording_start_error: Option<&'static str>,
         recording_deferred: bool,
         recording_reporters: Vec<crate::backend::recording_admission::RecordingStartReporter>,
@@ -6736,6 +6745,7 @@ pub(crate) mod keyboard_grab_tests {
                 audio_live: Vec::new(),
                 audio_statuses: Vec::new(),
                 recording_requests: Vec::new(),
+                recording_audio_options: Vec::new(),
                 recording_start_error: None,
                 recording_deferred: false,
                 recording_reporters: Vec::new(),
@@ -6791,6 +6801,17 @@ pub(crate) mod keyboard_grab_tests {
             } else {
                 Ok(None)
             }
+        }
+
+        fn compositor_request_recording_region_with_audio_tracked(
+            &mut self,
+            path: &str,
+            region: (i32, i32, u32, u32),
+            audio: &crate::backend::recording_admission::RecordingAudioOptions,
+        ) -> Result<Option<crate::backend::recording_admission::RecordingStartReceipt>, BackendError>
+        {
+            self.recording_audio_options.push(audio.clone());
+            self.compositor_request_recording_region_tracked(path, region)
         }
 
         fn compositor_stop_recording(&mut self) {
@@ -7654,6 +7675,111 @@ pub(crate) mod keyboard_grab_tests {
         );
         jwm.poll_audio_recording(&mut backend);
         assert_eq!(backend.toasts.len(), 1, "reported once");
+    }
+
+    impl Jwm {
+        fn submit_preflighted_recording_region(
+            &mut self,
+            backend: &mut dyn Backend,
+            output_path: &str,
+            region: Rect,
+            stopped_standalone_audio: bool,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let audio = crate::backend::recording_admission::RecordingAudioOptions::snapshot();
+            self.submit_preflighted_recording_region_with_audio(
+                backend,
+                output_path,
+                region,
+                stopped_standalone_audio,
+                &audio,
+            )
+        }
+    }
+
+    fn request_audio(enabled: bool) -> crate::backend::recording_admission::RecordingAudioOptions {
+        crate::backend::recording_admission::RecordingAudioOptions {
+            enabled,
+            device: "request-device".into(),
+            bitrate: "96k".into(),
+        }
+    }
+
+    #[test]
+    fn recording_audio_admission_uses_submitted_intent_instead_of_live_defaults() {
+        for enabled in [false, true] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            let mut audio = request_audio(enabled);
+            let expected = audio.clone();
+            jwm.submit_preflighted_recording_region_with_audio(
+                &mut backend,
+                "private.mp4",
+                Rect::new(0, 0, 640, 480),
+                false,
+                &audio,
+            )
+            .unwrap();
+            audio.enabled = !enabled;
+            audio.device = "next-device".into();
+            audio.bitrate = "192k".into();
+            assert_eq!(backend.recording_audio_options, vec![expected]);
+            assert_eq!(jwm.features.recording.audio_requested, enabled);
+            // A relative output fails before any native capture can start.
+            let error = jwm
+                .start_audio_recording(&mut backend, std::path::Path::new("not-opened.wav"))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error.contains("screen recording is already using"),
+                enabled,
+                "{error}"
+            );
+            assert!(!jwm.features.audio_recording.active);
+        }
+    }
+
+    #[test]
+    fn recording_audio_intent_rolls_back_on_rejection_but_unknown_stays_stoppable() {
+        for deferred in [false, true] {
+            let mut backend = GrabSpyBackend::new();
+            backend.recording_deferred = deferred;
+            if !deferred {
+                backend.recording_start_error = Some("rejected");
+            }
+            let mut jwm = jwm(&mut backend);
+            let result = jwm.submit_preflighted_recording_region_with_audio(
+                &mut backend,
+                "private.mp4",
+                Rect::new(0, 0, 640, 480),
+                false,
+                &request_audio(true),
+            );
+            if deferred {
+                result.unwrap();
+                backend.recording_reporters.pop().unwrap().complete(false);
+                jwm.poll_recording_start(&mut backend);
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(!jwm.features.recording.active);
+            assert!(!jwm.features.recording.audio_requested);
+        }
+        let mut backend = GrabSpyBackend::new();
+        backend.recording_deferred = true;
+        let mut jwm = jwm(&mut backend);
+        jwm.submit_preflighted_recording_region_with_audio(
+            &mut backend,
+            "unknown.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+            &request_audio(true),
+        )
+        .unwrap();
+        backend.recording_reporters.clear();
+        jwm.poll_recording_start(&mut backend);
+        assert!(jwm.features.recording.active && jwm.features.recording.audio_requested);
+        assert!(jwm.stop_recording_session(&mut backend).is_some());
+        assert!(!jwm.features.recording.active && !jwm.features.recording.audio_requested);
     }
 
     #[test]

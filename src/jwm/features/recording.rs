@@ -111,6 +111,9 @@ impl RecordingFileIdentity {
 pub struct RecordingState {
     /// 录制是否激活
     pub active: bool,
+    /// Audio intent for this submitted session, independent of later config.
+    /// Availability fallback and asynchronous stop do not prove device ownership.
+    pub(crate) audio_requested: bool,
     /// 最终输出文件路径
     pub output_path: Option<String>,
     /// 已完成的分段文件路径
@@ -155,6 +158,7 @@ impl RecordingState {
     /// 开始录制
     pub fn start(&mut self, output_path: String) {
         self.active = true;
+        self.audio_requested = false;
         self.output_path = Some(output_path);
         self.segments.clear();
         self.current_segment = None;
@@ -172,6 +176,11 @@ impl RecordingState {
         self.drag = RecordingRegionDrag::None;
     }
 
+    pub(crate) fn start_with_audio(&mut self, output_path: String, audio_requested: bool) {
+        self.start(output_path);
+        self.audio_requested = audio_requested;
+    }
+
     /// Remember a start/stop failure for status queries.
     pub fn note_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
@@ -183,6 +192,7 @@ impl RecordingState {
             self.segments.push(segment);
         }
         self.active = false;
+        self.audio_requested = false;
         self.selecting_region = false;
         self.adjusting_region = false;
         self.pending_output_path = None;
@@ -526,6 +536,20 @@ impl RecordingState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_audio_intent_is_reset_by_stop_cancel_and_next_session() {
+        let mut state = RecordingState::default();
+        state.start_with_audio("private.mp4".into(), true);
+        assert!(state.active && state.audio_requested);
+        state.stop();
+        assert!(!state.active && !state.audio_requested);
+        state.start_with_audio("second.mp4".into(), false);
+        assert!(state.active && !state.audio_requested);
+        state.start_with_audio("third.mp4".into(), true);
+        state.cancel();
+        assert!(!state.active && !state.audio_requested);
+    }
 
     #[test]
     fn recording_resize_remains_valid_after_screen_shrinks() {

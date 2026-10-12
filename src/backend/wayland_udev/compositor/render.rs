@@ -5094,7 +5094,11 @@ impl WaylandCompositor {
                         unsafe { gl.DeleteTextures(1, &texture) };
                     }
                 }
-                super::recording_commands::RecordingCommand::Start { path, region } => unsafe {
+                super::recording_commands::RecordingCommand::Start {
+                    path,
+                    region,
+                    audio,
+                } => unsafe {
                     let result = self.recording.start(
                         gl,
                         self.screen_w,
@@ -5105,6 +5109,7 @@ impl WaylandCompositor {
                         frame_behavior.recording_quality,
                         &frame_behavior.recording_encoder,
                         region,
+                        &audio,
                     );
                     if let Err(e) = &result {
                         log::error!("[compositor] Failed to start recording: {}", e);

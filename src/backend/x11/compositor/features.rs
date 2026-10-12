@@ -1731,6 +1731,16 @@ impl<C: CompositorConnection> Compositor<C> {
         output_path: &str,
         region: (i32, i32, u32, u32),
     ) -> Result<(), &'static str> {
+        let audio = crate::backend::recording_admission::RecordingAudioOptions::snapshot();
+        self.start_recording_region_with_audio(output_path, region, &audio)
+    }
+
+    pub(crate) fn start_recording_region_with_audio(
+        &mut self,
+        output_path: &str,
+        region: (i32, i32, u32, u32),
+        audio: &crate::backend::recording_admission::RecordingAudioOptions,
+    ) -> Result<(), &'static str> {
         if self.recording_active {
             return Err("recording is already active");
         }
@@ -1826,16 +1836,10 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         use crate::backend::compositor_common::recording_sink::RecordingSink;
         let encoder = select_recording_encoder(&self.recording_encoder);
-        let (audio_enabled, audio_device, audio_bitrate) = {
-            let cfg = crate::config::CONFIG.load();
-            let behavior = cfg.behavior();
-            (
-                behavior.recording_audio_enabled,
-                behavior.recording_audio_device.clone(),
-                behavior.recording_audio_bitrate.clone(),
-            )
-        };
-        let with_audio = audio_enabled && recording_audio_available(&audio_device);
+        let audio_enabled = audio.enabled;
+        let audio_device = &audio.device;
+        let audio_bitrate = &audio.bitrate;
+        let with_audio = audio_enabled && recording_audio_available(audio_device);
         if audio_enabled && !with_audio {
             log::warn!(
                 "compositor: recording microphone '{}' unavailable; continuing video-only",
@@ -1879,7 +1883,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .map(str::to_string),
         );
         if with_audio {
-            append_recording_audio_input(&mut args, &audio_device);
+            append_recording_audio_input(&mut args, audio_device);
         }
         // The packing shader samples the capture target upside down, so on that
         // path the bytes already arrive the right way up and no `vflip` is
@@ -1910,7 +1914,7 @@ impl<C: CompositorConnection> Compositor<C> {
             append_software_encoder_pacing(&mut args);
         }
         if with_audio {
-            append_recording_audio_output(&mut args, &audio_bitrate);
+            append_recording_audio_output(&mut args, audio_bitrate);
         }
         // Pin the chroma format for the software encoder only. Left to
         // negotiate from RGBA input, libx264 picks yuv444p / High 4:4:4
