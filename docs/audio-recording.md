@@ -59,6 +59,14 @@ While a recording the key stopped is still writing its file,
 `"finalizing": true`: the microphone is released, but the file is not complete
 yet. `finalizing` is `false` at every other time. The same query reports
 `output_bytes` (file length when the path exists) beside `output_exists`.
+
+`elapsed_ms` in this query and `get_status` is the session's wall-clock time
+since a successful start. It freezes at the first stop request, or when JWM
+observes that the recorder exited on its own, and stays frozen while the file
+is saving and after finalization or failure. Repeated stops and a rejected
+start do not change that elapsed time; a successful new start resets it.
+This is not the encoded file's precise audio duration: observation may lag a
+worker's actual exit, and device/encoder buffering is not measured here.
 A new recording cannot start
 over it: the key toggle and IPC `start_audio_recording` are refused with
 `the previous audio recording is still being finalized; try again in a moment`

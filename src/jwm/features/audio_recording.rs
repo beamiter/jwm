@@ -277,6 +277,8 @@ pub struct AudioRecordingState {
     pub active: bool,
     pub output_path: Option<String>,
     pub started_at: Option<Instant>,
+    /// First stop request or observed worker exit, excluding file finalization.
+    stopped_at: Option<Instant>,
     pub sample_rate: u32,
     pub channels: u16,
     pub device: String,
@@ -388,7 +390,7 @@ impl AudioRecordingState {
 
         self.active = true;
         self.output_path = Some(output_path.to_string_lossy().into_owned());
-        self.started_at = Some(Instant::now());
+        self.reset_elapsed(Instant::now());
         self.sample_rate = actual_rate;
         self.channels = actual_channels;
         self.device = device_name;
@@ -490,6 +492,7 @@ impl AudioRecordingState {
     /// finalizing is waited for too, so shutdown and the screen recorder's
     /// microphone hand-off never leave a half-written file or a held device.
     pub fn stop(&mut self) -> Result<(), String> {
+        self.freeze_elapsed(Instant::now());
         if let Some(finalizing) = self.finalizing.take() {
             self.active = false;
             let outcome = join_outcome(finalizing.handle);
@@ -525,6 +528,7 @@ impl AudioRecordingState {
     /// its own); `None` means the recorder is finalizing and
     /// [`Self::poll_finalized`] reports it once it returns.
     pub fn begin_stop(&mut self) -> Option<Result<(), String>> {
+        self.freeze_elapsed(Instant::now());
         if let Some(outcome) = self.exited.take() {
             self.active = false;
             return Some(outcome);
@@ -587,6 +591,7 @@ impl AudioRecordingState {
             .is_some_and(|worker| worker.handle.is_finished())
             && let Some(worker) = self.worker.take()
         {
+            self.freeze_elapsed(Instant::now());
             let outcome = join_outcome(worker.handle);
             if let Err(error) = &outcome {
                 log::warn!("[audio-recording] recorder stopped on its own: {error}");
@@ -635,14 +640,35 @@ impl AudioRecordingState {
         let mut state = Self::default();
         state.active = true;
         state.output_path = Some(output_path.to_string());
-        state.started_at = Some(Instant::now());
+        state.reset_elapsed(Instant::now());
         state.worker = Some(AudioWorker { stop, handle });
         state
     }
 
+    /// Session wall-clock time, frozen at the first stop request or observed
+    /// worker exit. This is not the encoded file's precise audio duration.
     pub fn elapsed(&self) -> Duration {
-        self.started_at
-            .map_or(Duration::ZERO, |start| start.elapsed())
+        self.elapsed_at(Instant::now())
+    }
+
+    #[cfg(any(feature = "media-audio", test))]
+    fn reset_elapsed(&mut self, now: Instant) {
+        self.started_at = Some(now);
+        self.stopped_at = None;
+    }
+
+    fn freeze_elapsed(&mut self, now: Instant) {
+        if self.started_at.is_some() && self.stopped_at.is_none() {
+            self.stopped_at = Some(now);
+        }
+    }
+
+    fn elapsed_at(&self, now: Instant) -> Duration {
+        self.started_at.map_or(Duration::ZERO, |start| {
+            self.stopped_at
+                .unwrap_or(now)
+                .saturating_duration_since(start)
+        })
     }
 }
 
@@ -961,6 +987,124 @@ fn write_wav_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn elapsed_without_a_session_stays_zero_and_new_sessions_reset_it() {
+        let now = Instant::now();
+        let mut state = AudioRecordingState::default();
+        assert_eq!(
+            state.elapsed_at(now + Duration::from_secs(100)),
+            Duration::ZERO
+        );
+        state.stop().unwrap();
+        assert_eq!(state.begin_stop(), Some(Ok(())));
+        assert!(state.stopped_at.is_none());
+        state.reset_elapsed(now);
+        state.freeze_elapsed(now + Duration::from_secs(5));
+        assert_eq!(
+            state.elapsed_at(now + Duration::from_secs(100)),
+            Duration::from_secs(5)
+        );
+        state.reset_elapsed(now + Duration::from_secs(200));
+        assert!(state.stopped_at.is_none());
+        assert_eq!(
+            state.elapsed_at(now + Duration::from_secs(203)),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn blocking_audio_stop_freezes_elapsed_once() {
+        let mut state = AudioRecordingState::recording_for_test("/unused.wav", |_| Ok(()));
+        state.reset_elapsed(Instant::now() - Duration::from_secs(1));
+        state.stop().unwrap();
+        let stopped = state.stopped_at.expect("stop freezes the session clock");
+        let elapsed = state.elapsed();
+        assert_eq!(state.elapsed_at(stopped + Duration::from_secs(60)), elapsed);
+        state.stop().unwrap();
+        assert_eq!(state.begin_stop(), Some(Ok(())));
+        assert_eq!(state.stopped_at, Some(stopped));
+        assert_eq!(state.elapsed(), elapsed);
+    }
+
+    #[test]
+    fn saving_and_finalized_or_failed_audio_keep_the_stop_request_time() {
+        for failed in [false, true] {
+            let (release, waiting) = std::sync::mpsc::channel();
+            let mut state = AudioRecordingState::recording_for_test("/unused.wav", move |_| {
+                waiting
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| error.to_string())?;
+                if failed {
+                    Err("finalization failed".into())
+                } else {
+                    Ok(())
+                }
+            });
+            state.reset_elapsed(Instant::now() - Duration::from_secs(1));
+            assert!(state.begin_stop().is_none());
+            let stopped = state.stopped_at.expect("request freezes the clock");
+            let elapsed = state.elapsed();
+            assert_eq!(state.begin_stop(), Some(Ok(())));
+            assert_eq!(state.elapsed_at(stopped + Duration::from_secs(60)), elapsed);
+            release.send(()).unwrap();
+            wait_until_finished(&state.finalizing.as_ref().unwrap().handle);
+            let outcome = state.poll_finalized().unwrap();
+            assert_eq!(outcome.outcome.is_err(), failed);
+            assert!(!state.is_finalizing());
+            assert_eq!(state.stopped_at, Some(stopped));
+            state.stop().unwrap();
+            assert_eq!(
+                state.elapsed_at(stopped + Duration::from_secs(120)),
+                elapsed
+            );
+        }
+    }
+
+    #[test]
+    fn observed_audio_exit_freezes_elapsed_before_it_is_reported() {
+        let mut state =
+            AudioRecordingState::recording_for_test("/unused.wav", |_| Err("device gone".into()));
+        state.reset_elapsed(Instant::now() - Duration::from_secs(1));
+        wait_until_finished(&state.worker.as_ref().unwrap().handle);
+        assert!(state.refresh());
+        assert!(
+            state.active,
+            "the exit still awaits its existing report path"
+        );
+        let stopped = state.stopped_at.expect("observation freezes the clock");
+        let elapsed = state.elapsed();
+        assert!(state.refresh());
+        assert_eq!(state.stop(), Err("device gone".into()));
+        assert_eq!(state.stopped_at, Some(stopped));
+        assert_eq!(state.elapsed_at(stopped + Duration::from_secs(60)), elapsed);
+    }
+
+    #[test]
+    fn a_rejected_audio_start_preserves_the_previous_session_clock() {
+        let now = Instant::now();
+        let mut state = AudioRecordingState::default();
+        state.reset_elapsed(now);
+        state.freeze_elapsed(now + Duration::from_secs(5));
+        assert!(
+            state
+                .start(
+                    Path::new("relative.wav"),
+                    "default",
+                    48000,
+                    2,
+                    "direct",
+                    "128k"
+                )
+                .is_err()
+        );
+        assert_eq!(state.started_at, Some(now));
+        assert_eq!(state.stopped_at, Some(now + Duration::from_secs(5)));
+        assert_eq!(
+            state.elapsed_at(now + Duration::from_secs(60)),
+            Duration::from_secs(5)
+        );
+    }
 
     #[cfg(feature = "media-audio")]
     #[test]
