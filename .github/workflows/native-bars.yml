@@ -490,7 +490,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Node for the isolated startup regression
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6, verified 2026-10-09
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6, verified 2026-10-09
         with:
           node-version: "24"
           package-manager-cache: false
@@ -563,7 +563,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6, verified 2026-10-09
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6, verified 2026-10-09
         with:
           node-version: "24"
           package-manager-cache: false
