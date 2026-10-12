@@ -369,7 +369,11 @@ after a source is armed, and the cursor switches to move/resize intents over
 those handles (a hand while soft-probing a window). `Enter` or `Space` saves a
 screenshot or starts/commits recording (and nudges with a toast if nothing is
 selected yet). Double-click inside an armed recording region also starts
-capture; double-click the dimmed veil in the screenshot editor saves the file.
+capture. After selecting a screenshot crop, double-click inside it to save;
+selection stays neutral until you explicitly choose a drawing tool. With a
+drawing tool selected, clicks inside the crop annotate and double-clicking the
+dimmed veil saves. Confirmation requires two clicks within 400 ms and 8 px,
+with neither click dragged across the crop edge or beyond that distance.
 Arrow keys nudge a committed selection (`Shift` uses 10-pixel steps), while
 `Escape`, right-click, or the recording shortcut again cancels safely.
 

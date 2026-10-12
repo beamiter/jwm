@@ -68,14 +68,66 @@ pub struct CaptureInteractionState {
     pub screenshot: CaptureTarget,
     pub recording: CaptureTarget,
     swallow_button_release: bool,
-    /// Last left-press used to detect a double-click confirm (X11/Wayland
-    /// button `time` is milliseconds). Shared across screenshot / recording
-    /// because the two interactive modes never overlap.
+    /// Last recording left-press used to detect double-click confirmation.
+    /// X11/Wayland button `time` is milliseconds. Screenshot confirmation
+    /// separately requires completed clicks rather than press pairs.
     confirm_press: Option<(u32, i32, i32)>,
+    screenshot_click: ScreenshotConfirmGesture,
 }
 
 const CONFIRM_DOUBLE_CLICK_MS: u32 = 400;
 const CONFIRM_DOUBLE_CLICK_SLOP: i32 = 8;
+
+/// A screenshot confirmation requires two completed clicks in the same surface.
+/// Selection drags and annotation presses never enter this tracker.
+#[derive(Debug, Default)]
+struct ScreenshotConfirmGesture {
+    pending: Option<(u32, i32, i32, bool)>,
+    previous: Option<(u32, i32, i32, bool)>,
+}
+
+impl ScreenshotConfirmGesture {
+    fn press(&mut self, time: u32, x: i32, y: i32, outside: bool) {
+        if self.pending.is_some() {
+            self.previous = None;
+        }
+        self.pending = Some((time, x, y, outside));
+    }
+
+    fn near(a: (i32, i32), b: (i32, i32)) -> bool {
+        (i64::from(a.0) - i64::from(b.0)).abs() <= i64::from(CONFIRM_DOUBLE_CLICK_SLOP)
+            && (i64::from(a.1) - i64::from(b.1)).abs() <= i64::from(CONFIRM_DOUBLE_CLICK_SLOP)
+    }
+
+    fn motion(&mut self, x: i32, y: i32, outside: bool) {
+        if self
+            .pending
+            .is_some_and(|(_, px, py, surface)| surface != outside || !Self::near((px, py), (x, y)))
+        {
+            *self = Self::default();
+        }
+    }
+
+    fn release(&mut self, time: u32, x: i32, y: i32, outside: bool) -> bool {
+        self.motion(x, y, outside);
+        let Some(click @ (pressed, px, py, surface)) = self.pending.take() else {
+            return false;
+        };
+        if time.wrapping_sub(pressed) > CONFIRM_DOUBLE_CLICK_MS {
+            self.previous = None;
+            return false;
+        }
+        let confirmed = self
+            .previous
+            .is_some_and(|(previous, ox, oy, old_surface)| {
+                pressed.wrapping_sub(previous) <= CONFIRM_DOUBLE_CLICK_MS
+                    && surface == old_surface
+                    && Self::near((px, py), (ox, oy))
+            });
+        self.previous = if confirmed { None } else { Some(click) };
+        confirmed
+    }
+}
 
 impl CaptureInteractionState {
     pub(crate) fn swallow_next_button_release(&mut self) {
@@ -87,7 +139,7 @@ impl CaptureInteractionState {
     }
 
     /// Record a left press and return true when it completes a double-click
-    /// near the previous press (armed recording start, screenshot save on veil).
+    /// near the previous press (armed recording start).
     pub(crate) fn note_confirm_double_click(&mut self, time: u32, x: i32, y: i32) -> bool {
         let hit = self.confirm_press.is_some_and(|(prev_t, prev_x, prev_y)| {
             time.wrapping_sub(prev_t) <= CONFIRM_DOUBLE_CLICK_MS
@@ -100,6 +152,25 @@ impl CaptureInteractionState {
 
     pub(crate) fn clear_confirm_double_click(&mut self) {
         self.confirm_press = None;
+        self.screenshot_click = ScreenshotConfirmGesture::default();
+    }
+
+    pub(crate) fn screenshot_confirm_press(&mut self, time: u32, x: i32, y: i32, outside: bool) {
+        self.screenshot_click.press(time, x, y, outside);
+    }
+
+    pub(crate) fn screenshot_confirm_motion(&mut self, x: i32, y: i32, outside: bool) {
+        self.screenshot_click.motion(x, y, outside);
+    }
+
+    pub(crate) fn screenshot_confirm_release(
+        &mut self,
+        time: u32,
+        x: i32,
+        y: i32,
+        outside: bool,
+    ) -> bool {
+        self.screenshot_click.release(time, x, y, outside)
     }
 
     /// Back-compat alias used by recording call sites.
@@ -831,6 +902,79 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_confirmation_requires_two_completed_clicks() {
+        let mut gesture = ScreenshotConfirmGesture::default();
+        gesture.press(100, 20, 30, false);
+        assert!(!gesture.release(120, 20, 30, false));
+        gesture.press(200, 22, 31, false);
+        assert!(gesture.release(220, 22, 31, false));
+        gesture.press(250, 22, 31, false);
+        assert!(!gesture.release(270, 22, 31, false));
+    }
+    #[test]
+    fn screenshot_confirmation_rejects_drag_even_after_pointer_returns() {
+        for outside in [false, true] {
+            let mut gesture = ScreenshotConfirmGesture::default();
+            gesture.press(100, 20, 30, outside);
+            assert!(!gesture.release(120, 20, 30, outside));
+            gesture.press(200, 20, 30, outside);
+            gesture.motion(29, 30, outside);
+            gesture.motion(20, 30, outside);
+            assert!(!gesture.release(220, 20, 30, outside));
+            gesture.press(250, 20, 30, outside);
+            assert!(!gesture.release(270, 20, 30, outside));
+        }
+    }
+    #[test]
+    fn screenshot_confirmation_rejects_crossing_crop_edge_or_distant_release() {
+        for (x, y, outside) in [(29, 30, false), (20, 39, false), (20, 30, true)] {
+            let mut gesture = ScreenshotConfirmGesture::default();
+            gesture.press(100, 20, 30, false);
+            assert!(!gesture.release(120, x, y, outside));
+            gesture.press(200, 20, 30, false);
+            assert!(!gesture.release(220, 20, 30, false));
+        }
+        let mut gesture = ScreenshotConfirmGesture::default();
+        gesture.press(100, 20, 30, false);
+        assert!(!gesture.release(120, 20, 30, false));
+        gesture.press(200, 20, 30, true);
+        assert!(!gesture.release(220, 20, 30, true));
+    }
+    #[test]
+    fn screenshot_confirmation_obeys_time_slop_and_wraparound() {
+        for (gap, dx, expected) in [(400, 8, true), (401, 8, false), (400, 9, false)] {
+            let mut gesture = ScreenshotConfirmGesture::default();
+            let first = u32::MAX - 100;
+            gesture.press(first, 20, 30, false);
+            assert!(!gesture.release(first.wrapping_add(20), 20, 30, false));
+            gesture.press(first.wrapping_add(gap), 20 + dx, 30, false);
+            assert_eq!(
+                gesture.release(first.wrapping_add(gap + 20), 20 + dx, 30, false),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn screenshot_confirmation_rejects_long_hold_and_missing_release() {
+        let mut gesture = ScreenshotConfirmGesture::default();
+        gesture.press(100, 20, 30, false);
+        assert!(!gesture.release(501, 20, 30, false));
+        gesture.press(550, 20, 30, false);
+        assert!(!gesture.release(570, 20, 30, false));
+        gesture.press(600, 20, 30, false);
+        gesture.press(650, 20, 30, false);
+        assert!(!gesture.release(670, 20, 30, false));
+    }
+    #[test]
+    fn screenshot_confirmation_extreme_coordinates_do_not_overflow() {
+        let mut gesture = ScreenshotConfirmGesture::default();
+        gesture.press(100, i32::MIN, i32::MIN, false);
+        assert!(!gesture.release(120, i32::MIN, i32::MIN, false));
+        gesture.press(200, i32::MAX, i32::MAX, false);
+        assert!(!gesture.release(220, i32::MAX, i32::MAX, false));
+    }
 
     #[test]
     fn layout_change_cancels_screenshot_and_its_pending_retry() {

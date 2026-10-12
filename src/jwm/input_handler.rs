@@ -2926,6 +2926,7 @@ impl Jwm {
 
         // Screenshot region selection mode
         if self.features.screenshot.active {
+            self.features.capture.clear_confirm_double_click();
             // A label under construction owns the keyboard: every printable
             // key is text, so no tool shortcut may fire while one is open.
             if self.features.screenshot.is_typing() {
@@ -3471,21 +3472,14 @@ impl Jwm {
                     .is_none_or(|rect| {
                         !crate::jwm::features::capture::rect_contains_point(rect, xi, yi)
                     });
-                // Double-click the dimmed veil (outside the crop) to save —
-                // keeps drawing tools free of an accidental double-tap save.
-                if outside {
-                    let double_click = self
-                        .features
+                // The default selection mode supports double-clicking the crop.
+                // Explicit annotation tools keep their canvas gestures; the veil
+                // remains a confirmation surface regardless of the active tool.
+                if outside || self.features.screenshot.tool == ScreenshotTool::Select {
+                    self.features
                         .capture
-                        .note_confirm_double_click(time, xi, yi);
-                    if double_click {
-                        self.features.capture.swallow_next_button_release();
-                        self.finish_screenshot_select(backend, false);
-                    } else {
-                        // A lone veil click is not a stroke; swallow the release
-                        // so it cannot fall through to the desktop.
-                        self.features.capture.swallow_next_button_release();
-                    }
+                        .screenshot_confirm_press(time, xi, yi, outside);
+                    self.features.capture.swallow_next_button_release();
                     return Ok(PointerPressDisposition::Consumed);
                 }
                 // Ink clicks and veil clicks are distinct gestures, even

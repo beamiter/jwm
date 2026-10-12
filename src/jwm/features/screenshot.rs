@@ -233,8 +233,8 @@ impl ScreenshotTool {
     #[must_use]
     pub const fn icon(self) -> ToolbarIcon {
         match self {
-            // `Select` never appears in the toolbar; the pencil is the tool the
-            // editor opens in, so it is the honest stand-in.
+            // `Select` is neutral and has no toolbar button. Its icon is only
+            // a fallback; selecting Pencil explicitly starts drawing.
             Self::Select | Self::Pencil => ToolbarIcon::Pencil,
             Self::Line => ToolbarIcon::Line,
             Self::Arrow => ToolbarIcon::Arrow,
@@ -566,7 +566,7 @@ impl ScreenshotState {
             rect.y.saturating_add(rect.h) as f64,
         );
         self.committed = true;
-        self.tool = ScreenshotTool::Pencil;
+        self.tool = ScreenshotTool::Select;
     }
 
     /// 开始拖动选择
@@ -675,6 +675,9 @@ impl ScreenshotState {
     }
 
     pub fn begin_annotation(&mut self, x: f32, y: f32) {
+        if self.tool == ScreenshotTool::Select {
+            return;
+        }
         // A click-placed tool has nothing to drag: it lands the mark now, so a
         // click that never moves still produces one.
         if self.tool.is_click_placed() {
@@ -3372,6 +3375,24 @@ mod tests {
 
         // 零尺寸选择应该返回 None
         assert!(state.get_selection_rect().is_none());
+    }
+
+    #[test]
+    fn selected_screenshot_stays_neutral_until_a_tool_is_chosen() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.select_rect(Rect::new(100, 100, 200, 150));
+        assert_eq!(state.tool, ScreenshotTool::Select);
+        state.begin_annotation(150.0, 150.0);
+        state.update_annotation(170.0, 170.0);
+        state.commit_annotation();
+        assert!(!state.drawing_annotation);
+        assert!(state.annotations.is_empty());
+        state.set_tool(ScreenshotTool::Pencil);
+        state.begin_annotation(150.0, 150.0);
+        state.update_annotation(170.0, 170.0);
+        state.commit_annotation();
+        assert_eq!(state.annotations.len(), 1);
     }
 
     #[test]

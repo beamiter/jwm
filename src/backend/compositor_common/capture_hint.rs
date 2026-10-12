@@ -70,7 +70,7 @@ pub(crate) fn screenshot_editor_hint_label(typing: bool) -> &'static str {
     if typing {
         "Screenshot text · Enter finish label · Esc discard label · Backspace erase"
     } else {
-        "Screenshot · Enter / Space save · double-click veil · Ctrl+C copy · Esc"
+        "Screenshot · Enter / Space save · double-click selection before drawing / veil · Ctrl+C copy · Esc"
     }
 }
 
