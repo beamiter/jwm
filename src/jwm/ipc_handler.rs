@@ -476,14 +476,16 @@ fn recording_output_is_valid(
         return false;
     }
     let verdict = probe(path);
-    // Remember a rejection only for bytes that held still across the probe:
-    // a file still being written may have failed on a half-written tail. And
-    // without an mtime, an in-place rewrite of the same length is invisible.
-    *rejected = (verdict == Some(false)
-        && before.has_modified_time()
-        && RecordingFileIdentity::of(path).as_ref() == Some(&before))
-    .then_some(before);
-    verdict == Some(true)
+    // Accept either verdict only for bytes whose observed identity held
+    // still across the probe. Without an mtime, a same-length rewrite is
+    // invisible, so neither success nor rejection can establish stability.
+    let unchanged =
+        before.has_modified_time() && RecordingFileIdentity::of(path).as_ref() == Some(&before);
+    *rejected = (verdict == Some(false) && unchanged).then_some(before);
+    // Success is evidence about the bytes probed, not whatever now occupies
+    // the pathname. A changed or missing file must earn its own verdict on a
+    // later poll rather than permanently caching this one as finalized.
+    verdict == Some(true) && unchanged
 }
 
 /// The verdict of one ffprobe run: `Some` when ffprobe judged the file, or
@@ -9907,6 +9909,98 @@ mod tests {
                 serde_json::to_value(individual).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn recording_probe_success_does_not_finalize_a_removed_file() {
+        let dir = scratch_dir("removed");
+        let path = dir.join("capture.mp4");
+        std::fs::write(&path, b"old file").unwrap();
+        let mut rejected = None;
+        assert!(!recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| {
+                std::fs::remove_file(&path).unwrap();
+                Some(true)
+            }
+        ));
+        assert!(rejected.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recording_probe_success_does_not_finalize_a_replacement_file() {
+        let dir = scratch_dir("replaced");
+        let path = dir.join("capture.mp4");
+        let replacement = dir.join("replacement.mp4");
+        std::fs::write(&path, b"old file").unwrap();
+        std::fs::write(&replacement, b"new file").unwrap();
+        let mut rejected = None;
+        assert!(!recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| {
+                std::fs::rename(&replacement, &path).unwrap();
+                Some(true)
+            }
+        ));
+        assert!(rejected.is_none());
+        assert!(recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| Some(true)
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recording_probe_success_does_not_finalize_a_file_that_grew() {
+        let dir = scratch_dir("grew");
+        let path = dir.join("capture.mp4");
+        std::fs::write(&path, b"old file").unwrap();
+        let mut rejected = None;
+        assert!(!recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| {
+                std::fs::write(&path, b"longer file content").unwrap();
+                Some(true)
+            }
+        ));
+        assert!(rejected.is_none());
+        assert!(recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| Some(true)
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recording_probe_stable_success_and_failure_preserve_existing_verdicts() {
+        let dir = scratch_dir("stable");
+        let path = dir.join("capture.mp4");
+        std::fs::write(&path, b"stable file").unwrap();
+        let mut rejected = None;
+        assert!(recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| Some(true)
+        ));
+        assert!(rejected.is_none());
+        assert!(!recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| Some(false)
+        ));
+        assert!(rejected.is_some());
+        assert!(!recording_output_is_valid(
+            path.to_str().unwrap(),
+            &mut rejected,
+            |_| panic!("unchanged rejection should be cached")
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A per-test scratch directory, so parallel tests never share a path.
