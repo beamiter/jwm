@@ -2381,7 +2381,9 @@ impl Jwm {
     }
 
     /// `Ok(false)` means the pointer was not available; the keyboard grab and
-    /// any temporary compositor have already been handed back.
+    /// any temporary compositor have already been handed back. Success retires
+    /// older deferred surfaces immediately, before this panel can be dismissed;
+    /// failures leave their original request and deadline available to retry.
     fn prepare_system_ui_inner(
         &mut self,
         backend: &mut dyn Backend,
@@ -2477,6 +2479,7 @@ impl Jwm {
                 return Err(format!("could not grab pointer for {label}").into());
             }
             log::info!("Shell: {label} takes over from the panel on screen");
+            self.features.deferred_grab = None;
             self.hand_over_system_ui(backend);
             return Ok(true);
         }
@@ -2513,6 +2516,7 @@ impl Jwm {
         }
 
         let Some(root) = backend.root_window() else {
+            self.features.deferred_grab = None;
             return Ok(true);
         };
         if let Err(error) = backend.key_ops().grab_keyboard(root) {
@@ -2520,11 +2524,16 @@ impl Jwm {
             return Err(error.into());
         }
         let Some(pointer_mask) = pointer_grab.event_mask() else {
+            // The switcher's keyboard-only fallback owns all input it needs.
+            self.features.deferred_grab = None;
             return Ok(true);
         };
 
         match backend.input_ops().grab_pointer(pointer_mask, None) {
-            Ok(true) => Ok(true),
+            Ok(true) => {
+                self.features.deferred_grab = None;
+                Ok(true)
+            }
             // Hand the keyboard straight back: a caller that parks and retries
             // must not sit on it while it waits.
             Ok(false) => {
@@ -3442,6 +3451,7 @@ impl Jwm {
                 self.features.overview.deactivate();
                 return Err(error.into());
             }
+            self.features.deferred_grab = None;
             backend.compositor_set_overview_mode(true, &layout);
         }
         Ok(())
@@ -3721,6 +3731,7 @@ impl Jwm {
             }
         }
 
+        self.features.deferred_grab = None;
         self.features.annotation_active = true;
         backend.compositor_set_annotation_mode(true);
         Ok(())
@@ -3875,6 +3886,7 @@ impl Jwm {
                 return Err(error.into());
             }
         }
+        self.features.deferred_grab = None;
         Ok(())
     }
 
@@ -4932,6 +4944,7 @@ impl Jwm {
                         return Err(error.into());
                     }
                 }
+                self.features.deferred_grab = None;
                 self.features.expose_active = true;
                 backend.compositor_set_expose_mode(true, windows);
                 // 高亮落在当前聚焦窗口上：进入后直接回车等于回到原窗口。
@@ -7109,6 +7122,259 @@ pub(crate) mod keyboard_grab_tests {
             jwm.begin_recording_region_selection(backend, "/unused/handoff.mp4".into())?;
             Ok(jwm.features.recording.selecting_region)
         });
+    }
+
+    fn parked_modal_request(
+        shell: bool,
+        now: std::time::Instant,
+    ) -> crate::jwm::features::DeferredGrab {
+        use crate::jwm::features::{DeferredGrab, DeferredGrabAction, ShellHubRoute};
+        DeferredGrab::new(
+            if shell {
+                DeferredGrabAction::ShellHub {
+                    route: Some(ShellHubRoute::Theme),
+                }
+            } else {
+                DeferredGrabAction::Screenshot {
+                    output_path: "/unused/parked.png".into(),
+                }
+            },
+            now,
+        )
+    }
+
+    fn open_modal_for_retry_test(
+        jwm: &mut Jwm,
+        backend: &mut dyn Backend,
+        mode: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match mode {
+            "shell" => jwm.open_shell_from_status_bar(
+                backend,
+                Some(crate::jwm::features::ShellHubRoute::Theme),
+            ),
+            "launcher" => {
+                // Keep application discovery entirely in memory.
+                jwm.features.launcher_catalog_refreshed_at = Some(std::time::Instant::now());
+                jwm.app_launcher(backend, &NO_ARG)
+            }
+            "help" => jwm.show_keybindings(backend, &NO_ARG),
+            "annotation" => jwm.toggle_annotation(backend, &NO_ARG),
+            "expose" => jwm.toggle_expose(backend, &NO_ARG),
+            "overview" => jwm.toggle_overview(backend, &NO_ARG),
+            "recording" => {
+                jwm.begin_recording_region_selection(backend, "/unused/selection.mp4".into())
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn assert_direct_modal_retires_deferred(mode: &str) {
+        for shell in [false, true] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            overview_window(&mut jwm, 0xb41);
+            let now = std::time::Instant::now();
+            jwm.features.deferred_grab = Some(parked_modal_request(shell, now));
+
+            open_modal_for_retry_test(&mut jwm, &mut backend, mode).unwrap();
+            assert!(jwm.grab_holding_mode_on_screen().is_some(), "{mode}");
+            assert!(backend.keyboard_held(), "{mode}");
+            assert_eq!(
+                backend.input_ops.held.load(Ordering::Relaxed),
+                mode != "overview"
+            );
+            assert!(
+                jwm.features.deferred_grab.is_none(),
+                "{mode} must retire the old request as soon as it owns input"
+            );
+            if jwm.features.system_ui.is_active() {
+                jwm.close_system_ui(&mut backend);
+            } else {
+                jwm.close_grab_holding_modes(&mut backend).unwrap();
+            }
+            let events = backend.input_ops.events.lock().unwrap().clone();
+            for _ in 0..2 {
+                jwm.tick_deferred_grab(&mut backend, now);
+                assert!(
+                    jwm.grab_holding_mode_on_screen().is_none(),
+                    "{mode} must stay dismissed"
+                );
+                assert!(jwm.features.deferred_grab.is_none());
+                assert!(!backend.keyboard_held());
+                assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+                assert_eq!(*backend.input_ops.events.lock().unwrap(), events);
+            }
+            assert!(backend.recording_requests.is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_shell_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("shell");
+    }
+
+    #[test]
+    fn direct_launcher_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("launcher");
+    }
+
+    #[test]
+    fn direct_help_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("help");
+    }
+
+    #[test]
+    fn direct_annotation_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("annotation");
+    }
+
+    #[test]
+    fn direct_expose_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("expose");
+    }
+
+    #[test]
+    fn direct_overview_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("overview");
+    }
+
+    #[test]
+    fn direct_recording_selector_retires_deferred_before_cancel() {
+        assert_direct_modal_retires_deferred("recording");
+    }
+
+    #[test]
+    fn direct_modal_grab_failures_preserve_deferred_deadlines() {
+        for mode in [
+            "shell",
+            "launcher",
+            "help",
+            "annotation",
+            "expose",
+            "overview",
+            "recording",
+        ] {
+            for failure in 1..=3 {
+                // Overview only needs the keyboard.
+                if mode == "overview" && failure != 3 {
+                    continue;
+                }
+                let mut backend = GrabSpyBackend::new();
+                let mut jwm = jwm(&mut backend);
+                overview_window(&mut jwm, 0xb42);
+                let parked = parked_modal_request(false, std::time::Instant::now());
+                jwm.features.deferred_grab = Some(parked.clone());
+                backend
+                    .input_ops
+                    .reply
+                    .store(if failure == 3 { 0 } else { failure }, Ordering::Relaxed);
+                backend
+                    .key_ops
+                    .refuse
+                    .store(failure == 3, Ordering::Relaxed);
+
+                let result = if mode == "shell" {
+                    // The retry entry point preserves an existing request;
+                    // a new bar request intentionally installs its own one.
+                    jwm.begin_shell_from_status_bar(
+                        &mut backend,
+                        Some(crate::jwm::features::ShellHubRoute::Theme),
+                    )
+                } else {
+                    open_modal_for_retry_test(&mut jwm, &mut backend, mode).map(|()| true)
+                };
+                assert!(!matches!(result, Ok(true)), "{mode}: {failure}");
+                assert_eq!(
+                    jwm.features.deferred_grab.as_ref(),
+                    Some(&parked),
+                    "{mode}: {failure}"
+                );
+                assert!(jwm.grab_holding_mode_on_screen().is_none());
+                assert!(!backend.keyboard_held());
+                assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+            }
+        }
+    }
+
+    #[test]
+    fn shell_retry_keeps_deferred_deadline_until_grabs_succeed() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let now = std::time::Instant::now();
+        let parked = parked_modal_request(true, now);
+        jwm.features.deferred_grab = Some(parked.clone());
+        backend.input_ops.reply.store(1, Ordering::Relaxed);
+        for tick in [now, now + crate::jwm::features::deferred_grab::RETRY] {
+            jwm.tick_deferred_grab(&mut backend, tick);
+            assert_eq!(jwm.features.deferred_grab.as_ref(), Some(&parked));
+            assert!(!jwm.features.system_ui.is_active());
+            assert!(!backend.keyboard_held());
+            assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        }
+        backend.input_ops.reply.store(0, Ordering::Relaxed);
+        jwm.tick_deferred_grab(&mut backend, now);
+        assert!(jwm.features.system_ui.is_active());
+        assert!(jwm.features.deferred_grab.is_none());
+        assert!(backend.keyboard_held());
+        assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        jwm.close_system_ui(&mut backend);
+        jwm.tick_deferred_grab(&mut backend, now);
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(!backend.keyboard_held());
+    }
+
+    #[test]
+    fn switcher_keyboard_only_fallback_retires_deferred_before_immediate_close() {
+        for pointer_reply in [0, 1] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            overview_window(&mut jwm, 0xb43);
+            overview_window(&mut jwm, 0xb44);
+            let now = std::time::Instant::now();
+            jwm.features.deferred_grab = Some(parked_modal_request(false, now));
+            backend
+                .input_ops
+                .reply
+                .store(pointer_reply, Ordering::Relaxed);
+            // The fake reports no held modifier, so the real switcher commits
+            // and closes immediately after its normal or keyboard-only open.
+            jwm.window_switcher(&mut backend, &WMArgEnum::Int(1))
+                .unwrap();
+            assert!(jwm.features.deferred_grab.is_none());
+            assert!(!jwm.features.system_ui.is_active());
+            assert!(!backend.keyboard_held());
+            backend.input_ops.reply.store(0, Ordering::Relaxed);
+            jwm.tick_deferred_grab(&mut backend, now);
+            assert!(jwm.grab_holding_mode_on_screen().is_none());
+            assert!(!backend.keyboard_held());
+        }
+    }
+
+    #[test]
+    fn system_ui_handover_retires_deferred_only_after_pointer_success() {
+        for pointer_reply in 0..=2 {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            jwm.calendar(&mut backend, &NO_ARG).unwrap();
+            let parked = parked_modal_request(false, std::time::Instant::now());
+            jwm.features.deferred_grab = Some(parked.clone());
+            backend
+                .input_ops
+                .reply
+                .store(pointer_reply, Ordering::Relaxed);
+            let result = jwm.show_keybindings(&mut backend, &NO_ARG);
+            if pointer_reply == 0 {
+                assert!(result.is_ok());
+                assert!(jwm.features.deferred_grab.is_none());
+            } else {
+                assert!(result.is_err());
+                assert!(jwm.features.system_ui.is_calendar());
+                assert_eq!(jwm.features.deferred_grab.as_ref(), Some(&parked));
+            }
+            assert!(backend.keyboard_held());
+            assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        }
     }
 
     #[test]
