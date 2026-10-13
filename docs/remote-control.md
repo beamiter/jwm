@@ -863,6 +863,22 @@ Rendering still runs on the viewer's main thread, so a slow native draw can
 still delay the next input pass; no claim of measured end-to-end mouse latency
 is made by the offline tests.
 
+Clipboard forwarding also yields to the viewer loop: at most four captured
+texts are considered per pass, including oversized texts that are skipped.
+Each nonblocking capture read inspects at most 32 queued items so a backlog of
+unsupported images cannot monopolize the pass. Remaining captures stay in FIFO
+order; a budget yield is not a disconnect. Worker closure is still reported
+once preceding captures have been consumed, potentially on a later pass.
+The host's blocking clipboard receiver retains its existing absolute deadline.
+
+These are work-count bounds, not hard response-time bounds. Four maximum-sized
+texts can still total 1 MiB before protocol overhead, and an individual socket
+write or native draw can block. On an otherwise idle viewer, the existing
+200 ms heartbeat wake schedules another pass; this may delay a large clipboard
+backlog while preserving opportunities to process input, draw/ACK and heartbeat.
+No new polling thread, immediate retry loop, queue or clipboard permission is
+introduced, and the existing clipboard producer queue is unchanged.
+
 Letterbox bars preserve aspect ratio and are not remote desktop content.
 Clicks there neither grab nor send a remote button press. A button pressed
 inside the image is still released if its drag ends outside, with the pointer

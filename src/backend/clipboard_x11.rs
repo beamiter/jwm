@@ -401,8 +401,9 @@ impl ClipboardCaptures {
     /// Returning on a timeout rather than parking forever lets the caller
     /// notice session shutdown without a second wake channel. PNG captures
     /// are skipped so a local image copy cannot stall text forwarding.
-    /// `Ok(None)` is a live timeout; `Err` means the worker permanently
-    /// closed its channel after all queued captures were drained.
+    /// `Ok(None)` is a live timeout or a nonblocking fairness yield;
+    /// `Err` means the worker permanently closed its channel after all queued
+    /// captures were drained.
     pub(crate) fn recv_timeout(
         &self,
         timeout: std::time::Duration,
@@ -412,14 +413,23 @@ impl ClipboardCaptures {
     }
 }
 
-/// Empty-but-live is a timeout; a drained closed channel cannot recover.
+/// Maximum captures inspected by one nonblocking remote-viewer poll.
+/// Blocking callers already have the absolute deadline below.
+#[cfg(feature = "remote-x11")]
+const MAX_NONBLOCKING_CAPTURE_ITEMS: usize = 32;
+
+/// Empty/budget-limited is a live yield; a drained closed channel cannot recover.
 #[cfg(feature = "remote-x11")]
 fn recv_captured_text(
     captured: &std::sync::mpsc::Receiver<CapturedClipboard>,
     timeout: std::time::Duration,
 ) -> Result<Option<String>, std::sync::mpsc::RecvError> {
     let deadline = std::time::Instant::now() + timeout;
+    let mut inspected = 0;
     loop {
+        if timeout.is_zero() && inspected >= MAX_NONBLOCKING_CAPTURE_ITEMS {
+            return Ok(None);
+        }
         let remaining = if timeout.is_zero() {
             std::time::Duration::ZERO
         } else {
@@ -431,10 +441,11 @@ fn recv_captured_text(
         match captured.recv_timeout(remaining) {
             Ok(CapturedClipboard::Text(text)) => return Ok(Some(text)),
             Ok(CapturedClipboard::Png(_)) => {
+                // Only the nonblocking path needs a count limit. The host's
+                // blocking path rechecks its absolute deadline on every item.
                 if timeout.is_zero() {
-                    continue;
+                    inspected += 1;
                 }
-                continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(None),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -1823,6 +1834,76 @@ fn publish_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_zero_timeout_yields_after_png_budget_without_losing_text() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..32 {
+            tx.send(CapturedClipboard::Png(vec![0])).unwrap();
+        }
+        tx.send(CapturedClipboard::Text("after images".into()))
+            .unwrap();
+        drop(tx);
+        assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::ZERO),
+            Ok(Some("after images".into()))
+        );
+        assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_png_budget_boundary_defers_but_preserves_close() {
+        for png_count in [32, 33, 64] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            for _ in 0..png_count {
+                tx.send(CapturedClipboard::Png(vec![0])).unwrap();
+            }
+            drop(tx);
+            for _ in 0..png_count / 32 {
+                assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
+            }
+            assert!(recv_captured_text(&rx, std::time::Duration::ZERO).is_err());
+        }
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_zero_timeout_png_budget_is_not_a_disconnect() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..64 {
+            tx.send(CapturedClipboard::Png(vec![0])).unwrap();
+        }
+        for _ in 0..2 {
+            assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
+        }
+        assert_eq!(recv_captured_text(&rx, std::time::Duration::ZERO), Ok(None));
+        tx.send(CapturedClipboard::Text("still live".into()))
+            .unwrap();
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::ZERO),
+            Ok(Some("still live".into()))
+        );
+    }
+
+    #[cfg(feature = "remote-x11")]
+    #[test]
+    fn capture_receive_nonzero_timeout_keeps_absolute_deadline_path() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for _ in 0..64 {
+            tx.send(CapturedClipboard::Png(vec![0])).unwrap();
+        }
+        tx.send(CapturedClipboard::Text("waiting caller".into()))
+            .unwrap();
+        drop(tx);
+        assert_eq!(
+            recv_captured_text(&rx, std::time::Duration::from_secs(60)),
+            Ok(Some("waiting caller".into()))
+        );
+        assert!(recv_captured_text(&rx, std::time::Duration::from_secs(60)).is_err());
+    }
 
     #[cfg(feature = "remote-x11")]
     #[test]

@@ -42,6 +42,9 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
 /// The loop otherwise parks until its next heartbeat, and a quarter second of
 /// copy-paste latency is imperceptible next to that.
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
+// Bound clipboard work before the next input pass, frame ACK and heartbeat.
+// Oversized/rejected captures count too; this is not a socket latency bound.
+const MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS: usize = 4;
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -510,7 +513,7 @@ fn forward_viewer_clipboard_from<W: std::io::Write>(
         return Ok(false);
     }
     let mut wrote = false;
-    loop {
+    for _ in 0..MAX_VIEWER_CLIPBOARD_RECORDS_PER_PASS {
         let text = match receive() {
             Ok(Some(text)) => text,
             Ok(None) => return Ok(wrote),
@@ -535,6 +538,8 @@ fn forward_viewer_clipboard_from<W: std::io::Write>(
             }
         }
     }
+    // Queued captures remain in FIFO order for the next viewer pass.
+    Ok(wrote)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1329,6 +1334,55 @@ mod tests {
             assert!(message.contains("test cause"));
             assert!(std::error::Error::source(&failure).is_some());
         }
+    }
+
+    #[test]
+    fn viewer_clipboard_budget_yields_and_preserves_queued_text_order() {
+        let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+        let mut next = 0;
+        for expected_end in [4, 8] {
+            let mut receive = || {
+                next += 1;
+                assert!(next <= expected_end + 1, "clipboard pass did not yield");
+                Ok(Some(format!("text-{next}")))
+            };
+            assert!(forward_viewer_clipboard_from(&mut receive, &mut writer, false).unwrap());
+            assert_eq!(next, expected_end);
+        }
+        let mut reader = SessionReader::new(std::io::Cursor::new(writer.into_inner()), TEST_PSK);
+        for index in 1..=8 {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Clipboard);
+            assert_eq!(decode_clipboard(&payload).unwrap(), format!("text-{index}"));
+        }
+    }
+
+    #[test]
+    fn viewer_clipboard_budget_counts_rejected_text_and_later_worker_exit() {
+        let mut writer = SessionWriter::new(Vec::new(), TEST_PSK);
+        let mut calls = 0;
+        let oversized = "x".repeat(super::super::messages::MAX_CLIPBOARD_BYTES + 1);
+        assert!(
+            !forward_viewer_clipboard_from(
+                || {
+                    calls += 1;
+                    assert!(
+                        calls <= 4,
+                        "rejected text must count against the pass budget"
+                    );
+                    Ok(Some(oversized.clone()))
+                },
+                &mut writer,
+                false,
+            )
+            .unwrap()
+        );
+        assert_eq!(calls, 4);
+        let error =
+            forward_viewer_clipboard_from(|| Err(std::sync::mpsc::RecvError), &mut writer, false)
+                .unwrap_err();
+        assert!(error.is::<ClientFailure>());
+        assert!(writer.into_inner().is_empty());
     }
 
     #[test]
