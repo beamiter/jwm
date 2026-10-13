@@ -11711,12 +11711,35 @@ mod tests {
     fn evolve8h_wave_30_strut_changes_broadcast_all_monitor_bars() {
         const STRUT: &str = include_str!("strut_manager.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert_eq!(
-            STRUT
-                .matches("broadcast_monitor_bar_all_monitors(backend)")
-                .count(),
-            3
-        );
+        for entry in [
+            "reconcile_external_struts_after_topology_change",
+            "refresh_unmanaged_x11_strut",
+            "check_strut_on_manage",
+            "remove_strut_on_unmanage",
+        ] {
+            let signature = format!("fn {entry}(");
+            let start = STRUT.find(&signature).expect("strut entry exists");
+            let body_start = start + STRUT[start..].find('{').expect("entry body exists");
+            let mut depth = 0;
+            let body_end = STRUT[body_start..]
+                .char_indices()
+                .find_map(|(offset, ch)| {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(body_start + offset + 1)
+                })
+                .expect("entry body is balanced");
+            let body = &STRUT[body_start..body_end];
+            assert_eq!(
+                body.matches("broadcast_monitor_bar_all_monitors(backend)")
+                    .count(),
+                1,
+                "{entry} must broadcast every monitor bar exactly once"
+            );
+        }
         assert!(DOCS.contains("External strut"));
     }
 
