@@ -2828,8 +2828,26 @@ impl Jwm {
         &mut self,
         name: &str,
         args: &serde_json::Value,
-        backend: &dyn Backend,
+        backend: &mut dyn Backend,
     ) -> IpcResponse {
+        // These replies advertise whether the microphone is recording. Settle
+        // completed workers before reading that state, just as the frame tick
+        // does: refresh alone leaves a dead worker's active flag latched for
+        // the next stop gesture, and does not collect completed finalization.
+        // The collector never waits for a live or still-finalizing worker.
+        if matches!(
+            name,
+            "get_audio_recording_status"
+                | "get_audio_recording"
+                | "get_arec"
+                | "get_status"
+                | "get_st"
+                | "get_effect_status"
+                | "get_effects"
+                | "get_fx"
+        ) {
+            self.poll_audio_recording(backend);
+        }
         let cfg = CONFIG.load();
         match name {
             "get_status" | "get_st" => IpcResponse::ok(Some(
@@ -3041,7 +3059,6 @@ impl Jwm {
                 })))
             }
             "get_audio_recording_status" | "get_audio_recording" | "get_arec" => {
-                self.features.audio_recording.refresh();
                 let recording = &self.features.audio_recording;
                 let (output_exists, output_bytes) = recording
                     .output_path
@@ -8065,7 +8082,7 @@ mod tests {
             jwm.handle_ipc_command(&mut backend, "quit", &serde_json::json!({}))
                 .success
         );
-        let response = jwm.handle_ipc_query("get_magnifier", &serde_json::json!({}), &backend);
+        let response = jwm.handle_ipc_query("get_magnifier", &serde_json::json!({}), &mut backend);
         assert!(response.success);
         assert!(response.data.is_some());
     }
@@ -8896,6 +8913,7 @@ mod tests {
         hdr: Vec<(OutputId, bool)>,
         /// Every MIC chip push, in order.
         mic_indicator: Vec<bool>,
+        audio_indicator: Vec<crate::backend::api::AudioRecordingIndicator>,
         /// Every toast the WM pushed, in order.
         toasts: Vec<crate::backend::api::ToastNotification>,
     }
@@ -8915,6 +8933,7 @@ mod tests {
                 clipboard: Vec::new(),
                 hdr: Vec::new(),
                 mic_indicator: Vec::new(),
+                audio_indicator: Vec::new(),
                 toasts: Vec::new(),
             }
         }
@@ -8933,6 +8952,12 @@ mod tests {
     impl CompositorMedia for PairingIpcBackend {
         fn compositor_set_mic_indicator(&mut self, active: bool) {
             self.mic_indicator.push(active);
+        }
+        fn compositor_set_audio_recording_indicator(
+            &mut self,
+            status: crate::backend::api::AudioRecordingIndicator,
+        ) {
+            self.audio_indicator.push(status);
         }
     }
     impl CompositorWorkspaceEffects for PairingIpcBackend {
@@ -9500,7 +9525,7 @@ mod tests {
         jwm.features.control_snapshot_job = None;
         jwm.features.control_snapshot_refreshed_at = Some(std::time::Instant::now());
 
-        let unread = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &backend);
+        let unread = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &mut backend);
         assert!(unread.success, "{unread:?}");
         assert_eq!(
             unread.data.as_ref().and_then(|data| data.get("muted")),
@@ -9510,7 +9535,7 @@ mod tests {
 
         jwm.cache_control_mic_mute(true);
 
-        let muted = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &backend);
+        let muted = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &mut backend);
         assert!(muted.success, "{muted:?}");
         assert_eq!(
             muted.data.as_ref().and_then(|data| data.get("muted")),
@@ -10211,6 +10236,191 @@ mod tests {
             MAX_REPORTED_UNKNOWN_TOPICS,
             "the report is bounded"
         );
+    }
+
+    /// Status must settle the same completed worker as the tick. `refresh`
+    /// alone deliberately keeps `active` latched for the next stop gesture.
+    #[test]
+    fn audio_status_queries_settle_unexpected_exit_before_answering() {
+        use crate::backend::api::AudioRecordingIndicator;
+        for query in [
+            "get_audio_recording_status",
+            "get_audio_recording",
+            "get_arec",
+            "get_status",
+            "get_st",
+            "get_effect_status",
+            "get_effects",
+            "get_fx",
+        ] {
+            let mut backend = PairingIpcBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            jwm.features.audio_recording =
+                crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                    "/tmp/jwm-query-failed-no-file.wav",
+                    |_stop| Err("fake encoder stopped unexpectedly".into()),
+                );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !jwm.features.audio_recording.refresh() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            let elapsed = jwm.features.audio_recording.elapsed();
+            assert!(jwm.features.audio_recording.active, "exit is latched");
+            let response = jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+            assert!(response.success, "{query}: {response:?}");
+            let data = response.data.unwrap();
+            match query {
+                "get_status" | "get_st" => {
+                    assert_eq!(data["audio_recording"]["active"], false, "{query}");
+                    assert_eq!(data["features"]["audio_recording"], false, "{query}");
+                    assert_eq!(
+                        data["audio_recording"]["last_error"],
+                        "fake encoder stopped unexpectedly"
+                    );
+                }
+                "get_effect_status" | "get_effects" | "get_fx" => {
+                    assert_eq!(data["audio_recording"], false, "{query}");
+                }
+                _ => {
+                    assert_eq!(data["active"], false, "{query}");
+                    assert_eq!(data["finalizing"], false);
+                    assert_eq!(data["last_error"], "fake encoder stopped unexpectedly");
+                    assert_eq!(data["output_path"], "/tmp/jwm-query-failed-no-file.wav");
+                }
+            }
+            assert_eq!(backend.mic_indicator, vec![false]);
+            assert_eq!(
+                backend.audio_indicator.last(),
+                Some(&AudioRecordingIndicator::Hidden)
+            );
+            assert_eq!(
+                backend.toast_titles(),
+                vec!["\u{f130}  Audio recording failed"]
+            );
+            assert_eq!(backend.toasts[0].urgency, 2);
+            assert_eq!(jwm.features.audio_recording.elapsed(), elapsed);
+            // Repeated status reads and the next tick cannot repeat a failure
+            // notification or start another recorder.
+            jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+            jwm.poll_audio_recording(&mut backend);
+            assert_eq!(backend.toasts.len(), 1);
+            assert_eq!(backend.mic_indicator, vec![false]);
+            assert!(!jwm.features.audio_recording.active);
+        }
+    }
+
+    #[test]
+    fn audio_status_queries_collect_completed_finalization_once() {
+        use crate::backend::api::AudioRecordingIndicator;
+        for fails in [false, true] {
+            let mut backend = PairingIpcBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let (release, finalize) = std::sync::mpsc::channel::<()>();
+            jwm.features.audio_recording =
+                crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                    "/tmp/jwm-query-finalize-no-file.wav",
+                    move |_stop| {
+                        finalize
+                            .recv_timeout(std::time::Duration::from_secs(30))
+                            .unwrap();
+                        if fails {
+                            Err("fake finalization failed".into())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                );
+            jwm.begin_stopping_audio_recording(&mut backend).unwrap();
+            release.send(()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let data = loop {
+                let response =
+                    jwm.handle_ipc_query("get_arec", &serde_json::json!({}), &mut backend);
+                assert!(response.success);
+                let data = response.data.unwrap();
+                assert_eq!(data["active"], false);
+                if data["finalizing"] == false {
+                    break data;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "status never collected the finished worker"
+                );
+                std::thread::yield_now();
+            };
+            assert_eq!(
+                backend.audio_indicator.last(),
+                Some(&AudioRecordingIndicator::Hidden)
+            );
+            if fails {
+                assert_eq!(data["last_error"], "fake finalization failed");
+                assert_eq!(
+                    backend.toast_titles(),
+                    vec!["\u{f130}  Audio recording failed"]
+                );
+            } else {
+                assert!(data["last_error"].is_null());
+                assert_eq!(
+                    backend.toast_titles(),
+                    vec!["\u{f130}  Audio recording stopped"]
+                );
+                assert_eq!(
+                    backend.toasts[0].body,
+                    "/tmp/jwm-query-finalize-no-file.wav"
+                );
+            }
+            jwm.handle_ipc_query("get_arec", &serde_json::json!({}), &mut backend);
+            jwm.poll_audio_recording(&mut backend);
+            assert_eq!(backend.toasts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn audio_status_queries_leave_live_and_pending_workers_running() {
+        use crate::backend::api::AudioRecordingIndicator;
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let (release, finalize) = std::sync::mpsc::channel::<()>();
+        jwm.features.audio_recording =
+            crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                "/tmp/jwm-query-live-no-file.wav",
+                move |_stop| {
+                    finalize
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .unwrap();
+                    Ok(())
+                },
+            );
+        for finalizing in [false, true] {
+            if finalizing {
+                jwm.begin_stopping_audio_recording(&mut backend).unwrap();
+            }
+            let started = std::time::Instant::now();
+            let response = jwm.handle_ipc_query("get_arec", &serde_json::json!({}), &mut backend);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "query waited for an unfinished worker"
+            );
+            assert!(response.success);
+            let data = response.data.unwrap();
+            assert_eq!(data["active"], !finalizing);
+            assert_eq!(data["finalizing"], finalizing);
+            assert!(backend.toasts.is_empty());
+            if finalizing {
+                assert_eq!(
+                    backend.audio_indicator.last(),
+                    Some(&AudioRecordingIndicator::Finalizing)
+                );
+            } else {
+                assert!(matches!(
+                    backend.audio_indicator.last(),
+                    Some(AudioRecordingIndicator::Recording { .. })
+                ));
+            }
+        }
+        release.send(()).unwrap();
+        jwm.stop_audio_recording(&mut backend).unwrap();
     }
 
     /// A key stop no longer joins the recorder on the event thread: the MIC
