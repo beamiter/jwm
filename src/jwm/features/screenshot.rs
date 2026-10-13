@@ -1283,6 +1283,11 @@ impl Jwm {
             }
         }
 
+        // This request now owns both grabs. Retire any older parked surface
+        // immediately: waiting for the next tick lets Cancel or completion
+        // leave the screen empty and resurrect that stale request instead.
+        self.features.deferred_grab = None;
+
         let freeze_enabled = crate::config::CONFIG
             .load()
             .behavior()
@@ -2502,6 +2507,31 @@ mod tests {
     }
 
     #[test]
+    fn a_direct_screenshot_preserves_its_retry_until_both_grabs_succeed() {
+        crate::jwm::features::toggles::keyboard_grab_tests::assert_drag_handoff(
+            true,
+            |jwm, backend| {
+                let parked = DeferredGrab::new(
+                    DeferredGrabAction::Screenshot {
+                        output_path: "/unused/parked.png".into(),
+                    },
+                    std::time::Instant::now(),
+                );
+                jwm.features.deferred_grab = Some(parked.clone());
+                let result = jwm.begin_interactive_capture(backend, "/unused/handoff.png");
+                if matches!(result, Ok(true)) {
+                    assert!(jwm.features.deferred_grab.is_none());
+                } else {
+                    // Pointer-busy, pointer transport failure and keyboard
+                    // refusal never claim ownership of the pending request.
+                    assert_eq!(jwm.features.deferred_grab.as_ref(), Some(&parked));
+                }
+                result
+            },
+        );
+    }
+
+    #[test]
     fn screenshot_watcher_admission_refuses_fullscreen_before_path_preflight() {
         use crate::jwm::features::monitor_lock::test_support::{
             LockSpyBackend, jwm_on_two_monitors,
@@ -2675,6 +2705,95 @@ mod tests {
             assert!(!jwm.features.screenshot.active, "{mode}");
             assert!(jwm.features.deferred_grab.is_none(), "{mode}");
         }
+    }
+
+    #[test]
+    fn a_direct_screenshot_start_retires_older_deferred_surfaces() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+
+        for action in [
+            DeferredGrabAction::Screenshot {
+                output_path: "/unused/older-shot.png".into(),
+            },
+            DeferredGrabAction::ShellHub { route: None },
+        ] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            jwm.features.deferred_grab = Some(DeferredGrab::new(action, std::time::Instant::now()));
+            jwm.features
+                .screenshot_completions
+                .push(connectivity::BackgroundJob::refused());
+
+            // A second direct request wins the grabs before the maintenance
+            // tick can revisit the old, pointer-busy request. No capture or
+            // output preflight runs in this display-free fixture.
+            assert!(
+                jwm.begin_interactive_capture(&mut backend, "/unused/newer-shot.png")
+                    .unwrap()
+            );
+            assert!(jwm.features.screenshot.active);
+            assert_eq!(
+                jwm.features.screenshot.output_path.as_deref(),
+                Some("/unused/newer-shot.png")
+            );
+            assert!(
+                jwm.features.deferred_grab.is_none(),
+                "the older surface must lose its retry when the new selector owns input"
+            );
+            assert_eq!(jwm.features.screenshot_completions.len(), 1);
+            jwm.cancel_screenshot_select(&mut backend);
+        }
+    }
+
+    fn assert_direct_screenshot_cannot_replay_after_exit(finish: bool) {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let now = std::time::Instant::now();
+        jwm.features.deferred_grab = Some(DeferredGrab::new(
+            DeferredGrabAction::Screenshot {
+                output_path: "/unused/older-shot.png".into(),
+            },
+            now,
+        ));
+        assert!(
+            jwm.begin_interactive_capture(&mut backend, "/unused/newer-shot.png")
+                .unwrap()
+        );
+        if finish {
+            // Exercise completion's own cleanup branch without asking for an
+            // actual screenshot, writing files, or starting a watcher.
+            jwm.features.screenshot.select_rect(Rect::new(0, 0, 1, 1));
+            jwm.finish_screenshot_select(&mut backend, false);
+        } else {
+            jwm.cancel_screenshot_select(&mut backend);
+        }
+        assert!(!jwm.features.screenshot.active);
+        assert!(jwm.features.screenshot.output_path.is_none());
+        for _ in 0..2 {
+            jwm.tick_deferred_grab(&mut backend, now);
+            assert!(
+                !jwm.features.screenshot.active,
+                "a selector that already exited must not reopen from an older retry"
+            );
+            assert!(!jwm.features.system_ui.is_active());
+            assert!(jwm.features.deferred_grab.is_none());
+        }
+        assert!(jwm.features.screenshot_completions.is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_direct_screenshot_cannot_replay_an_older_retry() {
+        assert_direct_screenshot_cannot_replay_after_exit(false);
+    }
+
+    #[test]
+    fn a_completed_direct_screenshot_cannot_replay_an_older_retry() {
+        assert_direct_screenshot_cannot_replay_after_exit(true);
     }
 
     /// A selector parked waiting for the pointer is dropped, not armed, when

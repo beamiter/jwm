@@ -7,6 +7,9 @@ monorepo use independent Semantic Versions.
 
 ### Audit follow-up
 
+- Retire older pointer-grab retries as soon as a screenshot selector acquires
+  input, so cancelling or finishing it before the next tick cannot reopen an
+  earlier screenshot or Shell Hub request.
 - Keep remote-viewer escape-key autorepeat local in pointer-only sessions, so
   holding F12 cannot accidentally release control; genuine double taps still
   release input, and focus/grab changes reset incomplete taps.
