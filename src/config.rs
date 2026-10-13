@@ -47,6 +47,10 @@ pub(crate) const fn scene_linear_render_path_requested(
 
 static CONFIG_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Bound the explicitly configured daily wallpaper collection.
+pub const MAX_WALLPAPER_ROTATION_PATHS: usize = 366;
+/// Unix paths are bounded in bytes, including UTF-8 multibyte characters.
+pub const MAX_WALLPAPER_ROTATION_PATH_BYTES: usize = 4096;
 
 fn read_config_bytes(path: &Path) -> std::io::Result<(Vec<u8>, fs::Permissions)> {
     // A FIFO can block at open(), before any size check or reload debounce.
@@ -392,6 +396,11 @@ fn atomic_write_with_sequence(
     contents: &[u8],
     mut next_sequence: impl FnMut() -> u64,
 ) -> std::io::Result<ConfigWriteOutcome> {
+    // Never publish a config the bounded reader cannot load on the next
+    // reload or startup. Check before resolving paths or creating directories.
+    if contents.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(config_file_too_large(path));
+    }
     // Preserve symlink-based dotfile setups. Renaming over `path` itself would
     // replace the link; resolving the complete chain lets us atomically
     // replace its target while leaving every user-managed link intact. The
@@ -1307,6 +1316,15 @@ pub struct BehaviorConfig {
     /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
     #[serde(default = "default_wallpaper_mode")]
     pub wallpaper_mode: String,
+    /// "off" keeps static wallpapers; "daily" rotates the collection below
+    /// by local calendar date, assigning different images to output slots.
+    /// Daily rotation takes precedence over static monitor/tag overrides.
+    #[serde(default = "default_wallpaper_rotation")]
+    pub wallpaper_rotation: String,
+    /// Ordered, unique wallpaper paths for daily rotation. Static wallpaper
+    /// settings remain intact and take effect again when rotation is off.
+    #[serde(default)]
+    pub wallpaper_rotation_paths: Vec<String>,
     /// Remember what was copied, so the clipboard picker has something to
     /// offer. Memory only: the history is never written to disk and does not
     /// survive a restart. Offers marked as secrets are never recorded.
@@ -1678,6 +1696,10 @@ fn default_particle_lifetime() -> f32 {
 fn default_particle_gravity() -> f32 {
     800.0
 }
+fn default_wallpaper_rotation() -> String {
+    "off".to_string()
+}
+
 fn default_wallpaper_mode() -> String {
     "fill".to_string()
 }
@@ -2189,6 +2211,8 @@ impl Default for Config {
                         .to_string_lossy()
                         .into_owned(),
                     wallpaper_mode: default_wallpaper_mode(),
+                    wallpaper_rotation: default_wallpaper_rotation(),
+                    wallpaper_rotation_paths: Vec::new(),
                     wallpaper_monitors: Vec::new(),
                     wallpaper_tags: Vec::new(),
                     swallow_enabled: true,
@@ -4526,7 +4550,8 @@ impl Config {
 
     /// Apply a single key/value override to the in-memory config without
     /// touching the on-disk file. Only a small set of hot-tunable scalar
-    /// keys are accepted; unknown or unsupported keys return Err.
+    /// keys and the bounded wallpaper collection are accepted; unknown or
+    /// unsupported keys return Err.
     pub fn set_value(&mut self, key: &str, value: &serde_json::Value) -> Result<(), String> {
         let as_u32 = || {
             value
@@ -4671,6 +4696,40 @@ impl Config {
                     ));
                 }
                 self.inner.behavior.wallpaper_mode = mode;
+            }
+            "behavior.wallpaper_rotation" => {
+                let rotation = as_string()?;
+                if !["off", "daily"].contains(&rotation.as_str()) {
+                    return Err(format!(
+                        "behavior.wallpaper_rotation={rotation:?} (expected off or daily)"
+                    ));
+                }
+                self.inner.behavior.wallpaper_rotation = rotation;
+            }
+            "behavior.wallpaper_rotation_paths" => {
+                let values = value
+                    .as_array()
+                    .filter(|values| values.len() <= MAX_WALLPAPER_ROTATION_PATHS)
+                    .ok_or_else(|| format!(
+                        "expected string array with at most {MAX_WALLPAPER_ROTATION_PATHS} entries for '{key}'"
+                    ))?;
+                let paths = values.iter().enumerate().map(|(index, value)| {
+                    value.as_str()
+                        .filter(|path| path.len() <= MAX_WALLPAPER_ROTATION_PATH_BYTES)
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!(
+                            "expected string of at most {MAX_WALLPAPER_ROTATION_PATH_BYTES} bytes for '{key}[{index}]'"
+                        ))
+                }).collect::<Result<Vec<_>, _>>()?;
+                if let Some((index, error)) =
+                    validation::wallpaper_rotation_paths_error(&paths, false)
+                {
+                    return Err(format!(
+                        "{key}{}: {error}",
+                        index.map_or_else(String::new, |index| format!("[{index}]"))
+                    ));
+                }
+                self.inner.behavior.wallpaper_rotation_paths = paths;
             }
             "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
             "behavior.wallpaper_colors" => self.inner.behavior.wallpaper_colors = as_bool()?,
@@ -4974,6 +5033,151 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn wallpaper_rotation_schema_defaults_for_legacy_and_roundtrips_daily() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string(&Config::default().inner).unwrap()).unwrap();
+        let behavior = table.get_mut("behavior").unwrap().as_table_mut().unwrap();
+        behavior.remove("wallpaper_rotation");
+        behavior.remove("wallpaper_rotation_paths");
+        let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
+        assert_eq!(legacy.behavior.wallpaper_rotation, "off");
+        assert!(legacy.behavior.wallpaper_rotation_paths.is_empty());
+
+        let mut config = Config { inner: legacy };
+        config.inner.behavior.wallpaper_rotation = "daily".into();
+        config.inner.behavior.wallpaper_rotation_paths =
+            vec!["/walls/01.png".into(), "/walls/02.png".into()];
+        let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        assert_eq!(loaded.behavior.wallpaper_rotation, "daily");
+        assert_eq!(
+            loaded.behavior.wallpaper_rotation_paths,
+            config.behavior().wallpaper_rotation_paths
+        );
+        assert!(!config.diagnostics().has_errors());
+    }
+
+    #[test]
+    fn wallpaper_rotation_diagnostics_reject_invalid_modes_and_collections() {
+        let mut config = Config::default();
+        config.inner.behavior.wallpaper_rotation = "weekly".into();
+        assert!(
+            config
+                .diagnostics()
+                .issues()
+                .iter()
+                .any(|issue| issue.level == ConfigDiagnosticLevel::Error
+                    && issue.path == "behavior.wallpaper_rotation")
+        );
+        config.inner.behavior.wallpaper_rotation = "daily".into();
+        for paths in [
+            Vec::new(),
+            vec!["".into()],
+            vec![" \t".into()],
+            vec!["/walls/bad\0.png".into()],
+            vec!["/walls/a.png".into(), "/walls/a.png".into()],
+            vec!["x".repeat(super::MAX_WALLPAPER_ROTATION_PATH_BYTES + 1)],
+            (0..=super::MAX_WALLPAPER_ROTATION_PATHS)
+                .map(|i| format!("/walls/{i}.png"))
+                .collect(),
+        ] {
+            config.inner.behavior.wallpaper_rotation_paths = paths;
+            assert!(
+                config
+                    .diagnostics()
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.level == ConfigDiagnosticLevel::Error
+                        && issue.path.starts_with("behavior.wallpaper_rotation_paths"))
+            );
+        }
+        config.inner.behavior.wallpaper_rotation_paths = (0..super::MAX_WALLPAPER_ROTATION_PATHS)
+            .map(|i| format!("/walls/{i}.png"))
+            .collect();
+        assert!(!config.diagnostics().has_errors());
+        config.inner.behavior.wallpaper_rotation_paths =
+            vec!["x".repeat(super::MAX_WALLPAPER_ROTATION_PATH_BYTES)];
+        assert!(!config.diagnostics().has_errors());
+    }
+
+    #[test]
+    fn wallpaper_rotation_hot_batch_is_atomic_and_preserves_static_settings() {
+        let mut config = Config::default();
+        config.inner.behavior.wallpaper = "/walls/static.png".into();
+        config.inner.behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 0,
+            path: "/walls/static-monitor.png".into(),
+            mode: "fit".into(),
+        }];
+        config.inner.behavior.wallpaper_tags = vec![WallpaperTagConfig {
+            tag: 1,
+            monitor: -1,
+            path: "/walls/static-tag.png".into(),
+            mode: "fill".into(),
+        }];
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_rotation".into(),
+                    serde_json::json!("daily"),
+                ),
+                (
+                    "behavior.wallpaper_rotation_paths".into(),
+                    serde_json::json!(["/walls/01.png", "/walls/02.png"]),
+                ),
+            ])
+            .unwrap();
+        let before = toml::to_string(&config.inner).unwrap();
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!(["/walls/01.png", "/walls/01.png"]),
+            serde_json::json!(["/walls/01.png", 7]),
+            serde_json::json!(["x".repeat(super::MAX_WALLPAPER_ROTATION_PATH_BYTES + 1)]),
+            serde_json::json!(
+                (0..=super::MAX_WALLPAPER_ROTATION_PATHS)
+                    .map(|i| format!("/walls/{i}.png"))
+                    .collect::<Vec<_>>()
+            ),
+        ] {
+            assert!(
+                config
+                    .set_values(&[("behavior.wallpaper_rotation_paths".into(), value)])
+                    .is_err()
+            );
+            assert_eq!(toml::to_string(&config.inner).unwrap(), before);
+        }
+        assert!(
+            config
+                .set_values(&[(
+                    "behavior.wallpaper_rotation".into(),
+                    serde_json::json!("weekly")
+                )])
+                .is_err()
+        );
+        assert_eq!(toml::to_string(&config.inner).unwrap(), before);
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_rotation".into(),
+                    serde_json::json!("off"),
+                ),
+                (
+                    "behavior.wallpaper_rotation_paths".into(),
+                    serde_json::json!([]),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(config.behavior().wallpaper, "/walls/static.png");
+        assert_eq!(
+            config.behavior().wallpaper_monitors[0].path,
+            "/walls/static-monitor.png"
+        );
+        assert_eq!(
+            config.behavior().wallpaper_tags[0].path,
+            "/walls/static-tag.png"
+        );
     }
 
     #[test]
@@ -6335,6 +6539,64 @@ border_px = 3
         assert_eq!(attempts, 128);
         assert_eq!(std::fs::read(&occupied).unwrap(), b"other writer");
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn config_write_limit_preserves_reloadable_files_during_persistence_growth() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = temporary_config_path("write-size-limit");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("config.toml");
+        let mut config = Config::default();
+        config.inner.appearance.ui_theme = "paper".into();
+        let mut text = toml::to_string(&config.inner).unwrap();
+        text.push_str("\n#");
+        text.extend(std::iter::repeat_n(
+            'x',
+            MAX_CONFIG_FILE_BYTES as usize - text.len() - 1,
+        ));
+        text.push('\n');
+        assert_eq!(text.len() as u64, MAX_CONFIG_FILE_BYTES);
+
+        // The exact limit is a valid published config and can reload.
+        super::atomic_write(&path, text.as_bytes()).unwrap();
+        Config::load_from_file(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let original_mode = std::fs::metadata(&path).unwrap().mode();
+
+        text.push('x');
+        let error = super::atomic_write_with_sequence(&path, text.as_bytes(), || {
+            panic!("an oversized write must not create a temporary")
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let absent_parent = directory.join("must-not-be-created");
+        assert!(super::atomic_write(&absent_parent.join("config.toml"), text.as_bytes()).is_err());
+        assert!(!absent_parent.exists());
+        text.pop();
+
+        // Both normal surgical writers can grow a valid near-limit config.
+        // They must reject that growth before publishing the edited bytes.
+        let errors = [
+            config
+                .persist_ui_theme_to(&path, "tokyo-night")
+                .unwrap_err(),
+            config
+                .persist_layout_tags_to(&path, &[layout_tag(1, 0, "monocle")])
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(
+                matches!(&error, ConfigError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData)
+            );
+            assert!(error.to_string().contains("limit"), "{error}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(std::fs::metadata(&path).unwrap().mode(), original_mode);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        Config::load_from_file(&path).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
 

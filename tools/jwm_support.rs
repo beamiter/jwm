@@ -323,14 +323,17 @@ fn collect_session_environment() -> BTreeMap<String, String> {
     SESSION_ENV_KEYS
         .iter()
         .filter_map(|key| {
-            env::var_os(key).map(|value| {
-                (
-                    (*key).to_string(),
-                    sanitize_reported_value(&value.to_string_lossy()),
-                )
-            })
+            env::var_os(key).map(|value| ((*key).to_string(), sanitize_session_value(key, &value)))
         })
         .collect()
+}
+
+fn sanitize_session_value(key: &str, value: &std::ffi::OsStr) -> String {
+    if key == "WAYLAND_DISPLAY" && Path::new(value).is_absolute() {
+        "<absolute socket path redacted>".to_string()
+    } else {
+        sanitize_reported_value(&value.to_string_lossy())
+    }
 }
 
 fn parse_os_release(content: &str) -> BTreeMap<String, String> {
@@ -397,6 +400,9 @@ fn sanitize_doctor_summary(id: &str, summary: &str) -> String {
 fn sanitize_doctor_detail(id: &str, detail: Option<String>) -> Option<String> {
     let detail = detail?;
     match id {
+        "backend.host_display" if detail.starts_with("WAYLAND_DISPLAY=/") => {
+            Some("WAYLAND_DISPLAY=<absolute socket path redacted>".to_string())
+        }
         "backend.display" | "backend.host_display" | "backend.dri" | "session.dbus" => {
             Some(sanitize_reported_value(&detail))
         }
@@ -647,9 +653,12 @@ fn normalize_ipc_response(response: Value) -> QueryProbe {
         return QueryProbe::failed("IPC response is missing a boolean `success` field");
     };
     if success {
+        let Some(data) = response.get("data").filter(|data| data.is_object()) else {
+            return QueryProbe::failed("IPC response is missing an object `data` field");
+        };
         QueryProbe {
             success: true,
-            data: response.get("data").cloned(),
+            data: Some(data.clone()),
             error: None,
         }
     } else {
@@ -913,6 +922,57 @@ SECRET_TOKEN=do-not-copy
         assert!(!sanitized.contains('\n'));
         assert!(sanitized.ends_with('…'));
         assert!(sanitized.chars().count() <= MAX_REPORTED_VALUE_CHARS + 1);
+    }
+
+    #[test]
+    fn successful_ipc_probes_require_object_data() {
+        for response in [
+            json!({"success": true}),
+            json!({"success": true, "data": null}),
+            json!({"success": true, "data": "PRIVATE_SENTINEL"}),
+            json!({"success": true, "data": []}),
+            json!({"success": true, "data": 42}),
+        ] {
+            let probe = normalize_ipc_response(response);
+            assert!(!probe.success);
+            assert!(probe.data.is_none());
+            assert!(
+                !serde_json::to_string(&probe)
+                    .unwrap()
+                    .contains("PRIVATE_SENTINEL")
+            );
+        }
+        assert!(normalize_ipc_response(json!({"success": true, "data": {}})).success);
+    }
+
+    #[test]
+    fn absolute_wayland_socket_paths_are_redacted_in_both_report_sources() {
+        let socket = std::ffi::OsStr::new("/home/PRIVATE_SENTINEL/socket");
+        assert_eq!(
+            sanitize_session_value("WAYLAND_DISPLAY", socket),
+            "<absolute socket path redacted>"
+        );
+        assert_eq!(
+            sanitize_session_value("WAYLAND_DISPLAY", std::ffi::OsStr::new("wayland-1")),
+            "wayland-1"
+        );
+        assert_eq!(
+            sanitize_doctor_detail(
+                "backend.host_display",
+                Some(format!(
+                    "WAYLAND_DISPLAY={}, DISPLAY=:0",
+                    socket.to_string_lossy()
+                ))
+            ),
+            Some("WAYLAND_DISPLAY=<absolute socket path redacted>".to_string())
+        );
+        assert_eq!(
+            sanitize_doctor_detail(
+                "backend.host_display",
+                Some("WAYLAND_DISPLAY=wayland-1".to_string())
+            ),
+            Some("WAYLAND_DISPLAY=wayland-1".to_string())
+        );
     }
 
     #[test]

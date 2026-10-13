@@ -197,9 +197,14 @@ Wayland 行按 `get_capture_status` 的真实能力决定执行或跳过(嵌套
 后端不服务帧捕获,如实记 skip),在 X11 行用 `xwd` 抓取 Xephyr
 根窗口验证像素可读。
 
+窗口生命周期步骤记录新窗口的 ID，确认聚焦后才发送关闭命令，并验证
+同一个 ID 已消失。其他窗口退出导致数量下降不会被误判为通过。
+失败日志最多读取末尾 64 KiB，再提取最后几行；非 UTF-8 字节容错显示，
+大日志或无换行长行也不会造成无界读取。
+
 **x11rb vs xcb 差分**:两个 X11 传输在各自的 Xephyr 里执行同一段
-固定 16 阶段 IPC 场景,截取 17 份归一化可观测状态快照(窗口
-class/tags/浮动/minimized/几何/焦点 + 工作区布局/占用;传输相关 id
+固定 18 阶段 IPC 场景,截取 19 份归一化可观测状态快照(窗口
+class/tags/浮动/minimized/maximized/几何/焦点 + 工作区布局/占用;传输相关 id
 与异步标题按定义排除)。新增的动态阶段从 `get_windows` 选择连续两次
 稳定的当前焦点窗口,发送 `minimize`,等待 `is_minimized=true`、失焦和
 窗口完全停靠到桌面左侧同时收敛;随后用该传输自己的 window id 发送
@@ -212,7 +217,7 @@ class/tags/浮动/minimized/几何/焦点 + 工作区布局/占用;传输相关 
 场景还覆盖易分歧的平铺策略面:两窗主区/栈区分割、
 `setlayout`(tile/monocle)、`setmfact`、`incnmaster` 增减、`zoom`、
 `focusstack`、`movestack`、`togglebar`(工作区变化)、tag 往返、
-`togglefloating`。两个映射阶段都启动
+`togglemaximize` 往返、`togglefloating`。两个映射阶段都启动
 *同一个*已解析客户端(xterm):单一可靠客户端映射两次可保证被管理
 窗口集确定;异构 libXt 客户端(xclock/xeyes)启动时创建瞬时窗口会
 把客户端启动时序泄漏进对比。任一快照不一致即整个矩阵失败,并指明

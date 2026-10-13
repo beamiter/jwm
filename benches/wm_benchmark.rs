@@ -733,6 +733,31 @@ fn benchmark_scrolling_state_steady_sync(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_wallpaper_selection(c: &mut Criterion) {
+    use jwm::jwm::features::wallpaper::{EntryKind, select_wallpapers};
+    use std::path::PathBuf;
+
+    let mut group = c.benchmark_group("Wallpaper Selection");
+    for count in [200, 40_000, 400_000] {
+        group.bench_with_input(
+            BenchmarkId::new("reverse_listing", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let entries = (0..count).rev().map(|index| {
+                        (
+                            PathBuf::from(format!("/images/{index:08}.png")),
+                            EntryKind::File,
+                        )
+                    });
+                    std::hint::black_box(select_wallpapers(entries, |_| unreachable!()));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // 注册所有基准测试
 criterion_group!(
     benches,
@@ -742,6 +767,7 @@ criterion_group!(
     benchmark_remove_clients,
     benchmark_update_clients,
     benchmark_swap_clients,
-    benchmark_scrolling_state_steady_sync
+    benchmark_scrolling_state_steady_sync,
+    benchmark_wallpaper_selection
 );
 criterion_main!(benches);

@@ -51,8 +51,7 @@ build_workspace() (
     log=$(mktemp "${TMPDIR:-/tmp}/jwm-build.XXXXXXXX")
     trap 'rm -f -- "$log"' EXIT
     # Capture both statuses immediately, including when the pipeline fails.
-    # shellcheck disable=SC2086
-    if cargo build --locked --target-dir "$JWM_TARGET_DIR" $CARGO_BUILD_MODE_FLAG $CARGO_JOBS "$@" 2>&1 | tee "$log"; then
+    if cargo build --locked --target-dir "$JWM_TARGET_DIR" "${CARGO_BUILD_MODE_ARGS[@]}" "${CARGO_JOBS_ARGS[@]}" "$@" 2>&1 | tee "$log"; then
         build_status=("${PIPESTATUS[@]}")
     else
         build_status=("${PIPESTATUS[@]}")
@@ -68,8 +67,7 @@ build_workspace() (
         local clean_profile=(--release)
         [[ "$BUILD_MODE" == release ]] || clean_profile=(--profile dev)
         cargo clean -p xcb "${clean_profile[@]}" --target-dir "$JWM_TARGET_DIR" || return $?
-        # shellcheck disable=SC2086
-        cargo build --locked --target-dir "$JWM_TARGET_DIR" $CARGO_BUILD_MODE_FLAG $CARGO_JOBS "$@"
+        cargo build --locked --target-dir "$JWM_TARGET_DIR" "${CARGO_BUILD_MODE_ARGS[@]}" "${CARGO_JOBS_ARGS[@]}" "$@"
         return $?
     fi
     return "$status"
@@ -124,6 +122,7 @@ JOBS=""
 # 帮助信息
 # ============================================================
 usage() {
+    local status=${1:-0}
     cat <<EOF
 用法: $(basename "$0") [选项]
 
@@ -160,7 +159,7 @@ usage() {
   $(basename "$0") -b xcb_bar --skip-jwm     # 仅安装该 bar
   $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不安装 bar
 EOF
-    exit 0
+    exit "$status"
 }
 
 list_bars() {
@@ -212,12 +211,20 @@ add_selected_bars() {
     done
 }
 
+require_option_value() {
+    if [[ $# -lt 2 || -z $2 || $2 == -* ]]; then
+        err "$1 需要参数值"
+        exit 2
+    fi
+}
+
 # ============================================================
 # 参数解析
 # ============================================================
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--mode)
+            require_option_value "$@"
             BUILD_MODE="$2"
             if [[ "$BUILD_MODE" != "debug" && "$BUILD_MODE" != "release" ]]; then
                 err "构建模式必须是 debug 或 release"
@@ -226,6 +233,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -b|--bar)
+            require_option_value "$@"
             add_selected_bars "$2"
             shift 2
             ;;
@@ -233,7 +241,12 @@ while [[ $# -gt 0 ]]; do
             list_bars
             ;;
         -j|--jobs)
+            require_option_value "$@"
             JOBS="$2"
+            if [[ ! $JOBS =~ ^[1-9][0-9]*$ ]]; then
+                err "并行编译任务数必须是正整数: $JOBS"
+                exit 2
+            fi
             shift 2
             ;;
         --gen-config)
@@ -253,7 +266,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             err "未知选项: $1"
-            usage
+            usage 2
             ;;
     esac
 done
@@ -262,16 +275,16 @@ done
 # 构建参数
 # ============================================================
 if [[ "$BUILD_MODE" == "release" ]]; then
-    CARGO_INSTALL_MODE_FLAG=""
-    CARGO_BUILD_MODE_FLAG="--release"
+    CARGO_INSTALL_MODE_ARGS=()
+    CARGO_BUILD_MODE_ARGS=(--release)
 else
-    CARGO_INSTALL_MODE_FLAG="--debug"
-    CARGO_BUILD_MODE_FLAG=""
+    CARGO_INSTALL_MODE_ARGS=(--debug)
+    CARGO_BUILD_MODE_ARGS=()
 fi
 
-CARGO_JOBS=""
+CARGO_JOBS_ARGS=()
 if [[ -n "$JOBS" ]]; then
-    CARGO_JOBS="-j $JOBS"
+    CARGO_JOBS_ARGS=(-j "$JOBS")
 fi
 
 # ============================================================
@@ -314,6 +327,14 @@ target_user_home() {
     fi
 
     echo "$target_home"
+}
+
+target_user_data_home() {
+    if [[ ${XDG_DATA_HOME:-} == /* ]]; then
+        printf '%s\n' "$XDG_DATA_HOME"
+    else
+        printf '%s/.local/share\n' "$(target_user_home)"
+    fi
 }
 
 jwm_config_dir() {
@@ -488,8 +509,7 @@ build_bar() {
     fi
 
     info "安装 $bar（$BUILD_MODE 模式）..."
-    # shellcheck disable=SC2086
-    cargo install --locked --target-dir "$JWM_TARGET_DIR/bar-install/$bar" --path "$bar_dir" --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
+    cargo install --locked --target-dir "$JWM_TARGET_DIR/bar-install/$bar" --path "$bar_dir" --force "${CARGO_INSTALL_MODE_ARGS[@]}" "${CARGO_JOBS_ARGS[@]}" --root "$(cargo_install_root)"
 
     ok "$bar 安装完成: $(cargo_bin_dir)"
 }
@@ -637,7 +657,6 @@ build_and_install_bridge() {
     fi
 
     info "编译 jwm-bridge（$BUILD_MODE 模式）..."
-    # shellcheck disable=SC2086
     (cd "$PROJECT_ROOT" && build_workspace -p jwm-bridge)
 
     local bridge_target="$JWM_TARGET_DIR"
@@ -652,8 +671,14 @@ build_and_install_bridge() {
 
     # D-Bus 按需激活：应用第一次调用 Notify 时总线才启动 bridge，
     # 不需要写进任何 autostart，也能在 jwm 重启后继续工作。
-    install -Dm644 "$bridge_dir/dist/org.freedesktop.Notifications.service" \
-        "$HOME/.local/share/dbus-1/services/org.freedesktop.Notifications.service"
+    local service_destination
+    service_destination="$(target_user_data_home)/dbus-1/services/org.freedesktop.Notifications.service"
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" install -Dm644 \
+            "$bridge_dir/dist/org.freedesktop.Notifications.service" "$service_destination"
+    else
+        install -Dm644 "$bridge_dir/dist/org.freedesktop.Notifications.service" "$service_destination"
+    fi
 
     ok "jwm-bridge 安装完成，并已注册 org.freedesktop.Notifications 激活文件"
 }
@@ -671,7 +696,6 @@ build_and_install_jwm() {
     cd "$PROJECT_ROOT"
 
     # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support/jwm-remote 写入 cargo bin。
-    # shellcheck disable=SC2086
     build_workspace
 
     local target_dir="$JWM_TARGET_DIR"

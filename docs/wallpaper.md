@@ -31,7 +31,10 @@ back to `~/Pictures/Wallpapers`, then `~/Pictures`. A leading `~` is expanded.
 
 `png`, `jpg`, `jpeg`, `webp`, `bmp`, and `gif` are listed, sorted
 case-insensitively by name (names that differ only in case keep a fixed
-order), and capped at 200 entries. The directory is read on a worker thread:
+order), and capped at 200 entries. Selection keeps at most 400 candidates
+in memory while reading the directory, retaining the first 200 names in
+global order even when better names arrive at the end of the scan.
+The directory is read on a worker thread:
 the panel opens at once with a `Scanning…` status line and the rows fill in
 when the listing lands, so an enormous pictures directory or a slow network
 mount never stalls the frame that opened the panel. Choosing the directory
@@ -81,6 +84,45 @@ jwm-tool msg set_config --args '{"key": "behavior.wallpaper_mode", "value": "fit
 
 `wallpaper_mode` accepts `fill`, `fit`, `stretch`, or `center`, and rejects
 anything else rather than silently falling back.
+
+## Daily rotation and different screens
+
+```toml
+[behavior]
+wallpaper_rotation = "daily" # "off" restores static wallpaper selection
+wallpaper_rotation_paths = [
+  "/home/me/.local/share/jwm/wallpapers/01.png",
+  "/home/me/.local/share/jwm/wallpapers/02.png",
+  "/home/me/.local/share/jwm/wallpapers/03.png",
+]
+```
+
+The ordered collection advances by one image on each local calendar date.
+Screens use consecutive offsets, so up to the collection's image count are
+different at the same time. With 14 images the cycle repeats every 14 days;
+more than 14 screens necessarily reuse images. The assignment uses current
+output order, so connecting or removing a screen may shift its image.
+
+Selection is applied on startup, configuration changes, and output changes.
+The existing maintenance tick notices midnight or a clock/date correction
+within about a second; no external timer or daemon is needed. Image loading
+remains asynchronous on X11, Wayland, and compositor-off X11. Theme colors
+follow the first output's selected image.
+
+Daily selection takes precedence over static `wallpaper`, `wallpaper_monitors`
+and `wallpaper_tags`, leaving those values intact for when rotation is off.
+The collection must be nonempty, contain unique nonempty paths, and have at
+most 366 entries (each at most 4096 bytes). These two fields support atomic
+IPC updates through `set_config_batch`; file edits are needed for persistence.
+
+Inspect today's selected paths with:
+
+```sh
+jwm-tool msg get_config --args '{"keys":["wallpaper_rotation","wallpaper_rotation_paths","wallpaper_rotation_local_date","wallpaper_rotation_assignments"]}'
+```
+
+`wallpaper_rotation_assignments` reports the selected path and display mode
+for each screen. It describes selection, rather than decoder completion.
 
 ## Colours from the wallpaper
 

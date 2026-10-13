@@ -1,0 +1,126 @@
+{
+  "generator": "built-in image_gen",
+  "count": 14,
+  "rotation_enabled": true,
+  "multimonitor_assignment_enabled": true,
+  "files": [
+    {
+      "file": "01-alpine-dawn.png",
+      "title": "冰湖晨曦",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2458034,
+      "sha256": "ecc8a13de1994d2776bb235806608ce636a666e5accf8355ece85e8eaed975ba"
+    },
+    {
+      "file": "02-ocean-aerial.png",
+      "title": "浅海潮汐",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2699510,
+      "sha256": "d4e3b610964a5b96b5d49aaa7b10b5e9364708191b6bbf55f8a5f0e135f2d417"
+    },
+    {
+      "file": "03-aurora-fjord.png",
+      "title": "极光峡湾",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2441790,
+      "sha256": "ca3ffecc691dfd925bc17aa82044e2c2f304436287b59685a5d74ddd29037d9e"
+    },
+    {
+      "file": "04-desert-silence.png",
+      "title": "沙丘静语",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2137332,
+      "sha256": "f859670043458da4d74f823b3409ae235577054186e1de2e0b2a60c1c2a2a9ca"
+    },
+    {
+      "file": "05-bamboo-mist.png",
+      "title": "竹林云雾",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2838441,
+      "sha256": "ea769859b72c31ddd6b6e5275eb53df0de3c5e1ad39fc3f7d21a640afd2661f2"
+    },
+    {
+      "file": "06-autumn-valley.png",
+      "title": "秋山流光",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2809547,
+      "sha256": "405edc821b4ad8306042cbbf9d89cff5d982be9fc5aa0d5c75b22e5d513202e7"
+    },
+    {
+      "file": "07-moss-waterfall.png",
+      "title": "苔谷瀑声",
+      "width": 1672,
+      "height": 941,
+      "bytes": 3132222,
+      "sha256": "7b4a410a6d1455f62caabfd92a4d41454982f1a7551e3fa10df40dba582fa6c7"
+    },
+    {
+      "file": "08-cloud-sea.png",
+      "title": "云海日出",
+      "width": 1672,
+      "height": 941,
+      "bytes": 1893021,
+      "sha256": "f41983284b398f24b3310935ebfa785aa323c4e089b897972b86bb7d22552a48"
+    },
+    {
+      "file": "09-starry-dunes.png",
+      "title": "星河远境",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2566580,
+      "sha256": "d7dd59f05abed405be7452b54eabb2566c17e970cdc56484afd193678db82925"
+    },
+    {
+      "file": "10-volcanic-coast.png",
+      "title": "玄岩金浪",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2462993,
+      "sha256": "0714bcd174e7b8d9fe1492c3d307b55f10080f2263c1ddefda6a9bc57d771d2f"
+    },
+    {
+      "file": "11-silk-waves.png",
+      "title": "流体丝光",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2068906,
+      "sha256": "011185450d153e5e1a3c93b3a1b6392a243d178f0f14c7eb4f49b8e6ce24367c"
+    },
+    {
+      "file": "12-violet-nebula.png",
+      "title": "紫境星云",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2599950,
+      "sha256": "8e443980fbe807ef0baf05a3e35922715c1e5f68b9cdeb1223a1e4272c0a22e6"
+    },
+    {
+      "file": "13-architecture-fog.png",
+      "title": "雾中几何",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2107919,
+      "sha256": "a9cd7672574735b942c33efca6332089b5b2ec0aaa2f3489fed59ec43e948d31"
+    },
+    {
+      "file": "14-luminous-tide.png",
+      "title": "荧海月夜",
+      "width": 1672,
+      "height": 941,
+      "bytes": 2288005,
+      "sha256": "cf112c26c304a3fe5dca948e08a997488baf3d174ae4c1d2b3b2961bfdde3c28"
+    }
+  ],
+  "rotation_policy": "local-calendar-day plus dense output slot, modulo 14",
+  "installed_directory": "/home/ubuntu/.local/share/jwm/wallpapers/jwm-14",
+  "enabled_config_families": [
+    "x11",
+    "wayland"
+  ]
+}

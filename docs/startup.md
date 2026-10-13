@@ -56,7 +56,9 @@ suffixes `.1` through `.127`; if all are occupied, generation returns an error
 and preserves the configuration and existing backups. Older backups with higher
 suffixes remain readable.
 
-Configuration reads, backups and restores accept regular files up to 4 MiB;
+Configuration reads, writes, backups and restores share a 4 MiB limit.
+Theme and layout persistence refuse edits that would cross it before creating
+directories or replacing the existing file. Reads accept regular files;
 special files such as FIFOs are rejected without waiting for a writer. Backups
 preserve the original bytes even when an interrupted edit left invalid TOML or
 UTF-8. Restore atomically replaces the resolved target, preserves existing

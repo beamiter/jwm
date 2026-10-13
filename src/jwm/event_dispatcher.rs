@@ -3246,6 +3246,33 @@ mod tests {
     }
 
     #[test]
+    fn daily_wallpaper_refresh_is_lightweight_and_date_driven() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let now = std::time::Instant::now();
+        let second = std::time::Duration::from_secs(1);
+        let paths = vec!["a".to_string(), "b".to_string()];
+        jwm.configure_wallpaper_rotation_at(&mut backend, "daily", &paths, now, 100);
+        assert_eq!(backend.compositor_monitor_updates, 1);
+        jwm.poll_wallpaper_rotation_at(&mut backend, now, 101);
+        jwm.poll_wallpaper_rotation_at(&mut backend, now + second, 100);
+        assert_eq!(backend.compositor_monitor_updates, 1);
+        jwm.poll_wallpaper_rotation_at(&mut backend, now + second * 2, 101);
+        jwm.poll_wallpaper_rotation_at(&mut backend, now + second * 3, 99);
+        assert_eq!(backend.compositor_monitor_updates, 3);
+        jwm.configure_wallpaper_rotation_at(&mut backend, "daily", &paths, now, 99);
+        assert_eq!(backend.compositor_monitor_updates, 3);
+        jwm.configure_wallpaper_rotation_at(&mut backend, "daily", &["c".to_string()], now, 99);
+        assert_eq!(backend.compositor_monitor_updates, 4);
+        jwm.configure_wallpaper_rotation_at(&mut backend, "off", &paths, now, 99);
+        assert_eq!(backend.compositor_monitor_updates, 5);
+        assert_eq!(jwm.features.wallpaper_rotation.next_wakeup(now), None);
+        jwm.poll_wallpaper_rotation_at(&mut backend, now + second * 4, 102);
+        assert_eq!(backend.compositor_monitor_updates, 5);
+        assert_eq!(backend.compositor_config_applies, 0);
+    }
+
+    #[test]
     fn common_update_reaps_spawned_transient_without_sigchld() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -12996,6 +13023,7 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        next = min_optional_duration(next, self.features.wallpaper_rotation.next_wakeup(now));
         next = min_optional_duration(
             next,
             self.chord_armed_until
@@ -13319,6 +13347,7 @@ impl EventHandler for Jwm {
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
         self.poll_config_reload(backend, now);
+        self.poll_wallpaper_rotation(backend, now);
         // After the reload poll: a pending edit of the user's gets to land
         // before JWM writes its own per-tag layouts over the same file.
         self.flush_layout_persistence(backend, now);

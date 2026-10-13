@@ -644,11 +644,17 @@ fn check_dri(path: &Path) -> DoctorCheck {
     };
     let mut cards = entries
         .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| {
-            name.strip_prefix("card").is_some_and(|suffix| {
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let is_card_name = name.strip_prefix("card").is_some_and(|suffix| {
                 !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
-            })
+            });
+            // Follow device symlinks, but never count an ordinary file or
+            // directory merely because its name resembles a DRM card node.
+            (is_card_name
+                && fs::metadata(entry.path())
+                    .is_ok_and(|metadata| metadata.file_type().is_char_device()))
+            .then_some(name)
         })
         .collect::<Vec<_>>();
     cards.sort();
@@ -1088,11 +1094,39 @@ mod tests {
             check_backend_requirements(BackendChoice::WaylandUdev, &inputs)[0].status,
             DoctorStatus::Error
         );
-        fs::write(inputs.dri_dir.join("card0"), []).unwrap();
+        // /dev/null models the character-device type only; this test does
+        // not probe a DRM driver or claim that this node can run KMS.
+        std::os::unix::fs::symlink("/dev/null", inputs.dri_dir.join("card0")).unwrap();
         assert_eq!(
             check_backend_requirements(BackendChoice::WaylandUdev, &inputs)[0].status,
             DoctorStatus::Pass
         );
+    }
+
+    #[test]
+    fn dri_check_requires_a_directory_with_named_character_devices() {
+        let root = TestDir::new();
+        let dri = root.path().join("dri");
+        assert_eq!(check_dri(&dri).status, DoctorStatus::Error);
+        fs::write(&dri, []).unwrap();
+        assert_eq!(check_dri(&dri).status, DoctorStatus::Error);
+        fs::remove_file(&dri).unwrap();
+        fs::create_dir(&dri).unwrap();
+        assert_eq!(check_dri(&dri).status, DoctorStatus::Error);
+
+        fs::write(dri.join("card0"), []).unwrap();
+        fs::create_dir(dri.join("card1")).unwrap();
+        std::os::unix::fs::symlink("missing-device", dri.join("card2")).unwrap();
+        for lookalike in ["card", "card3-extra", "cardX", "card٣", "renderD128"] {
+            std::os::unix::fs::symlink("/dev/null", dri.join(lookalike)).unwrap();
+        }
+        assert_eq!(check_dri(&dri).status, DoctorStatus::Error);
+
+        // Model the filesystem type independently of actual DRM hardware.
+        std::os::unix::fs::symlink("/dev/null", dri.join("card10")).unwrap();
+        let check = check_dri(&dri);
+        assert_eq!(check.status, DoctorStatus::Pass);
+        assert_eq!(check.detail.as_deref(), Some("card10"));
     }
 
     #[test]

@@ -170,6 +170,23 @@ animation for the duration of the benchmark window, or uses the one already
 running (visible on screen either way; see Recording for when it is
 unavailable).
 
+## Wallpaper selection microbenchmark
+
+The wallpaper picker retains at most 400 candidates while selecting the first
+200 names from the entire listing. Its candidate storage therefore stays
+bounded as a directory grows, while case-insensitive ordering and path tie
+breaks stay deterministic.
+
+```sh
+cargo bench --locked --bench wm_benchmark -- 'Wallpaper Selection'
+```
+
+This benchmark generates regular-file candidates in reverse order at 200,
+40,000, and 400,000 entries. It includes path and sort-key construction;
+it excludes filesystem reads, image decoding, and compositor rendering.
+Compare runs on the same host and toolchain. It does not measure frame time
+or replace the compositor budgets below.
+
 ## Budgets (v1)
 
 `jwm-tool perf budgets` prints the authoritative table; in summary:

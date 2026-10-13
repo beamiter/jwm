@@ -6354,6 +6354,8 @@ impl Jwm {
             "wallpaper_crossfade": cfg.behavior().wallpaper_crossfade,
             "wallpaper_crossfade_duration_ms": cfg.behavior().wallpaper_crossfade_duration_ms,
             "wallpaper_dir": cfg.behavior().wallpaper_dir,
+            "wallpaper_rotation": cfg.behavior().wallpaper_rotation,
+            "wallpaper_rotation_paths": cfg.behavior().wallpaper_rotation_paths,
             "overview_thumbnail_gap": cfg.behavior().overview_thumbnail_gap,
             "wobbly_stiffness": cfg.behavior().wobbly_stiffness,
             "wobbly_damping": cfg.behavior().wobbly_damping,
@@ -6560,6 +6562,35 @@ impl Jwm {
             for (key, value) in more {
                 base.insert(key.clone(), value.clone());
             }
+        }
+        // Report the same dense output slots used by the wallpaper consumers,
+        // so callers can verify today's per-screen selection without opening
+        // the image files or rewriting the configuration.
+        let date = chrono::Local::now().date_naive();
+        let day = chrono::Datelike::num_days_from_ce(&date);
+        let assignments: Vec<_> = self
+            .state
+            .monitor_order
+            .iter()
+            .filter_map(|key| self.state.monitors.get(*key))
+            .enumerate()
+            .map(|(slot, monitor)| {
+                let (path, mode) =
+                    crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at(
+                        cfg.behavior(),
+                        slot as u32,
+                        monitor.get_active_tags(),
+                        day,
+                    );
+                serde_json::json!({"monitor": slot, "path": path, "mode": mode})
+            })
+            .collect();
+        if let Some(base) = full.as_object_mut() {
+            base.insert(
+                "wallpaper_rotation_local_date".into(),
+                date.to_string().into(),
+            );
+            base.insert("wallpaper_rotation_assignments".into(), assignments.into());
         }
         let Some(keys) = args.get("keys").and_then(|v| v.as_array()) else {
             return full;

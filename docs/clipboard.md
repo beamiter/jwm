@@ -34,6 +34,11 @@ column (in memory only — never written to disk) plus position and a label
 like `PNG 1920×1080  1.2M`; while the thumbnail is still decoding the
 FontAwesome image glyph stands in.
 
+Rebuilding or filtering the list reuses encoded PNG bytes already registered
+for thumbnails, instead of copying every image again on each query change.
+The content hash still verifies the image identity; decoding stays on the
+existing thumbnail worker.
+
 Copying something already in the history moves it back to the top instead of
 adding a duplicate — the list is "what I might paste next", so recency is the
 useful order. Text and PNG share one newest-first list; identical PNG bytes

@@ -48,6 +48,10 @@ pub const UNLOCK_GRACE: Duration = Duration::from_secs(60);
 /// the rest of the idle period because of it.
 pub const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Back off failed server-blanker suppression, including backends whose
+/// default implementation has no server blanker to change.
+const SAVER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// How many times in a row a refusal whose cause the backend did not explain
 /// is retried before it is treated as settled for this idle period. At
 /// [`LOCK_RETRY_INTERVAL`] apart this is a minute of asking, which outlasts a
@@ -185,9 +189,34 @@ pub struct IdleTracker {
     /// nothing to poll for, and the wakeup timer stands down until a read
     /// succeeds again.
     clock_unavailable: bool,
+    saver_retry_at: Option<Instant>,
 }
 
 impl IdleTracker {
+    /// A failed request must not be remembered as success. The regular idle
+    /// poll supplies retries without adding a separate maintenance timer.
+    fn suppress_server_saver(
+        &mut self,
+        suppressed: bool,
+        now: Instant,
+        suppress: impl FnOnce() -> bool,
+    ) -> bool {
+        if suppressed {
+            self.saver_retry_at = None;
+            return true;
+        }
+        if self.saver_retry_at.is_some_and(|retry_at| now < retry_at) {
+            return false;
+        }
+        if suppress() {
+            self.saver_retry_at = None;
+            true
+        } else {
+            self.saver_retry_at = Some(now + SAVER_RETRY_INTERVAL);
+            false
+        }
+    }
+
     /// The actions to perform now, given how long the session has been idle.
     ///
     /// `inhibited` covers everything that should hold the session awake — the
@@ -474,11 +503,13 @@ impl crate::jwm::Jwm {
         // the X server's blanker resets the very clock read above, so a stage
         // later than the server's own timeout would never be reached. Once
         // this session has a policy, it is the only one.
-        if !self.server_saver_suppressed {
+        if !self.server_saver_suppressed
+            && self
+                .idle
+                .suppress_server_saver(false, now, || backend.suppress_server_screensaver())
+        {
             self.server_saver_suppressed = true;
-            if backend.suppress_server_screensaver() {
-                log::info!("Idle: the display server's own blanking is now off");
-            }
+            log::info!("Idle: the display server's own blanking is now off");
         }
 
         let inhibited = self.idle_inhibited
@@ -789,6 +820,44 @@ fn run_idle_command(what: &str, command: &str) -> Option<std::process::Child> {
 mod tests {
     use super::*;
     use crate::jwm::features::monitor_lock::test_support::{LockSpyBackend, jwm_on_two_monitors};
+
+    #[test]
+    fn server_saver_failures_retry_and_success_stops_requests() {
+        let now = Instant::now();
+        let mut tracker = IdleTracker::default();
+        assert!(!tracker.suppress_server_saver(false, now, || false));
+        assert!(!tracker.suppress_server_saver(false, now + secs(1), || {
+            panic!("suppression retried before its deadline")
+        }));
+        assert!(tracker.suppress_server_saver(false, now + SAVER_RETRY_INTERVAL, || true));
+        assert!(tracker.suppress_server_saver(true, now + secs(20), || {
+            panic!("successful suppression must not be repeated")
+        }));
+    }
+
+    #[test]
+    fn unsupported_server_saver_is_rate_limited_without_a_new_wakeup() {
+        let now = Instant::now();
+        let mut tracker = IdleTracker::default();
+        let mut calls = 0;
+        for second in 0..=12 {
+            assert!(
+                !tracker.suppress_server_saver(false, now + secs(second), || {
+                    calls += 1;
+                    false
+                })
+            );
+        }
+        assert_eq!(calls, 3, "requests happen at 0, 5 and 10 seconds");
+        // The existing one-second poll wakes at the retry deadline. Missing
+        // clocks and disabled idle settings continue to need no timer.
+        assert_eq!(
+            idle_poll_wakeup(true, true, false, Some(now + secs(4)), now + secs(4)),
+            Some(POLL_INTERVAL)
+        );
+        assert_eq!(idle_poll_wakeup(false, true, false, Some(now), now), None);
+        assert_eq!(idle_poll_wakeup(true, false, false, Some(now), now), None);
+    }
 
     fn settings() -> IdleSettings {
         IdleSettings::from_secs(60, 0.3, 300, 600, true)

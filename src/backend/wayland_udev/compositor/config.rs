@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::compositor_common::effects::finite_clamp;
 use crate::backend::compositor_common::wallpaper::{
-    parse_wallpaper_mode, resolve_wallpaper_for_tag,
+    parse_wallpaper_mode, resolve_wallpaper_for_tag_at,
 };
 use crate::config::CONFIG;
 use crate::core::animation::AnimationSpeed;
@@ -1807,6 +1807,7 @@ impl WaylandCompositor {
 
         let cfg = CONFIG.load();
         let behavior = cfg.behavior();
+        let day = chrono::Datelike::num_days_from_ce(&chrono::Local::now().date_naive());
 
         if geometry_changed {
             self.retired_wallpaper_textures.extend(
@@ -1818,7 +1819,16 @@ impl WaylandCompositor {
         }
 
         for (slot, &(idx, x, y, w, h, active_tags)) in monitors.iter().enumerate() {
-            let (path, mode_str) = resolve_wallpaper_for_tag(behavior, idx, active_tags);
+            let (path, mode_str) = resolve_wallpaper_for_tag_at(
+                behavior,
+                if behavior.wallpaper_rotation == "daily" {
+                    slot as u32
+                } else {
+                    idx
+                },
+                active_tags,
+                day,
+            );
             let path = path.to_string();
             let mode = parse_wallpaper_mode(mode_str);
 

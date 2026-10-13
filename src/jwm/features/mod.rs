@@ -46,6 +46,7 @@ pub mod tags_overview;
 pub mod toggles;
 pub mod wallpaper;
 pub mod wallpaper_colors;
+pub mod wallpaper_rotation;
 
 pub use audio_recording::AudioRecordingState;
 pub use calendar::CalendarView;
@@ -195,6 +196,8 @@ pub struct FeatureStates {
     /// The wallpaper the last extraction was started for, so a config apply
     /// that changed something else does not decode the same picture again.
     pub themed_wallpaper: String,
+    /// Last observed local date and the enabled daily rotation check deadline.
+    pub wallpaper_rotation: wallpaper_rotation::WallpaperRotationState,
     /// The palette in use and the wallpaper it came from, published over IPC
     /// so the status bar can match it. The two travel together because a
     /// wallpaper with no colour to take leaves the previous palette in place,

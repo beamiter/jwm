@@ -41,12 +41,23 @@ const MAX_IPC_FRAME_BYTES: usize = 1024 * 1024;
 /// Bytes already read stay in `frame` when the underlying reader times out;
 /// subscription callers can therefore poll cancellation without corrupting a
 /// fragmented JSON value.
+#[cfg(test)]
 fn read_bounded_frame<R: BufRead>(
     reader: &mut R,
     frame: &mut Vec<u8>,
     limit: usize,
 ) -> io::Result<bool> {
+    read_bounded_frame_checked(reader, frame, limit, || Ok(()))
+}
+
+fn read_bounded_frame_checked<R: BufRead>(
+    reader: &mut R,
+    frame: &mut Vec<u8>,
+    limit: usize,
+    mut check: impl FnMut() -> io::Result<()>,
+) -> io::Result<bool> {
     loop {
+        check()?;
         let available = match reader.fill_buf() {
             Ok(available) => available,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -153,13 +164,11 @@ impl JwmIpc {
         stream.flush()?;
 
         let mut reader = BufReader::new(stream);
-        let mut frame = Vec::with_capacity(4096);
-        if !read_bounded_frame(&mut reader, &mut frame, MAX_IPC_FRAME_BYTES)? {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "jwm closed the socket without responding",
-            ));
-        }
+        let frame = jwm_ipc_transport::read_frame_until(
+            &mut reader,
+            MAX_IPC_FRAME_BYTES,
+            std::time::Instant::now() + IO_TIMEOUT,
+        )?;
         let response: Value = serde_json::from_slice(&frame)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         if response
@@ -240,7 +249,17 @@ fn pump_events(
         if sink.is_closed() {
             return Ok(EventPumpExit::ReceiverClosed);
         }
-        match read_bounded_frame(&mut reader, &mut frame, MAX_IPC_FRAME_BYTES) {
+        match read_bounded_frame_checked(&mut reader, &mut frame, MAX_IPC_FRAME_BYTES, || {
+            if sink.is_closed() {
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "event receiver closed",
+                ))
+            } else {
+                Ok(())
+            }
+        }) {
+            Err(_) if sink.is_closed() => return Ok(EventPumpExit::ReceiverClosed),
             Ok(false) => return Ok(EventPumpExit::StreamClosed),
             Ok(true) => {}
             Err(error)
@@ -557,6 +576,35 @@ mod tests {
     }
 
     #[test]
+    fn a_query_deadline_covers_the_whole_trickled_response() {
+        let dir = ScratchDir::new(0o700);
+        let listener = UnixListener::bind(dir.socket()).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_write_timeout(Some(TEST_TIMEOUT)).unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let stop_at = std::time::Instant::now() + IO_TIMEOUT + Duration::from_secs(1);
+            while !server_stop.load(Ordering::Relaxed) && std::time::Instant::now() < stop_at {
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = std::time::Instant::now();
+        let result = runtime_client(&dir).query("get_version");
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < IO_TIMEOUT + Duration::from_secs(1));
+    }
+
+    #[test]
     fn bounded_frame_reader_preserves_frame_boundaries() {
         let mut reader = Cursor::new(b"first\nnext\nunterminated".as_slice());
         let mut frame = Vec::new();
@@ -611,6 +659,74 @@ mod tests {
         writer.write_all(b"\"test\"}\n").unwrap();
         assert!(read_bounded_frame(&mut reader, &mut frame, 64).unwrap());
         assert_eq!(frame, br#"{"event":"test"}"#);
+    }
+
+    #[test]
+    fn subscription_keeps_partial_frames_across_idle_cancellation_polls() {
+        let dir = ScratchDir::new(0o700);
+        let listener = UnixListener::bind(dir.socket()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_write_timeout(Some(TEST_TIMEOUT)).unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            stream.write_all(b"{\"event\":").unwrap();
+            std::thread::sleep(RECEIVER_CLOSED_POLL + Duration::from_millis(100));
+            stream.write_all(b"\"test\"}\n").unwrap();
+        });
+        let (sink, mut receiver) = tokio::sync::mpsc::channel(1);
+        let ipc = runtime_client(&dir);
+        let worker = std::thread::spawn(move || {
+            pump_events(&ipc, &serde_json::json!({"subscribe": ["test"]}), &sink)
+        });
+        let event = receiver.blocking_recv();
+        server.join().unwrap();
+        assert_eq!(worker.join().unwrap().unwrap(), EventPumpExit::StreamClosed);
+        assert_eq!(event, Some(serde_json::json!({"event": "test"})));
+    }
+
+    #[test]
+    fn partial_trickle_does_not_prevent_subscription_cancellation() {
+        let dir = ScratchDir::new(0o700);
+        let listener = UnixListener::bind(dir.socket()).unwrap();
+        let (sink, receiver) = tokio::sync::mpsc::channel(1);
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (finished_tx, finished_rx) = std_mpsc::channel();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_write_timeout(Some(TEST_TIMEOUT)).unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            stream.write_all(b"{").unwrap();
+            started_tx.send(()).unwrap();
+            while !server_stop.load(Ordering::Relaxed) {
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let ipc = runtime_client(&dir);
+        let worker = std::thread::spawn(move || {
+            let result = pump_events(&ipc, &serde_json::json!({"subscribe": ["test"]}), &sink);
+            finished_tx.send(result).unwrap();
+        });
+        started_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+        // Give the reader time to enter the incomplete frame while the
+        // server continues sending faster than its read timeout.
+        std::thread::sleep(Duration::from_millis(40));
+        drop(receiver);
+        let finished = finished_rx.recv_timeout(Duration::from_secs(1));
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        worker.join().unwrap();
+        assert_eq!(finished.unwrap().unwrap(), EventPumpExit::ReceiverClosed);
     }
 
     #[test]

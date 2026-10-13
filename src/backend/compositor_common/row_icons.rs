@@ -187,13 +187,26 @@ pub(crate) fn memory_icon_key(png_bytes: &[u8]) -> String {
     format!("{MEMORY_ICON_PREFIX}{:016x}", hasher.finish())
 }
 
-/// Remember PNG bytes under `key` for the decode worker. Clipboard history
-/// never writes these to disk; the compositor reads them back by key.
-pub(crate) fn register_memory_icon(key: String, png_bytes: Arc<[u8]>) {
+/// Register borrowed bytes only when the published-band store lacks the key.
+/// Hashing stays with the caller, and copying a large PNG never holds the
+/// store lock. A concurrent insert keeps its existing bytes.
+pub(crate) fn register_memory_icon_bytes(key: String, png_bytes: &[u8]) {
     if !key.starts_with(MEMORY_ICON_PREFIX) || png_bytes.is_empty() {
         return;
     }
-    memory_icons().lock_safe().entry(key).or_insert(png_bytes);
+    register_memory_icon_in(memory_icons(), key, || Arc::<[u8]>::from(png_bytes));
+}
+
+fn register_memory_icon_in(
+    store: &Mutex<HashMap<String, Arc<[u8]>>>,
+    key: String,
+    make_bytes: impl FnOnce() -> Arc<[u8]>,
+) {
+    if store.lock_safe().contains_key(&key) {
+        return;
+    }
+    let bytes = make_bytes();
+    store.lock_safe().entry(key).or_insert(bytes);
 }
 
 fn memory_icon_bytes(key: &str) -> Option<Arc<[u8]>> {
@@ -793,6 +806,58 @@ mod tests {
     }
 
     #[test]
+    fn memory_icon_cache_hits_do_not_construct_payloads() {
+        let store = Mutex::new(HashMap::new());
+        let key = memory_icon_key(b"png bytes");
+        let bytes = Arc::<[u8]>::from(&b"png bytes"[..]);
+        let mut copies = 0;
+        register_memory_icon_in(&store, key.clone(), || {
+            assert!(
+                store.try_lock().is_ok(),
+                "payload construction must not hold the store lock"
+            );
+            copies += 1;
+            bytes.clone()
+        });
+        for _ in 0..50 {
+            register_memory_icon_in(&store, key.clone(), || {
+                panic!("cached bytes must not be copied")
+            });
+        }
+        assert_eq!(copies, 1);
+        assert!(Arc::ptr_eq(&bytes, &store.lock_safe()[&key]));
+        store.lock_safe().clear();
+        register_memory_icon_in(&store, key.clone(), || {
+            copies += 1;
+            bytes.clone()
+        });
+        assert_eq!(copies, 2, "eviction must permit registration again");
+        assert!(Arc::ptr_eq(&bytes, &store.lock_safe()[&key]));
+    }
+
+    #[test]
+    fn memory_icon_concurrent_registration_keeps_existing_payload() {
+        let store = Arc::new(Mutex::new(HashMap::new()));
+        let key = memory_icon_key(b"png bytes");
+        let existing = Arc::<[u8]>::from(&b"existing"[..]);
+        register_memory_icon_in(&store, key.clone(), || {
+            assert!(store.try_lock().is_ok(), "copy runs outside the store lock");
+            // Complete another writer's insertion between the first lookup
+            // and publication. A join makes the interleaving deterministic.
+            let other_store = store.clone();
+            let other_key = key.clone();
+            let other_bytes = existing.clone();
+            std::thread::spawn(move || {
+                register_memory_icon_in(&other_store, other_key, || other_bytes);
+            })
+            .join()
+            .unwrap();
+            Arc::<[u8]>::from(&b"candidate"[..])
+        });
+        assert!(Arc::ptr_eq(&existing, &store.lock_safe()[&key]));
+    }
+
+    #[test]
     fn memory_icon_keys_are_stable_for_identical_bytes() {
         let png = b"\x89PNG\r\n\x1a\nnot-a-real-png";
         let key = memory_icon_key(png);
@@ -803,7 +868,7 @@ mod tests {
         // suite clears it, so the round trip is taken under one lock: a
         // publish landing between a register and the read back would fail
         // this for a reason that has nothing to do with icon keys. What
-        // `register_memory_icon` does with an accepted key is exactly this
+        // `register_memory_icon_bytes` does with an accepted key is exactly this
         // insert.
         {
             let mut store = memory_icons().lock_safe();
@@ -819,8 +884,8 @@ mod tests {
         assert!(memory_icon_bytes(&key).is_none());
 
         // And the guards keep junk out of the store in the first place.
-        register_memory_icon("not-a-memory-key".into(), Arc::<[u8]>::from(png.as_slice()));
-        register_memory_icon(key.clone(), Arc::<[u8]>::from(&b""[..]));
+        register_memory_icon_bytes("not-a-memory-key".into(), png.as_slice());
+        register_memory_icon_bytes(key.clone(), &[]);
         let store = memory_icons().lock_safe();
         assert!(!store.contains_key("not-a-memory-key"));
         assert!(!store.contains_key(&key));

@@ -188,3 +188,128 @@ fn generated_bundle_honors_the_documented_privacy_guarantees() {
         );
     }
 }
+
+#[test]
+fn absolute_wayland_display_is_redacted_from_the_generated_bundle() {
+    let sentinel = "/home/PRIVATE_WAYLAND_SENTINEL/socket";
+    let output = Command::new(env!("CARGO_BIN_EXE_jwm-support"))
+        .args(["--offline", "--compact", "--backend", "wayland-winit"])
+        .env("WAYLAND_DISPLAY", sentinel)
+        .env_remove("DISPLAY")
+        .output()
+        .expect("run support CLI");
+    assert!(output.status.success());
+    let raw = String::from_utf8(output.stdout).unwrap();
+    assert!(!raw.contains("PRIVATE_WAYLAND_SENTINEL"), "{raw}");
+    let bundle: Value = serde_json::from_str(&raw).unwrap();
+    assert_support_bundle_v1(&bundle);
+    assert_eq!(
+        bundle["session_environment"]["WAYLAND_DISPLAY"],
+        "<absolute socket path redacted>"
+    );
+    let host = bundle["doctor"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "backend.host_display")
+        .unwrap();
+    assert_eq!(
+        host["detail"],
+        "WAYLAND_DISPLAY=<absolute socket path redacted>"
+    );
+}
+
+#[test]
+fn strict_cli_rejects_success_frames_without_object_data() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    // This probe needs an X11 backend so its doctor can use a non-local
+    // DISPLAY without touching a desktop or requiring a DRM device.
+    if !jwm::application::BackendChoice::X11rb.is_compiled() {
+        return;
+    }
+    struct ProbeDir(PathBuf);
+    impl Drop for ProbeDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    for response in [
+        serde_json::json!({"success": true, "data": {}}),
+        serde_json::json!({"success": true}),
+        serde_json::json!({"success": true, "data": null}),
+        serde_json::json!({"success": true, "data": "PRIVATE_RESPONSE_SENTINEL"}),
+    ] {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = ProbeDir(
+            std::env::temp_dir().join(format!("jwm-support-probe-{}-{suffix}", std::process::id())),
+        );
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory.0)
+            .unwrap();
+        let listener = UnixListener::bind(directory.0.join("jwm-ipc.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let valid = response["data"].is_object();
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for query in ["get_status", "get_capabilities"] {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "support CLI did not query {query}"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("accept support probe: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["query"], query);
+                writeln!(stream, "{response}").unwrap();
+            }
+        });
+        let output = Command::new(env!("CARGO_BIN_EXE_jwm-support"))
+            .args(["--strict", "--compact", "--backend", "x11rb"])
+            .env("XDG_RUNTIME_DIR", &directory.0)
+            .env("XDG_CONFIG_HOME", directory.0.join("config"))
+            .env("DISPLAY", "remote.example:0")
+            .env_remove("WAYLAND_DISPLAY")
+            .output()
+            .expect("run strict support CLI");
+        peer.join().unwrap();
+        let raw = String::from_utf8(output.stdout).unwrap();
+        let bundle: Value = serde_json::from_str(&raw).unwrap();
+        assert_support_bundle_v1(&bundle);
+        assert_ne!(
+            bundle["doctor"]["status"], "error",
+            "isolated doctor failed: {raw}"
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(if valid { 0 } else { 2 }),
+            "{raw}"
+        );
+        for probe in ["health", "capabilities"] {
+            assert_eq!(bundle["live"][probe]["success"], valid);
+            if !valid {
+                assert!(bundle["live"][probe].get("data").is_none());
+            }
+        }
+        assert!(!raw.contains("PRIVATE_RESPONSE_SENTINEL"));
+    }
+}

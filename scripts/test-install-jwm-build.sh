@@ -30,7 +30,7 @@ if [[ $package == jwm-bridge && $SCENARIO == bridge-failure ]]; then
     echo 'error: bridge compilation failure' >&2
     exit 101
 fi
-if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure ]]; then
+if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure && $SCENARIO != sudo-target && $SCENARIO != xdg-target ]]; then
     count=0
     [[ ! -f $CASE_DIR/count ]] || read -r count < "$CASE_DIR/count"
     count=$((count + 1))
@@ -69,11 +69,30 @@ case "$SCENARIO" in
     tee-cargo|tee-success) exit 74 ;;
 esac
 STUB
+cat > "$TEST_ROOT/bin/id" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${SCENARIO:-} == sudo-target && $* == -u ]]; then
+    printf '0\n'
+else
+    /usr/bin/id "$@"
+fi
+STUB
+cat > "$TEST_ROOT/bin/getent" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${SCENARIO:-} == sudo-target && $* == 'passwd fixture-user' ]]; then
+    printf 'fixture-user:x:1000:1000:Fixture:%s:/bin/bash\n' "$CASE_DIR/login-home"
+else
+    /usr/bin/getent "$@"
+fi
+STUB
 chmod +x "$TEST_ROOT/bin/"*
 fail() { printf 'test-install-jwm-build: FAIL: %s\n' "$*" >&2; exit 1; }
 run_case() {
     local scenario=$1 mode=$2 target=$3 expected=$4 status=0
     export CASE_DIR="$TEST_ROOT/$scenario-$mode" SCENARIO=$scenario
+    local sudo_user='' data_home=''
+    [[ $scenario != sudo-target ]] || sudo_user=fixture-user
+    [[ $scenario != xdg-target ]] || data_home="$CASE_DIR/custom data"
     mkdir -p "$CASE_DIR/home/.cargo/bin" "$CASE_DIR/config/jwm"
     local binary
     for binary in jwm jwm-tool jwm-support jwm-remote; do
@@ -81,7 +100,7 @@ run_case() {
     done
     printf '[status_bar]\nname = "old"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
     cp "$CASE_DIR/config/jwm/config_x11.toml" "$CASE_DIR/config/jwm/config_wayland.toml"
-    TMPDIR="$CASE_DIR" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" CARGO_TARGET_DIR="$target" \
+    TMPDIR="$CASE_DIR" SUDO_USER="$sudo_user" XDG_DATA_HOME="$data_home" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" CARGO_TARGET_DIR="$target" \
         bash "$REPO/scripts/install_jwm_scripts.sh" --mode "$mode" --jobs 2 > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $status == "$expected" ]] || fail "$scenario/$mode status $status, expected $expected"
     for binary in jwm jwm-tool jwm-support jwm-remote; do
@@ -98,6 +117,7 @@ run_case() {
     [[ $target == /* ]] || resolved="$REPO/$target"
     grep -Fq "install <--locked> <--target-dir> <$resolved/bar-install/tao_glow_bar>" "$CASE_DIR/cargo.log" || fail 'bar cache or lock missing'
     grep -Fq "build <--locked> <--target-dir> <$resolved>" "$CASE_DIR/cargo.log" || fail 'workspace target missing'
+    [[ $(grep -c '<-j> <2>' "$CASE_DIR/cargo.log") -ge 2 ]] || fail 'jobs not passed as two arguments to build/install'
     if [[ $expected == 0 ]]; then
         grep -Fq '<-p> <jwm-bridge>' "$CASE_DIR/cargo.log" || fail 'bridge build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
@@ -119,6 +139,11 @@ run_case() {
             ;;
         *) [[ $cleans == 0 ]] || fail 'unexpected clean' ;;
     esac
+    if [[ $scenario == sudo-target ]]; then
+        grep -Fq -- "-u fixture-user install -Dm644 $REPO/bridge/dist/org.freedesktop.Notifications.service $CASE_DIR/login-home/.local/share/dbus-1/services/org.freedesktop.Notifications.service" "$CASE_DIR/system.log" || fail 'sudo bridge activation did not run as login user in login home'
+    elif [[ $scenario == xdg-target ]]; then
+        grep -Fq "$CASE_DIR/custom data/dbus-1/services/org.freedesktop.Notifications.service" "$CASE_DIR/system.log" || fail 'bridge activation ignored XDG_DATA_HOME'
+    fi
     if [[ $scenario == repeated ]]; then
         [[ $(cat "$CASE_DIR/count") == 2 ]] || fail 'recovery retried more than once'
     fi
@@ -126,6 +151,8 @@ run_case() {
 run_case missing release 'custom target' 0
 run_case missing debug "$TEST_ROOT/absolute target" 0
 run_case success debug 'normal target' 0
+run_case sudo-target debug 'sudo target' 0
+run_case xdg-target release 'xdg target' 0
 run_case ordinary release 'failed target' 101
 run_case repeated release 'repeated target' 101
 run_case tee-cargo release 'tee cargo target' 101
@@ -142,5 +169,27 @@ PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.ca
     bash "$REPO/scripts/install_jwm_scripts.sh" --skip-jwm --skip-bar > "$CASE_DIR/output.log" 2>&1
 for binary in jwm jwm-tool jwm-support jwm-remote; do
     [[ $(cat "$CASE_DIR/home/.cargo/bin/$binary") == "old $binary" ]] || fail "--skip-jwm removed $binary"
+done
+# Reject malformed input before any build, installation or config generation.
+check_invalid_args() {
+    local status=0
+    export CASE_DIR="$TEST_ROOT/invalid-$invalid_index" SCENARIO=success
+    mkdir -p "$CASE_DIR/home"
+    PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" \
+        bash "$REPO/scripts/install_jwm_scripts.sh" "$@" > "$CASE_DIR/output.log" 2>&1 || status=$?
+    [[ $status == 2 ]] || fail "invalid arguments returned $status: $*"
+    [[ ! -e $CASE_DIR/cargo.log && ! -e $CASE_DIR/system.log && ! -e $CASE_DIR/home/.config ]] || fail "invalid arguments caused side effects: $*"
+    grep -q '\[ERROR\]' "$CASE_DIR/output.log" || fail "missing argument diagnostic: $*"
+    ((invalid_index += 1))
+}
+invalid_index=0
+check_invalid_args --unknown
+for option in --mode -m --bar -b --jobs -j; do
+    check_invalid_args "$option"
+    check_invalid_args "$option" ''
+    check_invalid_args "$option" --skip-bar
+done
+for value in 0 -1 abc '2 --features backend-xcb' '2 3' 1.5; do
+    check_invalid_args --jobs "$value"
 done
 printf 'test-install-jwm-build: PASS\n'

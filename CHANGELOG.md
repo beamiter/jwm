@@ -7,6 +7,32 @@ monorepo use independent Semantic Versions.
 
 ### Audit follow-up
 
+- Add persistent daily wallpaper rotation with different images per output,
+  shared by X11, Wayland and compositor-off X11. Midnight refresh uses the
+  existing maintenance loop, and turning rotation off restores static settings.
+- Bound complete bridge and portal IPC replies by an absolute deadline, and
+  let a closed event receiver cancel even a continuously trickled partial frame.
+- Retry failed X11 server-blanker suppression with a five-second backoff;
+  remember success only after the backend confirms it.
+- Keep wallpaper selection storage bounded to 400 candidates while preserving
+  the globally first 200 names; add large-listing regression and benchmark cases.
+- Reject invalid source-installer arguments before side effects, preserve
+  Cargo argument boundaries, install bridge activation files as the sudo
+  target user, and honor portal XDG configuration and data directories.
+- Honor desktop file ID precedence in the launcher, including user deletion
+  stubs and renamed overrides; retain application scan budgets.
+- Keep config writes within the reader's 4 MiB limit, refusing theme or layout
+  persistence growth before replacing a reloadable file.
+- Make nested-smoke lifecycle checks follow the newly mapped window's identity,
+  and bound failure-log reads to a UTF-8-tolerant 64 KiB tail.
+- Reuse registered clipboard PNG payloads during list filtering, removing
+  repeated full-image copies while preserving thumbnail cache behavior.
+- Redact absolute Wayland socket paths from both support-bundle sources, and
+  reject malformed successful IPC payloads so strict probes cannot pass them.
+- Require named DRM card entries to be character devices in startup diagnostics,
+  so ordinary files and directories cannot satisfy the hardware presence check.
+- Expand desktop launcher percent literals and name/icon/file fields once,
+  preserving argument boundaries and existing quoting behavior.
 - Preserve the built-in Wayland lock overlay across compositor reconstruction,
   reject unearned popup grabs, and revoke touch sequences across modal ownership
   changes. A narrowly patched, fixed Smithay snapshot accompanies the touch fix.

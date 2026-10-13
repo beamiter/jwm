@@ -1649,6 +1649,7 @@ impl Jwm {
 
         // 8. A new wallpaper means new accent colours, when the user asked for
         // them. The decode runs on a worker; the frame tick adopts the result.
+        self.reset_wallpaper_rotation(Instant::now());
         self.refresh_wallpaper_theme();
         self.features.native_root_key.clear();
         self.ensure_native_root_wallpaper(backend);

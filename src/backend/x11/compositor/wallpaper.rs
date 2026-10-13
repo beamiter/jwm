@@ -12,8 +12,9 @@ fn uses_global_wallpaper_fallback(
     resolved_mode: WallpaperMode,
     global_path: &str,
     global_mode: WallpaperMode,
+    daily_rotation: bool,
 ) -> bool {
-    resolved_path == global_path && resolved_mode == global_mode
+    !daily_rotation && resolved_path == global_path && resolved_mode == global_mode
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,15 +521,26 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
+        let day = chrono::Datelike::num_days_from_ce(&chrono::Local::now().date_naive());
 
-        for &(idx, x, y, w, h, active_tags) in monitors {
-            let (resolved_path, mode_str) = resolve_wallpaper_for_tag(behavior, idx, active_tags);
+        for (slot, &(idx, x, y, w, h, active_tags)) in monitors.iter().enumerate() {
+            let (resolved_path, mode_str) = resolve_wallpaper_for_tag_at(
+                behavior,
+                if behavior.wallpaper_rotation == "daily" {
+                    slot as u32
+                } else {
+                    idx
+                },
+                active_tags,
+                day,
+            );
             let mode = parse_wallpaper_mode(mode_str);
             let uses_global_fallback = uses_global_wallpaper_fallback(
                 resolved_path,
                 mode,
                 &behavior.wallpaper,
                 parse_wallpaper_mode(&behavior.wallpaper_mode),
+                behavior.wallpaper_rotation == "daily",
             );
             // `mw.texture` is reserved for an actual monitor/tag override.
             // Outputs whose resolved configuration equals the global default
@@ -562,7 +574,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     img_h: 0,
                     current_path: override_path,
                 });
-            } else if let Some(mw) = self.monitor_wallpapers.get_mut(idx as usize) {
+            } else if let Some(mw) = self.monitor_wallpapers.get_mut(slot) {
                 if mw.current_path != override_path || mw.mode != mode {
                     mw.mode = mode;
                     mw.current_path.clone_from(&override_path);
@@ -570,7 +582,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     // slower decode of the previous tag's wallpaper must not
                     // race in afterward and overwrite the current selection.
                     self.pending_monitor_wallpapers
-                        .retain(|(pending_idx, _)| *pending_idx != idx as usize);
+                        .retain(|(pending_idx, _)| *pending_idx != slot);
                     if !override_path.is_empty() {
                         let rx = Self::load_wallpaper_async(
                             &override_path,
@@ -578,7 +590,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.screen_h,
                             mode,
                         );
-                        self.pending_monitor_wallpapers.push((idx as usize, rx));
+                        self.pending_monitor_wallpapers.push((slot, rx));
                     } else if let Some(texture) = mw.texture.take() {
                         unsafe {
                             self.gl.delete_texture(texture);
@@ -702,12 +714,24 @@ mod tests {
     }
 
     #[test]
+    fn daily_selection_is_independent_of_global_crossfade() {
+        assert!(!uses_global_wallpaper_fallback(
+            "global.png",
+            WallpaperMode::Fill,
+            "global.png",
+            WallpaperMode::Fill,
+            true,
+        ));
+    }
+
+    #[test]
     fn identical_monitor_selection_reuses_global_texture() {
         assert!(uses_global_wallpaper_fallback(
             "global.png",
             WallpaperMode::Fill,
             "global.png",
             WallpaperMode::Fill,
+            false,
         ));
     }
 
@@ -718,12 +742,14 @@ mod tests {
             WallpaperMode::Fill,
             "global.png",
             WallpaperMode::Fill,
+            false,
         ));
         assert!(!uses_global_wallpaper_fallback(
             "global.png",
             WallpaperMode::Fit,
             "global.png",
             WallpaperMode::Fill,
+            false,
         ));
     }
 }

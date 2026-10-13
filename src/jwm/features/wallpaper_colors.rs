@@ -384,6 +384,17 @@ pub fn hex(rgb: [f32; 3]) -> String {
     )
 }
 
+fn theme_wallpaper_path(behavior: &crate::config::BehaviorConfig, day: i32) -> &str {
+    if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
+        crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at(
+            behavior, 0, 0, day,
+        )
+        .0
+    } else {
+        &behavior.wallpaper
+    }
+}
+
 impl crate::jwm::Jwm {
     /// Start extracting colours when the wallpaper has changed and the
     /// feature is on. Called after every config apply, which is also where a
@@ -392,7 +403,16 @@ impl crate::jwm::Jwm {
         let (enabled, wallpaper) = {
             let cfg = crate::config::CONFIG.load();
             let behavior = cfg.behavior();
-            (behavior.wallpaper_colors, behavior.wallpaper.clone())
+            let day = if behavior.wallpaper_rotation == "daily" {
+                self.features
+                    .wallpaper_rotation
+                    .observed_day()
+                    .unwrap_or_else(super::wallpaper_rotation::local_day)
+            } else {
+                0
+            };
+            let wallpaper = theme_wallpaper_path(behavior, day).to_string();
+            (behavior.wallpaper_colors, wallpaper)
         };
         if !enabled {
             // Nothing is put back: the colours in memory stay until a reload
@@ -511,6 +531,19 @@ mod tests {
             }
         }
         buffer
+    }
+
+    #[test]
+    fn daily_theme_tracks_primary_slot_and_off_restores_static_path() {
+        let mut behavior = crate::config::Config::default().behavior().clone();
+        behavior.wallpaper = "static.png".to_string();
+        behavior.wallpaper_rotation = "daily".to_string();
+        behavior.wallpaper_rotation_paths = vec!["a.png".to_string(), "b.png".to_string()];
+        assert_eq!(theme_wallpaper_path(&behavior, 100), "a.png");
+        assert_eq!(theme_wallpaper_path(&behavior, 101), "b.png");
+        assert_eq!(theme_wallpaper_path(&behavior, 99), "b.png");
+        behavior.wallpaper_rotation = "off".to_string();
+        assert_eq!(theme_wallpaper_path(&behavior, 101), "static.png");
     }
 
     #[test]

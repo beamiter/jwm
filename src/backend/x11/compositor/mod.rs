@@ -181,7 +181,7 @@ use types::*;
 pub(crate) use vsync::VsyncMethod;
 pub(crate) use wallpaper_common::{
     WallpaperImageData, WallpaperMode, compute_wallpaper_rect, parse_wallpaper_mode,
-    resolve_wallpaper_for_tag,
+    resolve_wallpaper_for_tag_at,
 };
 use waterlily::{WaterlilyIpc, WaterlilyTexture};
 pub(crate) use wobbly::WobblyState;

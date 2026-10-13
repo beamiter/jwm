@@ -52,6 +52,9 @@ struct ApplicationScanBudget {
     directory_entries: usize,
     desktop_files: usize,
     desktop_bytes: u64,
+    /// Higher-priority roots claim IDs even for hidden entries. Byte IDs
+    /// avoid aliasing distinct non-UTF-8 filenames through lossy conversion.
+    desktop_ids: HashSet<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2048,9 +2051,10 @@ impl SystemUiState {
         history: &crate::jwm::features::ClipboardHistory,
         query: &str,
     ) -> (Vec<ListRow>, Vec<Option<String>>) {
-        use crate::backend::compositor_common::row_icons::{memory_icon_key, register_memory_icon};
+        use crate::backend::compositor_common::row_icons::{
+            memory_icon_key, register_memory_icon_bytes,
+        };
         use crate::jwm::features::ClipboardEntry;
-        use std::sync::Arc;
 
         let needle = crate::jwm::features::clipboard::normalize_query(query);
         let mut rows = Vec::new();
@@ -2061,7 +2065,7 @@ impl SystemUiState {
             let icon = match entry {
                 ClipboardEntry::Png { bytes, .. } if !bytes.is_empty() => {
                     let key = memory_icon_key(bytes);
-                    register_memory_icon(key.clone(), Arc::<[u8]>::from(bytes.as_slice()));
+                    register_memory_icon_bytes(key.clone(), bytes.as_slice());
                     Some(key)
                 }
                 _ => None,
@@ -5089,6 +5093,7 @@ fn scan_desktop_dir(
                 continue;
             };
             let mut in_entry = false;
+            let mut has_entry = false;
             let mut name = None;
             let mut exec = None;
             let mut icon = None;
@@ -5097,6 +5102,7 @@ fn scan_desktop_dir(
             for line in body.lines() {
                 if line.starts_with('[') {
                     in_entry = line == "[Desktop Entry]";
+                    has_entry |= in_entry;
                     continue;
                 }
                 if !in_entry {
@@ -5125,13 +5131,30 @@ fn scan_desktop_dir(
                     terminal = true;
                 }
             }
+            // Desktop IDs are relative paths with '/' replaced by '-'. An
+            // override claims its ID before visibility and required launch
+            // fields are checked: Hidden=true deletion stubs have neither
+            // Name nor Exec. Unreadable files and files without the entry
+            // group do not claim an ID.
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let id = relative
+                .as_os_str()
+                .as_encoded_bytes()
+                .iter()
+                .map(|&byte| if byte == b'/' { b'-' } else { byte })
+                .collect();
+            if !has_entry || !budget.desktop_ids.insert(id) {
+                continue;
+            }
             let (Some(name), Some(exec)) = (name, exec) else {
                 continue;
             };
             if hidden || !seen.insert(name.clone()) {
                 continue;
             }
-            let command = parse_exec(&exec);
+            let command = expand_desktop_exec(&exec, &name, icon.as_deref(), Some(&path));
             if command.is_empty() {
                 continue;
             }
@@ -5173,9 +5196,73 @@ fn read_desktop_file(path: &Path, budget: &mut ApplicationScanBudget) -> Option<
     String::from_utf8(bytes).ok()
 }
 
+#[cfg(test)]
 fn parse_exec(exec: &str) -> Vec<String> {
+    expand_desktop_exec(exec, "", None, None)
+}
+
+fn expand_desktop_exec(
+    exec: &str,
+    name: &str,
+    icon: Option<&str>,
+    path: Option<&Path>,
+) -> Vec<String> {
+    expand_exec_fields(split_exec(exec), name, icon, path).unwrap_or_default()
+}
+
+fn expand_exec_fields(
+    args: Vec<String>,
+    name: &str,
+    icon: Option<&str>,
+    path: Option<&Path>,
+) -> Option<Vec<String>> {
+    let mut expanded = Vec::new();
+    for arg in args {
+        if arg == "%i" {
+            if let Some(icon) = icon.filter(|value| !value.is_empty()) {
+                expanded.extend(["--icon".into(), icon.into()]);
+            }
+            continue;
+        }
+        let mut chars = arg.chars();
+        let mut value = String::new();
+        let mut had_code = false;
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                value.push(ch);
+                continue;
+            }
+            had_code = true;
+            match chars.next()? {
+                '%' => value.push('%'),
+                'c' => value.push_str(name),
+                'k' => {
+                    if let Some(path) = path {
+                        value.push_str(&path.to_string_lossy());
+                    }
+                }
+                code @ ('f' | 'F' | 'u' | 'U') => {
+                    if matches!(code, 'F' | 'U') && arg != format!("%{code}") {
+                        return None;
+                    }
+                }
+                'd' | 'D' | 'n' | 'N' | 'v' | 'm' => {}
+                _ => return None,
+            }
+        }
+        // Preserve explicit empty argv from quoting, but omit arguments that
+        // consist only of fields with no supplied value. Never parse inserted
+        // name/icon/path data as field codes again.
+        if !value.is_empty() || !had_code {
+            expanded.push(value);
+        }
+    }
+    Some(expanded)
+}
+
+fn split_exec(exec: &str) -> Vec<String> {
     // Desktop Exec quoting is deliberately small but handles the common quoted
-    // argv form. Field codes are omitted because no files/URLs were supplied.
+    // argv form. Field expansion follows this step and never re-tokenizes values.
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote = None;
@@ -5218,9 +5305,7 @@ fn parse_exec(exec: &str) -> Vec<String> {
     if argument_started {
         args.push(current);
     }
-    args.into_iter()
-        .filter(|arg| !arg.starts_with('%'))
-        .collect()
+    args
 }
 
 /// The lock screen's one in-flight PAM authentication. `pam_authenticate`
@@ -7642,6 +7727,76 @@ mod tests {
     }
 
     #[test]
+    fn desktop_exec_expands_literals_and_context_once() {
+        assert_eq!(
+            parse_exec("foo %% %%literal --ratio=100%% %f %F %u %U"),
+            ["foo", "%", "%literal", "--ratio=100%"]
+        );
+        assert_eq!(
+            expand_desktop_exec(
+                "foo %c --title=%c %i %k",
+                "Name %U with spaces",
+                Some("icon %f"),
+                Some(Path::new("/tmp/a desktop.desktop"))
+            ),
+            [
+                "foo",
+                "Name %U with spaces",
+                "--title=Name %U with spaces",
+                "--icon",
+                "icon %f",
+                "/tmp/a desktop.desktop"
+            ]
+        );
+        assert_eq!(
+            parse_exec("foo %i %k %d %D %n %N %v %m --safe"),
+            ["foo", "--safe"]
+        );
+        for invalid in [
+            "foo %z",
+            "foo --icon=%i",
+            "foo --files=%F",
+            "foo --url=%U",
+            "foo trailing%",
+        ] {
+            assert!(parse_exec(invalid).is_empty(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn desktop_scan_expands_exec_fields_with_entry_context() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-exec-fields-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("fields.desktop");
+        fs::write(&path, "[Desktop Entry]\nName=Fields app\nIcon=fields-icon\nExec=fields %% --ratio=100%% %c %i %k %U\n").unwrap();
+        let mut entries = Vec::new();
+        scan_desktop_dir(
+            &root,
+            &mut entries,
+            &mut HashSet::new(),
+            &mut ApplicationScanBudget::default(),
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].command,
+            [
+                "fields",
+                "%",
+                "--ratio=100%",
+                "Fields app",
+                "--icon",
+                "fields-icon",
+                path.to_str().unwrap()
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_desktop_exec() {
         assert_eq!(
             parse_exec("foo --name 'two words' %U"),
@@ -7665,6 +7820,87 @@ mod tests {
             parse_exec(r#"foo two\ words \"quoted\" "a\\b" %f %U --safe"#),
             ["foo", "two words", "\"quoted\"", "a\\b", "--safe"]
         );
+    }
+
+    #[test]
+    fn desktop_scan_honors_file_id_overrides_before_display_names() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-desktop-overrides-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let user = root.join("user");
+        let system = root.join("system");
+        for dir in [&user, &system, &user.join("nested"), &system.join("other")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let application =
+            |name: &str, command: &str| format!("[Desktop Entry]\nName={name}\nExec={command}\n");
+        for (file, body) in [
+            (
+                user.join("hidden.desktop"),
+                "[Desktop Entry]\nHidden=true\n".into(),
+            ),
+            (
+                system.join("hidden.desktop"),
+                application("Hidden system app", "hidden"),
+            ),
+            (
+                user.join("quiet.desktop"),
+                "[Desktop Entry]\nNoDisplay=true\n".into(),
+            ),
+            (
+                system.join("quiet.desktop"),
+                application("Quiet system app", "quiet"),
+            ),
+            (
+                user.join("rename.desktop"),
+                application("User name", "user-command"),
+            ),
+            (
+                system.join("rename.desktop"),
+                application("Old name", "old-command"),
+            ),
+            (
+                user.join("nested/tool.desktop"),
+                application("Nested user", "nested-user"),
+            ),
+            (
+                system.join("nested-tool.desktop"),
+                application("Nested old", "nested-old"),
+            ),
+            (
+                system.join("other/tool.desktop"),
+                application("Other tool", "other-tool"),
+            ),
+            (
+                user.join("invalid.desktop"),
+                "[Other Group]\nHidden=true\n".into(),
+            ),
+            (
+                system.join("invalid.desktop"),
+                application("Valid fallback", "valid"),
+            ),
+        ] {
+            fs::write(file, body).unwrap();
+        }
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        let mut budget = ApplicationScanBudget::default();
+        scan_desktop_dir(&user, &mut entries, &mut seen, &mut budget);
+        scan_desktop_dir(&system, &mut entries, &mut seen, &mut budget);
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Nested user", "Other tool", "User name", "Valid fallback"]
+        );
+        assert_eq!(entries[2].command, ["user-command"]);
+        assert_eq!(budget.desktop_ids.len(), 6);
+        assert_eq!(budget.desktop_files, 11);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

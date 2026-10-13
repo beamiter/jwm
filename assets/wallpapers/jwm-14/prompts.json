@@ -1,0 +1,91 @@
+{
+  "generator": "Built-in image_gen",
+  "requested_count": 14,
+  "requested_format": "3840x2160 landscape desktop wallpapers",
+  "themes": [
+    {
+      "file": "01-alpine-dawn.png",
+      "name": "冰湖晨曦",
+      "scene": "A still turquoise alpine lake, distant snow-covered peaks, a thin ribbon of dawn mist, gentle amber sunrise on pale summits and cool blue shadows. Quiet natural grandeur, photographic realism with careful cinematic color.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A still turquoise alpine lake, distant snow-covered peaks, a thin ribbon of dawn mist, gentle amber sunrise on pale summits and cool blue shadows. Quiet natural grandeur, photographic realism with careful cinematic color."
+    },
+    {
+      "file": "02-ocean-aerial.png",
+      "name": "浅海潮汐",
+      "scene": "An aerial coastal seascape where pale sandbar arcs meet clear aquamarine water and deep sapphire sea, delicate white surf, organic minimal curves. Refined aerial photography, realistic water textures.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: An aerial coastal seascape where pale sandbar arcs meet clear aquamarine water and deep sapphire sea, delicate white surf, organic minimal curves. Refined aerial photography, realistic water textures."
+    },
+    {
+      "file": "03-aurora-fjord.png",
+      "name": "极光峡湾",
+      "scene": "A luminous emerald and soft cyan aurora sweeping above a dark Nordic fjord and restrained snow silhouettes, mirrorlike water, a few subtle stars. Natural celestial photography, calm luminous sky.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A luminous emerald and soft cyan aurora sweeping above a dark Nordic fjord and restrained snow silhouettes, mirrorlike water, a few subtle stars. Natural celestial photography, calm luminous sky."
+    },
+    {
+      "file": "04-desert-silence.png",
+      "name": "沙丘静语",
+      "scene": "Expansive sculptural copper and apricot desert dunes, long soft indigo shadows, a subtle hazy warm horizon. Minimal fine-art landscape photography with tactile sand grain.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: Expansive sculptural copper and apricot desert dunes, long soft indigo shadows, a subtle hazy warm horizon. Minimal fine-art landscape photography with tactile sand grain."
+    },
+    {
+      "file": "05-bamboo-mist.png",
+      "name": "竹林云雾",
+      "scene": "An elegant bamboo grove receding into jade morning mist, slender trunks and sparse leaves, painterly subtle texture like contemporary Chinese ink landscape combined with refined atmospheric realism. Serene muted celadon.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: An elegant bamboo grove receding into jade morning mist, slender trunks and sparse leaves, painterly subtle texture like contemporary Chinese ink landscape combined with refined atmospheric realism. Serene muted celadon."
+    },
+    {
+      "file": "06-autumn-valley.png",
+      "name": "秋山流光",
+      "scene": "A remote autumn valley with deep crimson and golden maple foliage reflected in a quiet dark stream, distant mountains fading into blue dusk. Elegant cinematic natural landscape, restrained saturated accents.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A remote autumn valley with deep crimson and golden maple foliage reflected in a quiet dark stream, distant mountains fading into blue dusk. Elegant cinematic natural landscape, restrained saturated accents."
+    },
+    {
+      "file": "07-moss-waterfall.png",
+      "name": "苔谷瀑声",
+      "scene": "A slender white waterfall falling into an emerald pool in a moss-covered basalt gorge, soft diffused woodland light, lush intricate moss, deep peaceful shadow. High-end landscape photography.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A slender white waterfall falling into an emerald pool in a moss-covered basalt gorge, soft diffused woodland light, lush intricate moss, deep peaceful shadow. High-end landscape photography."
+    },
+    {
+      "file": "08-cloud-sea.png",
+      "name": "云海日出",
+      "scene": "A vast soft sea of clouds beneath layered blue mountain ridges at sunrise, peach and rose light at the horizon, airy minimal composition and delicate atmospheric depth. Fine-art cinematic landscape.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A vast soft sea of clouds beneath layered blue mountain ridges at sunrise, peach and rose light at the horizon, airy minimal composition and delicate atmospheric depth. Fine-art cinematic landscape."
+    },
+    {
+      "file": "09-starry-dunes.png",
+      "name": "星河远境",
+      "scene": "A graceful Milky Way arch over silent cool-blue dunes beneath a deep midnight sky, subdued starlight and no overbright foreground. Realistic night-sky landscape, contemplative cosmic scale.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A graceful Milky Way arch over silent cool-blue dunes beneath a deep midnight sky, subdued starlight and no overbright foreground. Realistic night-sky landscape, contemplative cosmic scale."
+    },
+    {
+      "file": "10-volcanic-coast.png",
+      "name": "玄岩金浪",
+      "scene": "A dramatic volcanic black-sand coastline and dark basalt formations with delicate warm-gold sunset reflections through rolling waves, soft mist at the horizon. Refined moody photographic realism.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A dramatic volcanic black-sand coastline and dark basalt formations with delicate warm-gold sunset reflections through rolling waves, soft mist at the horizon. Refined moody photographic realism."
+    },
+    {
+      "file": "11-silk-waves.png",
+      "name": "流体丝光",
+      "scene": "Abstract broad flowing silk-like waves in midnight navy, muted cobalt and warm champagne, smooth sculptural folds, restrained luminous edge lighting, rich tactile satin texture. Sophisticated minimalist 3D art.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: Abstract broad flowing silk-like waves in midnight navy, muted cobalt and warm champagne, smooth sculptural folds, restrained luminous edge lighting, rich tactile satin texture. Sophisticated minimalist 3D art."
+    },
+    {
+      "file": "12-violet-nebula.png",
+      "name": "紫境星云",
+      "scene": "A deep-space nebula with luminous violet and teal gas gently drifting across an expansive midnight sky, distant tiny stars, subtle natural volumetric textures, ethereal calm. High-quality astronomical-inspired digital art.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A deep-space nebula with luminous violet and teal gas gently drifting across an expansive midnight sky, distant tiny stars, subtle natural volumetric textures, ethereal calm. High-quality astronomical-inspired digital art."
+    },
+    {
+      "file": "13-architecture-fog.png",
+      "name": "雾中几何",
+      "scene": "Minimal monumental concrete arches and broad sculptural planes dissolving into pearl-gray morning mist, subtle slate blue shadows, soft natural light. Quiet refined architectural fine-art imagery.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: Minimal monumental concrete arches and broad sculptural planes dissolving into pearl-gray morning mist, subtle slate blue shadows, soft natural light. Quiet refined architectural fine-art imagery."
+    },
+    {
+      "file": "14-luminous-tide.png",
+      "name": "荧海月夜",
+      "scene": "A secluded dark beach with thin bioluminescent cyan surf tracing the shore beneath a soft moonlit horizon, gentle navy sea and sparse stars. Restrained dreamy but believable cinematic natural landscape.",
+      "prompt": "Use case: stylized-concept / photorealistic-natural. Asset type: premium JWM desktop wallpaper. Generate exactly ONE full-bleed landscape wallpaper, 3840x2160 pixels, 16:9 aspect ratio, edge-to-edge image. Compose for a calm computer desktop: broad quiet areas, refined depth, crisp detail without visual clutter, comfortable brightness, no text, no letters, no logos, no watermarks, no border, no UI, no collage, no desktop mockup. Scene and style: A secluded dark beach with thin bioluminescent cyan surf tracing the shore beneath a soft moonlit horizon, gentle navy sea and sparse stars. Restrained dreamy but believable cinematic natural landscape."
+    }
+  ]
+}

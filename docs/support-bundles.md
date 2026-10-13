@@ -57,6 +57,8 @@ two-second deadline for request writes and response reads. A trickling response
 does not renew that budget. Responses must be newline-terminated and fit within
 four megabytes including the newline. A stopped compositor or a full accept
 queue produces a useful report instead of leaving a probe waiting indefinitely.
+Successful live replies must include an object `data` field. Missing, null,
+or scalar payloads are recorded as failed probes and make `--strict` exit 2.
 
 ## Privacy boundary
 
@@ -81,6 +83,10 @@ XDG_CURRENT_DESKTOP
 XDG_SESSION_DESKTOP
 DESKTOP_SESSION
 ```
+
+An absolute `WAYLAND_DISPLAY` socket path is replaced with
+`<absolute socket path redacted>` in both session environment and doctor
+details. Relative display names remain available for diagnosis.
 
 The selected `/etc/os-release` keys are `NAME`, `PRETTY_NAME`, `ID`, `ID_LIKE`,
 `VERSION`, and `VERSION_ID`.

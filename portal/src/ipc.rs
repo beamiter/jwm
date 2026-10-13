@@ -357,7 +357,12 @@ fn query_windows_at(socket: &Path, uid: u32) -> io::Result<Vec<WindowInfo>> {
     sock.write_all(b"{\"query\":\"get_windows\"}\n")?;
     // The connection stays open after the reply, so read exactly one frame:
     // reading to EOF would always end in the read timeout.
-    read_windows_response(BufReader::new(&sock))
+    let frame = jwm_ipc_transport::read_frame_until(
+        &mut BufReader::new(sock),
+        MAX_IPC_FRAME_BYTES as usize,
+        std::time::Instant::now() + Duration::from_millis(500),
+    )?;
+    read_windows_response(frame.as_slice())
 }
 
 fn query_monitors_at(socket: &Path, uid: u32) -> io::Result<Vec<MonitorInfo>> {
@@ -365,7 +370,12 @@ fn query_monitors_at(socket: &Path, uid: u32) -> io::Result<Vec<MonitorInfo>> {
     sock.set_read_timeout(Some(Duration::from_millis(500)))?;
     sock.set_write_timeout(Some(Duration::from_millis(500)))?;
     sock.write_all(b"{\"query\":\"get_monitors\"}\n")?;
-    read_monitors_response(BufReader::new(&sock))
+    let frame = jwm_ipc_transport::read_frame_until(
+        &mut BufReader::new(sock),
+        MAX_IPC_FRAME_BYTES as usize,
+        std::time::Instant::now() + Duration::from_millis(500),
+    )?;
+    read_monitors_response(frame.as_slice())
 }
 
 /// Parse one newline-terminated reply frame into the window list.
@@ -598,6 +608,43 @@ mod tests {
         assert_eq!(windows[0].tags, 2);
         assert_eq!(windows[0].monitor, Some(0));
         assert!(!windows[0].is_on_view);
+    }
+
+    #[test]
+    fn query_deadlines_cover_the_whole_trickled_response() {
+        for windows in [true, false] {
+            let dir = ScratchDir::new(0o700);
+            let listener = UnixListener::bind(dir.socket()).unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_stop = stop.clone();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let stop_at = std::time::Instant::now() + Duration::from_secs(2);
+                while !server_stop.load(Ordering::Relaxed) && std::time::Instant::now() < stop_at {
+                    if stream.write_all(b" ").is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            let started = std::time::Instant::now();
+            let error = if windows {
+                query_windows_at(&dir.socket(), effective_uid()).unwrap_err()
+            } else {
+                query_monitors_at(&dir.socket(), effective_uid()).unwrap_err()
+            };
+            stop.store(true, Ordering::Relaxed);
+            server.join().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
     }
 
     #[test]

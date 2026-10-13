@@ -71,6 +71,11 @@ are out of order still behaves sensibly — the earlier one simply happens first
 Setting every stage to 0 switches the whole policy off, and JWM then never
 reads the idle clock at all.
 
+When an idle policy is active, JWM suppresses the X server's own blanker so
+it cannot reset the idle clock before a later lock stage. A failed suppression
+request is retried at most once every five seconds; only a successful request
+is remembered for the session. Retries use the existing idle poll.
+
 `jwm --check-config` reads these keys before a session ever starts: it warns
 when `idle_lock_secs` is below the floor described below, and when
 `idle_dim_level` falls outside `[0, 1]` — a level the dim stage replaces with

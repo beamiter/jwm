@@ -52,6 +52,63 @@ pub fn write_all_with_timeout(
     Ok(())
 }
 
+/// Read one bounded newline-delimited frame under an absolute deadline.
+/// The delimiter is omitted; a nonempty final frame at EOF is accepted for
+/// compatibility with existing local clients. Buffered following frames stay
+/// in `reader` for the next call.
+pub fn read_frame_until(
+    reader: &mut io::BufReader<UnixStream>,
+    limit: usize,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    use io::BufRead as _;
+    let mut frame = Vec::with_capacity(limit.min(4096));
+    loop {
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining(deadline)?))?;
+        let available = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                remaining(deadline)?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        remaining(deadline)?;
+        if available.is_empty() {
+            return if frame.is_empty() {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "IPC peer closed without a response",
+                ))
+            } else {
+                Ok(frame)
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let count = newline.unwrap_or(available.len());
+        if count > limit.saturating_sub(frame.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IPC frame exceeded limit",
+            ));
+        }
+        frame.extend_from_slice(&available[..count]);
+        reader.consume(count + usize::from(newline.is_some()));
+        if newline.is_some() {
+            remaining(deadline)?;
+            return Ok(frame);
+        }
+    }
+}
+
 /// Connect to a filesystem Unix socket within `timeout` and return a blocking
 /// stream. A full listener backlog cannot leave control tools waiting forever.
 /// Read/write deadlines are configured separately by the caller.
@@ -290,6 +347,66 @@ mod tests {
         let mut received = [0; 8];
         server.read_exact(&mut received).unwrap();
         assert_eq!(&received, b"request\n");
+    }
+
+    #[test]
+    fn response_deadline_is_not_extended_by_trickled_bytes() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            server
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            while !worker_stop.load(Ordering::Relaxed) {
+                if server.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let started = Instant::now();
+        let mut reader = io::BufReader::new(client);
+        let result = read_frame_until(&mut reader, 1024, started + Duration::from_millis(80));
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn response_frames_preserve_boundaries_and_enforce_content_limit() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server.write_all(b"12345678\nnext\n123456789\n").unwrap();
+        let mut reader = io::BufReader::new(client);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            read_frame_until(&mut reader, 8, deadline).unwrap(),
+            b"12345678"
+        );
+        assert_eq!(read_frame_until(&mut reader, 8, deadline).unwrap(), b"next");
+        assert_eq!(
+            read_frame_until(&mut reader, 8, deadline)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn response_eof_preserves_legacy_tail_and_rejects_empty_stream() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server.write_all(b"tail").unwrap();
+        drop(server);
+        let mut reader = io::BufReader::new(client);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(read_frame_until(&mut reader, 8, deadline).unwrap(), b"tail");
+        assert_eq!(
+            read_frame_until(&mut reader, 8, deadline)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::backend::api::Backend;
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::wallpaper::{
     MAX_NATIVE_ROOT_BYTES, NativeMonitorBlit, blit_rgba_clipped, compose_native_root,
-    compute_wallpaper_rect, parse_wallpaper_mode, resolve_wallpaper_for_tag,
+    compute_wallpaper_rect, parse_wallpaper_mode, resolve_wallpaper_for_tag_at,
 };
 use crate::config::CONFIG;
 use crate::jwm::Jwm;
@@ -107,15 +107,26 @@ impl Jwm {
         let fill = ui_theme::palette().native_letterbox_rgb();
         let theme = cfg.ui_theme();
         let (root_w, root_h) = native_root_canvas_size(self)?;
+        let day = chrono::Datelike::num_days_from_ce(&chrono::Local::now().date_naive());
         let mut images: Vec<(String, PathBuf)> = Vec::new();
         let mut monitors = Vec::new();
         let mut key = format!("{root_w}x{root_h};theme={theme};fill={fill:?}");
+        let mut slot = 0_u32;
         for (idx, &mk) in self.state.monitor_order.iter().enumerate() {
             let Some(monitor) = self.state.monitors.get(mk) else {
                 continue;
             };
-            let (path, mode_str) =
-                resolve_wallpaper_for_tag(behavior, idx as u32, monitor.get_active_tags());
+            let (path, mode_str) = resolve_wallpaper_for_tag_at(
+                behavior,
+                if behavior.wallpaper_rotation == "daily" {
+                    slot
+                } else {
+                    idx as u32
+                },
+                monitor.get_active_tags(),
+                day,
+            );
+            slot += 1;
             let expanded = expand_home(path, &home);
             let token = wallpaper_file_token(&expanded);
             key.push_str(&format!(

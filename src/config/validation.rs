@@ -252,6 +252,50 @@ fn validate_choice_ignore_ascii_case(
     }
 }
 
+/// First collection error, shared by file diagnostics and hot overrides.
+pub(super) fn wallpaper_rotation_paths_error(
+    paths: &[String],
+    require_nonempty: bool,
+) -> Option<(Option<usize>, String)> {
+    if paths.len() > super::MAX_WALLPAPER_ROTATION_PATHS {
+        return Some((
+            None,
+            format!(
+                "collection has {} entries; use at most {}",
+                paths.len(),
+                super::MAX_WALLPAPER_ROTATION_PATHS
+            ),
+        ));
+    }
+    if require_nonempty && paths.is_empty() {
+        return Some((
+            None,
+            "daily rotation requires at least one wallpaper path".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        let error = if path.trim().is_empty() {
+            Some("wallpaper path must not be empty".into())
+        } else if path.contains('\0') {
+            Some("wallpaper path must not contain a NUL character".into())
+        } else if path.len() > super::MAX_WALLPAPER_ROTATION_PATH_BYTES {
+            Some(format!(
+                "wallpaper path exceeds {} bytes",
+                super::MAX_WALLPAPER_ROTATION_PATH_BYTES
+            ))
+        } else if !seen.insert(path.as_str()) {
+            Some("wallpaper path duplicates an earlier collection entry".into())
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Some((Some(index), error));
+        }
+    }
+    None
+}
+
 fn canonical_modifier(value: &str) -> Option<&'static str> {
     match value {
         "Mod1" | "Alt" => Some("Alt"),
@@ -1136,6 +1180,30 @@ impl Config {
             &behavior.client_moveresize,
             &["always", "floating-only", "never"],
         );
+        if !["off", "daily"].contains(&behavior.wallpaper_rotation.as_str()) {
+            diagnostics.error(
+                "behavior.wallpaper_rotation",
+                format!(
+                    "unknown mode {:?}; expected off or daily",
+                    behavior.wallpaper_rotation
+                ),
+                None,
+            );
+        }
+        if let Some((index, error)) = wallpaper_rotation_paths_error(
+            &behavior.wallpaper_rotation_paths,
+            behavior.wallpaper_rotation == "daily",
+        ) {
+            diagnostics.error(
+                index.map_or_else(
+                    || "behavior.wallpaper_rotation_paths".into(),
+                    |index| format!("behavior.wallpaper_rotation_paths[{index}]"),
+                ),
+                error,
+                None,
+            );
+        }
+
         validate_choice_ignore_ascii_case(
             &mut diagnostics,
             "behavior.wallpaper_mode",

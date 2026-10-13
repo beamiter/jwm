@@ -141,6 +141,12 @@ builds its frontend: React/Solid/Svelte/Vue variants require Node.js plus
 `wasm32-unknown-unknown` Rust target. The helper checks these prerequisites up
 front and prints the exact install command for anything missing.
 
+The source installer rejects unknown options, missing option values, and
+non-positive or malformed `--jobs` values before building or installing.
+The bridge activation file uses the target login user's data directory when
+run through sudo. Both the bridge and portal installers honor an absolute
+`XDG_DATA_HOME`; the portal also honors an absolute `XDG_CONFIG_HOME`.
+
 ## Control JWM
 
 `jwm-tool` sends typed JSON commands and queries over JWM's private Unix socket:

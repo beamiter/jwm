@@ -22,6 +22,19 @@ Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 named. Entries marked `Hidden=true` or `NoDisplay=true` are left out, because
 their author asked for that.
 
+Higher-priority directories override lower-priority entries by desktop file
+ID, including deletion stubs with only `Hidden=true`. Renaming an override's
+display name does not bring the old system entry back. IDs use the path
+relative to `applications`, with `/` replaced by `-`, following the
+[desktop entry specification](https://specifications.freedesktop.org/desktop-entry/latest/file-naming.html).
+
+`Exec` expands `%%` to a literal percent sign, `%c` to the selected application
+name, `%k` to the desktop file path, and a standalone `%i` to `--icon` plus
+the entry's icon. Inserted values stay within their argument and are expanded
+once. File/URL fields are removed when launching without files or URLs;
+unknown fields and embedded multi-argument fields are rejected, following the
+[Exec field rules](https://specifications.freedesktop.org/desktop-entry/latest/exec-variables.html).
+
 Rows show the application's icon beside its name: icons come from the
 entry's `Icon=` key, resolved through the icon theme by the same cached
 resolver the status bars use, and decode on a worker thread — a missing icon

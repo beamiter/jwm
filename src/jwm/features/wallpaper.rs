@@ -18,10 +18,9 @@ const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "bmp", "gif"]
 /// scrolls, but building and ordering rows for tens of thousands of pictures
 /// would stall the frame that opened it.
 ///
-/// The cap bounds the rows and the ordering work, not the directory read:
-/// every name is still read once, so a caller on the event loop pays for the
-/// `readdir` of the whole directory. What it no longer pays for is a stat per
-/// picture, see [`select_wallpapers`].
+/// Selection retains at most twice this many candidates while the worker
+/// reads the whole directory. Only entries whose type is unresolved need a
+/// stat, see [`select_wallpapers`].
 pub const MAX_ENTRIES: usize = 200;
 
 /// What a directory entry's own type says about it, as the directory listing
@@ -123,8 +122,10 @@ pub fn list_wallpapers(dir: &Path) -> Vec<PathBuf> {
 /// did not already settle the question, so a directory of forty thousand
 /// photos is not forty thousand stats on the thread that opened the picker.
 ///
-/// Each sort key is built once rather than per comparison, and only the
-/// [`MAX_ENTRIES`] first names are fully ordered. Equal keys (`Alps.jpg`
+/// Each sort key is built once rather than per comparison. Batches retain
+/// only the best [`MAX_ENTRIES`] names, bounding candidate storage even for
+/// an enormous directory; only the final selection is fully ordered.
+/// Equal keys (`Alps.jpg`
 /// beside `alps.jpg`) fall back to the path, so the order never depends on
 /// the order the directory happened to list them in.
 #[must_use]
@@ -132,7 +133,7 @@ pub fn select_wallpapers(
     entries: impl IntoIterator<Item = (PathBuf, EntryKind)>,
     mut is_file: impl FnMut(&Path) -> bool,
 ) -> Vec<PathBuf> {
-    let mut files: Vec<(String, PathBuf)> = entries
+    let candidates = entries
         .into_iter()
         .filter(|(path, kind)| {
             is_image(path)
@@ -142,8 +143,19 @@ pub fn select_wallpapers(
                     EntryKind::Unresolved => is_file(path),
                 }
         })
-        .map(|(path, _)| (sort_key(&path), path))
-        .collect();
+        .map(|(path, _)| (sort_key(&path), path));
+    let mut files = Vec::with_capacity(MAX_ENTRIES * 2);
+    for candidate in candidates {
+        files.push(candidate);
+        if files.len() == MAX_ENTRIES * 2 {
+            // A discarded name already has MAX_ENTRIES better names, so
+            // later entries can never bring it back into the final result.
+            // Partition in batches to keep both storage and total ordering
+            // work bounded without sorting every candidate on insertion.
+            files.select_nth_unstable(MAX_ENTRIES);
+            files.truncate(MAX_ENTRIES);
+        }
+    }
     if files.len() > MAX_ENTRIES {
         // Partition around the cap in linear time; only what survives the
         // cap is worth a full sort.
@@ -341,6 +353,40 @@ mod tests {
                     PathBuf::from("/w/b.png")
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn batched_selection_matches_global_order_across_batch_boundaries() {
+        for total in [
+            MAX_ENTRIES - 1,
+            MAX_ENTRIES,
+            MAX_ENTRIES * 2 - 1,
+            MAX_ENTRIES * 2,
+            MAX_ENTRIES * 2 + 1,
+            MAX_ENTRIES * 13 + 57,
+        ] {
+            let paths: Vec<PathBuf> = (0..total)
+                .map(|index| {
+                    let name = if index % 2 == 0 { "Alps" } else { "alps" };
+                    PathBuf::from(format!("/w/{index:05}/{name}{:03}.png", index % 97))
+                })
+                .collect();
+            let mut expected = paths.clone();
+            expected.sort_unstable_by(|a, b| sort_key(a).cmp(&sort_key(b)).then_with(|| a.cmp(b)));
+            expected.truncate(MAX_ENTRIES);
+
+            for reverse in [false, true] {
+                let mut entries = paths.clone();
+                if reverse {
+                    entries.reverse();
+                }
+                let selected = select_wallpapers(
+                    entries.into_iter().map(|path| (path, EntryKind::File)),
+                    |_| unreachable!("regular files need no stat"),
+                );
+                assert_eq!(selected, expected, "total={total}, reverse={reverse}");
+            }
         }
     }
 

@@ -93,11 +93,23 @@ pub(crate) fn compute_wallpaper_rect(
     }
 }
 
-pub(crate) fn resolve_wallpaper_for_tag(
+/// Resolve one dense monitor slot against one sampled local civil day.
+/// Daily rotation temporarily takes priority over static overrides without
+/// mutating them, so turning it off restores the original selection.
+pub(crate) fn resolve_wallpaper_for_tag_at(
     behavior: &BehaviorConfig,
     monitor_idx: u32,
     active_tags: u32,
+    day: i32,
 ) -> (&str, &str) {
+    if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
+        let count = behavior.wallpaper_rotation_paths.len() as i64;
+        let slot = (i64::from(day) + i64::from(monitor_idx)).rem_euclid(count) as usize;
+        return (
+            &behavior.wallpaper_rotation_paths[slot],
+            &behavior.wallpaper_mode,
+        );
+    }
     let mut best: Option<&WallpaperTagConfig> = None;
     let mut best_specific = false;
     for wt in &behavior.wallpaper_tags {
@@ -333,9 +345,9 @@ fn blit_nearest(
 mod tests {
     use super::{
         NativeMonitorBlit, NativeWallpaperImage, PreviewRequest, WallpaperMode, blit_rgba_clipped,
-        compose_native_root, preview_request, resolve_wallpaper_for_tag,
+        compose_native_root, preview_request, resolve_wallpaper_for_tag_at,
     };
-    use crate::config::{BehaviorConfig, Config, WallpaperTagConfig};
+    use crate::config::{BehaviorConfig, Config, WallpaperMonitorConfig, WallpaperTagConfig};
 
     fn behavior_with_tags(tags: &[(u32, &str)]) -> BehaviorConfig {
         let mut behavior = Config::default().behavior().clone();
@@ -355,14 +367,95 @@ mod tests {
     }
 
     #[test]
+    fn daily_wallpapers_are_distinct_and_repeat_after_the_catalog_cycle() {
+        let mut behavior = behavior_with_tags(&[]);
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths =
+            (0..14).map(|i| format!("/walls/day-{i}.png")).collect();
+        for day in [i32::MIN, -15, -1, 0, 1, i32::MAX] {
+            let paths: std::collections::HashSet<_> = (0..14)
+                .map(|slot| resolve_wallpaper_for_tag_at(&behavior, slot, 1, day).0)
+                .collect();
+            assert_eq!(paths.len(), 14);
+            if day <= i32::MAX - 14 {
+                for slot in 0..14 {
+                    assert_eq!(
+                        resolve_wallpaper_for_tag_at(&behavior, slot, 1, day),
+                        resolve_wallpaper_for_tag_at(&behavior, slot, 1, day + 14)
+                    );
+                    assert_eq!(
+                        resolve_wallpaper_for_tag_at(&behavior, slot, 1, day + 1),
+                        resolve_wallpaper_for_tag_at(&behavior, (slot + 1) % 14, 1, day)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn daily_calendar_boundaries_advance_one_image() {
+        use chrono::{Datelike, NaiveDate};
+        let mut behavior = behavior_with_tags(&[]);
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths =
+            (0..14).map(|i| format!("/walls/day-{i}.png")).collect();
+        for (before, after) in [
+            ((2026, 12, 31), (2027, 1, 1)),
+            ((2028, 2, 28), (2028, 2, 29)),
+            ((2028, 2, 29), (2028, 3, 1)),
+        ] {
+            let day = |(y, m, d)| NaiveDate::from_ymd_opt(y, m, d).unwrap().num_days_from_ce();
+            assert_eq!(day(after), day(before) + 1);
+            assert_eq!(
+                resolve_wallpaper_for_tag_at(&behavior, 0, 1, day(after)),
+                resolve_wallpaper_for_tag_at(&behavior, 1, 1, day(before))
+            );
+        }
+    }
+
+    #[test]
+    fn turning_daily_off_restores_static_tag_and_monitor_overrides() {
+        let mut behavior = behavior_with_tags(&[(0, "/walls/tag.png")]);
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 1,
+            path: "/walls/monitor.png".into(),
+            mode: "fit".into(),
+        }];
+        behavior.wallpaper_rotation_paths =
+            vec!["/walls/daily-a.png".into(), "/walls/daily-b.png".into()];
+        behavior.wallpaper_rotation = "daily".into();
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(&behavior, 0, 1, 0),
+            ("/walls/daily-a.png", "fill")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(&behavior, 1, 1, 0),
+            ("/walls/daily-b.png", "fill")
+        );
+        behavior.wallpaper_rotation = "off".into();
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(&behavior, 0, 1, 0),
+            ("/walls/tag.png", "fill")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(&behavior, 1, 2, 0),
+            ("/walls/monitor.png", "fit")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(&behavior, 0, 2, 0),
+            ("/walls/global.png", "fill")
+        );
+    }
+
+    #[test]
     fn a_tag_wallpaper_applies_while_its_tag_is_active() {
         let behavior = behavior_with_tags(&[(1, "/walls/two.png")]);
         assert_eq!(
-            resolve_wallpaper_for_tag(&behavior, 0, 0b10),
+            resolve_wallpaper_for_tag_at(&behavior, 0, 0b10, 0),
             ("/walls/two.png", "fill")
         );
         assert_eq!(
-            resolve_wallpaper_for_tag(&behavior, 0, 0b01),
+            resolve_wallpaper_for_tag_at(&behavior, 0, 0b01, 0),
             ("/walls/global.png", "fill")
         );
     }
@@ -379,7 +472,7 @@ mod tests {
         ]);
         for active_tags in [0b01, 0b10, u32::MAX] {
             assert_eq!(
-                resolve_wallpaper_for_tag(&behavior, 0, active_tags),
+                resolve_wallpaper_for_tag_at(&behavior, 0, active_tags, 0),
                 ("/walls/global.png", "fill"),
                 "{active_tags:#b}"
             );
@@ -387,7 +480,7 @@ mod tests {
         // The highest valid bit still resolves.
         let behavior = behavior_with_tags(&[(31, "/walls/last.png")]);
         assert_eq!(
-            resolve_wallpaper_for_tag(&behavior, 0, 1 << 31).0,
+            resolve_wallpaper_for_tag_at(&behavior, 0, 1 << 31, 0).0,
             "/walls/last.png"
         );
     }

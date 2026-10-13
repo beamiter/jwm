@@ -6,9 +6,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LIBEXEC="$HOME/.local/libexec"
-DBUS_SVC="$HOME/.local/share/dbus-1/services"
-PORTAL_DIR="$HOME/.local/share/xdg-desktop-portal/portals"
-PORTAL_CONF="$HOME/.config/xdg-desktop-portal"
+DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+[[ $DATA_HOME == /* ]] || DATA_HOME="$HOME/.local/share"
+[[ $CONFIG_HOME == /* ]] || CONFIG_HOME="$HOME/.config"
+DBUS_SVC="$DATA_HOME/dbus-1/services"
+PORTAL_DIR="$DATA_HOME/xdg-desktop-portal/portals"
+PORTAL_CONF="$CONFIG_HOME/xdg-desktop-portal"
 PORTAL_MANIFEST="$ROOT/portal/Cargo.toml"
 PORTAL_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 if [[ "$PORTAL_TARGET_DIR" != /* ]]; then

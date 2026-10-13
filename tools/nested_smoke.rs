@@ -14,7 +14,7 @@
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -2684,6 +2684,36 @@ fn spawn_nested_client(
         .map_err(|error| format!("spawn {argv:?}: {error}"))
 }
 
+/// A count decrease could mean a pre-existing window closed. Focus the new
+/// identity, verify that focus was accepted, and wait for that identity to go.
+fn close_lifecycle_window(socket: &Path, id: u64, deadline: Instant) -> Result<(), String> {
+    let response = ipc_roundtrip(
+        socket,
+        &serde_json::json!({"command": "focus_window", "args": {"id": id}}),
+    )?;
+    expect_success("focus_window", response)?;
+    if !poll_until(deadline, || {
+        let response = ipc_query(socket, "get_windows")?;
+        Ok(window_by_id(&response["data"], id)
+            .is_some_and(|window| window["is_focused"].as_bool() == Some(true)))
+    })? {
+        return Err(format!(
+            "lifecycle window {id} did not gain focus before the step deadline"
+        ));
+    }
+    ipc_command(socket, "killclient")?;
+    if poll_until(deadline, || {
+        let response = ipc_query(socket, "get_windows")?;
+        managed_window_ids(&response["data"]).map(|ids| !ids.contains(&id))
+    })? {
+        Ok(())
+    } else {
+        Err(format!(
+            "lifecycle window {id} survived killclient until the step deadline"
+        ))
+    }
+}
+
 fn run_window_lifecycle_step(
     spec: &StepSpec,
     context: &RunContext,
@@ -2708,8 +2738,10 @@ fn run_window_lifecycle_step(
         };
     };
 
-    let baseline = match window_count(&socket) {
-        Ok(count) => count,
+    let baseline = match ipc_query(&socket, "get_windows")
+        .and_then(|response| managed_window_ids(&response["data"]))
+    {
+        Ok(ids) => ids,
         Err(error) => return step_fail(spec, started, error, context),
     };
 
@@ -2718,29 +2750,13 @@ fn run_window_lifecycle_step(
         Err(error) => return step_fail(spec, started, error, context),
     };
 
-    let mapped = poll_until(deadline, || {
-        window_count(&socket).map(|count| count > baseline)
+    let outcome = wait_for_toggle_window(&socket, deadline, &baseline).and_then(|target| {
+        close_lifecycle_window(&socket, target.id, deadline)?;
+        Ok(format!(
+            "{} mapped window {} and killclient removed that window",
+            argv[0], target.id
+        ))
     });
-    let outcome = match mapped {
-        Ok(true) => match ipc_command(&socket, "killclient") {
-            Ok(_) => match poll_until(deadline, || {
-                window_count(&socket).map(|count| count <= baseline)
-            }) {
-                Ok(true) => Ok(format!(
-                    "{} mapped a window and killclient removed it",
-                    argv[0]
-                )),
-                Ok(false) => Err("window survived killclient until the step deadline".to_string()),
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        },
-        Ok(false) => Err(format!(
-            "{} never appeared in get_windows before the step deadline",
-            argv[0]
-        )),
-        Err(error) => Err(error),
-    };
     // The client must never outlive the step, whatever happened above.
     let _ = client.kill();
     let _ = client.wait();
@@ -3341,9 +3357,32 @@ fn command_in_path(command: &str) -> bool {
     })
 }
 
+const MAX_LOG_TAIL_BYTES: u64 = 64 * 1024;
+
+fn read_log_tail(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log is not a regular file",
+        ));
+    }
+    file.seek(SeekFrom::Start(
+        metadata.len().saturating_sub(MAX_LOG_TAIL_BYTES),
+    ))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LOG_TAIL_BYTES).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn log_tail(path: &Path, lines: usize) -> String {
-    match fs::read_to_string(path) {
-        Ok(content) => {
+    match read_log_tail(path) {
+        Ok(bytes) => {
+            let content = String::from_utf8_lossy(&bytes);
             let tail: Vec<&str> = content
                 .lines()
                 .rev()
@@ -3361,10 +3400,121 @@ fn log_tail(path: &Path, lines: usize) -> String {
         Err(error) => format!("log unavailable: {error}"),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_tail_bounds_large_files_and_preserves_non_utf8_diagnostics() {
+        use std::io::Write;
+        let directory = create_private_runtime_dir(NestedBackendKind::Winit).unwrap();
+        let path = directory.join("large.log");
+        let mut file = fs::File::create(&path).unwrap();
+        let block = vec![b'x'; MAX_LOG_TAIL_BYTES as usize];
+        for _ in 0..48 {
+            file.write_all(&block).unwrap();
+        }
+        file.write_all(b"\nfirst\ninvalid: \xff\nlast\n").unwrap();
+        drop(file);
+        assert_eq!(
+            read_log_tail(&path).unwrap().len(),
+            MAX_LOG_TAIL_BYTES as usize
+        );
+        assert_eq!(
+            log_tail(&path, 2),
+            "last log lines: invalid: \u{fffd} | last"
+        );
+        assert_eq!(log_tail(&path, 0), "log is empty");
+        // A single enormous line must stay bounded too.
+        fs::write(&path, vec![0xff; 3 * MAX_LOG_TAIL_BYTES as usize]).unwrap();
+        let tail = log_tail(&path, 10);
+        assert!(tail.len() <= 3 * MAX_LOG_TAIL_BYTES as usize + "last log lines: ".len());
+        assert!(!tail.contains("unavailable"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn lifecycle_with_stub(
+        focused: bool,
+        remaining_id: u64,
+    ) -> (Result<(), String>, Vec<serde_json::Value>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let directory = create_private_runtime_dir(NestedBackendKind::X11).unwrap();
+        let socket = directory.join("test.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut responses = vec![
+                serde_json::json!({"success": true}),
+                serde_json::json!({"success": true, "data": [
+                    {"id": 1, "is_focused": !focused},
+                    {"id": 2, "is_focused": focused}
+                ]}),
+            ];
+            if focused {
+                responses.extend([
+                    serde_json::json!({"success": true}),
+                    serde_json::json!({"success": true, "data": [{"id": remaining_id}]}),
+                ]);
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut requests = Vec::new();
+            for response in responses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing lifecycle IPC request");
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("accept lifecycle request: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                requests.push(serde_json::from_str(&line).unwrap());
+                writeln!(stream, "{response}").unwrap();
+            }
+            requests
+        });
+        // Polls always make one observation, so an expired deadline makes
+        // nonconvergence deterministic without sleeping through a timeout.
+        let result = close_lifecycle_window(&socket, 2, Instant::now());
+        let requests = peer.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        (result, requests)
+    }
+
+    #[test]
+    fn lifecycle_focuses_and_removes_the_new_identity() {
+        let (result, requests) = lifecycle_with_stub(true, 1);
+        result.unwrap();
+        assert_eq!(
+            requests[0],
+            serde_json::json!({"command": "focus_window", "args": {"id": 2}})
+        );
+        assert_eq!(requests[2]["command"], "killclient");
+    }
+
+    #[test]
+    fn lifecycle_refuses_to_kill_when_the_old_window_remains_selected() {
+        let (result, requests) = lifecycle_with_stub(false, 1);
+        assert!(result.unwrap_err().contains("did not gain focus"));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request["command"] == "killclient")
+        );
+    }
+
+    #[test]
+    fn lifecycle_rejects_count_decrease_that_removed_the_old_window() {
+        let (result, _) = lifecycle_with_stub(true, 2);
+        assert!(result.unwrap_err().contains("window 2 survived"));
+    }
 
     #[test]
     fn winit_runs_on_either_host_session_and_x11_kinds_need_display() {
