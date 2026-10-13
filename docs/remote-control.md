@@ -158,6 +158,8 @@ contents into a shell command or a reconnect script.
 3. Restart the host with `--allow-input`; connect with `--grab-input`. Confirm
    click-to-control, the grabbed/released title changes, and double-F12 releases
    all remotely held input. With differing XKB maps, verify pointer-only status.
+   In both modes, hold F12 past the keyboard repeat delay: control must stay
+   grabbed, while a real double tap must release it. Pointer-only keys stay local.
 4. Close the viewer normally, then reconnect deliberately. Interrupt the host
    or network and confirm a clear session-stage reason; no automatic reconnect.
 5. Select a monitor/region, change its position/size, and verify fail-closed

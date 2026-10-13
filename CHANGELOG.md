@@ -7,6 +7,9 @@ monorepo use independent Semantic Versions.
 
 ### Audit follow-up
 
+- Keep remote-viewer escape-key autorepeat local in pointer-only sessions, so
+  holding F12 cannot accidentally release control; genuine double taps still
+  release input, and focus/grab changes reset incomplete taps.
 - Add persistent daily wallpaper rotation with different images per output,
   shared by X11, Wayland and compositor-off X11. Midnight refresh uses the
   existing maintenance loop, and turning rotation off restores static settings.

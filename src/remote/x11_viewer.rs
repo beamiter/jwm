@@ -143,6 +143,77 @@ struct PendingKeyRelease {
     queued_at: Instant,
 }
 
+/// Local key state includes the escape key even in a pointer-only session.
+/// Otherwise its autorepeat release/press pairs look like deliberate taps.
+#[derive(Default)]
+struct ViewerKeyboardState {
+    held: HashSet<u8>,
+    pending_release: Option<PendingKeyRelease>,
+    escape_taps: EscapeTapDetector,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyPressAction {
+    Ignore,
+    Forward,
+    ReleaseGrab,
+}
+
+impl ViewerKeyboardState {
+    fn press(
+        &mut self,
+        keycode: u8,
+        escape: bool,
+        forward_keyboard: bool,
+        now: Instant,
+    ) -> KeyPressAction {
+        if (!forward_keyboard && !escape) || !self.held.insert(keycode) {
+            return KeyPressAction::Ignore;
+        }
+        if escape && self.escape_taps.observe(now) {
+            KeyPressAction::ReleaseGrab
+        } else if forward_keyboard {
+            KeyPressAction::Forward
+        } else {
+            KeyPressAction::Ignore
+        }
+    }
+
+    fn defer_release(&mut self, keycode: u8, time: u32, now: Instant) {
+        if self.held.contains(&keycode) {
+            self.pending_release = Some(PendingKeyRelease {
+                keycode,
+                time,
+                queued_at: now,
+            });
+        }
+    }
+
+    fn consume_repeat(&mut self, keycode: u8, time: u32) -> bool {
+        if self
+            .pending_release
+            .is_some_and(|release| release.keycode == keycode && release.time == time)
+        {
+            self.pending_release = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn flush_release(&mut self, events: &mut Vec<ViewerEvent>, forward_keyboard: bool) {
+        if let Some(release) = self.pending_release.take()
+            && self.held.remove(&release.keycode)
+            && forward_keyboard
+        {
+            events.push(ViewerEvent::Key {
+                keycode: release.keycode,
+                pressed: false,
+            });
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativePixelWriter {
     /// Native depth-24 pixels stored as little-endian 0x00RRGGBB words.
@@ -197,10 +268,8 @@ pub struct Viewer {
     escape_keycodes: Vec<u8>,
     escape_keysym: u32,
     escape_name: String,
-    escape_taps: EscapeTapDetector,
-    held_keycodes: HashSet<u8>,
+    keyboard: ViewerKeyboardState,
     held_buttons: ForwardedButtons,
-    pending_key_release: Option<PendingKeyRelease>,
     deferred_events: VecDeque<Event>,
     last_frame: Option<StoredFrame>,
     closed: bool,
@@ -401,10 +470,8 @@ impl Viewer {
             escape_keycodes,
             escape_keysym,
             escape_name: escape_key.to_string(),
-            escape_taps: EscapeTapDetector::default(),
-            held_keycodes: HashSet::new(),
+            keyboard: ViewerKeyboardState::default(),
             held_buttons: ForwardedButtons::default(),
-            pending_key_release: None,
             deferred_events: VecDeque::new(),
             last_frame: None,
             closed: false,
@@ -438,17 +505,15 @@ impl Viewer {
                 break;
             };
             if let Event::KeyPress(key) = &event
-                && self.pending_key_release.is_some_and(|release| {
-                    release.keycode == key.detail && release.time == key.time
-                })
+                && self.keyboard.consume_repeat(key.detail, key.time)
             {
                 // Core X11 autorepeat is a synthetic release/press pair with
                 // identical keycode and timestamp. Keep the remote key held
                 // and let the host server generate its own repeat cadence.
-                self.pending_key_release = None;
                 continue;
             }
-            self.flush_pending_key_release(&mut result);
+            self.keyboard
+                .flush_release(&mut result, self.forward_keyboard);
             match event {
                 Event::Expose(event) if event.window == self.window => {
                     redraw |= event.count == 0;
@@ -528,40 +593,34 @@ impl Viewer {
                         pressed: false,
                     });
                 }
-                Event::KeyPress(event) if event.event == self.window => {
-                    // Release on a double tap only, so a single press still
-                    // reaches the remote machine. Swallowing the escape key
-                    // outright meant a grabbed session could never send it.
+                Event::KeyPress(event) if event.event == self.window && self.forwarding_input() => {
+                    // Local escape tracking is independent of permission to
+                    // forward keyboard input. Repeats never count as taps.
                     let escape = self.grab_input && self.grabbed && self.is_escape(event.detail);
-                    let released = escape && self.escape_taps.observe(Instant::now());
-                    if released {
-                        self.release_local_grab()?;
-                        self.release_all_input(&mut result);
-                    } else if self.forwarding_input()
-                        && self.forward_keyboard
-                        && self.held_keycodes.insert(event.detail)
-                    {
-                        result.push(ViewerEvent::Key {
+                    match self.keyboard.press(
+                        event.detail,
+                        escape,
+                        self.forward_keyboard,
+                        Instant::now(),
+                    ) {
+                        KeyPressAction::ReleaseGrab => {
+                            self.release_local_grab()?;
+                            self.release_all_input(&mut result);
+                        }
+                        KeyPressAction::Forward => result.push(ViewerEvent::Key {
                             keycode: event.detail,
                             pressed: true,
-                        });
+                        }),
+                        KeyPressAction::Ignore => {}
                     }
                 }
-                Event::KeyRelease(event) if event.event == self.window => {
-                    // A release for a key we forwarded is forwarded too. The
-                    // press that released the grab was not forwarded, and
-                    // release_all_input has already cleared the held set, so
-                    // held_keycodes is what decides.
-                    if self.forwarding_input()
-                        && self.forward_keyboard
-                        && self.held_keycodes.contains(&event.detail)
-                    {
-                        self.pending_key_release = Some(PendingKeyRelease {
-                            keycode: event.detail,
-                            time: event.time,
-                            queued_at: Instant::now(),
-                        });
-                    }
+                Event::KeyRelease(event)
+                    if event.event == self.window && self.forwarding_input() =>
+                {
+                    // Track the local escape release even when keyboard
+                    // forwarding is disabled, so its repeat pair is filtered.
+                    self.keyboard
+                        .defer_release(event.detail, event.time, Instant::now());
                 }
                 Event::MappingNotify(event) if event.request != Mapping::POINTER => {
                     if self.forward_keyboard {
@@ -608,10 +667,12 @@ impl Viewer {
         // release, even if scheduling/rendering took longer than the defer.
         if !budget.exhausted()
             && self
-                .pending_key_release
+                .keyboard
+                .pending_release
                 .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER)
         {
-            self.flush_pending_key_release(&mut result);
+            self.keyboard
+                .flush_release(&mut result, self.forward_keyboard);
         }
 
         if (self.width, self.height) != backing_dimensions && !self.closed {
@@ -668,7 +729,8 @@ impl Viewer {
             return Ok(true);
         }
         Ok(self
-            .pending_key_release
+            .keyboard
+            .pending_release
             .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER))
     }
 
@@ -682,7 +744,8 @@ impl Viewer {
     /// the X server has no new event (currently the autorepeat release filter).
     #[must_use]
     pub fn next_event_deadline(&self) -> Option<Instant> {
-        self.pending_key_release
+        self.keyboard
+            .pending_release
             .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER))
     }
 
@@ -869,20 +932,9 @@ impl Viewer {
         Ok(())
     }
 
-    fn flush_pending_key_release(&mut self, events: &mut Vec<ViewerEvent>) {
-        if let Some(release) = self.pending_key_release.take()
-            && self.held_keycodes.remove(&release.keycode)
-        {
-            events.push(ViewerEvent::Key {
-                keycode: release.keycode,
-                pressed: false,
-            });
-        }
-    }
-
     fn release_all_input(&mut self, events: &mut Vec<ViewerEvent>) {
-        self.pending_key_release = None;
-        self.held_keycodes.clear();
+        // A focus/grab boundary ends both held keys and a half-finished tap.
+        self.keyboard = ViewerKeyboardState::default();
         self.held_buttons.clear();
         events.push(ViewerEvent::ReleaseAll);
     }
@@ -2686,6 +2738,151 @@ mod tests {
         let edge = quick + Duration::from_secs(10);
         assert!(!taps.observe(edge));
         assert!(taps.observe(edge + ESCAPE_DOUBLE_TAP));
+    }
+
+    #[test]
+    fn pointer_only_escape_hold_filters_core_autorepeat_without_forwarding_keys() {
+        let mut keyboard = ViewerKeyboardState::default();
+        let base = Instant::now();
+        let escape = 96;
+        assert_eq!(
+            keyboard.press(escape, true, false, base),
+            KeyPressAction::Ignore
+        );
+        let mut events = Vec::new();
+        for tick in 1..=40 {
+            let now = base + Duration::from_millis(u64::from(tick) * 30);
+            keyboard.defer_release(escape, tick, now);
+            assert!(keyboard.consume_repeat(escape, tick));
+            keyboard.flush_release(&mut events, false);
+            assert!(keyboard.held.contains(&escape));
+        }
+        keyboard.defer_release(escape, 41, base + Duration::from_secs(2));
+        keyboard.flush_release(&mut events, false);
+        assert!(keyboard.held.is_empty());
+        assert!(keyboard.pending_release.is_none());
+        assert!(events.is_empty(), "pointer-only keys must remain local");
+        // A tap after a long hold starts a new pair, even if repeat was fast.
+        assert_eq!(
+            keyboard.press(escape, true, false, base + Duration::from_secs(2)),
+            KeyPressAction::Ignore
+        );
+    }
+
+    #[test]
+    fn escape_double_tap_still_releases_in_pointer_only_and_keyboard_sessions() {
+        for forward_keyboard in [false, true] {
+            let mut keyboard = ViewerKeyboardState::default();
+            let base = Instant::now();
+            let escape = 96;
+            assert_eq!(
+                keyboard.press(escape, true, forward_keyboard, base),
+                if forward_keyboard {
+                    KeyPressAction::Forward
+                } else {
+                    KeyPressAction::Ignore
+                }
+            );
+            keyboard.defer_release(escape, 1, base + Duration::from_millis(20));
+            // A genuine second press has a different X timestamp.
+            assert!(!keyboard.consume_repeat(escape, 2));
+            let mut events = Vec::new();
+            keyboard.flush_release(&mut events, forward_keyboard);
+            assert_eq!(
+                events,
+                if forward_keyboard {
+                    vec![ViewerEvent::Key {
+                        keycode: escape,
+                        pressed: false,
+                    }]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                keyboard.press(escape, true, forward_keyboard, base + ESCAPE_DOUBLE_TAP),
+                KeyPressAction::ReleaseGrab
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_presses_without_release_never_count_as_escape_taps() {
+        for forward_keyboard in [false, true] {
+            let mut keyboard = ViewerKeyboardState::default();
+            let base = Instant::now();
+            keyboard.press(96, true, forward_keyboard, base);
+            for millis in [30, 60, 90, 300, 500, 600, 630, 660] {
+                assert_eq!(
+                    keyboard.press(
+                        96,
+                        true,
+                        forward_keyboard,
+                        base + Duration::from_millis(millis),
+                    ),
+                    KeyPressAction::Ignore
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_only_non_escape_keys_have_no_forwarded_or_repeat_state() {
+        let mut keyboard = ViewerKeyboardState::default();
+        let now = Instant::now();
+        assert_eq!(
+            keyboard.press(38, false, false, now),
+            KeyPressAction::Ignore
+        );
+        keyboard.defer_release(38, 1, now);
+        assert!(keyboard.held.is_empty());
+        assert!(keyboard.pending_release.is_none());
+        assert!(!keyboard.consume_repeat(38, 1));
+    }
+
+    #[test]
+    fn keyboard_repeats_preserve_one_press_and_one_final_release() {
+        let mut keyboard = ViewerKeyboardState::default();
+        let now = Instant::now();
+        assert_eq!(
+            keyboard.press(38, false, true, now),
+            KeyPressAction::Forward
+        );
+        keyboard.defer_release(38, 1, now);
+        assert!(!keyboard.consume_repeat(39, 1), "keycodes must match too");
+        assert!(keyboard.consume_repeat(38, 1));
+        let mut events = Vec::new();
+        keyboard.flush_release(&mut events, true);
+        assert!(events.is_empty());
+        keyboard.defer_release(38, 2, now);
+        keyboard.flush_release(&mut events, true);
+        keyboard.flush_release(&mut events, true);
+        assert_eq!(
+            events,
+            [ViewerEvent::Key {
+                keycode: 38,
+                pressed: false,
+            }]
+        );
+        assert!(keyboard.held.is_empty());
+    }
+
+    #[test]
+    fn clearing_keyboard_state_discards_pending_release_and_incomplete_escape_tap() {
+        let mut keyboard = ViewerKeyboardState::default();
+        let now = Instant::now();
+        keyboard.press(96, true, true, now);
+        keyboard.defer_release(96, 1, now);
+        // This is the same reset used by focus loss, unmap and grab release.
+        keyboard = ViewerKeyboardState::default();
+        let mut events = Vec::new();
+        keyboard.flush_release(&mut events, true);
+        assert!(events.is_empty());
+        assert_eq!(
+            keyboard.press(96, true, true, now + Duration::from_millis(100)),
+            KeyPressAction::Forward,
+            "a new grab must not complete an old grab's escape pair"
+        );
     }
 
     #[test]
