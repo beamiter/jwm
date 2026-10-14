@@ -5318,7 +5318,9 @@ impl<C: CompositorConnection> Compositor<C> {
         let wallpaper_result = self.pending_wallpaper.as_ref().map(|rx| rx.try_recv());
         match wallpaper_result {
             Some(Ok(data)) => {
-                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
+                let uploaded = Self::upload_wallpaper_texture(&self.gl, &data);
+                self.wallpaper_load_failed = uploaded.is_none();
+                if let Some((tex, w, h)) = uploaded {
                     unsafe {
                         if self.wallpaper_crossfade {
                             if let Some(stale) = self.old_wallpaper_texture.take() {
@@ -5359,6 +5361,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 log::warn!("compositor: async wallpaper loader disconnected");
+                self.wallpaper_load_failed = true;
                 self.pending_wallpaper = None;
             }
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
@@ -5367,28 +5370,33 @@ impl<C: CompositorConnection> Compositor<C> {
         self.pending_monitor_wallpapers.retain_mut(|(idx, rx)| {
             match rx.try_recv() {
                 Ok(data) => {
-                    if let Some(mw) = self.monitor_wallpapers.get_mut(*idx)
-                        && let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data)
-                    {
-                        if let Some(previous) = mw.texture.replace(tex) {
-                            unsafe {
-                                self.gl.delete_texture(previous);
+                    if let Some(mw) = self.monitor_wallpapers.get_mut(*idx) {
+                        let uploaded = Self::upload_wallpaper_texture(&self.gl, &data);
+                        mw.load_failed = uploaded.is_none();
+                        if let Some((tex, w, h)) = uploaded {
+                            if let Some(previous) = mw.texture.replace(tex) {
+                                unsafe {
+                                    self.gl.delete_texture(previous);
+                                }
                             }
+                            mw.img_w = w;
+                            mw.img_h = h;
+                            mw.mode = data.mode;
+                            wallpaper_just_loaded = true;
+                            log::info!(
+                                "compositor: async monitor wallpaper [{}] ready ({}x{})",
+                                idx,
+                                w,
+                                h
+                            );
                         }
-                        mw.img_w = w;
-                        mw.img_h = h;
-                        mw.mode = data.mode;
-                        wallpaper_just_loaded = true;
-                        log::info!(
-                            "compositor: async monitor wallpaper [{}] ready ({}x{})",
-                            idx,
-                            w,
-                            h
-                        );
                     }
                     false // remove from pending list
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if let Some(mw) = self.monitor_wallpapers.get_mut(*idx) {
+                        mw.load_failed = true;
+                    }
                     log::warn!(
                         "compositor: async monitor wallpaper loader [{}] disconnected",
                         idx

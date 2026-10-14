@@ -631,6 +631,7 @@ pub(super) struct MonitorWallpaper {
     pub(super) img_w: u32,
     pub(super) img_h: u32,
     pub(super) current_path: String,
+    pub(super) load_failed: bool,
 }
 
 pub(super) struct BorderUniforms {

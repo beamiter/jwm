@@ -1291,6 +1291,7 @@ impl<C: CompositorConnection> Compositor<C> {
             wallpaper_mode,
             wallpaper_requested_mode: wallpaper_mode,
             wallpaper_path: behavior.wallpaper.clone(),
+            wallpaper_load_failed: false,
             wallpaper_img_w: 0,
             wallpaper_img_h: 0,
             monitor_wallpapers: Vec::new(),

@@ -93,16 +93,17 @@ fn monitor_crossfade_layers(
 ///
 /// The mode applies at once only when no new image is coming: the wallpaper
 /// is being cleared, or the request keeps the current path with no decode in
-/// flight, so the visible texture is already that path's image (or, after a
-/// failed decode, the image that stays up in its place).
+/// flight and the last request succeeded, so the visible texture is already
+/// that path's image. A failed request may still be showing an older image.
 fn wallpaper_mode_on_request(
     current_path: &str,
     decode_in_flight: bool,
+    load_failed: bool,
     current_mode: WallpaperMode,
     requested_path: &str,
     requested_mode: WallpaperMode,
 ) -> WallpaperMode {
-    let same_image = requested_path == current_path && !decode_in_flight;
+    let same_image = requested_path == current_path && !decode_in_flight && !load_failed;
     if requested_path.is_empty() || same_image {
         requested_mode
     } else {
@@ -452,9 +453,9 @@ impl WaylandCompositor {
                 Ok(data) => {
                     // Keep the currently visible texture alive unless the new
                     // upload succeeds.
-                    if let Some((tex, w, h)) =
-                        unsafe { Self::upload_wallpaper_texture_gles(gl, &data) }
-                    {
+                    let uploaded = unsafe { Self::upload_wallpaper_texture_gles(gl, &data) };
+                    self.wallpaper_load_failed = uploaded.is_none();
+                    if let Some((tex, w, h)) = uploaded {
                         if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
                             if let Some(old) = self.old_wallpaper_texture.take() {
                                 unsafe {
@@ -494,6 +495,7 @@ impl WaylandCompositor {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     // Thread finished without sending (error logged in thread).
+                    self.wallpaper_load_failed = true;
                     self.pending_wallpaper = None;
                 }
             }
@@ -539,9 +541,11 @@ impl WaylandCompositor {
         for (i, (mon_idx, rx)) in self.pending_monitor_wallpapers.iter().enumerate() {
             match rx.try_recv() {
                 Ok(data) => {
-                    if let Some((tex, w, h)) =
-                        unsafe { Self::upload_wallpaper_texture_gles(gl, &data) }
-                    {
+                    let uploaded = unsafe { Self::upload_wallpaper_texture_gles(gl, &data) };
+                    if let Some(mw) = self.monitor_wallpapers.get_mut(*mon_idx) {
+                        mw.load_failed = uploaded.is_none();
+                    }
+                    if let Some((tex, w, h)) = uploaded {
                         if let Some(mw) = self.monitor_wallpapers.get_mut(*mon_idx) {
                             if let Some(old) = mw.texture.replace(tex) {
                                 unsafe {
@@ -564,6 +568,9 @@ impl WaylandCompositor {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    if let Some(mw) = self.monitor_wallpapers.get_mut(*mon_idx) {
+                        mw.load_failed = true;
+                    }
                     completed.push(i);
                 }
             }
@@ -800,10 +807,12 @@ impl WaylandCompositor {
         self.wallpaper_mode = wallpaper_mode_on_request(
             &self.wallpaper_path,
             self.pending_wallpaper.is_some(),
+            self.wallpaper_load_failed,
             self.wallpaper_mode,
             path,
             wp_mode,
         );
+        self.wallpaper_load_failed = false;
         self.wallpaper_requested_mode = wp_mode;
         self.wallpaper_path = path.to_string();
 
@@ -1084,6 +1093,7 @@ mod tests {
             wallpaper_mode_on_request(
                 "/wall/old.jpg",
                 false,
+                false,
                 WallpaperMode::Fill,
                 "/wall/new.jpg",
                 WallpaperMode::Center,
@@ -1096,9 +1106,27 @@ mod tests {
             wallpaper_mode_on_request(
                 "/wall/new.jpg",
                 true,
+                false,
                 WallpaperMode::Fill,
                 "/wall/new.jpg",
                 WallpaperMode::Center,
+            ),
+            WallpaperMode::Fill
+        );
+    }
+
+    #[test]
+    fn wallpaper_failed_same_path_retry_keeps_last_successful_mode() {
+        // A/Fill is visible; B/Fit failed and its receiver was removed.
+        // Explicitly retrying B must not relayout A while B decodes again.
+        assert_eq!(
+            wallpaper_mode_on_request(
+                "/wall/B.png",
+                false,
+                true,
+                WallpaperMode::Fill,
+                "/wall/B.png",
+                WallpaperMode::Fit
             ),
             WallpaperMode::Fill
         );
@@ -1109,6 +1137,7 @@ mod tests {
         assert_eq!(
             wallpaper_mode_on_request(
                 "/wall/current.jpg",
+                false,
                 false,
                 WallpaperMode::Fill,
                 "/wall/current.jpg",
@@ -1121,6 +1150,7 @@ mod tests {
             wallpaper_mode_on_request(
                 "/wall/current.jpg",
                 true,
+                false,
                 WallpaperMode::Fill,
                 "",
                 WallpaperMode::Stretch,

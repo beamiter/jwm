@@ -888,6 +888,8 @@ where
     wallpaper_requested_mode: WallpaperMode,
     /// Stored wallpaper path for change detection during hot-reload.
     wallpaper_path: String,
+    /// Retry a failed request only on a later configuration refresh.
+    wallpaper_load_failed: bool,
     wallpaper_img_w: u32,
     wallpaper_img_h: u32,
     /// Per-monitor wallpaper overrides. Populated by set_monitors().

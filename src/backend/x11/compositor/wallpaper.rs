@@ -573,9 +573,17 @@ impl<C: CompositorConnection> Compositor<C> {
                     img_w: 0,
                     img_h: 0,
                     current_path: override_path,
+                    load_failed: false,
                 });
             } else if let Some(mw) = self.monitor_wallpapers.get_mut(slot) {
-                if mw.current_path != override_path || mw.mode != mode {
+                if crate::backend::compositor_common::wallpaper::wallpaper_request_needs_reload(
+                    &mw.current_path,
+                    mw.mode,
+                    &override_path,
+                    mode,
+                    mw.load_failed,
+                ) {
+                    mw.load_failed = false;
                     mw.mode = mode;
                     mw.current_path.clone_from(&override_path);
                     // Only the newest request for a monitor may publish. A
@@ -853,6 +861,66 @@ mod deferred_load_tests {
             .unwrap();
         assert_eq!(result.width, 2);
         assert_eq!(*gate.lock(), 1);
+    }
+
+    #[test]
+    fn wallpaper_decode_failure_does_not_retry_from_polling_alone() {
+        let gate = gate(1);
+        let decoded = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&decoded);
+        let load = DeferredWallpaperLoad::new(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+            None
+        });
+        assert!(matches!(
+            load.try_recv_with(gate, |worker| {
+                worker();
+                Ok(())
+            }),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        for _ in 0..10 {
+            assert!(matches!(
+                load.try_recv_with(gate, |_| panic!("poll must not retry")),
+                Err(mpsc::TryRecvError::Disconnected)
+            ));
+        }
+        assert_eq!(decoded.load(Ordering::Relaxed), 1);
+        // Explicit refresh replaces the failed slot with a fresh request.
+        let replacement = DeferredWallpaperLoad::new(|_| Some(image(7)));
+        assert_eq!(
+            replacement
+                .try_recv_with(gate, |worker| {
+                    worker();
+                    Ok(())
+                })
+                .unwrap()
+                .width,
+            7
+        );
+    }
+
+    #[test]
+    fn wallpaper_superseded_failure_cannot_poison_current_request() {
+        let gate = gate(2);
+        let mut old_worker = None;
+        let old = DeferredWallpaperLoad::new(|_| None);
+        assert!(matches!(
+            old.try_recv_with(gate, |worker| {
+                old_worker = Some(worker);
+                Ok(())
+            }),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        // Production drops the old receiver before installing its replacement.
+        drop(old);
+        let current = DeferredWallpaperLoad::new(|_| Some(image(8)));
+        old_worker.take().unwrap()();
+        let result = current.try_recv_with(gate, |worker| {
+            worker();
+            Ok(())
+        });
+        assert_eq!(result.unwrap().width, 8);
     }
 
     #[test]

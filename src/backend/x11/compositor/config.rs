@@ -15,8 +15,15 @@ fn wallpaper_config_update(
     current_requested_mode: WallpaperMode,
     new_path: &str,
     new_mode: WallpaperMode,
+    load_failed: bool,
 ) -> WallpaperConfigUpdate {
-    if current_path == new_path && current_requested_mode == new_mode {
+    if !crate::backend::compositor_common::wallpaper::wallpaper_request_needs_reload(
+        current_path,
+        current_requested_mode,
+        new_path,
+        new_mode,
+        load_failed,
+    ) {
         WallpaperConfigUpdate::Unchanged
     } else if new_path.is_empty() {
         WallpaperConfigUpdate::Clear
@@ -758,9 +765,11 @@ impl<C: CompositorConnection> Compositor<C> {
             self.wallpaper_requested_mode,
             &behavior.wallpaper,
             new_mode,
+            self.wallpaper_load_failed,
         ) {
             WallpaperConfigUpdate::Unchanged => {}
             WallpaperConfigUpdate::Reload => {
+                self.wallpaper_load_failed = false;
                 // Dropping the receiver invalidates any older decode. Its
                 // worker may finish, but can no longer publish into this
                 // compositor after a path or mode change.
@@ -775,6 +784,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 ));
             }
             WallpaperConfigUpdate::Clear => {
+                self.wallpaper_load_failed = false;
                 // Clearing the path is an immediate state transition: cancel
                 // the decode and retire both sides of any active crossfade.
                 self.pending_wallpaper = None;
@@ -1020,13 +1030,80 @@ mod tests {
     use crate::backend::compositor_common::wallpaper::WallpaperMode;
 
     #[test]
+    fn wallpaper_failed_request_can_retry_restored_same_path() {
+        use crate::backend::compositor_common::image_source::open_regular_image;
+        let dir = std::env::temp_dir().join(format!("jwm-wallpaper-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("restored.png");
+        std::fs::remove_file(&path).ok();
+        // A file disappears after the picker has already listed it.
+        assert!(open_regular_image(&path).is_err());
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(open_regular_image(&path).is_err());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        assert!(open_regular_image(&path).is_ok());
+        let retry = wallpaper_config_update(
+            path.to_str().unwrap(),
+            WallpaperMode::Fill,
+            path.to_str().unwrap(),
+            WallpaperMode::Fill,
+            true,
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            retry,
+            WallpaperConfigUpdate::Reload,
+            "explicit reapply after failed decoding must retry the restored file"
+        );
+    }
+
+    #[test]
+    fn wallpaper_failed_request_can_clear_or_be_superseded_without_reloading_success() {
+        assert_eq!(
+            wallpaper_config_update(
+                "failed.png",
+                WallpaperMode::Fill,
+                "",
+                WallpaperMode::Fill,
+                true
+            ),
+            WallpaperConfigUpdate::Clear
+        );
+        assert_eq!(
+            wallpaper_config_update(
+                "failed.png",
+                WallpaperMode::Fill,
+                "next.png",
+                WallpaperMode::Fill,
+                true
+            ),
+            WallpaperConfigUpdate::Reload
+        );
+        // Queueing the replacement clears failure; an in-flight or successful
+        // identical request is not restarted by another config refresh.
+        assert_eq!(
+            wallpaper_config_update(
+                "next.png",
+                WallpaperMode::Fill,
+                "next.png",
+                WallpaperMode::Fill,
+                false
+            ),
+            WallpaperConfigUpdate::Unchanged
+        );
+    }
+
+    #[test]
     fn wallpaper_request_change_reloads_for_path_or_mode() {
         assert_eq!(
             wallpaper_config_update(
                 "old.png",
                 WallpaperMode::Fill,
                 "new.png",
-                WallpaperMode::Fill
+                WallpaperMode::Fill,
+                false
             ),
             WallpaperConfigUpdate::Reload
         );
@@ -1035,7 +1112,8 @@ mod tests {
                 "same.png",
                 WallpaperMode::Fill,
                 "same.png",
-                WallpaperMode::Fit
+                WallpaperMode::Fit,
+                false
             ),
             WallpaperConfigUpdate::Reload
         );
@@ -1044,11 +1122,17 @@ mod tests {
     #[test]
     fn empty_wallpaper_path_is_an_explicit_clear() {
         assert_eq!(
-            wallpaper_config_update("old.png", WallpaperMode::Center, "", WallpaperMode::Stretch),
+            wallpaper_config_update(
+                "old.png",
+                WallpaperMode::Center,
+                "",
+                WallpaperMode::Stretch,
+                false
+            ),
             WallpaperConfigUpdate::Clear
         );
         assert_eq!(
-            wallpaper_config_update("", WallpaperMode::Fit, "", WallpaperMode::Fit),
+            wallpaper_config_update("", WallpaperMode::Fit, "", WallpaperMode::Fit, false),
             WallpaperConfigUpdate::Unchanged
         );
     }

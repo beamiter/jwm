@@ -627,6 +627,7 @@ pub(crate) struct MonitorWallpaper {
     /// Currently-loaded wallpaper path (used to skip reloads when active tags
     /// change but the resolved wallpaper for this monitor stays the same).
     pub current_path: String,
+    pub load_failed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1541,6 +1542,8 @@ pub(crate) struct WaylandCompositor {
     /// mode would restart a decode that is already in flight.
     wallpaper_requested_mode: WallpaperMode,
     wallpaper_path: String,
+    /// Retry a failed request only on a later configuration refresh.
+    wallpaper_load_failed: bool,
     wallpaper_img_w: u32,
     wallpaper_img_h: u32,
     monitor_wallpapers: Vec<MonitorWallpaper>,
@@ -3052,6 +3055,7 @@ impl WaylandCompositor {
                 wallpaper_mode: WallpaperMode::Fill,
                 wallpaper_requested_mode: WallpaperMode::Fill,
                 wallpaper_path: String::new(),
+                wallpaper_load_failed: false,
                 wallpaper_img_w: 0,
                 wallpaper_img_h: 0,
                 monitor_wallpapers: Vec::new(),

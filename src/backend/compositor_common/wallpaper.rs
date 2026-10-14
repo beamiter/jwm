@@ -10,6 +10,19 @@ pub(crate) enum WallpaperMode {
     Center,
 }
 
+/// Called only when configuration/output state is refreshed, never while
+/// polling a decode. A failed request keeps its identity and visible texture,
+/// but may be retried on the next refresh even when its path is unchanged.
+pub(crate) fn wallpaper_request_needs_reload(
+    current_path: &str,
+    current_mode: WallpaperMode,
+    new_path: &str,
+    new_mode: WallpaperMode,
+    load_failed: bool,
+) -> bool {
+    load_failed || current_path != new_path || current_mode != new_mode
+}
+
 pub(crate) struct WallpaperImageData {
     pub(crate) rgba: Vec<u8>,
     pub(crate) width: u32,
@@ -385,6 +398,18 @@ mod tests {
             })
             .collect();
         behavior
+    }
+
+    #[test]
+    fn wallpaper_failed_refresh_gate_preserves_identity_and_normal_deduplication() {
+        use super::{WallpaperMode::Fill, wallpaper_request_needs_reload as reload};
+        // The same gate drives global and monitor slots on both backends.
+        for path in ["daily.png", "monitor.png", "tag.png"] {
+            assert!(reload(path, Fill, path, Fill, true));
+            assert!(!reload(path, Fill, path, Fill, false));
+            assert!(reload(path, Fill, "", Fill, true));
+            assert!(reload(path, Fill, "next.png", Fill, true));
+        }
     }
 
     #[test]

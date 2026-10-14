@@ -5352,6 +5352,7 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
             img_w: 1,
             img_h: 1,
             current_path: String::new(),
+            load_failed: false,
         });
         compositor
             .retired_wallpaper_textures

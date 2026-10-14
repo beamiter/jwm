@@ -169,8 +169,15 @@ fn wallpaper_config_requests_change(
     requested_mode: WallpaperMode,
     new_path: &str,
     new_mode: WallpaperMode,
+    load_failed: bool,
 ) -> bool {
-    current_path != new_path || requested_mode != new_mode
+    crate::backend::compositor_common::wallpaper::wallpaper_request_needs_reload(
+        current_path,
+        requested_mode,
+        new_path,
+        new_mode,
+        load_failed,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -789,6 +796,7 @@ impl WaylandCompositor {
             self.wallpaper_requested_mode,
             &b.wallpaper,
             parse_wallpaper_mode(&b.wallpaper_mode),
+            self.wallpaper_load_failed,
         ) {
             self.set_wallpaper(&b.wallpaper.clone(), &b.wallpaper_mode.clone());
         }
@@ -1847,9 +1855,17 @@ impl WaylandCompositor {
                     img_w: 0,
                     img_h: 0,
                     current_path: path,
+                    load_failed: false,
                 });
             } else if let Some(mw) = self.monitor_wallpapers.get_mut(slot) {
-                if mw.current_path != path || mw.mode != mode {
+                if crate::backend::compositor_common::wallpaper::wallpaper_request_needs_reload(
+                    &mw.current_path,
+                    mw.mode,
+                    &path,
+                    mode,
+                    mw.load_failed,
+                ) {
+                    mw.load_failed = false;
                     // A newer request supersedes any decode still in flight for
                     // this monitor; otherwise the older result can win the race.
                     self.pending_monitor_wallpapers
@@ -3447,6 +3463,16 @@ mod tests {
     }
 
     #[test]
+    fn wallpaper_failed_request_retries_only_until_replacement_is_queued() {
+        use super::wallpaper_config_requests_change as changed;
+        use crate::backend::compositor_common::wallpaper::WallpaperMode::Fill;
+        assert!(changed("same.png", Fill, "same.png", Fill, true));
+        assert!(changed("same.png", Fill, "", Fill, true));
+        assert!(changed("same.png", Fill, "next.png", Fill, true));
+        assert!(!changed("next.png", Fill, "next.png", Fill, false));
+    }
+
+    #[test]
     fn a_reload_during_a_new_image_decode_does_not_restart_it() {
         use super::wallpaper_config_requests_change as requests_change;
         use crate::backend::compositor_common::wallpaper::WallpaperMode;
@@ -3458,6 +3484,7 @@ mod tests {
             WallpaperMode::Center,
             "/w/new.jpg",
             WallpaperMode::Center,
+            false
         ));
         // A different mode or path is.
         assert!(requests_change(
@@ -3465,18 +3492,21 @@ mod tests {
             WallpaperMode::Center,
             "/w/new.jpg",
             WallpaperMode::Fit,
+            false
         ));
         assert!(requests_change(
             "/w/new.jpg",
             WallpaperMode::Center,
             "/w/other.jpg",
             WallpaperMode::Center,
+            false
         ));
         assert!(requests_change(
             "/w/new.jpg",
             WallpaperMode::Center,
             "",
             WallpaperMode::Center,
+            false
         ));
 
         // The reload compares against the request, and `set_wallpaper` is
