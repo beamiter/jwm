@@ -4099,6 +4099,7 @@ impl Jwm {
             let format = behavior.audio_recording_format.as_str();
             if !matches!(format, "wav" | "flac" | "opus" | "mp3") {
                 let error = format!("unsupported audio recording format: {format}");
+                self.features.audio_recording.last_error = Some(error.clone());
                 // Same shape as the screen recorder's unavailable toast: a
                 // mic the user believes is recording when it is not is the
                 // privacy-relevant case, so the failure breaks through
@@ -4150,6 +4151,9 @@ impl Jwm {
             )
         };
         if let Err(error) = started {
+            // Keep the failed request visible to later status queries without
+            // clearing a live/finalizing session that rejected a second start.
+            self.features.audio_recording.last_error = Some(error.clone());
             // Mirror the screen recorder's unavailable toast, urgency and
             // all: a start that did not happen must not fail silently.
             self.push_system_toast(

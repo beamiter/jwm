@@ -10256,6 +10256,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn audio_start_failure_remains_visible_in_status() {
+        for previous_error in [None, Some("older audio failure")] {
+            let mut backend = PairingIpcBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            jwm.features.audio_recording.last_error = previous_error.map(str::to_owned);
+            let rejected = jwm.handle_ipc_command(
+                &mut backend,
+                "start_audio_recording",
+                &serde_json::json!({"path": "relative-recording.wav"}),
+            );
+            assert!(!rejected.success);
+            let error = rejected
+                .error
+                .expect("start rejection must explain the failure");
+            for query in [
+                "get_audio_recording_status",
+                "get_audio_recording",
+                "get_arec",
+                "get_status",
+                "get_st",
+            ] {
+                let status = jwm
+                    .handle_ipc_query(query, &serde_json::json!({}), &mut backend)
+                    .data
+                    .unwrap();
+                let audio = if matches!(query, "get_status" | "get_st") {
+                    &status["audio_recording"]
+                } else {
+                    &status
+                };
+                assert_eq!(audio["active"], false);
+                assert_eq!(audio["last_error"], error);
+            }
+            assert_eq!(
+                backend.toasts.len(),
+                1,
+                "status polls must not repeat rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_start_failure_preserves_the_existing_recording() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.audio_recording =
+            crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                "/tmp/jwm-active-status-only-no-file.wav",
+                |stop| {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                        if std::time::Instant::now() >= deadline {
+                            return Err("fake recorder stop deadline".into());
+                        }
+                        std::thread::yield_now();
+                    }
+                    Ok(())
+                },
+            );
+        let started_at = jwm.features.audio_recording.started_at;
+        let rejected = jwm.handle_ipc_command(
+            &mut backend,
+            "start_audio_recording",
+            &serde_json::json!({"path": "relative-recording.wav"}),
+        );
+        assert!(!rejected.success);
+        assert!(jwm.features.audio_recording.active);
+        assert!(!jwm.features.audio_recording.is_finalizing());
+        assert_eq!(jwm.features.audio_recording.started_at, started_at);
+        assert_eq!(
+            jwm.features.audio_recording.output_path.as_deref(),
+            Some("/tmp/jwm-active-status-only-no-file.wav")
+        );
+        assert_eq!(jwm.features.audio_recording.last_error, rejected.error);
+        assert!(!backend.mic_indicator.contains(&false));
+        jwm.stop_audio_recording(&mut backend).unwrap();
+    }
+
+    #[test]
+    fn successful_audio_start_retains_prior_error_clear() {
+        // Source contract complements the device-free failure tests: actual
+        // successful device acquisition needs a live audio backend.
+        let source = include_str!("features/audio_recording.rs");
+        let body = source
+            .split_once("let (worker, (actual_rate, actual_channels)) = self.spawn_worker(")
+            .unwrap()
+            .1;
+        let committed = body.split_once("self.active = true;").unwrap().1;
+        assert!(
+            committed
+                .split_once("Ok(())")
+                .unwrap()
+                .0
+                .contains("self.last_error = None;")
+        );
+    }
+
     /// Status must settle the same completed worker as the tick. `refresh`
     /// alone deliberately keeps `active` latched for the next stop gesture.
     #[test]
