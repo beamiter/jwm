@@ -602,6 +602,13 @@ impl AudioRecordingState {
         self.exited.is_some()
     }
 
+    /// A timed-out initializer can still own the capture device even though
+    /// no recording became active. Never join it while it is still running.
+    pub(crate) fn has_pending_initialization(&mut self) -> bool {
+        self.reap_abandoned();
+        self.abandoned.is_some()
+    }
+
     fn reap_abandoned(&mut self) {
         if !self
             .abandoned
@@ -642,6 +649,24 @@ impl AudioRecordingState {
         state.output_path = Some(output_path.to_string());
         state.reset_elapsed(Instant::now());
         state.worker = Some(AudioWorker { stop, handle });
+        state
+    }
+
+    /// A real timed-out initialization, held by a gate instead of a device.
+    #[cfg(all(test, feature = "media-audio"))]
+    pub(crate) fn abandoned_for_test(release: mpsc::Receiver<()>) -> Self {
+        let mut state = Self::default();
+        let result = state.spawn_worker(
+            Path::new("/unused/abandoned-audio.wav"),
+            Duration::from_millis(10),
+            move |stop, _ready| {
+                let _ = release.recv_timeout(Duration::from_secs(5));
+                assert!(stop.load(Ordering::Acquire));
+                Err("fake initialization ended after timeout".into())
+            },
+        );
+        assert!(result.is_err());
+        assert!(state.abandoned.is_some());
         state
     }
 

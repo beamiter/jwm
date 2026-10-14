@@ -4399,6 +4399,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         captures_audio: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if captures_audio && self.features.audio_recording.has_pending_initialization() {
+            return Err(
+                "The previous audio recorder is still opening the capture device; try again once it responds."
+                    .into(),
+            );
+        }
         if captures_audio
             && (self.features.audio_recording.active
                 || self.features.audio_recording.is_finalizing())
@@ -8192,6 +8198,82 @@ pub(crate) mod keyboard_grab_tests {
         );
         jwm.poll_audio_recording(&mut backend);
         assert_eq!(backend.toasts.len(), 1, "reported once");
+    }
+
+    #[test]
+    fn active_audio_recording_is_stopped_before_screen_handoff() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_exited = std::sync::Arc::clone(&exited);
+        jwm.features.audio_recording =
+            AudioRecordingState::recording_for_test("/unused/active-audio.wav", move |stop| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !stop.load(Ordering::Acquire) {
+                    if std::time::Instant::now() >= deadline {
+                        return Err("fake active recorder was not stopped".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                worker_exited.store(true, Ordering::Release);
+                Ok(())
+            });
+        jwm.free_microphone_for_screen_recording(&mut backend, false)
+            .expect("screen-only capture leaves standalone audio active");
+        assert!(jwm.features.audio_recording.active);
+        assert!(!exited.load(Ordering::Acquire));
+        assert!(backend.toasts.is_empty());
+
+        jwm.free_microphone_for_screen_recording(&mut backend, true)
+            .expect("active audio is stopped before microphone handoff");
+        assert!(exited.load(Ordering::Acquire));
+        assert!(!jwm.features.audio_recording.active);
+        assert!(!jwm.features.audio_recording.is_finalizing());
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording stopped"]
+        );
+        jwm.poll_audio_recording(&mut backend);
+        assert_eq!(backend.toasts.len(), 1, "reported once");
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn abandoned_audio_initialization_blocks_only_audio_screen_handoff() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let (release, gate) = std::sync::mpsc::channel();
+        jwm.features.audio_recording = AudioRecordingState::abandoned_for_test(gate);
+        assert!(!jwm.features.audio_recording.active);
+        assert!(!jwm.features.audio_recording.is_finalizing());
+
+        // A stop cannot turn a still-running initialization into release proof.
+        jwm.stop_audio_recording(&mut backend).unwrap();
+        jwm.free_microphone_for_screen_recording(&mut backend, false)
+            .expect("screen-only capture needs no microphone");
+        let before = std::time::Instant::now();
+        let error = jwm
+            .free_microphone_for_screen_recording(&mut backend, true)
+            .expect_err("the abandoned initializer still owns the device reservation");
+        assert!(before.elapsed() < std::time::Duration::from_secs(1));
+        assert!(error.to_string().contains("try again"));
+        assert!(backend.toasts.is_empty(), "no recording stopped or saved");
+
+        // Release is determined by the old worker actually returning. No tick
+        // is required: the handoff itself must reap a completed initializer.
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while jwm
+            .free_microphone_for_screen_recording(&mut backend, true)
+            .is_err()
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            backend.toasts.is_empty(),
+            "initialization was never a recording"
+        );
     }
 
     impl Jwm {
