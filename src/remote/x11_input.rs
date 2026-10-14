@@ -557,7 +557,10 @@ impl PressedState {
 
     /// Forget one held input that has already been released.
     fn release(&mut self, held: HeldInput) {
-        if let Some(index) = self.held.iter().position(|item| same_input(*item, held)) {
+        // Cleanup can hold several physical identities for one logical
+        // button after a failed remap/repress batch. Forget only the release
+        // that succeeded, leaving every other identity available for retry.
+        if let Some(index) = self.held.iter().position(|item| *item == held) {
             self.held.remove(index);
         }
     }
@@ -568,11 +571,36 @@ impl PressedState {
     }
 
     fn record_possible_press(&mut self, event: InputEvent, physical: Option<u8>) {
-        if matches!(
-            event,
-            InputEvent::Key { pressed: true, .. } | InputEvent::Button { pressed: true, .. }
-        ) {
-            self.record_success(event, physical);
+        let held = match event {
+            InputEvent::Key {
+                keycode,
+                pressed: true,
+            } => HeldInput::Key(keycode),
+            InputEvent::Button {
+                button,
+                pressed: true,
+            } => HeldInput::Button {
+                logical: button,
+                physical: physical.unwrap_or(button),
+            },
+            _ => return,
+        };
+        // This is the union of every possibly held request prefix, not the
+        // final logical state. A release then repress after remapping can
+        // hold a different physical button under the same logical number.
+        // Deduplicate actual cleanup targets without merging keys/buttons.
+        let already_tracked = self.held.iter().any(|item| match (*item, held) {
+            (HeldInput::Key(left), HeldInput::Key(right)) => left == right,
+            (
+                HeldInput::Button { physical: left, .. },
+                HeldInput::Button {
+                    physical: right, ..
+                },
+            ) => left == right,
+            _ => false,
+        });
+        if !already_tracked {
+            self.held.push(held);
         }
     }
 }
@@ -1031,6 +1059,160 @@ mod tests {
         .unwrap();
         assert!(final_pressed.release_plan().is_empty());
         assert_eq!(uncertain_pressed.release_plan(), initial.release_plan());
+    }
+
+    #[test]
+    fn remapped_repress_failure_retains_both_physical_buttons() {
+        for release in [
+            InputEvent::Button {
+                button: 1,
+                pressed: false,
+            },
+            InputEvent::ReleaseAll,
+        ] {
+            let mut initial = PressedState::default();
+            initial.record_success(
+                InputEvent::Button {
+                    button: 1,
+                    pressed: true,
+                },
+                Some(1),
+            );
+            let (prepared, next, uncertain) = prepare_batch(
+                &[
+                    release,
+                    InputEvent::Button {
+                        button: 1,
+                        pressed: true,
+                    },
+                ],
+                &initial,
+                8,
+                255,
+                &[2, 1],
+                (0, 0),
+            )
+            .unwrap();
+            assert_eq!(
+                prepared
+                    .iter()
+                    .map(|p| (p.type_, p.detail))
+                    .collect::<Vec<_>>(),
+                [(BUTTON_RELEASE_EVENT, 1), (BUTTON_PRESS_EVENT, 2)]
+            );
+            assert_eq!(
+                next.release_plan(),
+                [HeldInput::Button {
+                    logical: 1,
+                    physical: 2
+                }]
+            );
+            let mut successful = initial.clone();
+            execute_prepared_batch(
+                &mut successful,
+                prepared.clone(),
+                next.clone(),
+                uncertain.clone(),
+                |_| Ok::<(), ()>(()),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(successful.release_plan(), next.release_plan());
+            let mut failed_queue = initial.clone();
+            let mut queued = 0;
+            let result = execute_prepared_batch(
+                &mut failed_queue,
+                prepared.clone(),
+                next.clone(),
+                uncertain.clone(),
+                |_| {
+                    queued += 1;
+                    if queued == 2 { Err(()) } else { Ok(()) }
+                },
+                || panic!("queue failure must not flush"),
+            );
+            assert!(result.is_err());
+            assert_eq!(failed_queue.release_plan(), uncertain.release_plan());
+            let mut live = initial;
+            let result = execute_prepared_batch(
+                &mut live,
+                prepared,
+                next,
+                uncertain,
+                |_| Ok::<(), ()>(()),
+                || Err(()),
+            );
+            assert!(result.is_err());
+            assert_eq!(
+                live.release_plan(),
+                [
+                    HeldInput::Button {
+                        logical: 1,
+                        physical: 2
+                    },
+                    HeldInput::Button {
+                        logical: 1,
+                        physical: 1
+                    },
+                ]
+            );
+            // A successful release of the new physical button must not forget
+            // the older button if its release later fails and needs retrying.
+            live.release(HeldInput::Button {
+                logical: 1,
+                physical: 2,
+            });
+            assert_eq!(
+                live.release_plan(),
+                [HeldInput::Button {
+                    logical: 1,
+                    physical: 1
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_cleanup_deduplicates_physical_buttons_without_key_collisions() {
+        let mut uncertain = PressedState::default();
+        uncertain.record_possible_press(
+            InputEvent::Key {
+                keycode: 8,
+                pressed: true,
+            },
+            None,
+        );
+        uncertain.record_possible_press(
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            Some(8),
+        );
+        uncertain.record_possible_press(
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            Some(8),
+        );
+        uncertain.record_possible_press(
+            InputEvent::Button {
+                button: 2,
+                pressed: true,
+            },
+            Some(8),
+        );
+        assert_eq!(
+            uncertain.release_plan(),
+            [
+                HeldInput::Button {
+                    logical: 1,
+                    physical: 8
+                },
+                HeldInput::Key(8),
+            ]
+        );
     }
 
     #[test]
