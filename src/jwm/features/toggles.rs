@@ -6831,6 +6831,7 @@ pub(crate) mod keyboard_grab_tests {
         recording_overlays: Vec<Option<(i32, i32, u32, u32)>>,
         capture_selection_updates: Vec<bool>,
         capture_hints: Vec<Option<String>>,
+        screenshot_overlay_updates: Vec<String>,
     }
 
     impl GrabSpyBackend {
@@ -6862,6 +6863,7 @@ pub(crate) mod keyboard_grab_tests {
                 recording_overlays: Vec::new(),
                 capture_selection_updates: Vec::new(),
                 capture_hints: Vec::new(),
+                screenshot_overlay_updates: Vec::new(),
             }
         }
 
@@ -6977,6 +6979,20 @@ pub(crate) mod keyboard_grab_tests {
         }
     }
     impl CompositorWorkspaceEffects for GrabSpyBackend {
+        fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+            self.screenshot_overlay_updates
+                .push(format!("preview:{preview:?}"));
+        }
+
+        fn compositor_clear_snap_preview_immediate(&mut self) {
+            self.screenshot_overlay_updates.push("clear-preview".into());
+        }
+
+        fn compositor_set_screenshot_freeze(&mut self, active: bool) {
+            self.screenshot_overlay_updates
+                .push(format!("freeze:{active}"));
+        }
+
         fn compositor_set_overview_mode(
             &mut self,
             active: bool,
@@ -7005,7 +7021,22 @@ pub(crate) mod keyboard_grab_tests {
         }
     }
     impl CompositorWindowEffects for GrabSpyBackend {}
-    impl CompositorAnnotation for GrabSpyBackend {}
+    impl CompositorAnnotation for GrabSpyBackend {
+        fn compositor_set_annotation_mode(&mut self, active: bool) {
+            self.screenshot_overlay_updates
+                .push(format!("annotation:{active}"));
+        }
+
+        fn compositor_set_screenshot_toolbar(
+            &mut self,
+            toolbar: Option<
+                crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar,
+            >,
+        ) {
+            self.screenshot_overlay_updates
+                .push(format!("toolbar:{toolbar:?}"));
+        }
+    }
     impl DisplayControl for GrabSpyBackend {}
     impl RenderScheduler for GrabSpyBackend {
         fn has_compositor(&self) -> bool {
@@ -7082,6 +7113,91 @@ pub(crate) mod keyboard_grab_tests {
 
     fn jwm(backend: &mut GrabSpyBackend) -> Jwm {
         Jwm::new_with_runtime_backend(backend, "test").expect("test jwm")
+    }
+
+    /// Drive the real screenshot poll after a newer UI owner has been arranged.
+    /// All display/input operations stay in this in-memory backend.
+    pub(crate) fn assert_screenshot_completion_preserves_owner(
+        arrange: impl FnOnce(&mut Jwm, &mut dyn Backend),
+    ) {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        arrange(&mut jwm, &mut backend);
+        let before = format!(
+            "{:?}",
+            (
+                &jwm.features.screenshot,
+                &jwm.features.recording,
+                &jwm.features.capture,
+                &jwm.features.deferred_grab
+            )
+        );
+        let keyboard = backend.key_ops.held.load(Ordering::Relaxed);
+        let pointer = backend.input_ops.held.load(Ordering::Relaxed);
+        let pointer_events = backend.input_ops.events.lock().unwrap().clone();
+        let overlays = backend.screenshot_overlay_updates.clone();
+        let selection = backend.capture_selection_updates.clone();
+        let hints = backend.capture_hints.clone();
+        let recording_overlays = backend.recording_overlays.clone();
+        let recording_crops = backend.recording_crop_updates.clone();
+        let toasts = backend.toasts.len();
+        assert!(!jwm.features.screenshot_completions.is_empty());
+
+        jwm.poll_screenshot_completion_jobs(&mut backend);
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                (
+                    &jwm.features.screenshot,
+                    &jwm.features.recording,
+                    &jwm.features.capture,
+                    &jwm.features.deferred_grab
+                )
+            ),
+            before
+        );
+        assert_eq!(backend.key_ops.held.load(Ordering::Relaxed), keyboard);
+        assert_eq!(backend.input_ops.held.load(Ordering::Relaxed), pointer);
+        assert_eq!(*backend.input_ops.events.lock().unwrap(), pointer_events);
+        assert_eq!(backend.screenshot_overlay_updates, overlays);
+        assert_eq!(backend.capture_selection_updates, selection);
+        assert_eq!(backend.capture_hints, hints);
+        assert_eq!(backend.recording_overlays, recording_overlays);
+        assert_eq!(backend.recording_crop_updates, recording_crops);
+        assert_eq!(backend.toasts.len(), toasts + 1);
+        assert!(jwm.features.screenshot_completions.is_empty());
+        jwm.poll_screenshot_completion_jobs(&mut backend);
+        assert_eq!(
+            backend.toasts.len(),
+            toasts + 1,
+            "completion must be consumed once"
+        );
+    }
+
+    #[test]
+    fn screenshot_result_ownership_late_completion_preserves_recording_selection() {
+        use crate::jwm::features::connectivity::BackgroundJob;
+        use crate::jwm::features::screenshot::ScreenshotCompletion;
+        for completion in [
+            ScreenshotCompletion::Saved("/unused/older.png".into()),
+            ScreenshotCompletion::Failed("/unused/older.png".into()),
+        ] {
+            assert_screenshot_completion_preserves_owner(|jwm, backend| {
+                let (old_job, publish_old) = BackgroundJob::controlled_for_test();
+                jwm.features.screenshot_completions.push(old_job);
+                jwm.poll_screenshot_completion_jobs(backend);
+                assert_eq!(jwm.features.screenshot_completions.len(), 1);
+                jwm.begin_recording_region_selection(backend, "/unused/newer.mp4".into())
+                    .unwrap();
+                assert!(jwm.features.recording.selecting_region);
+                jwm.features.recording.set_region(Rect::new(20, 30, 80, 90));
+                jwm.sync_recording_region_overlay(backend);
+                assert_eq!(jwm.features.screenshot_completions.len(), 1);
+                assert!(jwm.features.screenshot_completions[0].take().is_none());
+                publish_old(completion);
+            });
+        }
     }
 
     fn overview_window(jwm: &mut Jwm, raw: u64) -> crate::core::models::ClientKey {

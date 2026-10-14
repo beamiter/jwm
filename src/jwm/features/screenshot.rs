@@ -2498,6 +2498,74 @@ mod tests {
     use super::*;
     use crate::backend::compositor_common::screenshot_toolbar::ButtonFace;
 
+    fn file_completions() -> [ScreenshotCompletion; 3] {
+        [
+            ScreenshotCompletion::Saved("/unused/older.png".into()),
+            ScreenshotCompletion::SavedWithoutAnnotations("/unused/older.png".into()),
+            ScreenshotCompletion::Failed("/unused/older.png".into()),
+        ]
+    }
+
+    #[test]
+    fn screenshot_result_ownership_cancel_then_immediate_new_selection() {
+        for completion in file_completions() {
+            crate::jwm::features::toggles::keyboard_grab_tests::assert_screenshot_completion_preserves_owner(
+                |jwm, backend| {
+                    let (old_job, publish_old) = connectivity::BackgroundJob::controlled_for_test();
+                    assert!(old_job.started());
+                    assert!(old_job.take().is_none());
+                    jwm.features.screenshot_completions.push(old_job);
+                    jwm.poll_screenshot_completion_jobs(backend);
+                    assert_eq!(jwm.features.screenshot_completions.len(), 1);
+                    assert!(jwm.begin_interactive_capture(backend, "/unused/cancelled.png").unwrap());
+                    jwm.features.screenshot.select_rect(Rect::new(3, 4, 50, 60));
+                    jwm.cancel_screenshot_select(backend);
+                    assert_eq!(jwm.features.screenshot_completions.len(), 1, "cancel must retain already accepted work");
+                    assert!(jwm.begin_interactive_capture(backend, "/unused/newer.png").unwrap());
+                    jwm.features.screenshot.select_rect(Rect::new(20, 30, 80, 90));
+                    jwm.sync_screenshot_toolbar(backend);
+                    // The same accepted worker remains pending across cancel
+                    // and reopen. Release it only after the new editor owns input.
+                    assert_eq!(jwm.features.screenshot_completions.len(), 1);
+                    assert!(jwm.features.screenshot_completions[0].take().is_none());
+                    publish_old(completion);
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn screenshot_result_ownership_repeated_alt_s_then_late_completion() {
+        for completion in file_completions() {
+            crate::jwm::features::toggles::keyboard_grab_tests::assert_screenshot_completion_preserves_owner(
+                |jwm, backend| {
+                    for _ in 0..3 {
+                        // Inject only the prepared path; the real Alt+S
+                        // active-selector branch performs the cancellation.
+                        assert!(jwm.begin_interactive_capture(backend, "/unused/cancelled.png").unwrap());
+                        jwm.take_screenshot(backend, &WMArgEnum::Int(0)).unwrap();
+                        assert!(!jwm.features.screenshot.active);
+                        assert!(jwm.features.screenshot.output_path.is_none());
+                        assert!(jwm.features.screenshot_completions.is_empty());
+                    }
+                    jwm.features.screenshot_completions.push(connectivity::BackgroundJob::completed_for_test(completion));
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn screenshot_result_ownership_late_writer_cannot_replace_newer_saved_capture() {
+        use crate::backend::compositor_common::screenshot::save_png_atomically;
+        let directory = ScratchDir::new("late-writer");
+        let path = directory.path().join("same-destination.png");
+        save_png_atomically(&path, &[0, 255, 0, 255], 1, 1).unwrap();
+        let newer = std::fs::read(&path).unwrap();
+        assert!(save_png_atomically(&path, &[255, 0, 0, 255], 1, 1).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), newer);
+        assert!(!screenshot_staging_path(&path).exists());
+    }
+
     #[test]
     fn screenshot_takes_input_only_after_cancelling_the_previous_drag() {
         crate::jwm::features::toggles::keyboard_grab_tests::assert_drag_handoff(

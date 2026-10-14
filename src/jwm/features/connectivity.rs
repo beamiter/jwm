@@ -652,6 +652,32 @@ impl<T> BackgroundJob<T> {
         self.started
     }
 
+    /// A pending worker whose result can be released in a deterministic test.
+    /// The returned publisher fills the real result slot without a host thread.
+    #[cfg(test)]
+    pub(crate) fn controlled_for_test() -> (Self, impl FnOnce(T)) {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(BackgroundJobState {
+            result: None,
+            notifier: None,
+        }));
+        let publisher = std::sync::Arc::clone(&slot);
+        (
+            Self {
+                slot,
+                started: true,
+            },
+            move |result| publisher.lock().unwrap().result = Some(result),
+        )
+    }
+
+    /// A deterministically completed worker, without a host thread or device.
+    #[cfg(test)]
+    pub(crate) fn completed_for_test(result: T) -> Self {
+        let (job, publish) = Self::controlled_for_test();
+        publish(result);
+        job
+    }
+
     /// A handle whose thread the OS refused, for tests that pin how the
     /// guards behave around one. There is no other way to build it: a real
     /// spawn failure needs the process to be out of threads. Crate-visible
