@@ -588,6 +588,16 @@ impl TileDecoder {
             return Err(invalid_data("tile keyframe does not carry every tile").into());
         }
 
+        // A delta reuses the established pixels and therefore their source
+        // coordinate space. Only a self-contained keyframe may change it.
+        // Reject before mutating the canvas, source metadata or atlas scratch.
+        if !header.keyframe && self.source != (header.source_width, header.source_height) {
+            return Err(invalid_data(
+                "tile delta frame does not match the current source geometry",
+            )
+            .into());
+        }
+
         let canvas_dimensions = (
             u32::from(header.encoded_width),
             u32::from(header.encoded_height),
@@ -1263,6 +1273,84 @@ mod tests {
             plan.emit && plan.keyframe,
             "a changed root geometry cannot be coded against the old reference"
         );
+    }
+
+    #[test]
+    fn source_geometry_delta_is_rejected_without_changing_decoder_state() {
+        for source_offset in [8, 10] {
+            for dirty in [false, true] {
+                let mut encoder = TileEncoder::new();
+                let mut decoder = TileDecoder::new();
+                let first = flat(64, 64, 10);
+                roundtrip(
+                    &mut encoder,
+                    &mut decoder,
+                    &first,
+                    90,
+                    TileEncodeRequest::Keyframe,
+                );
+                let original_source = decoder.source;
+                let original_canvas = decoder.canvas.clone();
+                let original_atlas = decoder.atlas.clone();
+                let mut next = flat(64, 64, 10);
+                if dirty {
+                    next.image.put_pixel(1, 1, Rgb([255; 3]));
+                }
+                let mut payload = Vec::new();
+                let plan = encode(
+                    &mut encoder,
+                    &mut payload,
+                    8,
+                    &next,
+                    90,
+                    TileEncodeRequest::Keepalive,
+                );
+                assert!(!plan.keyframe);
+                assert_eq!(plan.dirty_tiles > 0, dirty);
+                let valid_payload = payload.clone();
+                payload[source_offset..source_offset + 2].copy_from_slice(&256_u16.to_be_bytes());
+                let result = decoder.decode_into(&payload, new_decode_buffer_pool());
+                assert!(result.is_err(), "a delta cannot change source geometry");
+                assert_eq!(decoder.source, original_source);
+                assert_eq!(decoder.canvas, original_canvas);
+                assert_eq!(decoder.atlas, original_atlas);
+                let recovered = decoder
+                    .decode_into(&valid_payload, new_decode_buffer_pool())
+                    .unwrap();
+                assert_eq!(recovered.source_width(), first.source_width);
+                assert_eq!(recovered.source_height(), first.source_height);
+            }
+        }
+    }
+
+    #[test]
+    fn source_geometry_keyframe_establishes_the_next_delta_coordinate_space() {
+        let mut encoder = TileEncoder::new();
+        let mut decoder = TileDecoder::new();
+        let mut source = flat(64, 64, 10);
+        for (width, height) in [(128, 128), (256, 128), (256, 256)] {
+            source.source_width = width;
+            source.source_height = height;
+            let (plan, _, _) = roundtrip(
+                &mut encoder,
+                &mut decoder,
+                &source,
+                90,
+                TileEncodeRequest::Delta,
+            );
+            assert!(plan.keyframe);
+            assert_eq!(decoder.source, (width, height));
+            let (keepalive, _, _) = roundtrip(
+                &mut encoder,
+                &mut decoder,
+                &source,
+                90,
+                TileEncodeRequest::Keepalive,
+            );
+            assert!(!keepalive.keyframe);
+            assert_eq!(keepalive.dirty_tiles, 0);
+            assert_eq!(decoder.source, (width, height));
+        }
     }
 
     #[test]
