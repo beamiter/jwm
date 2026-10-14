@@ -6692,6 +6692,78 @@ mod modal_grab_tests {
     }
 
     #[test]
+    fn wallpaper_lifecycle_cancel_drops_a_late_listing_without_applying() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let (job, finish) = BackgroundJob::controlled_for_test();
+        jwm.features.wallpaper_listing = Some(job);
+        jwm.features.system_ui = scanning_wallpaper_picker();
+        jwm.apply_selected_wallpaper(&mut backend);
+        assert!(jwm.features.system_ui.is_wallpaper_picker());
+        jwm.close_system_ui(&mut backend);
+        finish((PathBuf::from("/old"), vec![PathBuf::from("/old/a.png")]));
+        jwm.poll_wallpaper_listing_job();
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(jwm.features.wallpaper_listing.is_none());
+    }
+
+    #[test]
+    fn wallpaper_lifecycle_reopened_picker_ignores_old_answer_in_both_orders() {
+        for old_finishes_first in [true, false] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            let (old, finish_old) = BackgroundJob::controlled_for_test();
+            jwm.features.wallpaper_listing = Some(old);
+            jwm.features.system_ui = scanning_wallpaper_picker();
+            jwm.close_system_ui(&mut backend);
+            let (new, finish_new) = BackgroundJob::controlled_for_test();
+            // The opener replaces the handle, so each opening owns its slot.
+            jwm.features.wallpaper_listing = Some(new);
+            jwm.features.system_ui = scanning_wallpaper_picker();
+            let old_result = (PathBuf::from("/old"), vec![PathBuf::from("/old/a.png")]);
+            let new_result = (PathBuf::from("/new"), vec![PathBuf::from("/new/b.png")]);
+            if old_finishes_first {
+                finish_old(old_result);
+                jwm.poll_wallpaper_listing_job();
+                assert_eq!(
+                    wallpaper_picker_message(&jwm.features.system_ui),
+                    Some(WALLPAPER_SCANNING)
+                );
+                assert!(jwm.features.system_ui.selected_wallpaper().is_none());
+                finish_new(new_result);
+            } else {
+                finish_new(new_result);
+                jwm.poll_wallpaper_listing_job();
+                finish_old(old_result);
+            }
+            jwm.poll_wallpaper_listing_job();
+            assert_eq!(
+                jwm.features.system_ui.selected_wallpaper(),
+                Some("/new/b.png")
+            );
+            assert!(jwm.features.wallpaper_listing.is_none());
+        }
+    }
+
+    #[test]
+    fn wallpaper_lifecycle_navigation_then_cancel_closes_the_picker() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui = SystemUiState::wallpaper_picker(
+            &[PathBuf::from("/walls/a.png"), PathBuf::from("/walls/b.png")],
+            "/walls/a.png",
+            "/walls",
+        );
+        jwm.features.system_ui.move_selection(1);
+        assert_eq!(
+            jwm.features.system_ui.selected_wallpaper(),
+            Some("/walls/b.png")
+        );
+        jwm.close_system_ui(&mut backend);
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
     fn a_refused_wallpaper_scan_says_so_instead_of_scanning_forever() {
         let mut backend = LockSpyBackend::new();
         let mut jwm = jwm_on_two_monitors(&mut backend);
