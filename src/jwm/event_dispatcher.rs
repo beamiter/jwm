@@ -12599,6 +12599,300 @@ mod tests {
         );
     }
     #[test]
+    fn master_resize_letter_width_works_from_master_and_stack_focus() {
+        use crate::backend::common_define::keys;
+        use crate::core::layout::LayoutEnum;
+        for layout in [
+            LayoutEnum::TILE,
+            LayoutEnum::FIBONACCI,
+            LayoutEnum::CENTERED_MASTER,
+            LayoutEnum::BSTACK,
+            LayoutEnum::DECK,
+            LayoutEnum::THREE_COL,
+        ] {
+            for selected in 0..4 {
+                for (sym, delta) in [(keys::KEY_h, -0.025), (keys::KEY_l, 0.025)] {
+                    let (mut jwm, mut backend, mon, clients) =
+                        master_resize_scene(layout.clone(), 4);
+                    jwm.key_bindings = crate::config::Config::default().get_keys();
+                    let target = if selected < 2 {
+                        clients[selected]
+                    } else {
+                        clients[0]
+                    };
+                    // Start away from native full-width bounds (notably bstack).
+                    jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(target));
+                    jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                        .unwrap();
+                    let baseline = jwm.state.monitors[mon].layout_resizes.clone();
+                    let before = live_rect(&jwm, target);
+                    jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(delta))
+                        .unwrap();
+                    let expected: Vec<_> = clients.iter().map(|&k| live_rect(&jwm, k)).collect();
+                    assert_ne!(
+                        expected[if selected < 2 { selected } else { 0 }].w,
+                        before.w,
+                        "{} must resize target",
+                        layout.0
+                    );
+                    jwm.state.monitors[mon].layout_resizes = baseline;
+                    jwm.arrange(&mut backend, Some(mon));
+                    jwm.state.monitors[mon]
+                        .set_selected_client_for_current_tag(Some(clients[selected]));
+                    jwm.handle_event(
+                        &mut backend,
+                        BackendEvent::WmKeyboardShortcut {
+                            keysym: sym,
+                            mods: Mods::ALT,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        clients
+                            .iter()
+                            .map(|&k| live_rect(&jwm, k))
+                            .collect::<Vec<_>>(),
+                        expected,
+                        "{} selected index {selected}",
+                        layout.0
+                    );
+                    assert_eq!(jwm.get_selected_client_key(), Some(clients[selected]));
+                    assert!(
+                        clients
+                            .iter()
+                            .all(|&k| !jwm.state.clients[k].state.is_floating)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn master_resize_letter_width_preserves_singleton_equal_rank_and_floating_behavior() {
+        use crate::backend::common_define::keys;
+        use crate::core::layout::LayoutEnum;
+        for layout in LayoutEnum::all() {
+            for count in [1, 4] {
+                for floating in [false, true] {
+                    let (mut jwm, mut backend, mon, clients) =
+                        master_resize_scene(layout.clone(), count);
+                    let key = *clients.last().unwrap();
+                    jwm.state.clients[key].state.is_floating = floating;
+                    jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(key));
+                    jwm.arrange(&mut backend, Some(mon));
+                    if !floating
+                        && *layout != LayoutEnum::FLOAT
+                        && !jwm.is_layout_resize_target(key)
+                    {
+                        continue; // The separate master/stack regression covers fallback.
+                    }
+                    jwm.key_bindings = crate::config::Config::default().get_keys();
+                    let before = live_rect(&jwm, key);
+                    jwm.handle_event(
+                        &mut backend,
+                        BackendEvent::WmKeyboardShortcut {
+                            keysym: keys::KEY_h,
+                            mods: Mods::ALT,
+                        },
+                    )
+                    .unwrap();
+                    assert!(
+                        live_rect(&jwm, key).w < before.w,
+                        "{} count {count} floating {floating}",
+                        layout.0
+                    );
+                    assert_eq!(jwm.get_selected_client_key(), Some(key));
+                    assert_eq!(jwm.state.clients[key].state.is_floating, floating);
+                    if !floating && *layout != LayoutEnum::FLOAT {
+                        let scope = jwm.layout_resize_scope(mon).unwrap();
+                        assert_eq!(
+                            jwm.state.monitors[mon].layout_resizes[&scope]
+                                .intent
+                                .unwrap()
+                                .client,
+                            key
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn master_resize_letter_width_does_not_change_vertical_or_mouse_actions() {
+        use crate::backend::api::ResizeEdge;
+        use crate::backend::common_define::keys;
+        use crate::core::layout::LayoutEnum;
+        use crate::jwm::mouse_handler::DragMode;
+        let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::TILE, 4);
+        jwm.key_bindings = crate::config::Config::default().get_keys();
+        jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(clients[3]));
+        let before: Vec<_> = clients.iter().map(|&k| live_rect(&jwm, k)).collect();
+        jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.025))
+            .unwrap();
+        for sym in [keys::KEY_h, keys::KEY_l] {
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WmKeyboardShortcut {
+                    keysym: sym,
+                    mods: Mods::ALT | Mods::SHIFT,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            clients
+                .iter()
+                .map(|&k| live_rect(&jwm, k))
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        assert!(matches!(
+            jwm.resize_drag_mode(clients[3], ResizeEdge::Right),
+            DragMode::Resize(_)
+        ));
+    }
+
+    #[test]
+    fn master_resize_letter_width_fallback_is_visible_and_monitor_local() {
+        use crate::backend::common_define::keys;
+        use crate::core::layout::LayoutEnum;
+        use crate::core::types::Rect;
+        let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::TILE, 6);
+        jwm.key_bindings = crate::config::Config::default().get_keys();
+        jwm.state.clients[clients[0]].state.tags = 2;
+        jwm.state.clients[clients[1]].state.is_fullscreen = true;
+        jwm.state.clients[clients[1]].state.is_floating = true;
+        let mut other_monitor = jwm.state.monitors[mon].clone();
+        other_monitor.num = 1;
+        other_monitor.layout_resizes.clear();
+        other_monitor.geometry.m_x = 1920;
+        other_monitor.geometry.w_x = 1920;
+        let other = jwm.state.monitors.insert(other_monitor);
+        jwm.state.monitor_order.push(other);
+        jwm.state.monitor_clients.insert(other, Vec::new());
+        jwm.state.monitor_stack.insert(other, Vec::new());
+        let other_key = add_maximize_test_client(
+            &mut jwm,
+            other,
+            WindowId::from_raw(0x7301),
+            Rect::new(1920, 40, 640, 480),
+            false,
+        );
+        jwm.state.clients[other_key].size_hints.hints_valid = true;
+        jwm.state.monitors[other].set_selected_client_for_current_tag(Some(other_key));
+        jwm.arrange(&mut backend, Some(other));
+        jwm.state.sel_mon = Some(mon);
+        jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(clients[5]));
+        jwm.arrange(&mut backend, Some(mon));
+        let untouched = [clients[0], clients[1], other_key].map(|k| live_rect(&jwm, k));
+        let other_context = jwm.state.monitors[other].layout_resizes.clone();
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WmKeyboardShortcut {
+                keysym: keys::KEY_h,
+                mods: Mods::ALT,
+            },
+        )
+        .unwrap();
+        let scope = jwm.layout_resize_scope(mon).unwrap();
+        assert_eq!(
+            jwm.state.monitors[mon].layout_resizes[&scope]
+                .intent
+                .unwrap()
+                .client,
+            clients[2]
+        );
+        assert_eq!(
+            [clients[0], clients[1], other_key].map(|k| live_rect(&jwm, k)),
+            untouched
+        );
+        assert_eq!(jwm.state.monitors[other].layout_resizes, other_context);
+        assert_eq!(jwm.get_selected_client_key(), Some(clients[5]));
+        assert_eq!(jwm.state.sel_mon, Some(mon));
+        // Invalid or ineligible selections must not silently resize some other window.
+        for selected in [Some(clients[0]), Some(clients[1]), Some(other_key), None] {
+            jwm.state.monitors[mon].set_selected_client_for_current_tag(selected);
+            let contexts = jwm.state.monitors[mon].layout_resizes.clone();
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WmKeyboardShortcut {
+                    keysym: keys::KEY_h,
+                    mods: Mods::ALT,
+                },
+            )
+            .unwrap();
+            assert_eq!(jwm.state.monitors[mon].layout_resizes, contexts);
+            assert_eq!(jwm.state.monitors[other].layout_resizes, other_context);
+            assert_eq!(live_rect(&jwm, other_key), untouched[2]);
+        }
+    }
+
+    #[test]
+    fn master_resize_horizontal_rejects_ineligible_selections_and_masters() {
+        use crate::core::layout::LayoutEnum;
+        for state in 0..7 {
+            let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::TILE, 4);
+            let selected = clients[3];
+            jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(selected));
+            let c = &mut jwm.state.clients[selected];
+            match state {
+                0 => c.state.is_fixed = true,
+                1 => c.state.is_pip = true,
+                2 => c.state.is_fullscreen = true,
+                3 => c.state.is_hidden = true,
+                4 => c.state.is_swallowed = true,
+                5 => {
+                    c.state.is_floating = true;
+                    c.state.is_maximized_horz = true;
+                }
+                _ => c.state.tags = 2,
+            }
+            let before: Vec<_> = clients.iter().map(|&k| live_rect(&jwm, k)).collect();
+            jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.025))
+                .unwrap();
+            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+            assert_eq!(
+                clients
+                    .iter()
+                    .map(|&k| live_rect(&jwm, k))
+                    .collect::<Vec<_>>(),
+                before
+            );
+        }
+        let (mut jwm, mut backend, mon, clients) = master_resize_scene(LayoutEnum::TILE, 4);
+        jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(clients[3]));
+        for &key in &clients[..2] {
+            jwm.state.clients[key].state.is_fixed = true;
+        }
+        let before: Vec<_> = clients.iter().map(|&k| live_rect(&jwm, k)).collect();
+        jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.025))
+            .unwrap();
+        assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+        assert_eq!(
+            clients
+                .iter()
+                .map(|&k| live_rect(&jwm, k))
+                .collect::<Vec<_>>(),
+            before
+        );
+        // A layout with no master group must keep targeting the selected tile.
+        jwm.state.monitors[mon].layout.n_master = 0;
+        jwm.arrange(&mut backend, Some(mon));
+        jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.025))
+            .unwrap();
+        let scope = jwm.layout_resize_scope(mon).unwrap();
+        assert_eq!(
+            jwm.state.monitors[mon].layout_resizes[&scope]
+                .intent
+                .unwrap()
+                .client,
+            clients[3]
+        );
+    }
+
+    #[test]
     fn master_resize_letter_shortcuts_dispatch_physical_axes_without_changing_focus() {
         use crate::backend::common_define::keys;
         use crate::core::layout::LayoutEnum;

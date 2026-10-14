@@ -341,10 +341,10 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
 | XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
-| Alt+Control+Left / Right | Shrink / grow the selected master horizontally (2.5%) |
+| Alt+Control+Left / Right | Shrink / grow master width (2.5%); works with stack focus too |
 | Alt+Control+Up / Down | Shrink / grow it vertically (2.5%) |
 | Alt+Control+Home | Reset layout-local resized dimensions |
-| Alt+H / L | Shrink / grow width (2.5%) |
+| Alt+H / L | Shrink / grow master width (2.5%); works with stack focus too |
 | Alt+Shift+H / L | Grow / shrink height (2.5%; preserves the former factor-key signs) |
 | Alt+J / K | Next / previous window; within-column focus in scrolling |
 | Alt+Left / Right | Focus the left / right column in scrolling (no-op in other layouts) |

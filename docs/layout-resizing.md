@@ -12,10 +12,10 @@ Default bindings:
 
 | Binding | Action |
 | --- | --- |
-| Alt+Control+Left / Right | Shrink / grow width by 2.5% of usable output width |
+| Alt+Control+Left / Right | Shrink / grow master width by 2.5%; works with stack focus too |
 | Alt+Control+Up / Down | Shrink / grow height by 2.5% of usable output height |
 | Alt+Control+Home | Reset the current workspace/layout resize intention |
-| Alt+H / L | Shrink / grow width by 2.5% |
+| Alt+H / L | Shrink / grow master width by 2.5%; works with stack focus too |
 | Alt+Shift+H / L | Grow / shrink height by 2.5% |
 | Alt+J / K | Next / previous window; focus within the current scrolling column |
 | Alt+Left / Right | Focus the left / right scrolling column; no-op outside scrolling |
@@ -31,6 +31,16 @@ jwm-tool msg resize_horizontal --args '{"value":0.025}'
 jwm-tool msg resize_vertical --args '{"value":-0.025}'
 jwm-tool msg reset_layout_size
 ```
+
+`resize_horizontal` (Alt+H/L, Alt+Control+Left/Right, or IPC) uses an eligible
+focused master as before. With a tiled stack client focused, it resizes the
+first eligible visible master on the same monitor without moving focus.
+Floating selections, singletons and equal-rank layouts still resize the selected
+client. Hidden, other-workspace, fullscreen, fixed-size, PiP and maximized
+selections do not trigger a fallback. Existing bindings to `resize_horizontal`
+get this fix without configuration changes. Vertical resize and mouse rules
+are unchanged: Alt+Shift+H/L and Alt+Control+Up/Down still require an eligible
+selected target, so they do not resize a master from stack focus.
 
 The H/L aliases use physical width and height in every layout. Shift+H grows
 height and Shift+L shrinks it, preserving the increase/decrease signs of the old
