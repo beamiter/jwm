@@ -616,6 +616,10 @@ macro_rules! delegate_compositor_capabilities {
                 ))
             }
 
+            fn compositor_recording_failed(&self) -> bool {
+                self.compositor.as_ref().is_some_and(|compositor| compositor.recording_failed())
+            }
+
             fn compositor_recording_stats(
                 &self,
             ) -> Option<$crate::backend::api::RecordingStats> {

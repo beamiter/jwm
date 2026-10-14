@@ -13344,6 +13344,9 @@ impl EventHandler for Jwm {
         self.tick_hidden_client_park_retries(backend, now);
         self.ensure_secondary_bars_running(backend, now);
 
+        // Settle an already failed current encoder before answering status or
+        // accepting commands. This is an atomic snapshot, never a writer wait.
+        self.poll_recording_failure(backend);
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
         self.poll_config_reload(backend, now);
@@ -13361,6 +13364,7 @@ impl EventHandler for Jwm {
         // Deferred Wayland starts complete inside the render above. Collect
         // their owned outcomes in this update without a new polling timer.
         self.poll_recording_start(backend);
+        self.poll_recording_failure(backend);
         self.poll_recording_stops(backend);
 
         // A request the pointer was busy for retries here rather than from a

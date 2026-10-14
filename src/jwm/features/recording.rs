@@ -120,8 +120,11 @@ pub struct RecordingState {
     pub segments: Vec<String>,
     /// 当前正在录制的分段
     pub current_segment: Option<String>,
-    /// Whether the final output has passed ffprobe validation.
+    /// Whether output passed ffprobe validation without a known capture failure.
     pub finalized: bool,
+    /// A failure of this exact capture invalidates even a playable partial file.
+    /// Reset only when a new session starts or this state is explicitly cleared.
+    pub(crate) capture_failed: bool,
     /// Prevent duplicate `recording/finalized` events while polling status.
     pub finalization_reported: bool,
     /// The finished file the ffprobe check last rejected. The probe runs on
@@ -163,6 +166,7 @@ impl RecordingState {
         self.segments.clear();
         self.current_segment = None;
         self.finalized = false;
+        self.capture_failed = false;
         self.finalization_reported = false;
         self.rejected_probe = None;
         self.region = None;
@@ -184,6 +188,12 @@ impl RecordingState {
     /// Remember a start/stop failure for status queries.
     pub fn note_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
+    }
+
+    pub(crate) fn note_capture_failure(&mut self, error: impl Into<String>) {
+        self.capture_failed = true;
+        self.finalized = false;
+        self.note_error(error);
     }
 
     /// 停止录制

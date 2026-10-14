@@ -3348,6 +3348,13 @@ pub trait CompositorMedia: Send {
         None
     }
 
+    /// An explicit failure of the current encoder only. A missing pipeline,
+    /// unavailable statistics, or an older stopped writer is not a failure.
+    /// This read must be nonblocking; stop takes ownership of cleanup separately.
+    fn compositor_recording_failed(&self) -> bool {
+        false
+    }
+
     /// How the recording in progress is actually going, or `None` when none is.
     fn compositor_recording_stats(&self) -> Option<RecordingStats> {
         None

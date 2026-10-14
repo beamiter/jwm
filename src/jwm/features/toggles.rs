@@ -4591,7 +4591,10 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some((segments, output_path)) = self.stop_recording_session(backend) else {
+        if self.poll_recording_failure(backend) {
+            return Ok(());
+        }
+        let Some((segments, output_path)) = self.stop_recording_session(backend, false) else {
             return Ok(());
         };
         info!(
@@ -4617,6 +4620,7 @@ impl Jwm {
     fn stop_recording_session(
         &mut self,
         backend: &mut dyn Backend,
+        failure_reported: bool,
     ) -> Option<(Vec<String>, String)> {
         self.features.recording_start = None;
         if !self.features.recording.active {
@@ -4639,10 +4643,62 @@ impl Jwm {
             .output_path
             .clone()
             .unwrap_or_default();
-        self.features
-            .recording_stops
-            .observe_with_audio(receipt, protects_audio);
+        if failure_reported {
+            self.features
+                .recording_stops
+                .observe_with_notice(receipt, protects_audio, true);
+        } else {
+            self.features
+                .recording_stops
+                .observe_with_audio(receipt, protects_audio);
+        }
         Some((segments, output_path))
+    }
+
+    /// Settle an explicit failure of the current pipeline without waiting for
+    /// encoder exit. No missing-statistics inference, old completion, or path
+    /// probe can stop a different session. Preserve files for inspection; a
+    /// failed capture must never launch normal finalization or a success toast.
+    pub(crate) fn poll_recording_failure(&mut self, backend: &mut dyn Backend) -> bool {
+        if !self.running.load(std::sync::atomic::Ordering::SeqCst)
+            || !self.features.recording.active
+            || !backend.compositor_recording_failed()
+        {
+            return false;
+        }
+        let _ = self.stop_recording_session(backend, true);
+        let output = self
+            .features
+            .recording
+            .output_path
+            .as_deref()
+            .filter(|path| !path.is_empty());
+        let retained = output.map_or_else(
+            || "Any output was left untouched".to_string(),
+            |path| format!("Any output at {path} was left untouched"),
+        );
+        let message = format!(
+            "The recording encoder failed and capture stopped. {retained}; it may be incomplete and has not been confirmed saved. Check the encoder log."
+        );
+        self.features
+            .recording
+            .note_capture_failure(message.clone());
+        self.broadcast_ipc_event(
+            "recording/error",
+            serde_json::json!({"operation": "capture", "error": message}),
+        );
+        self.push_system_toast(
+            backend,
+            crate::backend::api::ToastNotification {
+                title: "\u{f03d}  Recording failed".into(),
+                body: message.into(),
+                urgency: 2,
+                timeout_ms: 8000,
+                ..Default::default()
+            },
+        );
+        backend.compositor_force_full_redraw();
+        true
     }
 
     /// Observe stopped writers independently of the current recording. A
@@ -6763,6 +6819,7 @@ pub(crate) mod keyboard_grab_tests {
         recording_deferred: bool,
         recording_reporters: Vec<crate::backend::recording_admission::RecordingStartReporter>,
         recording_stop_calls: usize,
+        recording_broken: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         recording_tracks_exit: bool,
         recording_stop_receipts:
             std::collections::VecDeque<crate::backend::recording_completion::RecordingStopReceipt>,
@@ -6794,6 +6851,7 @@ pub(crate) mod keyboard_grab_tests {
                 recording_deferred: false,
                 recording_reporters: Vec::new(),
                 recording_stop_calls: 0,
+                recording_broken: None,
                 recording_tracks_exit: false,
                 recording_stop_receipts: std::collections::VecDeque::new(),
                 recording_crop_updates: Vec::new(),
@@ -6824,6 +6882,9 @@ pub(crate) mod keyboard_grab_tests {
             path: &str,
             region: (i32, i32, u32, u32),
         ) -> Result<(), crate::backend::error::BackendError> {
+            self.recording_broken = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )));
             self.recording_requests.push((path.into(), region));
             match self.recording_start_error {
                 Some(error) => Err(crate::backend::error::BackendError::Message(error.into())),
@@ -6861,6 +6922,13 @@ pub(crate) mod keyboard_grab_tests {
 
         fn compositor_stop_recording(&mut self) {
             self.recording_stop_calls += 1;
+            self.recording_broken = None;
+        }
+
+        fn compositor_recording_failed(&self) -> bool {
+            self.recording_broken
+                .as_ref()
+                .is_some_and(|broken| broken.load(Ordering::Relaxed))
         }
 
         fn compositor_tracks_recording_encoder_exit(&self) -> bool {
@@ -8022,7 +8090,7 @@ pub(crate) mod keyboard_grab_tests {
             &request_audio(true),
         )
         .unwrap();
-        jwm.stop_recording_session(backend).unwrap();
+        jwm.stop_recording_session(backend, false).unwrap();
         writer
     }
 
@@ -8040,12 +8108,12 @@ pub(crate) mod keyboard_grab_tests {
             &request_audio(true),
         )
         .unwrap();
-        jwm.stop_recording_session(&mut backend).unwrap();
+        jwm.stop_recording_session(&mut backend, false).unwrap();
         assert_eq!(
             jwm.features.recording_stops.audio_release(),
             AudioRelease::Unconfirmed
         );
-        assert!(jwm.stop_recording_session(&mut backend).is_none());
+        assert!(jwm.stop_recording_session(&mut backend, false).is_none());
         assert_eq!(backend.recording_stop_calls, 1);
         // A fresh compositor with no current writer cannot wash the old owner.
         jwm.features
@@ -8219,7 +8287,7 @@ pub(crate) mod keyboard_grab_tests {
             &request_audio(true),
         )
         .unwrap();
-        jwm.stop_recording_session(&mut backend).unwrap();
+        jwm.stop_recording_session(&mut backend, false).unwrap();
         jwm.submit_preflighted_recording_region_with_audio(
             &mut backend,
             "legacy-next.mp4",
@@ -8317,7 +8385,7 @@ pub(crate) mod keyboard_grab_tests {
         backend.recording_reporters.clear();
         jwm.poll_recording_start(&mut backend);
         assert!(jwm.features.recording.active && jwm.features.recording.audio_requested);
-        assert!(jwm.stop_recording_session(&mut backend).is_some());
+        assert!(jwm.stop_recording_session(&mut backend, false).is_some());
         assert!(!jwm.features.recording.active && !jwm.features.recording.audio_requested);
     }
 
@@ -8548,7 +8616,7 @@ pub(crate) mod keyboard_grab_tests {
                 // This is the actual synchronous phase of stop_recording.
                 // Keep its owned finalization payload in the test: no files,
                 // finalizer thread, encoder or ffprobe are invoked here.
-                let payload = jwm.stop_recording_session(&mut backend).unwrap();
+                let payload = jwm.stop_recording_session(&mut backend, false).unwrap();
                 assert_eq!(payload, (vec!["old.mp4".into()], "old.mp4".into()));
                 assert!(jwm.features.recording_start.is_none());
                 let new = match next {
@@ -8613,7 +8681,7 @@ pub(crate) mod keyboard_grab_tests {
                 .title
                 .ends_with("Recording start unconfirmed")
         );
-        assert!(jwm.stop_recording_session(&mut backend).is_some());
+        assert!(jwm.stop_recording_session(&mut backend, false).is_some());
         assert_eq!(backend.recording_stop_calls, 1);
         assert!(!jwm.features.recording.active);
     }
@@ -8719,7 +8787,8 @@ pub(crate) mod keyboard_grab_tests {
             .unwrap()
             .0;
         assert!(
-            stop.find("self.stop_recording_session(backend)").unwrap()
+            stop.find("self.stop_recording_session(backend, false)")
+                .unwrap()
                 < stop
                     .find("Self::finalize_recording(segments, output_path)")
                     .unwrap()
@@ -8755,6 +8824,383 @@ pub(crate) mod keyboard_grab_tests {
         }
     }
 
+    #[test]
+    fn runtime_encoder_failure_is_collected_by_update_without_manual_stop() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.submit_preflighted_recording_region(
+            &mut backend,
+            "not-opened.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+        )
+        .unwrap();
+        let (writer, receipt) = crate::backend::recording_completion::writer_completion_channel();
+        backend.recording_stop_receipts.push_back(
+            crate::backend::recording_completion::RecordingStopReceipt::from_writer(Some(receipt)),
+        );
+        backend.toasts.clear();
+        backend
+            .recording_broken
+            .as_ref()
+            .unwrap()
+            .store(true, Ordering::Relaxed);
+        crate::backend::api::EventHandler::update(&mut jwm, &mut backend).unwrap();
+        assert!(
+            !jwm.features.recording.active,
+            "a failed encoder must not leave REC active"
+        );
+        assert_eq!(backend.recording_stop_calls, 1);
+        assert!(
+            jwm.features
+                .recording
+                .last_error
+                .as_ref()
+                .unwrap()
+                .contains("encoder")
+        );
+        assert_eq!(backend.toast_titles(), vec!["\u{f03d}  Recording failed"]);
+        // Completion of this same failed writer must not repeat its failure.
+        writer.finish(
+            Some(crate::backend::recording_completion::WriterFailure::FrameWrite),
+            Some(crate::backend::recording_completion::EncoderWaitOutcome::Exited(false)),
+        );
+        crate::backend::api::EventHandler::update(&mut jwm, &mut backend).unwrap();
+        assert_eq!(backend.recording_stop_calls, 1);
+        assert_eq!(backend.toasts.len(), 1);
+        assert!(!jwm.features.recording.finalized);
+        assert!(!jwm.features.recording.finalization_reported);
+    }
+
+    #[test]
+    fn runtime_encoder_failure_wins_over_manual_stop_without_success_notice() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.submit_preflighted_recording_region(&mut backend, "", Rect::new(0, 0, 640, 480), false)
+            .unwrap();
+        // No file or finalizer subprocess is needed even on the old implementation.
+        jwm.features.recording.current_segment = None;
+        backend.toasts.clear();
+        backend
+            .recording_broken
+            .as_ref()
+            .unwrap()
+            .store(true, Ordering::Relaxed);
+        jwm.stop_recording(&mut backend).unwrap();
+        assert!(!jwm.features.recording.active);
+        assert_eq!(backend.recording_stop_calls, 1);
+        assert_eq!(backend.toast_titles(), vec!["\u{f03d}  Recording failed"]);
+        assert!(jwm.features.recording.last_error.is_some());
+    }
+
+    #[test]
+    fn runtime_encoder_failure_old_signal_cannot_stop_replacement_or_its_adjustment() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let writer = prepare_stopped_writer(&mut jwm, &mut backend, "old.mp4");
+        jwm.submit_preflighted_recording_region(
+            &mut backend,
+            "second.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+        )
+        .unwrap();
+        let old_signal = backend.recording_broken.as_ref().unwrap().clone();
+        jwm.stop_recording_session(&mut backend, false).unwrap();
+        let region = Rect::new(40, 50, 800, 600);
+        jwm.submit_preflighted_recording_region(&mut backend, "replacement.mp4", region, false)
+            .unwrap();
+        jwm.adjust_recording_region(&mut backend, &NO_ARG).unwrap();
+        backend.toasts.clear();
+        let calls = backend.recording_stop_calls;
+        old_signal.store(true, Ordering::Relaxed);
+        writer.finish(
+            Some(crate::backend::recording_completion::WriterFailure::FrameWrite),
+            None,
+        );
+        assert!(!jwm.poll_recording_failure(&mut backend));
+        jwm.poll_recording_stops(&mut backend);
+        assert_eq!(backend.recording_stop_calls, calls);
+        assert!(jwm.features.recording.active);
+        assert!(jwm.features.recording.adjusting_region);
+        assert_eq!(jwm.features.recording.region, Some(region));
+        assert_eq!(
+            jwm.features.recording.current_segment.as_deref(),
+            Some("replacement.mp4")
+        );
+        assert!(jwm.features.recording.last_error.is_none());
+        assert!(backend.keyboard_held());
+        assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        assert!(
+            !backend
+                .toast_titles()
+                .contains(&"\u{f03d}  Recording failed")
+        );
+    }
+
+    #[test]
+    fn runtime_encoder_failure_releases_adjustment_but_keeps_audio_exit_reservation_and_files() {
+        use crate::backend::recording_completion::{
+            AudioRelease, EncoderWaitOutcome, WriterFailure,
+        };
+        let directory =
+            std::env::temp_dir().join(format!("jwm-runtime-failure-test-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let completed = directory.join("completed.mp4");
+        let partial = directory.join("partial.mp4");
+        let empty = directory.join("empty.mp4");
+        std::fs::write(&completed, b"completed fixture, never remove").unwrap();
+        std::fs::write(&partial, b"partial fixture, preserve for inspection").unwrap();
+        std::fs::write(&empty, b"").unwrap();
+        let mut backend = GrabSpyBackend::new();
+        backend.recording_tracks_exit = true;
+        let mut jwm = jwm(&mut backend);
+        let (writer, receipt) = crate::backend::recording_completion::writer_completion_channel();
+        backend.recording_stop_receipts.push_back(
+            crate::backend::recording_completion::RecordingStopReceipt::from_writer(Some(receipt)),
+        );
+        let audio = crate::backend::recording_admission::RecordingAudioOptions {
+            enabled: true,
+            ..crate::backend::recording_admission::RecordingAudioOptions::snapshot()
+        };
+        jwm.submit_preflighted_recording_region_with_audio(
+            &mut backend,
+            partial.to_str().unwrap(),
+            Rect::new(0, 0, 640, 480),
+            false,
+            &audio,
+        )
+        .unwrap();
+        jwm.features
+            .recording
+            .segments
+            .push(completed.to_str().unwrap().into());
+        jwm.features
+            .recording
+            .segments
+            .push(empty.to_str().unwrap().into());
+        jwm.adjust_recording_region(&mut backend, &NO_ARG).unwrap();
+        backend.toasts.clear();
+        backend
+            .recording_broken
+            .as_ref()
+            .unwrap()
+            .store(true, Ordering::Relaxed);
+        assert!(jwm.poll_recording_failure(&mut backend));
+        assert!(!jwm.poll_recording_failure(&mut backend));
+        assert!(!jwm.features.recording.active);
+        assert!(!jwm.features.recording.selecting_region);
+        assert!(!jwm.features.recording.adjusting_region);
+        assert!(!backend.keyboard_held());
+        assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        assert_eq!(backend.recording_overlays.last(), Some(&None));
+        assert_eq!(backend.capture_hints.last(), Some(&None));
+        assert_eq!(
+            jwm.features.recording_stops.audio_release(),
+            AudioRelease::Pending
+        );
+        assert!(
+            jwm.submit_preflighted_recording_region_with_audio(
+                &mut backend,
+                "not-opened-new.mp4",
+                Rect::new(0, 0, 640, 480),
+                false,
+                &audio,
+            )
+            .is_err()
+        );
+        writer.finish(
+            Some(WriterFailure::FrameWrite),
+            Some(EncoderWaitOutcome::Exited(false)),
+        );
+        jwm.poll_recording_stops(&mut backend);
+        assert_eq!(
+            jwm.features.recording_stops.audio_release(),
+            AudioRelease::Available
+        );
+        assert_eq!(backend.toast_titles(), vec!["\u{f03d}  Recording failed"]);
+        assert_eq!(backend.recording_stop_calls, 1);
+        assert_eq!(
+            std::fs::read(completed).unwrap(),
+            b"completed fixture, never remove"
+        );
+        assert_eq!(
+            std::fs::read(partial).unwrap(),
+            b"partial fixture, preserve for inspection"
+        );
+        assert_eq!(std::fs::metadata(empty).unwrap().len(), 0);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_encoder_failure_does_not_infer_failure_from_missing_stats_or_shutdown() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.submit_preflighted_recording_region(
+            &mut backend,
+            "not-opened.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+        )
+        .unwrap();
+        assert!(backend.compositor_recording_stats().is_none());
+        assert!(!jwm.poll_recording_failure(&mut backend));
+        assert!(jwm.features.recording.active);
+        backend
+            .recording_broken
+            .as_ref()
+            .unwrap()
+            .store(true, Ordering::Relaxed);
+        jwm.running.store(false, Ordering::SeqCst);
+        assert!(!jwm.poll_recording_failure(&mut backend));
+        assert_eq!(backend.recording_stop_calls, 0);
+    }
+
+    #[test]
+    fn runtime_encoder_failure_wiring_is_shared_and_checked_before_status_and_after_render() {
+        let update = include_str!("../event_dispatcher.rs");
+        let update = update
+            .split_once("    fn update(&mut self, backend:")
+            .unwrap()
+            .1;
+        assert!(
+            update
+                .find("self.poll_recording_failure(backend);")
+                .unwrap()
+                < update.find("self.process_ipc(backend);").unwrap()
+        );
+        let after_render = update
+            .split_once("self.tick_animations(backend);")
+            .unwrap()
+            .1;
+        assert!(
+            after_render
+                .find("self.poll_recording_failure(backend);")
+                .unwrap()
+                < after_render
+                    .find("self.poll_recording_stops(backend);")
+                    .unwrap()
+        );
+        let delegation = include_str!("../../backend/x11/wm/compositor_delegation.rs");
+        assert!(delegation.contains("fn compositor_recording_failed(&self) -> bool"));
+        assert!(delegation.contains("compositor.recording_failed()"));
+        for source in [
+            include_str!("../../backend/xcb/backend.rs"),
+            include_str!("../../backend/x11rb/backend.rs"),
+        ] {
+            assert!(source.contains("delegate_compositor_capabilities!"));
+        }
+    }
+
+    #[test]
+    fn runtime_encoder_failure_status_queries_settle_the_current_sink_once() {
+        for query in [
+            "get_recording_status",
+            "get_recording",
+            "get_rec",
+            "get_status",
+            "get_st",
+            "get_effect_status",
+            "get_effects",
+            "get_fx",
+        ] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            let path = "failed-query-no-file.mp4";
+            jwm.submit_preflighted_recording_region(
+                &mut backend,
+                path,
+                Rect::new(0, 0, 640, 480),
+                false,
+            )
+            .unwrap();
+            let (writer, receipt) =
+                crate::backend::recording_completion::writer_completion_channel();
+            backend.recording_stop_receipts.push_back(
+                crate::backend::recording_completion::RecordingStopReceipt::from_writer(Some(
+                    receipt,
+                )),
+            );
+            backend.toasts.clear();
+            backend
+                .recording_broken
+                .as_ref()
+                .unwrap()
+                .store(true, Ordering::Relaxed);
+            let response = jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+            assert!(response.success);
+            let data = response.data.unwrap();
+            match query {
+                "get_status" | "get_st" => {
+                    assert_eq!(data["recording"]["active"], false, "{query}");
+                    assert_eq!(data["features"]["recording"], false, "{query}");
+                    assert!(
+                        data["recording"]["last_error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("not been confirmed saved")
+                    );
+                }
+                "get_effect_status" | "get_effects" | "get_fx" => {
+                    assert_eq!(data["recording"], false, "{query}")
+                }
+                _ => {
+                    assert_eq!(data["active"], false, "{query}");
+                    assert_eq!(data["finalized"], false, "{query}");
+                    assert_eq!(data["output_path"], path);
+                    assert!(
+                        data["last_error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("not been confirmed saved")
+                    );
+                }
+            }
+            writer.finish(
+                Some(crate::backend::recording_completion::WriterFailure::FrameWrite),
+                Some(crate::backend::recording_completion::EncoderWaitOutcome::Exited(false)),
+            );
+            jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+            jwm.poll_recording_stops(&mut backend);
+            assert_eq!(backend.recording_stop_calls, 1);
+            assert_eq!(backend.toast_titles(), vec!["\u{f03d}  Recording failed"]);
+            assert!(backend.toasts[0].body.contains(path));
+            assert!(!jwm.features.recording.finalization_reported);
+        }
+    }
+
+    #[test]
+    fn runtime_encoder_failure_status_rejects_cached_valid_partial_until_new_session() {
+        for query in ["get_recording_status", "get_recording", "get_rec"] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            jwm.features
+                .recording
+                .start("partial-not-opened.mp4".into());
+            jwm.features.recording.stop();
+            jwm.features
+                .recording
+                .note_capture_failure("fake encoder failure");
+            // Even a successful ffprobe result only proves the partial is playable.
+            // A cached validation must not make a failed capture finalized.
+            jwm.features.recording.finalized = true;
+            let response = jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+            let data = response.data.unwrap();
+            assert_eq!(data["finalized"], false);
+            assert_eq!(data["last_error"], "fake encoder failure");
+            assert!(!jwm.features.recording.finalization_reported);
+            // Normal completed output retains its existing validation semantics.
+            jwm.features.recording.start("new-not-opened.mp4".into());
+            assert!(!jwm.features.recording.capture_failed);
+            jwm.features.recording.stop();
+            jwm.features.recording.finalized = true;
+            let response = jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+            assert_eq!(response.data.unwrap()["finalized"], true);
+            assert!(jwm.features.recording.finalization_reported);
+            assert!(jwm.features.recording.last_error.is_none());
+        }
+    }
+
     fn prepare_stopped_writer(
         jwm: &mut Jwm,
         backend: &mut GrabSpyBackend,
@@ -8766,7 +9212,7 @@ pub(crate) mod keyboard_grab_tests {
         );
         jwm.submit_preflighted_recording_region(backend, path, Rect::new(10, 20, 640, 480), false)
             .unwrap();
-        let payload = jwm.stop_recording_session(backend).unwrap();
+        let payload = jwm.stop_recording_session(backend, false).unwrap();
         assert_eq!(payload, (vec![path.to_string()], path.to_string()));
         writer
     }
@@ -8836,7 +9282,7 @@ pub(crate) mod keyboard_grab_tests {
                 false,
             )
             .unwrap();
-            let _owned_payload = jwm.stop_recording_session(&mut backend).unwrap();
+            let _owned_payload = jwm.stop_recording_session(&mut backend, false).unwrap();
         }
         let before = backend.toasts.len();
         jwm.poll_recording_stops(&mut backend);

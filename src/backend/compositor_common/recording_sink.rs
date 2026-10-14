@@ -613,6 +613,72 @@ mod tests {
     }
 
     #[test]
+    fn runtime_encoder_failure_is_nonblocking_and_belongs_to_the_exact_sink() {
+        let child = Command::new("sh")
+            .args(["-c", "exit 7"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut broken = RecordingSink::spawn_with_timeouts(
+            child,
+            16,
+            "test",
+            Duration::from_millis(25),
+            Duration::from_millis(25),
+        );
+        let healthy = sink_over_cat(16);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !broken.is_broken() {
+            assert!(
+                Instant::now() < deadline,
+                "the closed fake encoder pipe was not observed"
+            );
+            let frame = broken.take_buffer();
+            broken.submit(frame);
+            std::thread::yield_now();
+        }
+        assert!(
+            !healthy.is_broken(),
+            "the new sink cannot inherit an old failure"
+        );
+        let before = Instant::now();
+        let (stats, receipt) = broken.finish_tracked();
+        assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(stats.broken);
+        assert_process_reaped(pid);
+        let mut observations =
+            crate::backend::recording_completion::RecordingStopObservations::default();
+        observations.observe_with_notice(
+            Some(
+                crate::backend::recording_completion::RecordingStopReceipt::from_writer(Some(
+                    receipt,
+                )),
+            ),
+            true,
+            true,
+        );
+        while observations.audio_release()
+            == crate::backend::recording_completion::AudioRelease::Pending
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the fake writer did not publish its completion"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            observations.audio_release(),
+            crate::backend::recording_completion::AudioRelease::Available
+        );
+        assert!(!observations.take_notices().failed);
+        assert!(!healthy.is_broken());
+        healthy.finish();
+    }
+
+    #[test]
     fn buffers_are_recycled_rather_than_reallocated() {
         const FRAME: usize = 16;
         let mut sink = sink_over_cat(FRAME);

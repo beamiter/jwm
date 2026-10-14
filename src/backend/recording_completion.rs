@@ -248,20 +248,25 @@ impl AudioRelease {
 
 #[derive(Debug, Default)]
 pub(crate) struct RecordingStopObservations {
-    pending: VecDeque<(RecordingStopReceipt, bool)>,
+    pending: VecDeque<(RecordingStopReceipt, bool, bool)>,
     audio_unconfirmed: bool,
     notices: StopNotices,
 }
 
 impl RecordingStopObservations {
-    fn record(&mut self, completion: WriterCompletion, protects_audio: bool) {
+    fn record(
+        &mut self,
+        completion: WriterCompletion,
+        protects_audio: bool,
+        failure_reported: bool,
+    ) {
         if protects_audio && !completion.encoder_exited {
             self.audio_unconfirmed = true;
             self.notices.unknown = true;
         }
         match completion.outcome {
             WriterOutcome::Finished => {}
-            WriterOutcome::Failed(_) => self.notices.failed = true,
+            WriterOutcome::Failed(_) => self.notices.failed |= !failure_reported,
             WriterOutcome::Unknown => self.notices.unknown = true,
         }
     }
@@ -269,11 +274,13 @@ impl RecordingStopObservations {
     fn collect(&mut self) {
         // Each old observation is polled once; pending entries keep their age.
         for _ in 0..self.pending.len() {
-            let (mut receipt, protects_audio) =
+            let (mut receipt, protects_audio, failure_reported) =
                 self.pending.pop_front().expect("bounded observation count");
             match receipt.poll_completion() {
-                Some(outcome) => self.record(outcome, protects_audio),
-                None => self.pending.push_back((receipt, protects_audio)),
+                Some(outcome) => self.record(outcome, protects_audio, failure_reported),
+                None => self
+                    .pending
+                    .push_back((receipt, protects_audio, failure_reported)),
             }
         }
     }
@@ -288,6 +295,18 @@ impl RecordingStopObservations {
         receipt: Option<RecordingStopReceipt>,
         protects_audio: bool,
     ) {
+        self.observe_with_notice(receipt, protects_audio, false);
+    }
+
+    /// An already reported runtime failure still needs its exact exit proof,
+    /// especially when the encoder also owns audio. Suppress only that repeat
+    /// failure; a later unknown exit remains a distinct actionable warning.
+    pub(crate) fn observe_with_notice(
+        &mut self,
+        receipt: Option<RecordingStopReceipt>,
+        protects_audio: bool,
+        failure_reported: bool,
+    ) {
         self.collect();
         let Some(mut receipt) = receipt else {
             self.notices.unknown = true;
@@ -295,34 +314,35 @@ impl RecordingStopObservations {
             return;
         };
         if let Some(outcome) = receipt.poll_completion() {
-            self.record(outcome, protects_audio);
+            self.record(outcome, protects_audio, failure_reported);
             return;
         }
         if self.pending.len() == MAX_STOP_OBSERVATIONS {
             // Prefer retiring notification-only work. If every bounded slot
             // protects audio, retain a conservative unconfirmed reservation;
             // discarding a receiver does not terminate its encoder.
-            let non_audio = self.pending.iter().position(|(_, audio)| !audio);
+            let non_audio = self.pending.iter().position(|(_, audio, _)| !audio);
             if non_audio.is_none() && !protects_audio {
                 self.notices.unknown = true;
                 return;
             }
             let index = non_audio.unwrap_or(0);
-            let (_, removed_audio) = self
+            let (_, removed_audio, _) = self
                 .pending
                 .remove(index)
                 .expect("bounded observation count");
             self.audio_unconfirmed |= removed_audio;
             self.notices.unknown = true;
         }
-        self.pending.push_back((receipt, protects_audio));
+        self.pending
+            .push_back((receipt, protects_audio, failure_reported));
     }
 
     pub(crate) fn audio_release(&mut self) -> AudioRelease {
         self.collect();
         if self.audio_unconfirmed {
             AudioRelease::Unconfirmed
-        } else if self.pending.iter().any(|(_, audio)| *audio) {
+        } else if self.pending.iter().any(|(_, audio, _)| *audio) {
             AudioRelease::Pending
         } else {
             AudioRelease::Available
@@ -338,7 +358,7 @@ impl RecordingStopObservations {
         // Reset UI observations without pretending a still-owned encoder was
         // released. The bounded audio responsibility survives feature resets
         // and is finally dropped with the WM itself on shutdown.
-        self.pending.retain(|(_, audio)| *audio);
+        self.pending.retain(|(_, audio, _)| *audio);
         self.notices = StopNotices::default();
     }
 }
@@ -346,6 +366,68 @@ impl RecordingStopObservations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reported_runtime_failure_suppresses_only_its_own_repeat_notice() {
+        for immediate in [false, true] {
+            let mut observations = RecordingStopObservations::default();
+            let (writer, receipt) = writer_completion_channel();
+            if immediate {
+                writer.finish(
+                    Some(WriterFailure::FrameWrite),
+                    Some(EncoderWaitOutcome::Exited(false)),
+                );
+                observations.observe_with_notice(
+                    Some(RecordingStopReceipt::from_writer(Some(receipt))),
+                    true,
+                    true,
+                );
+            } else {
+                observations.observe_with_notice(
+                    Some(RecordingStopReceipt::from_writer(Some(receipt))),
+                    true,
+                    true,
+                );
+                assert_eq!(observations.audio_release(), AudioRelease::Pending);
+                writer.finish(
+                    Some(WriterFailure::FrameWrite),
+                    Some(EncoderWaitOutcome::Exited(false)),
+                );
+            }
+            assert_eq!(observations.audio_release(), AudioRelease::Available);
+            assert_eq!(observations.take_notices(), StopNotices::default());
+            let (writer, receipt) = writer_completion_channel();
+            writer.finish(
+                Some(WriterFailure::FrameWrite),
+                Some(EncoderWaitOutcome::Exited(false)),
+            );
+            observations.observe_with_audio(
+                Some(RecordingStopReceipt::from_writer(Some(receipt))),
+                false,
+            );
+            assert!(
+                observations.take_notices().failed,
+                "an unrelated failure must still be reported"
+            );
+        }
+    }
+
+    #[test]
+    fn reported_runtime_failure_keeps_unconfirmed_audio_release_actionable() {
+        let mut observations = RecordingStopObservations::default();
+        let (writer, receipt) = writer_completion_channel();
+        observations.observe_with_notice(
+            Some(RecordingStopReceipt::from_writer(Some(receipt))),
+            true,
+            true,
+        );
+        drop(writer);
+        assert_eq!(observations.audio_release(), AudioRelease::Unconfirmed);
+        let notices = observations.take_notices();
+        assert!(notices.unknown);
+        assert!(!notices.failed);
+        assert_eq!(observations.take_notices(), StopNotices::default());
+    }
+
     #[test]
     fn audio_release_waits_for_exact_writer_even_when_file_result_failed() {
         for failure in [

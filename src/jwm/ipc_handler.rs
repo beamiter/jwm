@@ -2830,6 +2830,21 @@ impl Jwm {
         args: &serde_json::Value,
         backend: &mut dyn Backend,
     ) -> IpcResponse {
+        // Observe the current encoder before constructing any screen-recording
+        // snapshot, including queries invoked without a preceding frame tick.
+        if matches!(
+            name,
+            "get_recording_status"
+                | "get_recording"
+                | "get_rec"
+                | "get_status"
+                | "get_st"
+                | "get_effect_status"
+                | "get_effects"
+                | "get_fx"
+        ) {
+            self.poll_recording_failure(backend);
+        }
         // These replies advertise whether the microphone is recording. Settle
         // completed workers before reading that state, just as the frame tick
         // does: refresh alone leaves a dead worker's active flag latched for
@@ -2985,7 +3000,10 @@ impl Jwm {
                 // while the answer can still change: never during recording,
                 // never again once the file has passed, and not again for a
                 // rejected file until it changes on disk.
+                // A playable partial is still a failed capture. Keep it for
+                // inspection without publishing a finalized-success event.
                 let finalized = !active
+                    && !self.features.recording.capture_failed
                     && (self.features.recording.finalized
                         || output_path.as_deref().is_some_and(|path| {
                             recording_file_is_valid(

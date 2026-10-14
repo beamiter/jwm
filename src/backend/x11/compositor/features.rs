@@ -2115,7 +2115,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Drain the last asynchronous ReadPixels before closing ffmpeg. This
         // keeps the final frame instead of silently truncating every recording.
-        if was_active && self.recording_captured_frames > 0 {
+        if was_active && !self.recording_failed() && self.recording_captured_frames > 0 {
             let last_pbo = self.recording_current_pbo ^ 1;
             self.write_recording_pbo(last_pbo);
         }
@@ -2180,6 +2180,15 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn recording_frame_due(&self) -> bool {
         self.recording_frame_deadline()
             .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    /// Only the sink currently owned by this compositor can fail this session.
+    /// Its flag survives capture stopping and retires when stop takes the sink;
+    /// a detached old writer can never report against a replacement recording.
+    pub(crate) fn recording_failed(&self) -> bool {
+        self.recording_sink
+            .as_ref()
+            .is_some_and(|sink| sink.is_broken())
     }
 
     /// What the recording in progress is actually achieving.
