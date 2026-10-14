@@ -1,13 +1,14 @@
 use crate::backend::compositor_common::capture::flip_rgba_vertical;
-use crate::backend::compositor_common::screenshot::{ScreenshotPermit, save_png_async};
+use crate::backend::compositor_common::screenshot::{
+    ScreenshotDestination, ScreenshotPermit, save_png_async,
+};
 use smithay::backend::renderer::gles::ffi;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 
 struct PendingReadback {
     pbo: u32,
     fence: ffi::types::GLsync,
-    path: PathBuf,
+    path: ScreenshotDestination,
     width: u32,
     height: u32,
     permit: ScreenshotPermit,
@@ -32,13 +33,16 @@ impl ScreenshotReadback {
     pub(crate) unsafe fn enqueue(
         &mut self,
         gl: &ffi::Gles2,
-        path: PathBuf,
+        path: ScreenshotDestination,
         x: i32,
         y: i32,
         width: u32,
         height: u32,
         permit: ScreenshotPermit,
     ) {
+        if path.is_cancelled() {
+            return;
+        }
         let size = match crate::backend::compositor_common::capture::rgba_capture_len(width, height)
         {
             Ok(size) => size,
@@ -109,14 +113,35 @@ impl ScreenshotReadback {
     unsafe fn drain_ready_with(
         &mut self,
         gl: &ffi::Gles2,
-        mut write: impl FnMut(PathBuf, Vec<u8>, u32, u32, ScreenshotPermit),
+        mut write: impl FnMut(ScreenshotDestination, Vec<u8>, u32, u32, ScreenshotPermit),
     ) {
+        // Cancellation may arrive while an earlier fence is still pending.
+        // Retire every cancelled job now so it cannot retain admission or
+        // trigger a CPU allocation while the queue waits on unrelated work.
+        self.pending.retain(|job| {
+            if job.path.is_cancelled() {
+                unsafe {
+                    gl.DeleteSync(job.fence);
+                    gl.DeleteBuffers(1, &job.pbo);
+                }
+                false
+            } else {
+                true
+            }
+        });
         while let Some(front) = self.pending.front() {
             let state = unsafe { gl.ClientWaitSync(front.fence, 0, 0) };
             if state == ffi::TIMEOUT_EXPIRED {
                 break;
             }
             let job = self.pending.pop_front().expect("front was checked");
+            if job.path.is_cancelled() {
+                unsafe {
+                    gl.DeleteSync(job.fence);
+                    gl.DeleteBuffers(1, &job.pbo);
+                }
+                continue;
+            }
             if state != ffi::ALREADY_SIGNALED && state != ffi::CONDITION_SATISFIED {
                 // WAIT_FAILED is terminal. Retaining it would block every
                 // later screenshot and keep the render loop awake forever.
@@ -186,7 +211,8 @@ impl Default for ScreenshotReadback {
 mod tests {
     use super::*;
     use crate::backend::compositor_common::screenshot::{
-        ScreenshotBusy, ScreenshotQueue, ScreenshotRequest,
+        ScreenshotBusy, ScreenshotQueue, ScreenshotRequest, save_screenshot,
+        screenshot_memory_channel,
     };
     use std::cell::RefCell;
     use std::ffi::c_void;
@@ -273,11 +299,95 @@ mod tests {
         PendingReadback {
             pbo: id as u32,
             fence: id as ffi::types::GLsync,
-            path: PathBuf::from("unused-synthetic-test.png"),
+            path: ScreenshotDestination::from("unused-synthetic-test.png"),
             width: 1,
             height: 1,
             permit: permit(queue),
         }
+    }
+
+    #[test]
+    fn cancelled_memory_capture_skips_gpu_allocation_and_releases_admission() {
+        RELEASED.with(|released| *released.borrow_mut() = (Vec::new(), Vec::new()));
+        let gl = fake_gl();
+        let mut queue = ScreenshotQueue::isolated_for_test();
+        let mut readback = ScreenshotReadback::new();
+        let (sender, _receiver, cancellation) = screenshot_memory_channel();
+        cancellation.cancel();
+        unsafe {
+            readback.enqueue(
+                &gl,
+                ScreenshotDestination::Memory(sender),
+                0,
+                0,
+                1,
+                1,
+                permit(&mut queue),
+            );
+        }
+        assert!(!readback.has_pending());
+        assert_eq!(queue.in_flight_for_test(), 0);
+        // The fake GL allocator would create PBO 7 and its null fence would
+        // require deletion. Nothing was allocated for the cancelled request.
+        RELEASED.with(|released| assert_eq!(*released.borrow(), (vec![], vec![])));
+    }
+
+    #[test]
+    fn cancelled_memory_readback_is_retired_behind_an_unready_file_capture() {
+        RELEASED.with(|released| *released.borrow_mut() = (Vec::new(), Vec::new()));
+        let gl = fake_gl();
+        let mut queue = ScreenshotQueue::isolated_for_test();
+        let mut readback = ScreenshotReadback::new();
+        let (sender, _receiver, cancellation) = screenshot_memory_channel();
+        readback.pending.push_back(job(3, &mut queue));
+        let mut memory_job = job(4, &mut queue);
+        memory_job.path = ScreenshotDestination::Memory(sender);
+        readback.pending.push_back(memory_job);
+        cancellation.cancel();
+        unsafe {
+            readback.drain_ready_with(&gl, |_, _, _, _, _| {
+                panic!("cancelled memory capture must not reach its writer")
+            });
+        }
+        assert!(readback.has_pending());
+        assert_eq!(queue.in_flight_for_test(), 1);
+        RELEASED.with(|released| assert_eq!(*released.borrow(), (vec![4], vec![4])));
+        unsafe { readback.clear(&gl) };
+        assert_eq!(queue.in_flight_for_test(), 0);
+        RELEASED.with(|released| assert_eq!(*released.borrow(), (vec![4, 3], vec![4, 3])));
+    }
+
+    #[test]
+    fn ready_memory_readback_delivers_png_and_retains_admission_for_its_writer() {
+        RELEASED.with(|released| *released.borrow_mut() = (Vec::new(), Vec::new()));
+        let gl = fake_gl_with_pixels(true);
+        let mut queue = ScreenshotQueue::isolated_for_test();
+        let mut readback = ScreenshotReadback::new();
+        let (sender, receiver, _cancellation) = screenshot_memory_channel();
+        let mut memory_job = job(2, &mut queue);
+        memory_job.path = ScreenshotDestination::Memory(sender);
+        readback.pending.push_back(memory_job);
+        let mut writer = None;
+        unsafe {
+            readback.drain_ready_with(&gl, |path, pixels, width, height, permit| {
+                writer = Some((path, pixels, width, height, permit));
+            });
+        }
+        assert!(!readback.has_pending());
+        assert_eq!(queue.in_flight_for_test(), 1);
+        let (path, pixels, width, height, permit) = writer.unwrap();
+        assert!(matches!(&path, ScreenshotDestination::Memory(_)));
+        save_screenshot(path, &pixels, width, height).unwrap();
+        assert_eq!(queue.in_flight_for_test(), 1);
+        drop(permit);
+        assert_eq!(queue.in_flight_for_test(), 0);
+        let bytes = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let png = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(png.dimensions(), (1, 1));
+        assert_eq!(png.as_raw(), &[1, 2, 3, 4]);
+        RELEASED.with(|released| assert_eq!(*released.borrow(), (vec![2], vec![2])));
     }
 
     #[test]

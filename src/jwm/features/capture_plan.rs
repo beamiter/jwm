@@ -26,32 +26,26 @@ pub enum CaptureCompletion {
 /// 一次待执行捕获的完整描述。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturePlan {
-    /// 捕获落盘路径；剪贴板模式下是私有暂存文件。
+    /// 保存路径；剪贴板模式只携带日志标签，不交给文件后端。
     pub save_path: String,
     /// 捕获区域 (x, y, w, h)。
     pub region: (i32, i32, u32, u32),
-    /// 捕获后复制到剪贴板（并删除暂存文件）。
+    /// 捕获后通过内存结果复制到剪贴板。
     pub to_clipboard: bool,
     /// 捕获后把屏幕标注烘焙进 PNG。
     pub bake_annotations: bool,
 }
 
-/// 剪贴板模式使用的私有暂存文件路径。
-#[must_use]
-pub fn clipboard_staging_path(pid: u32, stamp_micros: u128) -> String {
-    format!("/tmp/.jwm-screenshot-clipboard-{pid}-{stamp_micros}.png")
-}
-
 /// 根据选择状态决定截图完成动作。
 ///
-/// 纯函数：调用方提供输出路径、选区与标注数量，剪贴板暂存路径通过
-/// `staging_path` 惰性计算，便于测试注入固定值。
+/// 纯函数：调用方提供输出路径、选区与标注数量，剪贴板日志标签通过
+/// `private_label` 惰性计算，便于测试注入固定值。
 pub fn plan_capture_completion(
     output_path: Option<String>,
     selection: Option<Rect>,
     annotation_count: usize,
     to_clipboard: bool,
-    staging_path: impl FnOnce() -> String,
+    private_label: impl FnOnce() -> String,
 ) -> CaptureCompletion {
     let Some(output_path) = output_path else {
         return CaptureCompletion::Cancel;
@@ -69,7 +63,7 @@ pub fn plan_capture_completion(
     }
 
     let save_path = if to_clipboard {
-        staging_path()
+        private_label()
     } else {
         output_path
     };
@@ -135,6 +129,25 @@ pub fn execute_capture_plan(
     }
 }
 
+/// Clipboard capture has no filesystem fallback: unsupported memory capture
+/// fails explicitly rather than persisting private screen contents.
+pub(crate) fn execute_capture_plan_to_memory(
+    media: &mut dyn CompositorMedia,
+    plan: &CapturePlan,
+    sender: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+) -> CaptureExecution {
+    let (x, y, width, height) = plan.region;
+    match media.take_screenshot_region_to_memory(sender.clone(), x, y, width, height) {
+        Ok(true) => CaptureExecution::CapturedRegion,
+        Ok(false) => match media.take_screenshot_to_memory(sender) {
+            Ok(true) => CaptureExecution::CapturedFullFallback,
+            Ok(false) => CaptureExecution::Unavailable,
+            Err(error) => CaptureExecution::Failed(error),
+        },
+        Err(error) => CaptureExecution::Failed(error),
+    }
+}
+
 /// Execute a requested full-screen capture without collapsing backend errors
 /// into an apparent success.
 ///
@@ -157,7 +170,7 @@ mod tests {
     use super::*;
 
     fn staging() -> String {
-        "/tmp/.staging.png".to_string()
+        "clipboard memory capture".to_string()
     }
 
     #[test]
@@ -219,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_capture_stages_into_a_private_temp_file() {
+    fn clipboard_capture_uses_a_memory_destination_label() {
         let CaptureCompletion::Capture(plan) = plan_capture_completion(
             Some("/tmp/shot.png".into()),
             Some(Rect::new(0, 0, 64, 64)),
@@ -229,13 +242,8 @@ mod tests {
         ) else {
             panic!("expected a capture plan");
         };
-        assert_eq!(plan.save_path, "/tmp/.staging.png");
+        assert_eq!(plan.save_path, "clipboard memory capture");
         assert!(plan.to_clipboard);
-
-        assert_eq!(
-            clipboard_staging_path(42, 7),
-            "/tmp/.jwm-screenshot-clipboard-42-7.png"
-        );
     }
 
     /// Phase 2 退出标准演示：策略测试只需要一个几行的伪造
@@ -349,6 +357,79 @@ mod tests {
                 if message == "fullscreen fallback failed"
         ));
         assert_eq!(media.full_calls, 1);
+    }
+
+    #[test]
+    fn memory_capture_fallback_preserves_origin_and_never_uses_file_api() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, ScreenshotMemorySender, save_screenshot,
+            screenshot_memory_channel,
+        };
+        struct MemoryMedia {
+            region: Result<bool, &'static str>,
+            full: bool,
+            full_calls: usize,
+            pending: Option<ScreenshotMemorySender>,
+        }
+        impl CompositorMedia for MemoryMedia {
+            fn take_screenshot_region_to_memory(
+                &mut self,
+                target: ScreenshotMemorySender,
+                _x: i32,
+                _y: i32,
+                _width: u32,
+                _height: u32,
+            ) -> Result<bool, BackendError> {
+                match self.region {
+                    Ok(true) => {
+                        self.pending = Some(target);
+                        Ok(true)
+                    }
+                    Ok(false) => Ok(false),
+                    Err(message) => Err(BackendError::Message(message.into())),
+                }
+            }
+            fn take_screenshot_to_memory(
+                &mut self,
+                target: ScreenshotMemorySender,
+            ) -> Result<bool, BackendError> {
+                self.full_calls += 1;
+                if self.full {
+                    self.pending = Some(target);
+                }
+                Ok(self.full)
+            }
+            fn take_screenshot_to_file(
+                &mut self,
+                _path: &std::path::Path,
+            ) -> Result<bool, BackendError> {
+                panic!("private capture must never fall back to a file")
+            }
+        }
+        for (region, full, expected_origin, full_calls) in [
+            (Ok(true), false, Some((1, 2)), 0),
+            (Ok(false), true, Some((0, 0)), 1),
+            (Ok(false), false, None, 1),
+            (Err("readback failed"), true, None, 0),
+        ] {
+            let mut media = MemoryMedia {
+                region,
+                full,
+                full_calls: 0,
+                pending: None,
+            };
+            let (sender, receiver, _cancel) = screenshot_memory_channel();
+            let result = execute_capture_plan_to_memory(&mut media, &plan(), sender);
+            assert_eq!(result.annotation_origin((1, 2)), expected_origin);
+            assert_eq!(media.full_calls, full_calls);
+            if let Some(sender) = media.pending.take() {
+                save_screenshot(ScreenshotDestination::Memory(sender), &[1, 2, 3, 255], 1, 1)
+                    .unwrap();
+                assert!(receiver.recv_timeout(std::time::Duration::ZERO).is_ok());
+            } else {
+                assert!(receiver.recv_timeout(std::time::Duration::ZERO).is_err());
+            }
+        }
     }
 
     #[test]

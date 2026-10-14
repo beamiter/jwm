@@ -2,7 +2,7 @@ use super::math::ortho;
 use super::*;
 use crate::backend::compositor_common::capture::{clip_region, flip_rgba_vertical};
 use crate::backend::compositor_common::minimized_thumbnail::snapshot_shader_opacity;
-use crate::backend::compositor_common::screenshot::save_png_async;
+use crate::backend::compositor_common::screenshot::{ScreenshotDestination, save_png_async};
 use glow::HasContext;
 
 /// A dedicated full-target quad. `v_uv.y == 0` is the top of the source;
@@ -467,12 +467,15 @@ impl<C: CompositorConnection> Compositor<C> {
         (self.brightness - 1.0).abs() > f32::EPSILON
     }
 
-    /// Capture the current framebuffer to a PNG file.
+    /// Capture the current framebuffer to a PNG destination.
     pub(super) fn capture_screenshot(
         &mut self,
-        path: &std::path::Path,
+        path: ScreenshotDestination,
         permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) -> bool {
+        if path.is_cancelled() {
+            return false;
+        }
         let w = self.screen_w;
         let h = self.screen_h;
         let mut pixels =
@@ -496,7 +499,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         flip_rgba_vertical(&mut pixels, w, h);
         save_png_async(
-            path.to_path_buf(),
+            path,
             pixels,
             w,
             h,
@@ -506,16 +509,19 @@ impl<C: CompositorConnection> Compositor<C> {
         true
     }
 
-    /// Capture a region of the current framebuffer to a PNG file.
+    /// Capture a region of the current framebuffer to a PNG destination.
     pub(super) fn capture_screenshot_region(
         &mut self,
-        path: &std::path::Path,
+        path: ScreenshotDestination,
         rx: i32,
         ry: i32,
         rw: u32,
         rh: u32,
         permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) -> bool {
+        if path.is_cancelled() {
+            return false;
+        }
         let Some(region) = clip_region(self.screen_w, self.screen_h, rx, ry, rw, rh) else {
             log::warn!(
                 "{}: requested region is empty",
@@ -550,14 +556,6 @@ impl<C: CompositorConnection> Compositor<C> {
             );
         }
         flip_rgba_vertical(&mut pixels, w, h);
-        save_png_async(
-            path.to_path_buf(),
-            pixels,
-            w,
-            h,
-            self.renderer_ctx("screenshot-region: save PNG"),
-            permit,
-        );
         log::info!(
             "compositor: region screenshot queued to {} ({}x{} at {},{})",
             path.display(),
@@ -565,6 +563,14 @@ impl<C: CompositorConnection> Compositor<C> {
             h,
             x,
             y
+        );
+        save_png_async(
+            path,
+            pixels,
+            w,
+            h,
+            self.renderer_ctx("screenshot-region: save PNG"),
+            permit,
         );
         true
     }

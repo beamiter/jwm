@@ -7185,7 +7185,7 @@ pub(crate) mod keyboard_grab_tests {
         ] {
             assert_screenshot_completion_preserves_owner(|jwm, backend| {
                 let (old_job, publish_old) = BackgroundJob::controlled_for_test();
-                jwm.features.screenshot_completions.push(old_job);
+                jwm.features.screenshot_completions.push(old_job.into());
                 jwm.poll_screenshot_completion_jobs(backend);
                 assert_eq!(jwm.features.screenshot_completions.len(), 1);
                 jwm.begin_recording_region_selection(backend, "/unused/newer.mp4".into())

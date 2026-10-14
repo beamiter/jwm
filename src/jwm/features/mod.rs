@@ -137,7 +137,7 @@ pub struct FeatureStates {
     /// Completion watchers for queued screenshot captures, one per capture.
     /// The workers only wait for the compositor's PNG publish (and run the
     /// clipboard hand-off); the frame tick turns their outcomes into toasts.
-    pub screenshot_completions: Vec<connectivity::BackgroundJob<screenshot::ScreenshotCompletion>>,
+    pub screenshot_completions: Vec<screenshot::ScreenshotCompletionJob>,
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub(crate) recording_start: Option<PendingRecordingStart>,

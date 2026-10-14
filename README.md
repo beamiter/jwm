@@ -459,6 +459,21 @@ concurrent captures. Additional requests return a busy error. A single CPU RGBA
 readback is limited to 512 MiB, with checked dimensions and fallible allocation;
 oversized captures fail without attempting a giant readback.
 
+Clipboard captures use a one-result in-memory PNG channel, never a private
+PNG file in `/tmp`. Encoded clipboard PNGs are limited to 64 MiB (a new limit
+below the native X11 offer limit); oversized output fails explicitly without
+reducing image quality. The existing per-capture RGBA limit remains 512 MiB.
+These are per-buffer limits, not a total process-memory budget: annotation
+work retains the original PNG plus its RGBA image and replacement PNG, and
+native clipboard offers may need a PNG copy. Up to four completion watchers
+can retain results; the original capture RGBA is released before publishing
+its PNG to an annotation worker. A timeout, refused watcher or committed
+shutdown/restart cancels the private destination, so late results are dropped.
+Cancellation prevents new native-offer enqueue operations after it returns;
+it does not retract an offer already queued with the clipboard owner.
+Unsupported memory capture fails rather than falling back to a temporary file.
+Explicitly saved screenshots retain atomic no-clobber file publication.
+
 A finished capture announces itself: a toast carries the saved path (or
 confirms the clipboard copy), and a failed one surfaces even while Do Not
 Disturb is on. While a recording runs, a small `REC` chip with the running

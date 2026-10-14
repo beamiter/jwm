@@ -1024,6 +1024,9 @@ impl Jwm {
             // X11/system teardown stages.
             warn!("[cleanup] could not flush pending layout persistence: {error}");
         }
+        // Private screenshot workers must lose publication authority before
+        // backend teardown or an exec can detach their completion threads.
+        self.cancel_private_screenshot_completions();
         // Same reason for the notification history: its writer thread holds
         // the newest snapshot for up to a second, and the next process reads
         // the file.
@@ -2374,6 +2377,8 @@ mod normal_exit_transaction_tests {
         monitor_pushes: Vec<Vec<(u32, i32, i32, u32, u32, u32)>>,
         /// Every EWMH desktop publish as `(current, total)`, oldest first.
         desktop_pushes: Vec<(u32, u32)>,
+        private_capture_gate:
+            Option<crate::backend::compositor_common::screenshot::ScreenshotCancellation>,
     }
 
     impl ExitBackend {
@@ -2390,6 +2395,7 @@ mod normal_exit_transaction_tests {
                 operations,
                 monitor_pushes: Vec::new(),
                 desktop_pushes: Vec::new(),
+                private_capture_gate: None,
             }
         }
     }
@@ -2487,6 +2493,12 @@ mod normal_exit_transaction_tests {
         }
 
         fn cleanup(&mut self) -> Result<(), BackendError> {
+            if let Some(gate) = &self.private_capture_gate {
+                assert!(
+                    gate.is_cancelled(),
+                    "private publication must be cancelled before backend cleanup"
+                );
+            }
             self.operations
                 .lock()
                 .expect("exit operations lock")
@@ -2697,6 +2709,34 @@ mod normal_exit_transaction_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(reiconified, vec![second.0, first.0]);
+    }
+
+    #[test]
+    fn shutdown_and_restart_cancel_private_capture_before_backend_teardown() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot, screenshot_memory_channel,
+        };
+        use crate::jwm::features::{
+            connectivity::BackgroundJob, screenshot::ScreenshotCompletionJob,
+        };
+        for restarting in [false, true] {
+            let mut backend = ExitBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+            let (sender, _receiver, gate) = screenshot_memory_channel();
+            let (job, _publish) = BackgroundJob::controlled_for_test();
+            backend.private_capture_gate = Some(gate.clone());
+            jwm.features
+                .screenshot_completions
+                .push(ScreenshotCompletionJob::private(job, gate.clone()));
+            jwm.is_restarting.store(restarting, Ordering::SeqCst);
+            jwm.cleanup(&mut backend).unwrap();
+            assert!(gate.is_cancelled());
+            assert!(jwm.features.screenshot_completions.is_empty());
+            assert!(
+                save_screenshot(ScreenshotDestination::Memory(sender), &[1, 2, 3, 255], 1, 1)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

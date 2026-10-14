@@ -1,7 +1,379 @@
-//! Backend-neutral screenshot file output helpers.
+//! Backend-neutral screenshot file and bounded in-memory output helpers.
 
 use crate::backend::error::BackendErrorContext;
 use std::collections::VecDeque;
+
+/// Encoded clipboard images have their own bound in addition to the RGBA
+/// readback budget. A noisy capture may legitimately exceed this limit.
+const MAX_SCREENSHOT_PNG_BYTES: usize = 64 * 1024 * 1024;
+const SCREENSHOT_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Cancellation is shared by the capture, result waiter and main-thread owner.
+/// The gate serializes cancellation with the final clipboard offer, so an old
+/// request cannot replace the clipboard after cancellation has returned.
+#[derive(Clone, Debug)]
+pub struct ScreenshotCancellation {
+    gate: std::sync::Arc<std::sync::Mutex<bool>>,
+}
+
+impl ScreenshotCancellation {
+    pub fn cancel(&self) {
+        *self.gate.lock().unwrap_or_else(|error| error.into_inner()) = true;
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.gate.lock().map(|cancelled| *cancelled).unwrap_or(true)
+    }
+
+    /// Run one short final action only while this request is still active.
+    /// Do not wait, encode, or call cancellation methods from inside `work`.
+    /// A panicking action poisons the gate and future actions fail closed.
+    pub fn with_active<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        let cancelled = self.gate.lock().ok()?;
+        if *cancelled {
+            return None;
+        }
+        let result = work();
+        drop(cancelled);
+        Some(result)
+    }
+}
+
+/// Cloneable so a synchronous backend fallback can reuse the same result sink.
+/// Dropping the last sender disconnects a waiter, including capture/spawn errors.
+#[derive(Clone, Debug)]
+pub struct ScreenshotMemorySender {
+    sender: std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>,
+    cancellation: ScreenshotCancellation,
+    completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ScreenshotMemorySender {
+    fn try_send(self, result: Result<Vec<u8>, String>) -> std::io::Result<()> {
+        self.cancellation
+            .with_active(|| {
+                // Capacity one alone is insufficient: a fallback clone could
+                // otherwise enqueue again once the receiver takes the result.
+                // Claim the terminal state under the cancellation gate before
+                // trying delivery, including delivery failures.
+                if self
+                    .completed
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    return Err(screenshot_already_completed_error());
+                }
+                self.sender.try_send(result).map_err(|error| match error {
+                    std::sync::mpsc::TrySendError::Full(_) => std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "screenshot result slot is already occupied",
+                    ),
+                    std::sync::mpsc::TrySendError::Disconnected(_) => std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "screenshot result receiver disconnected",
+                    ),
+                })
+            })
+            .ok_or_else(screenshot_cancelled_error)?
+    }
+}
+
+#[derive(Debug)]
+pub struct ScreenshotMemoryReceiver {
+    receiver: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    cancellation: ScreenshotCancellation,
+    delivered: std::cell::Cell<bool>,
+}
+
+impl ScreenshotMemoryReceiver {
+    /// Wait in short slices so cancellation also interrupts a stalled capture.
+    /// A successful result transfers final-offer cancellation to the main owner.
+    pub fn recv_timeout(&self, timeout: std::time::Duration) -> Result<Vec<u8>, String> {
+        if self.delivered.get() {
+            return Err("screenshot result was already received".to_owned());
+        }
+        let started = std::time::Instant::now();
+        loop {
+            if self.cancellation.is_cancelled() {
+                return self.fail("screenshot cancelled");
+            }
+            match self.receiver.try_recv() {
+                Ok(result) => return self.receive(result),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return self.fail("screenshot capture disconnected before producing a PNG");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return self.fail("screenshot capture timed out");
+            }
+            match self
+                .receiver
+                .recv_timeout(remaining.min(SCREENSHOT_CANCEL_POLL))
+            {
+                Ok(result) => return self.receive(result),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return self.fail("screenshot capture disconnected before producing a PNG");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn receive(&self, result: Result<Vec<u8>, String>) -> Result<Vec<u8>, String> {
+        match self.cancellation.with_active(|| result) {
+            Some(Ok(bytes)) => {
+                self.delivered.set(true);
+                Ok(bytes)
+            }
+            Some(Err(error)) => self.fail(&error),
+            None => self.fail("screenshot cancelled"),
+        }
+    }
+
+    fn fail(&self, message: &str) -> Result<Vec<u8>, String> {
+        self.cancellation.cancel();
+        // Discard an already queued payload too; a timed-out receiver must not
+        // retain private image bytes until its eventual owner cleanup.
+        let _ = self.receiver.try_recv();
+        Err(message.to_owned())
+    }
+}
+
+impl Drop for ScreenshotMemoryReceiver {
+    fn drop(&mut self) {
+        if !self.delivered.get() {
+            self.cancellation.cancel();
+        }
+    }
+}
+
+/// A single encoded result slot; producers never block waiting for the owner.
+pub fn screenshot_memory_channel() -> (
+    ScreenshotMemorySender,
+    ScreenshotMemoryReceiver,
+    ScreenshotCancellation,
+) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let cancellation = ScreenshotCancellation {
+        gate: std::sync::Arc::new(std::sync::Mutex::new(false)),
+    };
+    (
+        ScreenshotMemorySender {
+            sender,
+            cancellation: cancellation.clone(),
+            completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        },
+        ScreenshotMemoryReceiver {
+            receiver,
+            cancellation: cancellation.clone(),
+            delivered: std::cell::Cell::new(false),
+        },
+        cancellation,
+    )
+}
+
+/// File captures keep atomic no-clobber publication. Clipboard captures never
+/// acquire a filesystem path and deliver the encoded PNG directly to memory.
+#[derive(Clone, Debug)]
+pub enum ScreenshotDestination {
+    File(std::path::PathBuf),
+    Memory(ScreenshotMemorySender),
+}
+
+impl ScreenshotDestination {
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            Self::File(_) => false,
+            Self::Memory(sender) => sender.cancellation.is_cancelled(),
+        }
+    }
+
+    pub fn display(&self) -> &Self {
+        self
+    }
+}
+
+impl std::fmt::Display for ScreenshotDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "{}", path.display()),
+            Self::Memory(_) => f.write_str("clipboard memory"),
+        }
+    }
+}
+
+impl From<std::path::PathBuf> for ScreenshotDestination {
+    fn from(path: std::path::PathBuf) -> Self {
+        Self::File(path)
+    }
+}
+
+impl From<&str> for ScreenshotDestination {
+    fn from(path: &str) -> Self {
+        Self::File(path.into())
+    }
+}
+
+fn screenshot_already_completed_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "screenshot result was already produced",
+    )
+}
+
+fn screenshot_cancelled_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "screenshot cancelled")
+}
+
+struct BoundedPngWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    failure: Option<std::io::Error>,
+}
+
+impl BoundedPngWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            failure: None,
+        }
+    }
+
+    fn into_bytes(self) -> std::io::Result<Vec<u8>> {
+        match self.failure {
+            Some(error) => Err(error),
+            None => Ok(self.bytes),
+        }
+    }
+
+    fn write_bounded(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let new_len = self.bytes.len().checked_add(buffer.len()).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "PNG output size overflow")
+        })?;
+        if new_len > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "screenshot PNG exceeds the 64 MiB in-memory output budget",
+            ));
+        }
+        self.bytes
+            .try_reserve_exact(buffer.len())
+            .map_err(std::io::Error::other)?;
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+}
+
+impl std::io::Write for BoundedPngWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let result = self.write_bounded(buffer);
+        if let Err(error) = &result
+            && self.failure.is_none()
+        {
+            // png::Writer finishes IEND in Drop and can ignore that write's
+            // error. Preserve it so a truncated PNG is never a successful result.
+            self.failure = Some(std::io::Error::new(error.kind(), error.to_string()));
+        }
+        result
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Validate the shared 512 MiB RGBA bound before encoding, and bound every
+/// output allocation rather than checking only after a PNG has been built.
+pub(crate) fn encode_png_bounded(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, image::ImageError> {
+    use image::ImageEncoder as _;
+
+    let expected_len = crate::backend::compositor_common::capture::rgba_capture_len(width, height)
+        .map_err(image::ImageError::IoError)?;
+    if pixels.len() != expected_len {
+        return Err(image::ImageError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "invalid screenshot RGBA buffer length: expected {expected_len}, got {}",
+                pixels.len()
+            ),
+        )));
+    }
+    let mut writer = BoundedPngWriter::new(MAX_SCREENSHOT_PNG_BYTES);
+    image::codecs::png::PngEncoder::new(&mut writer).write_image(
+        pixels,
+        width,
+        height,
+        image::ColorType::Rgba8.into(),
+    )?;
+    writer.into_bytes().map_err(image::ImageError::IoError)
+}
+
+/// Small borrowed-buffer adapter for deterministic synchronous tests. Production
+/// writers use the owned adapter to release raw pixels before result delivery.
+#[cfg(test)]
+pub(crate) fn save_screenshot(
+    destination: ScreenshotDestination,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), image::ImageError> {
+    save_screenshot_buffer(destination, pixels, width, height)
+}
+
+/// Release the original RGBA allocation before publishing an in-memory PNG, so
+/// a clipboard annotation/decode worker cannot overlap its next RGBA allocation
+/// with this readback buffer. File output keeps the existing atomic helper.
+pub(crate) fn save_screenshot_owned(
+    destination: ScreenshotDestination,
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> Result<(), image::ImageError> {
+    save_screenshot_buffer(destination, pixels, width, height)
+}
+
+fn save_screenshot_buffer(
+    destination: ScreenshotDestination,
+    pixels: impl AsRef<[u8]>,
+    width: u32,
+    height: u32,
+) -> Result<(), image::ImageError> {
+    match destination {
+        ScreenshotDestination::File(path) => {
+            save_png_atomically(&path, pixels.as_ref(), width, height)
+        }
+        ScreenshotDestination::Memory(sender) => {
+            if sender.cancellation.is_cancelled() {
+                return Err(image::ImageError::IoError(screenshot_cancelled_error()));
+            }
+            if sender.completed.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(image::ImageError::IoError(
+                    screenshot_already_completed_error(),
+                ));
+            }
+            let result = encode_png_bounded(pixels.as_ref(), width, height);
+            drop(pixels);
+            match result {
+                Ok(bytes) => sender
+                    .try_send(Ok(bytes))
+                    .map_err(image::ImageError::IoError),
+                Err(error) => {
+                    // Report encoder failures promptly even if a backend still
+                    // holds a fallback clone. The original error remains useful
+                    // to the writer's backend-context logger.
+                    let _ = sender.try_send(Err(error.to_string()));
+                    Err(error)
+                }
+            }
+        }
+    }
+}
 
 /// Sidecar path used while encoding a screenshot before its atomic publish.
 ///
@@ -162,11 +534,11 @@ impl std::error::Error for ScreenshotBusy {}
 /// A screenshot request expressed in compositor coordinates (top-left origin).
 pub enum ScreenshotRequest {
     Full {
-        path: std::path::PathBuf,
+        path: ScreenshotDestination,
         permit: ScreenshotPermit,
     },
     Region {
-        path: std::path::PathBuf,
+        path: ScreenshotDestination,
         x: i32,
         y: i32,
         width: u32,
@@ -195,7 +567,7 @@ impl Default for ScreenshotQueue {
 }
 
 impl ScreenshotQueue {
-    pub fn request_full(&mut self, path: std::path::PathBuf) -> Result<(), ScreenshotBusy> {
+    pub fn request_full(&mut self, path: ScreenshotDestination) -> Result<(), ScreenshotBusy> {
         let permit = self.admission.try_acquire()?;
         self.requests
             .push_back(ScreenshotRequest::Full { path, permit });
@@ -204,7 +576,7 @@ impl ScreenshotQueue {
 
     pub fn request_region(
         &mut self,
-        path: std::path::PathBuf,
+        path: ScreenshotDestination,
         x: i32,
         y: i32,
         width: u32,
@@ -273,13 +645,13 @@ pub(crate) fn spawn_screenshot_worker(
         .spawn(screenshot_worker(permit, work))
 }
 
-/// Encode RGBA pixels off the render thread and atomically publish the PNG.
-/// Consumers therefore only ever observe a complete image at `path`.
+/// Encode RGBA pixels off the render thread into a file or memory result sink.
+/// Consumers only ever observe a complete PNG.
 ///
 /// `context` tags the asynchronous failure with the requesting backend and
 /// operation, since by the time encoding fails the capture call has returned.
 pub fn save_png_async(
-    path: std::path::PathBuf,
+    path: ScreenshotDestination,
     pixels: Vec<u8>,
     width: u32,
     height: u32,
@@ -288,11 +660,12 @@ pub fn save_png_async(
 ) {
     let spawn_context = context.clone();
     if let Err(error) = spawn_screenshot_worker("jwm-screenshot-png", permit, move || {
-        let result = save_png_atomically(&path, &pixels, width, height);
+        let destination_label = path.to_string();
+        let result = save_screenshot_owned(path, pixels, width, height);
         if let Err(e) = result {
             log::warn!("{context}: {e}");
         } else {
-            log::info!("compositor: screenshot saved to {}", path.display());
+            log::info!("compositor: screenshot saved to {destination_label}");
         }
     }) {
         log::warn!("{spawn_context}: could not spawn PNG writer: {error}");
@@ -312,6 +685,300 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn owned_memory_capture_releases_raw_pixels_before_result_delivery() {
+        struct DropProbe<'a> {
+            pixels: Vec<u8>,
+            receiver: &'a ScreenshotMemoryReceiver,
+            released: &'a std::cell::Cell<bool>,
+        }
+
+        impl AsRef<[u8]> for DropProbe<'_> {
+            fn as_ref(&self) -> &[u8] {
+                &self.pixels
+            }
+        }
+
+        impl Drop for DropProbe<'_> {
+            fn drop(&mut self) {
+                assert!(matches!(
+                    self.receiver.receiver.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+                self.released.set(true);
+            }
+        }
+
+        for pixels in [vec![1, 2, 3, 255], vec![1, 2, 3]] {
+            let valid = pixels.len() == 4;
+            let (sender, receiver, _) = screenshot_memory_channel();
+            let released = std::cell::Cell::new(false);
+            let result = save_screenshot_buffer(
+                ScreenshotDestination::Memory(sender),
+                DropProbe {
+                    pixels,
+                    receiver: &receiver,
+                    released: &released,
+                },
+                1,
+                1,
+            );
+            assert!(released.get());
+            assert_eq!(result.is_ok(), valid);
+            assert_eq!(
+                receiver.recv_timeout(std::time::Duration::ZERO).is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[test]
+    fn memory_capture_delivers_png_without_creating_any_file() {
+        let scratch = scratch_dir("memory-only");
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        let pixels = [255, 0, 127, 255];
+        save_screenshot(ScreenshotDestination::Memory(sender), &pixels, 1, 1).unwrap();
+        let png = receiver.recv_timeout(std::time::Duration::ZERO).unwrap();
+        assert_eq!(
+            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .unwrap()
+                .to_rgba8()
+                .as_raw(),
+            &pixels
+        );
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        assert!(!cancellation.is_cancelled());
+        // The result can outlive its waiter while the main owner still controls
+        // whether the complete PNG may become the clipboard offer.
+        drop(receiver);
+        assert_eq!(cancellation.with_active(|| "offer"), Some("offer"));
+        cancellation.cancel();
+        assert_eq!(cancellation.with_active(|| "late offer"), None);
+        std::fs::remove_dir(scratch).unwrap();
+    }
+
+    #[test]
+    fn memory_capture_sender_clones_support_fallback_and_disconnect_on_last_drop() {
+        let (sender, receiver, _) = screenshot_memory_channel();
+        let fallback = sender.clone();
+        drop(sender);
+        fallback.try_send(Ok(vec![1, 2, 3])).unwrap();
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::ZERO).unwrap(),
+            [1, 2, 3]
+        );
+
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        drop(sender.clone());
+        drop(sender);
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap_err();
+        assert!(error.contains("disconnected"));
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn memory_capture_result_slot_never_blocks_a_second_sender() {
+        let (sender, receiver, _) = screenshot_memory_channel();
+        sender.clone().try_send(Ok(vec![1])).unwrap();
+        let error = sender.try_send(Ok(vec![2])).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::ZERO).unwrap(),
+            [1]
+        );
+    }
+
+    #[test]
+    fn memory_capture_rejects_fallback_result_after_first_result_was_received() {
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        save_screenshot(
+            ScreenshotDestination::Memory(sender.clone()),
+            &[1, 2, 3, 255],
+            1,
+            1,
+        )
+        .unwrap();
+        assert!(
+            !receiver
+                .recv_timeout(std::time::Duration::ZERO)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!cancellation.is_cancelled());
+        let error = save_screenshot(ScreenshotDestination::Memory(sender), &[4, 5, 6, 255], 1, 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("already produced"));
+        assert!(matches!(
+            receiver.receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn memory_capture_encoding_error_wakes_waiter_with_fallback_still_alive() {
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        let fallback = sender.clone();
+        assert!(save_screenshot(ScreenshotDestination::Memory(sender), &[1, 2, 3], 1, 1).is_err());
+        let error = receiver
+            .recv_timeout(std::time::Duration::ZERO)
+            .unwrap_err();
+        assert!(error.contains("RGBA buffer length"));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            fallback.try_send(Ok(vec![])).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
+
+    #[test]
+    fn memory_capture_cancellation_discards_queued_result_and_rejects_late_writer() {
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        sender.clone().try_send(Ok(vec![1, 2, 3])).unwrap();
+        cancellation.cancel();
+        assert_eq!(
+            receiver
+                .recv_timeout(std::time::Duration::ZERO)
+                .unwrap_err(),
+            "screenshot cancelled"
+        );
+        assert!(matches!(
+            receiver.receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let destination = ScreenshotDestination::Memory(sender);
+        assert!(destination.is_cancelled());
+        assert!(save_screenshot(destination, &[1, 2, 3, 255], 1, 1).is_err());
+        assert_eq!(
+            cancellation.with_active(|| panic!("cancelled request offered clipboard")),
+            None::<()>
+        );
+    }
+
+    #[test]
+    fn memory_capture_cancellation_interrupts_wait_without_waiting_for_sender() {
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+        let (done_sender, done_receiver) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ready_sender.send(()).unwrap();
+            done_sender
+                .send(receiver.recv_timeout(std::time::Duration::from_secs(60)))
+                .unwrap();
+        });
+        ready_receiver.recv().unwrap();
+        cancellation.cancel();
+        let result = done_receiver.recv_timeout(std::time::Duration::from_secs(2));
+        // Release the live producer even on an assertion failure, so a broken
+        // cancellation implementation cannot strand the test waiter.
+        drop(sender);
+        waiter.join().unwrap();
+        assert_eq!(result.unwrap().unwrap_err(), "screenshot cancelled");
+    }
+
+    #[test]
+    fn memory_capture_timeout_and_receiver_drop_cancel_late_writes() {
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::ZERO)
+                .unwrap_err()
+                .contains("timed out")
+        );
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            sender.try_send(Ok(vec![1])).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        drop(receiver);
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            sender.try_send(Ok(vec![1])).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
+
+    #[test]
+    fn memory_capture_panicking_offer_closes_cancellation_gate() {
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        assert!(
+            std::panic::catch_unwind(|| cancellation.with_active(|| panic!("offer failed")))
+                .is_err()
+        );
+        assert!(cancellation.is_cancelled());
+        assert_eq!(cancellation.with_active(|| "second offer"), None);
+        cancellation.cancel();
+        drop((sender, receiver));
+    }
+
+    #[test]
+    fn bounded_png_writer_rejects_oversize_before_allocating_or_extending() {
+        use std::io::Write as _;
+        let mut writer = BoundedPngWriter::new(8);
+        assert!(writer.write_all(&[0; 9]).is_err());
+        assert_eq!(writer.bytes.capacity(), 0);
+        writer.write_all(&[1; 4]).unwrap();
+        assert!(writer.write_all(&[2; 5]).is_err());
+        assert_eq!(writer.bytes, [1; 4]);
+        writer.write_all(&[3; 4]).unwrap();
+        assert_eq!(writer.bytes.len(), 8);
+        assert!(writer.write_all(&[4]).is_err());
+        assert_eq!(writer.bytes.len(), 8);
+    }
+
+    #[test]
+    fn bounded_png_writer_preserves_errors_from_encoder_finalization() {
+        use image::ImageEncoder as _;
+        let pixels = [0, 0, 0, 255];
+        let complete = encode_png_bounded(&pixels, 1, 1).unwrap();
+        let mut writer = BoundedPngWriter::new(complete.len() - 1);
+        let _ = image::codecs::png::PngEncoder::new(&mut writer).write_image(
+            &pixels,
+            1,
+            1,
+            image::ColorType::Rgba8.into(),
+        );
+        assert!(writer.bytes.len() < complete.len());
+        assert!(
+            writer
+                .into_bytes()
+                .unwrap_err()
+                .to_string()
+                .contains("64 MiB")
+        );
+    }
+
+    #[test]
+    fn bounded_png_encoder_propagates_output_limit_and_rejects_invalid_rgba() {
+        use image::ImageEncoder as _;
+        let mut writer = BoundedPngWriter::new(8);
+        assert!(
+            image::codecs::png::PngEncoder::new(&mut writer)
+                .write_image(&[0, 0, 0, 255], 1, 1, image::ColorType::Rgba8.into())
+                .is_err()
+        );
+        assert!(writer.bytes.len() <= 8);
+        assert!(encode_png_bounded(&[1, 2, 3], 1, 1).is_err());
+        for (width, height) in [(0, 1), (1, 0), (16385, 8192), (u32::MAX, u32::MAX)] {
+            assert!(encode_png_bounded(&[], width, height).is_err());
+        }
+    }
+
+    #[test]
+    fn file_destination_keeps_atomic_no_clobber_publication() {
+        let scratch = scratch_dir("file-destination");
+        let path = scratch.join("shot.png");
+        let first = [1, 2, 3, 255];
+        save_screenshot(path.clone().into(), &first, 1, 1).unwrap();
+        assert!(save_screenshot(path.clone().into(), &[4, 5, 6, 255], 1, 1).is_err());
+        assert_eq!(image::open(&path).unwrap().to_rgba8().as_raw(), &first);
+        assert!(!screenshot_staging_path(&path).exists());
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     #[test]
@@ -459,10 +1126,10 @@ mod tests {
         let mut requests = queue.take_all();
         assert!(!queue.has_pending());
         assert!(
-            matches!(requests.pop_front(), Some(ScreenshotRequest::Full { path, .. }) if path == std::path::Path::new("first.png"))
+            matches!(requests.pop_front(), Some(ScreenshotRequest::Full { path: ScreenshotDestination::File(path), .. }) if path == std::path::Path::new("first.png"))
         );
         assert!(
-            matches!(requests.pop_front(), Some(ScreenshotRequest::Region { path, x: 1, y: 2, width: 3, height: 4, .. }) if path == std::path::Path::new("second.png"))
+            matches!(requests.pop_front(), Some(ScreenshotRequest::Region { path: ScreenshotDestination::File(path), x: 1, y: 2, width: 3, height: 4, .. }) if path == std::path::Path::new("second.png"))
         );
     }
 
@@ -474,10 +1141,10 @@ mod tests {
 
         let mut requests = queue.take_all();
         assert!(
-            matches!(requests.pop_front(), Some(ScreenshotRequest::Full { path, .. }) if path == std::path::Path::new("first.png"))
+            matches!(requests.pop_front(), Some(ScreenshotRequest::Full { path: ScreenshotDestination::File(path), .. }) if path == std::path::Path::new("first.png"))
         );
         assert!(
-            matches!(requests.pop_front(), Some(ScreenshotRequest::Full { path, .. }) if path == std::path::Path::new("second.png"))
+            matches!(requests.pop_front(), Some(ScreenshotRequest::Full { path: ScreenshotDestination::File(path), .. }) if path == std::path::Path::new("second.png"))
         );
         assert!(requests.is_empty());
     }

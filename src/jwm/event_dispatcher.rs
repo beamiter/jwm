@@ -8449,7 +8449,8 @@ mod tests {
         jwm.features.screenshot_completions.push(
             crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
                 crate::jwm::features::screenshot::ScreenshotCompletion::Failed("test".into())
-            }),
+            })
+            .into(),
         );
         assert!(
             !jwm.background_job_readiness_is_complete(),
@@ -8461,7 +8462,7 @@ mod tests {
         let job = crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
             crate::jwm::features::screenshot::ScreenshotCompletion::Failed("test".into())
         });
-        jwm.features.screenshot_completions = vec![jwm.track_background_job(job)];
+        jwm.features.screenshot_completions = vec![jwm.track_background_job(job).into()];
         assert!(
             jwm.background_job_readiness_is_complete(),
             "a tracked screenshot completion rides the readiness hub"
@@ -13311,7 +13312,7 @@ impl Jwm {
                 .features
                 .screenshot_completions
                 .iter()
-                .all(BackgroundJob::readiness_is_covered)
+                .all(|job| job.readiness_is_covered())
             && self.features.system_ui.auth_readiness_is_covered()
     }
 

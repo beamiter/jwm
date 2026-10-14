@@ -4369,7 +4369,7 @@ impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     pub(crate) fn request_screenshot(
         &mut self,
-        path: std::path::PathBuf,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
     ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
         self.screenshot_requests.request_full(path)?;
         self.needs_render = true;
@@ -4378,7 +4378,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn request_screenshot_region(
         &mut self,
-        path: std::path::PathBuf,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
         x: i32,
         y: i32,
         w: u32,
@@ -7827,7 +7827,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     path,
                     permit,
                 } => {
-                    self.capture_screenshot(&path, permit);
+                    self.capture_screenshot(path, permit);
                 }
                 crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
                     path,
@@ -7837,7 +7837,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     height,
                     permit,
                 } => {
-                    self.capture_screenshot_region(&path, x, y, width, height, permit);
+                    self.capture_screenshot_region(path, x, y, width, height, permit);
                 }
             }
         }

@@ -3581,7 +3581,7 @@ impl KmsState {
 
     pub(super) fn request_screenshot(
         &mut self,
-        path: std::path::PathBuf,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
     ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
         self.screenshot_requests.request_full(path)?;
         self.needs_render = true;
@@ -3590,7 +3590,7 @@ impl KmsState {
 
     pub(super) fn request_screenshot_region(
         &mut self,
-        path: std::path::PathBuf,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
         x: i32,
         y: i32,
         w: u32,
@@ -6572,9 +6572,12 @@ impl KmsState {
         width: i32,
         height: i32,
         elements: &[KmsRenderElement],
-        path: &std::path::Path,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
         permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) {
+        if path.is_cancelled() {
+            return;
+        }
         let expected_len = match crate::backend::compositor_common::capture::rgba_capture_len(
             width as u32,
             height as u32,
@@ -6650,6 +6653,9 @@ impl KmsState {
             log::warn!("screenshot mapping length mismatch");
             return;
         }
+        if path.is_cancelled() {
+            return;
+        }
         let pixels = match crate::backend::compositor_common::capture::copy_rgba_capture(
             pixels,
             width as u32,
@@ -6662,7 +6668,7 @@ impl KmsState {
             }
         };
         spawn_screenshot_png_write(
-            path.to_owned(),
+            path,
             width as u32,
             height as u32,
             pixels,
@@ -6677,13 +6683,16 @@ impl KmsState {
         width: i32,
         height: i32,
         elements: &[KmsRenderElement],
-        path: &std::path::Path,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
         rx: i32,
         ry: i32,
         rw: u32,
         rh: u32,
         permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
     ) {
+        if path.is_cancelled() {
+            return;
+        }
         let expected_len = match crate::backend::compositor_common::capture::rgba_capture_len(
             width as u32,
             height as u32,
@@ -6773,6 +6782,9 @@ impl KmsState {
         let (x, y, cw, ch) = (region.x, region.y, region.width, region.height);
         let full_row_bytes = width as usize * 4;
         let crop_row_bytes = cw as usize * 4;
+        if path.is_cancelled() {
+            return;
+        }
         let mut cropped =
             match crate::backend::compositor_common::capture::allocate_rgba_capture(cw, ch) {
                 Ok(pixels) => pixels,
@@ -6788,14 +6800,7 @@ impl KmsState {
                 .copy_from_slice(&full_pixels[src_offset..src_offset + crop_row_bytes]);
         }
 
-        spawn_screenshot_png_write(
-            path.to_owned(),
-            cw,
-            ch,
-            cropped,
-            "screenshot-region",
-            permit,
-        );
+        spawn_screenshot_png_write(path, cw, ch, cropped, "screenshot-region", permit);
     }
 
     /// Fulfill pending wlr-screencopy copy requests for a given output.
@@ -9435,7 +9440,7 @@ impl KmsState {
                             out_w,
                             out_h,
                             &elements,
-                            &path,
+                            path,
                             permit,
                         ),
                         crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
@@ -9450,7 +9455,7 @@ impl KmsState {
                             out_w,
                             out_h,
                             &elements,
-                            &path,
+                            path,
                             x,
                             y,
                             width,
@@ -9862,43 +9867,93 @@ fn pick_crtc(
     None
 }
 
-/// Save raw RGBA pixel data as a PNG file.
-///
-/// Smithay's `OutputDamageTracker::render_output` flips Y in its projection matrix,
-/// so `copy_framebuffer` already returns rows in top-to-bottom (scanout) order.
-fn save_rgba_png(
-    path: &std::path::Path,
-    width: u32,
-    height: u32,
-    pixels: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
-    crate::backend::compositor_common::screenshot::save_png_atomically(
-        path, pixels, width, height,
-    )?;
-    Ok(())
-}
-
 /// Persist a completed readback without holding up the compositor's frame
 /// loop. The pixel buffer is owned before this is called, so the renderer and
-/// its GL mapping can be released immediately.
+/// its GL mapping can be released immediately. Smithay's projection already
+/// returns rows in top-to-bottom order for either destination.
 fn spawn_screenshot_png_write(
-    path: std::path::PathBuf,
+    path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
     label: &'static str,
     permit: crate::backend::compositor_common::screenshot::ScreenshotPermit,
 ) {
+    if path.is_cancelled() {
+        return;
+    }
+    let destination = path.display().to_string();
     match crate::backend::compositor_common::screenshot::spawn_screenshot_worker(
         "jwm-screenshot-png",
         permit,
-        move || match save_rgba_png(&path, width, height, &pixels) {
-            Ok(()) => log::info!("[{label}] saved to {}", path.display()),
+        move || match crate::backend::compositor_common::screenshot::save_screenshot_owned(
+            path, pixels, width, height,
+        ) {
+            Ok(()) => log::info!("[{label}] saved to {destination}"),
             Err(error) => log::error!("[{label}: save PNG] {error}"),
         },
     ) {
         Ok(_) => {}
         Err(error) => log::error!("[screenshot] could not start PNG writer: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod screenshot_memory_tests {
+    use super::spawn_screenshot_png_write;
+    use crate::backend::compositor_common::screenshot::{
+        ScreenshotDestination, ScreenshotPermit, ScreenshotQueue, ScreenshotRequest,
+        screenshot_memory_channel,
+    };
+
+    fn permit(queue: &mut ScreenshotQueue) -> ScreenshotPermit {
+        queue.request_full("unused-kms-test.png".into()).unwrap();
+        let ScreenshotRequest::Full { permit, .. } = queue.take_all().pop_front().unwrap() else {
+            unreachable!()
+        };
+        permit
+    }
+
+    #[test]
+    fn cancelled_kms_memory_writer_releases_admission_without_spawning() {
+        let mut queue = ScreenshotQueue::isolated_for_test();
+        let (sender, _receiver, cancellation) = screenshot_memory_channel();
+        cancellation.cancel();
+        spawn_screenshot_png_write(
+            ScreenshotDestination::Memory(sender),
+            1,
+            1,
+            vec![1, 2, 3, 255],
+            "test",
+            permit(&mut queue),
+        );
+        assert_eq!(queue.in_flight_for_test(), 0);
+    }
+
+    #[test]
+    fn kms_memory_writer_delivers_png_and_releases_admission() {
+        let mut queue = ScreenshotQueue::isolated_for_test();
+        let (sender, receiver, _cancellation) = screenshot_memory_channel();
+        spawn_screenshot_png_write(
+            ScreenshotDestination::Memory(sender),
+            1,
+            1,
+            vec![1, 2, 3, 255],
+            "test",
+            permit(&mut queue),
+        );
+        let bytes = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let png = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(png.dimensions(), (1, 1));
+        assert_eq!(png.as_raw(), &[1, 2, 3, 255]);
+        // Delivery precedes the worker's final permit drop by a few instructions.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while queue.in_flight_for_test() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(queue.in_flight_for_test(), 0);
     }
 }
 

@@ -169,15 +169,13 @@ const fn capture_view_needed(
     kms_capture_pending || screenshot_pending || recording_frame_due || recording_start_pending
 }
 
-/// The file a queued screenshot request will be written to.
-fn screenshot_request_path(
+/// The destination a queued screenshot request will be written to.
+fn screenshot_request_destination(
     request: &crate::backend::compositor_common::screenshot::ScreenshotRequest,
-) -> &std::path::Path {
+) -> &crate::backend::compositor_common::screenshot::ScreenshotDestination {
     use crate::backend::compositor_common::screenshot::ScreenshotRequest;
     match request {
-        ScreenshotRequest::Full { path, .. } | ScreenshotRequest::Region { path, .. } => {
-            path.as_path()
-        }
+        ScreenshotRequest::Full { path, .. } | ScreenshotRequest::Region { path, .. } => path,
     }
 }
 
@@ -5021,7 +5019,7 @@ impl WaylandCompositor {
                     for request in self.screenshot_requests.take_all() {
                         log::error!(
                             "[compositor] screenshot {} dropped: encoded capture view unavailable",
-                            screenshot_request_path(&request).display()
+                            screenshot_request_destination(&request).display()
                         );
                     }
                 }
@@ -8809,7 +8807,7 @@ impl WaylandCompositor {
     #[allow(dead_code)]
     pub(crate) fn request_screenshot(
         &mut self,
-        path: PathBuf,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
     ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
         self.screenshot_requests.request_full(path)?;
         self.needs_render = true;
@@ -8819,7 +8817,7 @@ impl WaylandCompositor {
     #[allow(dead_code)]
     pub(crate) fn request_screenshot_region(
         &mut self,
-        path: PathBuf,
+        path: crate::backend::compositor_common::screenshot::ScreenshotDestination,
         x: i32,
         y: i32,
         w: u32,

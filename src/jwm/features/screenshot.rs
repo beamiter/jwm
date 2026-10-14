@@ -38,8 +38,53 @@ fn screenshot_watcher_capacity(pending: usize) -> Result<(), crate::backend::err
     }
 }
 
+/// A screenshot-specific owner. Ordinary BackgroundJob detachment does not
+/// cancel its closure, so the private-output gate belongs to this main-loop
+/// handle and is closed before shutdown can drop the backend or exec.
+#[derive(Debug)]
+pub struct ScreenshotCompletionJob {
+    job: connectivity::BackgroundJob<ScreenshotCompletion>,
+    cancellation: Option<crate::backend::compositor_common::screenshot::ScreenshotCancellation>,
+}
+
+impl ScreenshotCompletionJob {
+    pub(crate) fn private(
+        job: connectivity::BackgroundJob<ScreenshotCompletion>,
+        cancellation: crate::backend::compositor_common::screenshot::ScreenshotCancellation,
+    ) -> Self {
+        Self {
+            job,
+            cancellation: Some(cancellation),
+        }
+    }
+}
+
+impl std::ops::Deref for ScreenshotCompletionJob {
+    type Target = connectivity::BackgroundJob<ScreenshotCompletion>;
+    fn deref(&self) -> &Self::Target {
+        &self.job
+    }
+}
+
+impl From<connectivity::BackgroundJob<ScreenshotCompletion>> for ScreenshotCompletionJob {
+    fn from(job: connectivity::BackgroundJob<ScreenshotCompletion>) -> Self {
+        Self {
+            job,
+            cancellation: None,
+        }
+    }
+}
+
+impl Drop for ScreenshotCompletionJob {
+    fn drop(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
+    }
+}
+
 /// What baking annotations into a published capture reports.
-type BakeResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type BakeResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// What one queued capture eventually did, reported by its watcher job and
 /// turned into a toast by the frame tick.
@@ -1525,8 +1570,8 @@ impl Jwm {
         to_clipboard: bool,
     ) {
         use crate::jwm::features::capture_plan::{
-            CaptureCompletion, CaptureExecution, clipboard_staging_path, execute_capture_plan,
-            plan_capture_completion,
+            CaptureCompletion, CaptureExecution, execute_capture_plan,
+            execute_capture_plan_to_memory, plan_capture_completion,
         };
 
         // A label still being typed counts as part of the capture — finishing
@@ -1539,13 +1584,7 @@ impl Jwm {
             self.features.screenshot.get_selection_rect(),
             annotations.len(),
             to_clipboard,
-            || {
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_micros())
-                    .unwrap_or_default();
-                clipboard_staging_path(std::process::id(), stamp)
-            },
+            || "clipboard memory capture".to_string(),
         );
 
         let plan = match completion {
@@ -1592,7 +1631,16 @@ impl Jwm {
             return;
         }
         let (x, y, width, height) = plan.region;
-        let execution = execute_capture_plan(backend, &plan);
+        let memory = plan
+            .to_clipboard
+            .then(crate::backend::compositor_common::screenshot::screenshot_memory_channel);
+        let (execution, private_completion) = match memory {
+            Some((sender, receiver, cancellation)) => (
+                execute_capture_plan_to_memory(backend, &plan, sender),
+                Some((receiver, cancellation)),
+            ),
+            None => (execute_capture_plan(backend, &plan), None),
+        };
         let region_origin = execution.annotation_origin((x, y));
         match execution {
             CaptureExecution::CapturedRegion => {
@@ -1617,6 +1665,16 @@ impl Jwm {
         }
 
         if let Some(region_origin) = region_origin {
+            if let Some((receiver, cancellation)) = private_completion {
+                self.track_memory_screenshot_completion(
+                    backend,
+                    receiver,
+                    cancellation,
+                    annotations,
+                    region_origin,
+                );
+                return;
+            }
             self.track_screenshot_completion(
                 backend,
                 plan.save_path,
@@ -1633,6 +1691,154 @@ impl Jwm {
                 screenshot_completion_toast(&ScreenshotCompletion::Failed(plan.save_path)),
             );
         }
+    }
+
+    /// Called after shutdown preflight has committed, before backend teardown.
+    pub(crate) fn cancel_private_screenshot_completions(&mut self) {
+        for completion in &self.features.screenshot_completions {
+            if let Some(cancellation) = &completion.cancellation {
+                cancellation.cancel();
+            }
+        }
+        self.features.screenshot_completions.clear();
+    }
+
+    fn track_memory_screenshot_completion(
+        &mut self,
+        backend: &mut dyn Backend,
+        receiver: crate::backend::compositor_common::screenshot::ScreenshotMemoryReceiver,
+        cancellation: crate::backend::compositor_common::screenshot::ScreenshotCancellation,
+        annotations: Vec<ScreenshotAnnotation>,
+        region_origin: (i32, i32),
+    ) {
+        let image_sender = backend.clipboard_image_sender();
+        let worker_cancellation = cancellation.clone();
+        let job = connectivity::BackgroundJob::spawn(move || {
+            Self::complete_memory_capture(
+                receiver,
+                &worker_cancellation,
+                region_origin,
+                &annotations,
+                image_sender,
+                SCREENSHOT_FILE_TIMEOUT,
+            )
+        });
+        self.admit_memory_screenshot_completion_job(backend, job, cancellation);
+    }
+
+    fn admit_memory_screenshot_completion_job(
+        &mut self,
+        backend: &mut dyn Backend,
+        job: connectivity::BackgroundJob<ScreenshotCompletion>,
+        cancellation: crate::backend::compositor_common::screenshot::ScreenshotCancellation,
+    ) {
+        if !job.started() {
+            cancellation.cancel();
+            self.push_system_toast(
+                backend,
+                screenshot_completion_toast(&ScreenshotCompletion::Failed(capture_failure_detail(
+                    true, "",
+                ))),
+            );
+            return;
+        }
+        self.features
+            .screenshot_completions
+            .push(ScreenshotCompletionJob::private(
+                self.track_background_job(job),
+                cancellation,
+            ));
+    }
+
+    fn complete_memory_capture(
+        receiver: crate::backend::compositor_common::screenshot::ScreenshotMemoryReceiver,
+        cancellation: &crate::backend::compositor_common::screenshot::ScreenshotCancellation,
+        region_origin: (i32, i32),
+        annotations: &[ScreenshotAnnotation],
+        image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
+        timeout: Duration,
+    ) -> ScreenshotCompletion {
+        let failed = || ScreenshotCompletion::Failed(capture_failure_detail(true, ""));
+        let png = match receiver.recv_timeout(timeout) {
+            Ok(png) => png,
+            Err(error) => {
+                log::warn!("[take_screenshot] private capture failed: {error}");
+                return failed();
+            }
+        };
+        if cancellation.is_cancelled() {
+            return failed();
+        }
+        let (png, annotations_lost) = Self::annotate_memory_png(png, region_origin, annotations);
+        if cancellation.is_cancelled() {
+            return failed();
+        }
+        // Allocate the bounded clipboard copy outside the cancellation gate.
+        let native_offer = image_sender.map(|sender| (sender, png.clone()));
+        // Serialize only the native-offer enqueue with shutdown cancellation.
+        // Encoding, image decode and allocation never hold this gate.
+        cancellation
+            .with_active(|| {
+                let offered = if let Some((sender, offer)) = native_offer {
+                    if !sender.send_png(offer) {
+                        return failed();
+                    }
+                    true
+                } else {
+                    false
+                };
+                ScreenshotCompletion::CopiedToClipboard {
+                    png,
+                    offered,
+                    annotations_lost,
+                }
+            })
+            .unwrap_or_else(failed)
+    }
+
+    fn annotate_memory_png(
+        png: Vec<u8>,
+        region_origin: (i32, i32),
+        annotations: &[ScreenshotAnnotation],
+    ) -> (Vec<u8>, bool) {
+        if annotations.is_empty() {
+            return (png, false);
+        }
+        match Self::bake_annotations_into_memory(&png, region_origin, annotations) {
+            Ok(annotated) => (annotated, false),
+            Err(error) => {
+                log::warn!("[take_screenshot] memory annotations failed: {error}");
+                (png, true)
+            }
+        }
+    }
+
+    fn bake_annotations_into_memory(
+        png: &[u8],
+        region_origin: (i32, i32),
+        annotations: &[ScreenshotAnnotation],
+    ) -> BakeResult<Vec<u8>> {
+        let mut reader =
+            image::ImageReader::with_format(io::Cursor::new(png), image::ImageFormat::Png);
+        let mut limits = image::Limits::default();
+        limits.max_alloc =
+            Some(crate::backend::compositor_common::capture::MAX_RGBA_CAPTURE_BYTES as u64);
+        reader.limits(limits);
+        use image::ImageDecoder as _;
+        let decoder = reader.into_decoder()?;
+        let (width, height) = decoder.dimensions();
+        crate::backend::compositor_common::capture::rgba_capture_len(width, height)?;
+        let mut image = image::DynamicImage::from_decoder(decoder)?.into_rgba8();
+        for annotation in annotations {
+            Self::draw_annotation(&mut image, region_origin, annotation);
+        }
+        Ok(
+            crate::backend::compositor_common::screenshot::encode_png_bounded(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+            )?,
+        )
     }
 
     fn ensure_screenshot_completion_capacity(
@@ -1706,7 +1912,7 @@ impl Jwm {
         }
         self.features
             .screenshot_completions
-            .push(self.track_background_job(job));
+            .push(self.track_background_job(job).into());
     }
 
     /// The watcher's worker half: wait for the compositor to publish the PNG,
@@ -2514,7 +2720,7 @@ mod tests {
                     let (old_job, publish_old) = connectivity::BackgroundJob::controlled_for_test();
                     assert!(old_job.started());
                     assert!(old_job.take().is_none());
-                    jwm.features.screenshot_completions.push(old_job);
+                    jwm.features.screenshot_completions.push(old_job.into());
                     jwm.poll_screenshot_completion_jobs(backend);
                     assert_eq!(jwm.features.screenshot_completions.len(), 1);
                     assert!(jwm.begin_interactive_capture(backend, "/unused/cancelled.png").unwrap());
@@ -2548,10 +2754,163 @@ mod tests {
                         assert!(jwm.features.screenshot.output_path.is_none());
                         assert!(jwm.features.screenshot_completions.is_empty());
                     }
-                    jwm.features.screenshot_completions.push(connectivity::BackgroundJob::completed_for_test(completion));
+                    jwm.features.screenshot_completions.push(connectivity::BackgroundJob::completed_for_test(completion).into());
                 },
             );
         }
+    }
+
+    #[test]
+    fn clipboard_timeout_discards_a_late_memory_writer_without_files() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot, screenshot_memory_channel,
+        };
+        let directory = ScratchDir::new("clipboard-late-memory-writer");
+        let sentinel = directory.path().join("saved.png");
+        std::fs::write(&sentinel, b"user saved output").unwrap();
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            blocked.recv().unwrap();
+            save_screenshot(
+                ScreenshotDestination::Memory(sender),
+                &[10, 20, 30, 255],
+                1,
+                1,
+            )
+        });
+        let completion = Jwm::complete_memory_capture(
+            receiver,
+            &cancellation,
+            (0, 0),
+            &[],
+            None,
+            Duration::from_millis(1),
+        );
+        assert!(matches!(completion, ScreenshotCompletion::Failed(_)));
+        release.send(()).unwrap();
+        assert!(writer.join().unwrap().is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"user saved output");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn private_screenshot_shutdown_cancels_the_detached_worker_before_offer() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot, screenshot_memory_channel,
+        };
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        let worker_gate = cancellation.clone();
+        let (native_sender, native_receiver) = std::sync::mpsc::channel();
+        let native = crate::backend::clipboard_offer::ClipboardImageSender::new(native_sender);
+        let watcher = std::thread::spawn(move || {
+            Jwm::complete_memory_capture(
+                receiver,
+                &worker_gate,
+                (0, 0),
+                &[],
+                Some(native),
+                Duration::from_secs(1),
+            )
+        });
+        let (job, _publish) = connectivity::BackgroundJob::controlled_for_test();
+        jwm.features
+            .screenshot_completions
+            .push(ScreenshotCompletionJob {
+                job,
+                cancellation: Some(cancellation.clone()),
+            });
+        jwm.cancel_private_screenshot_completions();
+        assert!(jwm.features.screenshot_completions.is_empty());
+        assert!(cancellation.is_cancelled());
+        assert!(
+            save_screenshot(ScreenshotDestination::Memory(sender), &[0, 0, 0, 255], 1, 1).is_err()
+        );
+        assert!(matches!(
+            watcher.join().unwrap(),
+            ScreenshotCompletion::Failed(_)
+        ));
+        assert!(native_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn private_screenshot_refused_watcher_closes_its_producer() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot, screenshot_memory_channel,
+        };
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let (sender, _receiver, cancellation) = screenshot_memory_channel();
+        jwm.admit_memory_screenshot_completion_job(
+            &mut backend,
+            connectivity::BackgroundJob::refused(),
+            cancellation.clone(),
+        );
+        assert!(cancellation.is_cancelled());
+        assert!(jwm.features.screenshot_completions.is_empty());
+        assert!(
+            save_screenshot(ScreenshotDestination::Memory(sender), &[0, 0, 0, 255], 1, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn private_screenshot_annotations_are_baked_in_memory_and_offered() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot, screenshot_memory_channel,
+        };
+        let (sender, receiver, cancellation) = screenshot_memory_channel();
+        let pixels = RgbaImage::from_pixel(8, 6, Rgba([10, 20, 30, 255]));
+        save_screenshot(ScreenshotDestination::Memory(sender), pixels.as_raw(), 8, 6).unwrap();
+        let annotation = ScreenshotAnnotation::FilledRectangle {
+            from: (100.0, 100.0),
+            to: (104.0, 104.0),
+            color: [255, 0, 0, 255],
+        };
+        let (native_sender, native_receiver) = std::sync::mpsc::channel();
+        let native = crate::backend::clipboard_offer::ClipboardImageSender::new(native_sender);
+        let completion = Jwm::complete_memory_capture(
+            receiver,
+            &cancellation,
+            (100, 100),
+            &[annotation],
+            Some(native),
+            Duration::from_secs(1),
+        );
+        let ScreenshotCompletion::CopiedToClipboard {
+            png,
+            offered,
+            annotations_lost,
+        } = completion
+        else {
+            panic!("memory capture did not complete");
+        };
+        assert!(offered);
+        assert!(!annotations_lost);
+        let image = image::load_from_memory(&png).unwrap().into_rgba8();
+        assert_eq!(*image.get_pixel(1, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(*image.get_pixel(6, 5), Rgba([10, 20, 30, 255]));
+        assert!(native_receiver.try_recv().is_ok());
+    }
+
+    #[test]
+    fn private_screenshot_annotation_failure_preserves_original_bytes() {
+        let original = b"invalid PNG";
+        let annotation = ScreenshotAnnotation::FilledRectangle {
+            from: (0.0, 0.0),
+            to: (4.0, 4.0),
+            color: [255, 0, 0, 255],
+        };
+        let (preserved, lost) = Jwm::annotate_memory_png(original.to_vec(), (0, 0), &[annotation]);
+        assert!(lost);
+        assert_eq!(preserved, original);
     }
 
     #[test]
@@ -2611,7 +2970,7 @@ mod tests {
         for _ in 0..MAX_SCREENSHOT_WATCHERS {
             jwm.features
                 .screenshot_completions
-                .push(connectivity::BackgroundJob::refused());
+                .push(connectivity::BackgroundJob::refused().into());
         }
         let error = jwm.submit_screenshot_fullscreen(&mut backend).unwrap_err();
         assert!(error.to_string().contains("screenshot busy"));
@@ -2631,7 +2990,7 @@ mod tests {
         for _ in 0..MAX_SCREENSHOT_WATCHERS {
             jwm.features
                 .screenshot_completions
-                .push(connectivity::BackgroundJob::refused());
+                .push(connectivity::BackgroundJob::refused().into());
         }
         jwm.features.screenshot.start();
         jwm.features.screenshot.output_path = Some("/nonexistent/not-captured.png".into());
@@ -2672,7 +3031,13 @@ mod tests {
             .unwrap();
         assert!(region.find("ungrab_keyboard()").unwrap() < admission);
         assert!(region.find("ungrab_pointer()").unwrap() < admission);
-        assert!(admission < region.find("let execution = execute_capture_plan").unwrap());
+        assert!(
+            admission
+                < region
+                    .find("execute_capture_plan_to_memory(backend")
+                    .unwrap()
+        );
+        assert!(admission < region.find("execute_capture_plan(backend").unwrap());
         let track = shipped
             .split_once("fn track_screenshot_completion")
             .unwrap()
@@ -2792,7 +3157,7 @@ mod tests {
             jwm.features.deferred_grab = Some(DeferredGrab::new(action, std::time::Instant::now()));
             jwm.features
                 .screenshot_completions
-                .push(connectivity::BackgroundJob::refused());
+                .push(connectivity::BackgroundJob::refused().into());
 
             // A second direct request wins the grabs before the maintenance
             // tick can revisit the old, pointer-busy request. No capture or
@@ -2943,7 +3308,7 @@ mod tests {
         let mut jwm = jwm_on_two_monitors(&mut backend);
         jwm.features
             .screenshot_completions
-            .push(connectivity::BackgroundJob::refused());
+            .push(connectivity::BackgroundJob::refused().into());
         jwm.features.deferred_grab = Some(DeferredGrab::new(
             DeferredGrabAction::Screenshot {
                 output_path: "/nonexistent/parked.png".into(),

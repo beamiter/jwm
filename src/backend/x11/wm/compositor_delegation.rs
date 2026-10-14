@@ -459,7 +459,7 @@ macro_rules! delegate_compositor_capabilities {
                 path: &std::path::Path,
             ) -> Result<bool, crate::backend::error::BackendError> {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.request_screenshot(path.to_path_buf()).map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
+                    compositor.request_screenshot(path.to_path_buf().into()).map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
                     Ok(true)
                 } else {
                     Ok(false)
@@ -475,7 +475,39 @@ macro_rules! delegate_compositor_capabilities {
                 height: u32,
             ) -> Result<bool, crate::backend::error::BackendError> {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.request_screenshot_region(path.to_path_buf(), x, y, width, height).map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
+                    compositor.request_screenshot_region(path.to_path_buf().into(), x, y, width, height).map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+
+            fn take_screenshot_to_memory(
+                &mut self,
+                target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+            ) -> Result<bool, crate::backend::error::BackendError> {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor
+                        .request_screenshot(crate::backend::compositor_common::screenshot::ScreenshotDestination::Memory(target))
+                        .map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+
+            fn take_screenshot_region_to_memory(
+                &mut self,
+                target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+                x: i32,
+                y: i32,
+                width: u32,
+                height: u32,
+            ) -> Result<bool, crate::backend::error::BackendError> {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor
+                        .request_screenshot_region(crate::backend::compositor_common::screenshot::ScreenshotDestination::Memory(target), x, y, width, height)
+                        .map_err(|error| crate::backend::error::BackendError::Message(error.to_string()))?;
                     Ok(true)
                 } else {
                     Ok(false)

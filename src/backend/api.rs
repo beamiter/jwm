@@ -3260,6 +3260,26 @@ pub trait CompositorMedia: Send {
         Ok(false)
     }
 
+    /// Queue an in-memory PNG screenshot without creating a file.
+    fn take_screenshot_to_memory(
+        &mut self,
+        _target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    /// Queue an in-memory PNG region using the same coordinates as file capture.
+    fn take_screenshot_region_to_memory(
+        &mut self,
+        _target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+        _x: i32,
+        _y: i32,
+        _width: u32,
+        _height: u32,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     fn compositor_capture_thumbnail(
         &self,
         _window: WindowId,

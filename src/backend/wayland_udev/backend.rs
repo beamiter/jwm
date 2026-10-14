@@ -4591,7 +4591,7 @@ impl CompositorMedia for UdevBackend {
     fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
         if let Some(kms) = &self.kms {
             kms.borrow_mut()
-                .request_screenshot(path.to_path_buf())
+                .request_screenshot(path.to_path_buf().into())
                 .map_err(|error| BackendError::Message(error.to_string()))?;
             self.state.needs_redraw = true;
             Ok(true)
@@ -4610,7 +4610,53 @@ impl CompositorMedia for UdevBackend {
     ) -> Result<bool, BackendError> {
         if let Some(kms) = &self.kms {
             kms.borrow_mut()
-                .request_screenshot_region(path.to_path_buf(), x, y, width, height)
+                .request_screenshot_region(path.to_path_buf().into(), x, y, width, height)
+                .map_err(|error| BackendError::Message(error.to_string()))?;
+            self.state.needs_redraw = true;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn take_screenshot_to_memory(
+        &mut self,
+        target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+    ) -> Result<bool, BackendError> {
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut()
+                .request_screenshot(
+                    crate::backend::compositor_common::screenshot::ScreenshotDestination::Memory(
+                        target,
+                    ),
+                )
+                .map_err(|error| BackendError::Message(error.to_string()))?;
+            self.state.needs_redraw = true;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn take_screenshot_region_to_memory(
+        &mut self,
+        target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, BackendError> {
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut()
+                .request_screenshot_region(
+                    crate::backend::compositor_common::screenshot::ScreenshotDestination::Memory(
+                        target,
+                    ),
+                    x,
+                    y,
+                    width,
+                    height,
+                )
                 .map_err(|error| BackendError::Message(error.to_string()))?;
             self.state.needs_redraw = true;
             Ok(true)
