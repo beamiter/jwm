@@ -983,6 +983,21 @@ impl Jwm {
         });
     }
 
+    fn current_picker_wallpaper(&self) -> String {
+        let tags = self
+            .state
+            .monitor_order
+            .first()
+            .and_then(|key| self.state.monitors.get(*key))
+            .map_or(0, |monitor| monitor.get_active_tags());
+        crate::jwm::features::wallpaper::picker_current_at(
+            CONFIG.load().behavior(),
+            tags,
+            crate::jwm::features::wallpaper_rotation::local_day(),
+        )
+        .to_owned()
+    }
+
     /// Open the wallpaper picker in its scanning state and list the
     /// directory on a worker.
     ///
@@ -997,7 +1012,10 @@ impl Jwm {
         let (current, configured_dir) = {
             let cfg = CONFIG.load();
             let behavior = cfg.behavior();
-            (behavior.wallpaper.clone(), behavior.wallpaper_dir.clone())
+            (
+                self.current_picker_wallpaper(),
+                behavior.wallpaper_dir.clone(),
+            )
         };
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         let worker_current = current.clone();
@@ -1044,7 +1062,7 @@ impl Jwm {
         if !self.features.system_ui.is_wallpaper_picker() {
             return;
         }
-        let current = CONFIG.load().behavior().wallpaper.clone();
+        let current = self.current_picker_wallpaper();
         self.features.system_ui = crate::jwm::features::SystemUiState::wallpaper_picker(
             &paths,
             &current,
@@ -1511,9 +1529,9 @@ impl Jwm {
         Ok(())
     }
 
-    /// Apply the selected wallpaper through the same configuration path a
-    /// `set_config` takes, so both compositors pick it up on their next
-    /// `apply_config` exactly as they would from a reload.
+    /// Publish the session choice and run the normal apply-config path.
+    /// Daily rotation uses a date-scoped fallback; static selection changes
+    /// the global path. Neither choice writes the configuration file.
     pub(crate) fn apply_selected_wallpaper(&mut self, backend: &mut dyn Backend) {
         let Some(path) = self
             .features
@@ -1523,21 +1541,30 @@ impl Jwm {
         else {
             return;
         };
-        let mut updated = (**CONFIG.load()).clone();
-        if let Err(error) = updated.set_value(
-            "behavior.wallpaper",
-            &serde_json::Value::String(path.clone()),
-        ) {
-            error!("Wallpaper: {error}");
-            return;
-        }
+        let updated = match CONFIG
+            .load()
+            .with_picker_wallpaper(&path, crate::jwm::features::wallpaper_rotation::local_day())
+        {
+            Ok(updated) => updated,
+            Err(error) => {
+                error!("Wallpaper: {error}");
+                return;
+            }
+        };
         CONFIG.store(std::sync::Arc::new(updated));
         self.apply_config_changes(backend);
         info!("Wallpaper: {path}");
-        self.broadcast_ipc_event(
-            "config/changed",
-            serde_json::json!({ "key": "behavior.wallpaper", "value": path }),
-        );
+        if CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
+            self.broadcast_ipc_event(
+                "config/wallpaper",
+                serde_json::json!({ "path": path, "scope": "today", "rotation": "daily" }),
+            );
+        } else {
+            self.broadcast_ipc_event(
+                "config/changed",
+                serde_json::json!({ "key": "behavior.wallpaper", "value": path }),
+            );
+        }
         self.close_system_ui(backend);
     }
 

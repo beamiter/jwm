@@ -1325,6 +1325,10 @@ pub struct BehaviorConfig {
     /// settings remain intact and take effect again when rotation is off.
     #[serde(default)]
     pub wallpaper_rotation_paths: Vec<String>,
+    /// Session-only manual choice for one local civil day. Never serialized
+    /// into TOML/IPC configuration; clones retain it, reloads discard it.
+    #[serde(skip)]
+    pub(crate) wallpaper_daily_pick: Option<(i32, String)>,
     /// Remember what was copied, so the clipboard picker has something to
     /// offer. Memory only: the history is never written to disk and does not
     /// survive a restart. Offers marked as secrets are never recorded.
@@ -2213,6 +2217,7 @@ impl Default for Config {
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_rotation: default_wallpaper_rotation(),
                     wallpaper_rotation_paths: Vec::new(),
+                    wallpaper_daily_pick: None,
                     wallpaper_monitors: Vec::new(),
                     wallpaper_tags: Vec::new(),
                     swallow_enabled: true,
@@ -4704,6 +4709,9 @@ impl Config {
                         "behavior.wallpaper_rotation={rotation:?} (expected off or daily)"
                     ));
                 }
+                if rotation == "off" {
+                    self.inner.behavior.wallpaper_daily_pick = None;
+                }
                 self.inner.behavior.wallpaper_rotation = rotation;
             }
             "behavior.wallpaper_rotation_paths" => {
@@ -4850,6 +4858,38 @@ impl Config {
         let mut candidate = self.clone();
         candidate.set_values(&[(key.to_string(), value.clone())])?;
         Ok(candidate)
+    }
+
+    /// Build a session-only choice. Daily rotation keeps its catalog and
+    /// static fallback intact; only this day's resolved fallback changes.
+    pub(crate) fn with_picker_wallpaper(&self, path: &str, day: i32) -> Result<Self, String> {
+        let mut candidate = self.clone();
+        let behavior = &mut candidate.inner.behavior;
+        if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
+            behavior.wallpaper_daily_pick = Some((day, path.to_owned()));
+        } else {
+            behavior.wallpaper_daily_pick = None;
+            candidate.set_value("behavior.wallpaper", &serde_json::json!(path))?;
+        }
+        Ok(candidate)
+    }
+
+    /// Forget a choice after leaving its day (or disabling rotation), so a
+    /// later clock correction back to that date cannot revive an expired pick.
+    pub(crate) fn expire_picker_wallpaper(&mut self, day: i32) -> bool {
+        let behavior = &mut self.inner.behavior;
+        let expired = behavior
+            .wallpaper_daily_pick
+            .as_ref()
+            .is_some_and(|(picked_day, _)| {
+                *picked_day != day
+                    || behavior.wallpaper_rotation != "daily"
+                    || behavior.wallpaper_rotation_paths.is_empty()
+            });
+        if expired {
+            behavior.wallpaper_daily_pick = None;
+        }
+        expired
     }
 
     /// Atomically apply a batch of hot-tunable in-memory overrides. The
@@ -5100,6 +5140,162 @@ mod tests {
         config.inner.behavior.wallpaper_rotation_paths =
             vec!["x".repeat(super::MAX_WALLPAPER_ROTATION_PATH_BYTES)];
         assert!(!config.diagnostics().has_errors());
+    }
+
+    #[test]
+    fn wallpaper_picker_replaces_today_without_disabling_tomorrows_rotation() {
+        use crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at;
+        let mut config = Config::default();
+        config.inner.behavior.wallpaper = "/walls/static.png".into();
+        config.inner.behavior.wallpaper_rotation = "daily".into();
+        config.inner.behavior.wallpaper_rotation_paths =
+            vec!["/walls/a.png".into(), "/walls/b.png".into()];
+        let picked = config
+            .with_picker_wallpaper("/walls/picked.png", 100)
+            .unwrap();
+        assert_eq!(picked.behavior().wallpaper_rotation, "daily");
+        for monitor in [0, 1] {
+            assert_eq!(
+                resolve_wallpaper_for_tag_at(picked.behavior(), monitor, 1, 100).0,
+                "/walls/picked.png"
+            );
+            assert_eq!(
+                resolve_wallpaper_for_tag_at(picked.behavior(), monitor, 1, 101),
+                resolve_wallpaper_for_tag_at(config.behavior(), monitor, 1, 101)
+            );
+        }
+        assert_eq!(picked.behavior().wallpaper, config.behavior().wallpaper);
+        assert_eq!(
+            picked.behavior().wallpaper_rotation_paths,
+            config.behavior().wallpaper_rotation_paths
+        );
+    }
+
+    #[test]
+    fn wallpaper_picker_runtime_choice_is_not_persisted_and_latest_pick_wins() {
+        use crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at;
+        let mut config = Config::default();
+        config.inner.behavior.wallpaper_rotation = "daily".into();
+        config.inner.behavior.wallpaper_rotation_paths = vec!["/walls/day.png".into()];
+        let picked = config
+            .with_picker_wallpaper("/walls/one.png", 100)
+            .unwrap()
+            .with_picker_wallpaper("/walls/two.png", 100)
+            .unwrap();
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(picked.behavior(), 0, 1, 100).0,
+            "/walls/two.png"
+        );
+        assert_eq!(
+            serde_json::to_value(&picked.inner).unwrap(),
+            serde_json::to_value(&config.inner).unwrap()
+        );
+        let serialized = toml::to_string(&picked.inner).unwrap();
+        assert!(!serialized.contains("wallpaper_daily_pick"));
+        assert!(!serialized.contains("/walls/two.png"));
+        let reloaded = Config {
+            inner: toml::from_str(&serialized).unwrap(),
+        };
+        assert!(reloaded.behavior().wallpaper_daily_pick.is_none());
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(reloaded.behavior(), 0, 1, 100).0,
+            "/walls/day.png"
+        );
+        let mut expired = picked.clone();
+        assert!(!expired.expire_picker_wallpaper(100));
+        assert!(expired.expire_picker_wallpaper(101));
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(expired.behavior(), 0, 1, 100).0,
+            "/walls/day.png"
+        );
+        assert!(!expired.expire_picker_wallpaper(100));
+        let mut disabled = picked;
+        disabled
+            .set_value("behavior.wallpaper_rotation", &serde_json::json!("off"))
+            .unwrap();
+        disabled
+            .set_value("behavior.wallpaper_rotation", &serde_json::json!("daily"))
+            .unwrap();
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(disabled.behavior(), 0, 1, 100).0,
+            "/walls/day.png"
+        );
+    }
+
+    #[test]
+    fn wallpaper_picker_keeps_static_selection_and_empty_catalog_behavior() {
+        for rotation in ["off", "daily"] {
+            let mut config = Config::default();
+            config.inner.behavior.wallpaper_rotation = rotation.into();
+            config.inner.behavior.wallpaper_rotation_paths.clear();
+            let picked = config
+                .with_picker_wallpaper("/walls/static-pick.png", 100)
+                .unwrap();
+            assert_eq!(picked.behavior().wallpaper, "/walls/static-pick.png");
+            assert_eq!(picked.behavior().wallpaper_rotation, rotation);
+            assert!(picked.behavior().wallpaper_daily_pick.is_none());
+        }
+    }
+
+    #[test]
+    fn wallpaper_picker_daily_choice_preserves_explicit_static_overrides() {
+        use crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at;
+        let mut config = Config::default();
+        config.inner.behavior.wallpaper_rotation = "daily".into();
+        config.inner.behavior.wallpaper_rotation_paths = vec!["/walls/day.png".into()];
+        config.inner.behavior.wallpaper_mode = "fill".into();
+        config.inner.behavior.wallpaper_monitors = vec![
+            WallpaperMonitorConfig {
+                monitor: 1,
+                path: "/walls/monitor.png".into(),
+                mode: "fit".into(),
+            },
+            WallpaperMonitorConfig {
+                monitor: 2,
+                path: String::new(),
+                mode: "center".into(),
+            },
+        ];
+        config.inner.behavior.wallpaper_tags = vec![WallpaperTagConfig {
+            monitor: -1,
+            tag: 2,
+            path: "/walls/tag.png".into(),
+            mode: String::new(),
+        }];
+        let picked = config
+            .with_picker_wallpaper("/walls/picked.png", 100)
+            .unwrap();
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(picked.behavior(), 0, 1, 100),
+            ("/walls/picked.png", "fill")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(picked.behavior(), 1, 1, 100),
+            ("/walls/monitor.png", "fit")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(picked.behavior(), 2, 1, 100),
+            ("/walls/picked.png", "center")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag_at(picked.behavior(), 1, 4, 100),
+            ("/walls/tag.png", "fill")
+        );
+        assert_eq!(
+            crate::jwm::features::wallpaper::picker_current_at(picked.behavior(), 4, 100),
+            "/walls/picked.png",
+            "the picker marks the manual choice even when tag rules override its first output"
+        );
+        for monitor in 0..3 {
+            assert_eq!(
+                resolve_wallpaper_for_tag_at(picked.behavior(), monitor, 4, 101),
+                ("/walls/day.png", "fill")
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&picked.inner).unwrap(),
+            serde_json::to_value(&config.inner).unwrap()
+        );
     }
 
     #[test]

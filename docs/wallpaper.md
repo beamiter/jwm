@@ -49,10 +49,11 @@ a symlink to an image is listed, one to a folder or a dangling one is not.
 
 ## How it applies
 
-The choice goes through the same path a `set_config` takes — it updates
-`behavior.wallpaper` in the live configuration and runs the normal
-apply-config step, so both compositors pick it up exactly as they would from a
-reload, crossfade included when `wallpaper_crossfade` is on. An X11 session
+The choice runs the normal apply-config step. With daily rotation off it
+updates `behavior.wallpaper` in the live configuration. With daily rotation
+on it replaces today's global fallback without changing the rotation setting,
+collection, or saved static wallpaper. Both compositors use that effective
+choice through their usual wallpaper loading path. An X11 session
 running **without** the compositor still shows that picture: it is decoded off
 the event loop (Triangle-filtered to each output, not nearest-neighbour) and
 installed as the root pixmap (`_XROOTPMAP_ID`), laid out per output with the
@@ -69,10 +70,20 @@ that changes on disk is picked up by its mtime, and translucent PNG pixels
 blend over the theme letterbox. Setup and output layout changes install that
 picture as soon as the monitors exist.
 
+A manual daily choice applies to all outputs using the global fallback;
+explicit monitor/tag wallpapers retain their own pictures and modes. The
+picker marks the manual choice when reopened. Rotation stays enabled: at the
+next local date it returns to the existing automatic schedule (including its
+normal priority over static overrides). A later manual choice replaces the
+earlier one. Opening, browsing, and cancelling do not change today's choice.
+The daily choice is session-only and is discarded on configuration-file
+reload, restart, or disabling rotation; it is never written to TOML.
+
 That also means the change is **in memory only**, like every other
 `set_config`: it lasts for the session and is not written back to
-`config_x11.toml`. To make a wallpaper permanent, set `behavior.wallpaper` in
-the file.
+`config_x11.toml`. For a permanent static wallpaper, set `behavior.wallpaper`
+and `behavior.wallpaper_rotation = "off"` in the file. Daily choices leave
+the saved rotation schedule untouched.
 
 `behavior.wallpaper`, `behavior.wallpaper_mode`, and `behavior.wallpaper_dir`
 are now settable over IPC too:

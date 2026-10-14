@@ -66,6 +66,7 @@ impl Jwm {
     /// Reloads already publish monitors and refresh native wallpaper/theme.
     /// Only reset this lightweight observer; do not repeat config application.
     pub(crate) fn reset_wallpaper_rotation(&mut self, now: Instant) {
+        Self::expire_daily_wallpaper_pick(local_day());
         let cfg = CONFIG.load();
         let behavior = cfg.behavior();
         let day = if behavior.wallpaper_rotation == "daily"
@@ -133,7 +134,19 @@ impl Jwm {
         day: i32,
     ) {
         if self.features.wallpaper_rotation.observe_day(day, now) {
+            Self::expire_daily_wallpaper_pick(day);
             self.refresh_rotating_wallpaper(backend);
+        }
+    }
+
+    fn expire_daily_wallpaper_pick(day: i32) {
+        let cfg = CONFIG.load();
+        if cfg.behavior().wallpaper_daily_pick.is_none() {
+            return;
+        }
+        let mut updated = (**cfg).clone();
+        if updated.expire_picker_wallpaper(day) {
+            CONFIG.store(std::sync::Arc::new(updated));
         }
     }
 

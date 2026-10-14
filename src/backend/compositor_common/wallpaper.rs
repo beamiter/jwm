@@ -93,6 +93,19 @@ pub(crate) fn compute_wallpaper_rect(
     }
 }
 
+/// Today's manual daily choice. Date gating also protects callers that run
+/// before the maintenance tick has observed midnight.
+pub(crate) fn daily_picker_wallpaper_at(behavior: &BehaviorConfig, day: i32) -> Option<&str> {
+    if behavior.wallpaper_rotation != "daily" || behavior.wallpaper_rotation_paths.is_empty() {
+        return None;
+    }
+    behavior
+        .wallpaper_daily_pick
+        .as_ref()
+        .filter(|(picked_day, _)| *picked_day == day)
+        .map(|(_, path)| path.as_str())
+}
+
 /// Resolve one dense monitor slot against one sampled local civil day.
 /// Daily rotation temporarily takes priority over static overrides without
 /// mutating them, so turning it off restores the original selection.
@@ -102,7 +115,11 @@ pub(crate) fn resolve_wallpaper_for_tag_at(
     active_tags: u32,
     day: i32,
 ) -> (&str, &str) {
-    if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
+    let manual = daily_picker_wallpaper_at(behavior, day);
+    if behavior.wallpaper_rotation == "daily"
+        && !behavior.wallpaper_rotation_paths.is_empty()
+        && manual.is_none()
+    {
         let count = behavior.wallpaper_rotation_paths.len() as i64;
         let slot = (i64::from(day) + i64::from(monitor_idx)).rem_euclid(count) as usize;
         return (
@@ -110,6 +127,10 @@ pub(crate) fn resolve_wallpaper_for_tag_at(
             &behavior.wallpaper_mode,
         );
     }
+    // A manual daily pick replaces the global fallback, preserving explicit
+    // monitor/tag choices. Without a manual pick the automatic daily branch
+    // above retains its existing priority over those static rules.
+    let fallback = manual.unwrap_or(&behavior.wallpaper);
     let mut best: Option<&WallpaperTagConfig> = None;
     let mut best_specific = false;
     for wt in &behavior.wallpaper_tags {
@@ -149,7 +170,7 @@ pub(crate) fn resolve_wallpaper_for_tag_at(
         .find(|wm| wm.monitor == monitor_idx)
     {
         let path = if pm.path.is_empty() {
-            &behavior.wallpaper
+            fallback
         } else {
             &pm.path
         };
@@ -160,7 +181,7 @@ pub(crate) fn resolve_wallpaper_for_tag_at(
         };
         return (path, mode);
     }
-    (&behavior.wallpaper, &behavior.wallpaper_mode)
+    (fallback, &behavior.wallpaper_mode)
 }
 
 /// Cap on a native X11 root pixmap so a bogus screen size cannot allocate

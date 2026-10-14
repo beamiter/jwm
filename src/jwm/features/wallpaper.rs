@@ -11,6 +11,20 @@
 
 use std::path::{Path, PathBuf};
 
+/// Highlight the manual daily choice even when the first output has an
+/// explicit override. Otherwise reflect that output's currently resolved image.
+pub(crate) fn picker_current_at(
+    behavior: &crate::config::BehaviorConfig,
+    active_tags: u32,
+    day: i32,
+) -> &str {
+    use crate::backend::compositor_common::wallpaper::{
+        daily_picker_wallpaper_at, resolve_wallpaper_for_tag_at,
+    };
+    daily_picker_wallpaper_at(behavior, day)
+        .unwrap_or_else(|| resolve_wallpaper_for_tag_at(behavior, 0, active_tags, day).0)
+}
+
 /// Extensions the compositor's image loader handles.
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 
@@ -192,6 +206,58 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wallpaper_picker_reopens_on_todays_effective_choice_without_stopping_rotation() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_rotation".into(),
+                    serde_json::json!("daily"),
+                ),
+                (
+                    "behavior.wallpaper_rotation_paths".into(),
+                    serde_json::json!(["/walls/a.png", "/walls/b.png"]),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(picker_current_at(config.behavior(), 1, 100), "/walls/a.png");
+        let paths = [
+            PathBuf::from("/walls/a.png"),
+            PathBuf::from("/walls/picked.png"),
+        ];
+        let mut panel = crate::jwm::features::SystemUiState::wallpaper_picker(
+            &paths,
+            picker_current_at(config.behavior(), 1, 100),
+            "/walls",
+        );
+        panel.move_selection(1);
+        // Preview/navigation never touches the config; dropping this panel is
+        // the model-level cancel operation.
+        assert_eq!(picker_current_at(config.behavior(), 1, 100), "/walls/a.png");
+        let picked = config
+            .with_picker_wallpaper(panel.selected_wallpaper().unwrap(), 100)
+            .unwrap();
+        drop(panel);
+        let reopened = crate::jwm::features::SystemUiState::wallpaper_picker(
+            &paths,
+            picker_current_at(picked.behavior(), 1, 100),
+            "/walls",
+        );
+        assert_eq!(reopened.selected_wallpaper(), Some("/walls/picked.png"));
+        assert_eq!(picker_current_at(picked.behavior(), 1, 101), "/walls/b.png");
+        assert_eq!(picked.behavior().wallpaper_rotation, "daily");
+        let source = include_str!("toggles.rs");
+        assert_eq!(source.matches("with_picker_wallpaper(").count(), 1);
+        assert!(source.contains("\"config/wallpaper\""));
+        assert!(
+            crate::ipc::IPC_REGISTRY
+                .subscription_topics
+                .contains(&"config")
+        );
+        assert_eq!(source.matches("self.current_picker_wallpaper()").count(), 2);
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("jwm-wallpaper-{}-{tag}", std::process::id()));
