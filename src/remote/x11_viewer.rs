@@ -214,6 +214,24 @@ impl ViewerKeyboardState {
     }
 }
 
+// An external keyboard grab diverts releases even though the ordinary focus
+// has not changed. Our own grab's synthetic focus notifications must not tear
+// down the grab we just acquired.
+fn focus_out_releases_input(mode: NotifyMode, owns_grab: bool) -> bool {
+    mode == NotifyMode::NORMAL || (mode == NotifyMode::GRAB && !owns_grab)
+}
+
+fn clear_forwarded_input(
+    keyboard: &mut ViewerKeyboardState,
+    buttons: &mut ForwardedButtons,
+    events: &mut Vec<ViewerEvent>,
+) {
+    // A focus/grab boundary ends both held keys and a half-finished tap.
+    *keyboard = ViewerKeyboardState::default();
+    buttons.clear();
+    events.push(ViewerEvent::ReleaseAll);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativePixelWriter {
     /// Native depth-24 pixels stored as little-endian 0x00RRGGBB words.
@@ -547,7 +565,8 @@ impl Viewer {
                     self.release_all_input(&mut result);
                 }
                 Event::FocusOut(event)
-                    if event.event == self.window && event.mode == NotifyMode::NORMAL =>
+                    if event.event == self.window
+                        && focus_out_releases_input(event.mode, self.grabbed) =>
                 {
                     self.release_local_grab()?;
                     self.release_all_input(&mut result);
@@ -933,10 +952,7 @@ impl Viewer {
     }
 
     fn release_all_input(&mut self, events: &mut Vec<ViewerEvent>) {
-        // A focus/grab boundary ends both held keys and a half-finished tap.
-        self.keyboard = ViewerKeyboardState::default();
-        self.held_buttons.clear();
-        events.push(ViewerEvent::ReleaseAll);
+        clear_forwarded_input(&mut self.keyboard, &mut self.held_buttons, events);
     }
 
     fn pointer_is_inside_image(&self, x: i16, y: i16) -> bool {
@@ -2865,6 +2881,71 @@ mod tests {
             }]
         );
         assert!(keyboard.held.is_empty());
+    }
+
+    #[test]
+    fn external_keyboard_grab_releases_chord_and_discards_deferred_edges() {
+        let now = Instant::now();
+        let mut keyboard = ViewerKeyboardState::default();
+        let mut buttons = ForwardedButtons::default();
+        let mut events = Vec::new();
+        assert_eq!(
+            keyboard.press(37, false, true, now),
+            KeyPressAction::Forward
+        );
+        assert_eq!(keyboard.press(96, true, true, now), KeyPressAction::Forward);
+        keyboard.defer_release(96, 9, now);
+        assert!(buttons.press(1, true));
+        // Another client grabs the keyboard while Ctrl + button are held.
+        // Releases during that grab will never reach this viewer.
+        // poll_events flushes a pending release before matching FocusOut.
+        keyboard.flush_release(&mut events, true);
+        if focus_out_releases_input(NotifyMode::GRAB, false) {
+            clear_forwarded_input(&mut keyboard, &mut buttons, &mut events);
+        }
+        assert_eq!(
+            events,
+            [
+                ViewerEvent::Key {
+                    keycode: 96,
+                    pressed: false
+                },
+                ViewerEvent::ReleaseAll
+            ]
+        );
+        assert!(keyboard.held.is_empty());
+        assert!(!keyboard.consume_repeat(96, 9));
+        keyboard.flush_release(&mut events, true);
+        assert!(!buttons.release(1));
+        assert_eq!(
+            events,
+            [
+                ViewerEvent::Key {
+                    keycode: 96,
+                    pressed: false
+                },
+                ViewerEvent::ReleaseAll
+            ]
+        );
+        assert_eq!(
+            keyboard.press(37, false, true, now),
+            KeyPressAction::Forward
+        );
+        assert_eq!(keyboard.press(96, true, true, now), KeyPressAction::Forward);
+    }
+
+    #[test]
+    fn own_grab_notifications_do_not_release_new_grab() {
+        assert!(focus_out_releases_input(NotifyMode::NORMAL, false));
+        assert!(focus_out_releases_input(NotifyMode::NORMAL, true));
+        assert!(!focus_out_releases_input(NotifyMode::GRAB, true));
+        for owns_grab in [false, true] {
+            assert!(!focus_out_releases_input(NotifyMode::UNGRAB, owns_grab));
+            assert!(!focus_out_releases_input(
+                NotifyMode::WHILE_GRABBED,
+                owns_grab
+            ));
+        }
     }
 
     #[test]
