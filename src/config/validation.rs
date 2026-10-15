@@ -1180,12 +1180,16 @@ impl Config {
             &behavior.client_moveresize,
             &["always", "floating-only", "never"],
         );
-        validate_choice(
-            &mut diagnostics,
-            "behavior.wallpaper_effect",
-            &behavior.wallpaper_effect,
-            &["off", "astronomy"],
-        );
+        if !["off", "astronomy"].contains(&behavior.wallpaper_effect.as_str()) {
+            diagnostics.error(
+                "behavior.wallpaper_effect",
+                format!(
+                    "unknown effect {:?}; expected off or astronomy",
+                    behavior.wallpaper_effect
+                ),
+                None,
+            );
+        }
         if behavior.wallpaper_earth_texture.contains('\0')
             || behavior.wallpaper_earth_texture.len() > super::MAX_WALLPAPER_ROTATION_PATH_BYTES
         {
