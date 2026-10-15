@@ -2,7 +2,26 @@
 //! is deliberately silent: it is not authority over a public output pathname.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+
+/// Failure-only feedback for one logical recording session. Old receipts keep
+/// their own signal when the WM starts or clears a different session.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RecordingFailureSignal(Arc<AtomicBool>);
+
+impl RecordingFailureSignal {
+    pub(crate) fn failed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn record(&self, outcome: WriterOutcome) {
+        if matches!(outcome, WriterOutcome::Failed(_)) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriterFailure {
@@ -130,6 +149,7 @@ pub struct RecordingStopReceipt {
     writer: Option<WriterCompletionReceipt>,
     consumed: bool,
     never_started: bool,
+    failure_signal: Option<RecordingFailureSignal>,
 }
 
 impl RecordingStopReceipt {
@@ -140,7 +160,13 @@ impl RecordingStopReceipt {
             writer,
             consumed: false,
             never_started: false,
+            failure_signal: None,
         }
+    }
+
+    pub(crate) fn with_failure_signal(mut self, signal: RecordingFailureSignal) -> Self {
+        self.failure_signal = Some(signal);
+        self
     }
 
     #[cfg(test)]
@@ -175,6 +201,9 @@ impl RecordingStopReceipt {
             None if self.never_started => WriterCompletion::NEVER_STARTED,
             None => WriterCompletion::UNKNOWN,
         };
+        if let Some(signal) = &self.failure_signal {
+            signal.record(completion.outcome);
+        }
         self.writer = None;
         self.consumed = true;
         Some(completion)
@@ -213,6 +242,7 @@ pub(crate) fn recording_stop_channel() -> (RecordingStopReporter, RecordingStopR
             writer: None,
             consumed: false,
             never_started: false,
+            failure_signal: None,
         },
     )
 }
@@ -271,7 +301,8 @@ impl RecordingStopObservations {
         }
     }
 
-    fn collect(&mut self) {
+    /// Poll ready receipts without waiting or consuming their UI notices.
+    pub(crate) fn collect(&mut self) {
         // Each old observation is polled once; pending entries keep their age.
         for _ in 0..self.pending.len() {
             let (mut receipt, protects_audio, failure_reported) =
@@ -366,6 +397,61 @@ impl RecordingStopObservations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_failure_feedback_is_owned_and_does_not_consume_notices() {
+        for deferred in [false, true] {
+            let signal = RecordingFailureSignal::default();
+            let other = RecordingFailureSignal::default();
+            let (writer, completion) = writer_completion_channel();
+            let mut observations = RecordingStopObservations::default();
+            let receipt = if deferred {
+                let (stop, receipt) = recording_stop_channel();
+                stop.complete(Some(completion));
+                receipt
+            } else {
+                RecordingStopReceipt::from_writer(Some(completion))
+            };
+            observations
+                .observe_with_audio(Some(receipt.with_failure_signal(signal.clone())), true);
+            observations.collect();
+            assert!(!signal.failed());
+            assert_eq!(observations.audio_release(), AudioRelease::Pending);
+
+            writer.finish(
+                Some(WriterFailure::FrameWrite),
+                Some(EncoderWaitOutcome::Exited(false)),
+            );
+            observations.collect();
+            assert!(signal.failed());
+            assert!(!other.failed());
+            assert_eq!(observations.audio_release(), AudioRelease::Available);
+            assert!(observations.take_notices().failed);
+            assert_eq!(observations.take_notices(), StopNotices::default());
+            observations.collect();
+            assert!(signal.failed());
+        }
+    }
+
+    #[test]
+    fn stopped_success_unknown_and_cancelled_start_do_not_signal_failure() {
+        for outcome in [Some(EncoderWaitOutcome::Exited(true)), None] {
+            let signal = RecordingFailureSignal::default();
+            let (writer, completion) = writer_completion_channel();
+            let mut receipt = RecordingStopReceipt::from_writer(Some(completion))
+                .with_failure_signal(signal.clone());
+            writer.finish(None, outcome);
+            assert!(receipt.poll().is_some());
+            assert!(!signal.failed());
+        }
+        let signal = RecordingFailureSignal::default();
+        let (stop, receipt) = recording_stop_channel();
+        let mut receipt = receipt.with_failure_signal(signal.clone());
+        stop.complete_without_encoder();
+        assert_eq!(receipt.poll(), Some(WriterOutcome::Unknown));
+        assert!(!signal.failed());
+    }
+
     #[test]
     fn reported_runtime_failure_suppresses_only_its_own_repeat_notice() {
         for immediate in [false, true] {

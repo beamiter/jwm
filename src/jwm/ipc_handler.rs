@@ -2844,6 +2844,8 @@ impl Jwm {
                 | "get_fx"
         ) {
             self.poll_recording_failure(backend);
+            self.features.recording_stops.collect();
+            self.features.recording.settle_stopped_failure();
         }
         // These replies advertise whether the microphone is recording. Settle
         // completed workers before reading that state, just as the frame tick
@@ -3002,7 +3004,7 @@ impl Jwm {
                 // rejected file until it changes on disk.
                 // A playable partial is still a failed capture. Keep it for
                 // inspection without publishing a finalized-success event.
-                let finalized = !active
+                let mut finalized = !active
                     && !self.features.recording.capture_failed
                     && (self.features.recording.finalized
                         || output_path.as_deref().is_some_and(|path| {
@@ -3011,6 +3013,12 @@ impl Jwm {
                                 &mut self.features.recording.rejected_probe,
                             )
                         }));
+                // The bounded probe may have overlapped the writer's exit.
+                // Collect again before publishing its verdict, without holding
+                // a lock across that wait or consuming post-render notices.
+                self.features.recording_stops.collect();
+                self.features.recording.settle_stopped_failure();
+                finalized &= !self.features.recording.capture_failed;
                 self.features.recording.finalized = finalized;
                 let should_broadcast = finalized && !self.features.recording.finalization_reported;
                 if should_broadcast {

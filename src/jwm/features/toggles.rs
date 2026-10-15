@@ -4738,7 +4738,9 @@ impl Jwm {
         }
         let protects_audio = self.features.recording.audio_requested
             && backend.compositor_tracks_recording_encoder_exit();
-        let receipt = backend.compositor_stop_recording_tracked();
+        let receipt = backend.compositor_stop_recording_tracked().map(|receipt| {
+            receipt.with_failure_signal(self.features.recording.stopped_failure.clone())
+        });
         self.features.recording.stop();
         let segments = std::mem::take(&mut self.features.recording.segments);
         let output_path = self
@@ -4813,6 +4815,7 @@ impl Jwm {
             return;
         }
         let notices = self.features.recording_stops.take_notices();
+        self.features.recording.settle_stopped_failure();
         if !notices.failed && !notices.unknown {
             return;
         }
@@ -9708,6 +9711,76 @@ pub(crate) mod keyboard_grab_tests {
     }
 
     #[test]
+    fn stopped_writer_failure_is_collected_before_cached_success_status() {
+        use crate::backend::recording_completion::{EncoderWaitOutcome, WriterFailure};
+        for query in [
+            "get_recording_status",
+            "get_recording",
+            "get_rec",
+            "get_status",
+            "get_st",
+        ] {
+            for maintenance_first in [false, true] {
+                for already_reported in [false, true] {
+                    let mut backend = GrabSpyBackend::new();
+                    let mut jwm = jwm(&mut backend);
+                    let writer =
+                        prepare_stopped_writer(&mut jwm, &mut backend, "partial-not-opened.mp4");
+                    jwm.features.recording.finalized = true;
+                    jwm.features.recording.finalization_reported = already_reported;
+                    assert!(jwm.stop_recording_session(&mut backend, false).is_none());
+                    writer.finish(
+                        Some(WriterFailure::FrameWrite),
+                        Some(EncoderWaitOutcome::Exited(false)),
+                    );
+                    if maintenance_first {
+                        jwm.poll_recording_stops(&mut backend);
+                    }
+                    let response =
+                        jwm.handle_ipc_query(query, &serde_json::json!({}), &mut backend);
+                    let data = response.data.unwrap();
+                    let data = if matches!(query, "get_status" | "get_st") {
+                        &data["recording"]
+                    } else {
+                        &data
+                    };
+                    assert_eq!(data["active"], false, "{query}");
+                    assert!(
+                        data["last_error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("stopped recording encoder failed")
+                    );
+                    if !matches!(query, "get_status" | "get_st") {
+                        assert_eq!(data["finalized"], false, "{query}");
+                    }
+                    assert!(jwm.features.recording.capture_failed);
+                    assert!(!jwm.features.recording.finalized);
+                    assert_eq!(
+                        jwm.features.recording.finalization_reported,
+                        already_reported
+                    );
+                    assert_eq!(backend.recording_stop_calls, 1);
+                    jwm.poll_recording_stops(&mut backend);
+                    let notices = backend.toasts.len();
+                    jwm.poll_recording_stops(&mut backend);
+                    assert_eq!(backend.toasts.len(), notices);
+                    assert_eq!(
+                        backend
+                            .toasts
+                            .iter()
+                            .filter(|toast| toast
+                                .title
+                                .ends_with("Stopped recording encoder failed"))
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn an_old_stopped_writer_failure_does_not_modify_a_new_recording_or_its_crop() {
         use crate::backend::recording_completion::WriterFailure;
         let mut backend = GrabSpyBackend::new();
@@ -9737,6 +9810,8 @@ pub(crate) mod keyboard_grab_tests {
         assert!(backend.recording_overlays.is_empty());
         assert!(backend.recording_crop_updates.is_empty());
         assert_eq!(backend.recording_stop_calls, 1);
+        assert!(!jwm.features.recording.capture_failed);
+        assert!(jwm.features.recording.last_error.is_none());
         assert_eq!(backend.toasts.len(), before + 1);
         let toast = backend.toasts.last().unwrap();
         assert!(toast.title.ends_with("Stopped recording encoder failed"));
@@ -9758,6 +9833,11 @@ pub(crate) mod keyboard_grab_tests {
         assert!(!jwm.features.recording.finalized);
         assert!(!jwm.features.recording.finalization_reported);
         assert!(!jwm.features.recording.active);
+        let response = jwm.handle_ipc_query("get_rec", &serde_json::json!({}), &mut backend);
+        let data = response.data.unwrap();
+        assert_eq!(data["finalized"], false);
+        assert!(!jwm.features.recording.capture_failed);
+        assert!(jwm.features.recording.last_error.is_none());
     }
 
     #[test]
@@ -9834,7 +9914,6 @@ pub(crate) mod keyboard_grab_tests {
             .0;
         for forbidden in [
             "output_path",
-            "features.recording.",
             "compositor_stop_recording",
             "compositor_set_recording_region",
             "std::fs::",
@@ -9843,6 +9922,8 @@ pub(crate) mod keyboard_grab_tests {
         ] {
             assert!(!poll.contains(forbidden), "{forbidden}");
         }
+        assert_eq!(poll.matches("features.recording.").count(), 1);
+        assert!(poll.contains("self.features.recording.settle_stopped_failure();"));
     }
 
     /// A theme the config file refused to take is live only until the next

@@ -1,5 +1,6 @@
 //! 屏幕录制功能
 
+use crate::backend::recording_completion::RecordingFailureSignal;
 use crate::core::types::Rect;
 
 const MIN_RECORDING_REGION_SIZE: i32 = 16;
@@ -125,6 +126,8 @@ pub struct RecordingState {
     /// A failure of this exact capture invalidates even a playable partial file.
     /// Reset only when a new session starts or this state is explicitly cleared.
     pub(crate) capture_failed: bool,
+    /// Exact-session feedback from its stopped writer, never a pathname lookup.
+    pub(crate) stopped_failure: RecordingFailureSignal,
     /// Prevent duplicate `recording/finalized` events while polling status.
     pub finalization_reported: bool,
     /// The finished file the ffprobe check last rejected. The probe runs on
@@ -167,6 +170,7 @@ impl RecordingState {
         self.current_segment = None;
         self.finalized = false;
         self.capture_failed = false;
+        self.stopped_failure = RecordingFailureSignal::default();
         self.finalization_reported = false;
         self.rejected_probe = None;
         self.region = None;
@@ -194,6 +198,19 @@ impl RecordingState {
         self.capture_failed = true;
         self.finalized = false;
         self.note_error(error);
+    }
+
+    /// A confirmed failure overrides even an earlier playable-file verdict.
+    /// Success and unknown completion have no authority to mark output saved.
+    pub(crate) fn settle_stopped_failure(&mut self) {
+        if !self.active && self.stopped_failure.failed() {
+            if !self.capture_failed {
+                self.note_capture_failure(
+                    "The stopped recording encoder failed. Its output may be incomplete and has not been confirmed saved. Check the encoder log.",
+                );
+            }
+            self.finalized = false;
+        }
     }
 
     /// 停止录制
@@ -546,6 +563,117 @@ impl RecordingState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observe_stopped_state(
+        state: &RecordingState,
+    ) -> (
+        crate::backend::recording_completion::WriterCompletionReporter,
+        crate::backend::recording_completion::RecordingStopObservations,
+    ) {
+        use crate::backend::recording_completion::{
+            RecordingStopObservations, RecordingStopReceipt, writer_completion_channel,
+        };
+        let (writer, completion) = writer_completion_channel();
+        let mut observations = RecordingStopObservations::default();
+        observations.observe(Some(
+            RecordingStopReceipt::from_writer(Some(completion))
+                .with_failure_signal(state.stopped_failure.clone()),
+        ));
+        (writer, observations)
+    }
+
+    #[test]
+    fn stopped_writer_failure_revokes_cached_finalization_for_its_session() {
+        use crate::backend::recording_completion::{EncoderWaitOutcome, WriterFailure};
+        let mut state = RecordingState::new();
+        state.start("not-opened.mp4".into());
+        state.stop();
+        let (writer, mut observations) = observe_stopped_state(&state);
+        state.finalized = true;
+        writer.finish(
+            Some(WriterFailure::FrameWrite),
+            Some(EncoderWaitOutcome::Exited(false)),
+        );
+        observations.collect();
+        state.settle_stopped_failure();
+        assert!(!state.active && state.capture_failed && !state.finalized);
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("stopped recording encoder failed")
+        );
+        assert_eq!(state.output_path.as_deref(), Some("not-opened.mp4"));
+        let error = state.last_error.clone();
+        state.stop();
+        state.finalized = true;
+        state.settle_stopped_failure();
+        assert!(!state.finalized);
+        assert_eq!(state.last_error, error);
+    }
+
+    #[test]
+    fn new_or_cleared_session_never_inherits_an_old_stopped_failure() {
+        use crate::backend::recording_completion::WriterFailure;
+        for new_session in [false, true] {
+            let mut state = RecordingState::new();
+            state.start("same-path.mp4".into());
+            state.stop();
+            let (writer, mut observations) = observe_stopped_state(&state);
+            if new_session {
+                state.start("same-path.mp4".into());
+            } else {
+                state.clear();
+            }
+            writer.finish(Some(WriterFailure::EncoderExit), None);
+            observations.collect();
+            state.settle_stopped_failure();
+            assert_eq!(state.active, new_session);
+            assert!(!state.capture_failed);
+            assert!(state.last_error.is_none());
+            // Isolation still holds after the new session itself is stopped.
+            state.stop();
+            state.finalized = true;
+            state.settle_stopped_failure();
+            assert!(state.finalized && !state.capture_failed);
+        }
+    }
+
+    #[test]
+    fn stopped_writer_success_never_supplies_a_file_validation_verdict() {
+        use crate::backend::recording_completion::EncoderWaitOutcome;
+        let mut state = RecordingState::new();
+        state.start("not-opened.mp4".into());
+        state.stop();
+        let (writer, mut observations) = observe_stopped_state(&state);
+        writer.finish(None, Some(EncoderWaitOutcome::Exited(true)));
+        observations.collect();
+        state.settle_stopped_failure();
+        assert!(!state.finalized && !state.finalization_reported && !state.capture_failed);
+        assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn stopped_failure_preserves_reported_history_and_the_original_error() {
+        use crate::backend::recording_completion::WriterFailure;
+        let mut state = RecordingState::new();
+        state.start("not-opened.mp4".into());
+        state.stop();
+        let (writer, mut observations) = observe_stopped_state(&state);
+        state.finalization_reported = true;
+        state.note_capture_failure("specific earlier capture failure");
+        state.finalized = true;
+        writer.finish(Some(WriterFailure::EncoderExit), None);
+        observations.collect();
+        state.settle_stopped_failure();
+        assert!(!state.finalized);
+        assert!(state.finalization_reported);
+        assert_eq!(
+            state.last_error.as_deref(),
+            Some("specific earlier capture failure")
+        );
+    }
 
     #[test]
     fn session_audio_intent_is_reset_by_stop_cancel_and_next_session() {
