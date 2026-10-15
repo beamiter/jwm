@@ -3474,6 +3474,7 @@ dependencies = [
  "libc",
  "log",
  "pango 0.22.9",
+ "pango-sys 0.22.9",
  "pangocairo",
  "serde",
  "shared_structures",
