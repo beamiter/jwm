@@ -409,3 +409,61 @@ mod timezone_boundary_tests {
         }
     }
 }
+
+/// Coverage is inspected before this frame's effect ticks. A currently opaque
+/// window is not a safe occluder if that tick can fade or shrink it.
+pub(crate) fn occluder_stable_before_effects(
+    fading_out: bool,
+    animation_scale: f32,
+    target_scale: f32,
+    peek_pending: bool,
+) -> bool {
+    !fading_out
+        && !peek_pending
+        && animation_scale.is_finite()
+        && target_scale.is_finite()
+        // Match tick_fades' settled-target tolerance, avoiding a permanent
+        // wake for a residual scale difference that it will never animate.
+        && (animation_scale - target_scale).abs() <= 0.001
+}
+
+#[cfg(test)]
+mod first_effect_frame_tests {
+    use super::*;
+
+    fn covered(fading_out: bool, scale: f32, target: f32, peek: bool) -> bool {
+        let rects = if occluder_stable_before_effects(fading_out, scale, target, peek) {
+            vec![(0, 0, 1920, 1080)]
+        } else {
+            vec![]
+        };
+        fully_covered(1920, 1080, &rects)
+    }
+    #[test]
+    fn close_fade_and_scale_first_frame_do_not_hide_background() {
+        assert!(covered(false, 1.0, 1.0, false));
+        assert!(!covered(true, 1.0, 1.0, false));
+        assert!(!covered(false, 1.0, 0.8, false));
+    }
+    #[test]
+    fn peek_first_frame_resumes_and_completion_allows_idle_again() {
+        let now = Instant::now();
+        let mut clock = WallpaperClock::default();
+        clock.set_paused(covered(false, 1.0, 1.0, false));
+        assert_eq!(clock.deadline(now), None);
+        // set_peek_mode starts a transition while opacity is still exactly 1.
+        clock.set_paused(covered(false, 1.0, 1.0, true));
+        assert!(clock.tick(now));
+        // After peek returns to fully opaque and the transition is gone,
+        // the same coverage may pause animation again (no permanent wakeups).
+        clock.set_paused(covered(false, 1.0, 1.0, false));
+        assert_eq!(clock.deadline(now + Duration::from_secs(1)), None);
+    }
+    #[test]
+    fn cancelled_close_and_invalid_scale_are_conservative() {
+        assert!(!covered(false, f32::NAN, 1.0, false));
+        assert!(!covered(false, 1.0, f32::INFINITY, false));
+        assert!(covered(false, 1.0, 1.0, false));
+        assert!(covered(false, 1.0, 1.0005, false));
+    }
+}

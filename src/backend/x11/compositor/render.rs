@@ -5071,6 +5071,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 .iter()
                 .filter_map(|&(win, x, y, w, h)| {
                     let wt = self.windows.get(&win)?;
+                    // tick_fades/tick_peek run later in this frame. Their
+                    // first step may expose wallpaper despite opacity 1 now.
+                    if !crate::backend::compositor_common::animated_wallpaper::occluder_stable_before_effects(
+                        wt.fading_out,
+                        wt.anim_scale,
+                        wt.anim_scale_target,
+                        self.peek_start.is_some(),
+                    ) {
+                        return None;
+                    }
                     let opacity = wt.opacity_override.unwrap_or(if focused == Some(win) {
                         self.active_opacity
                     } else {
