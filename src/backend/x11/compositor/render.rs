@@ -5058,6 +5058,53 @@ impl<C: CompositorConnection> Compositor<C> {
         // the unchanged-frame gate below.
         let mut explicit_render = std::mem::take(&mut self.needs_render);
         let mut damage_wakeup = std::mem::take(&mut self.damage_render_pending);
+        let astronomy_occluded = if crate::config::CONFIG.load().behavior().wallpaper_effect
+            == "astronomy"
+            && !self.overview_active
+            && !self.overview_closing
+            && !self.expose_active
+            && self.expose_entries.is_empty()
+            && self.genie_active.is_empty()
+            && !self.transition_active()
+        {
+            let opaque_rects: Vec<_> = scene
+                .iter()
+                .filter_map(|&(win, x, y, w, h)| {
+                    let wt = self.windows.get(&win)?;
+                    let opacity = wt.opacity_override.unwrap_or(if focused == Some(win) {
+                        self.active_opacity
+                    } else {
+                        self.inactive_opacity
+                    }) * wt.fade_opacity
+                        * self.peek_opacity_for(&wt.class_name);
+                    let radius = if wt.is_fullscreen {
+                        0.0
+                    } else {
+                        wt.corner_radius_override.unwrap_or(self.corner_radius)
+                    };
+                    is_opaque_occluder(
+                        wt.has_rgba,
+                        opacity,
+                        radius,
+                        wt.is_shaped,
+                        wt.scale,
+                        wt.anim_scale,
+                        (self.wobbly_windows && wt.wobbly.is_some()) || self.window_tilt,
+                    )
+                    .then_some((x, y, w, h))
+                })
+                .take(129)
+                .collect();
+            crate::backend::compositor_common::animated_wallpaper::fully_covered(
+                self.screen_w,
+                self.screen_h,
+                &opaque_rects,
+            )
+        } else {
+            false
+        };
+        let astronomy_changed = self.prepare_astronomy_wallpaper(astronomy_occluded);
+        explicit_render |= astronomy_changed;
 
         // Auto-enable profiler when benchmark is running
         if self.benchmark.is_running() && !self.frame_profiler.is_enabled() {
@@ -5560,6 +5607,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // out of `explicit_render`, so continuously-rendering clients can use
         // both the blur cache and partial framebuffer repair.
         let transition_only = self.transition_active()
+            && !astronomy_changed
             && !waterlily_layer_dirty
             && !self.overview_active
             && !self.expose_active
@@ -5575,7 +5623,8 @@ impl<C: CompositorConnection> Compositor<C> {
             && !motion_trails_active
             && !tilt_pending
             && !attention_active;
-        let uncached_blur_source_changed = waterlily_layer_dirty
+        let uncached_blur_source_changed = astronomy_changed
+            || waterlily_layer_dirty
             || self.transition_active()
             || self.overview_active
             || self.expose_active
@@ -6141,6 +6190,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.use_program(None);
                 }
             }
+        }
+
+        if !astronomy_occluded {
+            self.draw_astronomy_wallpaper();
         }
 
         // A restored X window is already at its final server-side geometry so

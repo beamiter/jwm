@@ -7,6 +7,8 @@
 //! * GLX imports them through `GLX_EXT_texture_from_pixmap`.
 //! * EGL/GLES imports them through `EGL_KHR_image_pixmap` + `GL_OES_EGL_image`.
 
+mod wallpaper_power;
+
 use self::egl::EglPlatform;
 use self::glx::GlxPlatform;
 use super::{OmlSyncControl, PixmapBinding};

@@ -1009,16 +1009,22 @@ impl Jwm {
     fn wallpaper_picker_state(&mut self) -> crate::jwm::features::SystemUiState {
         use crate::jwm::features::wallpaper;
 
-        let (current, configured_dir) = {
+        let (current, configured_dir, fallback) = {
             let cfg = CONFIG.load();
             let behavior = cfg.behavior();
             (
                 self.current_picker_wallpaper(),
                 behavior.wallpaper_dir.clone(),
+                behavior.wallpaper.clone(),
             )
         };
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-        let worker_current = current.clone();
+        // Effects are picker identities, never paths for directory discovery.
+        let worker_current = if current == wallpaper::ASTRONOMY_CHOICE {
+            fallback
+        } else {
+            current.clone()
+        };
         let job = crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
             let directory = wallpaper::resolve_directory(&configured_dir, &worker_current, &home);
             let paths = wallpaper::list_wallpapers(&directory);
@@ -1533,18 +1539,64 @@ impl Jwm {
     /// Daily rotation uses a date-scoped fallback; static selection changes
     /// the global path. Neither choice writes the configuration file.
     pub(crate) fn apply_selected_wallpaper(&mut self, backend: &mut dyn Backend) {
+        if self.features.wallpaper_listing.is_some() {
+            return;
+        }
         let Some(path) = self
             .features
             .system_ui
-            .selected_wallpaper()
+            .selected_wallpaper_choice()
             .map(str::to_string)
         else {
             return;
         };
-        let updated = match CONFIG
-            .load()
-            .with_picker_wallpaper(&path, crate::jwm::features::wallpaper_rotation::local_day())
+        let astronomy = path == crate::jwm::features::wallpaper::ASTRONOMY_CHOICE;
+        if astronomy && crate::config::get_backend_family() == crate::config::BackendFamily::Wayland
         {
+            set_wallpaper_picker_message(
+                &mut self.features.system_ui,
+                "Astronomy Earth requires the X11 compositor; choose an image on Wayland.",
+            );
+            self.mark_system_ui_dirty();
+            return;
+        }
+        if astronomy && !backend.has_compositor() {
+            set_wallpaper_picker_message(
+                &mut self.features.system_ui,
+                "Enable the X11 compositor to use Astronomy Earth.",
+            );
+            self.mark_system_ui_dirty();
+            return;
+        }
+        if astronomy {
+            let ready = {
+                let cfg = CONFIG.load();
+                let behavior = cfg.behavior();
+                crate::jwm::features::wallpaper::astronomy_texture_ready(
+                    behavior.wallpaper_effect == "astronomy",
+                    &behavior.wallpaper_earth_texture,
+                    std::path::Path::is_file,
+                )
+            };
+            if !ready {
+                set_wallpaper_picker_message(
+                    &mut self.features.system_ui,
+                    "Configure behavior.wallpaper_earth_texture with an Earth image file first.",
+                );
+                self.mark_system_ui_dirty();
+                return;
+            }
+        }
+        let result = if astronomy {
+            CONFIG
+                .load()
+                .with_validated_value("behavior.wallpaper_effect", &serde_json::json!("astronomy"))
+        } else {
+            CONFIG
+                .load()
+                .with_picker_wallpaper(&path, crate::jwm::features::wallpaper_rotation::local_day())
+        };
+        let updated = match result {
             Ok(updated) => updated,
             Err(error) => {
                 error!("Wallpaper: {error}");
@@ -1554,12 +1606,16 @@ impl Jwm {
         CONFIG.store(std::sync::Arc::new(updated));
         self.apply_config_changes(backend);
         info!("Wallpaper: {path}");
-        if CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": "behavior.wallpaper_effect", "value": if astronomy { "astronomy" } else { "off" } }),
+        );
+        if !astronomy && CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
             self.broadcast_ipc_event(
                 "config/wallpaper",
                 serde_json::json!({ "path": path, "scope": "today", "rotation": "daily" }),
             );
-        } else {
+        } else if !astronomy {
             self.broadcast_ipc_event(
                 "config/changed",
                 serde_json::json!({ "key": "behavior.wallpaper", "value": path }),

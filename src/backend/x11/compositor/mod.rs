@@ -1,4 +1,5 @@
 mod annotations;
+mod astronomy_wallpaper;
 mod effects;
 mod expose;
 mod jelly_renderer;
@@ -879,6 +880,7 @@ where
 
     // --- Wallpaper ---
     /// Default wallpaper texture (used for monitors without a per-monitor override).
+    astronomy_wallpaper: astronomy_wallpaper::AstronomyWallpaper,
     wallpaper_texture: Option<glow::Texture>,
     /// Layout mode of the texture currently stored in `wallpaper_texture`.
     wallpaper_mode: WallpaperMode,
@@ -1330,6 +1332,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
+            self.astronomy_wallpaper.cleanup(&self.gl);
             if let Some(tex) = self.wallpaper_texture.take() {
                 self.gl.delete_texture(tex);
             }

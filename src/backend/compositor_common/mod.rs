@@ -1,11 +1,16 @@
 //! Protocol-independent compositor helpers shared by Wayland and X11 backends.
 
+#[cfg(feature = "x11-backends")]
+pub(crate) mod animated_wallpaper;
 pub mod annotation_overlay;
 pub(crate) mod attention;
 pub mod benchmark;
 pub(crate) mod border_style;
 pub mod capture;
 pub(crate) mod capture_hint;
+// Test-first composition design; no production KMS integration yet.
+#[cfg(test)]
+mod capture_plan;
 pub(crate) mod capture_veil;
 pub(crate) mod debug_hud;
 pub(crate) mod dynamic_island;

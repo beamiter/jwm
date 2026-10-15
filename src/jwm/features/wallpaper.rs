@@ -11,6 +11,19 @@
 
 use std::path::{Path, PathBuf};
 
+/// Picker-only identity. Never pass it to an image decoder or store it as a path.
+pub(crate) const ASTRONOMY_CHOICE: &str = "jwm-effect:astronomy";
+
+/// A fresh effect selection needs a local texture. Re-selecting the active
+/// effect must not disable it merely because its source has since disappeared.
+pub(crate) fn astronomy_texture_ready(
+    already_active: bool,
+    texture: &str,
+    is_file: impl FnOnce(&Path) -> bool,
+) -> bool {
+    already_active || (!texture.trim().is_empty() && is_file(Path::new(texture)))
+}
+
 /// Highlight the manual daily choice even when the first output has an
 /// explicit override. Otherwise reflect that output's currently resolved image.
 pub(crate) fn picker_current_at(
@@ -21,6 +34,9 @@ pub(crate) fn picker_current_at(
     use crate::backend::compositor_common::wallpaper::{
         daily_picker_wallpaper_at, resolve_wallpaper_for_tag_at,
     };
+    if behavior.wallpaper_effect == "astronomy" {
+        return ASTRONOMY_CHOICE;
+    }
     daily_picker_wallpaper_at(behavior, day)
         .unwrap_or_else(|| resolve_wallpaper_for_tag_at(behavior, 0, active_tags, day).0)
 }
@@ -206,6 +222,53 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn astronomy_requires_a_regular_texture_only_for_new_selection() {
+        assert!(!astronomy_texture_ready(false, "", |_| panic!(
+            "empty path must not be inspected"
+        )));
+        assert!(!astronomy_texture_ready(false, "  ", |_| true));
+        assert!(!astronomy_texture_ready(false, "/missing.jpg", |_| false));
+        assert!(!astronomy_texture_ready(false, "/directory", |_| false));
+        assert!(
+            astronomy_texture_ready(false, "/earth.jpg", |path| path == Path::new("/earth.jpg"))
+        );
+        assert!(astronomy_texture_ready(true, "", |_| panic!(
+            "active effect must be preserved"
+        )));
+        assert!(astronomy_texture_ready(true, "/gone.jpg", |_| false));
+    }
+
+    #[test]
+    fn astronomy_is_selected_without_becoming_an_image_preview_or_path() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_value("behavior.wallpaper_effect", &serde_json::json!("astronomy"))
+            .unwrap();
+        assert_eq!(
+            picker_current_at(config.behavior(), 1, 100),
+            ASTRONOMY_CHOICE
+        );
+        let paths = [PathBuf::from("/walls/static.png")];
+        let mut panel = crate::jwm::features::SystemUiState::wallpaper_picker(
+            &paths,
+            ASTRONOMY_CHOICE,
+            "/walls",
+        );
+        assert_eq!(panel.selected_wallpaper_choice(), Some(ASTRONOMY_CHOICE));
+        assert_eq!(panel.selected_wallpaper(), None);
+        panel.move_selection(-1);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/static.png"));
+        let picked = config
+            .with_picker_wallpaper(panel.selected_wallpaper().unwrap(), 100)
+            .unwrap();
+        assert_eq!(picked.behavior().wallpaper_effect, "off");
+        assert_eq!(picked.behavior().wallpaper, "/walls/static.png");
+        let empty = crate::jwm::features::SystemUiState::wallpaper_picker(&[], "", "/missing");
+        assert_eq!(empty.selected_wallpaper_choice(), Some(ASTRONOMY_CHOICE));
+        assert_eq!(empty.selected_wallpaper(), None);
+    }
 
     #[test]
     fn wallpaper_picker_reopens_on_todays_effective_choice_without_stopping_rotation() {

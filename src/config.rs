@@ -1311,6 +1311,12 @@ pub struct BehaviorConfig {
     /// Used as the default wallpaper for all monitors unless overridden by wallpaper_monitors.
     #[serde(default)]
     pub wallpaper: String,
+    /// Optional live wallpaper. Static paths and daily rotation remain fallbacks.
+    #[serde(default = "default_wallpaper_rotation")]
+    pub wallpaper_effect: String,
+    /// Equirectangular Earth day texture; empty uses the renderer's fallback.
+    #[serde(default)]
+    pub wallpaper_earth_texture: String,
     /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
     #[serde(default = "default_wallpaper_mode")]
     pub wallpaper_mode: String,
@@ -2212,6 +2218,8 @@ impl Default for Config {
                         .join("wallpaper.jpg")
                         .to_string_lossy()
                         .into_owned(),
+                    wallpaper_effect: "off".into(),
+                    wallpaper_earth_texture: String::new(),
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_rotation: default_wallpaper_rotation(),
                     wallpaper_rotation_paths: Vec::new(),
@@ -4691,6 +4699,22 @@ impl Config {
                 self.inner.behavior.client_moveresize = normalized;
             }
             "behavior.wallpaper" => self.inner.behavior.wallpaper = as_string()?,
+            "behavior.wallpaper_effect" => {
+                let effect = as_string()?;
+                if !["off", "astronomy"].contains(&effect.as_str()) {
+                    return Err("behavior.wallpaper_effect must be off or astronomy".into());
+                }
+                self.inner.behavior.wallpaper_effect = effect;
+            }
+            "behavior.wallpaper_earth_texture" => {
+                let path = as_string()?;
+                if path.contains('\0') || path.len() > MAX_WALLPAPER_ROTATION_PATH_BYTES {
+                    return Err(
+                        "behavior.wallpaper_earth_texture is not a valid bounded path".into(),
+                    );
+                }
+                self.inner.behavior.wallpaper_earth_texture = path;
+            }
             "behavior.wallpaper_mode" => {
                 let mode = as_string()?;
                 if !["fill", "fit", "stretch", "center"].contains(&mode.as_str()) {
@@ -4864,6 +4888,7 @@ impl Config {
     pub(crate) fn with_picker_wallpaper(&self, path: &str, day: i32) -> Result<Self, String> {
         let mut candidate = self.clone();
         let behavior = &mut candidate.inner.behavior;
+        behavior.wallpaper_effect = "off".into();
         if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
             behavior.wallpaper_daily_pick = Some((day, path.to_owned()));
         } else {
@@ -5072,6 +5097,99 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn astronomy_schema_defaults_roundtrip_and_hot_updates_preserve_fallbacks() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string(&Config::default().inner).unwrap()).unwrap();
+        let behavior = table.get_mut("behavior").unwrap().as_table_mut().unwrap();
+        behavior.remove("wallpaper_effect");
+        behavior.remove("wallpaper_earth_texture");
+        let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
+        assert_eq!(legacy.behavior.wallpaper_effect, "off");
+        assert!(legacy.behavior.wallpaper_earth_texture.is_empty());
+        let mut config = Config { inner: legacy };
+        config.inner.behavior.wallpaper = "/walls/static.png".into();
+        config.inner.behavior.wallpaper_rotation = "daily".into();
+        config.inner.behavior.wallpaper_rotation_paths = vec!["/walls/day.png".into()];
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_effect".into(),
+                    serde_json::json!("astronomy"),
+                ),
+                (
+                    "behavior.wallpaper_earth_texture".into(),
+                    serde_json::json!("/walls/earth.jpg"),
+                ),
+            ])
+            .unwrap();
+        let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        assert_eq!(loaded.behavior.wallpaper_effect, "astronomy");
+        assert_eq!(loaded.behavior.wallpaper_earth_texture, "/walls/earth.jpg");
+        assert_eq!(loaded.behavior.wallpaper, "/walls/static.png");
+        assert_eq!(loaded.behavior.wallpaper_rotation, "daily");
+        assert_eq!(loaded.behavior.wallpaper_rotation_paths, ["/walls/day.png"]);
+        let picked = config
+            .with_picker_wallpaper("/walls/pick.png", 100)
+            .unwrap();
+        assert_eq!(picked.behavior().wallpaper_effect, "off");
+        assert_eq!(picked.behavior().wallpaper_rotation, "daily");
+        assert_eq!(picked.behavior().wallpaper, "/walls/static.png");
+        assert_eq!(
+            picked.behavior().wallpaper_daily_pick,
+            Some((100, "/walls/pick.png".into()))
+        );
+        assert_eq!(
+            picked.behavior().wallpaper_earth_texture,
+            "/walls/earth.jpg"
+        );
+    }
+
+    #[test]
+    fn astronomy_validation_rejects_bad_effect_and_texture_atomically() {
+        let mut config = Config::default();
+        for value in [serde_json::json!("earth"), serde_json::json!(true)] {
+            assert!(
+                config
+                    .set_value("behavior.wallpaper_effect", &value)
+                    .is_err()
+            );
+            assert_eq!(config.behavior().wallpaper_effect, "off");
+        }
+        for value in [
+            serde_json::json!("bad\0.jpg"),
+            serde_json::json!(true),
+            serde_json::json!("x".repeat(super::MAX_WALLPAPER_ROTATION_PATH_BYTES + 1)),
+        ] {
+            assert!(
+                config
+                    .set_values(&[
+                        (
+                            "behavior.wallpaper_effect".into(),
+                            serde_json::json!("astronomy")
+                        ),
+                        ("behavior.wallpaper_earth_texture".into(), value),
+                    ])
+                    .is_err()
+            );
+            assert_eq!(config.behavior().wallpaper_effect, "off");
+        }
+        config.inner.behavior.wallpaper_effect = "unknown".into();
+        config.inner.behavior.wallpaper_earth_texture = "bad\0.jpg".into();
+        let diagnostics = config.diagnostics();
+        for path in [
+            "behavior.wallpaper_effect",
+            "behavior.wallpaper_earth_texture",
+        ] {
+            assert!(
+                diagnostics
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.level == ConfigDiagnosticLevel::Error && issue.path == path)
+            );
+        }
     }
 
     #[test]

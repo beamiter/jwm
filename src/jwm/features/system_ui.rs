@@ -2573,7 +2573,7 @@ impl SystemUiState {
 
     /// Build the wallpaper picker from a directory listing.
     pub fn wallpaper_picker(paths: &[std::path::PathBuf], current: &str, directory: &str) -> Self {
-        let rows: Vec<ListRow> = paths
+        let mut rows: Vec<ListRow> = paths
             .iter()
             .map(|path| ListRow {
                 key: path.to_string_lossy().into_owned(),
@@ -2581,6 +2581,17 @@ impl SystemUiState {
                 data: RowData::Wallpaper,
             })
             .collect();
+        let astronomy = crate::jwm::features::wallpaper::ASTRONOMY_CHOICE;
+        let marker = if current == astronomy {
+            "\u{f00c}"
+        } else {
+            " "
+        };
+        rows.push(ListRow {
+            key: astronomy.into(),
+            text: format!("\u{f0ac} {marker} Astronomy Earth"),
+            data: RowData::Wallpaper,
+        });
         // Start on the wallpaper already in use, so Escape-ing out of the
         // panel and reopening does not lose the user's place.
         let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
@@ -2600,10 +2611,15 @@ impl SystemUiState {
         self.is_list(ListKind::Wallpaper)
     }
 
-    /// The wallpaper the selection rests on. This is both what Enter applies
-    /// and the path the overlay payload ships as the side preview's decode
-    /// request, so the thumbnail always shows exactly what a commit would.
+    /// Image path for the side preview. Effect identities never reach the
+    /// image decoder; applying a choice uses `selected_wallpaper_choice`.
     pub fn selected_wallpaper(&self) -> Option<&str> {
+        self.selected_wallpaper_choice()
+            .filter(|key| *key != crate::jwm::features::wallpaper::ASTRONOMY_CHOICE)
+    }
+
+    /// Selection identity for committing; unlike the preview this includes effects.
+    pub(crate) fn selected_wallpaper_choice(&self) -> Option<&str> {
         Some(self.selected_row(ListKind::Wallpaper)?.key.as_str())
     }
 
@@ -5952,7 +5968,7 @@ mod tests {
             SystemUiState::wallpaper_picker(&[], "", "/walls")
                 .overlay_parts()
                 .items[0]
-                .contains("/walls")
+                .contains("Astronomy Earth")
         );
     }
 
@@ -6725,7 +6741,7 @@ mod tests {
 
     #[test]
     fn the_side_preview_payload_is_absent_without_a_highlighted_candidate() {
-        // An empty scan has no candidate to preview.
+        // An empty scan offers Astronomy, which has no image preview.
         let empty = SystemUiState::wallpaper_picker(&[], "", "/walls");
         assert!(empty.is_wallpaper_picker());
         assert!(empty.selected_wallpaper().is_none());

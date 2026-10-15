@@ -103,6 +103,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // dispatch timeout and rebuilt the scene ~1000 times a second to
             // feed a 30 fps encoder; `compositor_frame_deadline` now sleeps
             // exactly until the next frame instead.
+            || self.astronomy_wallpaper.due()
             || self.recording_frame_due()
             || self.iconic_snapshot_recapture_pending()
         {

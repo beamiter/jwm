@@ -2268,10 +2268,16 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             None
         };
-        [recording, toast_boundary, osd_boundary, pixmap_refresh]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            recording,
+            toast_boundary,
+            osd_boundary,
+            pixmap_refresh,
+            self.astronomy_wallpaper.deadline(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Time until the next recording frame, or `None` when not recording. The
