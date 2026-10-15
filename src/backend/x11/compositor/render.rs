@@ -5058,8 +5058,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // the unchanged-frame gate below.
         let mut explicit_render = std::mem::take(&mut self.needs_render);
         let mut damage_wakeup = std::mem::take(&mut self.damage_render_pending);
-        let astronomy_occluded = if crate::config::CONFIG.load().behavior().wallpaper_effect
-            == "astronomy"
+        let astronomy_cfg = crate::config::CONFIG.load();
+        let astronomy_occluded = if astronomy_cfg.behavior().wallpaper_effect == "astronomy"
             && !self.overview_active
             && !self.overview_closing
             && !self.expose_active
@@ -5105,14 +5105,28 @@ impl<C: CompositorConnection> Compositor<C> {
                 })
                 .take(129)
                 .collect();
-            crate::backend::compositor_common::animated_wallpaper::fully_covered(
-                self.screen_w,
-                self.screen_h,
+            // Use this frame's monitor geometry, not Astronomy's cached draw
+            // plan: prepare updates that cache only after this decision.
+            let per_output = astronomy_cfg.behavior().wallpaper_astronomy_layout == "per-output";
+            let outputs: Vec<_> = if per_output {
+                self.monitor_wallpapers
+                    .iter()
+                    .take(129)
+                    .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            crate::backend::compositor_common::animated_wallpaper::astronomy_fully_covered(
+                (self.screen_w, self.screen_h),
+                &outputs,
+                per_output,
                 &opaque_rects,
             )
         } else {
             false
         };
+        drop(astronomy_cfg);
         let astronomy_changed = self.prepare_astronomy_wallpaper(astronomy_occluded);
         explicit_render |= astronomy_changed;
 

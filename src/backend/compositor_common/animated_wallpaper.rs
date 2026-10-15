@@ -266,6 +266,230 @@ pub(crate) fn fully_covered(width: u32, height: u32, rects: &[(i32, i32, u32, u3
         end >= h
     })
 }
+
+/// Whether every animated canvas pixel is hidden. Span (including the draw
+/// fallback for missing/excessive output geometry) retains whole-root semantics:
+/// its sky in desktop gaps can be visible in a root screenshot or recording.
+/// Per-output gaps are static, so only the current draw-plan clips are targets.
+pub(crate) fn astronomy_fully_covered(
+    screen: (u32, u32),
+    outputs: &[(i32, i32, u32, u32)],
+    per_output: bool,
+    occluders: &[(i32, i32, u32, u32)],
+) -> bool {
+    if occluders.len() > 128 {
+        return false;
+    }
+    if !per_output || outputs.is_empty() || outputs.len() > 128 {
+        return fully_covered(screen.0, screen.1, occluders);
+    }
+    let plan = astronomy_draw_plan(screen, outputs, true, None);
+    if plan.is_empty() {
+        // Known but invalid/outside geometry must not assert invisible output.
+        return false;
+    }
+    type Rect = (i64, i64, i64, i64);
+    let (width, height) = (i64::from(screen.0), i64::from(screen.1));
+    // Draw clips use GL bottom-left. Convert to X11 top-left once so windows
+    // and targets share one coordinate system, without shifting root origins.
+    let mut targets: Vec<Rect> = plan
+        .iter()
+        .map(|draw| {
+            let (x, y, w, h) = draw.clip;
+            let top = height - i64::from(y) - i64::from(h);
+            (
+                i64::from(x),
+                top,
+                i64::from(x) + i64::from(w),
+                top + i64::from(h),
+            )
+        })
+        .collect();
+    let mut covers: Vec<Rect> = occluders
+        .iter()
+        .filter_map(|&(x, y, w, h)| {
+            let (x, y) = (i64::from(x), i64::from(y));
+            let r = (
+                x.max(0),
+                y.max(0),
+                (x + i64::from(w)).min(width),
+                (y + i64::from(h)).min(height),
+            );
+            (r.0 < r.2 && r.1 < r.3).then_some(r)
+        })
+        .collect();
+    let mut edges = Vec::with_capacity((targets.len() + covers.len()) * 2);
+    for r in targets.iter().chain(&covers) {
+        edges.extend([r.0, r.2]);
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    // Sort by y only once. Each x slab filters this ordering and merges in
+    // linear time; no per-output coverage recursion or per-slab sorting.
+    targets.sort_unstable_by_key(|r| (r.1, r.3));
+    covers.sort_unstable_by_key(|r| (r.1, r.3));
+    fn merged_spans(rects: &[Rect], left: i64, right: i64, spans: &mut Vec<(i64, i64)>) {
+        spans.clear();
+        for r in rects.iter().filter(|r| r.0 <= left && r.2 >= right) {
+            match spans.last_mut() {
+                Some(last) if r.1 <= last.1 => last.1 = last.1.max(r.3),
+                _ => spans.push((r.1, r.3)),
+            }
+        }
+    }
+    let mut wanted = Vec::with_capacity(targets.len());
+    let mut covered = Vec::with_capacity(covers.len());
+    for edge in edges.windows(2) {
+        merged_spans(&targets, edge[0], edge[1], &mut wanted);
+        if wanted.is_empty() {
+            continue;
+        }
+        merged_spans(&covers, edge[0], edge[1], &mut covered);
+        let mut index = 0;
+        for &(start, end) in &wanted {
+            while index < covered.len() && covered[index].1 <= start {
+                index += 1;
+            }
+            if index == covered.len() || covered[index].0 > start || covered[index].1 < end {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod output_coverage_tests {
+    use super::*;
+    const L: [(i32, i32, u32, u32); 2] = [(0, 0, 100, 200), (100, 100, 100, 100)];
+    #[test]
+    fn per_output_pauses_in_gaps_but_span_preserves_root_capture() {
+        assert!(astronomy_fully_covered((200, 200), &L, true, &L));
+        assert!(!astronomy_fully_covered((200, 200), &L, false, &L));
+        assert!(!astronomy_fully_covered((200, 200), &[], true, &L));
+        assert!(!astronomy_fully_covered(
+            (200, 200),
+            &vec![L[0]; 129],
+            true,
+            &L
+        ));
+        assert!(astronomy_fully_covered(
+            (200, 200),
+            &vec![L[0]; 129],
+            true,
+            &[(0, 0, 200, 200)]
+        ));
+    }
+    #[test]
+    fn current_topology_and_one_pixel_holes_resume() {
+        assert!(astronomy_fully_covered((200, 200), &L, true, &L));
+        let exposed = [(0, 0, 100, 200), (100, 99, 100, 101)];
+        assert!(!astronomy_fully_covered((200, 200), &exposed, true, &L));
+        let hole = [(0, 0, 100, 200), (100, 101, 100, 99)];
+        assert!(!astronomy_fully_covered((200, 200), &L, true, &hole));
+        assert!(!astronomy_fully_covered(
+            (200, 200),
+            &L,
+            true,
+            &vec![L[0]; 129]
+        ));
+    }
+    #[test]
+    fn negative_origins_mirrors_and_overlaps_are_clipped_without_translation() {
+        let outputs = [(-50, -50, 100, 100), (0, 0, 100, 100), (0, 0, 100, 100)];
+        assert!(astronomy_fully_covered(
+            (100, 100),
+            &outputs,
+            true,
+            &[(0, 0, 50, 100), (50, 0, 50, 100)]
+        ));
+        assert!(!astronomy_fully_covered(
+            (100, 100),
+            &outputs,
+            true,
+            &[(0, 0, 49, 100), (50, 0, 50, 100)]
+        ));
+        assert!(!astronomy_fully_covered(
+            (100, 100),
+            &[(100, 100, 1, 1), (0, 0, 0, 100)],
+            true,
+            &[(0, 0, 100, 100)]
+        ));
+        assert!(!astronomy_fully_covered((0, 100), &outputs, true, &outputs));
+    }
+    #[test]
+    fn adjacent_window_unions_cover_one_output_and_disjoint_targets() {
+        assert!(astronomy_fully_covered(
+            (100, 100),
+            &[(0, 0, 100, 100)],
+            true,
+            &[(0, 0, 100, 50), (0, 50, 50, 50), (50, 50, 50, 50)]
+        ));
+        assert!(astronomy_fully_covered(
+            (100, 100),
+            &[(0, 0, 100, 20), (0, 80, 100, 20)],
+            true,
+            &[(0, 0, 100, 100)]
+        ));
+        assert!(!astronomy_fully_covered(
+            (100, 100),
+            &[(0, 0, 100, 100)],
+            true,
+            &[(0, 0, 100, 49), (0, 50, 100, 50)]
+        ));
+    }
+    #[test]
+    fn bounded_sweep_matches_small_pixel_oracle() {
+        // Deterministic pseudo-random rectangles exercise unions and clipping.
+        let mut seed = 19u64;
+        for _ in 0..1000 {
+            let mut next = || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (seed >> 32) as u32
+            };
+            let mut outputs = Vec::new();
+            let mut covers = Vec::new();
+            for _ in 0..1 + next() % 4 {
+                outputs.push((
+                    (next() % 12) as i32 - 2,
+                    (next() % 12) as i32 - 2,
+                    next() % 12,
+                    next() % 12,
+                ));
+            }
+            for _ in 0..next() % 8 {
+                covers.push((
+                    (next() % 12) as i32 - 2,
+                    (next() % 12) as i32 - 2,
+                    next() % 12,
+                    next() % 12,
+                ));
+            }
+            let inside = |x: i32, y: i32, r: &(i32, i32, u32, u32)| {
+                x >= r.0
+                    && y >= r.1
+                    && i64::from(x) < i64::from(r.0) + i64::from(r.2)
+                    && i64::from(y) < i64::from(r.1) + i64::from(r.3)
+            };
+            let mut any = false;
+            let mut expected = true;
+            for y in 0..8 {
+                for x in 0..8 {
+                    if outputs.iter().any(|r| inside(x, y, r)) {
+                        any = true;
+                        expected &= covers.iter().any(|r| inside(x, y, r));
+                    }
+                }
+            }
+            assert_eq!(
+                astronomy_fully_covered((8, 8), &outputs, true, &covers),
+                any && expected,
+                "outputs={outputs:?}, covers={covers:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
