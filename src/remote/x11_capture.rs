@@ -513,6 +513,25 @@ struct DamageTracker {
     gate: DamageGateState,
 }
 
+/// A viewport resize changes the desired pixels even on a static desktop.
+/// Keep the bounds and gate update together so the next capture cannot skip
+/// the resize until the periodic forced refresh. Repeated bounds stay idle.
+fn update_encoded_bounds(
+    current_width: &mut u16,
+    current_height: &mut u16,
+    max_width: u16,
+    max_height: u16,
+    gate: &mut DamageGateState,
+) -> bool {
+    if (*current_width, *current_height) == (max_width, max_height) {
+        return false;
+    }
+    *current_width = max_width;
+    *current_height = max_height;
+    gate.invalidate();
+    true
+}
+
 impl DamageTracker {
     fn connect(conn: &RustConnection) -> RemoteResult<Self> {
         let available = match conn.extension_information(damage::X11_EXTENSION_NAME) {
@@ -1643,11 +1662,15 @@ impl X11Capture {
     ///
     /// Returns whether the effective bounds changed.
     pub fn set_encoded_bounds(&mut self, max_width: u16, max_height: u16) -> bool {
-        if (self.max_width, self.max_height) == (max_width, max_height) {
+        if !update_encoded_bounds(
+            &mut self.max_width,
+            &mut self.max_height,
+            max_width,
+            max_height,
+            &mut self.damage.gate,
+        ) {
             return false;
         }
-        self.max_width = max_width;
-        self.max_height = max_height;
         // A native-width session never built a scaler. Downscaling now needs
         // one, and the CPU resize fallback would otherwise be permanent.
         if max_width != 0 && self.render_scaler.is_none() && self.render_failures == 0 {
@@ -4863,6 +4886,108 @@ mod tests {
             gate.decide(base + Duration::from_secs(4), geometry, cursor, false),
             DamageGateDecision::NoChange
         );
+    }
+
+    #[test]
+    fn encoded_bounds_changes_capture_static_desktops_immediately() {
+        let base = Instant::now();
+        let geometry = (1920, 1080);
+        let cursor = CursorSnapshot::Position(Some((20, 30)));
+        let mut width = 640;
+        let mut height = 360;
+        let mut gate = clean_damage_gate(base, geometry, cursor);
+
+        // Growing, shrinking, a height-only change, and restoring unbounded
+        // capture all need new pixels without waiting for desktop damage.
+        for (index, (bounds, expected)) in [
+            ((1280, 720), (1280, 720)),
+            ((640, 360), (640, 360)),
+            ((640, 200), (355, 200)),
+            ((0, 0), (1920, 1080)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = base + Duration::from_millis((index as u64 + 1) * 100);
+            assert_eq!(
+                gate.decide(now, geometry, cursor, false),
+                DamageGateDecision::NoChange
+            );
+            assert!(update_encoded_bounds(
+                &mut width,
+                &mut height,
+                bounds.0,
+                bounds.1,
+                &mut gate,
+            ));
+            assert_eq!((width, height), bounds);
+            assert_eq!(
+                scaled_dimensions(geometry.0, geometry.1, width, height),
+                expected
+            );
+            assert_eq!(
+                gate.decide(now, geometry, cursor, false),
+                DamageGateDecision::Capture
+            );
+            gate.subtract_queued();
+            gate.capture_succeeded(now, geometry, cursor);
+        }
+    }
+
+    #[test]
+    fn repeated_encoded_bounds_preserve_idle_and_pending_damage() {
+        let base = Instant::now();
+        let geometry = (1920, 1080);
+        let cursor = CursorSnapshot::Disabled;
+        let mut width = 1280;
+        let mut height = 720;
+        let mut gate = clean_damage_gate(base, geometry, cursor);
+
+        for dirty in [false, true] {
+            if dirty {
+                gate.invalidate();
+            }
+            assert!(!update_encoded_bounds(
+                &mut width,
+                &mut height,
+                1280,
+                720,
+                &mut gate,
+            ));
+            assert_eq!((width, height), (1280, 720));
+            assert_eq!(gate.dirty, dirty);
+            assert_eq!(
+                gate.decide(base + Duration::from_millis(100), geometry, cursor, false),
+                if dirty {
+                    DamageGateDecision::Capture
+                } else {
+                    DamageGateDecision::NoChange
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_bounds_are_retained_when_current_pixels_fit_both_sizes() {
+        let base = Instant::now();
+        let geometry = (1920, 1080);
+        let cursor = CursorSnapshot::Disabled;
+        let mut width = 640;
+        let mut height = 360;
+        let mut gate = clean_damage_gate(base, geometry, cursor);
+        assert!(update_encoded_bounds(
+            &mut width,
+            &mut height,
+            640,
+            400,
+            &mut gate,
+        ));
+        assert_eq!((width, height), (640, 400));
+        assert_eq!(scaled_dimensions(1920, 1080, width, height), (640, 360));
+        // A later source rotation must use the new height bound even though
+        // the original landscape image fitted both old and new bounds.
+        assert_eq!(scaled_dimensions(1080, 1920, width, height), (225, 400));
+        assert!(gate.dirty);
     }
 
     #[test]
