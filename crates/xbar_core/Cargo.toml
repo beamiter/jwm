@@ -24,7 +24,7 @@ provider-battery-sysfs = []
 provider-brightnessctl = ["dep:libc", "dep:log"]
 provider-network-sysfs = []
 provider-system = ["dep:sysinfo"]
-render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:image", "dep:pango", "dep:pangocairo"]
+render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:image", "dep:pango", "dep:pango-sys", "dep:pangocairo"]
 runtime-linux = ["dep:libc", "dep:log"]
 transport-shared = ["dep:shared_structures"]
 
@@ -57,6 +57,10 @@ image = { version = "0.25", default-features = false, features = [
 
 cairo-rs = { version = "0.22.0", optional = true }
 pango = { version = "0.22.8", optional = true }
+# pango 0.22.9 uses PANGO_FONT_MASK_WIDTH, absent from pango-sys 0.22.0.
+# The upstream wrapper still accepts ^0.22.0, so constrain the FFI floor for
+# standalone bars as well as the root workspace's locked build.
+pango-sys = { version = "0.22.9", optional = true }
 pangocairo = { version = "0.22.8", optional = true }
 
 [dev-dependencies]
