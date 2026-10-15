@@ -2190,6 +2190,9 @@ pub enum BackendEvent {
         keycode: u8,
         state: u16,
         time: u32,
+        /// An autorepeated press, not a new physical shortcut gesture.
+        /// Modal text/navigation may repeat; bindings use their own policy.
+        repeat: bool,
     },
     KeyRelease {
         keycode: u8,

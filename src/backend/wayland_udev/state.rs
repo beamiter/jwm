@@ -7735,6 +7735,7 @@ mod protocol_hardening_tests {
             keycode: 38,
             state: 0,
             time: 1,
+            repeat: false,
         });
         server.state.push_event(BackendEvent::KeyRelease {
             keycode: 38,

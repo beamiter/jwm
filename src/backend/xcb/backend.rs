@@ -30,6 +30,7 @@ use crate::backend::x11::wm::iconify::IconifyCoordinator;
 use crate::backend::x11::wm::interactive_resize::{
     interactive_move_origin, interactive_resize_geometry,
 };
+use crate::backend::x11::wm::key_repeat::{ClassicKeyRepeat, KeyIdentity, RawKeyEvent};
 use crate::backend::x11::wm::managed_unmap::{
     ManagedUnmapDisposition, ManagedUnmapTracker, SharedManagedUnmaps,
 };
@@ -587,6 +588,199 @@ fn collect_xcb_event_batch<T, E>(
     Ok(events)
 }
 
+/// Inspect the typed raw event before any mapping/filtering or batching.
+/// `response_type()` preserves the SendEvent high bit in XCB's wire header.
+fn raw_key_event(event: &xcb::Event) -> RawKeyEvent {
+    match event {
+        xcb::Event::X(x::Event::KeyPress(event)) => RawKeyEvent::Press(KeyIdentity {
+            keycode: event.detail(),
+            time: event.time(),
+            event: event.event().resource_id(),
+            root: event.root().resource_id(),
+            synthetic: event.response_type() & 0x80 != 0,
+        }),
+        xcb::Event::X(x::Event::KeyRelease(event)) => RawKeyEvent::Release(KeyIdentity {
+            keycode: event.detail(),
+            time: event.time(),
+            event: event.event().resource_id(),
+            root: event.root().resource_id(),
+            synthetic: event.response_type() & 0x80 != 0,
+        }),
+        _ => RawKeyEvent::Other,
+    }
+}
+
+#[cfg(test)]
+mod key_repeat_tests {
+    use super::{
+        ClassicKeyRepeat, KeyIdentity, RawKeyEvent, XCB_EVENT_BATCH_LIMIT, XcbBatchPoll,
+        collect_xcb_event_batch, raw_key_event,
+    };
+    use xcb::{Raw, Xid, XidNew, x};
+
+    fn key_event(press: bool, identity: KeyIdentity) -> xcb::Event {
+        let event = x::KeyPressEvent::new(
+            identity.keycode,
+            identity.time,
+            x::Window::new(identity.root),
+            x::Window::new(identity.event),
+            x::Window::none(),
+            0,
+            0,
+            0,
+            0,
+            x::KeyButMask::empty(),
+            true,
+        );
+        // SAFETY: the constructor owns a malloc-backed core key event.
+        // KeyRelease has the identical wire layout. Only its first byte is
+        // changed, then ownership passes to the matching typed event exactly once.
+        unsafe {
+            let raw = event.into_raw();
+            raw.cast::<u8>()
+                .write((if press { 2 } else { 3 }) | if identity.synthetic { 0x80 } else { 0 });
+            xcb::Event::X(if press {
+                x::Event::KeyPress(x::KeyPressEvent::from_raw(raw))
+            } else {
+                x::Event::KeyRelease(x::KeyReleaseEvent::from_raw(raw))
+            })
+        }
+    }
+
+    fn identity() -> KeyIdentity {
+        KeyIdentity {
+            keycode: 38,
+            time: 1234,
+            event: 10,
+            root: 1,
+            synthetic: false,
+        }
+    }
+
+    #[test]
+    fn adapter_preserves_all_identity_fields_and_send_event_bit() {
+        let RawKeyEvent::Press(key) = raw_key_event(&key_event(
+            true,
+            KeyIdentity {
+                synthetic: true,
+                ..identity()
+            },
+        )) else {
+            panic!("expected a raw key press");
+        };
+        assert_eq!(
+            (key.keycode, key.time, key.event, key.root),
+            (38, 1234, 10, 1)
+        );
+        assert!(key.synthetic);
+    }
+
+    #[test]
+    fn adjacent_server_release_press_repeats_but_press_alone_does_not() {
+        let mut repeat = ClassicKeyRepeat::default();
+        assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+        assert!(!repeat.observe(raw_key_event(&key_event(false, identity()))));
+        assert!(repeat.observe(raw_key_event(&key_event(true, identity()))));
+        assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+    }
+
+    #[test]
+    fn each_identity_mismatch_and_synthetic_event_prevents_repeat() {
+        for changed in [
+            KeyIdentity {
+                keycode: 39,
+                ..identity()
+            },
+            KeyIdentity {
+                time: 1235,
+                ..identity()
+            },
+            KeyIdentity {
+                event: 11,
+                ..identity()
+            },
+            KeyIdentity {
+                root: 2,
+                ..identity()
+            },
+            KeyIdentity {
+                synthetic: true,
+                ..identity()
+            },
+        ] {
+            let mut repeat = ClassicKeyRepeat::default();
+            assert!(!repeat.observe(raw_key_event(&key_event(false, identity()))));
+            assert!(!repeat.observe(raw_key_event(&key_event(true, changed))));
+        }
+        let mut repeat = ClassicKeyRepeat::default();
+        assert!(!repeat.observe(raw_key_event(&key_event(
+            false,
+            KeyIdentity {
+                synthetic: true,
+                ..identity()
+            },
+        ))));
+        assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+    }
+
+    #[test]
+    fn ignored_focus_and_unmap_events_break_raw_adjacency() {
+        for intervening in [
+            xcb::Event::X(x::Event::FocusOut(x::FocusOutEvent::new(
+                x::NotifyDetail::Nonlinear,
+                x::Window::new(10),
+                x::NotifyMode::Normal,
+            ))),
+            xcb::Event::X(x::Event::UnmapNotify(x::UnmapNotifyEvent::new(
+                x::Window::new(1),
+                x::Window::new(10),
+                false,
+            ))),
+        ] {
+            let mut repeat = ClassicKeyRepeat::default();
+            assert!(!repeat.observe(raw_key_event(&key_event(false, identity()))));
+            assert!(!repeat.observe(raw_key_event(&intervening)));
+            assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+        }
+    }
+
+    #[test]
+    fn repeat_identity_survives_batch_boundary_and_empty_poll() {
+        let mut repeat = ClassicKeyRepeat::default();
+        let mut prefetched = Vec::new();
+        let mut count = 0;
+        let first = collect_xcb_event_batch(&mut prefetched, || {
+            count += 1;
+            let event = if count == XCB_EVENT_BATCH_LIMIT {
+                key_event(false, identity())
+            } else {
+                key_event(
+                    true,
+                    KeyIdentity {
+                        keycode: 40,
+                        ..identity()
+                    },
+                )
+            };
+            let is_repeat = repeat.observe(raw_key_event(&event));
+            XcbBatchPoll::<_, ()>::Event((event, is_repeat))
+        })
+        .unwrap();
+        assert_eq!(first.len(), XCB_EVENT_BATCH_LIMIT);
+        let empty =
+            collect_xcb_event_batch(&mut prefetched, || XcbBatchPoll::<_, ()>::Empty).unwrap();
+        assert!(empty.is_empty());
+        let event = key_event(true, identity());
+        let is_repeat = repeat.observe(raw_key_event(&event));
+        // Model the before_sleep prefetch, already observed before dispatch.
+        prefetched.push((event, is_repeat));
+        let next =
+            collect_xcb_event_batch(&mut prefetched, || XcbBatchPoll::<_, ()>::Empty).unwrap();
+        assert_eq!(next.len(), 1);
+        assert!(next[0].1);
+    }
+}
+
 /// calloop source for XCB's socket plus its userspace event queue.
 ///
 /// A synchronous reply can consume a ClientMessage from the socket and leave
@@ -594,7 +788,8 @@ fn collect_xcb_event_batch<T, E>(
 /// generic fd source can sleep indefinitely even though an event is ready.
 struct XcbEventSource {
     conn: Arc<xcb::Connection>,
-    prefetched: Vec<xcb::Event>,
+    prefetched: Vec<(xcb::Event, bool)>,
+    key_repeat: ClassicKeyRepeat,
     wake_token: Option<Token>,
 }
 
@@ -630,6 +825,7 @@ impl XcbEventSource {
         Self {
             conn,
             prefetched: Vec::new(),
+            key_repeat: ClassicKeyRepeat::default(),
             wake_token: None,
         }
     }
@@ -642,6 +838,8 @@ impl XcbEventSource {
         for _ in 0..XCB_EVENT_BATCH_LIMIT {
             match self.conn.poll_for_queued_event() {
                 Ok(Some(event)) => {
+                    let repeat = self.key_repeat.observe(raw_key_event(&event));
+                    let event = (event, repeat);
                     self.prefetched.push(event);
                     return Ok(true);
                 }
@@ -649,10 +847,13 @@ impl XcbEventSource {
                 // Preserve the old event loop's handling of asynchronous X11
                 // protocol errors: log the error and continue draining rather
                 // than terminating the window manager.
-                Err(error) => log::log!(
-                    xcb_async_protocol_error_level(&error),
-                    "queued XCB event error (continuing): {error}"
-                ),
+                Err(error) => {
+                    self.key_repeat.observe(RawKeyEvent::Other);
+                    log::log!(
+                        xcb_async_protocol_error_level(&error),
+                        "queued XCB event error (continuing): {error}"
+                    );
+                }
             }
         }
 
@@ -664,7 +865,7 @@ impl XcbEventSource {
 }
 
 impl EventSource for XcbEventSource {
-    type Event = Vec<xcb::Event>;
+    type Event = Vec<(xcb::Event, bool)>;
     type Metadata = ();
     type Ret = ();
     type Error = BackendError;
@@ -681,18 +882,26 @@ impl EventSource for XcbEventSource {
         F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
         let conn = &self.conn;
+        let key_repeat = &mut self.key_repeat;
         let events =
             collect_xcb_event_batch(&mut self.prefetched, || match conn.poll_for_event() {
-                Ok(Some(event)) => XcbBatchPoll::Event(event),
+                Ok(Some(event)) => {
+                    let repeat = key_repeat.observe(raw_key_event(&event));
+                    XcbBatchPoll::Event((event, repeat))
+                }
                 Ok(None) => XcbBatchPoll::Empty,
                 Err(xcb::Error::Protocol(error)) => {
+                    key_repeat.observe(RawKeyEvent::Other);
                     log::log!(
                         xcb_async_protocol_error_level(&error),
                         "XCB event error (continuing): {error}"
                     );
                     XcbBatchPoll::Skipped
                 }
-                Err(xcb::Error::Connection(error)) => XcbBatchPoll::Fatal(xcb_err(error)),
+                Err(xcb::Error::Connection(error)) => {
+                    key_repeat.observe(RawKeyEvent::Other);
+                    XcbBatchPoll::Fatal(xcb_err(error))
+                }
             })?;
         if !events.is_empty() {
             callback(events, &mut ());
@@ -1549,7 +1758,7 @@ impl XcbBackend {
         }
     }
 
-    fn map_event(&mut self, event: xcb::Event) -> Option<BackendEvent> {
+    fn map_event(&mut self, event: xcb::Event, repeat: bool) -> Option<BackendEvent> {
         match event {
             xcb::Event::X(x::Event::MapRequest(ev)) => {
                 if self.is_compositor_overlay(ev.window()) {
@@ -1692,6 +1901,7 @@ impl XcbBackend {
                 })
             }
             xcb::Event::X(x::Event::KeyPress(ev)) => Some(BackendEvent::KeyPress {
+                repeat,
                 keycode: ev.detail(),
                 state: ev.state().bits() as u16,
                 time: ev.time(),
@@ -2506,8 +2716,8 @@ impl Backend for XcbBackend {
                 data.compositor_frame_consumed_this_dispatch = false;
                 let mut pending_motion = None;
                 let mut pending_configure = None;
-                for event in events {
-                    if let Some(mapped) = data.backend.map_event(event) {
+                for (event, repeat) in events {
+                    if let Some(mapped) = data.backend.map_event(event, repeat) {
                         data.dispatch_backend_event(
                             mapped,
                             &mut pending_motion,

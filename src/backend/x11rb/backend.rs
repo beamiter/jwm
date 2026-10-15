@@ -2821,6 +2821,7 @@ mod event_source {
     use crate::backend::api::{BackendEvent, NetWmAction, NetWmState};
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
+    use crate::backend::x11::wm::key_repeat::{ClassicKeyRepeat, KeyIdentity, RawKeyEvent};
     use crate::backend::x11::wm::managed_unmap::{ManagedUnmapDisposition, SharedManagedUnmaps};
     use crate::backend::x11::wm::{
         ClientMessageAtoms, ClientMessageKind, PropertyKindAtoms, ProtocolErrorClass,
@@ -2842,6 +2843,23 @@ mod event_source {
 
     fn is_background_event_window(root_x11: u32, overlay: u32, event_window: u32) -> bool {
         event_window == root_x11 || (overlay != 0 && overlay == event_window)
+    }
+
+    /// Classify before mapping: even an otherwise ignored event breaks the
+    /// adjacency required by classic X11 release/press autorepeat.
+    fn raw_key_event(event: &XEvent) -> RawKeyEvent {
+        let identity = |event: &xproto::KeyPressEvent| KeyIdentity {
+            keycode: event.detail,
+            time: event.time,
+            event: event.event,
+            root: event.root,
+            synthetic: event.response_type & 0x80 != 0,
+        };
+        match event {
+            XEvent::KeyPress(event) => RawKeyEvent::Press(identity(event)),
+            XEvent::KeyRelease(event) => RawKeyEvent::Release(identity(event)),
+            _ => RawKeyEvent::Other,
+        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -2899,6 +2917,7 @@ mod event_source {
         overlay_x11: Arc<AtomicU32>,
         ids: X11IdRegistry,
         managed_unmaps: SharedManagedUnmaps,
+        key_repeat: ClassicKeyRepeat,
         // Events produced beyond the single one returned by map_event (e.g. a
         // _NET_WM_STATE ClientMessage carrying two state atoms). Drained first.
         pending: VecDeque<BackendEvent>,
@@ -2923,6 +2942,7 @@ mod event_source {
                 overlay_x11,
                 ids,
                 managed_unmaps,
+                key_repeat: ClassicKeyRepeat::default(),
                 pending: VecDeque::new(),
                 wake_token: None,
             }
@@ -2995,6 +3015,7 @@ mod event_source {
         }
 
         fn map_event(&mut self, ev: XEvent) -> Option<BackendEvent> {
+            let repeat = self.key_repeat.observe(raw_key_event(&ev));
             match ev {
                 XEvent::ButtonPress(e) => {
                     log::debug!(
@@ -3030,6 +3051,7 @@ mod event_source {
                 XEvent::RandrScreenChangeNotify(_) => Some(BackendEvent::ScreenLayoutChanged),
                 XEvent::RandrNotify(_) => Some(BackendEvent::ScreenLayoutChanged),
                 XEvent::KeyPress(e) => Some(BackendEvent::KeyPress {
+                    repeat,
                     keycode: e.detail,
                     state: e.state.bits(),
                     time: e.time,
@@ -3459,6 +3481,118 @@ mod event_source {
             poll.unregister(fd)?;
             self.wake_token = None;
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod key_repeat_tests {
+        use super::{ClassicKeyRepeat, KeyIdentity, RawKeyEvent, XEvent, raw_key_event, xproto};
+
+        fn key_event(press: bool, identity: KeyIdentity) -> XEvent {
+            let event = xproto::KeyPressEvent {
+                response_type: (if press { 2 } else { 3 })
+                    | if identity.synthetic { 0x80 } else { 0 },
+                detail: identity.keycode,
+                time: identity.time,
+                event: identity.event,
+                root: identity.root,
+                ..Default::default()
+            };
+            if press {
+                XEvent::KeyPress(event)
+            } else {
+                XEvent::KeyRelease(event)
+            }
+        }
+
+        fn identity() -> KeyIdentity {
+            KeyIdentity {
+                keycode: 38,
+                time: 1234,
+                event: 10,
+                root: 1,
+                synthetic: false,
+            }
+        }
+
+        #[test]
+        fn adapter_preserves_all_identity_fields_and_send_event_bit() {
+            let RawKeyEvent::Press(key) = raw_key_event(&key_event(
+                true,
+                KeyIdentity {
+                    synthetic: true,
+                    ..identity()
+                },
+            )) else {
+                panic!("expected a raw key press");
+            };
+            assert_eq!(
+                (key.keycode, key.time, key.event, key.root),
+                (38, 1234, 10, 1)
+            );
+            assert!(key.synthetic);
+        }
+
+        #[test]
+        fn adjacent_server_release_press_repeats_but_press_alone_does_not() {
+            let mut repeat = ClassicKeyRepeat::default();
+            assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+            assert!(!repeat.observe(raw_key_event(&key_event(false, identity()))));
+            assert!(repeat.observe(raw_key_event(&key_event(true, identity()))));
+            assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+        }
+
+        #[test]
+        fn each_identity_mismatch_and_synthetic_event_prevents_repeat() {
+            for changed in [
+                KeyIdentity {
+                    keycode: 39,
+                    ..identity()
+                },
+                KeyIdentity {
+                    time: 1235,
+                    ..identity()
+                },
+                KeyIdentity {
+                    event: 11,
+                    ..identity()
+                },
+                KeyIdentity {
+                    root: 2,
+                    ..identity()
+                },
+                KeyIdentity {
+                    synthetic: true,
+                    ..identity()
+                },
+            ] {
+                let mut repeat = ClassicKeyRepeat::default();
+                assert!(!repeat.observe(raw_key_event(&key_event(false, identity()))));
+                assert!(!repeat.observe(raw_key_event(&key_event(true, changed))));
+            }
+            let mut repeat = ClassicKeyRepeat::default();
+            assert!(!repeat.observe(raw_key_event(&key_event(
+                false,
+                KeyIdentity {
+                    synthetic: true,
+                    ..identity()
+                },
+            ))));
+            assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+        }
+
+        #[test]
+        fn ignored_focus_and_unmap_events_break_raw_adjacency() {
+            for intervening in [
+                XEvent::FocusOut(xproto::FocusOutEvent::default()),
+                XEvent::UnmapNotify(xproto::UnmapNotifyEvent::default()),
+                XEvent::Unknown(vec![0; 32]),
+            ] {
+                let mut repeat = ClassicKeyRepeat::default();
+                assert!(!repeat.observe(raw_key_event(&key_event(false, identity()))));
+                assert!(!repeat.observe(raw_key_event(&intervening)));
+                assert!(!repeat.observe(raw_key_event(&key_event(true, identity()))));
+            }
         }
     }
 

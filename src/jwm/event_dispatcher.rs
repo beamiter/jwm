@@ -507,7 +507,14 @@ impl WMController for Jwm {
     }
 
     // === 输入事件 ===
-    fn on_key_press(&mut self, backend: &mut dyn Backend, keycode: u8, mods: u16, _time: u32) {
+    fn on_key_press(
+        &mut self,
+        backend: &mut dyn Backend,
+        keycode: u8,
+        mods: u16,
+        _time: u32,
+        repeat: bool,
+    ) {
         let debug_keys = std::env::var("JWM_DEBUG_KEYS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -526,7 +533,7 @@ impl WMController for Jwm {
                 mods_clean.bits()
             );
         }
-        if let Err(e) = self.on_key_press_internal(backend, keycode, mods) {
+        if let Err(e) = self.on_key_press_internal_with_repeat(backend, keycode, mods, repeat) {
             error!("Error handling KeyPress: {:?}", e);
         }
     }
@@ -5771,6 +5778,7 @@ mod tests {
                             keycode: b'p',
                             state: 0,
                             time: 1150,
+                            repeat: false,
                         },
                     )
                     .unwrap();
@@ -13614,9 +13622,10 @@ impl EventHandler for Jwm {
                 keycode,
                 state,
                 time,
+                repeat,
             } => {
                 self.last_user_activity_time = time;
-                self.on_key_press(backend, keycode, state, time);
+                self.on_key_press(backend, keycode, state, time, repeat);
             }
             BackendEvent::KeyRelease {
                 keycode,

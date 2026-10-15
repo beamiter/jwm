@@ -725,6 +725,7 @@ fn advance_key_repeat(
         keycode: state.keycode,
         state: state.mods_raw,
         time: event_time,
+        repeat: true,
     })
 }
 
@@ -3515,6 +3516,7 @@ impl UdevBackend {
                                     keycode: keycode_u8,
                                     state: mods_state,
                                     time: time.millis(),
+                                    repeat: false,
                                 });
 
                                 // Start (or reset) key repeat for bound shortcuts.
@@ -8123,6 +8125,7 @@ mod udev_backend_selection_tests {
                 keycode: 42,
                 state,
                 time: 1_400,
+                repeat: true,
             } if state == Mods::ALT.bits()
         ));
         assert_eq!(state.unwrap().press_time, 1_000);

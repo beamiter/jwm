@@ -19,6 +19,8 @@ pub(crate) mod floating_restore;
 pub(crate) mod iconify;
 /// Overflow-safe geometry calculation for interactive X11 moves and resizes.
 pub(crate) mod interactive_resize;
+/// Classic X11 autorepeat classification before raw event identity is lost.
+pub(crate) mod key_repeat;
 /// Sequence-aware classification of JWM-owned X11 unmap requests.
 pub(crate) mod managed_unmap;
 /// Strict codec for JWM's private maximize-restore exec-restart snapshot.

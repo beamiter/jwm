@@ -2367,11 +2367,25 @@ impl Jwm {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
         keycode: u8,
         state_bits: u16,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.on_key_press_internal_with_repeat(backend, keycode, state_bits, false)
+    }
+
+    /// Dispatch a backend key press while preserving its repeat classification.
+    /// Modal text/navigation keeps repeating; shortcut actions opt in through
+    /// `WMKey::repeatable` instead of inheriting the keyboard's repeat rate.
+    pub(crate) fn on_key_press_internal_with_repeat(
+        &mut self,
+        backend: &mut dyn Backend,
+        keycode: u8,
+        state_bits: u16,
+        repeat: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let debug_keys = std::env::var("JWM_DEBUG_KEYS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -2403,7 +2417,7 @@ impl Jwm {
         // impossible until the panel is dismissed. Never bypass the lock
         // screen, which must not expose its contents to a screenshot.
         if self.features.system_ui.is_active() && !self.features.system_ui.is_locked() {
-            if let Some((func, arg)) = self
+            if let Some((func, arg, repeatable)) = self
                 .key_bindings
                 .iter()
                 .find(|kc| {
@@ -2411,8 +2425,16 @@ impl Jwm {
                         && (kc.mask & key_mods) == clean_state
                         && kc.func_opt.is_some_and(Self::is_native_screenshot)
                 })
-                .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())))
+                .and_then(|kc| {
+                    kc.func_opt
+                        .map(|func| (func, kc.arg.clone(), kc.repeatable))
+                })
             {
+                // Consume a held shortcut before it can dismiss the panel or
+                // fall through into the panel's text field.
+                if repeat && !repeatable {
+                    return Ok(());
+                }
                 // The panel's overlay and grabs would otherwise intercept the
                 // selection pointer events (and make the panel appear in a
                 // fullscreen capture). Close it before entering capture mode.
@@ -2479,8 +2501,14 @@ impl Jwm {
                                 && (kc.mask & key_mods) == clean_state
                                 && kc.func_opt.is_some_and(Self::lock_media_func)
                         })
-                        .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())));
-                    if let Some((func, arg)) = passthrough {
+                        .and_then(|kc| {
+                            kc.func_opt
+                                .map(|func| (func, kc.arg.clone(), kc.repeatable))
+                        });
+                    if let Some((func, arg, repeatable)) = passthrough {
+                        if repeat && !repeatable {
+                            return Ok(());
+                        }
                         if let Err(error) = func(self, backend, &arg) {
                             error!("Error executing lock-screen media key: {error}");
                         }
@@ -2617,8 +2645,16 @@ impl Jwm {
                             && (kc.mask & key_mods) == clean_state
                             && kc.func_opt.is_some_and(Self::opens_system_ui_panel)
                     })
-                    .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())));
-                if let Some((func, arg)) = toggle {
+                    .and_then(|kc| {
+                        kc.func_opt
+                            .map(|func| (func, kc.arg.clone(), kc.repeatable))
+                    });
+                if let Some((func, arg, repeatable)) = toggle {
+                    // A suppressed opener still owns this key: letting it fall
+                    // through would type its letter into the modal query.
+                    if repeat && !repeatable {
+                        return Ok(());
+                    }
                     if let Err(e) = func(self, backend, &arg) {
                         error!("Error toggling system UI panel: {:?}", e);
                     }
@@ -3210,16 +3246,18 @@ impl Jwm {
             if keysym == keys::KEY_Page_Down {
                 return self.page_overview(backend, 1);
             }
-            // Alt+Ctrl+Tab → confirm (close overview, focus selected)
-            if keysym == keys::KEY_Tab
-                && overview_mods.contains(Mods::ALT)
-                && overview_mods.contains(Mods::CONTROL)
+            // Alt+Ctrl+Tab / Enter → confirm (close overview, focus selected).
+            // Holding the opener must not immediately confirm the mode it just
+            // opened. Navigation above repeats; confirmation is a physical press.
+            if keysym == keys::KEY_Return
+                || (keysym == keys::KEY_Tab
+                    && overview_mods.contains(Mods::ALT)
+                    && overview_mods.contains(Mods::CONTROL))
             {
-                return self.toggle_overview(backend, &WMArgEnum::Int(0));
-            }
-            // Enter → confirm (close overview, focus selected)
-            if keysym == keys::KEY_Return {
-                return self.toggle_overview(backend, &WMArgEnum::Int(0));
+                if !repeat {
+                    return self.toggle_overview(backend, &WMArgEnum::Int(0));
+                }
+                return Ok(());
             }
             // Escape → cancel (close overview, no focus change)
             if keysym == keys::KEY_Escape {
@@ -3237,6 +3275,14 @@ impl Jwm {
         // The next key either matches a chord binding (dispatch + ungrab) or
         // falls through to normal handling (also ungrab).
         if let Some(chord) = self.chord_compiled.clone() {
+            // A chord consists of deliberate physical presses, even when its
+            // second-key action is repeatable. Holding the leader or another
+            // key must neither extend the deadline nor consume the armed chord.
+            // Leave expiry to maintenance/the next physical press as usual.
+            if repeat && (self.chord_armed_until.is_some() || chord.leader == (clean_state, keysym))
+            {
+                return Ok(());
+            }
             // Normally the maintenance deadline expires this first; retain
             // the check for an event delivered on the deadline itself.
             self.expire_chord(backend, std::time::Instant::now());
@@ -3288,6 +3334,9 @@ impl Jwm {
             .find(|kc| keysym == kc.key_sym && (kc.mask & key_mods) == clean_state);
         let matched = found.is_some();
         let call = found.and_then(|kc| {
+            if repeat && !kc.repeatable {
+                return None;
+            }
             if debug_keys {
                 let func_name = kc.func_opt.map(Self::func_name).unwrap_or("<none>");
                 info!(
@@ -5237,6 +5286,385 @@ mod tests {
 
         fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
             Ok(())
+        }
+    }
+
+    /// A controllable keysym and an in-memory keyboard-grab log. No X server,
+    /// input device or real system-control worker is involved in these tests.
+    #[derive(Clone, Default)]
+    struct RepeatDispatchKeys {
+        keysym: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        grabs: std::sync::Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl RepeatDispatchKeys {
+        fn select(&self, keysym: u32) {
+            self.keysym
+                .store(keysym, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl crate::backend::api::KeyOps for RepeatDispatchKeys {
+        fn grab_keys(
+            &self,
+            _root: WindowId,
+            _bindings: &[(crate::backend::common_define::Mods, u32)],
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn clear_key_grabs(&self, _root: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn grab_keyboard(&self, _root: WindowId) -> Result<(), BackendError> {
+            self.grabs.lock().unwrap().push(true);
+            Ok(())
+        }
+
+        fn ungrab_keyboard(&self) -> Result<(), BackendError> {
+            self.grabs.lock().unwrap().push(false);
+            Ok(())
+        }
+
+        fn clean_mods(&self, raw: u16) -> crate::backend::common_define::Mods {
+            crate::backend::common_define::Mods::from_bits_truncate(raw)
+        }
+
+        fn keysym_from_keycode(&mut self, _keycode: u8) -> Result<u32, BackendError> {
+            Ok(self.keysym.load(std::sync::atomic::Ordering::Relaxed))
+        }
+
+        fn clear_cache(&mut self) {}
+    }
+
+    fn repeat_dispatch_fixture() -> (Jwm, ConfigureReplyBackend, RepeatDispatchKeys) {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.key_bindings.clear();
+        jwm.chord_compiled = None;
+        jwm.chord_armed_until = None;
+        let input = RepeatDispatchKeys::default();
+        backend.key_ops = Box::new(input.clone());
+        backend.toast_log.lock().unwrap().clear();
+        (jwm, backend, input)
+    }
+
+    fn count_repeat_dispatch(
+        _jwm: &mut Jwm,
+        backend: &mut dyn Backend,
+        _arg: &crate::jwm::types::WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        backend
+            .as_any()
+            .downcast_ref::<ConfigureReplyBackend>()
+            .unwrap()
+            .toast_log
+            .lock()
+            .unwrap()
+            .push("shortcut callback".into());
+        Ok(())
+    }
+
+    fn repeat_test_launcher() -> crate::jwm::features::SystemUiState {
+        crate::jwm::features::SystemUiState::Launcher {
+            query: String::new(),
+            entries: std::sync::Arc::from([]),
+            windows: Vec::new(),
+            matches: Vec::new(),
+            selected: 0,
+            usage: Default::default(),
+            computed: None,
+            indexing: false,
+        }
+    }
+
+    #[test]
+    fn repeat_dispatch_uses_the_first_bindings_repeat_policy() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::jwm::types::{WMArgEnum, WMKey};
+
+        for repeatable in [false, true] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            input.select(keys::KEY_r);
+            jwm.key_bindings = vec![
+                WMKey::new(
+                    Mods::ALT,
+                    keys::KEY_r,
+                    Some(count_repeat_dispatch),
+                    WMArgEnum::Int(0),
+                )
+                .with_repeatable(repeatable),
+                // Skipping a suppressed match must not find a later repeatable
+                // binding for the same key and dispatch it instead.
+                WMKey::new(
+                    Mods::ALT,
+                    keys::KEY_r,
+                    Some(count_repeat_dispatch),
+                    WMArgEnum::Int(0),
+                )
+                .with_repeatable(true),
+            ];
+            jwm.on_key_press_internal(&mut backend, 1, Mods::ALT.bits())
+                .unwrap();
+            for _ in 0..20 {
+                jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), true)
+                    .unwrap();
+            }
+            assert_eq!(
+                backend.toast_log.lock().unwrap().len(),
+                if repeatable { 21 } else { 1 }
+            );
+            jwm.on_key_press_internal(&mut backend, 1, Mods::ALT.bits())
+                .unwrap();
+            assert_eq!(
+                backend.toast_log.lock().unwrap().len(),
+                if repeatable { 22 } else { 2 }
+            );
+        }
+    }
+
+    #[test]
+    fn repeat_dispatch_screenshot_passthrough_preserves_the_open_panel() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::jwm::types::{WMArgEnum, WMKey};
+
+        for repeatable in [false, true] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            input.select(keys::KEY_s);
+            jwm.features.system_ui = repeat_test_launcher();
+            // Exercise the real screenshot callback's cancellation path only:
+            // it returns before choosing a path or reading any display pixels.
+            jwm.features.screenshot.start();
+            jwm.key_bindings = vec![
+                WMKey::new(
+                    Mods::ALT,
+                    keys::KEY_s,
+                    Some(Jwm::take_screenshot),
+                    WMArgEnum::Int(0),
+                )
+                .with_repeatable(repeatable),
+            ];
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), true)
+                .unwrap();
+            assert_eq!(jwm.features.system_ui.is_active(), !repeatable);
+            assert_eq!(jwm.features.screenshot.active, !repeatable);
+            if !repeatable {
+                assert!(!jwm.features.system_ui.has_search_query());
+                assert!(input.grabs.lock().unwrap().is_empty());
+                jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), false)
+                    .unwrap();
+                assert!(!jwm.features.system_ui.is_active());
+                assert!(!jwm.features.screenshot.active);
+            }
+        }
+    }
+
+    #[test]
+    fn repeat_dispatch_locked_media_uses_the_safe_control_queue() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::jwm::features::SystemUiState;
+        use crate::jwm::features::system_controls::{ControlRequest, TestControlQueueGuard};
+        use crate::jwm::types::{WMArgEnum, WMKey};
+
+        let queue = TestControlQueueGuard::install();
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        jwm.features.system_ui = SystemUiState::lock();
+        jwm.key_bindings = vec![
+            WMKey::new(
+                Mods::empty(),
+                keys::KEY_XF86AudioMute,
+                Some(Jwm::volume_mute),
+                WMArgEnum::Int(0),
+            ),
+            WMKey::new(
+                Mods::empty(),
+                keys::KEY_XF86AudioRaiseVolume,
+                Some(Jwm::volume_adjust),
+                WMArgEnum::Int(5),
+            )
+            .with_repeatable(true),
+        ];
+        input.select(keys::KEY_XF86AudioMute);
+        for _ in 0..20 {
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+                .unwrap();
+        }
+        assert!(queue.requests().is_empty());
+        assert!(jwm.features.system_ui.lock_is_idle());
+        jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, false)
+            .unwrap();
+        input.select(keys::KEY_XF86AudioRaiseVolume);
+        for repeat in [false, true, true] {
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, repeat)
+                .unwrap();
+        }
+        assert_eq!(
+            queue.requests(),
+            vec![
+                ControlRequest::VolumeToggleMute,
+                ControlRequest::VolumeAdjust(5),
+                ControlRequest::VolumeAdjust(5),
+                ControlRequest::VolumeAdjust(5),
+            ]
+        );
+        assert!(jwm.features.system_ui.is_locked());
+    }
+
+    #[test]
+    fn repeat_dispatch_panel_toggle_is_consumed_without_query_text() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::jwm::types::{WMArgEnum, WMKey};
+
+        for repeatable in [false, true] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            input.select(keys::KEY_a);
+            jwm.features.system_ui = repeat_test_launcher();
+            jwm.key_bindings = vec![
+                WMKey::new(
+                    Mods::ALT,
+                    keys::KEY_a,
+                    Some(Jwm::app_launcher),
+                    WMArgEnum::Int(0),
+                )
+                .with_repeatable(repeatable),
+            ];
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), true)
+                .unwrap();
+            assert_eq!(jwm.features.system_ui.is_active(), !repeatable);
+            if !repeatable {
+                assert!(!jwm.features.system_ui.has_search_query());
+                assert!(input.grabs.lock().unwrap().is_empty());
+                jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), false)
+                    .unwrap();
+                assert!(!jwm.features.system_ui.is_active());
+            }
+        }
+    }
+
+    #[test]
+    fn repeat_dispatch_keeps_modal_typing_backspace_and_navigation() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::jwm::features::SystemUiState;
+        use crate::jwm::types::{WMArgEnum, WMKey};
+
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        jwm.features.system_ui = repeat_test_launcher();
+        // A bare launcher shortcut outside the panel must not steal a
+        // repeated letter from the panel's query field.
+        jwm.key_bindings = vec![WMKey::new(
+            Mods::empty(),
+            keys::KEY_a,
+            Some(Jwm::app_launcher),
+            WMArgEnum::Int(0),
+        )];
+        input.select(keys::KEY_a);
+        for _ in 0..2 {
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+                .unwrap();
+        }
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("aa")
+        );
+        input.select(keys::KEY_BackSpace);
+        jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+            .unwrap();
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("a")
+        );
+
+        jwm.features.system_ui = SystemUiState::Info {
+            title: "Repeat navigation".into(),
+            lines: (0..40).map(|index| format!("Row {index}")).collect(),
+            query: String::new(),
+            matches: (0..40).collect(),
+            offset: 0,
+        };
+        input.select(keys::KEY_Down);
+        for _ in 0..2 {
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+                .unwrap();
+        }
+        assert!(matches!(
+            jwm.features.system_ui,
+            SystemUiState::Info { offset: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn repeat_dispatch_chords_require_physical_presses_without_rearming() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::config::CompiledChord;
+        use crate::jwm::types::{WMArgEnum, WMKey};
+        use std::time::Duration;
+
+        for repeatable in [false, true] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            jwm.chord_compiled = Some(CompiledChord {
+                leader: (Mods::ALT, keys::KEY_space),
+                timeout: Duration::from_secs(60),
+                bindings: vec![
+                    WMKey::new(
+                        Mods::empty(),
+                        keys::KEY_r,
+                        Some(count_repeat_dispatch),
+                        WMArgEnum::Int(0),
+                    )
+                    .with_repeatable(repeatable),
+                ],
+            });
+            input.select(keys::KEY_space);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), true)
+                .unwrap();
+            assert!(jwm.chord_armed_until.is_none());
+            assert!(input.grabs.lock().unwrap().is_empty());
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), false)
+                .unwrap();
+            let deadline = jwm.chord_armed_until;
+            assert!(deadline.is_some());
+            for (keysym, mods) in [
+                (keys::KEY_space, Mods::ALT),
+                (keys::KEY_r, Mods::empty()),
+                (keys::KEY_z, Mods::empty()),
+            ] {
+                input.select(keysym);
+                jwm.on_key_press_internal_with_repeat(&mut backend, 1, mods.bits(), true)
+                    .unwrap();
+                assert_eq!(jwm.chord_armed_until, deadline);
+                assert_eq!(*input.grabs.lock().unwrap(), vec![true]);
+                assert!(backend.toast_log.lock().unwrap().is_empty());
+            }
+            input.select(keys::KEY_r);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, false)
+                .unwrap();
+            assert!(jwm.chord_armed_until.is_none());
+            assert_eq!(*input.grabs.lock().unwrap(), vec![true, false]);
+            assert_eq!(backend.toast_log.lock().unwrap().len(), 1);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+                .unwrap();
+            assert_eq!(backend.toast_log.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn repeat_dispatch_overview_opener_does_not_immediately_confirm() {
+        use crate::backend::common_define::{Mods, keys};
+
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        for (keysym, mods) in [
+            (keys::KEY_Tab, Mods::ALT | Mods::CONTROL),
+            (keys::KEY_Return, Mods::empty()),
+        ] {
+            jwm.features.overview.active = true;
+            input.select(keysym);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, mods.bits(), true)
+                .unwrap();
+            assert!(jwm.features.overview.active);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, mods.bits(), false)
+                .unwrap();
+            assert!(!jwm.features.overview.active);
         }
     }
 

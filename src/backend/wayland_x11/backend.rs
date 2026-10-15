@@ -2159,6 +2159,7 @@ fn process_input_event_windowed<B: InputBackend>(
                             keycode: keycode_u8,
                             state: mods_state,
                             time: time.millis(),
+                            repeat: false,
                         });
                 }
 
