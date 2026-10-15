@@ -13,6 +13,7 @@ limitation and leaves the existing static wallpaper selected.
 wallpaper_effect = "astronomy" # "off" is the backwards-compatible default
 wallpaper_earth_texture = "" # bundled NASA Earth texture
 wallpaper_timezone_offset_hours = 8 # presentation timezone, integer -12..14
+wallpaper_astronomy_layout = "span" # "per-output" shows one complete globe per screen
 ```
 
 Use the existing Wallpaper picker to select Astronomy Earth, or select a normal
@@ -40,9 +41,19 @@ restart JWM after a managed release rollback to use that release's executable an
 asset. Missing assets leave static wallpaper intact and the picker explains the
 missing prerequisite.
 
-One globe is centered on the X framebuffer, spanning adjacent monitors rather
-than repeating on each monitor. Coordinates use framebuffer pixels, not logical
-monitor origins. This is deliberately an initial global-wallpaper mode.
+`wallpaper_astronomy_layout = "span"` is the default: one globe is centered on
+the X framebuffer and spans adjacent monitors. Choose `"per-output"` to show a
+complete globe on each output, using that output's size and position. All globes
+share the same current UTC instant, display timezone, and texture. Coordinates
+use framebuffer pixels.
+
+This setting controls Astronomy placement only. `wallpaper_mode` still controls
+static-image scaling (`fill`, `fit`, `stretch`, or `center`). Changing layout uses
+the existing config reload or hot-config path; selecting a static image in the
+Wallpaper picker preserves the Astronomy layout for the next time it is enabled.
+For a persistent per-screen choice, set `wallpaper_astronomy_layout = "per-output"`
+in `[behavior]` and reload the configuration. Hot changes are session-only unless
+also written to the configuration file.
 
 ## Time and appearance
 

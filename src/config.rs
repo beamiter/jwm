@@ -1320,6 +1320,10 @@ pub struct BehaviorConfig {
     /// Astronomy presentation timezone, independent of the OS timezone.
     #[serde(default = "default_wallpaper_timezone_offset_hours")]
     pub wallpaper_timezone_offset_hours: i32,
+    /// Astronomy placement: span the framebuffer, or one globe per output.
+    /// Independent of wallpaper_mode, which scales static image wallpapers.
+    #[serde(default = "default_wallpaper_astronomy_layout")]
+    pub wallpaper_astronomy_layout: String,
     /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
     #[serde(default = "default_wallpaper_mode")]
     pub wallpaper_mode: String,
@@ -1707,6 +1711,10 @@ fn default_particle_lifetime() -> f32 {
 fn default_particle_gravity() -> f32 {
     800.0
 }
+fn default_wallpaper_astronomy_layout() -> String {
+    "span".into()
+}
+
 fn default_wallpaper_timezone_offset_hours() -> i32 {
     8
 }
@@ -2228,6 +2236,7 @@ impl Default for Config {
                     wallpaper_effect: "off".into(),
                     wallpaper_earth_texture: String::new(),
                     wallpaper_timezone_offset_hours: default_wallpaper_timezone_offset_hours(),
+                    wallpaper_astronomy_layout: default_wallpaper_astronomy_layout(),
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_rotation: default_wallpaper_rotation(),
                     wallpaper_rotation_paths: Vec::new(),
@@ -4714,6 +4723,15 @@ impl Config {
                 }
                 self.inner.behavior.wallpaper_effect = effect;
             }
+            "behavior.wallpaper_astronomy_layout" => {
+                let layout = as_string()?;
+                if !["span", "per-output"].contains(&layout.as_str()) {
+                    return Err(
+                        "behavior.wallpaper_astronomy_layout must be span or per-output".into(),
+                    );
+                }
+                self.inner.behavior.wallpaper_astronomy_layout = layout;
+            }
             "behavior.wallpaper_timezone_offset_hours" => {
                 let hours = value
                     .as_i64()
@@ -5125,9 +5143,11 @@ mod tests {
         behavior.remove("wallpaper_effect");
         behavior.remove("wallpaper_earth_texture");
         behavior.remove("wallpaper_timezone_offset_hours");
+        behavior.remove("wallpaper_astronomy_layout");
         let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
         assert_eq!(legacy.behavior.wallpaper_effect, "off");
         assert_eq!(legacy.behavior.wallpaper_timezone_offset_hours, 8);
+        assert_eq!(legacy.behavior.wallpaper_astronomy_layout, "span");
         assert!(legacy.behavior.wallpaper_earth_texture.is_empty());
         let mut config = Config { inner: legacy };
         config.inner.behavior.wallpaper = "/walls/static.png".into();
@@ -5164,6 +5184,80 @@ mod tests {
         assert_eq!(
             picked.behavior().wallpaper_earth_texture,
             "/walls/earth.jpg"
+        );
+    }
+
+    #[test]
+    fn astronomy_layout_defaults_roundtrips_and_preserves_static_settings() {
+        let mut config = Config::default();
+        assert_eq!(config.behavior().wallpaper_astronomy_layout, "span");
+        // Default-file generation serializes this same configuration.
+        assert!(
+            toml::to_string(&config.inner)
+                .unwrap()
+                .contains("wallpaper_astronomy_layout = \"span\"")
+        );
+        let static_mode = config.behavior().wallpaper_mode.clone();
+        let static_path = config.behavior().wallpaper.clone();
+        for layout in ["per-output", "span", "per-output"] {
+            config
+                .set_values(&[(
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!(layout),
+                )])
+                .unwrap();
+            let loaded: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            assert_eq!(loaded.behavior.wallpaper_astronomy_layout, layout);
+            assert_eq!(loaded.behavior.wallpaper_mode, static_mode);
+            assert_eq!(loaded.behavior.wallpaper, static_path);
+        }
+        let picked = config
+            .with_picker_wallpaper("/walls/static.png", 100)
+            .unwrap();
+        assert_eq!(picked.behavior().wallpaper_astronomy_layout, "per-output");
+        assert_eq!(picked.behavior().wallpaper_effect, "off");
+        let enabled = picked
+            .with_validated_value("behavior.wallpaper_effect", &serde_json::json!("astronomy"))
+            .unwrap();
+        assert_eq!(enabled.behavior().wallpaper_astronomy_layout, "per-output");
+    }
+
+    #[test]
+    fn astronomy_layout_rejects_invalid_toml_and_hot_values_atomically() {
+        let mut config = Config::default();
+        for bad in [
+            serde_json::json!("fill"),
+            serde_json::json!("per_monitor"),
+            serde_json::json!("SPAN"),
+            serde_json::json!(""),
+            serde_json::json!(false),
+            serde_json::json!(1),
+        ] {
+            assert!(
+                config
+                    .set_values(&[
+                        (
+                            "behavior.wallpaper_effect".into(),
+                            serde_json::json!("astronomy")
+                        ),
+                        ("behavior.wallpaper_astronomy_layout".into(), bad),
+                    ])
+                    .is_err()
+            );
+            assert_eq!(config.behavior().wallpaper_astronomy_layout, "span");
+            assert_eq!(config.behavior().wallpaper_effect, "off");
+        }
+        config.inner.behavior.wallpaper_astronomy_layout = "fill".into();
+        let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        let loaded = Config { inner: loaded };
+        assert!(
+            loaded
+                .diagnostics()
+                .issues()
+                .iter()
+                .any(|issue| issue.path == "behavior.wallpaper_astronomy_layout"
+                    && issue.level == ConfigDiagnosticLevel::Error)
         );
     }
 

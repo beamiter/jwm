@@ -15,6 +15,27 @@ W,H=int(os.environ.get("PREVIEW_WIDTH",960)),int(os.environ.get("PREVIEW_HEIGHT"
 helper=ROOT/'astronomy_values.rs'
 helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\nfn main() { let a: Vec<String> = std::env::args().collect(); let t:f64=a[1].parse().unwrap(); let o:i32=a[2].parse().unwrap(); let v=astronomy::solar_direction(t); println!("{} {} {} {}", v[0], v[1], v[2], astronomy::viewing_longitude(t,o)); }')
 subprocess.run([shutil.which('rustc') or 'rustc', str(helper), '-Awarnings', '-o', str(ROOT/'astronomy_values')],check=True)
+# Invoke the production Rust geometry planner; do not copy coordinate policy to Python.
+planner=ROOT/'astronomy_plan.rs'
+planner.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\n'+r"""
+fn main() {
+ let a:Vec<String>=std::env::args().skip(1).collect();
+ let n:Vec<i64>=a.iter().map(|x|x.parse().unwrap()).collect();
+ let outputs:Vec<_>=n[7..].chunks_exact(4).map(|v|(v[0] as i32,v[1] as i32,v[2] as u32,v[3] as u32)).collect();
+ let repair=if n[3]<0 {None} else {Some((n[3] as i32,n[4] as i32,n[5] as i32,n[6] as i32))};
+ let plan=astronomy::astronomy_draw_plan((n[0] as u32,n[1] as u32),&outputs,n[2]!=0,repair);
+ print!("[");
+ for (i,d) in plan.iter().enumerate() {
+  if i>0 {print!(",");}
+  print!("{{\"origin\":[{},{}],\"size\":[{},{}],\"radius\":{},\"clip\":[{},{},{},{}]}}",d.origin[0],d.origin[1],d.size[0],d.size[1],d.radius,d.clip.0,d.clip.1,d.clip.2,d.clip.3);
+ }
+ println!("]");
+}
+""")
+subprocess.run([shutil.which('rustc') or 'rustc',str(planner),'-Awarnings','-o',str(ROOT/'astronomy_plan')],check=True)
+def layout_plan(width,height,outputs,per_output=True,repair=None):
+ args=[width,height,int(per_output),*(repair if repair is not None else (-1,0,0,0)),*(v for output in outputs for v in output)]
+ return json.loads(subprocess.check_output([str(ROOT/'astronomy_plan'),*map(str,args)]))
 BASE=datetime.datetime(2026,10,15,tzinfo=datetime.timezone.utc).timestamp()
 E=C.CDLL('libEGL.so.1'); P=C.c_void_p; I=C.c_int; U=C.c_uint; F=C.c_float
 E.eglGetProcAddress.argtypes=[C.c_char_p]; E.eglGetProcAddress.restype=P
@@ -65,6 +86,8 @@ for es in (False,True):
  gl('glViewport',None,[I,I,I,I])(0,0,W,H)
  loc=gl('glGetUniformLocation',I,[U,C.c_char_p]); unif1i=gl('glUniform1i',None,[I,I]);unif1f=gl('glUniform1f',None,[I,F])
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),W,H)
+ gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),0,0)
+ unif1f(loc(prog,b'sphere_radius'),layout_plan(W,H,[],False)[0]['radius'])
  tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex));gl('glBindTexture',None,[U,U])(0x0DE1,tex)
  param=gl('glTexParameteri',None,[U,U,I])
  for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
@@ -103,6 +126,8 @@ for es in (False,True):
  assert current(d,wide,wide,ctx)
  gl('glViewport',None,[I,I,I,I])(0,0,5120,1440)
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),5120,1440)
+ gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),0,0)
+ unif1f(loc(prog,b'sphere_radius'),layout_plan(5120,1440,[],False)[0]['radius'])
  values=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),str(PREVIEW_INSTANT),str(8*3600)]).split()))
  gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3]);unif1f(loc(prog,b'view_longitude'),values[3])
  gl('glDrawArrays',None,[U,I,I])(4,0,3)
@@ -113,6 +138,68 @@ for es in (False,True):
  im.save(ROOT/f'{kind}-earth-dualoutput-5120x1440.png')
  # Physical labels can be (-2560,0)+(0,0); root framebuffer positions remain 0..5120.
  results[kind]['dualoutput']={'utc_instant':datetime.datetime.fromtimestamp(PREVIEW_INSTANT,datetime.timezone.utc).isoformat(),'view_offset_hours':8,'size':[5120,1440],'earth_center':[2560,720],'earth_radius':604.8,'opaque':True,'expected':'One globe spans output boundary; no per-monitor duplication.'}
+ # Execute actual production geometry plans with the actual shader in both APIs.
+ # This validates pixel mapping; Rust compositor integration/state restoration is
+ # separately covered by its production tests and source review.
+ enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
+ scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
+ clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
+ def layout_image(width,height,outputs,repair=None):
+  target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
+  assert current(d,target,target,ctx)
+  gl('glViewport',None,[I,I,I,I])(0,0,width,height)
+  disable(0x0C11);clear_color(7/255,11/255,19/255,1);clear(0x4000)
+  plan=layout_plan(width,height,outputs,repair=repair)
+  for draw_plan in plan:
+   enable(0x0C11);scissor(*draw_plan['clip'])
+   gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),*draw_plan['origin'])
+   gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),*draw_plan['size'])
+   unif1f(loc(prog,b'sphere_radius'),draw_plan['radius'])
+   gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  if repair is None: disable(0x0C11)
+  else: enable(0x0C11);scissor(*repair)
+  pixels=(C.c_ubyte*(width*height*4))();read(0,0,width,height,0x1908,0x1401,pixels)
+  assert gl('glGetError',U,[])()==0
+  output=Image.frombytes('RGBA',(width,height),bytes(pixels)).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+  assert output.getchannel('A').getextrema()==(255,255)
+  current(d,None,None,None);egl('eglDestroySurface',U,[P,P])(d,target)
+  return output,plan
+ layout_cases={
+  'per-output-dual-5120x1440':(5120,1440,[(0,0,2560,1440),(2560,0,2560,1440)]),
+  'per-output-mixed-3000x1920':(3000,1920,[(0,0,1920,1080),(1920,0,1080,1920)]),
+  'per-output-negative-2560x1440':(2560,1440,[(-1280,0,2560,1440),(1280,0,1280,1440)]),
+  'per-output-gap-3000x1800':(3000,1800,[(0,0,1800,1080),(1800,720,1200,1080)]),
+ }
+ layout_metrics=[]
+ for name,(width,height,outputs) in layout_cases.items():
+  output,plan=layout_image(width,height,outputs)
+  output.save(ROOT/f'{kind}-{name}.png')
+  layout_metrics.append({'file':f'{kind}-{name}.png','size':[width,height],'outputs':outputs,'plan':plan})
+  if name=='per-output-dual-5120x1440':
+   assert ImageChops.difference(output.crop((0,0,2560,1440)).convert('RGB'),output.crop((2560,0,5120,1440)).convert('RGB')).getbbox() is None
+  if name=='per-output-mixed-3000x1920':
+   assert all(v['radius']<=min(v['size'])*0.42+0.001 for v in plan)
+   assert output.getpixel((100,1800))==(7,11,19,255), 'output gap must preserve static background'
+  if name=='per-output-negative-2560x1440':
+   full,_=layout_image(2560,1440,[(0,0,2560,1440)])
+   assert ImageChops.difference(output.crop((0,0,1280,1440)).convert('RGB'),full.crop((1280,0,2560,1440)).convert('RGB')).getbbox() is None, 'negative canvas recentered when clipped'
+ # Repairs must preserve every untouched pixel, including between outputs.
+ small_outputs=[(0,0,320,240),(320,0,320,240)]
+ full,_=layout_image(640,240,small_outputs)
+ repair=(300,70,40,50)
+ partial,_=layout_image(640,240,small_outputs,repair)
+ expected=Image.new('RGBA',(640,240),(7,11,19,255));box=(300,120,340,170)
+ expected.paste(full.crop(box),box)
+ assert ImageChops.difference(expected.convert('RGB'),partial.convert('RGB')).getbbox() is None
+ duplicate,_=layout_image(640,240,[*small_outputs,small_outputs[0]])
+ assert ImageChops.difference(full.convert('RGB'),duplicate.convert('RGB')).getbbox() is None
+ overlap=[(0,0,400,240),(240,0,400,240)]
+ first,_=layout_image(640,240,overlap);second,_=layout_image(640,240,list(reversed(overlap)))
+ assert ImageChops.difference(first.convert('RGB'),second.convert('RGB')).getbbox() is None
+ invalid,plan=layout_image(320,240,[(400,0,100,100)])
+ assert not plan and invalid.getpixel((160,120))==(7,11,19,255)
+ results[kind]['layouts']=layout_metrics
+ results[kind]['layout_pixel_assertions']='PASS: dual centers, portrait radius, gaps, negative clipping, repairs, mirror dedup, stable overlaps, outside-root'
  current(d,None,None,None)
  egl('eglDestroySurface',U,[P,P])(d,wide)
  current(d,None,None,None)
@@ -123,7 +210,10 @@ results['source_sha256']=hashlib.sha256(source.encode()).hexdigest()
 for a,b in zip(results['gl330']['metrics'],results['gles300']['metrics']):
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
  assert max(v[1] for v in delta.getextrema()) <= 1, (a['file'],delta.getextrema())
-print('PASS: GLSL/GLES, opaque frames, stationary sky, UTC motion; output:',ROOT)
+for a,b in zip(results['gl330']['layouts'],results['gles300']['layouts']):
+ delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
+ assert max(v[1] for v in delta.getextrema()) <= 1, (a['file'],delta.getextrema())
+print('PASS: GLSL/GLES, opaque frames, stationary sky, UTC motion, production multi-output plans; output:',ROOT)
 
 (ROOT/'earth-validation.json').write_text(json.dumps(results,indent=2)+'\n')
 print(json.dumps(results,indent=2))

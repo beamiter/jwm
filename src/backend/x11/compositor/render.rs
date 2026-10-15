@@ -6203,7 +6203,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         if !astronomy_occluded {
-            self.draw_astronomy_wallpaper();
+            self.draw_astronomy_wallpaper(use_scissor.then_some(damage_scissor));
         }
 
         // A restored X window is already at its final server-side geometry so

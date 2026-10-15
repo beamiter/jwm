@@ -467,3 +467,175 @@ mod first_effect_frame_tests {
         assert!(covered(false, 1.0, 1.0005, false));
     }
 }
+
+/// One canvas in root framebuffer coordinates. Clip is GL bottom-left;
+/// origin and size retain the original canvas even when only part is visible.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AstronomyDraw {
+    pub(crate) origin: [f32; 2],
+    pub(crate) size: [f32; 2],
+    pub(crate) radius: f32,
+    pub(crate) clip: (i32, i32, i32, i32),
+}
+
+impl AstronomyDraw {
+    /// Intersection used by the production draw loop without allocating.
+    pub(crate) fn repair_clip(
+        &self,
+        repair: Option<(i32, i32, i32, i32)>,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let a = self.clip;
+        let Some(b) = repair else {
+            return Some(a);
+        };
+        if b.2 <= 0 || b.3 <= 0 {
+            return None;
+        }
+        let x = i64::from(a.0).max(i64::from(b.0));
+        let y = i64::from(a.1).max(i64::from(b.1));
+        let right = (i64::from(a.0) + i64::from(a.2)).min(i64::from(b.0) + i64::from(b.2));
+        let top = (i64::from(a.1) + i64::from(a.3)).min(i64::from(b.1) + i64::from(b.3));
+        (right > x && top > y).then_some((x as i32, y as i32, (right - x) as i32, (top - y) as i32))
+    }
+}
+
+/// Bounded, deterministic layout. Span, absent geometry, and excessive output
+/// counts use the compatible root canvas. Known but invisible outputs do not.
+/// Outputs use X11 top-left coordinates; repair uses GL bottom-left coordinates.
+pub(crate) fn astronomy_draw_plan(
+    screen: (u32, u32),
+    outputs: &[(i32, i32, u32, u32)],
+    per_output: bool,
+    repair: Option<(i32, i32, i32, i32)>,
+) -> Vec<AstronomyDraw> {
+    let (sw, sh) = (i64::from(screen.0), i64::from(screen.1));
+    if sw == 0 || sh == 0 || sw > i64::from(i32::MAX) || sh > i64::from(i32::MAX) {
+        return Vec::new();
+    }
+    let independent = per_output && !outputs.is_empty() && outputs.len() <= 128;
+    let mut canvases = if independent {
+        outputs.to_vec()
+    } else {
+        vec![(0, 0, screen.0, screen.1)]
+    };
+    // Mirrors draw once. Partial overlaps have stable lexicographic painter
+    // order, independent of server enumeration; later canvases win.
+    canvases.sort_unstable();
+    canvases.dedup();
+    canvases
+        .into_iter()
+        .filter_map(|(x, y, w, h)| {
+            if w == 0 || h == 0 {
+                return None;
+            }
+            let (x, y, w64, h64) = (i64::from(x), i64::from(y), i64::from(w), i64::from(h));
+            let bottom = sh - y - h64;
+            let (left, low, right, high) = (
+                x.max(0),
+                bottom.max(0),
+                (x + w64).min(sw),
+                (bottom + h64).min(sh),
+            );
+            if left >= right || low >= high {
+                return None;
+            }
+            let mut draw = AstronomyDraw {
+                origin: [x as f32, bottom as f32],
+                size: [w as f32, h as f32],
+                radius: if independent {
+                    w.min(h) as f32 * 0.42
+                } else {
+                    h as f32 * 0.42
+                },
+                clip: (
+                    left as i32,
+                    low as i32,
+                    (right - left) as i32,
+                    (high - low) as i32,
+                ),
+            };
+            draw.clip = draw.repair_clip(repair)?;
+            Some(draw)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn span_and_missing_geometry_preserve_root_canvas() {
+        let span = astronomy_draw_plan((5120, 1440), &[], false, None);
+        assert_eq!(span[0].origin, [0.0, 0.0]);
+        assert_eq!(span[0].size, [5120.0, 1440.0]);
+        assert_eq!(span[0].radius, 1440.0 * 0.42);
+        assert_eq!(span, astronomy_draw_plan((5120, 1440), &[], true, None));
+        assert_eq!(
+            span,
+            astronomy_draw_plan((5120, 1440), &vec![(0, 0, 1, 1); 129], true, None)
+        );
+    }
+    #[test]
+    fn dual_and_portrait_keep_independent_centers() {
+        let p = astronomy_draw_plan(
+            (4000, 2560),
+            &[(0, 0, 2560, 1440), (2560, 0, 1440, 2560)],
+            true,
+            None,
+        );
+        assert_eq!(p[0].origin, [0.0, 1120.0]);
+        assert_eq!(p[1].origin, [2560.0, 0.0]);
+        assert_eq!(p[0].radius, p[1].radius);
+        assert_eq!(p[1].radius, 1440.0 * 0.42);
+    }
+    #[test]
+    fn clipped_output_and_repair_never_recenter_canvas() {
+        let p = astronomy_draw_plan(
+            (100, 100),
+            &[(-50, -20, 100, 100)],
+            true,
+            Some((10, 30, 20, 40)),
+        );
+        assert_eq!(p[0].origin, [-50.0, 20.0]);
+        assert_eq!(p[0].size, [100.0, 100.0]);
+        assert_eq!(p[0].clip, (10, 30, 20, 40));
+        assert!(
+            astronomy_draw_plan(
+                (100, 100),
+                &[(200, 0, 100, 100), (0, 0, 0, 100)],
+                true,
+                None
+            )
+            .is_empty()
+        );
+        assert!(astronomy_draw_plan((100, 100), &[], true, Some((0, 0, -1, 10))).is_empty());
+    }
+    #[test]
+    fn mirrors_and_overlap_have_stable_order() {
+        let a = [(0, 0, 80, 80), (20, 20, 80, 80), (0, 0, 80, 80)];
+        let b = [a[1], a[0], a[2]];
+        let p = astronomy_draw_plan((100, 100), &a, true, None);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p, astronomy_draw_plan((100, 100), &b, true, None));
+        assert_eq!(p[1].origin, [20.0, 0.0]);
+    }
+    #[test]
+    fn holes_stay_empty_and_arithmetic_is_bounded() {
+        let p = astronomy_draw_plan(
+            (200, 200),
+            &[(0, 0, 100, 200), (100, 100, 100, 100)],
+            true,
+            Some((100, 100, 100, 100)),
+        );
+        assert!(p.is_empty());
+        assert!(astronomy_draw_plan((0, 100), &[], true, None).is_empty());
+        assert!(astronomy_draw_plan((u32::MAX, 100), &[], true, None).is_empty());
+        let p = astronomy_draw_plan(
+            (100, 100),
+            &[(i32::MIN, i32::MIN, u32::MAX, u32::MAX)],
+            true,
+            None,
+        );
+        assert_eq!(p[0].clip, (0, 0, 100, 100));
+    }
+}

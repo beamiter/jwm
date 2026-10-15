@@ -1,7 +1,8 @@
 //! Astronomy is a wallpaper material, rendered below every client window.
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
-    POWER_QUERY_INTERVAL, WallpaperClock, resolve_earth_texture, solar_direction, viewing_longitude,
+    AstronomyDraw, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
+    resolve_earth_texture, solar_direction, viewing_longitude,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,9 +26,54 @@ pub(super) struct AstronomyWallpaper {
     sample_unix: f64,
     sample_offset: i32,
     frame_changed: bool,
+    layout: String,
+    draw_plan: Vec<AstronomyDraw>,
+    layout_screen: (u32, u32),
+    layout_outputs: Vec<(i32, i32, u32, u32)>,
 }
 
 impl AstronomyWallpaper {
+    /// Rebuild only on material layout/topology changes, never on ordinary damage.
+    fn update_layout(
+        &mut self,
+        enabled: bool,
+        layout: &str,
+        screen: (u32, u32),
+        outputs: impl Iterator<Item = (i32, i32, u32, u32)> + Clone,
+    ) -> bool {
+        let a = self;
+        let per_output = layout == "per-output";
+        let output_count = if enabled && per_output {
+            outputs.clone().take(129).count()
+        } else {
+            0
+        };
+        let topology_changed = a.layout_outputs.len() != output_count
+            || (enabled
+                && per_output
+                && a.layout_outputs
+                    .iter()
+                    .zip(outputs.clone())
+                    .any(|(old, m)| *old != m));
+        let mut layout_changed = a.layout != layout || a.layout_screen != screen;
+        if layout_changed || topology_changed || a.enabled != enabled {
+            a.layout_outputs.clear();
+            if enabled && per_output {
+                a.layout_outputs.extend(outputs.take(129));
+            }
+            let plan = if enabled {
+                astronomy_draw_plan(screen, &a.layout_outputs, per_output, None)
+            } else {
+                Vec::new()
+            };
+            layout_changed |= a.draw_plan != plan;
+            a.draw_plan = plan;
+            a.layout.clear();
+            a.layout.push_str(layout);
+            a.layout_screen = screen;
+        }
+        layout_changed
+    }
     fn observe_power(&mut self, now: Instant, reply: Option<bool>) -> bool {
         let powered = reply == Some(true);
         let changed = self.powered != powered;
@@ -71,7 +117,16 @@ impl<C: CompositorConnection> Compositor<C> {
         let enabled = cfg.behavior().wallpaper_effect == "astronomy";
         let configured = &cfg.behavior().wallpaper_earth_texture;
         let offset_seconds = cfg.behavior().wallpaper_timezone_offset_hours * 3600;
+        let layout = &cfg.behavior().wallpaper_astronomy_layout;
         let a = &mut self.astronomy_wallpaper;
+        let layout_changed = a.update_layout(
+            enabled,
+            layout,
+            (self.screen_w, self.screen_h),
+            self.monitor_wallpapers
+                .iter()
+                .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h)),
+        );
         let changed = a.enabled != enabled || a.configured_path != *configured;
         if changed {
             a.enabled = enabled;
@@ -101,7 +156,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         if !a.enabled || a.failed {
-            return changed;
+            return changed || layout_changed;
         }
         let power_changed = if a
             .last_power_query
@@ -125,12 +180,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 .unwrap_or_default()
                 .as_secs_f64();
         }
-        a.frame_changed = changed || power_changed || timezone_changed || tick;
+        a.frame_changed = changed || layout_changed || power_changed || timezone_changed || tick;
         a.frame_changed
     }
 
     /// Called with a current context, after the normal static wallpaper pass.
-    pub(super) fn draw_astronomy_wallpaper(&mut self) {
+    pub(super) fn draw_astronomy_wallpaper(&mut self, repair: Option<(i32, i32, i32, i32)>) {
         let a = &mut self.astronomy_wallpaper;
         unsafe {
             for tex in a.retired.drain(..) {
@@ -203,11 +258,6 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             let gl = &self.gl;
             gl.use_program(Some(program));
-            gl.uniform_2_f32(
-                gl.get_uniform_location(program, "resolution").as_ref(),
-                self.screen_w as f32,
-                self.screen_h as f32,
-            );
             gl.uniform_3_f32(
                 gl.get_uniform_location(program, "sun_direction").as_ref(),
                 sun[0],
@@ -222,7 +272,38 @@ impl<C: CompositorConnection> Compositor<C> {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.quad_vao));
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.enable(glow::SCISSOR_TEST);
+            for canvas in &a.draw_plan {
+                let clip = if let Some(repair) = repair {
+                    let Some(clip) = canvas.repair_clip(Some(repair)) else {
+                        continue;
+                    };
+                    clip
+                } else {
+                    canvas.clip
+                };
+                gl.scissor(clip.0, clip.1, clip.2, clip.3);
+                gl.uniform_2_f32(
+                    gl.get_uniform_location(program, "canvas_origin").as_ref(),
+                    canvas.origin[0],
+                    canvas.origin[1],
+                );
+                gl.uniform_2_f32(
+                    gl.get_uniform_location(program, "resolution").as_ref(),
+                    canvas.size[0],
+                    canvas.size[1],
+                );
+                gl.uniform_1_f32(
+                    gl.get_uniform_location(program, "sphere_radius").as_ref(),
+                    canvas.radius,
+                );
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+            if let Some(clip) = repair {
+                gl.scissor(clip.0, clip.1, clip.2, clip.3);
+            } else {
+                gl.disable(glow::SCISSOR_TEST);
+            }
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_vertex_array(None);
             gl.use_program(None);
@@ -233,6 +314,42 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_updates_preserve_image_lifecycle_and_ignore_stable_frames() {
+        let mut a = AstronomyWallpaper::default();
+        a.path = "loaded-earth.jpg".into();
+        a.configured_path = "configured-earth.jpg".into();
+        a.failed = true;
+        let outputs = [(0, 0, 100, 100), (100, 0, 100, 100)];
+        assert!(a.update_layout(true, "span", (200, 100), outputs.into_iter()));
+        a.enabled = true;
+        let ptr = a.draw_plan.as_ptr();
+        assert!(!a.update_layout(true, "span", (200, 100), outputs.into_iter()));
+        assert_eq!(ptr, a.draw_plan.as_ptr());
+        assert!(a.update_layout(true, "per-output", (200, 100), outputs.into_iter()));
+        assert_eq!(a.draw_plan.len(), 2);
+        let old = a.draw_plan.clone();
+        assert!(!a.update_layout(true, "per-output", (200, 100), outputs.into_iter().rev()));
+        assert_eq!(a.draw_plan, old);
+        assert!(a.update_layout(
+            true,
+            "per-output",
+            (200, 100),
+            [(0, 0, 200, 100)].into_iter()
+        ));
+        assert!(a.update_layout(
+            true,
+            "per-output",
+            (200, 200),
+            [(0, 0, 200, 100)].into_iter()
+        ));
+        assert_eq!(a.path, "loaded-earth.jpg");
+        assert_eq!(a.configured_path, "configured-earth.jpg");
+        assert!(a.failed);
+        assert!(a.update_layout(false, "per-output", (200, 200), outputs.into_iter()));
+        assert!(a.draw_plan.is_empty());
+    }
 
     #[test]
     fn power_loss_or_query_error_requests_one_fallback_repaint() {

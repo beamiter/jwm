@@ -1190,6 +1190,13 @@ impl Config {
                 None,
             );
         }
+        if !["span", "per-output"].contains(&behavior.wallpaper_astronomy_layout.as_str()) {
+            diagnostics.error(
+                "behavior.wallpaper_astronomy_layout",
+                "expected span or per-output",
+                None,
+            );
+        }
         if !(-12..=14).contains(&behavior.wallpaper_timezone_offset_hours) {
             diagnostics.error(
                 "behavior.wallpaper_timezone_offset_hours",

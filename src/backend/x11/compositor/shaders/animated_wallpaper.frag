@@ -1,6 +1,8 @@
 #version 330 core
 // Astronomy wallpaper: original renderer, NASA equirectangular daytime map.
 uniform vec2 resolution;
+uniform vec2 canvas_origin;
+uniform float sphere_radius;
 uniform vec3 sun_direction;
 uniform float view_longitude;
 uniform sampler2D earth_map;
@@ -52,11 +54,12 @@ vec3 galaxy_background(vec2 pixel) {
     return sky;
 }
 void main() {
-    vec2 p = (gl_FragCoord.xy - resolution * 0.5) / max(resolution.y * 0.42, 1.0);
+    vec2 pixel = gl_FragCoord.xy - canvas_origin;
+    vec2 p = (pixel - resolution * 0.5) / max(sphere_radius, 1.0);
     float radius2 = dot(p, p);
     if (radius2 > 1.0) {
         float halo = exp(-24.0 * (sqrt(radius2) - 1.0));
-        frag_color = vec4(galaxy_background(gl_FragCoord.xy) + vec3(0.025, 0.075, 0.15) * halo, 1.0);
+        frag_color = vec4(galaxy_background(pixel) + vec3(0.025, 0.075, 0.15) * halo, 1.0);
         return;
     }
     vec3 n = vec3(p, sqrt(max(0.0, 1.0 - radius2)));
