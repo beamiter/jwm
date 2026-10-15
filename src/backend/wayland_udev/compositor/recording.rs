@@ -804,6 +804,12 @@ impl RecordingState {
         self.capture_texture = 0;
     }
 
+    /// Retain the current sink's failure even after capture clears `active`.
+    /// Stop takes the sink, retiring its signal before a replacement session.
+    pub(crate) fn failed(&self) -> bool {
+        self.sink.as_ref().is_some_and(|sink| sink.is_broken())
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.active
     }
@@ -1044,6 +1050,15 @@ impl RecordingState {
     #[cfg(test)]
     pub(crate) const fn gpu_resources_for_tests(&self) -> ([u32; 2], u32, u32) {
         (self.pbo, self.capture_fbo, self.capture_texture)
+    }
+
+    /// CPU-only lifecycle fixture: no encoder, media file or GPU allocation.
+    #[cfg(test)]
+    pub(crate) fn with_sink_for_tests(sink: RecordingSink, active: bool) -> Self {
+        let mut state = Self::new();
+        state.sink = Some(sink);
+        state.active = active;
+        state
     }
 
     /// An inactive recorder whose `canvas` was sized for a region of

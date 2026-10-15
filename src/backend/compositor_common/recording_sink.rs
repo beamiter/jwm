@@ -521,6 +521,27 @@ impl std::fmt::Display for RecordingSinkStats {
 }
 
 #[cfg(test)]
+impl RecordingSink {
+    /// A process-free sink exposing the same failure flag as the real writer.
+    pub(crate) fn with_failure_flag_for_tests(broken: Arc<AtomicBool>) -> Self {
+        let (frames, _receiver) = sync_channel(QUEUE_DEPTH);
+        let (_recycled, recycled) = sync_channel(POOL_DEPTH);
+        let (_reporter, completion) = writer_completion_channel();
+        Self {
+            frames: Some(frames),
+            recycled,
+            pool: Vec::new(),
+            frame_size: 0,
+            broken,
+            dropped: Arc::new(AtomicU64::new(0)),
+            submitted: 0,
+            writer: None,
+            completion,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn encoder_exit_proof_tracks_reaping_independently_of_cleanup_errors() {

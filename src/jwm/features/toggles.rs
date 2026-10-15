@@ -6929,6 +6929,8 @@ pub(crate) mod keyboard_grab_tests {
         recording_reporters: Vec<crate::backend::recording_admission::RecordingStartReporter>,
         recording_stop_calls: usize,
         recording_broken: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        #[cfg(feature = "backend-wayland-udev")]
+        wayland_recording: Option<crate::backend::wayland_udev::compositor::TestRecordingLifecycle>,
         recording_tracks_exit: bool,
         recording_stop_receipts:
             std::collections::VecDeque<crate::backend::recording_completion::RecordingStopReceipt>,
@@ -6962,6 +6964,8 @@ pub(crate) mod keyboard_grab_tests {
                 recording_reporters: Vec::new(),
                 recording_stop_calls: 0,
                 recording_broken: None,
+                #[cfg(feature = "backend-wayland-udev")]
+                wayland_recording: None,
                 recording_tracks_exit: false,
                 recording_stop_receipts: std::collections::VecDeque::new(),
                 recording_crop_updates: Vec::new(),
@@ -6997,6 +7001,10 @@ pub(crate) mod keyboard_grab_tests {
                 false,
             )));
             self.recording_requests.push((path.into(), region));
+            #[cfg(feature = "backend-wayland-udev")]
+            if let Some(recording) = self.wayland_recording.as_mut() {
+                recording.start(path, region);
+            }
             match self.recording_start_error {
                 Some(error) => Err(crate::backend::error::BackendError::Message(error.into())),
                 None => Ok(()),
@@ -7034,9 +7042,19 @@ pub(crate) mod keyboard_grab_tests {
         fn compositor_stop_recording(&mut self) {
             self.recording_stop_calls += 1;
             self.recording_broken = None;
+            #[cfg(feature = "backend-wayland-udev")]
+            {
+                if let Some(recording) = self.wayland_recording.as_mut() {
+                    recording.stop();
+                }
+            }
         }
 
         fn compositor_recording_failed(&self) -> bool {
+            #[cfg(feature = "backend-wayland-udev")]
+            if let Some(recording) = &self.wayland_recording {
+                return recording.failed();
+            }
             self.recording_broken
                 .as_ref()
                 .is_some_and(|broken| broken.load(Ordering::Relaxed))
@@ -9357,6 +9375,105 @@ pub(crate) mod keyboard_grab_tests {
         assert_eq!(backend.recording_stop_calls, 0);
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn wayland_encoder_failure_survives_inactive_capture_and_settles_status() {
+        use crate::backend::compositor_common::recording_sink::RecordingSink;
+        use crate::backend::wayland_udev::compositor::TestRecordingLifecycle;
+
+        for capture_active in [true, false] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            jwm.submit_preflighted_recording_region(
+                &mut backend,
+                "never-created.mp4",
+                Rect::new(0, 0, 640, 480),
+                false,
+            )
+            .unwrap();
+            let broken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            backend.wayland_recording = Some(TestRecordingLifecycle::new(
+                RecordingSink::with_failure_flag_for_tests(broken.clone()),
+                capture_active,
+            ));
+            backend.toasts.clear();
+            // Inactive alone is not a failure; missing stats must not decide it.
+            assert!(!jwm.poll_recording_failure(&mut backend));
+            assert!(jwm.features.recording.active);
+            broken.store(true, Ordering::Relaxed);
+            assert!(jwm.poll_recording_failure(&mut backend));
+            assert!(!jwm.features.recording.active);
+            assert_eq!(backend.recording_stop_calls, 1);
+            assert_eq!(backend.toast_titles(), vec!["\u{f03d}  Recording failed"]);
+            let response =
+                jwm.handle_ipc_query("get_recording_status", &serde_json::json!({}), &mut backend);
+            assert!(response.success);
+            let data = response.data.unwrap();
+            assert_eq!(data["active"], false);
+            assert!(
+                data["last_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not been confirmed saved")
+            );
+            assert!(!jwm.poll_recording_failure(&mut backend));
+            assert_eq!(backend.recording_stop_calls, 1);
+            assert!(!jwm.features.recording.finalized);
+        }
+    }
+
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn wayland_stopped_sink_cannot_fail_replacement_before_deferred_render() {
+        use crate::backend::compositor_common::recording_sink::RecordingSink;
+        use crate::backend::wayland_udev::compositor::TestRecordingLifecycle;
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.submit_preflighted_recording_region(
+            &mut backend,
+            "old-never-created.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+        )
+        .unwrap();
+        let old = Arc::new(AtomicBool::new(true));
+        backend.wayland_recording = Some(TestRecordingLifecycle::new(
+            RecordingSink::with_failure_flag_for_tests(old),
+            false,
+        ));
+        assert!(jwm.poll_recording_failure(&mut backend));
+        // Stop is now queued; the broken sink still physically exists.
+        jwm.submit_preflighted_recording_region(
+            &mut backend,
+            "new-never-created.mp4",
+            Rect::new(0, 0, 640, 480),
+            false,
+        )
+        .unwrap();
+        backend.toasts.clear();
+        assert!(!jwm.poll_recording_failure(&mut backend));
+        let response =
+            jwm.handle_ipc_query("get_recording_status", &serde_json::json!({}), &mut backend);
+        assert_eq!(response.data.unwrap()["active"], true);
+        assert_eq!(backend.recording_stop_calls, 1);
+        // Apply the real queue's Stop -> Start order without GPU/process work.
+        let new = Arc::new(AtomicBool::new(false));
+        backend
+            .wayland_recording
+            .as_mut()
+            .unwrap()
+            .apply_commands(RecordingSink::with_failure_flag_for_tests(new.clone()));
+        assert!(!jwm.poll_recording_failure(&mut backend));
+        assert!(jwm.features.recording.active);
+        new.store(true, Ordering::Relaxed);
+        assert!(jwm.poll_recording_failure(&mut backend));
+        assert!(!jwm.features.recording.active);
+        assert_eq!(backend.recording_stop_calls, 2);
+        assert_eq!(backend.toast_titles(), vec!["\u{f03d}  Recording failed"]);
+    }
+
     #[test]
     fn runtime_encoder_failure_wiring_is_shared_and_checked_before_status_and_after_render() {
         let update = include_str!("../event_dispatcher.rs");
@@ -9382,6 +9499,11 @@ pub(crate) mod keyboard_grab_tests {
                     .find("self.poll_recording_stops(backend);")
                     .unwrap()
         );
+        let wayland = include_str!("../../backend/wayland_udev/backend.rs");
+        assert!(wayland.contains("fn compositor_recording_failed(&self) -> bool"));
+        assert!(wayland.contains("compositor.recording_failed()"));
+        let compositor = include_str!("../../backend/wayland_udev/compositor/mod.rs");
+        assert!(compositor.contains("self.recording.failed()"));
         let delegation = include_str!("../../backend/x11/wm/compositor_delegation.rs");
         assert!(delegation.contains("fn compositor_recording_failed(&self) -> bool"));
         assert!(delegation.contains("compositor.recording_failed()"));

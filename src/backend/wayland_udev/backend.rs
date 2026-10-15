@@ -4927,6 +4927,12 @@ impl CompositorMedia for UdevBackend {
         Some(receipt)
     }
 
+    fn compositor_recording_failed(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|compositor| compositor.recording_failed())
+    }
+
     fn compositor_recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {
         self.compositor.as_ref()?.recording_stats()
     }

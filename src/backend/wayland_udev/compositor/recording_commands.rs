@@ -101,6 +101,13 @@ impl PendingRecordingCommands {
         self.start.is_some()
     }
 
+    /// A queued stop retires the old pipeline logically before GL teardown.
+    /// Its writer outcome belongs to the stop receipt, not a later Start.
+    /// A Start alone is not retirement and must not hide a current failure.
+    pub(super) fn current_pipeline_failed(&self, sink_failed: bool) -> bool {
+        !self.stop && sink_failed
+    }
+
     pub(super) fn has_pending(&self) -> bool {
         self.stop || self.has_start()
     }
@@ -162,6 +169,41 @@ mod tests {
             enabled,
             device: device.into(),
             bitrate: bitrate.into(),
+        }
+    }
+
+    #[test]
+    fn stop_barrier_retires_only_old_pipeline_failure_until_commands_apply() {
+        for tracked_stop in [false, true] {
+            let mut pending = PendingRecordingCommands::default();
+            assert!(pending.current_pipeline_failed(true));
+            // A Start alone can be rejected by an existing pipeline; do not
+            // hide that pipeline's genuine failure merely because it is queued.
+            pending.start("duplicate.mp4".into(), REGION);
+            assert!(pending.current_pipeline_failed(true));
+            if tracked_stop {
+                let (reporter, _receipt) =
+                    crate::backend::recording_completion::recording_stop_channel();
+                pending.stop_tracked(reporter);
+            } else {
+                pending.stop();
+            }
+            assert!(!pending.current_pipeline_failed(true));
+            pending.start("replacement.mp4".into(), REGION);
+            assert!(!pending.current_pipeline_failed(true));
+            let commands = pending.take();
+            assert!(matches!(
+                commands[0].as_ref().unwrap().command,
+                RecordingCommand::Stop
+            ));
+            assert!(matches!(
+                commands[1].as_ref().unwrap().command,
+                RecordingCommand::Start { .. }
+            ));
+            // take/apply is synchronous with GL current: no event/status poll
+            // runs between clearing the barrier and replacing the old sink.
+            assert!(!pending.current_pipeline_failed(false));
+            assert!(pending.current_pipeline_failed(true));
         }
     }
 

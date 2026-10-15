@@ -4676,6 +4676,11 @@ impl WaylandCompositor {
         is_auxiliary_window_id(window_id) || self.override_redirect_windows.contains(&window_id)
     }
 
+    pub(crate) fn recording_failed(&self) -> bool {
+        self.pending_recording
+            .current_pipeline_failed(self.recording.failed())
+    }
+
     pub(crate) fn recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {
         self.recording.stats()
     }
@@ -5238,4 +5243,57 @@ unsafe fn gl_string(gl: &ffi::Gles2, name: ffi::types::GLenum) -> String {
     unsafe { std::ffi::CStr::from_ptr(pointer.cast()) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// CPU-only fixture retaining the production deferred command queue and sink.
+#[cfg(test)]
+pub(crate) struct TestRecordingLifecycle {
+    recording: recording::RecordingState,
+    pending: recording_commands::PendingRecordingCommands,
+}
+
+#[cfg(test)]
+impl TestRecordingLifecycle {
+    pub(crate) fn new(
+        sink: crate::backend::compositor_common::recording_sink::RecordingSink,
+        active: bool,
+    ) -> Self {
+        Self {
+            recording: recording::RecordingState::with_sink_for_tests(sink, active),
+            pending: recording_commands::PendingRecordingCommands::default(),
+        }
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.pending
+            .current_pipeline_failed(self.recording.failed())
+    }
+
+    pub(crate) fn stop(&mut self) {
+        self.pending.stop();
+    }
+
+    pub(crate) fn start(&mut self, path: &str, region: (i32, i32, u32, u32)) {
+        self.pending.start(path.into(), region);
+    }
+
+    pub(crate) fn apply_commands(
+        &mut self,
+        next_sink: crate::backend::compositor_common::recording_sink::RecordingSink,
+    ) {
+        let mut next_sink = Some(next_sink);
+        for ready in self.pending.take().into_iter().flatten() {
+            match ready.command {
+                recording_commands::RecordingCommand::Stop => {
+                    self.recording = recording::RecordingState::new();
+                }
+                recording_commands::RecordingCommand::Start { .. } => {
+                    self.recording = recording::RecordingState::with_sink_for_tests(
+                        next_sink.take().unwrap(),
+                        true,
+                    );
+                }
+            }
+        }
+    }
 }
