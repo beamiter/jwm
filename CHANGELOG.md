@@ -7,6 +7,9 @@ monorepo use independent Semantic Versions.
 
 ### Audit follow-up
 
+- Keep fractional pointer motion, monitor focus and drag snapping on the
+  containing output at display seams, including negative desktop coordinates.
+
 - Keep external dock and desktop surfaces out of application focus traversal
   and activation, including after the last application closes or minimizes.
 - Pair Wayland pointer button delivery across modal, lock and session changes,

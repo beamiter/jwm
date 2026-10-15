@@ -888,8 +888,8 @@ impl InputOps for UdevInputOps {
     fn query_pointer_root(&self) -> Result<(i32, i32, u16, u16), BackendError> {
         let shared = self.shared.lock_safe();
         Ok((
-            shared.pointer_x as i32,
-            shared.pointer_y as i32,
+            shared.pointer_x.floor() as i32,
+            shared.pointer_y.floor() as i32,
             shared.mods_state,
             0,
         ))
@@ -8717,6 +8717,32 @@ mod udev_backend_selection_tests {
         let (x, y) = project_pointer_to_outputs(&outputs, 0.0, 0.0);
         assert!(x < 0.0 && y < 0.0);
         assert_eq!(output_at(&outputs, x, y), Some(OutputId(1)));
+    }
+
+    #[test]
+    fn root_pointer_query_preserves_projected_negative_output_ownership() {
+        let mut output = test_output(OutputId(1), "DP-negative");
+        output.x = -1920;
+        output.y = -1080;
+        let outputs = [output];
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        let input = UdevInputOps {
+            shared: shared.clone(),
+        };
+        for (x, y) in [(-0.25, -0.75), (0.0, 0.0), (-1920.0, -1080.0)] {
+            let projected = project_pointer_to_outputs(&outputs, x, y);
+            {
+                let mut state = shared.lock_safe();
+                state.pointer_x = projected.0;
+                state.pointer_y = projected.1;
+            }
+            let (px, py, _, _) = input.query_pointer_root().unwrap();
+            assert_eq!(
+                output_at(&outputs, f64::from(px), f64::from(py)),
+                Some(OutputId(1)),
+            );
+            assert_eq!(input.get_pointer_position().unwrap(), projected);
+        }
     }
 
     #[test]

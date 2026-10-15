@@ -155,7 +155,9 @@ impl Jwm {
         backend: &mut dyn Backend,
     ) -> Result<(i32, i32), Box<dyn std::error::Error>> {
         let (x, y) = backend.input_ops().get_pointer_position()?;
-        Ok((x as i32, y as i32))
+        // Monitor rectangles are half-open: use the containing pixel, including
+        // for fractional coordinates immediately left of or above zero.
+        Ok((x.floor() as i32, y.floor() as i32))
     }
 
     pub(super) fn recttomon(
@@ -245,6 +247,51 @@ mod tests {
     use crate::core::models::WMClient;
     use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
     use std::time::Duration;
+
+    #[test]
+    fn fractional_pointer_motion_stays_on_the_containing_output() {
+        use crate::backend::api::HitTarget;
+        use crate::core::controller::WMController;
+
+        for (origin, vertical) in [(0, false), (-1920, false), (0, true), (-1080, true)] {
+            let (width, height) = (1920, 1080);
+            let (x, y) = if vertical { (0, origin) } else { (origin, 0) };
+            let (next_x, next_y) = if vertical {
+                (x, y + height)
+            } else {
+                (x + width, y)
+            };
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, x, y, width, height),
+                output(2, next_x, next_y, width, height),
+            ]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let first = jwm.state.monitor_order[0];
+            let second = jwm.state.monitor_order[1];
+            let edge = f64::from(if vertical { next_y } else { next_x });
+            for (coordinate, expected) in [
+                (edge - 0.25, first),
+                (edge.next_down(), first),
+                (edge, second),
+            ] {
+                jwm.suppress_mouse_focus_until = None;
+                let (px, py) = if vertical {
+                    (100.0, coordinate)
+                } else {
+                    (coordinate, 100.0)
+                };
+                <Jwm as WMController>::on_motion_notify(
+                    &mut jwm,
+                    &mut backend,
+                    HitTarget::Background { output: None },
+                    px,
+                    py,
+                    0,
+                );
+                assert_eq!(jwm.state.motion_mon, Some(expected));
+            }
+        }
+    }
 
     #[test]
     fn dropped_windows_follow_largest_overlap_in_every_direction() {

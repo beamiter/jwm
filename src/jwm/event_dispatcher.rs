@@ -834,8 +834,8 @@ impl WMController for Jwm {
                             }
 
                             let (rx, ry) = self.last_mouse_root;
-                            let rx = rx as i32;
-                            let ry = ry as i32;
+                            let rx = rx.floor() as i32;
+                            let ry = ry.floor() as i32;
                             match ctl.mode {
                                 // Snap: releasing a move-drag near a monitor edge
                                 // re-attaches the window into the current layout at
@@ -917,8 +917,8 @@ impl WMController for Jwm {
                                 matches!(interaction_action, Some(InteractionAction::Resize(_)));
                             if !is_resize {
                                 let (rx, ry) = self.last_mouse_root;
-                                let rx = rx as i32;
-                                let ry = ry as i32;
+                                let rx = rx.floor() as i32;
+                                let ry = ry.floor() as i32;
                                 if let Some(mk) = self.recttomon(backend, rx, ry) {
                                     if let Some(plan) = self.plan_drag_snap(mk, rx, ry) {
                                         if let Some(ck) = self.get_selected_client_key() {
@@ -1224,8 +1224,8 @@ impl WMController for Jwm {
                     // Snap preview: show where a drop would land — the layout
                     // slot the window would re-attach to (or reorder into),
                     // or the floating half.
-                    let rx = root_x as i32;
-                    let ry = root_y as i32;
+                    let rx = root_x.floor() as i32;
+                    let ry = root_y.floor() as i32;
                     let preview = match self.drag_ctl.as_ref().map(|c| (c.mode, c.client)) {
                         Some((DragMode::Resize(_) | DragMode::ResizeTiled(_, _), _)) => None,
                         Some((DragMode::Reorder, drag_key)) => self
@@ -1274,11 +1274,13 @@ impl WMController for Jwm {
         }
 
         self.last_mouse_root = (root_x, root_y);
+        // Use the containing pixel so a point just inside a half-open output
+        // cannot round onto its neighbor (or truncate across a negative seam).
         if let Err(e) = self.on_motion_notify_internal(
             backend,
             win_opt,
-            root_x.round() as i32,
-            root_y.round() as i32,
+            root_x.floor() as i32,
+            root_y.floor() as i32,
             time,
         ) {
             error!("Error handling MotionNotify: {:?}", e);
