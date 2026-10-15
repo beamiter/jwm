@@ -249,7 +249,7 @@ impl Jwm {
         pointer: (f64, f64),
     ) -> Option<Rect> {
         let monitor =
-            self.recttomon(backend, pointer.0.round() as i32, pointer.1.round() as i32)?;
+            self.recttomon(backend, pointer.0.floor() as i32, pointer.1.floor() as i32)?;
         let (x, y, width, height) = self.monitor_rect(monitor);
         self.clamp_capture_rect(Rect::new(
             x,
@@ -315,8 +315,10 @@ impl Jwm {
     /// rather than the window the user is pointing at — the WM has to probe
     /// itself from client geometry.
     fn capture_client_at_pointer(&self, pointer: (f64, f64)) -> Option<ClientKey> {
-        let x = pointer.0.round() as i32;
-        let y = pointer.1.round() as i32;
+        // Capture hit tests use half-open rectangles, just like normal pointer
+        // delivery. Rounding can select the adjacent window or output.
+        let x = pointer.0.floor() as i32;
+        let y = pointer.1.floor() as i32;
         let mon_key = self.monitor_at_capture_pointer(x, y)?;
         let config = CONFIG.load();
         let status_bar_name = config.status_bar_name();
@@ -1137,6 +1139,90 @@ mod tests {
                     .find("self.update_fullscreen_clients_on_monitor")
                     .unwrap()
         );
+    }
+
+    #[test]
+    fn monitor_capture_keeps_fractional_pointer_on_its_output() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        for vertical in [false, true] {
+            let (x, y) = if vertical { (0, 1080) } else { (1920, 0) };
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, x, y, 1920, 1080),
+            ]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let edge = f64::from(if vertical { y } else { x });
+            for coordinate in [edge - 0.25, edge.next_down(), edge] {
+                let pointer = if vertical {
+                    (100.0, coordinate)
+                } else {
+                    (coordinate, 100.0)
+                };
+                let expected = if coordinate < edge {
+                    Rect::new(0, 0, 1920, 1080)
+                } else {
+                    Rect::new(x, y, 1920, 1080)
+                };
+                assert_eq!(
+                    jwm.monitor_capture_rect(&mut backend, pointer),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn window_capture_probe_keeps_fractional_pointer_on_its_window() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        for (origin, vertical) in [(0, false), (-1920, false), (0, true), (-1080, true)] {
+            let (x, y) = if vertical { (0, origin) } else { (origin, 0) };
+            let (next_x, next_y) = if vertical {
+                (x, y + 1080)
+            } else {
+                (x + 1920, y)
+            };
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, x, y, 1920, 1080),
+                output(2, next_x, next_y, 1920, 1080),
+            ]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let mut clients = Vec::new();
+            for (index, (cx, cy)) in [(x, y), (next_x, next_y)].into_iter().enumerate() {
+                let monitor = jwm.state.monitor_order[index];
+                let mut client = WMClient::new(WindowId::from_raw(100 + index as u64));
+                client.mon = Some(monitor);
+                client.state.tags = 1;
+                client.state.is_floating = true;
+                client.geometry.x = cx;
+                client.geometry.y = cy;
+                client.geometry.w = 1920;
+                client.geometry.h = 1080;
+                client.geometry.border_w = 0;
+                let key = jwm.insert_client(client);
+                jwm.attach_to_monitor(key, monitor);
+                jwm.attachstack(key);
+                jwm.last_stacking
+                    .insert(monitor, vec![WindowId::from_raw(100 + index as u64)]);
+                clients.push(key);
+            }
+            let edge = f64::from(if vertical { next_y } else { next_x });
+            for (coordinate, expected) in [
+                (edge - 0.25, clients[0]),
+                (edge.next_down(), clients[0]),
+                (edge, clients[1]),
+            ] {
+                let pointer = if vertical {
+                    (100.0, coordinate)
+                } else {
+                    (coordinate, 100.0)
+                };
+                assert_eq!(jwm.capture_client_at_pointer(pointer), Some(expected));
+            }
+        }
     }
 
     #[test]
