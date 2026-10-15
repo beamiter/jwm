@@ -338,7 +338,7 @@ impl App {
         if !self.depth_check_pending {
             return;
         }
-        use raw_window_handle::HasWindowHandle as _;
+        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
         let Ok(handle) = self.window.window_handle() else {
             return;
         };
