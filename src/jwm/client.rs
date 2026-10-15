@@ -1048,6 +1048,11 @@ impl Jwm {
             return;
         };
         let rect = state.floating_rect;
+        let rect = self.restart_floating_restore_rect(
+            backend,
+            client_key,
+            Rect::new(rect.x, rect.y, rect.w, rect.h),
+        );
         let restart_parked = self.restart_client_off_view(backend, client_key);
         let desktop_left = self.desktop_left_edge();
         if let Some(client) = self.state.clients.get_mut(client_key) {
@@ -7126,6 +7131,147 @@ mod unmanage_minimized_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn x11_restart_hand_float_follows_changed_output_geometry() {
+        // Removed right output, moved output with negative origins, moved
+        // negative-origin output, and a smaller mode with an oversized float.
+        for (source_x, source_y, destination, oversized) in [
+            (1920, 0, None, false),
+            (1920, 0, Some((-1920, -1080, 1920, 1080)), false),
+            (-1920, -1080, Some((1920, 0, 1920, 1080)), false),
+            (1920, 0, Some((1920, 0, 800, 600)), true),
+        ] {
+            for off_view in [false, true] {
+                for composited in [false, true] {
+                    let mut backend = ClientSpyBackend::new();
+                    backend.restart_identity = true;
+                    backend.has_compositor = composited;
+                    set_class(&backend, "RestartFixture", "restart-fixture");
+                    let first = backend.output_ops.enumerate_outputs()[0].clone();
+                    let mut source = second_output();
+                    source.x = source_x;
+                    source.y = source_y;
+                    backend.output_ops.overrides = Some(vec![first.clone(), source.clone()]);
+                    let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                    old.suppress_layout_animation = true;
+                    let key = manage_window(&mut old, &mut backend, 0xab01);
+                    let source_monitor = old
+                        .state
+                        .monitor_order
+                        .iter()
+                        .copied()
+                        .find(|key| {
+                            old.output_key_for_monitor(&backend, *key).as_deref()
+                                == Some("Virtual-2")
+                        })
+                        .unwrap();
+                    old.sendmon(&mut backend, Some(key), Some(source_monitor));
+                    old.state.clients[key].state.tags = if off_view { 2 } else { 1 };
+                    for monitor in old.state.monitors.values_mut() {
+                        monitor.tag_set = [1, 1];
+                    }
+                    let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+                    let rect = MinimizedRestoreRect {
+                        x: source_x + 140,
+                        y: source_y + 90,
+                        w: if oversized { 2400 } else { 700 },
+                        h: if oversized { 1500 } else { 500 },
+                    };
+                    *backend.property_ops.floating_restore.lock().unwrap() =
+                        Some(FloatingRestoreState {
+                            floating_rect: rect,
+                        });
+                    backend.output_ops.overrides = Some(if let Some((x, y, w, h)) = destination {
+                        source.x = x;
+                        source.y = y;
+                        source.width = w;
+                        source.height = h;
+                        vec![first, source]
+                    } else {
+                        vec![first]
+                    });
+                    let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                    fresh.suppress_layout_animation = true;
+                    fresh.install_restart_state(&backend, &intent).unwrap();
+                    fresh.restore_restart_monitors(&mut backend);
+                    let key = manage_window(&mut fresh, &mut backend, 0xab01);
+                    let monitor = fresh.state.clients[key].mon.unwrap();
+                    assert_eq!(
+                        fresh.output_key_for_monitor(&backend, monitor).as_deref(),
+                        Some(if destination.is_some() {
+                            "Virtual-2"
+                        } else {
+                            "Virtual-1"
+                        }),
+                    );
+                    let (output, work) = fresh.monitor_migration_areas(monitor).unwrap();
+                    let border = fresh.state.clients[key].geometry.border_w.max(0) * 2;
+                    let expected = if oversized {
+                        Rect::new(work.x, work.y, work.w - border, work.h - border)
+                    } else {
+                        Rect::new(output.x + 140, output.y + 90, 700, 500)
+                    };
+                    let geometry = &fresh.state.clients[key].geometry;
+                    assert_eq!(
+                        Rect::new(
+                            geometry.floating_x,
+                            geometry.floating_y,
+                            geometry.floating_w,
+                            geometry.floating_h,
+                        ),
+                        expected,
+                    );
+                    if off_view {
+                        assert_eq!(geometry.hidden_restore_rect, Some(expected));
+                        assert!(
+                            geometry.x + fresh.state.clients[key].total_width()
+                                <= fresh.desktop_left_edge()
+                        );
+                    }
+                    fresh.finish_restart_adoption(&mut backend);
+                    fresh.consume_restart_state(&backend, &intent);
+                    fresh.state.monitors[monitor].tag_set = [if off_view { 2 } else { 1 }; 2];
+                    fresh.show_client(&mut backend, key);
+                    let geometry = &fresh.state.clients[key].geometry;
+                    assert_eq!(
+                        Rect::new(geometry.x, geometry.y, geometry.w, geometry.h),
+                        expected,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn x11_restart_unchanged_output_preserves_partial_offscreen_hand_float() {
+        let (old, mut backend, _) = restart_fixture();
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let rect = MinimizedRestoreRect {
+            x: -100,
+            y: -50,
+            w: 700,
+            h: 500,
+        };
+        *backend.property_ops.floating_restore.lock().unwrap() = Some(FloatingRestoreState {
+            floating_rect: rect,
+        });
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        let key = manage_window(&mut fresh, &mut backend, 0xab01);
+        assert_eq!(
+            fresh.state.clients[key].geometry.hidden_restore_rect,
+            Some(Rect::new(-100, -50, 700, 500)),
+        );
+        fresh.finish_restart_adoption(&mut backend);
+        fresh.consume_restart_state(&backend, &intent);
+        let monitor = fresh.state.clients[key].mon.unwrap();
+        fresh.state.monitors[monitor].tag_set = [2, 1];
+        fresh.show_client(&mut backend, key);
+        assert_eq!(fresh.state.clients[key].rect(), (-100, -50, 700, 500));
     }
 
     #[test]

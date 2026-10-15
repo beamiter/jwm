@@ -11,6 +11,7 @@ use crate::backend::common_define::WindowId;
 use crate::config::{CONFIG, MAX_N_MASTER};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey};
+use crate::core::types::Rect;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -651,6 +652,56 @@ impl Jwm {
         client.state.tags = tags;
         self.restart_state.adopted.insert(id);
         Ok(true)
+    }
+
+    /// Rebase a verified restart's hand-float rectangle only when its output
+    /// geometry changed. Ordinary adoption and deliberately partial off-screen
+    /// placement on an unchanged output keep their exact absolute rectangle.
+    pub(super) fn restart_floating_restore_rect(
+        &self,
+        backend: &dyn Backend,
+        key: ClientKey,
+        rect: Rect,
+    ) -> Rect {
+        let Some(client) = self.state.clients.get(key) else {
+            return rect;
+        };
+        let Some(id) =
+            xid(backend, client.win).filter(|id| self.restart_state.adopted.contains(id))
+        else {
+            return rect;
+        };
+        let Some(snapshot) = self.restart_state.snapshot.as_ref() else {
+            return rect;
+        };
+        let Some(saved) = snapshot.clients.iter().find(|saved| saved.xid == id) else {
+            return rect;
+        };
+        let Some((target, work)) = client
+            .mon
+            .and_then(|monitor| self.monitor_migration_areas(monitor))
+        else {
+            return rect;
+        };
+        let source = snapshot.monitors[saved.monitor].output.rect;
+        if source == [target.x, target.y, target.w, target.h] {
+            return rect;
+        }
+        // The snapshot stores output bounds, not work areas. Translate by
+        // output origins first, then clamp to today's work area; otherwise a
+        // top bar's inset would be added twice to the saved vertical offset.
+        let translated = Rect::new(
+            target.x.saturating_add(rect.x.saturating_sub(source[0])),
+            target.y.saturating_add(rect.y.saturating_sub(source[1])),
+            rect.w,
+            rect.h,
+        );
+        super::monitor::translate_and_clamp_restore_rect(
+            translated,
+            None,
+            work,
+            client.geometry.border_w,
+        )
     }
 
     pub(crate) fn finish_restart_adoption(&mut self, backend: &mut dyn Backend) {

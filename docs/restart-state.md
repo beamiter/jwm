@@ -18,7 +18,11 @@ Named scratchpads and shell bars/docks keep their own ownership paths.
 Outputs are matched by unambiguous stable identity and connector, never by a
 reused monitor index. If an output is missing, its clients move to the nearest
 remaining output, retaining their valid tags. Its saved layout does not
-replace that other output's layout. Ambiguous duplicate identities do not
+replace that other output's layout. Hand-float restore rectangles follow a moved
+or resized output, or the replacement for a missing output, and fit its current
+work area including borders. Unchanged output geometry preserves the exact
+saved rectangle, including deliberate partial off-screen placement.
+Ambiguous duplicate identities do not
 silently select the first panel. If the configured tag count shrinks, masks
 are clipped; windows left with no valid tag use their destination's active
 view. A view that becomes all tags uses the all-tags layout slot.

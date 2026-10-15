@@ -138,7 +138,7 @@ fn rebase_work_area(old_monitor: Rect, old_work: Rect, new_monitor: Rect) -> Rec
 /// workarea, then make the complete decorated window fit the destination.
 /// Saturating arithmetic keeps negative-origin and extreme RandR coordinates
 /// deterministic instead of wrapping through the opposite side of the desk.
-fn translate_and_clamp_restore_rect(
+pub(super) fn translate_and_clamp_restore_rect(
     rect: Rect,
     source_work: Option<Rect>,
     target_work: Rect,
