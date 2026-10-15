@@ -1957,6 +1957,8 @@ impl UdevBackend {
 
     fn drop_kms(&mut self) {
         if let Some(old) = self.kms.take() {
+            // A retained device/reference must not retain pending capture replies.
+            old.borrow_mut().cancel_routed_screenshots();
             if let Some(token) = old.borrow_mut().registration_token.take() {
                 let _ = self.event_loop.handle().remove(token);
             }
@@ -7441,6 +7443,10 @@ impl Backend for UdevBackend {
             // method that previously contained the recovery path.
             if let Some(kms) = &self.kms {
                 kms.borrow_mut().recover_stale_frames();
+                // Routed screenshots must terminate even while session/DPMS/
+                // frame-pending gates prevent all rendering.
+                kms.borrow_mut()
+                    .poll_routed_screenshots(&self.state.soft_disabled_outputs);
             }
 
             // Only run compositor + animation work when KMS can actually
@@ -7574,10 +7580,16 @@ impl Backend for UdevBackend {
                         .and_then(|compositor| compositor.next_wakeup())
                 })
                 .flatten();
-            let frame_watchdog_wakeup = self
-                .kms
-                .as_ref()
-                .and_then(|kms| kms.borrow().next_frame_watchdog_wakeup());
+            let frame_watchdog_wakeup = self.kms.as_ref().and_then(|kms| {
+                let kms = kms.borrow();
+                [
+                    kms.next_frame_watchdog_wakeup(),
+                    kms.next_routed_screenshot_wakeup(),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+            });
             let timeout = event_loop_timeout(
                 has_pending_events,
                 poll_session_activation,

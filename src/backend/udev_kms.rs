@@ -1,3 +1,6 @@
+#[path = "udev_screenshot_route.rs"]
+mod screenshot_route;
+
 use crate::sync_ext::MutexExt;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -2809,6 +2812,10 @@ pub(super) struct KmsState {
     cursor_fallback_shadow_ids: Vec<Id>,
 
     screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
+    routed_screenshots: screenshot_route::RoutedQueue<
+        crate::backend::compositor_common::screenshot::ScreenshotRequest,
+        Output,
+    >,
 
     /// Shared queue for pending screencopy frames (from wlr-screencopy-unstable-v1).
     screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
@@ -3596,9 +3603,93 @@ impl KmsState {
         w: u32,
         h: u32,
     ) -> Result<(), crate::backend::compositor_common::screenshot::ScreenshotBusy> {
-        self.screenshot_requests.request_region(path, x, y, w, h)?;
+        // Extend only the validated normal/1 nonprimary case. Legacy primary
+        // and unsupported-layout semantics are deliberately unchanged.
+        if let Some(topology) = self.screenshot_topology()
+            && let Some(route) = screenshot_route::select_nonprimary(&topology, (x, y, w, h))
+        {
+            // Reuse the process-wide queued/readback/worker admission budget.
+            let mut admission =
+                crate::backend::compositor_common::screenshot::ScreenshotQueue::default();
+            admission.request_region(path, x, y, w, h)?;
+            let request = admission
+                .take_all()
+                .pop_front()
+                .expect("just admitted screenshot");
+            self.routed_screenshots
+                .push(request, topology, route, std::time::Instant::now());
+        } else {
+            self.screenshot_requests.request_region(path, x, y, w, h)?;
+        }
         self.needs_render = true;
         Ok(())
+    }
+
+    fn screenshot_topology(&self) -> Option<Vec<screenshot_route::OutputSnapshot<Output>>> {
+        if self.outputs.len() > screenshot_route::MAX_ROUTE_OUTPUTS {
+            return None;
+        }
+        Some(
+            self.outputs
+                .iter()
+                .map(|output| screenshot_route::OutputSnapshot {
+                    identity: output.output.clone(),
+                    x: output.origin.0,
+                    y: output.origin.1,
+                    width: output.mode_size.0,
+                    height: output.mode_size.1,
+                    unscaled_normal: !output.drm_mode_uncertain
+                        && output.output.current_scale().fractional_scale() == 1.0
+                        && output.output.current_transform() == Transform::Normal,
+                })
+                .collect(),
+        )
+    }
+
+    pub(super) fn cancel_routed_screenshots(&mut self) {
+        self.routed_screenshots.clear();
+    }
+
+    pub(super) fn next_routed_screenshot_wakeup(&self) -> Option<std::time::Duration> {
+        self.routed_screenshots
+            .next_wakeup(std::time::Instant::now())
+    }
+
+    /// CPU-only maintenance, called even when presentation/session gates close.
+    pub(super) fn poll_routed_screenshots(&mut self, disabled: &HashSet<String>) {
+        use crate::backend::compositor_common::screenshot::ScreenshotRequest;
+        if !self.routed_screenshots.has_pending() {
+            return;
+        }
+        let topology = self.screenshot_topology();
+        let outputs = &self.outputs;
+        let retired = self.routed_screenshots.retire_unservable(
+            topology.as_deref(),
+            |index| {
+                outputs.get(index).is_some_and(|output| {
+                    !output.dpms_off && !disabled.contains(&output.output_name)
+                })
+            },
+            |request| match request {
+                ScreenshotRequest::Full { path, .. } | ScreenshotRequest::Region { path, .. } => {
+                    path.is_cancelled()
+                }
+            },
+            std::time::Instant::now(),
+        );
+        for (request, reason) in retired {
+            let path = match &request {
+                ScreenshotRequest::Full { path, .. } | ScreenshotRequest::Region { path, .. } => {
+                    path
+                }
+            };
+            log::warn!(
+                "[kms] routed screenshot {} dropped: {reason}",
+                path.display()
+            );
+            // Dropping the owned request releases its permit and disconnects
+            // memory receivers. Never reinterpret it in the legacy queue.
+        }
     }
 
     /// Take the latest presentation time (returns None if not updated since last take).
@@ -3666,6 +3757,7 @@ impl KmsState {
     /// color-delivery route decision.
     pub(super) fn capture_readback_pending(&self) -> bool {
         self.screenshot_requests.has_pending()
+            || self.routed_screenshots.has_pending()
             || self
                 .screencopy_pending
                 .as_ref()
@@ -6779,26 +6871,18 @@ impl KmsState {
             log::warn!("screenshot region mapping length mismatch");
             return;
         }
-        let (x, y, cw, ch) = (region.x, region.y, region.width, region.height);
-        let full_row_bytes = width as usize * 4;
-        let crop_row_bytes = cw as usize * 4;
+        let (cw, ch) = (region.width, region.height);
         if path.is_cancelled() {
             return;
         }
-        let mut cropped =
-            match crate::backend::compositor_common::capture::allocate_rgba_capture(cw, ch) {
+        let cropped =
+            match screenshot_route::crop_rgba(full_pixels, width as u32, height as u32, region) {
                 Ok(pixels) => pixels,
                 Err(error) => {
-                    log::warn!("screenshot crop allocation refused: {error}");
+                    log::warn!("screenshot crop refused: {error}");
                     return;
                 }
             };
-        for row in 0..ch as usize {
-            let src_offset = (y as usize + row) * full_row_bytes + (x as usize * 4);
-            let dst_offset = row * crop_row_bytes;
-            cropped[dst_offset..dst_offset + crop_row_bytes]
-                .copy_from_slice(&full_pixels[src_offset..src_offset + crop_row_bytes]);
-        }
 
         spawn_screenshot_png_write(path, cw, ch, cropped, "screenshot-region", permit);
     }
@@ -8306,6 +8390,7 @@ impl KmsState {
             cursor_fallback_shadow_ids: (0..CURSOR_RECTS.len()).map(|_| Id::new()).collect(),
 
             screenshot_requests: Default::default(),
+            routed_screenshots: Default::default(),
             screencopy_pending: None,
             image_capture_pending: None,
             capture_counters: None,
@@ -8413,6 +8498,7 @@ impl KmsState {
         // Ahead of the early return: a capture of a dark or replaced output
         // must be answered even when nothing on screen needs a frame.
         self.fail_unservable_output_captures(&state.soft_disabled_outputs);
+        self.poll_routed_screenshots(&state.soft_disabled_outputs);
         if !self.needs_render || self.color_pipeline_delivery_blocked {
             return;
         }
@@ -9466,6 +9552,44 @@ impl KmsState {
                 }
             }
 
+            // Native region routes already pin output identity and Normal/1
+            // geometry. Only this output can consume its local crop.
+            for (request, local) in self.routed_screenshots.take_for_output(out_idx) {
+                if let crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
+                    path,
+                    permit,
+                    ..
+                } = request
+                {
+                    let source_covers_output = compositor.is_none_or(|comp| {
+                        screenshot_route::output_fits_source(
+                            (ox, oy),
+                            (out_w, out_h),
+                            comp.screen_size(),
+                        )
+                    });
+                    if capture_unavailable || !source_covers_output {
+                        log::error!(
+                            "[kms] routed screenshot {} dropped: encoded output capture view unavailable",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    Self::capture_screenshot_region_impl(
+                        &mut self.renderer,
+                        out_w,
+                        out_h,
+                        &elements,
+                        path,
+                        local.x as i32,
+                        local.y as i32,
+                        local.width,
+                        local.height,
+                        permit,
+                    );
+                }
+            }
+
             // ── wlr-screencopy fulfillment ──────────────────────────────────
             if !capture_unavailable && let Some(ref pending_queue) = self.screencopy_pending {
                 let output_ref = &self.outputs[out_idx].output;
@@ -9912,6 +10036,49 @@ mod screenshot_memory_tests {
             unreachable!()
         };
         permit
+    }
+
+    #[test]
+    fn routed_request_keeps_admission_until_teardown_and_disconnects_receiver() {
+        use super::screenshot_route::{OutputSnapshot, RoutedQueue, select_nonprimary};
+        let topology = vec![
+            OutputSnapshot {
+                identity: 0,
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 3,
+                unscaled_normal: true,
+            },
+            OutputSnapshot {
+                identity: 1,
+                x: 4,
+                y: 0,
+                width: 4,
+                height: 3,
+                unscaled_normal: true,
+            },
+        ];
+        let route = select_nonprimary(&topology, (5, 1, 1, 1)).unwrap();
+        let mut admission = ScreenshotQueue::isolated_for_test();
+        let (sender, receiver, _cancellation) = screenshot_memory_channel();
+        admission
+            .request_region(ScreenshotDestination::Memory(sender), 5, 1, 1, 1)
+            .unwrap();
+        let request = admission.take_all().pop_front().unwrap();
+        let mut routed = RoutedQueue::default();
+        routed.push(request, topology, route, std::time::Instant::now());
+        assert_eq!(admission.in_flight_for_test(), 1);
+        assert!(routed.take_for_output(0).is_empty());
+        assert_eq!(admission.in_flight_for_test(), 1);
+        routed.clear();
+        assert_eq!(admission.in_flight_for_test(), 0);
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::ZERO)
+                .unwrap_err()
+                .contains("disconnected")
+        );
     }
 
     #[test]
