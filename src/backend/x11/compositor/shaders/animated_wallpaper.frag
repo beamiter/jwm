@@ -57,12 +57,16 @@ void main() {
     vec2 pixel = gl_FragCoord.xy - canvas_origin;
     vec2 p = (pixel - resolution * 0.5) / max(sphere_radius, 1.0);
     float radius2 = dot(p, p);
-    if (radius2 > 1.0) {
+    // One framebuffer pixel of analytic silhouette coverage, stable over motion.
+    float edge = max(fwidth(radius2), 0.000001);
+    float coverage = 1.0 - smoothstep(1.0-edge*0.5, 1.0+edge*0.5, radius2);
+    if (coverage <= 0.0) {
         float halo = exp(-24.0 * (sqrt(radius2) - 1.0));
         frag_color = vec4(galaxy_background(pixel) + vec3(0.025, 0.075, 0.15) * halo, 1.0);
         return;
     }
     vec3 n = vec3(p, sqrt(max(0.0, 1.0 - radius2)));
+    if (radius2 > 1.0) n.xy *= inversesqrt(radius2);
     // Gentle fixed northward camera latitude; no inferred user location.
     float latitude = 0.18;
     n.yz = mat2(cos(latitude), -sin(latitude), sin(latitude), cos(latitude)) * n.yz;
@@ -76,5 +80,10 @@ void main() {
     vec3 color = surface * (0.055 + 0.945 * daylight) * (0.4 + 0.6 * max(light, 0.0));
     float rim = pow(1.0 - sqrt(max(0.0, 1.0-radius2)), 3.0);
     color += vec3(0.08, 0.26, 0.48) * rim * (0.15 + 0.85 * daylight);
+    if (coverage < 1.0) {
+        float halo = exp(-24.0 * max(0.0, sqrt(radius2) - 1.0));
+        vec3 sky = galaxy_background(pixel) + vec3(0.025, 0.075, 0.15) * halo;
+        color = mix(sky, color, coverage);
+    }
     frag_color = vec4(color, 1.0);
 }

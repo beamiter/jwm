@@ -107,6 +107,39 @@ for es in (False,True):
   name=f'{kind}-earth-utc{hour:.8f}-zone{zone:+d}.png';im.save(ROOT/name)
   metrics.append({'hour':hour,'zone':zone,'sun_direction':values[:3],'view_longitude':values[3],'file':name,'sha256':hashlib.sha256(im.tobytes()).hexdigest(),'rgb_extrema':im.convert('RGB').getextrema()})
   images.append(im)
+  if hour == 0 and zone == 0:
+   # Actual GPU regression against the same shader with hard silhouette only.
+   # Replacing the AA pass with its old branch must make this assertion fail.
+   assert source.count('if (coverage <= 0.0) {')==1
+   assert source.count('if (coverage < 1.0) {')==1
+   hard_source=source.replace('if (coverage <= 0.0) {','if (radius2 > 1.0) {').replace('if (coverage < 1.0) {','if (false) {')
+   hard_fragment=compile(hard_source,0x8B30)
+   hard_program=gl('glCreateProgram',U,[])();attach(hard_program,vs);attach(hard_program,hard_fragment)
+   gl('glLinkProgram',None,[U])(hard_program);linked=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(hard_program,0x8B82,C.byref(linked));assert linked.value
+   gl('glUseProgram',None,[U])(hard_program)
+   gl('glUniform2f',None,[I,F,F])(loc(hard_program,b'canvas_origin'),0,0)
+   gl('glUniform2f',None,[I,F,F])(loc(hard_program,b'resolution'),W,H)
+   radius=layout_plan(W,H,[],False)[0]['radius']
+   unif1f(loc(hard_program,b'sphere_radius'),radius)
+   gl('glUniform3f',None,[I,F,F,F])(loc(hard_program,b'sun_direction'),*values[:3]);unif1f(loc(hard_program,b'view_longitude'),values[3])
+   unif1i(loc(hard_program,b'earth_map'),0)
+   gl('glDrawArrays',None,[U,I,I])(4,0,3)
+   hard_pixels=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,hard_pixels)
+   assert gl('glGetError',U,[])()==0
+   hard_image=Image.frombytes('RGBA',(W,H),bytes(hard_pixels)).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+   delta=ImageChops.difference(im.convert('RGB'),hard_image.convert('RGB'))
+   red,green,blue=delta.split();mask=ImageChops.lighter(ImageChops.lighter(red,green),blue)
+   changed=0
+   for index,value in enumerate(mask.getdata()):
+    if value:
+     changed+=1
+     x=index%W+0.5-W/2;y=index//W+0.5-H/2
+     assert abs((x*x+y*y)**0.5-radius)<1.5, 'AA changed pixels outside silhouette'
+   assert changed>0, 'silhouette AA disappeared'
+   hard_image.save(ROOT/f'{kind}-hard-silhouette-control.png')
+   gl('glUseProgram',None,[U])(prog)
+   gl('glDeleteProgram',None,[U])(hard_program);gl('glDeleteShader',None,[U])(hard_fragment)
+
  # Fixed sky must never blink with clock/timezone updates. Corners are outside Earth.
  reference=images[0].crop((0,0,W//8,H//8)).convert('RGB')
  assert all(ImageChops.difference(reference,im.crop((0,0,W//8,H//8)).convert('RGB')).getbbox() is None for im in images)
