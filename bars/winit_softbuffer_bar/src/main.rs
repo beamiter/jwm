@@ -2,7 +2,6 @@ use anyhow::Result;
 use log::warn;
 use pango::FontDescription;
 use std::env;
-use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use winit::event_loop::OwnedDisplayHandle;
@@ -104,6 +103,10 @@ impl App {
             Some(surface) => surface,
             None => return Ok(()),
         };
+        // A transient resize failure must not strand later redraws on the
+        // old buffer size. Matching successful dimensions are a backend no-op.
+        xbar_core::surface::prepare_surface_size(width, height, |w, h| surface.resize(w, h))
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         let mut target = surface
             .buffer_mut()
             .map_err(|error| anyhow::anyhow!("softbuffer buffer acquisition failed: {error}"))?;
@@ -125,21 +128,19 @@ impl App {
                 target[row * width_usize..(row + 1) * width_usize].copy_from_slice(source);
             }
         }
-        match frame.damage {
-            Some(rect) if !rect.is_empty() => {
-                let damage = softbuffer::Rect {
-                    x: rect.x,
-                    y: rect.y,
-                    width: NonZeroU32::new(rect.width).expect("checked non-empty"),
-                    height: NonZeroU32::new(rect.height).expect("checked non-empty"),
-                };
-                target.present_with_damage(&[damage])
-            }
-            // First frame, a resize, or an unchanged scene after an expose:
-            // present everything.
-            _ => target.present(),
-        }
-        .map_err(|error| anyhow::anyhow!("softbuffer present failed: {error}"))?;
+        // Match the Tao presenter: a bar is a narrow band, and full presents
+        // avoid stale title pixels on the X11 SHM partial-damage path.
+        target
+            .present()
+            .map_err(|error| anyhow::anyhow!("softbuffer present failed: {error}"))?;
+        // X11 SHM completion is normally deferred until the next acquisition.
+        // Complete it now rather than leaving a title/workspace update queued
+        // until the next one-second clock tick.
+        drop(
+            surface
+                .buffer_mut()
+                .map_err(|error| anyhow::anyhow!("softbuffer completion failed: {error}"))?,
+        );
         let update = self.bar.take_pending_runtime();
         if !update.is_empty() {
             self.handle_runtime_update(update);
@@ -160,9 +161,10 @@ impl App {
         }
         self.logical_size = size.to_logical(self.scale_factor);
         if let Some(surface) = self.soft_surface.as_mut()
-            && let (Some(width), Some(height)) =
-                (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-            && let Err(error) = surface.resize(width, height)
+            && let Err(error) =
+                xbar_core::surface::prepare_surface_size(size.width, size.height, |w, h| {
+                    surface.resize(w, h)
+                })
         {
             warn!("softbuffer resize failed: {error}");
         }
@@ -287,13 +289,10 @@ impl ApplicationHandler<UserEvent> for App {
             .map_err(|error| anyhow::anyhow!("softbuffer surface initialization failed: {error}"))
             .expect("softbuffer surface");
         let size = window.inner_size();
-        if let (Some(width), Some(height)) =
-            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        {
-            surface
-                .resize(width, height)
-                .expect("initial softbuffer resize failed");
-        }
+        xbar_core::surface::prepare_surface_size(size.width, size.height, |w, h| {
+            surface.resize(w, h)
+        })
+        .expect("initial softbuffer resize failed");
 
         self.window_id = Some(window.id());
         self.window = Some(window);

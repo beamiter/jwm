@@ -213,7 +213,7 @@ fn compose(
 
     let mut canvas = GlassImage::new(screen_width, screen_height)?;
     let fill = pack([0xff, background[0], background[1], background[2]]).to_ne_bytes();
-    for pixel in canvas.data_mut().chunks_exact_mut(BYTES_PER_PIXEL) {
+    for pixel in canvas.data_mut().as_chunks_mut::<BYTES_PER_PIXEL>().0 {
         pixel.copy_from_slice(&fill);
     }
 

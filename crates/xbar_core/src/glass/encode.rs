@@ -81,15 +81,15 @@ fn base64_into(data: &[u8], out: &mut String) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let symbol = |bits: u32| ALPHABET[(bits & 0x3f) as usize] as char;
 
-    let mut chunks = data.chunks_exact(3);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = data.as_chunks::<3>();
+    for chunk in chunks {
         let group = u32::from(chunk[0]) << 16 | u32::from(chunk[1]) << 8 | u32::from(chunk[2]);
         out.push(symbol(group >> 18));
         out.push(symbol(group >> 12));
         out.push(symbol(group >> 6));
         out.push(symbol(group));
     }
-    match chunks.remainder() {
+    match remainder {
         [first] => {
             let group = u32::from(*first) << 16;
             out.push(symbol(group >> 18));
@@ -134,7 +134,13 @@ mod tests {
     #[test]
     fn a_strip_round_trips_through_png() {
         let mut image = GlassImage::new(3, 2).unwrap();
-        for (index, pixel) in image.data_mut().chunks_exact_mut(4).enumerate() {
+        for (index, pixel) in image
+            .data_mut()
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             let word = super::super::pack([0xff, index as u8 * 20, 40, 60]);
             pixel.copy_from_slice(&word.to_ne_bytes());
         }

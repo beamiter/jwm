@@ -92,6 +92,9 @@ jobs:
       - name: Test the shared wire protocol
         run: cargo test --locked -p shared_structures -p jwm_ipc_transport --all-targets
 
+      - name: Lint every xbar_core adapter feature
+        run: cargo clippy --locked -p xbar_core --all-features --all-targets --no-deps -- -D warnings
+
       - name: Test every xbar_core adapter feature
         run: cargo test --locked -p xbar_core --all-features --all-targets
 
@@ -175,7 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           for bar in ${{ matrix.bars }}; do
-            if [[ "$bar" == "tao_glow_bar" || "$bar" == "tao_pixels_bar" ]]; then
+            if [[ -f "bars/$bar/Cargo.lock" ]]; then
               cargo check --manifest-path "bars/$bar/Cargo.toml" \
                 --all-targets --locked
             else
@@ -188,7 +191,7 @@ jobs:
         run: |
           set -euo pipefail
           for bar in ${{ matrix.bars }}; do
-            if [[ "$bar" == "tao_glow_bar" || "$bar" == "tao_pixels_bar" ]]; then
+            if [[ -f "bars/$bar/Cargo.lock" ]]; then
               cargo test --manifest-path "bars/$bar/Cargo.toml" \
                 --all-targets --locked
             else

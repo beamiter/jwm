@@ -2,7 +2,6 @@ use anyhow::{Context as _, Result};
 use log::warn;
 use pango::FontDescription;
 use std::env;
-use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tao::platform::run_return::EventLoopExtRunReturn;
@@ -120,6 +119,9 @@ impl App {
             return Ok(());
         }
 
+        // Retry a failed resize on the next frame, even if the OS sends no
+        // further resize event. Softbuffer caches successful dimensions.
+        resize_soft_surface(&mut self.soft_surface, self.last_physical_size)?;
         self.resolve_translucency();
         let frame = self
             .canvas
@@ -284,13 +286,10 @@ fn resize_soft_surface(
     surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>,
     size: PhysicalSize<u32>,
 ) -> Result<()> {
-    let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-    else {
-        return Ok(());
-    };
-    surface
-        .resize(width, height)
-        .map_err(|error| anyhow::anyhow!("softbuffer resize failed: {error}"))
+    xbar_core::surface::prepare_surface_size(size.width, size.height, |width, height| {
+        surface.resize(width, height)
+    })
+    .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 /// A monitor size is only usable when the platform really knows one. An X

@@ -14,7 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::SharedEventNotifier;
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
-const NOTIFIER_POLL_SLICE_MS: libc::c_int = 50;
+// Input and worker-exit notifications wake poll immediately. The timeout is
+// only a shutdown safety fallback; match the notifier's 250ms wait budget
+// instead of waking an otherwise idle frontend forwarder twenty times/sec.
+const NOTIFIER_POLL_SLICE_MS: libc::c_int = 250;
 
 /// Conversion used by wake closures to report whether their event loop is
 /// still accepting events.
@@ -615,6 +618,26 @@ mod tests {
         assert!(!forwarder.has_pending_wake());
 
         drop(forwarder);
+        owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn idle_forwarder_shutdown_stays_bounded_without_synthetic_wakes() {
+        let (owner, notifier) = test_notifier("idle-shutdown");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&calls);
+        let forwarder = CoalescedNotifierForwarder::spawn(notifier, move |_ack| {
+            worker_calls.fetch_add(1, Ordering::Relaxed);
+            true
+        })
+        .unwrap();
+        // Exercise cancellation while both workers are waiting, not only
+        // immediate cancellation before their first poll.
+        thread::sleep(Duration::from_millis(30));
+        let started = Instant::now();
+        drop(forwarder);
+        assert!(started.elapsed() < Duration::from_millis(300));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
         owner.destroy().unwrap();
     }
 

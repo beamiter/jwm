@@ -307,7 +307,7 @@ impl GlassImage {
     #[must_use]
     pub fn to_rgba8(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.data.len());
-        for pixel in self.data.chunks_exact(BYTES_PER_PIXEL) {
+        for pixel in self.data.as_chunks::<BYTES_PER_PIXEL>().0 {
             let [alpha, red, green, blue] = unpack(read_word(pixel, 0));
             let straighten = |channel: u8| match alpha {
                 0 => 0,
@@ -516,7 +516,7 @@ fn solid(rgb: [u8; 3], width: u32, height: u32) -> Result<GlassImage, GlassError
     }
     let mut image = GlassImage::new(width, height)?;
     let word = pack([0xff, rgb[0], rgb[1], rgb[2]]).to_ne_bytes();
-    for pixel in image.data_mut().chunks_exact_mut(BYTES_PER_PIXEL) {
+    for pixel in image.data_mut().as_chunks_mut::<BYTES_PER_PIXEL>().0 {
         pixel.copy_from_slice(&word);
     }
     Ok(image)

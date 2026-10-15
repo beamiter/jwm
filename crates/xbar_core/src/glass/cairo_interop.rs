@@ -33,8 +33,9 @@ impl GlassImage {
             .map_err(|error| GlassError::Unavailable(format!("surface data borrow: {error}")))?;
         let mut image = Self::from_bgra(width, height, stride, &data)?;
         if format == Format::Rgb24 {
-            for pixel in image.data.chunks_exact_mut(BYTES_PER_PIXEL) {
-                pixel.copy_from_slice(&(super::read_word(pixel, 0) | 0xff00_0000).to_ne_bytes());
+            for pixel in image.data.as_chunks_mut::<BYTES_PER_PIXEL>().0 {
+                let opaque = super::read_word(pixel, 0) | 0xff00_0000;
+                *pixel = opaque.to_ne_bytes();
             }
         }
         Ok(image)
@@ -242,8 +243,8 @@ mod tests {
         // allocation held; a backdrop must not inherit that as alpha.
         let mut surface = ImageSurface::create(Format::Rgb24, 2, 2).unwrap();
         let image = GlassImage::from_image_surface(&mut surface).unwrap();
-        for pixel in image.data().chunks_exact(BYTES_PER_PIXEL) {
-            let word = u32::from_ne_bytes(pixel.try_into().unwrap());
+        for pixel in image.data().as_chunks::<BYTES_PER_PIXEL>().0 {
+            let word = u32::from_ne_bytes(*pixel);
             assert_eq!(word >> 24, 0xff);
         }
     }

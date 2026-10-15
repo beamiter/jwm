@@ -43,6 +43,7 @@ pub mod notifier;
 pub mod placement;
 pub mod presentation;
 pub mod runtime;
+pub mod surface;
 #[cfg(feature = "provider-system")]
 pub mod system_monitor;
 pub mod toolkit_dock;
