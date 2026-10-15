@@ -89,6 +89,20 @@ toggle never quietly reopens the microphone behind a failure nobody saw. An
 explicit IPC `start_audio_recording` is still accepted and starts a fresh
 recording.
 
+### Confirming ffmpeg capture
+
+The ffmpeg backend reports ready only after its dedicated machine-readable
+progress stream supplies a complete `progress=continue` report with positive
+`out_time_us`. Zero, negative, unavailable (`N/A`), malformed or partial timestamps
+are not readiness; `progress=end` is a terminal report, never a start signal.
+A live process, a header-only file, or an incomplete report is not
+capture evidence. Silent samples still advance encoded audio time. Compatible
+ffmpeg builds must provide this progress field; missing progress fails the same
+initialization deadline instead of claiming that recording started. The progress
+pipe is read nonblockingly with bounded work and storage on the recorder worker,
+which retains ownership of child cleanup. The direct ALSA readiness path is
+unchanged.
+
 ### A capture device that hangs
 
 A recorder that has not initialized within 3 seconds — a capture device whose

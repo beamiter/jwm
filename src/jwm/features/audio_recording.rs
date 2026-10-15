@@ -4,6 +4,10 @@
 //! ffmpeg worker while retaining ALSA as the Linux capture source.
 
 #[cfg(feature = "media-audio")]
+#[path = "audio_progress.rs"]
+mod audio_progress;
+
+#[cfg(feature = "media-audio")]
 use alsa::pcm::{Access, Format, HwParams, PCM};
 #[cfg(feature = "media-audio")]
 use alsa::{Direction, ValueOr};
@@ -698,7 +702,8 @@ impl AudioRecordingState {
 }
 
 /// The recorder process: `program` with `args`, stdin piped, stdout
-/// discarded, stderr to `stderr`.
+/// discarded by default (the ffmpeg caller overrides it for progress), and
+/// stderr to `stderr`.
 ///
 /// It is started on the recorder thread, which inherits the SIGCHLD block
 /// JWM keeps for the event loop's signalfd, and std would hand the recorder
@@ -733,6 +738,8 @@ fn capture_with_ffmpeg(
     let mut args = vec![
         "-hide_banner".to_string(),
         "-nostats".to_string(),
+        "-progress".to_string(),
+        "pipe:1".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
         "-n".to_string(),
@@ -772,7 +779,10 @@ fn capture_with_ffmpeg(
             return Err(error);
         }
     };
-    let child = match recorder_command(program, &args, Stdio::from(stderr)).spawn() {
+    let child = match recorder_command(program, &args, Stdio::from(stderr))
+        .stdout(Stdio::piped())
+        .spawn()
+    {
         Ok(child) => child,
         Err(error) => {
             let error = format!("cannot start ffmpeg audio recorder: {error}");
@@ -782,30 +792,32 @@ fn capture_with_ffmpeg(
     };
     let mut child = FfmpegChild::new(child);
 
-    thread::sleep(Duration::from_millis(150));
-    if let Some(status) = child
+    let mut progress_pipe = child
         .as_mut()
-        .try_wait()
-        .map_err(|error| error.to_string())?
-    {
-        let detail = read_ffmpeg_log_tail(log.path());
-        // ffmpeg -n may have refused a file created after start's preflight.
-        // Never unlink the destination merely because the child failed.
-        let error = format!(
-            "ffmpeg audio recorder exited during startup ({status}): {}",
-            detail.trim()
-        );
-        let _ = ready.send(Err(error.clone()));
-        return Err(error);
+        .stdout
+        .take()
+        .ok_or("ffmpeg progress pipe missing")?;
+    // One worker owns child and pipe. No blocking reader thread can outlive
+    // cancellation, and the existing start deadline still owns abandonment.
+    use std::os::fd::AsRawFd;
+    let fd = progress_pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "cannot configure ffmpeg progress pipe: {}",
+            std::io::Error::last_os_error()
+        ));
     }
-    if !claim_ready(&stop, &ready, (rate, channels)) {
-        drop(child);
-        // This path may now name another writer's output; preserve it.
-        return Err("ffmpeg audio recorder started after start() gave up on it".into());
-    }
+    let mut progress = audio_progress::AudioProgress::default();
+    let mut initialized = false;
 
     loop {
         if stop.load(Ordering::Acquire) {
+            if !initialized {
+                // The start deadline expired before capture was confirmed.
+                // The child guard kills/reaps it; preserve any partial output.
+                return Err("ffmpeg audio recorder stopped before initialization".into());
+            }
             if let Some(mut stdin) = child.as_mut().stdin.take() {
                 let _ = stdin.write_all(b"q\n");
                 let _ = stdin.flush();
@@ -832,6 +844,28 @@ fn capture_with_ffmpeg(
                 "ffmpeg audio recorder stopped unexpectedly ({status}): {}",
                 detail.trim()
             ));
+        }
+        let (encoded_audio, eof) = progress
+            .poll(&mut progress_pipe)
+            .map_err(|error| format!("cannot read ffmpeg progress: {error}"))?;
+        if eof {
+            return Err("ffmpeg audio progress closed before recording stopped".into());
+        }
+        if !initialized && encoded_audio {
+            // Do not adopt a buffered success report from an already-dead child.
+            if let Some(status) = child
+                .as_mut()
+                .try_wait()
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!(
+                    "ffmpeg audio recorder exited during initialization ({status})"
+                ));
+            }
+            if !claim_ready(&stop, &ready, (rate, channels)) {
+                return Err("ffmpeg audio recorder initialized after start() gave up on it".into());
+            }
+            initialized = true;
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -1204,6 +1238,129 @@ mod tests {
         );
         assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 960);
+    }
+
+    /// Synthetic shell child only: no ffmpeg, device access or media writes.
+    #[cfg(feature = "media-audio")]
+    fn synthetic_progress_child(script: &str) -> (PathBuf, PathBuf) {
+        let directory = unique_output_path("progress-child").with_extension("dir");
+        std::fs::create_dir(&directory).unwrap();
+        let program = directory.join("synthetic-recorder");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (directory, program)
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn ffmpeg_no_progress_hits_initialization_deadline_and_reaps_worker() {
+        let (directory, program) = synthetic_progress_child("while read line; do :; done");
+        let path = directory.join("never-created.wav");
+        let worker_path = path.clone();
+        let mut state = AudioRecordingState::default();
+        let result = state.spawn_worker(&path, Duration::from_millis(200), move |stop, ready| {
+            capture_with_ffmpeg(
+                program.to_str().unwrap(),
+                &worker_path,
+                "unused",
+                48000,
+                1,
+                "wav",
+                "96k",
+                stop,
+                ready,
+            )
+        });
+        let error = match result {
+            Err(error) => error,
+            Ok((worker, _)) => {
+                worker.stop.store(true, Ordering::Release);
+                wait_until_finished(&worker.handle);
+                let _ = join_outcome(worker.handle);
+                std::fs::remove_dir_all(&directory).unwrap();
+                panic!("a child without progress was adopted");
+            }
+        };
+        assert!(error.contains("did not initialize"));
+        assert!(!state.active);
+        let abandoned = state.abandoned.as_ref().unwrap();
+        wait_until_finished(&abandoned.handle);
+        assert_eq!(state.check_can_start(), Ok(()));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn ffmpeg_delayed_complete_progress_is_ready_and_stops_normally() {
+        let (directory, program) = synthetic_progress_child(
+            "printf 'out_time_us=0\nprogress=continue\n'; sleep 0.25; printf 'out_time_us=250000\nprogress=continue\n'; while read line; do [ \"$line\" = q ] && exit 0; done",
+        );
+        let path = directory.join("never-created.wav");
+        let worker_path = path.clone();
+        let mut state = AudioRecordingState::default();
+        let started = Instant::now();
+        let (worker, format) = state
+            .spawn_worker(&path, Duration::from_secs(2), move |stop, ready| {
+                capture_with_ffmpeg(
+                    program.to_str().unwrap(),
+                    &worker_path,
+                    "unused",
+                    48000,
+                    1,
+                    "wav",
+                    "96k",
+                    stop,
+                    ready,
+                )
+            })
+            .unwrap();
+        let startup_elapsed = started.elapsed();
+        worker.stop.store(true, Ordering::Release);
+        wait_until_finished(&worker.handle);
+        assert_eq!(join_outcome(worker.handle), Ok(()));
+        assert!(startup_elapsed >= Duration::from_millis(200));
+        assert_eq!(format, (48000, 1));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn ffmpeg_early_exit_and_partial_or_malformed_progress_never_claim_ready() {
+        for script in [
+            "exit 9",
+            "printf 'out_time_us=1000\nprogress=continue'; while read line; do :; done",
+            "printf 'out_time_us=N/A\nprogress=continue\n'; while read line; do :; done",
+        ] {
+            let (directory, program) = synthetic_progress_child(script);
+            let path = directory.join("never-created.wav");
+            let worker_path = path.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = stop.clone();
+            let (ready, receiver) = mpsc::sync_channel(1);
+            let handle = thread::spawn(move || {
+                capture_with_ffmpeg(
+                    program.to_str().unwrap(),
+                    &worker_path,
+                    "unused",
+                    48000,
+                    1,
+                    "wav",
+                    "96k",
+                    worker_stop,
+                    ready,
+                )
+            });
+            let adopted = matches!(receiver.recv_timeout(Duration::from_millis(200)), Ok(Ok(_)));
+            stop.store(true, Ordering::Release);
+            wait_until_finished(&handle);
+            let outcome = join_outcome(handle);
+            assert!(!adopted, "partial or malformed progress was adopted");
+            assert!(outcome.is_err());
+            assert!(!path.exists());
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[cfg(feature = "media-audio")]
