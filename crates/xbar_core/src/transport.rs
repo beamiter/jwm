@@ -102,6 +102,7 @@ fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
     WmSnapshot {
         sequence: Some(sequence),
         wm_session_id,
+        blur_status_bar: message.blur_status_bar,
         monitor: MonitorId(info.monitor_num),
         geometry: MonitorGeometry::from_raw(
             info.monitor_x,
@@ -236,6 +237,17 @@ mod tests {
             .expect("consumer drop must leave the owner link intact");
         drop(reopened);
         owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn transport_preserves_optional_bar_material() {
+        for preference in [None, Some(false), Some(true)] {
+            let snapshot = snapshot_from_shared(SharedMessage {
+                blur_status_bar: preference,
+                ..SharedMessage::default()
+            });
+            assert_eq!(snapshot.blur_status_bar, preference);
+        }
     }
 
     #[test]

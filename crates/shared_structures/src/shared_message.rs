@@ -293,6 +293,10 @@ pub struct SharedMessage {
     pub minimized_count: u32,
     pub minimized_flags: u32,
     pub minimized_windows: [MinimizedWindowInfo; MAX_MINIMIZED_WINDOWS],
+    /// JWM's status-bar material preference. `None` identifies a producer
+    /// predating this field; consumers use their clear-background default.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub blur_status_bar: Option<bool>,
 }
 
 /// `Default` 是廉价、可复现的零值（`timestamp == 0`），不含时钟副作用；
@@ -302,6 +306,7 @@ impl Default for SharedMessage {
     fn default() -> Self {
         Self {
             timestamp: 0,
+            blur_status_bar: None,
             wm_session_id: 0,
             minimized_generation: 0,
             monitor_info: MonitorInfo::default(),
@@ -1299,7 +1304,8 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<MinimizedWindowInfo>(), 176);
         assert_eq!(std::mem::size_of::<MinimizedWindowAnchor>(), 16);
-        assert_eq!(sz_msg, 3136);
+        // Domain storage may grow; the separate v14 WireMessage remains 3112 bytes.
+        assert_eq!(sz_msg, 3144);
         assert_eq!(sz_cmd, 64);
     }
 

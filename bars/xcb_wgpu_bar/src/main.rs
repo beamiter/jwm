@@ -15,7 +15,6 @@ use raw_window_handle::{
     WindowHandle, XcbDisplayHandle, XcbWindowHandle,
 };
 
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::Point;
 use xbar_core::render::cairo::{CairoBar, CpuCanvas, PointerInput};
@@ -423,15 +422,7 @@ fn main() -> Result<()> {
     // translucent; anywhere short of that the bar must paint fully opaque —
     // a 0.55 wash over an undefined clear is never acceptable.
     let translucent = want_alpha && gpu.is_transparent();
-    bar.renderer_mut().set_background_opacity(if translucent {
-        Some(
-            app_config
-                .background_opacity
-                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-        )
-    } else {
-        None
-    });
+    bar.follow_wm_background(app_config.background_opacity, translucent);
 
     conn.send_and_check_request(&x::MapWindow { window: win })?;
     conn.flush()?;

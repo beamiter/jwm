@@ -693,13 +693,11 @@ pub struct BehaviorConfig {
     /// WM_CLASS class. X11 compositor only.
     #[serde(default = "default_fade_exclude")]
     pub fade_exclude: Vec<String>,
-    /// Blur behind the status bar like any other translucent window.
-    ///
-    /// The bar is the one window that always sits directly over the wallpaper,
-    /// so leaving it out of the blur pass is what makes a translucent bar show
-    /// a sharp backdrop. Turn this off for a bar that frosts its own wallpaper
-    /// strip, which would otherwise composite over a second blur.
-    #[serde(default = "default_true")]
+    /// Bar background material: false = transparent (default), true = frosted.
+    /// Bundled bars receive this setting through their shared status snapshot;
+    /// text and icons keep their own opacity. Explicit bar opacity overrides
+    /// remain supported. Reloading config updates running bars.
+    #[serde(default)]
     pub blur_status_bar: bool,
     /// Enable temporal blur reuse: blend current frame blur with previous frame for stable content.
     #[serde(default = "default_true")]
@@ -2071,7 +2069,7 @@ impl Default for Config {
                     opacity_rules: Vec::new(),
                     blur_exclude: Vec::new(),
                     fade_exclude: default_fade_exclude(),
-                    blur_status_bar: default_true(),
+                    blur_status_bar: false,
                     rounded_corners_exclude: Vec::new(),
                     detect_client_opacity: true,
                     fullscreen_unredirect: true,
@@ -4775,6 +4773,7 @@ impl Config {
             "behavior.border_glow_color" => self.inner.behavior.border_glow_color = as_rgba()?,
             "behavior.clipboard_history" => self.inner.behavior.clipboard_history = as_bool()?,
             "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
+            "behavior.blur_status_bar" => self.inner.behavior.blur_status_bar = as_bool()?,
             "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
             "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,
             "behavior.corner_radius" => {
@@ -5039,8 +5038,8 @@ pub fn reload_global() -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgumentConfig, ButtonConfig, CONFIG_WRITE_COUNTER, ClientMoveResize, Config,
-        ConfigDiagnosticLevel, ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig,
+        ArgumentConfig, BehaviorConfig, ButtonConfig, CONFIG_WRITE_COUNTER, ClientMoveResize,
+        Config, ConfigDiagnosticLevel, ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig,
         MAX_CONFIG_FILE_BYTES, MAX_CURSOR_SIZE, MAX_N_MASTER, Mods, NewClientPosition, Ordering,
         STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
         configured_scratchpad_terminal, configured_terminal_execution_prefix, is_toml_table_header,
@@ -5785,6 +5784,28 @@ mod tests {
                 super::Jwm::toggle_mic_mute as super::WMFuncType
             )),
             "XF86AudioMicMute no longer resolves to toggle_mic_mute"
+        );
+    }
+
+    #[test]
+    fn bar_material_defaults_clear_and_preserves_explicit_legacy_frost() {
+        let mut cfg = Config::default();
+        assert!(!cfg.behavior().blur_status_bar);
+        let mut value = serde_json::to_value(cfg.behavior()).unwrap();
+        value.as_object_mut().unwrap().remove("blur_status_bar");
+        let absent: BehaviorConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(!absent.blur_status_bar);
+        value["blur_status_bar"] = serde_json::json!(true);
+        let explicit: BehaviorConfig = serde_json::from_value(value).unwrap();
+        assert!(explicit.blur_status_bar);
+        for enabled in [true, false] {
+            cfg.set_value("behavior.blur_status_bar", &serde_json::json!(enabled))
+                .unwrap();
+            assert_eq!(cfg.behavior().blur_status_bar, enabled);
+        }
+        assert!(
+            cfg.set_value("behavior.blur_status_bar", &serde_json::json!("frosted"))
+                .is_err()
         );
     }
 

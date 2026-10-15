@@ -405,8 +405,20 @@ impl CairoRenderer {
         // and fit the width the measurer reported for them.
         let extents = layout_paint_extents(layout);
         let (x, y) = text_origin(bounds, extents.width(), extents.height(), style.align);
+        let origin = (x - f64::from(extents.x()), y - f64::from(extents.y()));
+        if self.background_opacity.is_some_and(|opacity| opacity < 0.1) {
+            // Clear bars have no full-width contrast veil. Keep the ink intact
+            // and outline glyphs locally, including Pango's icon glyphs.
+            let light_ink = style.color.red + style.color.green + style.color.blue > 1.5;
+            let outline = if light_ink { 0.0 } else { 1.0 };
+            context.move_to(origin.0, origin.1);
+            pangocairo::functions::layout_path(context, layout);
+            context.set_source_rgba(outline, outline, outline, 0.8);
+            context.set_line_width(2.0);
+            context.stroke()?;
+        }
         set_source(context, style.color, 1.0);
-        context.move_to(x - f64::from(extents.x()), y - f64::from(extents.y()));
+        context.move_to(origin.0, origin.1);
         pangocairo::functions::show_layout(context, layout);
         context.status()?;
         Ok(())
@@ -635,6 +647,8 @@ pub struct CairoBar {
     last_damage: Damage,
     pending_runtime: RuntimeUpdate,
     dock_reporter: DockReporter,
+    background_material: Option<(Option<f64>, bool)>,
+    last_background_frosted: bool,
 }
 
 impl CairoBar {
@@ -660,6 +674,25 @@ impl CairoBar {
             last_damage: Damage::default(),
             pending_runtime: RuntimeUpdate::default(),
             dock_reporter: DockReporter::new(),
+            background_material: None,
+            last_background_frosted: false,
+        }
+    }
+
+    /// Follow JWM's live clear/frosted bar setting, retaining an explicit bar
+    /// alpha override. `transparent_backdrop` includes a supplied wallpaper.
+    pub fn follow_wm_background(
+        &mut self,
+        override_opacity: Option<f64>,
+        transparent_backdrop: bool,
+    ) {
+        self.background_material = Some((override_opacity, transparent_backdrop));
+    }
+
+    /// Complete a native alpha capability check without losing user overrides.
+    pub fn set_background_transparency_supported(&mut self, supported: bool) {
+        if let Some((_, capable)) = self.background_material.as_mut() {
+            *capable = supported;
         }
     }
 
@@ -752,6 +785,19 @@ impl CairoBar {
         backdrop: Option<&ImageSurface>,
         scale_factor: f64,
     ) -> Result<()> {
+        let previous_opacity = self.renderer.background_opacity();
+        let frosted = self.runtime.view().blur_status_bar.unwrap_or(false);
+        let material_changed =
+            self.background_material.is_some() && self.last_background_frosted != frosted;
+        self.last_background_frosted = frosted;
+        if let Some((override_opacity, transparent)) = self.background_material {
+            self.renderer
+                .set_background_opacity(Some(crate::background::bar_background_opacity(
+                    self.runtime.view().blur_status_bar,
+                    override_opacity,
+                    transparent,
+                )));
+        }
         self.renderer
             .synchronize_icon_font(self.config.icon_font.as_deref());
         let measurer = self.renderer.text_measurer(context);
@@ -778,7 +824,12 @@ impl CairoBar {
             );
         }
         self.renderer.render_over(context, &next_scene, backdrop)?;
-        self.last_damage = next_scene.damage_from(&self.scene);
+        self.last_damage =
+            if material_changed || previous_opacity != self.renderer.background_opacity() {
+                next_scene.damage_from(&empty_scene())
+            } else {
+                next_scene.damage_from(&self.scene)
+            };
         self.interaction = next_interaction;
         self.scene = next_scene;
         self.synchronize_dock_scene(scale_factor);
@@ -1940,6 +1991,41 @@ mod tests {
         assert_eq!(pixel(12, 12), pixel(15, 2));
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn switching_material_replaces_background_alpha_without_fading_foreground() {
+        let scene = Scene {
+            viewport: Size::new(8.0, 4.0),
+            clip: Rect::new(0.0, 0.0, 8.0, 4.0),
+            hits: Vec::new(),
+            nodes: vec![SceneNode::Background {
+                id: NodeId::Background,
+                bounds: Rect::new(0.0, 0.0, 8.0, 4.0),
+                fill: Rgba::rgb8(28, 28, 30),
+            }],
+        };
+        let mut surface = ImageSurface::create(Format::ARgb32, 8, 4).unwrap();
+        for (mode, expected_alpha) in [(Some(true), 140u8), (Some(false), 0), (Some(true), 140)] {
+            {
+                let context = Context::new(&surface).unwrap();
+                let renderer = CairoRenderer::new(FontDescription::from_string("Sans"))
+                    .with_background_opacity(crate::background::bar_background_opacity(
+                        mode, None, true,
+                    ));
+                renderer.render_over(&context, &scene, None).unwrap();
+                // An independent foreground mark is opaque in both modes.
+                context.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+                context.rectangle(0.0, 0.0, 1.0, 1.0);
+                context.fill().unwrap();
+            }
+            surface.flush();
+            let data = surface.data().unwrap();
+            let foreground = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+            let background = u32::from_ne_bytes(data[8..12].try_into().unwrap());
+            assert_eq!(foreground >> 24, 255);
+            assert!(((background >> 24) as i16 - i16::from(expected_alpha)).abs() <= 1);
+        }
     }
 
     /// The whole point of a backdrop: the bar's background must tint it rather

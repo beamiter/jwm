@@ -16,6 +16,7 @@ pub const MAX_FRONTEND_FRAME_BYTES: usize = 512 * 1024 * 1024;
 pub mod app_icon;
 #[cfg(feature = "provider-alsa")]
 pub mod audio_manager;
+pub mod background;
 #[cfg(feature = "provider-battery-sysfs")]
 pub mod battery;
 #[cfg(feature = "provider-brightnessctl")]

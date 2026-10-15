@@ -15,7 +15,6 @@ use winit::{
     window::{WindowAttributes, WindowId},
 };
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -323,7 +322,7 @@ impl ApplicationHandler<UserEvent> for App {
             .with_decorations(false)
             .with_resizable(true)
             .with_visible(true)
-            .with_transparent(self.compositor_active);
+            .with_transparent(true);
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -376,7 +375,8 @@ impl ApplicationHandler<UserEvent> for App {
             .zip(self.x11.as_ref())
             .map(|(xid, conn)| window_is_argb(conn, xid))
             .unwrap_or(false);
-        let want_alpha = self.compositor_active && argb;
+        let native_wayland = window_is_native_wayland(window.as_ref());
+        let want_alpha = native_wayland || (self.compositor_active && argb);
         // Ask for premultiplied alpha first: it says exactly what the frame
         // contains, and Mesa's X11 WSI offers it for an ARGB visual.
         //
@@ -397,9 +397,10 @@ impl ApplicationHandler<UserEvent> for App {
         let (pixels, translucent) = if want_alpha {
             match build(Some(pixels::wgpu::CompositeAlphaMode::PreMultiplied)) {
                 Ok(pixels) => (Ok(pixels), true),
-                Err(pixels::Error::InvalidAlphaMode(_)) => {
-                    (build(Some(pixels::wgpu::CompositeAlphaMode::Auto)), true)
-                }
+                Err(pixels::Error::InvalidAlphaMode(_)) => (
+                    build(Some(pixels::wgpu::CompositeAlphaMode::Auto)),
+                    !native_wayland,
+                ),
                 Err(error) => (Err(error), false),
             }
         } else {
@@ -408,9 +409,7 @@ impl ApplicationHandler<UserEvent> for App {
         let pixels = pixels
             .map_err(|error| anyhow::anyhow!("pixels initialization failed: {error}"))
             .expect("pixels create failed");
-        if !translucent {
-            self.bar.renderer_mut().set_background_opacity(None);
-        }
+        self.bar.set_background_transparency_supported(translucent);
         // The one line that says which bargain the bar struck. Without it a
         // solid bar is indistinguishable from a translucent one over a dark
         // desktop, and the reason — no compositor, an opaque visual, or a
@@ -600,6 +599,14 @@ fn window_size(conn: &RustConnection, xid: u32) -> Option<PhysicalSize<u32>> {
 }
 
 /// The X11 window id behind the winit window, if this is an X11 session.
+
+fn window_is_native_wayland(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(raw_window_handle::RawWindowHandle::Wayland(_))
+    )
+}
+
 fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
     use raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
@@ -643,15 +650,7 @@ fn main() -> Result<()> {
     // palette background at full opacity. The window's depth and the surface
     // itself still get a veto — `resumed` downgrades to solid if either
     // refuses alpha.
-    if compositor_active {
-        bar.renderer_mut().set_background_opacity(Some(
-            app_config
-                .background_opacity
-                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-        ));
-    } else {
-        bar.renderer_mut().set_background_opacity(None);
-    }
+    bar.follow_wm_background(app_config.background_opacity, compositor_active);
 
     let event_loop: EventLoop<UserEvent> = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();

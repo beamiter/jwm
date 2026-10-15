@@ -249,7 +249,10 @@ impl StatusBarBuilder {
         monitor_clients: &[ClientKey],
         is_selected_monitor: bool,
     ) -> SharedMessage {
-        let mut message = SharedMessage::default();
+        let mut message = SharedMessage {
+            blur_status_bar: Some(CONFIG.load().behavior().blur_status_bar),
+            ..SharedMessage::default()
+        };
         let mut monitor_info = MonitorInfo::default();
 
         // 设置监视器几何信息

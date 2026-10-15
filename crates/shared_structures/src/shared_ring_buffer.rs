@@ -99,6 +99,8 @@ pub(crate) struct WireMessage {
     client_name: [u8; crate::MAX_CLIENT_NAME_LEN],
     client_app_id: [u8; crate::MAX_APP_ID_LEN],
     ltsymbol: [u8; crate::MAX_LT_SYMBOL_LEN],
+    // Byte 0: optional bar material (0 = absent, 1 = clear, 2 = frosted).
+    // Reusing reserved space keeps the v14 wire layout compatible.
     _reserved: [u8; 3],
     layout_count: u32,
     layout_id: u32,
@@ -233,7 +235,15 @@ impl From<&SharedMessage> for WireMessage {
             client_name: canonicalize_fixed_string(message.monitor_info.client_name),
             client_app_id: canonicalize_fixed_string(message.monitor_info.client_app_id),
             ltsymbol: canonicalize_fixed_string(message.monitor_info.ltsymbol),
-            _reserved: [0; 3],
+            _reserved: [
+                match message.blur_status_bar {
+                    None => 0,
+                    Some(false) => 1,
+                    Some(true) => 2,
+                },
+                0,
+                0,
+            ],
             layout_count: message.monitor_info.layout_count,
             layout_id: message.monitor_info.layout_id,
             minimized_count,
@@ -282,6 +292,11 @@ impl From<WireMessage> for SharedMessage {
         }
         Self {
             timestamp: message.timestamp,
+            blur_status_bar: match message._reserved[0] {
+                1 => Some(false),
+                2 => Some(true),
+                _ => None,
+            },
             wm_session_id: message.wm_session_id,
             minimized_generation: message.minimized_generation,
             monitor_info,
@@ -714,6 +729,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<WireMinimizedWindowInfo>(), 176);
         assert_eq!(std::mem::size_of::<WireMessage>(), 3112);
         assert_eq!(std::mem::offset_of!(WireMessage, client_app_id), 181);
+        assert_eq!(std::mem::offset_of!(WireMessage, _reserved), 277);
         assert_eq!(std::mem::offset_of!(WireMessage, layout_count), 280);
         assert_eq!(std::mem::offset_of!(WireMessage, layout_id), 284);
         assert_eq!(std::mem::size_of::<WireCommand>(), 64);
@@ -729,6 +745,29 @@ mod tests {
         assert_eq!(std::mem::offset_of!(WireCommand, anchor_w), 48);
         assert_eq!(std::mem::offset_of!(WireCommand, anchor_h), 52);
         assert_eq!(std::mem::offset_of!(WireCommand, timestamp), 56);
+    }
+
+    #[test]
+    fn bar_material_uses_only_one_reserved_byte_and_preserves_legacy_messages() {
+        for (preference, encoded) in [(None, 0), (Some(false), 1), (Some(true), 2)] {
+            let outgoing = SharedMessage {
+                blur_status_bar: preference,
+                ..SharedMessage::default()
+            };
+            let wire = WireMessage::from(&outgoing);
+            assert_eq!(wire._reserved, [encoded, 0, 0]);
+            assert_eq!(SharedMessage::from(wire).blur_status_bar, preference);
+        }
+
+        // Old producers leave reserved bytes zero. Unrecognized future values
+        // are also absent, never an accidental request for frosted glass.
+        for unknown in [0, 3, u8::MAX] {
+            let mut wire = WireMessage::from(&SharedMessage::default());
+            wire._reserved = [unknown, u8::MAX, u8::MAX];
+            let decoded = SharedMessage::from(wire);
+            assert_eq!(decoded.blur_status_bar, None);
+            assert_eq!(WireMessage::from(&decoded)._reserved, [0; 3]);
+        }
     }
 
     #[test]

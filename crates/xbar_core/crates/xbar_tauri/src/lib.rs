@@ -18,7 +18,7 @@ use tauri::{
     WebviewWindow, Window, WindowEvent,
 };
 use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassStrip, fallback_rgb};
+use xbar_core::glass::{GlassParams, GlassStrip, fallback_rgb};
 use xbar_core::{
     ActionRequest, BarEffect, BarPlacement, FrontendSession, ModelConfig, ModelError,
     MonitorGeometry, PlatformEffectHandler, SessionOutput, TransportRecoveryConfig,
@@ -181,7 +181,7 @@ struct BridgeInner {
     baseline: WindowBaseline,
     config: BridgeConfig,
     process_actions: Mutex<ProcessActionHandler>,
-    glass: Mutex<Option<GlassBackdrop>>,
+    glass: Mutex<GlassBackdrop>,
 }
 
 /// The frosted backdrop, which a webview can only receive as an image file.
@@ -190,9 +190,12 @@ struct BridgeInner {
 /// behind the window, so the bridge frosts the wallpaper itself and hands the
 /// page a `data:` URL to composite its own tint over.
 struct GlassBackdrop {
-    strip: GlassStrip<WallpaperFile>,
+    strip: Option<GlassStrip<WallpaperFile>>,
     tint: [u8; 3],
-    generation: u64,
+    explicit_opacity: Option<f64>,
+    frosted_params: GlassParams,
+    generation: Option<u64>,
+    material: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -337,11 +340,15 @@ fn worker_loop<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner, signal: &Wor
             if let Err(error) = deliver_output(app, inner, output, false) {
                 log::error!("xbar background service failed: {error}");
             }
-            let geometry = release_session_for_glass(session);
+            let (geometry, blur_status_bar) = release_session_for_glass(session);
             // Cheap unless the wallpaper file or the bar geometry changed.
-            if let Err(error) =
-                refresh_glass(app, &inner.glass, &inner.config.window_label, geometry)
-            {
+            if let Err(error) = refresh_glass(
+                app,
+                &inner.glass,
+                &inner.config.window_label,
+                geometry,
+                blur_status_bar,
+            ) {
                 log::warn!("frosted backdrop unavailable: {error}");
             }
             (deadline, inner.config.poll_interval)
@@ -371,14 +378,15 @@ fn worker_loop<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner, signal: &Wor
     }
 }
 
-/// Capture the only session value glass refresh needs and release the worker's
+/// Capture material and geometry and release the worker's
 /// session guard before the refresh phase tries to acquire any other locks.
 fn release_session_for_glass(
     session: std::sync::MutexGuard<'_, FrontendSession>,
-) -> Option<MonitorGeometry> {
-    let geometry = session.runtime().view().geometry;
+) -> (Option<MonitorGeometry>, Option<bool>) {
+    let view = session.runtime().view();
+    let state = (view.geometry, view.blur_status_bar);
     drop(session);
-    geometry
+    state
 }
 
 #[tauri::command]
@@ -403,6 +411,14 @@ fn frontend_ready<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
+    // A page reload discards injected styles. Replay the current material on
+    // the next worker turn even when wallpaper and WM state did not change.
+    state
+        .inner
+        .glass
+        .lock()
+        .map_err(|error| format!("glass backdrop lock poisoned: {error}"))?
+        .generation = None;
     let mut session = state
         .inner
         .session
@@ -524,75 +540,109 @@ fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
 
 /// The wallpaper source this bar's configuration asks for, if any.
 ///
-/// Only the `[glass]` section of the shared bar config applies here; the rest
-/// of a Tauri bar's appearance belongs to its own stylesheet.
-fn glass_backdrop() -> Option<GlassBackdrop> {
+/// Wallpaper, theme tint, and the optional background alpha are shared with
+/// native bars; the page retains its foreground and control styles.
+fn glass_backdrop() -> GlassBackdrop {
     let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
         log::warn!("falling back to the default bar config: {error}");
         xbar_core::config::BarConfig::default()
     });
     let tint = fallback_rgb(config.theme);
-    // A provisional screen size; `refresh_glass` corrects it from the window
-    // manager's monitor geometry as soon as one arrives.
-    let strip = config.glass.file_strip(1920, 1080, tint)?;
-    Some(GlassBackdrop {
+    // Provisional dimensions are replaced with the WM monitor geometry.
+    let strip = config.glass.file_strip(1920, 1080, tint);
+    GlassBackdrop {
         strip,
         tint,
-        generation: 0,
-    })
+        explicit_opacity: config.background_opacity,
+        frosted_params: config.glass.params(),
+        generation: None,
+        material: None,
+    }
 }
 
-/// Re-frost the wallpaper under the bar and install it in the page when it
-/// changed.
-///
-/// The stylesheet is injected rather than routed through the frontend so that
-/// all six web frameworks share one implementation; the page keeps ownership
-/// of everything else it draws.
+/// Native transparency is requested in all six window configurations, but the
+/// bridge cannot verify realized alpha/compositor support without a platform
+/// adapter. A configured wallpaper therefore supplies a safe opaque backing:
+/// sharp in clear mode and blurred in frosted mode. With no wallpaper, keep a
+/// readable solid fallback rather than assume alpha can reach the desktop.
 fn refresh_glass<R: Runtime>(
     app: &AppHandle<R>,
-    glass_state: &Mutex<Option<GlassBackdrop>>,
+    glass_state: &Mutex<GlassBackdrop>,
     window_label: &str,
     geometry: Option<MonitorGeometry>,
+    blur_status_bar: Option<bool>,
 ) -> Result<(), String> {
     let mut glass = glass_state
         .lock()
         .map_err(|error| format!("glass backdrop lock poisoned: {error}"))?;
-    let Some(glass) = glass.as_mut() else {
-        return Ok(());
+    let frosted = blur_status_bar.unwrap_or(false);
+    let params = if frosted {
+        glass.frosted_params
+    } else {
+        GlassParams::clear()
     };
+    let tint = glass.tint;
+    let opacity = xbar_core::background::bar_background_opacity(
+        blur_status_bar,
+        glass.explicit_opacity,
+        glass.strip.is_some(),
+    );
+    let previous_generation = glass.generation;
+    let previous_material = glass.material;
     let window = main_window(app, window_label)?;
-    if let Some(geometry) = geometry {
-        glass
-            .strip
-            .source_mut()
-            .set_screen(geometry.width.max(1), geometry.height.max(1));
-    }
-    let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
-    let size = window
-        .inner_size()
-        .map_err(|error| format!("failed to query bar size: {error}"))?;
-
-    let Some((generation, image)) = glass
-        .strip
-        .ensure(x, y, size.width.max(1), size.height.max(1))
-    else {
-        return Ok(());
+    let (generation, css) = if let Some(strip) = glass.strip.as_mut() {
+        strip.cache_mut().set_params(params);
+        if let Some(geometry) = geometry {
+            strip
+                .source_mut()
+                .set_screen(geometry.width.max(1), geometry.height.max(1));
+        }
+        let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
+        let size = window
+            .inner_size()
+            .map_err(|error| format!("failed to query bar size: {error}"))?;
+        let Some((generation, image)) = strip.ensure(x, y, size.width.max(1), size.height.max(1))
+        else {
+            return Ok(());
+        };
+        if previous_generation == Some(generation) && previous_material == Some(frosted) {
+            return Ok(());
+        }
+        let css = image
+            .to_css_backdrop(DEFAULT_GLASS_SELECTOR, tint, opacity as f32)
+            .map_err(|error| format!("failed to encode the bar backdrop: {error}"))?;
+        (generation, css)
+    } else {
+        if previous_generation == Some(0) && previous_material == Some(frosted) {
+            return Ok(());
+        }
+        (0, solid_background_css(tint, opacity))
     };
-    if generation == glass.generation {
-        return Ok(());
-    }
-    let css = image
-        .to_css_backdrop(
-            DEFAULT_GLASS_SELECTOR,
-            glass.tint,
-            DEFAULT_BACKGROUND_OPACITY as f32,
-        )
-        .map_err(|error| format!("failed to encode the frosted backdrop: {error}"))?;
     window
         .eval(install_style_script(&css))
-        .map_err(|error| format!("failed to install the frosted backdrop: {error}"))?;
-    glass.generation = generation;
+        .map_err(|error| format!("failed to install the bar backdrop: {error}"))?;
+    glass.generation = Some(generation);
+    glass.material = Some(frosted);
     Ok(())
+}
+
+fn solid_background_css([red, green, blue]: [u8; 3], opacity: f64) -> String {
+    format!(
+        "{DEFAULT_GLASS_SELECTOR} {{ background-color: rgba({red}, {green}, {blue}, {opacity}); background-image: none; }}"
+    )
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_fallback_clears_any_previous_image_without_fading_content() {
+        let css = solid_background_css([28, 28, 30], 1.0);
+        assert!(css.contains("rgba(28, 28, 30, 1)"));
+        assert!(css.contains("background-image: none"));
+        assert!(!css.contains(" opacity:"));
+    }
 }
 
 /// Script that creates the bridge's own style element once and then only ever
@@ -786,7 +836,7 @@ mod tests {
         ));
 
         let guard = session.lock().unwrap();
-        assert_eq!(release_session_for_glass(guard), None);
+        assert_eq!(release_session_for_glass(guard), (None, None));
         assert!(session.try_lock().is_ok());
     }
 

@@ -20,8 +20,8 @@ use glutin::prelude::GlSurface;
 use x11rb::rust_connection::RustConnection;
 use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::glass::{
-    DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, GlassError, GlassImage, MAX_GLASS_IMAGE_BYTES,
-    StripRequest, WallpaperSource, fallback_rgb,
+    GlassBackdrop, GlassError, GlassImage, GlassParams, MAX_GLASS_IMAGE_BYTES, StripRequest,
+    WallpaperSource, fallback_rgb,
 };
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
@@ -79,11 +79,14 @@ struct GlPresenter {
     program: glow::NativeProgram,
     vao: glow::NativeVertexArray,
     texture: glow::NativeTexture,
+    alpha_supported: bool,
 }
 
 impl GlPresenter {
     fn new(window: &Window, physical_size: PhysicalSize<u32>) -> Result<Self> {
-        let (display, _config, surface, context, gl) = create_gl_surface(window)?;
+        use glutin::config::GlConfig as _;
+        let (display, config, surface, context, gl) = create_gl_surface(window)?;
+        let alpha_supported = config.alpha_size() > 0;
         let program = build_quad_program(&gl)?;
         let vao = build_quad_mesh(&gl);
         let texture = create_texture(&gl);
@@ -109,6 +112,7 @@ impl GlPresenter {
             program,
             vao,
             texture,
+            alpha_supported,
         })
     }
 
@@ -271,6 +275,7 @@ struct App {
     /// wallpaper instead of showing a solid slab.
     opaque: bool,
     glass: Option<GlassBackdrop<OpaqueWallpaper>>,
+    frosted_params: GlassParams,
     last_wallpaper_revision: Option<u64>,
     started_at: Instant,
     saw_root_pixmap: bool,
@@ -285,8 +290,12 @@ impl App {
         proxy: EventLoopProxy<UserEvent>,
         x11: Option<Rc<RustConnection>>,
         compositor_active: bool,
-        glass: Option<GlassBackdrop<OpaqueWallpaper>>,
+        mut glass: Option<GlassBackdrop<OpaqueWallpaper>>,
     ) -> Result<Self> {
+        let frosted_params = glass
+            .as_mut()
+            .map(|glass| *glass.cache_mut().params())
+            .unwrap_or_default();
         let physical_size = window.inner_size();
         let _ = bgra_frame_len(physical_size.width, physical_size.height)
             .context("initial window surface exceeds the frame budget")?;
@@ -314,12 +323,13 @@ impl App {
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
             x11,
-            depth_check_pending: compositor_active,
+            depth_check_pending: true,
             opaque: !compositor_active,
             last_wallpaper_revision: None,
             started_at: Instant::now(),
             saw_root_pixmap: !compositor_active && glass.is_none(),
             glass,
+            frosted_params,
         })
     }
 
@@ -333,16 +343,15 @@ impl App {
             return;
         };
         self.depth_check_pending = false;
+        let native_wayland = matches!(handle.as_raw(), RawWindowHandle::Wayland(_));
+        let native_alpha = matches!(&self.presenter, Presenter::OpenGl(gl) if gl.alpha_supported);
         let xid = raw_x11_window_id(handle.as_raw());
-        let argb = xid
-            .zip(self.x11.as_ref())
-            .is_some_and(|(xid, conn)| window_is_argb(conn, xid));
-        if !argb {
-            self.opaque = true;
-            self.bar
-                .renderer_mut()
-                .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY));
-        }
+        let argb = (native_wayland && native_alpha)
+            || (!self.opaque
+                && xid
+                    .zip(self.x11.as_ref())
+                    .is_some_and(|(xid, conn)| window_is_argb(conn, xid)));
+        self.opaque = !argb;
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -352,6 +361,14 @@ impl App {
         }
 
         self.resolve_translucency();
+        let frosted = self.bar.runtime().view().blur_status_bar.unwrap_or(false);
+        if let Some(glass) = self.glass.as_mut() {
+            glass.cache_mut().set_params(if frosted {
+                self.frosted_params
+            } else {
+                GlassParams::clear()
+            });
+        }
         let scale = self.scale_factor;
         let opaque = self.opaque;
         let position = self.window.outer_position().ok();
@@ -371,6 +388,7 @@ impl App {
             None
         };
 
+        bar.set_background_transparency_supported(!opaque || backdrop.is_some());
         presenter.redraw(bar, width, height, scale, backdrop)?;
         let update = self.bar.take_pending_runtime();
         if !update.is_empty() {
@@ -1067,16 +1085,7 @@ fn main() -> Result<()> {
         }
         Err(_) => (None, false, 0),
     };
-    if compositor_active {
-        bar.renderer_mut().set_background_opacity(Some(
-            app_config
-                .background_opacity
-                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-        ));
-    } else {
-        bar.renderer_mut()
-            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY));
-    }
+    bar.follow_wm_background(app_config.background_opacity, compositor_active);
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -1108,7 +1117,7 @@ fn main() -> Result<()> {
             .with_decorations(false)
             .with_resizable(true)
             .with_visible(true)
-            .with_transparent(compositor_active)
+            .with_transparent(true)
             .build(&event_loop)
             .context("failed to build tao window")?,
     );

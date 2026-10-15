@@ -2852,7 +2852,7 @@ impl WaylandCompositor {
                 inactive_desaturate: 0.25,
                 blur_enabled: false,
                 blur_strength: 3,
-                blur_status_bar: true,
+                blur_status_bar: false,
                 fade_in_step: 0.03,
                 fade_out_step: 0.03,
 

@@ -35,7 +35,7 @@ use x11rb::protocol::xproto::{
 use x11rb::xcb_ffi::XCBConnection;
 
 use xbar_core::config::BarConfig;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
+use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
@@ -346,6 +346,8 @@ struct IcedBar {
     is_hovered: bool,
     mouse_position: Option<iced::Point>,
     background: Color,
+    background_opacity: Option<f64>,
+    translucent: bool,
     dock: DockBridge,
 }
 
@@ -389,13 +391,11 @@ impl IcedBar {
         });
         let translucent = TRANSLUCENT.get().copied().unwrap_or(false);
         let [r, g, b] = fallback_rgb(bar_config.theme);
-        let alpha = if translucent {
-            bar_config
-                .background_opacity
-                .unwrap_or(DEFAULT_BACKGROUND_OPACITY) as f32
-        } else {
-            1.0
-        };
+        let alpha = xbar_core::background::bar_background_opacity(
+            None,
+            bar_config.background_opacity,
+            translucent,
+        ) as f32;
 
         Self {
             tabs: TAG_ICONS,
@@ -421,6 +421,8 @@ impl IcedBar {
             is_hovered: false,
             mouse_position: None,
             background: Color::from_rgba8(r, g, b, alpha),
+            background_opacity: bar_config.background_opacity,
+            translucent,
             dock: DockBridge::new(),
         }
     }
@@ -668,8 +670,14 @@ impl IcedBar {
     }
 
     fn style(&self, theme: &Theme) -> theme::Style {
+        let mut background = self.background;
+        background.a = xbar_core::background::bar_background_opacity(
+            self.runtime.view().blur_status_bar,
+            self.background_opacity,
+            self.translucent,
+        ) as f32;
         theme::Style {
-            background_color: self.background,
+            background_color: background,
             text_color: theme.palette().background.base.text,
         }
     }

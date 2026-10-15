@@ -18,7 +18,7 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, MAX_GLASS_IMAGE_BYTES};
+use xbar_core::glass::MAX_GLASS_IMAGE_BYTES;
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::Point;
 use xbar_core::render::cairo::{CairoBar, PointerInput};
@@ -717,14 +717,7 @@ fn main() -> Result<()> {
     // shows through, with an explicit config value still winning; without one
     // the palette background must paint fully opaque, so the configured
     // opacity is deliberately ignored rather than washed over nothing.
-    if translucent {
-        let opacity = app_config
-            .background_opacity
-            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
-        bar.renderer_mut().set_background_opacity(Some(opacity));
-    } else {
-        bar.renderer_mut().set_background_opacity(None);
-    }
+    bar.follow_wm_background(app_config.background_opacity, translucent);
 
     let win = conn.generate_id()?;
     let mut current_width = screen.width_in_pixels;

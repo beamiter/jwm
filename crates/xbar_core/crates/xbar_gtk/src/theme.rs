@@ -111,7 +111,7 @@ fn font_rules(font: &str, font_size: f32) -> String {
 /// Rules that differ per theme. Fill precedence follows `LayoutEngine`:
 /// urgent, then selected, then hover, then occupied — so those selectors are
 /// emitted in that order and the cascade resolves them the same way.
-fn theme_rules(theme: ThemeMode, background_opacity: f64, translucent: bool) -> String {
+fn theme_rules(theme: ThemeMode, background_opacity: Option<f64>, translucent: bool) -> String {
     let palette = Palette::for_theme(theme);
     let scope = match theme {
         ThemeMode::Dark => "window.theme-dark",
@@ -123,8 +123,16 @@ fn theme_rules(theme: ThemeMode, background_opacity: f64, translucent: bool) -> 
     // leak into an uncomposited window. The palette background is the same
     // color the Cairo bars fall back to, which keeps every bar's solid mode
     // byte-identical.
-    let alpha = if translucent { background_opacity } else { 1.0 };
+    let alpha =
+        xbar_core::background::bar_background_opacity(None, background_opacity, translucent);
+    let frosted_alpha =
+        xbar_core::background::bar_background_opacity(Some(true), background_opacity, translucent);
     let background = css(with_alpha(palette.background, alpha));
+    let frosted_background = css(with_alpha(palette.background, frosted_alpha));
+    let outline = match theme {
+        ThemeMode::Dark => "rgba(0, 0, 0, 0.9)",
+        ThemeMode::Light => "rgba(255, 255, 255, 0.95)",
+    };
     // In solid mode the window itself carries the theme color: the theme
     // class scopes make a runtime theme toggle recolor the whole strip
     // without regenerating the stylesheet.
@@ -137,6 +145,7 @@ fn theme_rules(theme: ThemeMode, background_opacity: f64, translucent: bool) -> 
     format!(
         "\
 {window_background}{scope} .bar-root {{ background-color: {background}; }}
+{scope} .bar-root.frosted {{ background-color: {frosted_background}; }}
 {scope} .pill {{ background-color: {pill}; color: {text}; }}
 {scope} .pill.occupied {{ background-color: {occupied}; }}
 {scope} .pill:hover {{ background-color: {hovered}; }}
@@ -149,6 +158,10 @@ fn theme_rules(theme: ThemeMode, background_opacity: f64, translucent: bool) -> 
   color: {selected_text};
 }}
 {scope} .client-name {{ color: {muted}; }}
+{scope} .bar-root:not(.frosted) .pill:not(.selected):not(.urgent),
+{scope} .bar-root:not(.frosted) .client-name {{
+  text-shadow: -1px 0 {outline}, 1px 0 {outline}, 0 -1px {outline}, 0 1px {outline};
+}}
 ",
         pill = css(palette.pill),
         occupied = css(palette.occupied),
@@ -164,14 +177,13 @@ fn theme_rules(theme: ThemeMode, background_opacity: f64, translucent: bool) -> 
 
 /// The complete stylesheet for one bar configuration and one window mode.
 ///
-/// The mode is baked in at generation: `install()` only ever adds providers,
-/// so regenerating for a mode change would stack rules instead of replacing
-/// them — and the mode is a startup decision anyway.
+/// Alpha capability is fixed at startup. Both material modes share this one
+/// provider, so hot reload changes only the root class and cannot stack styles.
 #[must_use]
 pub fn stylesheet(
     config: &PresentationConfig,
     font: &str,
-    background_opacity: f64,
+    background_opacity: Option<f64>,
     translucent: bool,
 ) -> String {
     let metrics = Metrics::from_config(config);
@@ -305,4 +317,32 @@ window.theme-dark {{
         dark = theme_rules(ThemeMode::Dark, background_opacity, translucent),
         light = theme_rules(ThemeMode::Light, background_opacity, translucent),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_material_classes_preserve_override_and_opaque_fallback() {
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let clear = css(with_alpha(Palette::for_theme(theme).background, 0.0));
+            let frost = css(with_alpha(Palette::for_theme(theme).background, 0.55));
+            let rules = theme_rules(theme, None, true);
+            assert!(rules.contains(&format!(".bar-root {{ background-color: {clear}; }}")));
+            assert!(rules.contains(&format!(
+                ".bar-root.frosted {{ background-color: {frost}; }}"
+            )));
+            for (translucent, expected) in [(true, 0.3), (false, 1.0)] {
+                let background = css(with_alpha(Palette::for_theme(theme).background, expected));
+                let rules = theme_rules(theme, Some(0.3), translucent);
+                assert!(
+                    rules.contains(&format!(".bar-root {{ background-color: {background}; }}"))
+                );
+                assert!(rules.contains(&format!(
+                    ".bar-root.frosted {{ background-color: {background}; }}"
+                )));
+            }
+        }
+    }
 }

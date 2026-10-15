@@ -1,20 +1,11 @@
-//! Frosted-glass backdrop, baked now only for the Tauri webview bridge.
+//! Wallpaper-backed glass and clear fallback for bars.
 //!
-//! A bar cannot see through itself: whatever "glass" it shows is something it
-//! draws.  Two ways exist to get there:
-//!
-//! * A compositor blurs what lies behind a translucent window.  Nothing in
-//!   this module beyond [`fallback_rgb`] and [`DEFAULT_BACKGROUND_OPACITY`]
-//!   is involved — the bar just needs per-pixel alpha.  Every non-Tauri bar
-//!   takes this path, deciding once at startup whether a compositing manager
-//!   owns `_NET_WM_CM_Sn` and the pipeline can deliver alpha; when either
-//!   fails it paints an opaque [`fallback_rgb`] background instead.
-//! * A webview cannot take that path: `backdrop-filter` blurs only what is
-//!   inside the page, never the desktop behind the window.  So the Tauri
-//!   bridge still bakes the backdrop — sample the wallpaper where the bar
-//!   sits, blur and saturate that strip, and hand it to the page as an
-//!   image.  That is what lives here, and it is this module's one remaining
-//!   baking consumer.
+//! Alpha-capable native bars let the compositor draw the desktop behind them.
+//! The official Tao/Glow bar can use a sampled wallpaper when its window is
+//! opaque; the Tauri bridge also uses this fallback when native alpha cannot
+//! be verified. Clear mode samples sharp pixels; frosted mode applies the
+//! glass recipe. Neither sampled fallback follows live windows or animated
+//! compositor backgrounds. Missing wallpaper retains a readable solid fill.
 //!
 //! The baked path stays free of anything X11-specific or Cairo-specific:
 //! [`frost`] is integer pixel math over a premultiplied `ARgb32` buffer —
@@ -81,7 +72,7 @@ pub const fn fallback_rgb(theme: crate::ThemeMode) -> [u8; 3] {
 /// A frosted backdrop only looks like a material if some of it shows through
 /// the bar's own background fill, so a frontend that frosts should default its
 /// background opacity here instead of to fully opaque.
-pub const DEFAULT_BACKGROUND_OPACITY: f64 = 0.55;
+pub const DEFAULT_BACKGROUND_OPACITY: f64 = crate::background::FROSTED_BACKGROUND_OPACITY;
 
 // ---------------- Errors ----------------
 
@@ -179,6 +170,18 @@ impl Default for GlassParams {
 }
 
 impl GlassParams {
+    /// Exact wallpaper sampling for a transparent-style bar on an opaque target.
+    #[must_use]
+    pub const fn clear() -> Self {
+        Self {
+            downscale: 1,
+            blur_radius: 0,
+            blur_passes: 0,
+            saturation: 1.0,
+            pad: 0,
+        }
+    }
+
     /// Clamp every field into the range the algorithms accept, so a config
     /// file cannot produce a division by zero or an allocation storm.
     #[must_use]
@@ -869,6 +872,17 @@ mod tests {
             self.calls += 1;
             Ok(self.image.clone())
         }
+    }
+
+    #[test]
+    fn clear_material_keeps_patterned_wallpaper_pixels_exact() {
+        let strip = image_from(16, 8, |x, y| {
+            [(x * 13) as u8, (y * 29) as u8, ((x + y) * 7) as u8]
+        });
+        let clear = frost(&strip, &GlassParams::clear(), 8).unwrap();
+        assert_eq!(clear.data(), strip.data());
+        let frosted = frost(&strip, &GlassParams::default(), 8).unwrap();
+        assert_ne!(frosted.data(), clear.data());
     }
 
     #[test]

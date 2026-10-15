@@ -28,3 +28,17 @@ await invoke("dispatch_action", {
 });
 await invoke("frontend_ready");
 ```
+
+## Bar material
+
+The bridge follows JWM's `behavior.blur_status_bar` on every status update.
+Missing/false means clear; true restores the existing frosted recipe. An explicit
+`background_opacity` in `~/.config/xbar/config.toml` still overrides the tint.
+
+The six bundled Tauri windows request native transparency. This bridge does not
+verify the realized window's alpha/compositor capability, so it conservatively
+uses a configured `[glass].wallpaper` as its backing: a sharp, untinted strip in
+clear mode and a blurred strip in frosted mode. Configure the same wallpaper file
+and mode as JWM. Without a usable wallpaper it keeps a solid, readable fallback.
+Toggling modes replaces the old backdrop, including after a page reload; it never
+changes whole-window opacity or fades the foreground.

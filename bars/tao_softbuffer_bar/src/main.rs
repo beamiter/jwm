@@ -14,7 +14,6 @@ use tao::{
 };
 
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -109,7 +108,7 @@ impl App {
             .zip(self.x11.as_ref())
             .is_some_and(|(xid, conn)| window_is_argb(conn, xid));
         if !argb {
-            self.bar.renderer_mut().set_background_opacity(None);
+            self.bar.set_background_transparency_supported(false);
         }
     }
 
@@ -380,15 +379,7 @@ fn main() -> Result<()> {
     // A translucent background only reads as a material when a compositor is
     // there to blend the desktop behind it; without one the bar keeps the
     // palette background at full opacity.
-    if compositor_active {
-        bar.renderer_mut().set_background_opacity(Some(
-            app_config
-                .background_opacity
-                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-        ));
-    } else {
-        bar.renderer_mut().set_background_opacity(None);
-    }
+    bar.follow_wm_background(app_config.background_opacity, compositor_active);
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = event_loop.create_proxy();

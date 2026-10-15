@@ -18,7 +18,6 @@ use gtk4::prelude::*;
 use gtk4::{Label, Orientation};
 use xbar_core::config::BarConfig;
 use xbar_core::controls::BarPresentation;
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
 use xbar_core::{BarSnapshot, ThemeMode};
 
@@ -38,10 +37,8 @@ pub struct BarTheme {
 }
 
 impl BarTheme {
-    /// `translucent` is the frontend's startup mode decision — compositor
-    /// present and an RGBA surface available — and it is baked into the
-    /// stylesheet here because `install()` only ever adds providers: a theme
-    /// that could change mode would have to stack rules, not replace them.
+    /// `translucent` records whether the window can carry per-pixel alpha.
+    /// Both material modes are installed once and selected by a live CSS class.
     #[must_use]
     pub fn from_config(config: &BarConfig, translucent: bool) -> Self {
         let mut presentation = config.presentation.clone();
@@ -53,9 +50,7 @@ impl BarTheme {
             presentation.labels = PresentationLabels::nerd_font();
         }
         let metrics = Metrics::from_config(&presentation);
-        let background_opacity = config
-            .background_opacity
-            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
+        let background_opacity = config.background_opacity;
         let stylesheet =
             theme::stylesheet(&presentation, &config.font, background_opacity, translucent);
         let pill_style = PillStyle {
@@ -147,6 +142,11 @@ impl BarSurface {
     /// Which cells exist, their order, their glyphs and their state are all
     /// decided by `xbar_core`; this only spends that decision on widgets.
     pub fn sync(&self, snapshot: &BarSnapshot, presentation: BarPresentation) {
+        if snapshot.blur_status_bar.unwrap_or(false) {
+            self.root.add_css_class("frosted");
+        } else {
+            self.root.remove_css_class("frosted");
+        }
         let BarPresentation {
             tags,
             layout_button,

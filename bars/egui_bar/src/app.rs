@@ -12,7 +12,7 @@ use anyhow::Result;
 use egui::{Color32, FontFamily, Pos2};
 use log::{debug, warn};
 use x11rb::protocol::xproto::Window;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
+use xbar_core::glass::fallback_rgb;
 use xbar_core::presentation::{
     InteractionState, LayoutEngine, Point, PointerAction, PresentationConfig, Scene, Size,
 };
@@ -45,6 +45,7 @@ pub struct EguiBarApp {
     pressed_pointer_button: Option<egui::PointerButton>,
     scene: Scene,
     style: SceneStyle,
+    background_opacity: Option<f64>,
     /// The window's clear colour when it is opaque: the solid background the
     /// scene is painted over.
     fallback: Color32,
@@ -116,18 +117,13 @@ impl EguiBarApp {
             },
             style: SceneStyle {
                 family: FontFamily::Proportional,
-                // The configured opacity is only meaningful when a compositor
-                // blends behind the window. Solid mode writes the background
-                // at full alpha outright, rather than washing 0.55 over a
-                // clear colour that merely happens to match it.
-                background_opacity: if translucent {
-                    config
-                        .background_opacity
-                        .unwrap_or(DEFAULT_BACKGROUND_OPACITY) as f32
-                } else {
-                    1.0
-                },
+                background_opacity: xbar_core::background::bar_background_opacity(
+                    None,
+                    config.background_opacity,
+                    translucent,
+                ) as f32,
             },
+            background_opacity: config.background_opacity,
             fallback: Color32::from_rgb(fallback[0], fallback[1], fallback[2]),
             translucent,
             process_actions: ProcessActionHandler::default(),
@@ -409,6 +405,11 @@ impl eframe::App for EguiBarApp {
         // Paint straight onto the background layer: the scene owns every pixel
         // of the bar, so a panel frame would only add margins the layout
         // engine has already accounted for.
+        self.style.background_opacity = xbar_core::background::bar_background_opacity(
+            self.runtime.view().blur_status_bar,
+            self.background_opacity,
+            self.translucent,
+        ) as f32;
         let painter = ctx.layer_painter(egui::LayerId::background());
         crate::scene::paint(&painter, viewport.min, &self.scene, &self.style);
 

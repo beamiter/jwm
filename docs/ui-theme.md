@@ -22,9 +22,10 @@ the native window border colour and the root wallpaper. Native `BorderPixel`
 is composited over the theme letterbox so unfocused rings stay visible on
 the wallpaper. Urgent and picture-in-picture windows use the same ring
 priority as the compositor (`attention_color`, then `pip_border_color`).
-The default status
-bar then frosts that root pixmap (or `glass.wallpaper` if the bar config
-sets one) instead of drawing a solid slab. Client windows keep
+The default status bar uses a clear background. On targets that cannot
+present alpha, the official bar samples the sharp root pixmap (or
+`glass.wallpaper` if the bar config sets one); a readable solid background is
+the fallback when neither is available. Client windows keep
 their own corner radius, shadow, and per-window frost settings.
 
 The themes split into two families: three **glass** themes that sample a
@@ -74,7 +75,40 @@ enrich the desktop it shows — and the shadow carries a violet cast.
 The lock card is the one exception in all three glass themes. It hides the
 desktop on purpose, so it draws solid.
 
-### The status bar's own optics
+### Clear or frosted status bars
+
+All bundled bars follow one JWM setting:
+
+```toml
+[behavior]
+blur_status_bar = false # default: clear background
+# blur_status_bar = true # frosted glass
+```
+
+Reload the JWM config to update running bars, or set it for the current session
+with `jwm-tool msg set_config --args '{"key":"behavior.blur_status_bar","value":true}'`.
+The setting changes the bar background only; text, icons and individual control
+pills keep their own opacity. Cairo bars give text a small contrasting outline
+in clear mode. Existing explicitly configured `blur_status_bar = true` keeps
+frosting. An omitted setting now selects clear. A bar's explicit
+`background_opacity` remains an override for its background tint.
+
+The shared-state wire retains its existing size/version: the optional mode is
+encoded in a reserved byte, so older readers ignore it. New bars connected to
+an older WM default to clear. A mode change triggers the usual theme redraw,
+without restarting the bar. X11's x11rb/xcb compositors and native Wayland
+already invalidate their blur membership/caches on this config reload.
+
+True desktop transparency requires a compositor and an alpha-capable window
+and presentation surface. Unsupported targets retain a readable opaque
+fallback. The official `tao_glow_bar` can instead sample sharp wallpaper in
+clear mode and frosted wallpaper in glass mode when it has to use an opaque
+window. That fallback is wallpaper sampling, not live transparency through
+other windows or animated compositor layers. Webview bars may likewise use a
+configured wallpaper when their native alpha capability cannot be verified.
+No global window opacity is used to fade the text along with the background.
+
+### The status bar's own optics in frosted mode
 
 A bar frosted through `behavior.blur_status_bar` draws on the same sheet with
 different numbers, because it is ~28–40px tall and never dismissed rather than
@@ -88,7 +122,7 @@ for the bar (`appearance.status_bar_height`); `xbar_core`'s default
 too, not from `behavior.corner_radius` — on a bar that thin that is a stadium,
 and the squircle needs a flat edge to ease its curvature out into. The tint is
 lighter for a different reason: the bar is the one frosted surface whose
-*client* also paints a veil (every bar in `bars/` washes 0.55 of its theme
+*client* also paints a veil (in frosted mode the bar washes 0.55 of its theme
 colour over what the compositor put behind it, which is what holds its text at
 contrast over an arbitrary wallpaper), so the compositor contributes only the
 sheet's hue, at the shared `STATUS_BAR_GLASS_TINT_ALPHA` of 0.08. The theme's

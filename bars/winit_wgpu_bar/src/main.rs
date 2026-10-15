@@ -14,7 +14,6 @@ use winit::{
 };
 
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -64,6 +63,14 @@ fn window_is_argb(conn: &RustConnection, xid: u32) -> bool {
 }
 
 /// The X11 window id behind the winit window, if this is an X11 session.
+
+fn window_is_native_wayland(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(raw_window_handle::RawWindowHandle::Wayland(_))
+    )
+}
+
 fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
     use raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
@@ -279,7 +286,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_decorations(false)
                 .with_resizable(true)
                 .with_visible(true)
-                .with_transparent(self.compositor_active);
+                .with_transparent(true);
 
             // 创建 Window（owned）
             let window = event_loop
@@ -291,13 +298,14 @@ impl ApplicationHandler<UserEvent> for App {
             // Transparency was only requested above; whether it arrived is a
             // separate question, because winit falls back to an opaque visual
             // silently. Ask the server for the window's actual depth.
-            let argb = self.compositor_active
-                && self
-                    .x11_side
-                    .as_ref()
-                    .zip(window_xid(arc.as_ref()))
-                    .map(|(conn, xid)| window_is_argb(conn, xid))
-                    .unwrap_or(false);
+            let argb = window_is_native_wayland(arc.as_ref())
+                || (self.compositor_active
+                    && self
+                        .x11_side
+                        .as_ref()
+                        .zip(window_xid(arc.as_ref()))
+                        .map(|(conn, xid)| window_is_argb(conn, xid))
+                        .unwrap_or(false));
 
             // 初始化 wgpu
             let physical_size = arc.inner_size();
@@ -317,15 +325,7 @@ impl ApplicationHandler<UserEvent> for App {
             // acceptable.
             let translucent = argb && gpu.is_transparent();
             self.bar
-                .renderer_mut()
-                .set_background_opacity(if translucent {
-                    Some(
-                        self.background_opacity
-                            .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-                    )
-                } else {
-                    None
-                });
+                .follow_wm_background(self.background_opacity, translucent);
             self.gpu = Some(gpu);
             self.window_id = Some(win_id);
 

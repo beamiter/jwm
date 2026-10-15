@@ -17,7 +17,7 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use log::{debug, warn};
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
+use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
@@ -96,10 +96,17 @@ struct GpuiComponentBar {
     /// configured opacity when a compositor blends the bar into the desktop,
     /// fully opaque when nothing would.
     panel_background: Rgba,
+    background_opacity: Option<f64>,
+    translucent: bool,
 }
 
 impl GpuiComponentBar {
-    fn new(panel_background: Rgba, cx: &mut Context<Self>) -> Self {
+    fn new(
+        panel_background: Rgba,
+        background_opacity: Option<f64>,
+        translucent: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let shared_path = env::args().skip(1).last().unwrap_or_default();
         let config = ModelConfig {
             show_seconds: true,
@@ -121,6 +128,8 @@ impl GpuiComponentBar {
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
             panel_background,
+            background_opacity,
+            translucent,
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
@@ -714,6 +723,11 @@ impl GpuiComponentBar {
 
 impl Render for GpuiComponentBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.panel_background.a = xbar_core::background::bar_background_opacity(
+            self.runtime.view().blur_status_bar,
+            self.background_opacity,
+            self.translucent,
+        ) as f32;
         let scale_factor = window.scale_factor().max(f32::EPSILON);
         self.default_size
             .get_or_insert_with(|| window.bounds().size);
@@ -816,13 +830,8 @@ fn main() {
 
     let translucent = compositor_active() && RENDERER_ALPHA_CAPABLE;
     let [red, green, blue] = fallback_rgb(config.theme);
-    let opacity = if translucent {
-        config
-            .background_opacity
-            .unwrap_or(DEFAULT_BACKGROUND_OPACITY)
-    } else {
-        1.0
-    };
+    let opacity =
+        xbar_core::background::bar_background_opacity(None, config.background_opacity, translucent);
     let panel_background = Rgba {
         r: f32::from(red) / 255.0,
         g: f32::from(green) / 255.0,
@@ -872,7 +881,9 @@ fn main() {
         };
 
         cx.open_window(options, move |window, cx| {
-            let view = cx.new(move |cx| GpuiComponentBar::new(panel_background, cx));
+            let view = cx.new(move |cx| {
+                GpuiComponentBar::new(panel_background, config.background_opacity, translucent, cx)
+            });
             cx.new(|cx| Root::new(view, window, cx))
         })
         .expect("failed to open gpui_component_bar window");

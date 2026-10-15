@@ -362,6 +362,9 @@ pub struct WmSnapshot {
     /// fallback used by snapshots serialized before the Dock protocol.
     #[serde(default)]
     pub wm_session_id: u64,
+    /// JWM bar material preference; absent from older producers means clear.
+    #[serde(default)]
+    pub blur_status_bar: Option<bool>,
     pub monitor: MonitorId,
     pub geometry: Option<MonitorGeometry>,
     pub layout_symbol: String,
@@ -1251,6 +1254,8 @@ pub struct BarView<'a> {
     /// Minimized-projection epoch captured by Dock interactions.
     pub wm_sequence: Option<u64>,
     pub wm_session_id: u64,
+    /// JWM bar material preference; absent from older producers means clear.
+    pub blur_status_bar: Option<bool>,
     pub tags: &'a [TagState],
     pub active_tag: Option<TagId>,
     pub monitor: MonitorId,
@@ -1292,6 +1297,9 @@ pub struct BarSnapshot {
     pub wm_sequence: Option<u64>,
     #[serde(default)]
     pub wm_session_id: u64,
+    /// JWM bar material preference; absent from older producers means clear.
+    #[serde(default)]
+    pub blur_status_bar: Option<bool>,
     pub tags: Vec<TagState>,
     pub active_tag: Option<TagId>,
     pub monitor: MonitorId,
@@ -1331,6 +1339,7 @@ impl BarSnapshot {
             wm_available: self.wm_available,
             wm_sequence: self.wm_sequence,
             wm_session_id: self.wm_session_id,
+            blur_status_bar: self.blur_status_bar,
             tags: &self.tags,
             active_tag: self.active_tag,
             monitor: self.monitor,
@@ -1415,6 +1424,7 @@ pub struct BarModel {
     wm_available: bool,
     wm_sequence: Option<u64>,
     wm_session_id: u64,
+    blur_status_bar: Option<bool>,
     tags: Vec<TagState>,
     active_tag: Option<TagId>,
     monitor: MonitorId,
@@ -1458,6 +1468,7 @@ impl BarModel {
             wm_available: false,
             wm_sequence: None,
             wm_session_id: 0,
+            blur_status_bar: None,
             tags: vec![TagState::default(); config.tag_count],
             active_tag: None,
             monitor: MonitorId::default(),
@@ -1497,6 +1508,7 @@ impl BarModel {
             wm_available: self.wm_available,
             wm_sequence: self.wm_sequence,
             wm_session_id: self.wm_session_id,
+            blur_status_bar: self.blur_status_bar,
             tags: &self.tags,
             active_tag: self.active_tag,
             monitor: self.monitor,
@@ -1535,6 +1547,7 @@ impl BarModel {
             wm_available: view.wm_available,
             wm_sequence: view.wm_sequence,
             wm_session_id: view.wm_session_id,
+            blur_status_bar: view.blur_status_bar,
             tags: view.tags.to_vec(),
             active_tag: view.active_tag,
             monitor: view.monitor,
@@ -1634,6 +1647,9 @@ impl BarModel {
         {
             dirty.set(DirtyBits::MINIMIZED_CHANGED);
         }
+        if self.blur_status_bar != snapshot.blur_status_bar {
+            dirty.set(DirtyBits::THEME_CHANGED);
+        }
         let geometry_changed = self.geometry != snapshot.geometry;
         if geometry_changed {
             dirty.set(DirtyBits::GEOMETRY_CHANGED);
@@ -1642,6 +1658,7 @@ impl BarModel {
         self.wm_available = true;
         self.wm_sequence = snapshot.sequence;
         self.wm_session_id = snapshot.wm_session_id;
+        self.blur_status_bar = snapshot.blur_status_bar;
         self.tags = snapshot.tags;
         self.active_tag = next_active;
         self.monitor = snapshot.monitor;
@@ -1691,9 +1708,12 @@ impl BarModel {
             || !self.minimized_windows.is_empty()
             || self.minimized_overflow;
 
+        let background_changed = self.blur_status_bar.is_some();
+
         self.wm_available = false;
         self.wm_sequence = None;
         self.wm_session_id = 0;
+        self.blur_status_bar = None;
         self.tags.fill(TagState::default());
         self.active_tag = None;
         self.monitor = MonitorId::default();
@@ -1710,6 +1730,9 @@ impl BarModel {
         self.layout_selector_open = false;
 
         let mut dirty = DirtyBits::new(DirtyBits::MONITOR_CHANGED);
+        if background_changed {
+            dirty.set(DirtyBits::THEME_CHANGED);
+        }
         if geometry_was_set {
             dirty.set(DirtyBits::GEOMETRY_CHANGED);
         }
@@ -2278,6 +2301,78 @@ mod tests {
         assert!(cleared.dirty.contains(DirtyBits::GEOMETRY_CHANGED));
         assert_eq!(cleared.effects, vec![BarEffect::ClearMonitorGeometry]);
         assert_eq!(model.view().geometry, None);
+    }
+
+    #[test]
+    fn bar_material_changes_redraw_without_a_new_minimized_epoch() {
+        let mut model = BarModel::default();
+        assert_eq!(model.view().blur_status_bar, None);
+        for preference in [Some(false), Some(true), Some(false), None] {
+            let snapshot = WmSnapshot {
+                sequence: Some(7),
+                blur_status_bar: preference,
+                ..WmSnapshot::default()
+            };
+            let update = model
+                .update(BarEvent::WindowManager(snapshot.clone()))
+                .unwrap();
+            assert!(update.dirty.contains(DirtyBits::THEME_CHANGED));
+            assert!(update.needs_redraw());
+            assert_eq!(model.view().blur_status_bar, preference);
+            assert_eq!(model.snapshot().blur_status_bar, preference);
+            assert_eq!(model.snapshot().view(), model.view());
+            let duplicate = model.update(BarEvent::WindowManager(snapshot)).unwrap();
+            assert!(!duplicate.needs_redraw());
+        }
+
+        model
+            .update(BarEvent::WindowManager(WmSnapshot {
+                blur_status_bar: Some(true),
+                ..WmSnapshot::default()
+            }))
+            .unwrap();
+        let disconnected = model.update(BarEvent::WindowManagerUnavailable).unwrap();
+        assert!(disconnected.dirty.contains(DirtyBits::THEME_CHANGED));
+        assert_eq!(model.view().blur_status_bar, None);
+        assert_eq!(model.snapshot().blur_status_bar, None);
+        assert!(
+            !model
+                .update(BarEvent::WindowManagerUnavailable)
+                .unwrap()
+                .needs_redraw()
+        );
+    }
+
+    #[test]
+    fn bar_material_serialization_accepts_old_snapshots_and_preserves_explicit_modes() {
+        for preference in [None, Some(false), Some(true)] {
+            let wm = WmSnapshot {
+                blur_status_bar: preference,
+                ..WmSnapshot::default()
+            };
+            let encoded = serde_json::to_string(&wm).unwrap();
+            assert_eq!(serde_json::from_str::<WmSnapshot>(&encoded).unwrap(), wm);
+            let mut model = BarModel::default();
+            model.update(BarEvent::WindowManager(wm)).unwrap();
+            let snapshot = model.snapshot();
+            let encoded = serde_json::to_string(&snapshot).unwrap();
+            assert_eq!(
+                serde_json::from_str::<BarSnapshot>(&encoded).unwrap(),
+                snapshot
+            );
+        }
+
+        let mut legacy_wm = serde_json::to_value(WmSnapshot::default()).unwrap();
+        legacy_wm.as_object_mut().unwrap().remove("blur_status_bar");
+        let decoded = serde_json::from_value::<WmSnapshot>(legacy_wm).unwrap();
+        assert_eq!(decoded.blur_status_bar, None);
+        let mut legacy_bar = serde_json::to_value(BarModel::default().snapshot()).unwrap();
+        legacy_bar
+            .as_object_mut()
+            .unwrap()
+            .remove("blur_status_bar");
+        let decoded = serde_json::from_value::<BarSnapshot>(legacy_bar).unwrap();
+        assert_eq!(decoded.blur_status_bar, None);
     }
 
     #[test]

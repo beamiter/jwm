@@ -764,6 +764,7 @@ mod tests {
             wm_available: true,
             wm_sequence: Some(7),
             wm_session_id: 11,
+            blur_status_bar: None,
             tags: vec![TagState::default()],
             active_tag: None,
             monitor: MonitorId(2),

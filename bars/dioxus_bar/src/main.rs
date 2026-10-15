@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
+use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::presentation::{Palette, Rgba};
 use xbar_core::{
@@ -312,30 +312,32 @@ fn css_rgba(color: Rgba) -> String {
 /// Injected after the stylesheet, so equal specificity is enough to win; the
 /// per-tag rules are `!important` at three class selectors deep, so the two
 /// overrides that fight them match that weight exactly.
-fn mode_style(translucent: bool) -> String {
-    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
-        warn!("falling back to the default bar config: {error}");
-        xbar_core::config::BarConfig::default()
-    });
+fn mode_style(
+    config: &xbar_core::config::BarConfig,
+    translucent: bool,
+    blur_status_bar: Option<bool>,
+) -> String {
     let [r, g, b] = fallback_rgb(config.theme);
     let palette = Palette::for_theme(config.theme);
-    let background = if translucent {
-        let alpha = config
-            .background_opacity
-            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
-        format!("rgba({r}, {g}, {b}, {alpha})")
-    } else {
-        format!("rgb({r}, {g}, {b})")
-    };
+    let alpha = xbar_core::background::bar_background_opacity(
+        blur_status_bar,
+        config.background_opacity,
+        translucent,
+    );
+    let background = format!("rgba({r}, {g}, {b}, {alpha})");
     let text = css_rgba(palette.text);
     let muted = css_rgba(palette.muted_text);
     let idle = css_rgba(palette.occupied);
     let hovered = css_rgba(palette.hovered);
+    let outline = match config.theme {
+        xbar_core::ThemeMode::Dark => "rgba(0,0,0,0.9)",
+        xbar_core::ThemeMode::Light => "rgba(255,255,255,0.95)",
+    };
 
     format!(
         ".button-row {{ background: {background}; }}
 body {{ color: {text}; }}
-.emoji-button.state-default {{ background: {idle}; border-color: {hovered}; color: {muted}; }}
+.emoji-button.state-default {{ background: {idle}; border-color: {hovered}; color: {muted}; text-shadow: -1px 0 {outline}, 1px 0 {outline}, 0 -1px {outline}, 0 1px {outline}; }}
 .emoji-button.state-default:hover:not(:disabled):not(.pressed):not(:active) {{ background: {hovered}; border-color: {hovered}; }}
 .emoji-button.state-default.pressed, .emoji-button.state-default:active {{ background: {hovered} !important; border-color: {hovered} !important; }}
 .button-row .emoji-button.state-occupied {{ color: {text} !important; }}
@@ -826,7 +828,13 @@ fn App() -> Element {
     // The launch decision is provisional until the depth probe below has seen
     // the window the toolkit actually produced.
     let translucent_at_launch = TRANSLUCENT_AT_LAUNCH.get().copied().unwrap_or(false);
-    let mut mode_css = use_signal(|| mode_style(translucent_at_launch));
+    let mut translucent = use_signal(|| translucent_at_launch);
+    let background_config = use_hook(|| {
+        xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            xbar_core::config::BarConfig::default()
+        })
+    });
     let mut pressed_button = use_signal(|| None::<usize>);
     let runtime = use_signal(move || Arc::new(Mutex::new(RuntimeOwner::new(shared_path))));
     let dock_wake = use_hook(|| Arc::new(tokio::sync::Notify::new()));
@@ -845,7 +853,7 @@ fn App() -> Element {
         let window = window.clone();
         move || {
             if translucent_at_launch && !window_is_argb(&window) {
-                mode_css.set(mode_style(false));
+                translucent.set(false);
             }
         }
     });
@@ -1039,6 +1047,11 @@ fn App() -> Element {
         }
     };
 
+    let mode_css = mode_style(
+        &background_config,
+        translucent(),
+        bar_snapshot.read().blur_status_bar,
+    );
     rsx! {
         document::Style { "{STYLE_CSS}" }
         document::Style { "{mode_css}" }

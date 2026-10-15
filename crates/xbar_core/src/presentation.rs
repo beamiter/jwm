@@ -2139,6 +2139,7 @@ mod tests {
             wm_available: true,
             wm_sequence: Some(1),
             wm_session_id: 7,
+            blur_status_bar: None,
             tags,
             active_tag: tags
                 .iter()

@@ -16,7 +16,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, MAX_GLASS_IMAGE_BYTES};
+use xbar_core::glass::MAX_GLASS_IMAGE_BYTES;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -135,7 +135,11 @@ impl App {
         let initial_size = window.inner_size();
         let _ = bgra_frame_len(initial_size.width, initial_size.height)
             .context("initial window surface exceeds the frame budget")?;
-        let (display, _config, surface, context, gl) = create_gl_surface(window)?;
+        use glutin::config::GlConfig as _;
+        let (display, config, surface, context, gl) = create_gl_surface(window)?;
+        if config.alpha_size() == 0 {
+            self.bar.set_background_transparency_supported(false);
+        }
 
         let program = build_quad_program(&gl)?;
         let vao = build_quad_mesh(&gl);
@@ -326,7 +330,7 @@ impl ApplicationHandler<UserEvent> for App {
             .with_decorations(false)
             .with_resizable(true)
             .with_visible(true)
-            .with_transparent(self.compositor_active);
+            .with_transparent(true);
         let window = Rc::new(
             event_loop
                 .create_window(attributes)
@@ -336,13 +340,12 @@ impl ApplicationHandler<UserEvent> for App {
         // back to an opaque visual silently, and only a depth-32 window
         // carries the frame's alpha to the compositor. Anything else drops
         // the bar back to the fully opaque background.
-        let translucent = self.compositor_active
-            && self.x11.as_ref().is_some_and(|conn| {
-                window_xid(window.as_ref()).is_some_and(|xid| window_is_argb(conn, xid))
-            });
-        if !translucent {
-            self.bar.renderer_mut().set_background_opacity(None);
-        }
+        let translucent = window_is_native_wayland(window.as_ref())
+            || (self.compositor_active
+                && self.x11.as_ref().is_some_and(|conn| {
+                    window_xid(window.as_ref()).is_some_and(|xid| window_is_argb(conn, xid))
+                }));
+        self.bar.set_background_transparency_supported(translucent);
 
         if let Err(error) = self.init_gl(window.as_ref()) {
             panic!("failed to initialize OpenGL: {error:#}");
@@ -785,6 +788,14 @@ fn compositor_active(conn: &RustConnection, screen_num: usize) -> bool {
 }
 
 /// The X11 window id behind the winit window, if this is an X11 session.
+
+fn window_is_native_wayland(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(raw_window_handle::RawWindowHandle::Wayland(_))
+    )
+}
+
 fn window_xid(handle: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
     use raw_window_handle::RawWindowHandle;
     match handle.window_handle().ok()?.as_raw() {
@@ -834,15 +845,7 @@ fn main() -> Result<()> {
     // A translucent background only reads as a material when a compositor is
     // there to blend the desktop behind it; without one the bar keeps the
     // palette background at full opacity.
-    if compositor_active {
-        bar.renderer_mut().set_background_opacity(Some(
-            app_config
-                .background_opacity
-                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-        ));
-    } else {
-        bar.renderer_mut().set_background_opacity(None);
-    }
+    bar.follow_wm_background(app_config.background_opacity, compositor_active);
 
     let event_loop: EventLoop<UserEvent> = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();

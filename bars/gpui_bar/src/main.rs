@@ -35,7 +35,7 @@ use gpui_platform::application;
 use std::sync::Arc;
 use x11rb::connection::Connection as _;
 use x11rb::xcb_ffi::XCBConnection;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
+use xbar_core::glass::fallback_rgb;
 
 // -------- Constants (mirror iced_bar) ----------------------------------------
 
@@ -93,6 +93,8 @@ struct GpuiBar {
     /// the configured opacity when a compositor blends the bar into the
     /// desktop, fully opaque when nothing would.
     background: Rgba,
+    background_opacity: Option<f64>,
+    translucent: bool,
 }
 
 struct DockTitleTooltip(SharedString);
@@ -113,7 +115,12 @@ impl Render for DockTitleTooltip {
 }
 
 impl GpuiBar {
-    fn new(background: Rgba, cx: &mut Context<Self>) -> Self {
+    fn new(
+        background: Rgba,
+        background_opacity: Option<f64>,
+        translucent: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
         let config = ModelConfig {
@@ -136,6 +143,8 @@ impl GpuiBar {
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
             background,
+            background_opacity,
+            translucent,
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
@@ -814,6 +823,11 @@ impl GpuiBar {
 
 impl Render for GpuiBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.background.a = xbar_core::background::bar_background_opacity(
+            self.runtime.view().blur_status_bar,
+            self.background_opacity,
+            self.translucent,
+        ) as f32;
         let scale_factor = window.scale_factor().max(f32::EPSILON);
         self.default_size
             .get_or_insert_with(|| window.bounds().size);
@@ -924,13 +938,8 @@ fn main() {
 
     let translucent = detect_translucency();
     let [red, green, blue] = fallback_rgb(config.theme);
-    let opacity = if translucent {
-        config
-            .background_opacity
-            .unwrap_or(DEFAULT_BACKGROUND_OPACITY)
-    } else {
-        1.0
-    };
+    let opacity =
+        xbar_core::background::bar_background_opacity(None, config.background_opacity, translucent);
     let background = Rgba {
         r: f32::from(red) / 255.0,
         g: f32::from(green) / 255.0,
@@ -969,7 +978,7 @@ fn main() {
         };
 
         cx.open_window(opts, move |_w, cx| {
-            cx.new(move |cx| GpuiBar::new(background, cx))
+            cx.new(move |cx| GpuiBar::new(background, config.background_opacity, translucent, cx))
         })
         .expect("failed to open window");
         cx.activate(true);

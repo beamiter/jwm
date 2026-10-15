@@ -13,7 +13,6 @@ use tao::{
     window::{Window, WindowBuilder, WindowId},
 };
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -64,6 +63,14 @@ fn window_is_argb(conn: &RustConnection, xid: u32) -> bool {
 
 /// The X11 window id behind the tao window, if this is an X11 session with a
 /// realized window — tao's GTK backend has no id to give out before that.
+
+fn window_is_native_wayland(window: &impl raw_window_handle::HasWindowHandle) -> bool {
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(raw_window_handle::RawWindowHandle::Wayland(_))
+    )
+}
+
 fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
     use raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
@@ -170,7 +177,7 @@ impl App {
                 .with_decorations(false)
                 .with_resizable(true)
                 .with_visible(true)
-                .with_transparent(self.compositor_active)
+                .with_transparent(true)
                 .build(event_loop)
                 .context("failed to create tao window")?,
         );
@@ -182,11 +189,12 @@ impl App {
         // X id is not out yet, ask for alpha anyway — the final opacity
         // decision in `resolve_background_mode` re-checks before any
         // translucent pixel is painted.
-        let want_alpha = self.compositor_active
-            && window_xid(window.as_ref())
-                .zip(self.x11_side.as_ref())
-                .map(|(xid, conn)| window_is_argb(conn, xid))
-                .unwrap_or(true);
+        let want_alpha = window_is_native_wayland(window.as_ref())
+            || (self.compositor_active
+                && window_xid(window.as_ref())
+                    .zip(self.x11_side.as_ref())
+                    .map(|(xid, conn)| window_is_argb(conn, xid))
+                    .unwrap_or(true));
         let gpu =
             WgpuPresenter::new_blocking(Arc::clone(&window), safe_width, safe_height, want_alpha)
                 .context("failed to initialize wgpu")?;
@@ -222,25 +230,18 @@ impl App {
             return;
         };
         let xid = window_xid(window.as_ref());
-        if xid.is_none() && self.compositor_active {
+        if xid.is_none() && self.compositor_active && !window_is_native_wayland(window.as_ref()) {
             return;
         }
-        let argb = self.compositor_active
-            && xid
-                .zip(self.x11_side.as_ref())
-                .map(|(xid, conn)| window_is_argb(conn, xid))
-                .unwrap_or(false);
+        let argb = window_is_native_wayland(window.as_ref())
+            || (self.compositor_active
+                && xid
+                    .zip(self.x11_side.as_ref())
+                    .map(|(xid, conn)| window_is_argb(conn, xid))
+                    .unwrap_or(false));
         let translucent = argb && gpu.is_transparent();
         self.bar
-            .renderer_mut()
-            .set_background_opacity(if translucent {
-                Some(
-                    self.background_opacity
-                        .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
-                )
-            } else {
-                None
-            });
+            .follow_wm_background(self.background_opacity, translucent);
         self.mode_resolved = true;
     }
 

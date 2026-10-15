@@ -35,7 +35,7 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::xcb_ffi::XCBConnection;
 
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
+use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH,
@@ -499,7 +499,7 @@ struct XilemBar {
     /// background to `background_opacity`, a solid one paints it opaque.
     translucent: bool,
     /// Alpha of the bar's background while translucent; ignored when solid.
-    background_opacity: f64,
+    background_opacity: Option<f64>,
 }
 
 impl XilemBar {
@@ -528,9 +528,7 @@ impl XilemBar {
             warn!("falling back to the default bar config: {error}");
             xbar_core::config::BarConfig::default()
         });
-        let background_opacity = app_config
-            .background_opacity
-            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
+        let background_opacity = app_config.background_opacity;
         Self {
             tab_colors: [
                 rgb(0xFF, 0x6B, 0x6B),
@@ -1602,11 +1600,12 @@ fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
     // only the alpha differs: washed to the configured opacity when the
     // compositor blends what lies behind the window, opaque when it does not.
     let [r, g, b] = fallback_rgb(state.runtime.view().theme);
-    let bar_bg = if state.translucent {
-        with_alpha(rgb(r, g, b), state.background_opacity as f32)
-    } else {
-        rgb(r, g, b)
-    };
+    let alpha = xbar_core::background::bar_background_opacity(
+        state.runtime.view().blur_status_bar,
+        state.background_opacity,
+        state.translucent,
+    );
+    let bar_bg = with_alpha(rgb(r, g, b), alpha as f32);
     fork(
         sized_box(app_logic(state))
             .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
