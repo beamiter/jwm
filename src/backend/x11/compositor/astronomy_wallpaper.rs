@@ -10,6 +10,34 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const VERTEX: &str = "#version 330 core\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
 const FRAGMENT: &str = include_str!("shaders/animated_wallpaper.frag");
 
+/// Uniform locations belong to one successfully linked program. Keeping them
+/// with its handle prevents stale locations from surviving program recreation.
+struct AstronomyProgram {
+    program: glow::Program,
+    sun_direction: Option<glow::UniformLocation>,
+    view_longitude: Option<glow::UniformLocation>,
+    earth_map: Option<glow::UniformLocation>,
+    canvas_origin: Option<glow::UniformLocation>,
+    resolution: Option<glow::UniformLocation>,
+    sphere_radius: Option<glow::UniformLocation>,
+}
+
+impl AstronomyProgram {
+    unsafe fn new(gl: &glow::Context, program: glow::Program) -> Self {
+        unsafe {
+            Self {
+                program,
+                sun_direction: gl.get_uniform_location(program, "sun_direction"),
+                view_longitude: gl.get_uniform_location(program, "view_longitude"),
+                earth_map: gl.get_uniform_location(program, "earth_map"),
+                canvas_origin: gl.get_uniform_location(program, "canvas_origin"),
+                resolution: gl.get_uniform_location(program, "resolution"),
+                sphere_radius: gl.get_uniform_location(program, "sphere_radius"),
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct AstronomyWallpaper {
     enabled: bool,
@@ -18,7 +46,7 @@ pub(super) struct AstronomyWallpaper {
     pending: Option<wallpaper::DeferredWallpaperLoad>,
     texture: Option<glow::Texture>,
     retired: Vec<glow::Texture>,
-    program: Option<glow::Program>,
+    program: Option<AstronomyProgram>,
     failed: bool,
     powered: bool,
     last_power_query: Option<Instant>,
@@ -103,7 +131,7 @@ impl AstronomyWallpaper {
                 gl.delete_texture(tex);
             }
             if let Some(program) = self.program.take() {
-                gl.delete_program(program);
+                gl.delete_program(program.program);
             }
         }
     }
@@ -240,8 +268,18 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         if a.program.is_none() {
             match unsafe { Self::create_program(&self.gl, VERTEX, FRAGMENT) } {
-                Ok(program) => a.program = Some(program),
+                Ok(program) => {
+                    a.program = Some(unsafe { AstronomyProgram::new(&self.gl, program) });
+                }
                 Err(error) => {
+                    // Failure stops future animation wakes. Release the uploaded
+                    // image now, while this draw owns a current GL context,
+                    // rather than waiting indefinitely for another frame.
+                    if let Some(texture) = a.texture.take() {
+                        unsafe {
+                            self.gl.delete_texture(texture);
+                        }
+                    }
                     a.failed = true;
                     log::warn!(
                         "astronomy wallpaper shader failed; keeping static wallpaper: {error}"
@@ -250,25 +288,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        let Some(program) = a.program else {
+        let Some(program) = a.program.as_ref() else {
             return;
         };
         let sun = solar_direction(a.sample_unix);
         let longitude = viewing_longitude(a.sample_unix, a.sample_offset);
         unsafe {
             let gl = &self.gl;
-            gl.use_program(Some(program));
-            gl.uniform_3_f32(
-                gl.get_uniform_location(program, "sun_direction").as_ref(),
-                sun[0],
-                sun[1],
-                sun[2],
-            );
-            gl.uniform_1_f32(
-                gl.get_uniform_location(program, "view_longitude").as_ref(),
-                longitude,
-            );
-            gl.uniform_1_i32(gl.get_uniform_location(program, "earth_map").as_ref(), 0);
+            gl.use_program(Some(program.program));
+            gl.uniform_3_f32(program.sun_direction.as_ref(), sun[0], sun[1], sun[2]);
+            gl.uniform_1_f32(program.view_longitude.as_ref(), longitude);
+            gl.uniform_1_i32(program.earth_map.as_ref(), 0);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.quad_vao));
@@ -284,19 +314,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 };
                 gl.scissor(clip.0, clip.1, clip.2, clip.3);
                 gl.uniform_2_f32(
-                    gl.get_uniform_location(program, "canvas_origin").as_ref(),
+                    program.canvas_origin.as_ref(),
                     canvas.origin[0],
                     canvas.origin[1],
                 );
-                gl.uniform_2_f32(
-                    gl.get_uniform_location(program, "resolution").as_ref(),
-                    canvas.size[0],
-                    canvas.size[1],
-                );
-                gl.uniform_1_f32(
-                    gl.get_uniform_location(program, "sphere_radius").as_ref(),
-                    canvas.radius,
-                );
+                gl.uniform_2_f32(program.resolution.as_ref(), canvas.size[0], canvas.size[1]);
+                gl.uniform_1_f32(program.sphere_radius.as_ref(), canvas.radius);
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
             if let Some(clip) = repair {
