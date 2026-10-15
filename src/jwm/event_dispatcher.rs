@@ -2100,7 +2100,11 @@ impl Jwm {
     /// both of those helpers act on the selection, so in that case the same
     /// two steps run here on the dragged window itself, without moving the
     /// selection or the selected monitor.
-    fn settle_released_drag(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
+    pub(super) fn settle_released_drag(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
         if self.get_selected_client_key() == Some(client_key) {
             self.sync_focused_floating_geometry(backend);
             if let Err(e) = self.check_monitor_consistency(backend) {
@@ -2140,19 +2144,15 @@ impl Jwm {
             || client.geometry.h != h;
         (client.geometry.x, client.geometry.y) = (x, y);
         (client.geometry.w, client.geometry.h) = (w, h);
-        (client.geometry.floating_x, client.geometry.floating_y) = (x, y);
-        (client.geometry.floating_w, client.geometry.floating_h) = (w, h);
+        if !client.state.is_pip {
+            (client.geometry.floating_x, client.geometry.floating_y) = (x, y);
+            (client.geometry.floating_w, client.geometry.floating_h) = (w, h);
+        }
         let current_monitor = client.mon;
 
-        // The output under the window's origin, without recttomon's fallback
-        // to the selected monitor: that monitor holds the selection, not
-        // necessarily this window.
-        let target = backend.output_ops().output_at(x, y).and_then(|output| {
-            self.state
-                .output_map
-                .iter()
-                .find_map(|(monitor, &id)| (id == output).then_some(monitor))
-        });
+        // Use the dragged window's visible footprint, independently of the
+        // selection and its monitor, just as for a still-selected drop.
+        let target = self.monitor_for_client_drop(client_key);
         if let Some(target) = target
             && Some(target) != current_monitor
         {
@@ -2162,7 +2162,7 @@ impl Jwm {
                 self.pull_back_from_locked_output(backend, client_key);
                 return;
             }
-            self.sendmon(backend, Some(client_key), Some(target));
+            self.sendmon_after_drop(backend, client_key, target);
             return;
         }
         if changed {
@@ -10344,6 +10344,9 @@ mod tests {
         let mut jwm = jwm_with_monitor();
         let mut backend = RenderSpyBackend::new();
         let monitor = jwm.state.monitor_order[0];
+        // This scenario restores a visible client; an off-view fullscreen
+        // exit deliberately stages its return rectangle off-screen.
+        jwm.state.monitors[monitor].tag_set = [1, 1];
         let monitor_geometry = &mut jwm.state.monitors[monitor].geometry;
         monitor_geometry.m_w = 1920;
         monitor_geometry.m_h = 1080;

@@ -39,7 +39,7 @@ use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SurfaceTree;
 use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::{self, Sender};
 use smithay::reexports::calloop::generic::Generic;
@@ -2245,16 +2245,7 @@ fn process_input_event_windowed<B: InputBackend>(
                     });
                 }
             } else if let Some(pointer) = state.seat.get_pointer() {
-                let mut frame = AxisFrame::new(time).source(event.source());
-                for axis in [Axis::Horizontal, Axis::Vertical] {
-                    if let Some(val) = event.amount(axis) {
-                        frame = frame.value(axis, val);
-                    }
-                    if let Some(v120) = event.amount_v120(axis) {
-                        frame = frame.v120(axis, v120 as i32);
-                    }
-                    frame = frame.relative_direction(axis, event.relative_direction(axis));
-                }
+                let frame = crate::backend::wayland_axis::pointer_axis_frame(&event, false);
                 pointer.axis(state, frame);
                 pointer.frame(state);
             }

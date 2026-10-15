@@ -7,6 +7,29 @@ monorepo use independent Semantic Versions.
 
 ### Audit follow-up
 
+- Keep external dock and desktop surfaces out of application focus traversal
+  and activation, including after the last application closes or minimizes.
+- Pair Wayland pointer button delivery across modal, lock and session changes,
+  releasing old implicit grabs without leaking an unmatched physical release.
+- Preserve clipboard history order across rapid native copies while preventing
+  late native reads from superseding JWM offers or XWayland ownership changes.
+- Preserve PiP's return rectangle during pointer drops and locked-output
+  pullback, carrying it across outputs without moving the chosen drop twice.
+- Leave fullscreen through its state transaction before revealing a parked
+  or minimized scratchpad at its centered floating placement; preserve hidden
+  restore geometry and leave the client unchanged if fullscreen exit fails.
+- Accept the launcher's `x` multiplication alias without another operator,
+  and accept scientific operands so small formatted answers can be reused in
+  calculations while ordinary application searches remain searches.
+- Keep the DRM/KMS pointer inside enabled output rectangles on relative and
+  absolute motion and pointer warps, avoiding cursor loss in gaps between
+  unequal-height displays and correcting negative-subpixel output hit tests.
+- Choose floating-window drop ownership by the largest output overlap, keep
+  ties on the current output, and preserve the chosen drop position even on
+  staggered outputs or when focus changed during the drag.
+- Preserve Wayland touchpad and libinput continuous-scroll end events, and
+  translate wheel-only input into logical scroll distances for nested clients,
+  including clients too old to receive high-resolution wheel events.
 - Retire older pointer-grab retries as soon as a screenshot selector acquires
   input, so cancelling or finishing it before the next tick cannot reopen an
   earlier screenshot or Shell Hub request.

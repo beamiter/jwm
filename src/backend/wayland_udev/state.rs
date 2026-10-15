@@ -340,16 +340,17 @@ impl CaptureCounters {
 
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
-    /// Text copied by clients, waiting to be drained into the history. Filled
-    /// by the reader threads started in `SelectionHandler::new_selection`, in
+    /// Payloads copied by clients, waiting to be drained into the history. Filled
+    /// by the reader threads started after `SelectionHandler::new_selection`, in
     /// the order the reads finish, each tagged with the capture generation
     /// its read started under.
     pub clipboard_captured: std::sync::Arc<
         std::sync::Mutex<Vec<(u64, crate::backend::clipboard_offer::CapturedClipboard)>>,
     >,
-    /// Generation of the newest selection read started by `capture_clipboard`.
+    /// Generation of the newest clipboard ownership change, assigned before
+    /// deferring its read so an older worker cannot overtake a pending copy.
     clipboard_capture_generation: u64,
-    /// Newest generation already handed out by `drain_clipboard_captured`.
+    /// Newest generation already delivered or retired by an ownership change.
     clipboard_delivered_generation: u64,
     /// Entry JWM is currently offering as the selection source, if any.
     /// `send_selection` writes this; a client taking the selection clears it.
@@ -2787,6 +2788,7 @@ impl JwmWaylandState {
                 // `SelectionHandler::new_selection`, so the history entry JWM
                 // was offering must be retired here. Otherwise
                 // `send_selection` keeps serving it to Wayland pastes.
+                self.retire_clipboard_selection();
                 self.clipboard_offered = None;
                 set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
             }
@@ -2806,6 +2808,7 @@ impl JwmWaylandState {
                     return;
                 }
                 if current_data_device_selection_userdata(&self.seat).is_some() {
+                    self.retire_clipboard_selection();
                     clear_data_device_selection(&self.display_handle, &self.seat);
                 }
             }
@@ -4692,6 +4695,7 @@ impl SelectionHandler for JwmWaylandState {
         if ty == SelectionTarget::Clipboard {
             // A client owns the clipboard now, so whatever JWM was offering
             // is no longer current.
+            self.begin_clipboard_selection();
             self.clipboard_offered = None;
             if let Some(source) = source.as_ref() {
                 self.clipboard_pending = Some(source.mime_types());
@@ -4974,6 +4978,20 @@ fn write_selection_async(payload: Vec<u8>, fd: std::os::fd::OwnedFd) {
 }
 
 impl JwmWaylandState {
+    /// Assign the native ownership change its generation before deferring its
+    /// read. Earlier completed copies still belong in history, oldest first.
+    fn begin_clipboard_selection(&mut self) {
+        self.clipboard_capture_generation += 1;
+        self.clipboard_pending = None;
+    }
+
+    /// Explicit JWM offers and Xwayland ownership supersede pending native
+    /// reads, which must not later displace the newly published history entry.
+    fn retire_clipboard_selection(&mut self) {
+        self.clipboard_delivered_generation = self.clipboard_capture_generation;
+        self.begin_clipboard_selection();
+    }
+
     /// Ask the selection owner for its payload and record it in the history.
     ///
     /// Offers marked as secrets never get this far. Text wins when present;
@@ -5016,7 +5034,6 @@ impl JwmWaylandState {
             return;
         }
 
-        self.clipboard_capture_generation += 1;
         let generation = self.clipboard_capture_generation;
         let captured = std::sync::Arc::clone(&self.clipboard_captured);
         let worker = std::thread::Builder::new()
@@ -5105,6 +5122,10 @@ impl JwmWaylandState {
     /// so Xwayland is told directly; its requests then reach
     /// `send_selection_to_xwayland`, which serves the offer.
     fn publish_clipboard_offer(&mut self, mime_types: &[&str]) {
+        self.retire_clipboard_selection();
+        // JWM records this offer synchronously in the policy layer; there is
+        // no client reader for its generation to deliver later.
+        self.clipboard_delivered_generation = self.clipboard_capture_generation;
         let mime_types: Vec<String> = mime_types.iter().map(|m| (*m).to_string()).collect();
         set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), ());
         if let Some(xwm) = self.x11_wm.as_mut()
@@ -7375,6 +7396,83 @@ mod protocol_hardening_tests {
                 CapturedClipboard::Text("newer".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn jwm_clipboard_offers_retire_delayed_reads_and_pending_mimes() {
+        for png in [false, true] {
+            let mut server = Server::new();
+            let state = &mut server.state;
+            state.begin_clipboard_selection();
+            let old_generation = state.clipboard_capture_generation;
+            state.clipboard_pending = Some(vec!["text/plain".to_owned()]);
+            if png {
+                assert!(state.offer_clipboard_png(vec![1, 2, 3]));
+            } else {
+                assert!(state.offer_clipboard_text("chosen history entry"));
+            }
+            assert!(state.clipboard_pending.is_none());
+            state.clipboard_captured.lock().unwrap().push((
+                old_generation,
+                CapturedClipboard::Text("delayed predecessor".to_owned()),
+            ));
+            assert!(state.drain_clipboard_captured().is_empty());
+
+            // A later real ownership change gets its own deliverable read.
+            state.begin_clipboard_selection();
+            let new_generation = state.clipboard_capture_generation;
+            state.clipboard_captured.lock().unwrap().push((
+                new_generation,
+                CapturedClipboard::Text("later client copy".to_owned()),
+            ));
+            assert_eq!(
+                state.drain_clipboard_captured(),
+                vec![CapturedClipboard::Text("later client copy".to_owned())]
+            );
+        }
+    }
+
+    #[test]
+    fn native_selection_changes_preserve_completed_copies_before_drain() {
+        for unsupported_successor in [false, true] {
+            let mut server = Server::new();
+            let state = &mut server.state;
+            state.begin_clipboard_selection();
+            state.clipboard_captured.lock().unwrap().push((
+                state.clipboard_capture_generation,
+                CapturedClipboard::Text("first copy".to_owned()),
+            ));
+            state.begin_clipboard_selection();
+            let mut expected = vec![CapturedClipboard::Text("first copy".to_owned())];
+            if unsupported_successor {
+                // The second owner cannot be captured, but must not erase
+                // the first payload already waiting to enter history.
+                state.clipboard_pending = Some(vec!["application/octet-stream".to_owned()]);
+            } else {
+                state.clipboard_captured.lock().unwrap().push((
+                    state.clipboard_capture_generation,
+                    CapturedClipboard::Text("second copy".to_owned()),
+                ));
+                expected.push(CapturedClipboard::Text("second copy".to_owned()));
+            }
+            assert_eq!(state.drain_clipboard_captured(), expected);
+        }
+    }
+
+    #[test]
+    fn xwayland_ownership_change_retires_pending_wayland_capture() {
+        let mut server = Server::new();
+        let state = &mut server.state;
+        state.begin_clipboard_selection();
+        let old_generation = state.clipboard_capture_generation;
+        state.clipboard_pending = Some(vec!["text/plain".to_owned()]);
+        state.adopt_xwayland_selection(SelectionTarget::Clipboard, vec!["UTF8_STRING".to_owned()]);
+        assert!(state.clipboard_pending.is_none());
+        state.clipboard_captured.lock().unwrap().push((
+            old_generation,
+            CapturedClipboard::Text("previous Wayland copy".to_owned()),
+        ));
+        assert!(state.drain_clipboard_captured().is_empty());
     }
 
     // ext_session_lock_manager_v1.lock / ext_session_lock_v1 wire opcodes.

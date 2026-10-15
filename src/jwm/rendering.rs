@@ -744,10 +744,13 @@ impl Jwm {
             client.geometry.y = ny;
             client.geometry.w = nw;
             client.geometry.h = nh;
-            client.geometry.floating_x = nx;
-            client.geometry.floating_y = ny;
-            client.geometry.floating_w = nw;
-            client.geometry.floating_h = nh;
+            // PiP owns floating_* as the pre-PiP return rectangle.
+            if !client.state.is_pip {
+                client.geometry.floating_x = nx;
+                client.geometry.floating_y = ny;
+                client.geometry.floating_w = nw;
+                client.geometry.floating_h = nh;
+            }
             changed
         } else {
             false

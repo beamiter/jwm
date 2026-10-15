@@ -67,7 +67,7 @@ use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent, prima
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::utils::bbox_from_surface_tree;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
+use smithay::input::pointer::{ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::reexports::calloop::channel::{self, Sender};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -446,7 +446,111 @@ impl TouchRoutes {
     }
 }
 
+/// Track physical button sequences across modal ownership changes. A modal
+/// must not strand a delivered press or expose its own press's later release.
+#[derive(Debug, Default)]
+struct ButtonRoutes {
+    buttons: HashMap<u32, bool>,
+    modal: bool,
+    owner_epoch: (bool, u64),
+    releases_pending: HashSet<u32>,
+    discard_focus: bool,
+}
+
+impl ButtonRoutes {
+    fn cancel_delivered(&mut self) {
+        for (&button, delivered) in &mut self.buttons {
+            if std::mem::replace(delivered, false) {
+                self.releases_pending.insert(button);
+            }
+        }
+    }
+
+    fn set_modal(&mut self, modal: bool) {
+        if modal && !self.modal {
+            self.cancel_delivered();
+        }
+        self.modal = modal;
+    }
+
+    fn set_owner_epoch(&mut self, epoch: (bool, u64)) {
+        if self.owner_epoch != epoch {
+            self.cancel_delivered();
+            // Old button releases must never reach the new lock owner.
+            self.discard_focus |= !self.releases_pending.is_empty();
+        }
+        self.owner_epoch = epoch;
+    }
+
+    fn button(&mut self, code: u32, pressed: bool, allow_press: bool) -> bool {
+        if pressed {
+            let delivered = !self.modal && allow_press;
+            if self.buttons.insert(code, delivered) == Some(true) {
+                // A lost physical release must not duplicate Smithay's down list.
+                self.releases_pending.insert(code);
+            }
+            delivered
+        } else {
+            self.buttons.remove(&code).unwrap_or(false)
+        }
+    }
+
+    fn take_releases(&mut self) -> (Vec<u32>, bool) {
+        let mut releases: Vec<_> = self.releases_pending.drain().collect();
+        releases.sort_unstable();
+        (releases, std::mem::take(&mut self.discard_focus))
+    }
+}
+
+fn reconcile_button_routes(state: &mut JwmWaylandState, shared: &Arc<Mutex<SharedState>>) {
+    let (releases, discard_focus) = {
+        let mut shared = shared.lock_safe();
+        let modal = !shared.session_active
+            || (!state.session_locked
+                && (shared.screenshot_grab_active || shared.system_ui_grab_active));
+        shared.button_routes.set_modal(modal);
+        shared
+            .button_routes
+            .set_owner_epoch((state.session_locked, state.session_lock_epoch));
+        shared.button_routes.take_releases()
+    };
+    if releases.is_empty() {
+        return;
+    }
+    if let Some(pointer) = state.seat.get_pointer() {
+        let serial = SCOUNTER.next_serial();
+        let time = smithay::backend::input::InputTime::from_millis(0);
+        if discard_focus {
+            let location = state.pointer_location;
+            pointer.unset_grab(state, serial, time);
+            pointer.motion(
+                state,
+                None,
+                &MotionEvent {
+                    location,
+                    serial,
+                    time,
+                },
+            );
+        }
+        for button in releases {
+            pointer.button(
+                state,
+                &ButtonEvent {
+                    serial: SCOUNTER.next_serial(),
+                    time,
+                    button,
+                    state: smithay::backend::input::ButtonState::Released,
+                },
+            );
+        }
+        pointer.frame(state);
+        state.request_client_flush();
+    }
+}
+
 fn reconcile_touch_routes(state: &mut JwmWaylandState, shared: &Arc<Mutex<SharedState>>) {
+    reconcile_button_routes(state, shared);
     let cancel = {
         let mut shared = shared.lock_safe();
         let modal =
@@ -504,6 +608,7 @@ struct SharedState {
     /// True while JWM's built-in launcher or lock screen owns all input.
     system_ui_grab_active: bool,
     touch_routes: TouchRoutes,
+    button_routes: ButtonRoutes,
     /// Fractional vertical wheel rotation, in clicks, not yet reported to
     /// the WM. While one of the grabs above owns the pointer, rotation is
     /// converted into synthetic button 4/5 presses one whole click at a
@@ -543,6 +648,7 @@ impl Default for SharedState {
             screenshot_grab_active: false,
             system_ui_grab_active: false,
             touch_routes: TouchRoutes::default(),
+            button_routes: ButtonRoutes::default(),
             wheel_remainder: 0.0,
             toast_rects: Vec::new(),
         }
@@ -758,6 +864,9 @@ impl InputOps for UdevInputOps {
             }
             shared.screenshot_grab_active = true;
             shared.touch_routes.set_modal(true);
+            if !shared.button_routes.owner_epoch.0 {
+                shared.button_routes.set_modal(true);
+            }
         }
         Ok(true)
     }
@@ -767,6 +876,8 @@ impl InputOps for UdevInputOps {
         shared.screenshot_grab_active = false;
         let modal = shared.system_ui_grab_active || !shared.session_active;
         shared.touch_routes.set_modal(modal);
+        let button_modal = !shared.session_active || (modal && !shared.button_routes.owner_epoch.0);
+        shared.button_routes.set_modal(button_modal);
         if shared.cursor_kind != StdCursorKind::LeftPtr {
             shared.cursor_kind = StdCursorKind::LeftPtr;
             shared.cursor_dirty = true;
@@ -2747,22 +2858,12 @@ impl UdevBackend {
                                 let mut s = shared.lock_safe();
                                 s.pointer_x += delta.x;
                                 s.pointer_y += delta.y;
-                                // Clamp cursor to union bounding box of all outputs.
-                                if !s.outputs.is_empty() {
-                                    let min_x = s.outputs.iter().map(|o| o.x).min().unwrap_or(0) as f64;
-                                    let min_y = s.outputs.iter().map(|o| o.y).min().unwrap_or(0) as f64;
-                                    let max_x = s.outputs.iter().map(|o| o.x + o.width).max().unwrap_or(1920) as f64 - 1.0;
-                                    let max_y = s.outputs.iter().map(|o| o.y + o.height).max().unwrap_or(1080) as f64 - 1.0;
-                                    s.pointer_x = s.pointer_x.clamp(min_x, max_x);
-                                    s.pointer_y = s.pointer_y.clamp(min_y, max_y);
-                                }
-                                let x = s.pointer_x;
-                                let y = s.pointer_y;
-                                let output = s
-                                    .outputs
-                                    .iter()
-                                    .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
-                                    .map(|o| o.id);
+                                let (x, y) = project_pointer_to_outputs(
+                                    s.enabled_outputs(), s.pointer_x, s.pointer_y,
+                                );
+                                s.pointer_x = x;
+                                s.pointer_y = y;
+                                let output = output_at(s.enabled_outputs(), x, y);
                                 (x, y, output, (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked)
                             };
 
@@ -2778,7 +2879,7 @@ impl UdevBackend {
                                 let mut s = shared.lock_safe();
                                 s.pointer_x = x;
                                 s.pointer_y = y;
-                                output = output_at(&s.outputs, x, y);
+                                output = output_at(s.enabled_outputs(), x, y);
                             }
                             state.pointer_location = location;
                             state.needs_redraw = true;
@@ -2841,11 +2942,16 @@ impl UdevBackend {
                             let time = event.time();
                             let (mut x, mut y, mut output, in_screenshot) = {
                                 let mut s = shared.lock_safe();
-                                let (w, h, origin_x, origin_y) = output_bounds(&s.outputs);
+                                let (w, h, origin_x, origin_y) = output_bounds(s.enabled_outputs());
                                 let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
-                                s.pointer_x = origin_x as f64 + pos.x;
-                                s.pointer_y = origin_y as f64 + pos.y;
-                                let output = output_at(&s.outputs, s.pointer_x, s.pointer_y);
+                                let (x, y) = project_pointer_to_outputs(
+                                    s.enabled_outputs(),
+                                    origin_x as f64 + pos.x,
+                                    origin_y as f64 + pos.y,
+                                );
+                                s.pointer_x = x;
+                                s.pointer_y = y;
+                                let output = output_at(s.enabled_outputs(), s.pointer_x, s.pointer_y);
                                 (s.pointer_x, s.pointer_y, output, (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked)
                             };
 
@@ -2861,7 +2967,7 @@ impl UdevBackend {
                                 let mut s = shared.lock_safe();
                                 s.pointer_x = x;
                                 s.pointer_y = y;
-                                output = output_at(&s.outputs, x, y);
+                                output = output_at(s.enabled_outputs(), x, y);
                             }
                             state.pointer_location = location;
                             state.needs_redraw = true;
@@ -2934,11 +3040,7 @@ impl UdevBackend {
                                 let x = s.pointer_x;
                                 let y = s.pointer_y;
                                 let _mods = s.mods_state;
-                                let output = s
-                                    .outputs
-                                    .iter()
-                                    .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
-                                    .map(|o| o.id);
+                                let output = output_at(s.enabled_outputs(), x, y);
                                 (
                                     x,
                                     y,
@@ -2997,7 +3099,11 @@ impl UdevBackend {
                             };
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
-                            if !in_screenshot && !on_toast {
+                            let deliver_button = shared.lock_safe().button_routes.button(
+                                button_code, pressed, !in_screenshot && !on_toast,
+                            );
+                            reconcile_button_routes(state, &shared);
+                            if deliver_button {
                                 if let Some(pointer) = state.seat.get_pointer() {
                                     // Ensure focus is up-to-date before sending the button.
                                     pointer.motion(
@@ -3570,7 +3676,7 @@ impl UdevBackend {
                                     clicks,
                                     x,
                                     y,
-                                    output_at(&s.outputs, x, y),
+                                    output_at(s.enabled_outputs(), x, y),
                                     s.mods_state,
                                 )
                             };
@@ -3594,19 +3700,7 @@ impl UdevBackend {
                                     });
                                 }
                             } else if let Some(pointer) = state.seat.get_pointer() {
-                                let mut frame = AxisFrame::new(time).source(event.source());
-                                for axis in [Axis::Horizontal, Axis::Vertical] {
-                                    if let Some(val) = event.amount(axis) {
-                                        frame = frame.value(axis, val);
-                                    }
-                                    if let Some(v120) = event.amount_v120(axis) {
-                                        frame = frame.v120(axis, v120 as i32);
-                                    }
-                                    frame = frame.relative_direction(
-                                        axis,
-                                        event.relative_direction(axis),
-                                    );
-                                }
+                                let frame = crate::backend::wayland_axis::pointer_axis_frame(&event, true);
                                 pointer.axis(state, frame);
                                 pointer.frame(state);
                             }
@@ -3617,7 +3711,7 @@ impl UdevBackend {
                             if !shared.lock_safe().touch_routes.down(slot) { return; }
                             let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
-                                output_bounds(&s.outputs)
+                                output_bounds(s.enabled_outputs())
                             };
                             let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
                             let pos: Point<f64, Logical> =
@@ -3642,7 +3736,7 @@ impl UdevBackend {
                             if !shared.lock_safe().touch_routes.motion(slot) { return; }
                             let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
-                                output_bounds(&s.outputs)
+                                output_bounds(s.enabled_outputs())
                             };
                             let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
                             let pos: Point<f64, Logical> =
@@ -3851,6 +3945,7 @@ impl UdevBackend {
                     SessionEvent::PauseSession => {
                         cancel_key_repeat_timer(&state.loop_handle, &shared);
                         shared.lock_safe().session_active = false;
+                        reconcile_button_routes(state, &shared);
                         pending_events
                             .lock_safe()
                             .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
@@ -4059,25 +4154,29 @@ fn mods_from_smithay(mods: &ModifiersState) -> Mods {
     out
 }
 
-fn output_bounds(outputs: &[OutputInfo]) -> (i32, i32, i32, i32) {
-    if outputs.is_empty() {
+fn output_bounds<'a>(outputs: impl IntoIterator<Item = &'a OutputInfo>) -> (i32, i32, i32, i32) {
+    let mut outputs = outputs.into_iter();
+    let Some(first) = outputs.next() else {
         return (1920, 1080, 0, 0);
+    };
+    let mut min_x = i64::from(first.x);
+    let mut min_y = i64::from(first.y);
+    let mut max_x = min_x + i64::from(first.width.max(1));
+    let mut max_y = min_y + i64::from(first.height.max(1));
+    for output in outputs {
+        let x = i64::from(output.x);
+        let y = i64::from(output.y);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x + i64::from(output.width.max(1)));
+        max_y = max_y.max(y + i64::from(output.height.max(1)));
     }
-
-    let min_x = outputs.iter().map(|o| o.x).min().unwrap_or(0);
-    let min_y = outputs.iter().map(|o| o.y).min().unwrap_or(0);
-    let max_x = outputs
-        .iter()
-        .map(|o| o.x + o.width.max(1))
-        .max()
-        .unwrap_or(min_x + 1920);
-    let max_y = outputs
-        .iter()
-        .map(|o| o.y + o.height.max(1))
-        .max()
-        .unwrap_or(min_y + 1080);
-
-    ((max_x - min_x).max(1), (max_y - min_y).max(1), min_x, min_y)
+    (
+        (max_x - min_x).clamp(1, i64::from(i32::MAX)) as i32,
+        (max_y - min_y).clamp(1, i64::from(i32::MAX)) as i32,
+        min_x as i32,
+        min_y as i32,
+    )
 }
 
 /// One KMS head as it is scanned out, in the WM's global physical space.
@@ -4226,13 +4325,54 @@ fn output_management_failure(
     failure
 }
 
-fn output_at(outputs: &[OutputInfo], x: f64, y: f64) -> Option<OutputId> {
+/// Keep the pointer inside the union of scanned-out rectangles, rather than
+/// their bounding box. Preserve valid subpixel locations and deterministically
+/// choose the first output when two projections have the same distance.
+fn project_pointer_to_outputs<'a>(
+    outputs: impl IntoIterator<Item = &'a OutputInfo>,
+    x: f64,
+    y: f64,
+) -> (f64, f64) {
+    let mut nearest = (x, y);
+    let mut distance = f64::INFINITY;
+    for output in outputs {
+        if output.width <= 0 || output.height <= 0 {
+            continue;
+        }
+        let left = f64::from(output.x);
+        let top = f64::from(output.y);
+        let right = left + f64::from(output.width);
+        let bottom = top + f64::from(output.height);
+        if x >= left && x < right && y >= top && y < bottom {
+            return (x, y);
+        }
+        // Output rectangles are half-open. next_down retains fractional
+        // precision while ensuring the projected point is actually inside.
+        let projected = (
+            x.clamp(left, right.next_down()),
+            y.clamp(top, bottom.next_down()),
+        );
+        let candidate_distance = (projected.0 - x).hypot(projected.1 - y);
+        if candidate_distance < distance {
+            nearest = projected;
+            distance = candidate_distance;
+        }
+    }
+    nearest
+}
+
+fn output_at<'a>(
+    outputs: impl IntoIterator<Item = &'a OutputInfo>,
+    x: f64,
+    y: f64,
+) -> Option<OutputId> {
     outputs
-        .iter()
+        .into_iter()
         .find(|o| {
-            let x = x as i32;
-            let y = y as i32;
-            x >= o.x && y >= o.y && x < (o.x + o.width) && y < (o.y + o.height)
+            x >= f64::from(o.x)
+                && y >= f64::from(o.y)
+                && x < f64::from(o.x) + f64::from(o.width)
+                && y < f64::from(o.y) + f64::from(o.height)
         })
         .map(|o| o.id)
 }
@@ -4854,6 +4994,8 @@ impl CompositorWorkspaceEffects for UdevBackend {
                 || shared.screenshot_grab_active
                 || !shared.session_active;
             shared.touch_routes.set_modal(modal);
+            let button_modal = !shared.session_active || (modal && !self.state.session_locked);
+            shared.button_routes.set_modal(button_modal);
         }
         reconcile_touch_routes(&mut self.state, &self.shared);
         if let Some(compositor) = self.compositor.as_mut() {
@@ -7446,6 +7588,16 @@ impl Backend for UdevBackend {
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
 
             if let Some(location) = self.state.pending_pointer_warp.take() {
+                let location = {
+                    let shared = self.shared.lock_safe();
+                    let (x, y) = project_pointer_to_outputs(
+                        shared.enabled_outputs(),
+                        location.x,
+                        location.y,
+                    );
+                    Point::from((x, y))
+                };
+                self.state.pointer_location = location;
                 let (x, y, output) = {
                     let mut shared = self.shared.lock_safe();
                     shared.pointer_x = location.x;
@@ -7453,7 +7605,7 @@ impl Backend for UdevBackend {
                     (
                         shared.pointer_x,
                         shared.pointer_y,
-                        output_at(&shared.outputs, shared.pointer_x, shared.pointer_y),
+                        output_at(shared.enabled_outputs(), shared.pointer_x, shared.pointer_y),
                     )
                 };
                 let hit = self
@@ -8527,6 +8679,236 @@ mod udev_backend_selection_tests {
             preferred_height: 0,
             preferred_refresh_mhz: 0,
         }
+    }
+
+    #[test]
+    fn pointer_projection_rejects_the_gap_below_a_shorter_head() {
+        let left = test_output(OutputId(1), "DP-1");
+        let mut right = test_output(OutputId(2), "DP-2");
+        right.x = 1920;
+        right.height = 720;
+        let outputs = [left, right];
+        let (x, y) = project_pointer_to_outputs(&outputs, 1950.0, 1000.0);
+        assert_eq!(x, 1920.0_f64.next_down());
+        assert_eq!(y, 1000.0);
+        assert_eq!(output_at(&outputs, x, y), Some(OutputId(1)));
+    }
+
+    #[test]
+    fn absolute_pointer_endpoint_stays_inside_half_open_output() {
+        let outputs = [test_output(OutputId(1), "DP-1")];
+        let (width, height, ox, oy) = output_bounds(&outputs);
+        let (x, y) =
+            project_pointer_to_outputs(&outputs, f64::from(ox + width), f64::from(oy + height));
+        assert_eq!((x, y), (1920.0_f64.next_down(), 1080.0_f64.next_down()));
+        assert_eq!(output_at(&outputs, x, y), Some(OutputId(1)));
+    }
+
+    #[test]
+    fn pointer_projection_preserves_negative_origins_and_valid_subpixels() {
+        let mut output = test_output(OutputId(1), "DP-1");
+        output.x = -1920;
+        output.y = -1080;
+        let outputs = [output];
+        assert_eq!(
+            project_pointer_to_outputs(&outputs, -0.25, -0.75),
+            (-0.25, -0.75)
+        );
+        let (x, y) = project_pointer_to_outputs(&outputs, 0.0, 0.0);
+        assert!(x < 0.0 && y < 0.0);
+        assert_eq!(output_at(&outputs, x, y), Some(OutputId(1)));
+    }
+
+    #[test]
+    fn pointer_hit_testing_does_not_truncate_negative_subpixels() {
+        let outputs = [test_output(OutputId(1), "DP-1")];
+        assert_eq!(output_at(&outputs, -0.25, 10.0), None);
+        assert_eq!(output_at(&outputs, 10.0, -0.25), None);
+    }
+
+    #[test]
+    fn pointer_projection_ignores_invalid_heads_and_handles_no_outputs() {
+        let outputs: [OutputInfo; 0] = [];
+        assert_eq!(
+            project_pointer_to_outputs(&outputs, 17.5, -4.0),
+            (17.5, -4.0)
+        );
+        let mut invalid = test_output(OutputId(1), "DP-1");
+        invalid.width = 0;
+        assert_eq!(
+            project_pointer_to_outputs([&invalid], 17.5, -4.0),
+            (17.5, -4.0)
+        );
+    }
+
+    #[test]
+    fn pointer_projection_uses_only_enabled_outputs() {
+        let mut shared = SharedState::default();
+        let left = test_output(OutputId(1), "DP-1");
+        let mut right = test_output(OutputId(2), "DP-2");
+        right.x = 1920;
+        shared.outputs = vec![left, right];
+        shared.disabled_outputs.insert("DP-2".to_string());
+        let (x, y) = project_pointer_to_outputs(shared.enabled_outputs(), 2000.0, 10.0);
+        assert_eq!((x, y), (1920.0_f64.next_down(), 10.0));
+    }
+
+    #[test]
+    fn overlapping_disabled_head_cannot_own_a_projected_pointer() {
+        let mut shared = SharedState::default();
+        shared.outputs = vec![
+            test_output(OutputId(1), "DP-disabled"),
+            test_output(OutputId(2), "DP-active"),
+        ];
+        shared.disabled_outputs.insert("DP-disabled".to_string());
+        let (x, y) = project_pointer_to_outputs(shared.enabled_outputs(), 1920.0, 1080.0);
+        assert_eq!(output_at(shared.enabled_outputs(), x, y), Some(OutputId(2)),);
+        assert_eq!(
+            output_at(shared.enabled_outputs(), 100.0, 100.0),
+            Some(OutputId(2)),
+        );
+    }
+
+    #[test]
+    fn disabled_adjacent_head_does_not_consume_absolute_device_range() {
+        let mut shared = SharedState::default();
+        let active = test_output(OutputId(1), "DP-active");
+        let mut disabled = test_output(OutputId(2), "DP-disabled");
+        disabled.x = 1920;
+        shared.outputs = vec![active, disabled];
+        shared.disabled_outputs.insert("DP-disabled".to_string());
+        let (width, height, x, y) = output_bounds(shared.enabled_outputs());
+        assert_eq!((width, height, x, y), (1920, 1080, 0, 0));
+        let (px, py) = project_pointer_to_outputs(
+            shared.enabled_outputs(),
+            f64::from(x) + 0.75 * f64::from(width),
+            f64::from(y) + 0.5 * f64::from(height),
+        );
+        assert_eq!((px, py), (1440.0, 540.0));
+    }
+
+    #[test]
+    fn absolute_device_bounds_preserve_enabled_negative_origins() {
+        let mut left = test_output(OutputId(1), "DP-left");
+        left.x = -1920;
+        left.y = -720;
+        let right = test_output(OutputId(2), "DP-right");
+        assert_eq!(output_bounds([&left, &right]), (3840, 1800, -1920, -720));
+    }
+
+    #[test]
+    fn absolute_device_bounds_clamp_extreme_extents_without_overflow() {
+        let mut low = test_output(OutputId(1), "DP-low");
+        low.x = i32::MIN;
+        low.y = i32::MIN;
+        let mut high = test_output(OutputId(2), "DP-high");
+        high.x = i32::MAX;
+        high.y = i32::MAX;
+        assert_eq!(
+            output_bounds([&low, &high]),
+            (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+        );
+    }
+
+    #[test]
+    fn absolute_device_bounds_keep_empty_effective_output_fallback() {
+        let mut shared = SharedState::default();
+        shared.outputs.push(test_output(OutputId(1), "DP-disabled"));
+        shared.disabled_outputs.insert("DP-disabled".to_string());
+        assert_eq!(output_bounds(shared.enabled_outputs()), (1920, 1080, 0, 0));
+    }
+
+    #[test]
+    fn modal_button_transition_releases_delivered_press_and_blocks_physical_up() {
+        let mut routes = ButtonRoutes::default();
+        assert!(routes.button(272, true, true));
+        routes.set_modal(true);
+        assert_eq!(routes.take_releases(), (vec![272], false));
+        routes.set_modal(false);
+        assert!(!routes.button(272, false, true));
+        assert_eq!(routes.take_releases(), (vec![], false));
+    }
+
+    #[test]
+    fn modal_owned_button_cannot_leak_release_when_modal_closes() {
+        let mut routes = ButtonRoutes::default();
+        routes.set_modal(true);
+        assert!(!routes.button(272, true, true));
+        routes.set_modal(false);
+        assert!(!routes.button(272, false, true));
+        assert!(routes.button(272, true, true));
+        assert!(routes.button(272, false, true));
+    }
+
+    #[test]
+    fn button_routes_preserve_toast_ownership_and_independent_buttons() {
+        let mut routes = ButtonRoutes::default();
+        assert!(!routes.button(272, true, false));
+        assert!(routes.button(273, true, true));
+        assert!(!routes.button(272, false, true));
+        assert!(routes.button(273, false, false));
+        assert!(!routes.button(274, false, true));
+    }
+
+    #[test]
+    fn lost_release_and_duplicate_press_restart_button_ownership() {
+        let mut routes = ButtonRoutes::default();
+        assert!(routes.button(272, true, true));
+        assert!(routes.button(272, true, true));
+        assert_eq!(routes.take_releases(), (vec![272], false));
+        assert!(routes.button(272, false, true));
+        assert!(routes.button(272, true, true));
+        routes.set_modal(true); // VT pause loses the physical release.
+        assert_eq!(routes.take_releases(), (vec![272], false));
+        routes.set_modal(false);
+        assert!(routes.button(272, true, true));
+        assert!(routes.button(272, false, true));
+    }
+
+    #[test]
+    fn lock_epoch_retires_old_buttons_before_new_owner_delivery() {
+        let mut routes = ButtonRoutes::default();
+        assert!(routes.button(272, true, true));
+        routes.set_owner_epoch((true, 1));
+        assert_eq!(routes.take_releases(), (vec![272], true));
+        assert!(!routes.button(272, false, true));
+        assert!(routes.button(273, true, true)); // Fresh locker input still works.
+        routes.set_owner_epoch((false, 1));
+        assert_eq!(routes.take_releases(), (vec![273], true));
+        assert!(!routes.button(273, false, true));
+    }
+
+    #[test]
+    fn modal_button_cancellation_releases_real_smithay_click_grab() {
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::Server;
+        let mut server = Server::new();
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        shared.lock_safe().session_active = true;
+        let pointer = server.state.seat.get_pointer().expect("test seat pointer");
+        assert!(shared.lock_safe().button_routes.button(272, true, true));
+        pointer.button(
+            &mut server.state,
+            &ButtonEvent {
+                serial: SCOUNTER.next_serial(),
+                time: smithay::backend::input::InputTime::from_millis(1),
+                button: 272,
+                state: smithay::backend::input::ButtonState::Pressed,
+            },
+        );
+        assert!(pointer.is_grabbed(), "press starts Smithay's implicit grab");
+        {
+            let mut shared = shared.lock_safe();
+            shared.screenshot_grab_active = true;
+            shared.button_routes.set_modal(true);
+        }
+        reconcile_button_routes(&mut server.state, &shared);
+        assert!(
+            !pointer.is_grabbed(),
+            "synthetic release retires the implicit grab"
+        );
+        shared.lock_safe().screenshot_grab_active = false;
+        reconcile_button_routes(&mut server.state, &shared);
+        assert!(!shared.lock_safe().button_routes.button(272, false, true));
     }
 
     #[test]

@@ -78,6 +78,9 @@ pub mod xcursor_theme;
 #[cfg(feature = "wayland-backends")]
 pub mod wayland;
 
+#[cfg(feature = "wayland-backends")]
+pub(crate) mod wayland_axis;
+
 // Shared xkbcommon-based key mapping used by Smithay-backed backends.
 #[cfg(feature = "wayland-backends")]
 pub mod wayland_key_ops;

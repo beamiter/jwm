@@ -103,6 +103,28 @@ impl Jwm {
         client_key_opt: Option<ClientKey>,
         target_mon_opt: Option<MonitorKey>,
     ) {
+        self.sendmon_impl(backend, client_key_opt, target_mon_opt, false);
+    }
+
+    /// A pointer drop has already placed the window in desktop coordinates.
+    /// Transfer ownership and tags without translating that chosen position
+    /// by the distance between outputs a second time.
+    pub(crate) fn sendmon_after_drop(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        target_mon: MonitorKey,
+    ) {
+        self.sendmon_impl(backend, Some(client_key), Some(target_mon), true);
+    }
+
+    fn sendmon_impl(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key_opt: Option<ClientKey>,
+        target_mon_opt: Option<MonitorKey>,
+        preserve_drop_geometry: bool,
+    ) {
         // info!("[sendmon]");
 
         let client_key = match client_key_opt {
@@ -188,6 +210,11 @@ impl Jwm {
             }
         }
 
+        if preserve_drop_geometry {
+            // The user chose the live desktop rectangle; only PiP's saved
+            // pre-mode rectangle follows the ownership transfer.
+            self.migrate_pip_drop_restore(client_key, source_work_area, target_work_area);
+        }
         if is_hidden {
             self.migrate_hidden_client_restore(
                 backend,
@@ -196,7 +223,13 @@ impl Jwm {
                 target_monitor_rect,
                 target_work_area,
             );
-        } else {
+        } else if !(preserve_drop_geometry
+            && self.state.clients.get(client_key).is_some_and(|client| {
+                client.state.is_floating
+                    && !client.state.is_fullscreen
+                    && !client.state.is_maximize_realized()
+            }))
+        {
             // A floating window keeps its place relative to the work area and
             // a fullscreen one fills the target output, instead of staying
             // (mostly) on the monitor it just left.

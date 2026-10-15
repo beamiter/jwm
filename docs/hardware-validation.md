@@ -47,6 +47,23 @@ Run on `wayland-udev` unless a row says otherwise. Mark Pass / Fail / Skip.
 | 13 | `scripts/test-install-lifecycle.sh` on a clean prefix | | |
 | 14 | Upgrade then rollback per [upgrade](upgrade.md) | | |
 | 15 | X11 compatibility smoke (`x11rb`) optional | | |
+| 16 | Touchpad two-finger scroll: vertical, horizontal, diagonal, lift and restart | | |
+| 17 | Pointer stays visible on unequal-height and offset outputs; floating drops adopt the largest overlap | | |
+| 18 | Held mouse button across screenshot, launcher, lock and VT changes releases cleanly | | |
+
+For the touchpad row, use a native Wayland client with scrollable content in
+both directions. Verify that lifting the fingers ends each active scroll axis
+and a new gesture works immediately; normal application kinetic scrolling may
+continue after lift. If available, also check a pointing stick's continuous
+scroll and a mouse wheel, including high-resolution partial wheel steps.
+Nested-backend smoke checks should include a client bound to `wl_pointer`
+version 4 to verify ordinary wheel scrolling without newer axis events.
+
+For the multi-output pointer row, move into the gap below a shorter display
+with both a mouse and an absolute device when available. Check output edges,
+negative output origins, and a disabled display that overlaps an enabled one.
+Drop floating windows across a boundary in both directions, including after
+keyboard focus moves to a different window, and verify position and tags.
 
 ## Perf contract
 

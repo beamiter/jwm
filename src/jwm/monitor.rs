@@ -230,6 +230,27 @@ enum VisibleMigration {
     Live,
 }
 
+fn translate_floating_restore(client: &mut WMClient, source_work: Option<Rect>, target_work: Rect) {
+    let floating = Rect::new(
+        client.geometry.floating_x,
+        client.geometry.floating_y,
+        client.geometry.floating_w,
+        client.geometry.floating_h,
+    );
+    if let Some(floating) = valid_rect(floating) {
+        let floating = translate_and_clamp_restore_rect(
+            floating,
+            source_work,
+            target_work,
+            client.geometry.border_w,
+        );
+        client.geometry.floating_x = floating.x;
+        client.geometry.floating_y = floating.y;
+        client.geometry.floating_w = floating.w;
+        client.geometry.floating_h = floating.h;
+    }
+}
+
 /// Move a non-minimized client's geometry to a new output. A fullscreen
 /// window fills the target output; a maximized window fills the target work
 /// area on its maximized axes; a floating or PiP window keeps its offset
@@ -278,22 +299,15 @@ fn migrate_visible_geometry(
     } else {
         rect_center_inside(live, target_monitor)
     };
+    if client.state.is_pip {
+        translate_floating_restore(client, source_work, target_work);
+    }
     if !parked && already_placed {
         return VisibleMigration::Unchanged;
     }
 
-    let floating = Rect::new(
-        client.geometry.floating_x,
-        client.geometry.floating_y,
-        client.geometry.floating_w,
-        client.geometry.floating_h,
-    );
-    if let Some(floating) = valid_rect(floating) {
-        let floating = translate(floating);
-        client.geometry.floating_x = floating.x;
-        client.geometry.floating_y = floating.y;
-        client.geometry.floating_w = floating.w;
-        client.geometry.floating_h = floating.h;
+    if !client.state.is_pip {
+        translate_floating_restore(client, source_work, target_work);
     }
 
     // Where the window is (or, parked, comes back to) on the target.
@@ -949,10 +963,31 @@ impl Jwm {
         Some((output, work))
     }
 
-    /// Apply one hidden-client migration and immediately move/resize its real
-    /// input window at the new parking coordinate. Cancelling a still-running
-    /// Hide animation is essential: its old completion target would otherwise
-    /// overwrite the freshly migrated restore state on the next frame.
+    /// Carry PiP's return slots without moving the user's chosen drop rectangle.
+    pub(super) fn migrate_pip_drop_restore(
+        &mut self,
+        client_key: ClientKey,
+        source_work: Option<Rect>,
+        target_work: Rect,
+    ) {
+        if let Some(client) = self.state.clients.get_mut(client_key)
+            && client.state.is_pip
+        {
+            translate_floating_restore(client, source_work, target_work);
+            if client.state.maximized_axes().any() {
+                client.geometry.maximize_restore_rect =
+                    client.geometry.maximize_restore_rect.map(|restore| {
+                        translate_and_clamp_restore_rect(
+                            restore,
+                            source_work,
+                            target_work,
+                            client.geometry.border_w,
+                        )
+                    });
+            }
+        }
+    }
+
     /// Carry a visible fullscreen, floating or PiP client to its new output
     /// and apply the geometry; see [`migrate_visible_geometry`].
     pub(super) fn migrate_visible_client(

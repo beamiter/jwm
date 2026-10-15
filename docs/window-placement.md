@@ -30,6 +30,19 @@ snapshot — so a later re-enable starts from what the user does next rather
 than from stale history. While the feature is disabled the snapshot file is
 deleted (or ignored); it is only loaded at startup when the feature is on.
 
+## Dragging between outputs
+
+A floating move or resize transfers the window to the output showing the
+largest area of its border-inclusive rectangle when the drag ends. Equal
+overlap keeps its current output; a drop outside every output also keeps that
+ownership. This works with outputs above or left of the primary output and
+with unequal output sizes.
+
+The window adopts the destination's active tags and keeps the position chosen
+by the drag. If focus changed during the drag, only the dragged window moves;
+the selected window and monitor stay selected. A locked destination refuses
+the transfer and pulls the window back onto its own unlocked output.
+
 ## What is remembered
 
 When a regular top-level window is unmanaged, closed by the user or by its
@@ -302,8 +315,10 @@ proximity still uses the outer monitor edges.
 
 `togglefloating` on a maximized window unmaximizes it first. A promoted
 window then simply returns to the layout; any other window is unmaximized and
-then tiled. Revealing a scratchpad unmaximizes it before placing it at its
-centered position.
+then tiled. Revealing a parked or minimized scratchpad exits fullscreen and
+unmaximizes it before placing it at its centered floating position on the
+selected monitor and tags. If exiting fullscreen fails, the scratchpad stays
+in its previous state without moving or being revealed.
 
 ### Fullscreen and picture-in-picture
 
@@ -316,6 +331,9 @@ rejoins the layout when that mode ends, at the end of the tiled windows rather
 than in the slot it left. Fullscreen and maximized may be reported together,
 as EWMH and xdg-shell allow.
 `togglemaximize` and `snap_window` leave fullscreen and PiP windows alone.
+Moving or resizing PiP preserves the rectangle it returns to when PiP ends.
+A cross-output drop carries that return rectangle to the destination work
+area while keeping the PiP window at the user's chosen drop position.
 
 ### Restarts and sessions
 

@@ -145,7 +145,10 @@ main-loop completion poll when no X11 image sender is present
 (`offer_clipboard_png` → `set_clipboard_png`, then `wl-copy`). When an X11
 sender already offered on the worker, the poll re-offers but soft-succeeds
 on re-offer failure so the toast stays honest. Nested Wayland backends share
-the same native path as activate/IPC.
+the same native path as activate/IPC. Completed native copies enter history in
+selection order, even if several arrive before the next history update. A JWM
+offer or XWayland ownership change retires older pending native reads, so a
+slow predecessor cannot replace the entry the user just selected or copied.
 
 The X11 watcher runs on **its own X connection and thread**, not the window
 manager's.

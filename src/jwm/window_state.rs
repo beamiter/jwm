@@ -1052,11 +1052,10 @@ impl Jwm {
         } else if !fullscreen && is_fullscreen {
             backend.property_ops().set_fullscreen_state(win, false)?;
 
-            let hidden = self
-                .state
-                .clients
-                .get(client_key)
-                .is_some_and(|client| client.state.is_hidden);
+            // Off-view clients include parked scratchpads (tags == 0), not
+            // only minimized clients. Keep their restored rectangle staged
+            // off-screen until their visibility transition exposes it.
+            let hidden = !self.is_client_visible_by_key(client_key);
             let desktop_left = self.desktop_left_edge();
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.is_fullscreen = false;
@@ -3069,6 +3068,151 @@ mod tests {
             client.geometry.w,
             client.geometry.h,
         )
+    }
+
+    #[test]
+    fn dragged_pip_restores_its_pre_pip_rectangle_for_selected_and_unselected_drops() {
+        for selected in [false, true] {
+            for cross_output in [false, true] {
+                for pip in [false, true] {
+                    let mut backend = MinimizeSpyBackend::new();
+                    let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                    let home = jwm.state.monitor_order[0];
+                    let area = jwm.monitor_work_area(home).unwrap();
+                    let source = Rect::new(area.x + 100, area.y + 90, 500, 350);
+                    let window = WindowId::from_raw(0x50d0);
+                    let (_, key) = add_mode_client(&mut jwm, window, source, true, false);
+                    let target = if cross_output {
+                        let mut output = backend.output_ops.enumerate_outputs()[0].clone();
+                        output.id = crate::backend::common_define::OutputId(99);
+                        output.name = "drop-target".into();
+                        output.x += output.width as i32;
+                        jwm.add_monitor(output);
+                        *jwm.state.monitor_order.last().unwrap()
+                    } else {
+                        home
+                    };
+                    let target_area = jwm.monitor_work_area(target).unwrap();
+                    if pip {
+                        assert!(jwm.set_client_pip(&mut backend, key, true).unwrap());
+                    }
+                    if !selected {
+                        add_mode_client(&mut jwm, WindowId::from_raw(0x50d1), source, true, false);
+                    }
+                    let dropped = Rect::new(target_area.x + 180, target_area.y + 140, 320, 220);
+                    backend.window_ops.geometries.lock().unwrap().insert(
+                        window,
+                        Geometry {
+                            x: dropped.x,
+                            y: dropped.y,
+                            w: dropped.w as u32,
+                            h: dropped.h as u32,
+                            ..Default::default()
+                        },
+                    );
+                    jwm.settle_released_drag(&mut backend, key);
+                    assert_eq!(
+                        client_rect(&jwm, key),
+                        dropped,
+                        "chosen drop must not move twice"
+                    );
+                    assert_eq!(jwm.state.clients[key].mon, Some(target));
+                    if pip {
+                        assert!(jwm.set_client_pip(&mut backend, key, false).unwrap());
+                        assert_eq!(
+                            client_rect(&jwm, key),
+                            Rect::new(
+                                source.x + target_area.x - area.x,
+                                source.y + target_area.y - area.y,
+                                source.w,
+                                source.h,
+                            ),
+                            "PiP return rectangle must follow output ownership"
+                        );
+                    } else {
+                        let geometry = &jwm.state.clients[key].geometry;
+                        assert_eq!(
+                            Rect::new(
+                                geometry.floating_x,
+                                geometry.floating_y,
+                                geometry.floating_w,
+                                geometry.floating_h
+                            ),
+                            dropped
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pulling_pip_back_from_an_output_preserves_its_return_rectangle() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let home = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(home).unwrap();
+        let source = Rect::new(area.x + 100, area.y + 90, 500, 350);
+        let (_, key) = add_mode_client(&mut jwm, WindowId::from_raw(0x50d2), source, true, false);
+        assert!(jwm.set_client_pip(&mut backend, key, true).unwrap());
+        jwm.state.clients[key].geometry.x = area.x + area.w + 200;
+        jwm.pull_back_from_locked_output(&mut backend, key);
+        assert!(client_rect(&jwm, key).x < area.x + area.w);
+        assert!(jwm.set_client_pip(&mut backend, key, false).unwrap());
+        assert_eq!(client_rect(&jwm, key), source);
+    }
+
+    #[test]
+    fn cross_output_pip_drop_carries_suspended_maximize_restore() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let home = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(home).unwrap();
+        let source = Rect::new(area.x + 100, area.y + 90, 500, 350);
+        let window = WindowId::from_raw(0x50d3);
+        let (_, key) = add_mode_client(&mut jwm, window, source, true, false);
+        let mut output = backend.output_ops.enumerate_outputs()[0].clone();
+        output.id = crate::backend::common_define::OutputId(99);
+        output.name = "maximize-drop-target".into();
+        output.x += output.width as i32;
+        jwm.add_monitor(output);
+        let target = *jwm.state.monitor_order.last().unwrap();
+        let target_area = jwm.monitor_work_area(target).unwrap();
+        assert!(
+            jwm.set_client_maximized(&mut backend, key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        assert!(jwm.set_client_pip(&mut backend, key, true).unwrap());
+        let dropped = Rect::new(target_area.x + 180, target_area.y + 140, 320, 220);
+        backend.window_ops.geometries.lock().unwrap().insert(
+            window,
+            Geometry {
+                x: dropped.x,
+                y: dropped.y,
+                w: dropped.w as u32,
+                h: dropped.h as u32,
+                ..Default::default()
+            },
+        );
+        jwm.settle_released_drag(&mut backend, key);
+        assert_eq!(client_rect(&jwm, key), dropped);
+        let restored = Rect::new(
+            source.x + target_area.x - area.x,
+            source.y + target_area.y - area.y,
+            source.w,
+            source.h,
+        );
+        assert_eq!(
+            jwm.state.clients[key].geometry.maximize_restore_rect,
+            Some(restored)
+        );
+        assert!(jwm.set_client_pip(&mut backend, key, false).unwrap());
+        assert_eq!(jwm.state.clients[key].state.maximized_axes(), MAX_BOTH);
+        assert!(
+            jwm.set_client_maximized(&mut backend, key, MAX_NONE, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        assert_eq!(client_rect(&jwm, key), restored);
     }
 
     fn add_mode_client(

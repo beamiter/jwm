@@ -340,13 +340,21 @@ const MAX_EXPRESSION_CHARS: usize = 256;
 #[must_use]
 pub fn evaluate(query: &str) -> Option<f64> {
     let trimmed = query.trim().trim_start_matches('=').trim();
-    if trimmed.is_empty()
-        || trimmed.chars().nth(MAX_EXPRESSION_CHARS).is_some()
-        || !trimmed.contains(['+', '-', '*', '/', '%', '^'])
-    {
+    if trimmed.is_empty() || trimmed.chars().nth(MAX_EXPRESSION_CHARS).is_some() {
         return None;
     }
     let tokens = tokenize(trimmed)?;
+    // Inspect parsed operators so aliases agree with the tokenizer and a
+    // sign inside a scientific literal does not turn a lone number into an
+    // expression.
+    if !tokens.iter().any(|token| {
+        matches!(
+            token,
+            Token::Plus | Token::Minus | Token::Star | Token::Slash | Token::Percent | Token::Caret
+        )
+    }) {
+        return None;
+    }
     let mut parser = Parser { tokens, at: 0 };
     let value = parser.expression(0)?;
     if parser.at != parser.tokens.len() || !value.is_finite() {
@@ -770,6 +778,19 @@ fn tokenize(text: &str) -> Option<Vec<Token>> {
             let start = at;
             while at < bytes.len() && (bytes[at].is_ascii_digit() || bytes[at] == '.') {
                 at += 1;
+            }
+            if matches!(bytes.get(at), Some('e' | 'E')) {
+                at += 1;
+                if matches!(bytes.get(at), Some('+' | '-')) {
+                    at += 1;
+                }
+                let exponent_start = at;
+                while at < bytes.len() && bytes[at].is_ascii_digit() {
+                    at += 1;
+                }
+                if at == exponent_start {
+                    return None;
+                }
             }
             let literal: String = bytes[start..at].iter().collect();
             tokens.push(Token::Number(literal.parse().ok()?));
@@ -1592,6 +1613,63 @@ mod tests {
         let oversized = format!("{}10+4{}", "(".repeat(127), ")".repeat(127));
         assert_eq!(oversized.chars().count(), MAX_EXPRESSION_CHARS + 2);
         assert_eq!(evaluate(&oversized), None);
+    }
+
+    #[test]
+    fn multiplication_alias_uses_the_same_query_mode_as_star() {
+        assert_eq!(evaluate("2x3"), Some(6.0));
+        assert_eq!(evaluate(".5x4"), Some(2.0));
+        assert_eq!(parse_query("2x3"), QueryMode::Answer(6.0));
+        assert_eq!(parse_query("2x3"), parse_query("2*3"));
+    }
+
+    #[test]
+    fn scientific_operands_accept_signed_exponents_and_decimal_mantissas() {
+        for (query, expected) in [
+            ("1e3+2", 1002.0),
+            ("1E+3+2", 1002.0),
+            ("1e-3*2", 0.002),
+            (".5e+2/2", 25.0),
+            ("1.25E-2*4", 0.05),
+            ("1.e2+1", 101.0),
+            ("-2e-2+1", 0.98),
+        ] {
+            assert_eq!(evaluate(query), Some(expected), "{query}");
+        }
+        let answer = format_result(evaluate("1/100000000000").unwrap());
+        assert_eq!(answer, "1e-11");
+        assert_eq!(evaluate(&format!("{answer}*2")), Some(2e-11));
+        assert_eq!(parse_query("1e-11*2"), QueryMode::Answer(2e-11));
+    }
+
+    #[test]
+    fn scientific_syntax_does_not_capture_numbers_or_application_searches() {
+        for query in [
+            "1e3",
+            "1e+3",
+            "1e-3",
+            "42",
+            "1.25",
+            "firefox",
+            "xterm",
+            "gtk+",
+            "re-search",
+            "",
+            "   ",
+        ] {
+            assert_eq!(evaluate(query), None, "{query}");
+            assert_eq!(
+                parse_query(query),
+                QueryMode::Search(query.trim().to_lowercase()),
+                "{query}"
+            );
+        }
+        for query in [
+            "1e+", "1e-*2", "1e*2", "1e++2", "1e--2", "1e2.3+1", "1ee2+1", ".e2+1", "1..2e3+1",
+            "1e999*0",
+        ] {
+            assert_eq!(evaluate(query), None, "{query}");
+        }
     }
 
     #[test]

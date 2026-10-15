@@ -356,14 +356,14 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        let (x, y) = match self.state.clients.get(client_key) {
-            Some(client) => (client.geometry.x, client.geometry.y),
+        let home = match self.state.clients.get(client_key) {
+            Some(client) => client.mon,
             None => return Ok(()),
         };
 
-        let target_monitor = self.recttomon(backend, x, y);
+        let target_monitor = self.monitor_for_client_drop(client_key);
         if let Some(target_mon_key) = target_monitor {
-            if Some(target_mon_key) != self.state.sel_mon {
+            if Some(target_mon_key) != home {
                 // Nobody can see a window behind a lock shade. Moving the
                 // window there and selecting that monitor would also hand it
                 // the focus (`focus(None)` picks the head of the monitor's
@@ -373,7 +373,7 @@ impl Jwm {
                     self.pull_back_from_locked_output(backend, client_key);
                     return Ok(());
                 }
-                self.sendmon(backend, Some(client_key), Some(target_mon_key));
+                self.sendmon_after_drop(backend, client_key, target_mon_key);
                 self.state.sel_mon = Some(target_mon_key);
                 self.focus(backend, None)?;
             }
@@ -381,7 +381,7 @@ impl Jwm {
         Ok(())
     }
 
-    /// Put a floating window whose origin was dropped on a locked output
+    /// Put a floating window dropped mostly on a locked output
     /// back inside its own monitor's work area, and remember that rect as
     /// its floating geometry. Its monitor keeps it, but a window left
     /// straddling the shade would sit on that monitor out of sight.
@@ -426,7 +426,9 @@ impl Jwm {
             client.win
         );
         self.resize_client(backend, client_key, x, y, w, h, false);
-        if let Some(client) = self.state.clients.get_mut(client_key) {
+        if let Some(client) = self.state.clients.get_mut(client_key)
+            && !client.state.is_pip
+        {
             client.geometry.floating_x = client.geometry.x;
             client.geometry.floating_y = client.geometry.y;
             client.geometry.floating_w = client.geometry.w;
@@ -669,7 +671,7 @@ mod tests {
 
         // The drag carried the window just below the shaded output's top
         // edge; that is where the server has it on release.
-        backend.window_ops.place(win, 2200, 20, 600, 400);
+        backend.window_ops.place(win, 1800, 20, 600, 400);
         jwm.last_mouse_root = (2300.0, 40.0);
         jwm.drag_ctl = Some(DragCtl {
             client: key,
@@ -787,7 +789,7 @@ mod tests {
         jwm.focus(&mut backend, Some(other)).expect("focus");
         assert_eq!(jwm.get_selected_client_key(), Some(other));
 
-        backend.window_ops.place(win, 2200, 20, 600, 400);
+        backend.window_ops.place(win, 1800, 20, 600, 400);
         jwm.last_mouse_root = (2300.0, 40.0);
         <Jwm as WMController>::on_button_release(
             &mut jwm,
@@ -826,5 +828,91 @@ mod tests {
         );
         let server = backend.window_ops.get_geometry(win).expect("server rect");
         assert_eq!((server.x, server.y), (x, y), "the server has it back");
+    }
+
+    #[test]
+    fn majority_overlap_drop_updates_ownership_and_tags_without_stealing_selection() {
+        for (selected_drag, target_height, drop_rect) in [
+            (true, 1080, (1800, 150, 600, 400)),
+            (false, 1080, (1800, 150, 600, 400)),
+            (true, 720, (1800, 600, 800, 600)),
+            (false, 720, (1800, 600, 800, 600)),
+        ] {
+            let mut backend = DropSpyBackend {
+                window_ops: DropWindowOps::default(),
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: SpyOutputOps {
+                    outputs: vec![
+                        output(1, 0, 0, 1920, 1080),
+                        output(2, 1920, 0, 1920, target_height),
+                    ],
+                },
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+            };
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let (home, target) = (jwm.state.monitor_order[0], jwm.state.monitor_order[1]);
+            jwm.state.monitors[target].tag_set = [2, 2];
+            let mut add_client = |raw, x| {
+                let mut client = WMClient::new(WindowId::from_raw(raw));
+                client.mon = Some(home);
+                client.state.tags = 1;
+                client.state.is_floating = true;
+                client.geometry.x = x;
+                client.geometry.y = 150;
+                client.geometry.w = 600;
+                client.geometry.h = 400;
+                client.geometry.border_w = 0;
+                let key = jwm.insert_client(client);
+                jwm.attach_to_monitor(key, home);
+                key
+            };
+            let dragged = add_client(0x5e04, 200);
+            let other = add_client(0x5e05, 900);
+            let selected = if selected_drag { dragged } else { other };
+            jwm.focus(&mut backend, Some(selected)).unwrap();
+            let win = jwm.state.clients[dragged].win;
+            jwm.drag_ctl = Some(DragCtl {
+                client: dragged,
+                win,
+                mode: DragMode::MoveFloat,
+                start_root: (500.0, 170.0),
+                activated: true,
+                was_floating: true,
+                orig_geom: (200, 150, 600, 400),
+                orig_index: Some(0),
+                mon: Some(home),
+                orig_maximize: MaximizeSnapshot::default(),
+            });
+            // The origin remains on home. On the shorter target, the center
+            // is outside it too, despite its winning visible overlap.
+            backend.window_ops.place(
+                win,
+                drop_rect.0,
+                drop_rect.1,
+                drop_rect.2 as u32,
+                drop_rect.3 as u32,
+            );
+            jwm.last_mouse_root = (2100.0, 350.0);
+            <Jwm as WMController>::on_button_release(
+                &mut jwm,
+                &mut backend,
+                HitTarget::Background { output: None },
+                0,
+            );
+            assert!(jwm.drag_ctl.is_none());
+            assert_eq!(jwm.state.clients[dragged].mon, Some(target));
+            assert_eq!(jwm.state.clients[dragged].state.tags, 2);
+            assert!(!jwm.state.monitor_clients[home].contains(&dragged));
+            assert!(jwm.state.monitor_clients[target].contains(&dragged));
+            assert_eq!(jwm.state.clients[dragged].rect(), drop_rect);
+            assert_eq!(jwm.get_selected_client_key(), Some(selected));
+            assert_eq!(
+                jwm.state.sel_mon,
+                Some(if selected_drag { target } else { home })
+            );
+        }
     }
 }

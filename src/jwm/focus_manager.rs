@@ -59,6 +59,9 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sel_client_key = self.get_selected_client_key();
         if let Some(client_key) = sel_client_key {
+            if !self.is_application_focus_eligible(client_key) {
+                return self.focus(backend, None);
+            }
             if let Some(client) = self.state.clients.get(client_key) {
                 if event_window != client.win {
                     if self.wintoclient(event_window).is_some() {
@@ -455,6 +458,11 @@ impl Jwm {
             log::debug!("[reveal_and_focus] window {win:?} is gone");
             return Ok(false);
         };
+        // Reject shell activation before restoring it or navigating tags:
+        // focus() would fall back to an application after those side effects.
+        if !self.is_application_focus_eligible(client_key) {
+            return Err(format!("window {win:?} is a shell surface and cannot be focused").into());
+        }
 
         // A parked scratchpad deliberately has no tag, so the generic
         // visibility path cannot infer where to reveal it and `focus()` would
@@ -607,6 +615,17 @@ impl Jwm {
         if !is_hidden && !parked {
             return Ok(false);
         }
+        // Revealing a scratchpad returns it to its centered floating mode.
+        // Finish fullscreen through its transaction while the client remains
+        // parked, before placement can overwrite fullscreen's return slot.
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.is_fullscreen)
+        {
+            self.setfullscreen(backend, client_key, false)?;
+        }
         // A scratchpad reveals at its own centered placement, not maximized:
         // drop maximize through its transaction first so the published atoms
         // and the restore slot agree with the geometry staged below. The
@@ -731,6 +750,13 @@ impl Jwm {
                     client.geometry.floating_h = height;
                 }
             } else {
+                if let Some(client) = self.state.clients.get_mut(client_key) {
+                    // Fullscreen exit staged the old visible rectangle while
+                    // parked. Placement now replaces it; show_client must not
+                    // restore that stale rectangle over the centered target.
+                    client.geometry.hidden_x = None;
+                    client.geometry.hidden_restore_rect = None;
+                }
                 let suppress = self.suppress_layout_animation;
                 self.suppress_layout_animation = true;
                 self.resize_client(backend, client_key, x, y, width, height, false);
@@ -894,7 +920,10 @@ impl Jwm {
         let previous_focus = self.get_selected_client_key();
 
         let is_visible = match client_key_opt {
-            Some(client_key) => self.is_client_visible_by_key(client_key),
+            Some(client_key) => {
+                self.is_application_focus_eligible(client_key)
+                    && self.is_client_visible_by_key(client_key)
+            }
             None => false,
         };
 
@@ -971,7 +1000,7 @@ mod scratchpad_reveal_tests {
     use crate::backend::error::BackendError;
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
-        DummyPropertyOps, DummyWindowOps,
+        DummyWindowOps,
     };
     use crate::core::animation::{AnimationKind, AnimationManager};
     use crate::core::models::WMClient;
@@ -986,10 +1015,82 @@ mod scratchpad_reveal_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use xbar_core::shared_structures::{SharedMessage, SharedRingBufferOptions};
 
+    #[derive(Default)]
+    struct ScratchpadPropertyOps {
+        fullscreen: std::cell::RefCell<Vec<(WindowId, bool)>>,
+        fail_fullscreen: std::cell::Cell<bool>,
+    }
+
+    impl PropertyOps for ScratchpadPropertyOps {
+        fn get_title(&self, _win: WindowId) -> String {
+            "Wayland Window".to_string()
+        }
+        fn get_class(&self, _win: WindowId) -> (String, String) {
+            ("app".into(), "App".into())
+        }
+        fn get_window_types(&self, _win: WindowId) -> Vec<crate::backend::api::WindowType> {
+            vec![crate::backend::api::WindowType::Normal]
+        }
+        fn is_fullscreen(&self, _win: WindowId) -> bool {
+            false
+        }
+        fn set_fullscreen_state(&self, win: WindowId, on: bool) -> Result<(), BackendError> {
+            if self.fail_fullscreen.replace(false) {
+                return Err(BackendError::Message("injected fullscreen failure".into()));
+            }
+            self.fullscreen.borrow_mut().push((win, on));
+            Ok(())
+        }
+        fn transient_for(&self, _win: WindowId) -> Option<WindowId> {
+            None
+        }
+        fn get_wm_hints(&self, _win: WindowId) -> Option<crate::backend::api::WmHints> {
+            None
+        }
+        fn set_urgent_hint(&self, _win: WindowId, _urgent: bool) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn fetch_normal_hints(
+            &self,
+            _win: WindowId,
+        ) -> Result<Option<crate::backend::api::NormalHints>, BackendError> {
+            Ok(None)
+        }
+        fn set_window_strut_top(
+            &self,
+            _win: WindowId,
+            _top: u32,
+            _sx: u32,
+            _ex: u32,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn set_window_type_dock(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn clear_window_strut(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn get_wm_state(&self, _win: WindowId) -> Result<i64, BackendError> {
+            Ok(1)
+        }
+        fn set_wm_state(&self, _win: WindowId, _state: i64) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn set_client_info_props(
+            &self,
+            _win: WindowId,
+            _tags: u32,
+            _monitor_num: u32,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
     struct ScratchpadBackend {
         window_ops: DummyWindowOps,
         input_ops: DummyInputOps,
-        property_ops: DummyPropertyOps,
+        property_ops: ScratchpadPropertyOps,
         output_ops: DummyOutputOps,
         key_ops: DummyKeyOps,
         cursor_provider: DummyCursorProvider,
@@ -1005,7 +1106,7 @@ mod scratchpad_reveal_tests {
             Self {
                 window_ops: DummyWindowOps,
                 input_ops: DummyInputOps,
-                property_ops: DummyPropertyOps,
+                property_ops: ScratchpadPropertyOps::default(),
                 output_ops: DummyOutputOps,
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
@@ -1312,6 +1413,97 @@ mod scratchpad_reveal_tests {
         }
         jwm.state.monitors[monitor_key].set_selected_client_for_current_tag(Some(keys[0]));
         (jwm, keys[0], keys[1])
+    }
+
+    fn add_shell_focus_candidates(jwm: &mut Jwm) -> [ClientKey; 2] {
+        let monitor = jwm.state.sel_mon.unwrap();
+        [true, false].map(|dock| {
+            let mut client = WMClient::new(WindowId::from_raw(if dock { 0x903 } else { 0x904 }));
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            client.state.is_floating = true;
+            client.state.is_dock = dock;
+            client.state.is_desktop = !dock;
+            client.state.never_focus = true;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            key
+        })
+    }
+
+    #[test]
+    fn focusstack_skips_shell_surfaces_in_both_directions() {
+        let (mut jwm, first, second) = jwm_with_two_tiled_windows();
+        add_shell_focus_candidates(&mut jwm);
+        let mut backend = ScratchpadBackend::new();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        for (direction, expected) in [(1, second), (1, first), (-1, second), (-1, first)] {
+            jwm.focusstack(&mut backend, &WMArgEnum::Int(direction))
+                .unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(expected));
+        }
+        assert!(backend.focused.iter().flatten().all(|win| {
+            [jwm.state.clients[first].win, jwm.state.clients[second].win].contains(win)
+        }));
+    }
+
+    #[test]
+    fn explicit_shell_focus_falls_back_without_rejecting_globally_active_apps() {
+        let (mut jwm, first, _) = jwm_with_two_tiled_windows();
+        let shells = add_shell_focus_candidates(&mut jwm);
+        let mut backend = ScratchpadBackend::new();
+        // WM_HINTS Input=false alone does not disqualify an application:
+        // globally active clients accept WM_TAKE_FOCUS.
+        jwm.state.clients[first].state.never_focus = true;
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        for shell in shells {
+            jwm.focus(&mut backend, Some(shell)).unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(first));
+            assert_eq!(
+                backend.focused.last(),
+                Some(&Some(jwm.state.clients[first].win))
+            );
+            let focus_calls = backend.focused.len();
+            let selected_monitor = jwm.state.sel_mon;
+            let shell_window = jwm.state.clients[shell].win;
+            assert!(jwm.reveal_and_focus(&mut backend, shell_window).is_err());
+            assert_eq!(jwm.state.sel_mon, selected_monitor);
+            assert_eq!(jwm.get_selected_client_key(), Some(first));
+            assert_eq!(backend.focused.len(), focus_calls);
+        }
+    }
+
+    #[test]
+    fn removing_the_last_application_focuses_root_instead_of_shell() {
+        let (mut jwm, first, second) = jwm_with_two_tiled_windows();
+        let shells = add_shell_focus_candidates(&mut jwm);
+        let mut backend = ScratchpadBackend::new();
+        jwm.unmanage_regular_client(&mut backend, first, true)
+            .unwrap();
+        jwm.unmanage_regular_client(&mut backend, second, true)
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), None);
+        assert_eq!(backend.focused.last(), Some(&None));
+        for shell in shells {
+            assert!(jwm.is_client_visible_by_key(shell));
+        }
+    }
+
+    #[test]
+    fn minimizing_the_last_application_focuses_root_instead_of_shell() {
+        let (mut jwm, first, second) = jwm_with_two_tiled_windows();
+        let shells = add_shell_focus_candidates(&mut jwm);
+        let mut backend = ScratchpadBackend::new();
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        jwm.set_client_minimized(&mut backend, first, true).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+        jwm.set_client_minimized(&mut backend, second, true)
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), None);
+        assert_eq!(backend.focused.last(), Some(&None));
+        for shell in shells {
+            assert!(jwm.is_client_visible_by_key(shell));
+        }
     }
 
     #[test]
@@ -1688,6 +1880,112 @@ mod scratchpad_reveal_tests {
         assert!(!client.state.is_hidden);
         assert_eq!(jwm.state.monitors[target].sel, Some(scratchpad));
         assert_eq!(backend.focused, vec![Some(window)]);
+    }
+
+    fn fullscreen_scratchpad(
+        minimized: bool,
+    ) -> (Jwm, ClientKey, WindowId, crate::core::models::MonitorKey) {
+        let (mut jwm, key, window, target) = jwm_with_cross_monitor_scratchpad(minimized);
+        let client = &mut jwm.state.clients[key];
+        client.state.is_fullscreen = true;
+        client.state.old_state = true;
+        client.geometry.border_w = 0;
+        client.geometry.old_border_w = 3;
+        client.geometry.old_x = 100;
+        client.geometry.old_y = 120;
+        client.geometry.old_w = 640;
+        client.geometry.old_h = 480;
+        (jwm, key, window, target)
+    }
+
+    #[test]
+    fn fullscreen_scratchpads_reveal_centered_without_fullscreen_on_the_new_monitor() {
+        for minimized in [false, true] {
+            let (mut jwm, key, window, target) = fullscreen_scratchpad(minimized);
+            let mut backend = ScratchpadBackend::new();
+            assert!(jwm.reveal_and_focus(&mut backend, window).unwrap());
+            let client = &jwm.state.clients[key];
+            let area = jwm.monitor_work_area(target).unwrap();
+            let width = area.w.saturating_mul(4) / 5;
+            let height = area.h.saturating_mul(4) / 5;
+            assert!(!client.state.is_fullscreen);
+            assert!(!client.state.is_hidden);
+            assert!(client.state.is_floating);
+            assert_eq!(client.geometry.border_w, 3);
+            assert_eq!(client.mon, Some(target));
+            assert_eq!(client.state.tags, 0b10);
+            assert_eq!(
+                Rect::new(
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w,
+                    client.geometry.h
+                ),
+                Rect::new(
+                    area.x + (area.w - width) / 2,
+                    area.y + (area.h - height) / 2,
+                    width,
+                    height
+                )
+            );
+            assert!(
+                backend
+                    .property_ops
+                    .fullscreen
+                    .borrow()
+                    .contains(&(window, false))
+            );
+        }
+    }
+
+    #[test]
+    fn exiting_fullscreen_keeps_a_parked_scratchpad_offscreen_until_reveal() {
+        let (mut jwm, key, window, _) = fullscreen_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.setfullscreen(&mut backend, key, false).unwrap();
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.tags, 0);
+        assert!(
+            !client.state.is_hidden,
+            "parking must not become minimization"
+        );
+        assert!(!client.state.is_fullscreen);
+        assert_eq!(client.geometry.border_w, 3);
+        assert!(
+            client.geometry.x + client.geometry.w + 2 * client.geometry.border_w
+                <= jwm.desktop_left_edge()
+        );
+        assert_eq!(
+            client.geometry.hidden_restore_rect,
+            Some(Rect::new(100, 120, 640, 480))
+        );
+        assert!(
+            backend
+                .property_ops
+                .fullscreen
+                .borrow()
+                .contains(&(window, false))
+        );
+    }
+
+    #[test]
+    fn failed_fullscreen_exit_does_not_move_or_reveal_the_scratchpad() {
+        for minimized in [false, true] {
+            let (mut jwm, key, window, _) = fullscreen_scratchpad(minimized);
+            let before = jwm.state.clients[key].clone();
+            let selection = jwm.state.sel_mon;
+            let mut backend = ScratchpadBackend::new();
+            backend.property_ops.fail_fullscreen.set(true);
+            assert!(jwm.reveal_and_focus(&mut backend, window).is_err());
+            let client = &jwm.state.clients[key];
+            assert_eq!(client.mon, before.mon);
+            assert_eq!(client.state.tags, before.state.tags);
+            assert_eq!(client.state.is_hidden, before.state.is_hidden);
+            assert!(client.state.is_fullscreen);
+            assert_eq!(client.geometry, before.geometry);
+            assert_eq!(jwm.state.sel_mon, selection);
+            assert!(backend.focused.is_empty());
+        }
     }
 
     /// Regression: the reveal moved a scratchpad off its monitor's list

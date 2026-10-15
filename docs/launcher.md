@@ -91,12 +91,15 @@ A query containing an operator is treated as a question rather than a search:
 ```
 
 `Enter` copies the result to the clipboard (and to the [clipboard
-history](clipboard.md)). `+ - * / % ^` work, with parentheses, unary minus, and
-the usual precedence; `^` associates to the right, so `2^3^2` is 512.
+history](clipboard.md)). `+ - * / % ^` work (`x` also multiplies), with
+parentheses, unary minus, and the usual precedence; `^` associates to the
+right, so `2^3^2` is 512.
 Powers bind before unary signs: `-2^2` is -4, `(-2)^2` is 4, and `2^-2` is
 0.25. Non-finite intermediate results are rejected even when a later operation
 could hide them. Nonzero answers below `1e-10` use scientific notation rather
-than rounding to a displayed zero.
+than rounding to a displayed zero. Scientific operands such as `1e-11*2`
+and `1.5E+3/2` are accepted, so a formatted result can be reused in another
+calculation. An exponent sign alone does not make a bare number an expression.
 
 Calculator expressions are limited to 256 characters, including parentheses
 and operators, to bound recursive parsing work.

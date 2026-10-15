@@ -174,6 +174,46 @@ impl Jwm {
         self.state.sel_mon
     }
 
+    /// A dropped window belongs to the output showing the largest part of
+    /// its outer rectangle. Keep its home output on ties and off-screen drops;
+    /// pointer hit testing continues to use `recttomon`.
+    pub(crate) fn monitor_for_client_drop(
+        &self,
+        client_key: ClientKey,
+    ) -> Option<super::MonitorKey> {
+        let client = self.state.clients.get(client_key)?;
+        let home = client
+            .mon
+            .filter(|key| self.state.monitors.contains_key(*key))
+            .or_else(|| self.state.monitor_order.first().copied())?;
+        let x = i64::from(client.geometry.x);
+        let y = i64::from(client.geometry.y);
+        let border = i64::from(client.geometry.border_w.max(0)) * 2;
+        let right = x + (i64::from(client.geometry.w) + border).max(0);
+        let bottom = y + (i64::from(client.geometry.h) + border).max(0);
+        let area = |key| {
+            let Some(monitor) = self.state.monitors.get(key) else {
+                return 0;
+            };
+            let g = &monitor.geometry;
+            let left = i64::from(g.m_x);
+            let top = i64::from(g.m_y);
+            let width = (right.min(left + i64::from(g.m_w.max(0))) - x.max(left)).max(0);
+            let height = (bottom.min(top + i64::from(g.m_h.max(0))) - y.max(top)).max(0);
+            width * height
+        };
+        let mut target = home;
+        let mut largest = area(home);
+        for &key in &self.state.monitor_order {
+            let overlap = area(key);
+            if overlap > largest {
+                target = key;
+                largest = overlap;
+            }
+        }
+        Some(target)
+    }
+
     pub(super) fn wintomon(
         &mut self,
         backend: &mut dyn Backend,
@@ -205,6 +245,81 @@ mod tests {
     use crate::core::models::WMClient;
     use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
     use std::time::Duration;
+
+    #[test]
+    fn dropped_windows_follow_largest_overlap_in_every_direction() {
+        for (second, rect, home, expected) in [
+            ((1920, 0), (1800, 100, 800, 400), 0, 1),
+            ((1920, 0), (1400, 100, 800, 400), 1, 0),
+            ((0, 1080), (100, 1000, 800, 400), 0, 1),
+            ((0, 1080), (100, 800, 800, 400), 1, 0),
+            ((-1920, 0), (-600, 100, 800, 400), 0, 1),
+            ((1920, 0), (1520, 100, 800, 400), 1, 1),
+            ((1920, 0), (1520, 100, 800, 400), 0, 0),
+            ((1920, 0), (5000, 3000, 800, 400), 1, 1),
+        ] {
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, second.0, second.1, 1920, 1080),
+            ]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let monitors = jwm.state.monitor_order.clone();
+            let mut client = WMClient::new(WindowId::from_raw(42));
+            client.mon = Some(monitors[home]);
+            client.geometry.x = rect.0;
+            client.geometry.y = rect.1;
+            client.geometry.w = rect.2;
+            client.geometry.h = rect.3;
+            client.geometry.border_w = 0;
+            let key = jwm.state.clients.insert(client);
+            assert_eq!(
+                jwm.monitor_for_client_drop(key),
+                Some(monitors[expected]),
+                "second={second:?} rect={rect:?} home={home}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropped_window_overlap_includes_borders_and_ignores_workarea() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitors = jwm.state.monitor_order.clone();
+        jwm.state.monitors[monitors[1]].geometry.w_x = 2200;
+        let mut client = WMClient::new(WindowId::from_raw(42));
+        client.mon = Some(monitors[0]);
+        client.geometry.x = 1810;
+        client.geometry.y = 0;
+        client.geometry.w = 200;
+        client.geometry.h = 100;
+        client.geometry.border_w = 20;
+        let key = jwm.state.clients.insert(client);
+        assert_eq!(jwm.monitor_for_client_drop(key), Some(monitors[1]));
+    }
+
+    #[test]
+    fn dropped_window_overlap_uses_wide_coordinates_and_areas() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let g = &mut jwm.state.monitors[monitor].geometry;
+        g.m_x = i32::MAX - 10;
+        g.m_y = i32::MAX - 10;
+        g.m_w = i32::MAX;
+        g.m_h = i32::MAX;
+        let mut client = WMClient::new(WindowId::from_raw(42));
+        client.mon = Some(monitor);
+        client.geometry.x = i32::MAX - 5;
+        client.geometry.y = i32::MAX - 5;
+        client.geometry.w = i32::MAX;
+        client.geometry.h = i32::MAX;
+        client.geometry.border_w = i32::MAX;
+        let key = jwm.state.clients.insert(client);
+        assert_eq!(jwm.monitor_for_client_drop(key), Some(monitor));
+    }
 
     #[test]
     fn immediate_resize_cancels_a_previous_animation() {

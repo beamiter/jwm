@@ -6,6 +6,16 @@ use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 
 impl Jwm {
+    /// Shell surfaces remain visible and managed, but are not application
+    /// focus targets. Do not reject `never_focus`: globally active ICCCM
+    /// clients use WM_TAKE_FOCUS instead of accepting SetInputFocus.
+    pub(crate) fn is_application_focus_eligible(&self, client_key: ClientKey) -> bool {
+        self.state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| !client.state.is_dock && !client.state.is_desktop)
+    }
+
     pub(crate) fn find_visible_client(&self) -> Option<ClientKey> {
         let sel_mon_key = self.state.sel_mon?;
         // Every window on a locked monitor is behind its shade. The selection
@@ -17,7 +27,9 @@ impl Jwm {
 
         if let Some(stack_clients) = self.state.monitor_stack.get(sel_mon_key) {
             for &client_key in stack_clients {
-                if self.is_client_visible_by_key(client_key) {
+                if self.is_application_focus_eligible(client_key)
+                    && self.is_client_visible_by_key(client_key)
+                {
                     return Some(client_key);
                 }
             }

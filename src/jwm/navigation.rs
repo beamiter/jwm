@@ -162,7 +162,9 @@ impl Jwm {
 
         if let Some(client_list) = self.state.monitor_clients.get(mon_key) {
             for &client_key in client_list {
-                if !self.is_client_visible_on_monitor(client_key, mon_key) {
+                if !self.is_application_focus_eligible(client_key)
+                    || !self.is_client_visible_on_monitor(client_key, mon_key)
+                {
                     continue;
                 }
 
@@ -658,6 +660,9 @@ impl Jwm {
             self.features.system_ui.selected_switcher_window(),
             |window| {
                 let client_key = self.wintoclient(WindowId::from_raw(window))?;
+                if !self.is_application_focus_eligible(client_key) {
+                    return None;
+                }
                 if self.is_client_visible_by_key(client_key) {
                     return Some(switcher::CommitWindowState::Visible);
                 }
