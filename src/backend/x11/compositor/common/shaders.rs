@@ -435,7 +435,7 @@ void main() {
     // This changes coverage only; neither geometry nor the outside gap grows.
     float pixel_width = max(fwidth(dist), 0.0001);
     float aa_w = u_bar_frost > 0.5 ? pixel_width * 0.5
-                                  : max(pixel_width * 1.25, 0.75);
+                                  : max(fwidth(dist) * 1.25, 0.75);
 
     float mask = 1.0 - smoothstep(-aa_w, aa_w, dist);
     if (mask <= 0.0) {
@@ -1559,7 +1559,7 @@ mod glass_edge_coverage_tests {
         assert!((coverage(-0.5, 1.0, false) - 0.784).abs() < 1e-6);
         // Link the numeric oracle to the shader expressions actually shipped.
         assert!(GLASS_FRAGMENT_SHADER.contains("u_bar_frost > 0.5 ? pixel_width * 0.5"));
-        assert!(GLASS_FRAGMENT_SHADER.contains(": max(pixel_width * 1.25, 0.75)"));
+        assert!(GLASS_FRAGMENT_SHADER.contains(": max(fwidth(dist) * 1.25, 0.75)"));
         assert!(GLASS_FRAGMENT_SHADER.contains("smoothstep(-aa_w, aa_w, dist)"));
     }
 
