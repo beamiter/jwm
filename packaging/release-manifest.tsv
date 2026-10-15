@@ -27,3 +27,6 @@ repo-file	vendor/glib/LICENSE	share/doc/jwm/third-party/glib/LICENSE	-	0644
 repo-file	vendor/glib/COPYRIGHT	share/doc/jwm/third-party/glib/COPYRIGHT	-	0644
 repo-file	vendor/glib/JWM-BACKPORT.md	share/doc/jwm/third-party/glib/JWM-BACKPORT.md	-	0644
 stable-link	-	share/doc/jwm	usr/local/share/doc/jwm	-
+# Version-local assets follow the real executable; no stable-link map change.
+repo-file	assets/astronomy/earth-nasa-january.jpg	share/jwm/astronomy/earth-nasa-january.jpg	-	0644
+repo-file	assets/astronomy/README.md	share/jwm/astronomy/README.md	-	0644

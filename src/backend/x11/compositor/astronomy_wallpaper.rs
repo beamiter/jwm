@@ -1,7 +1,7 @@
 //! Astronomy is a wallpaper material, rendered below every client window.
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
-    POWER_QUERY_INTERVAL, WallpaperClock, solar_direction, viewing_longitude,
+    POWER_QUERY_INTERVAL, WallpaperClock, resolve_earth_texture, solar_direction, viewing_longitude,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,6 +13,7 @@ const FRAGMENT: &str = include_str!("shaders/animated_wallpaper.frag");
 pub(super) struct AstronomyWallpaper {
     enabled: bool,
     path: String,
+    configured_path: String,
     pending: Option<wallpaper::DeferredWallpaperLoad>,
     texture: Option<glow::Texture>,
     retired: Vec<glow::Texture>,
@@ -68,20 +69,26 @@ impl<C: CompositorConnection> Compositor<C> {
         let now = Instant::now();
         let cfg = crate::config::CONFIG.load();
         let enabled = cfg.behavior().wallpaper_effect == "astronomy";
-        let path = &cfg.behavior().wallpaper_earth_texture;
+        let configured = &cfg.behavior().wallpaper_earth_texture;
+        let offset_seconds = cfg.behavior().wallpaper_timezone_offset_hours * 3600;
         let a = &mut self.astronomy_wallpaper;
-        let changed = a.enabled != enabled || a.path != *path;
+        let changed = a.enabled != enabled || a.configured_path != *configured;
         if changed {
             a.enabled = enabled;
-            a.path = path.clone();
+            a.configured_path = configured.clone();
+            a.path = if enabled {
+                resolve_earth_texture(configured).unwrap_or_default()
+            } else {
+                String::new()
+            };
             a.failed = false;
             a.pending = None;
             a.retired.extend(a.texture.take());
             a.last_power_query = None;
             a.clock = WallpaperClock::default();
-            if enabled && !path.is_empty() {
+            if enabled && !a.path.is_empty() {
                 a.pending = Some(Self::load_wallpaper_async(
-                    path,
+                    &a.path,
                     4096,
                     2048,
                     WallpaperMode::Stretch,
@@ -89,7 +96,7 @@ impl<C: CompositorConnection> Compositor<C> {
             } else if enabled {
                 a.failed = true;
                 log::warn!(
-                    "astronomy wallpaper: no Earth texture configured; keeping static wallpaper"
+                    "astronomy wallpaper: Earth texture unavailable; keeping static wallpaper"
                 );
             }
         }
@@ -105,6 +112,11 @@ impl<C: CompositorConnection> Compositor<C> {
             false
         };
 
+        let timezone_changed = a.sample_offset != offset_seconds;
+        if timezone_changed {
+            a.sample_offset = offset_seconds;
+            a.clock = WallpaperClock::default();
+        }
         a.clock.set_paused(!a.powered || occluded);
         let tick = a.clock.tick(now);
         if tick {
@@ -112,9 +124,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs_f64();
-            a.sample_offset = chrono::Local::now().offset().local_minus_utc();
         }
-        a.frame_changed = changed || power_changed || tick;
+        a.frame_changed = changed || power_changed || timezone_changed || tick;
         a.frame_changed
     }
 

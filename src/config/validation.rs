@@ -1190,6 +1190,13 @@ impl Config {
                 None,
             );
         }
+        if !(-12..=14).contains(&behavior.wallpaper_timezone_offset_hours) {
+            diagnostics.error(
+                "behavior.wallpaper_timezone_offset_hours",
+                "expected integer UTC offset in -12..14 hours",
+                None,
+            );
+        }
         if behavior.wallpaper_earth_texture.contains('\0')
             || behavior.wallpaper_earth_texture.len() > super::MAX_WALLPAPER_ROTATION_PATH_BYTES
         {

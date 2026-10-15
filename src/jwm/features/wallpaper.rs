@@ -14,14 +14,14 @@ use std::path::{Path, PathBuf};
 /// Picker-only identity. Never pass it to an image decoder or store it as a path.
 pub(crate) const ASTRONOMY_CHOICE: &str = "jwm-effect:astronomy";
 
-/// A fresh effect selection needs a local texture. Re-selecting the active
-/// effect must not disable it merely because its source has since disappeared.
+/// A fresh effect selection needs a resolved local texture (configured or
+/// bundled). Re-selecting an active effect does not discard its loaded image.
 pub(crate) fn astronomy_texture_ready(
     already_active: bool,
     texture: &str,
-    is_file: impl FnOnce(&Path) -> bool,
+    texture_available: impl FnOnce(&str) -> bool,
 ) -> bool {
-    already_active || (!texture.trim().is_empty() && is_file(Path::new(texture)))
+    already_active || texture_available(texture)
 }
 
 /// Highlight the manual daily choice even when the first output has an
@@ -224,20 +224,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn astronomy_requires_a_regular_texture_only_for_new_selection() {
-        assert!(!astronomy_texture_ready(false, "", |_| panic!(
-            "empty path must not be inspected"
-        )));
-        assert!(!astronomy_texture_ready(false, "  ", |_| true));
+    fn astronomy_checks_resolved_texture_only_for_new_selection() {
+        assert!(astronomy_texture_ready(false, "", |_| true));
+        assert!(!astronomy_texture_ready(false, "", |_| false));
         assert!(!astronomy_texture_ready(false, "/missing.jpg", |_| false));
-        assert!(!astronomy_texture_ready(false, "/directory", |_| false));
-        assert!(
-            astronomy_texture_ready(false, "/earth.jpg", |path| path == Path::new("/earth.jpg"))
-        );
+        assert!(astronomy_texture_ready(false, "/earth.jpg", |path| path == "/earth.jpg"));
         assert!(astronomy_texture_ready(true, "", |_| panic!(
             "active effect must be preserved"
         )));
-        assert!(astronomy_texture_ready(true, "/gone.jpg", |_| false));
     }
 
     #[test]

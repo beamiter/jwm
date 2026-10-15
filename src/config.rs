@@ -1314,9 +1314,12 @@ pub struct BehaviorConfig {
     /// Optional live wallpaper. Static paths and daily rotation remain fallbacks.
     #[serde(default = "default_wallpaper_rotation")]
     pub wallpaper_effect: String,
-    /// Equirectangular Earth day texture; empty uses the renderer's fallback.
+    /// Equirectangular Earth day texture; empty resolves the installed bundled asset.
     #[serde(default)]
     pub wallpaper_earth_texture: String,
+    /// Astronomy presentation timezone, independent of the OS timezone.
+    #[serde(default = "default_wallpaper_timezone_offset_hours")]
+    pub wallpaper_timezone_offset_hours: i32,
     /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
     #[serde(default = "default_wallpaper_mode")]
     pub wallpaper_mode: String,
@@ -1704,6 +1707,10 @@ fn default_particle_lifetime() -> f32 {
 fn default_particle_gravity() -> f32 {
     800.0
 }
+fn default_wallpaper_timezone_offset_hours() -> i32 {
+    8
+}
+
 fn default_wallpaper_rotation() -> String {
     "off".to_string()
 }
@@ -2220,6 +2227,7 @@ impl Default for Config {
                         .into_owned(),
                     wallpaper_effect: "off".into(),
                     wallpaper_earth_texture: String::new(),
+                    wallpaper_timezone_offset_hours: default_wallpaper_timezone_offset_hours(),
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_rotation: default_wallpaper_rotation(),
                     wallpaper_rotation_paths: Vec::new(),
@@ -4706,6 +4714,16 @@ impl Config {
                 }
                 self.inner.behavior.wallpaper_effect = effect;
             }
+            "behavior.wallpaper_timezone_offset_hours" => {
+                let hours = value
+                    .as_i64()
+                    .filter(|hours| (-12..=14).contains(hours))
+                    .ok_or_else(|| {
+                        "behavior.wallpaper_timezone_offset_hours must be an integer in -12..14"
+                            .to_string()
+                    })?;
+                self.inner.behavior.wallpaper_timezone_offset_hours = hours as i32;
+            }
             "behavior.wallpaper_earth_texture" => {
                 let path = as_string()?;
                 if path.contains('\0') || path.len() > MAX_WALLPAPER_ROTATION_PATH_BYTES {
@@ -5106,8 +5124,10 @@ mod tests {
         let behavior = table.get_mut("behavior").unwrap().as_table_mut().unwrap();
         behavior.remove("wallpaper_effect");
         behavior.remove("wallpaper_earth_texture");
+        behavior.remove("wallpaper_timezone_offset_hours");
         let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
         assert_eq!(legacy.behavior.wallpaper_effect, "off");
+        assert_eq!(legacy.behavior.wallpaper_timezone_offset_hours, 8);
         assert!(legacy.behavior.wallpaper_earth_texture.is_empty());
         let mut config = Config { inner: legacy };
         config.inner.behavior.wallpaper = "/walls/static.png".into();
@@ -5145,6 +5165,40 @@ mod tests {
             picked.behavior().wallpaper_earth_texture,
             "/walls/earth.jpg"
         );
+    }
+
+    #[test]
+    fn astronomy_timezone_is_bounded_hot_tunable_and_roundtrips() {
+        let mut config = Config::default();
+        for offset in [-12, 0, 8, 14] {
+            config
+                .set_value(
+                    "behavior.wallpaper_timezone_offset_hours",
+                    &serde_json::json!(offset),
+                )
+                .unwrap();
+            assert_eq!(config.behavior().wallpaper_timezone_offset_hours, offset);
+            let loaded: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            assert_eq!(loaded.behavior.wallpaper_timezone_offset_hours, offset);
+        }
+        for bad in [
+            serde_json::json!(-13),
+            serde_json::json!(15),
+            serde_json::json!(8.5),
+            serde_json::json!("8"),
+        ] {
+            assert!(
+                config
+                    .set_value("behavior.wallpaper_timezone_offset_hours", &bad)
+                    .is_err()
+            );
+            assert_eq!(config.behavior().wallpaper_timezone_offset_hours, 14);
+        }
+        config.inner.behavior.wallpaper_timezone_offset_hours = 15;
+        assert!(config.diagnostics().issues().iter().any(|issue| issue.path
+            == "behavior.wallpaper_timezone_offset_hours"
+            && issue.level == ConfigDiagnosticLevel::Error));
     }
 
     #[test]

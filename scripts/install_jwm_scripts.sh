@@ -711,6 +711,12 @@ build_and_install_jwm() {
     install_system_binary "$target_dir/jwm-support" /usr/local/bin
     install_system_binary "$target_dir/jwm-remote" /usr/local/bin
 
+    # Shared data is kept outside the executable and installed for both build modes.
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-january.jpg" \
+        /usr/local/share/jwm/astronomy/earth-nasa-january.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/README.md" \
+        /usr/local/share/jwm/astronomy/README.md
+
     ok "jwm, jwm-tool, jwm-support, jwm-remote 安装完成: /usr/local/bin（未安装到 cargo bin）"
 
     build_and_install_bridge

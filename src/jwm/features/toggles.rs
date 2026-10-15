@@ -1575,13 +1575,24 @@ impl Jwm {
                 crate::jwm::features::wallpaper::astronomy_texture_ready(
                     behavior.wallpaper_effect == "astronomy",
                     &behavior.wallpaper_earth_texture,
-                    std::path::Path::is_file,
+                    |path| {
+                        #[cfg(feature = "x11-backends")]
+                        {
+                            use crate::backend::compositor_common::animated_wallpaper::resolve_earth_texture;
+                            resolve_earth_texture(path).is_some()
+                        }
+                        #[cfg(not(feature = "x11-backends"))]
+                        {
+                            let _ = path;
+                            false
+                        }
+                    },
                 )
             };
             if !ready {
                 set_wallpaper_picker_message(
                     &mut self.features.system_ui,
-                    "Configure behavior.wallpaper_earth_texture with an Earth image file first.",
+                    "Earth texture missing. Reinstall JWM assets or configure behavior.wallpaper_earth_texture.",
                 );
                 self.mark_system_ui_dirty();
                 return;
