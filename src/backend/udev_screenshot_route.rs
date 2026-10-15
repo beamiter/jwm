@@ -111,7 +111,7 @@ impl<T, K> Default for RoutedQueue<T, K> {
 }
 
 impl<T, K: Eq> RoutedQueue<T, K> {
-    pub fn push(
+    pub(super) fn push(
         &mut self,
         payload: T,
         topology: Vec<OutputSnapshot<K>>,
@@ -125,13 +125,13 @@ impl<T, K: Eq> RoutedQueue<T, K> {
             deadline: now + ROUTE_TIMEOUT,
         });
     }
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.requests.clear();
     }
-    pub fn has_pending(&self) -> bool {
+    pub(super) fn has_pending(&self) -> bool {
         !self.requests.is_empty()
     }
-    pub fn next_wakeup(&self, now: Instant) -> Option<Duration> {
+    pub(super) fn next_wakeup(&self, now: Instant) -> Option<Duration> {
         self.requests
             .iter()
             .map(|r| r.deadline.saturating_duration_since(now))
@@ -139,7 +139,7 @@ impl<T, K: Eq> RoutedQueue<T, K> {
     }
     /// Runs before presentation gates, including on inactive sessions. None
     /// topology means its bounded snapshot cannot be represented anymore.
-    pub fn retire_unservable(
+    pub(super) fn retire_unservable(
         &mut self,
         topology: Option<&[OutputSnapshot<K>]>,
         available: impl Fn(usize) -> bool,
@@ -169,7 +169,7 @@ impl<T, K: Eq> RoutedQueue<T, K> {
         }
         retired
     }
-    pub fn take_for_output(&mut self, output_index: usize) -> Vec<(T, CaptureRegion)> {
+    pub(super) fn take_for_output(&mut self, output_index: usize) -> Vec<(T, CaptureRegion)> {
         let mut ready = Vec::new();
         let mut index = 0;
         while index < self.requests.len() {
