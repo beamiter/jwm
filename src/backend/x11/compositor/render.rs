@@ -1678,6 +1678,7 @@ impl<C: CompositorConnection> Compositor<C> {
         tint: [f32; 4],
         alpha: f32,
         params: &crate::backend::compositor_common::ui_theme::GlassParams,
+        bar_frost: bool,
     ) {
         let Some(backdrop) = self.glass_backdrop else {
             return;
@@ -1723,6 +1724,8 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.uniform_1_f32(u.sheen.as_ref(), params.sheen);
             self.gl
                 .uniform_1_f32(u.edge_shade.as_ref(), params.edge_shade);
+            self.gl
+                .uniform_1_f32(u.bar_frost.as_ref(), if bar_frost { 1.0 } else { 0.0 });
             self.gl.uniform_1_f32(u.grain.as_ref(), params.grain);
             self.gl
                 .uniform_1_f32(u.alpha.as_ref(), alpha.clamp(0.0, 1.0));
@@ -1771,7 +1774,9 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             let drew_glass = match palette.glass {
                 Some(params) if self.glass_backdrop.is_some() => {
-                    self.glass_fill_rounded(proj, x, y, w, h, r, r_top, surface, alpha, &params);
+                    self.glass_fill_rounded(
+                        proj, x, y, w, h, r, r_top, surface, alpha, &params, false,
+                    );
                     true
                 }
                 _ => false,
@@ -6844,6 +6849,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                         tint,
                                         fade,
                                         &params,
+                                        true,
                                     );
                                     self.glass_backdrop = previous_backdrop;
                                     // `glass_fill_rounded` binds the glass program
@@ -9381,6 +9387,15 @@ mod glass_backdrop_contract_tests {
         assert!(
             body.contains("ui_palette.status_bar_sheet_radius(radius,bh)"),
             "the sheet must round through the shared bar radius, not the window's"
+        );
+        assert!(
+            body.contains("tint,fade,&params,true,"),
+            "status bar must use full interior frost coverage"
+        );
+        let fill = compact_item(source, "unsafe fn glass_fill_rounded(");
+        assert!(
+            fill.contains("u.bar_frost.as_ref(),ifbar_frost{1.0}else{0.0}"),
+            "every glass draw must set or clear the bar coverage uniform"
         );
         // The sheet is drawn behind the state tracker's back; the restore
         // of the window program must go through a reset first, or the

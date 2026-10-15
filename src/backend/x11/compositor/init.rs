@@ -411,6 +411,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 rim_tint: gl.get_uniform_location(glass_program, "u_rim_tint"),
                 sheen: gl.get_uniform_location(glass_program, "u_sheen"),
                 edge_shade: gl.get_uniform_location(glass_program, "u_edge_shade"),
+                bar_frost: gl.get_uniform_location(glass_program, "u_bar_frost"),
                 grain: gl.get_uniform_location(glass_program, "u_grain"),
                 alpha: gl.get_uniform_location(glass_program, "u_alpha"),
             }

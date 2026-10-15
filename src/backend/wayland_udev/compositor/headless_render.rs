@@ -7666,6 +7666,89 @@ fn x11_glass_surface_frosts_its_backdrop() {
     );
 }
 
+/// Read back the real X11 glass program at both flat interior edges. The
+/// backdrop is already frosted (constant blue), so reduced alpha proves that
+/// unblurred scene pixels would leak through when this layer is composited.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_status_bar_frost_covers_interior_edge_pixels() {
+    use crate::backend::x11::compositor::shaders as s;
+    const W: i32 = 64;
+    const H: i32 = 64;
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!("headless GL unavailable - skipping status bar edge coverage");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(gl, s::VERTEX_SHADER, s::GLASS_FRAGMENT_SHADER)
+        .unwrap_or_else(|log| panic!("X11 glass must link: {log}"));
+    assert!(unsafe { gl.get_uniform_location(prog, "u_bar_frost") }.is_some());
+    let backdrop = [40u8, 120, 200, 255];
+    for bar_height in [16, 32] {
+        let draw = |bar: bool| {
+            render_quad_frame(gl, prog, backdrop, W, H, |gl| unsafe {
+                let u = |name: &str| gl.get_uniform_location(prog, name);
+                gl.uniform_matrix_4_f32_slice(
+                    u("u_projection").as_ref(),
+                    false,
+                    &ortho(W as f32, H as f32),
+                );
+                gl.uniform_4_f32(u("u_rect").as_ref(), 4.0, 12.0, 56.0, bar_height as f32);
+                gl.uniform_2_f32(u("u_size").as_ref(), 56.0, bar_height as f32);
+                gl.uniform_2_f32(u("u_screen_size").as_ref(), W as f32, H as f32);
+                gl.uniform_1_i32(u("u_backdrop").as_ref(), 0);
+                gl.uniform_4_f32(u("u_tint").as_ref(), 0.0, 0.0, 0.0, 0.0);
+                gl.uniform_1_f32(u("u_radius").as_ref(), 4.0);
+                gl.uniform_1_f32(u("u_radius_top").as_ref(), 4.0);
+                gl.uniform_1_f32(u("u_corner_exp").as_ref(), 4.2);
+                gl.uniform_1_f32(u("u_saturation").as_ref(), 1.0);
+                gl.uniform_1_f32(u("u_luminance").as_ref(), 1.0);
+                gl.uniform_1_f32(u("u_bevel_width").as_ref(), 0.0);
+                gl.uniform_1_f32(u("u_refraction").as_ref(), 0.0);
+                gl.uniform_1_f32(u("u_rim_width").as_ref(), 1.0);
+                gl.uniform_1_f32(u("u_rim_intensity").as_ref(), 0.0);
+                gl.uniform_3_f32(u("u_rim_tint").as_ref(), 0.0, 0.0, 0.0);
+                gl.uniform_1_f32(u("u_sheen").as_ref(), 0.0);
+                gl.uniform_1_f32(u("u_edge_shade").as_ref(), 0.0);
+                gl.uniform_1_f32(u("u_grain").as_ref(), 0.0);
+                gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+                gl.uniform_1_f32(u("u_bar_frost").as_ref(), if bar { 1.0 } else { 0.0 });
+            })
+        };
+        let broad = draw(false);
+        let bar = draw(true);
+        let pixel = |frame: &[u8], x: i32, y: i32| -> [u8; 4] {
+            let at = (y * W + x) as usize * 4;
+            frame[at..at + 4].try_into().unwrap()
+        };
+        for y in [12, 12 + bar_height - 1] {
+            assert!(
+                pixel(&broad, W / 2, y)[3] < 245,
+                "old soft edge must reproduce the leak"
+            );
+            assert_pixel(
+                pixel(&bar, W / 2, y),
+                backdrop,
+                2,
+                "bar interior edge is fully frosted",
+            );
+        }
+        for y in [11, 12 + bar_height] {
+            assert_pixel(
+                pixel(&bar, W / 2, y),
+                [0, 0, 0, 255],
+                0,
+                "outside bar gap remains untouched",
+            );
+        }
+        assert!(
+            pixel(&bar, 4, 12)[3] < 255,
+            "rounded corner retains its antialias coverage"
+        );
+    }
+    unsafe { gl.delete_program(prog) };
+}
+
 #[test]
 fn wayland_gradient_border_shader_interpolates() {
     use super::shaders as s;

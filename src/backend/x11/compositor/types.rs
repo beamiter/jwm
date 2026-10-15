@@ -702,6 +702,7 @@ pub(super) struct GlassUniforms {
     pub(super) rim_tint: Option<glow::UniformLocation>,
     pub(super) sheen: Option<glow::UniformLocation>,
     pub(super) edge_shade: Option<glow::UniformLocation>,
+    pub(super) bar_frost: Option<glow::UniformLocation>,
     pub(super) grain: Option<glow::UniformLocation>,
     pub(super) alpha: Option<glow::UniformLocation>,
 }

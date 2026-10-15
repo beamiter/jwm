@@ -395,6 +395,7 @@ uniform float u_rim_intensity;     // hairline strength
 uniform vec3  u_rim_tint;          // hairline color
 uniform float u_sheen;             // broad diagonal sheen across the face
 uniform float u_edge_shade;        // bottom contact-shade strength
+uniform float u_bar_frost;         // 1 = keep pixel-aligned bar interior fully frosted
 uniform float u_grain;             // dither amplitude
 uniform float u_alpha;             // fade envelope (toasts/OSD)
 in vec2 v_uv;
@@ -426,12 +427,15 @@ void main() {
     float gradient_len = length(gradient);
     // Outward surface normal in gl_FragCoord space (y up).
     vec2 normal = gradient_len > 1e-4 ? gradient / gradient_len : vec2(0.0);
-    // fwidth keeps the antialiased band one screen pixel wide whatever the
-    // sheet's size, exactly like the window and border programs. Solid glass
-    // widens it a little and floors it above a pixel: a thick edge has no
-    // geometrically sharp silhouette, and the floor keeps the squircle's very
-    // shallow corner tangent from stair-stepping.
-    float aa_w = max(fwidth(dist) * 1.25, 0.75);
+    // Broad panels retain their deliberately soft silhouette. On a thin bar,
+    // that +/-1.25-pixel ramp faded the last *interior* row (coverage 0.784 at
+    // dist=-0.5), letting sharp wallpaper leak through beneath the bright rim.
+    // A half-pixel half-width gives one screen pixel of AA: a pixel-aligned
+    // interior row is fully frosted, while the curved silhouette stays smooth.
+    // This changes coverage only; neither geometry nor the outside gap grows.
+    float pixel_width = max(fwidth(dist), 0.0001);
+    float aa_w = u_bar_frost > 0.5 ? pixel_width * 0.5
+                                  : max(pixel_width * 1.25, 0.75);
 
     float mask = 1.0 - smoothstep(-aa_w, aa_w, dist);
     if (mask <= 0.0) {
@@ -1528,3 +1532,45 @@ void main() {
     frag_color = mix(current, previous, u_temporal_mix);
 }
 "#;
+
+#[cfg(test)]
+mod glass_edge_coverage_tests {
+    use super::GLASS_FRAGMENT_SHADER;
+
+    fn coverage(dist: f32, pixel_width: f32, bar: bool) -> f32 {
+        let pixel_width = pixel_width.max(0.0001);
+        let half_width = if bar {
+            pixel_width * 0.5
+        } else {
+            (pixel_width * 1.25).max(0.75)
+        };
+        let t = ((dist + half_width) / (2.0 * half_width)).clamp(0.0, 1.0);
+        1.0 - t * t * (3.0 - 2.0 * t)
+    }
+
+    #[test]
+    fn bar_frost_fills_the_last_interior_pixel_without_expanding_geometry() {
+        for pixel_width in [0.25, 0.5, 1.0, 1.25, 1.5, 2.0, 4.0] {
+            assert_eq!(coverage(-0.5 * pixel_width, pixel_width, true), 1.0);
+            assert_eq!(coverage(0.5 * pixel_width, pixel_width, true), 0.0);
+            assert_eq!(coverage(0.0, pixel_width, true), 0.5);
+        }
+        // Reproduce the old interior leak rather than merely test the new value.
+        assert!((coverage(-0.5, 1.0, false) - 0.784).abs() < 1e-6);
+        // Link the numeric oracle to the shader expressions actually shipped.
+        assert!(GLASS_FRAGMENT_SHADER.contains("u_bar_frost > 0.5 ? pixel_width * 0.5"));
+        assert!(GLASS_FRAGMENT_SHADER.contains(": max(pixel_width * 1.25, 0.75)"));
+        assert!(GLASS_FRAGMENT_SHADER.contains("smoothstep(-aa_w, aa_w, dist)"));
+    }
+
+    #[test]
+    fn bar_frost_keeps_a_smooth_bounded_corner_transition() {
+        let values: Vec<_> = (-10..=10)
+            .map(|step| coverage(step as f32 / 20.0, 1.0, true))
+            .collect();
+        assert!(values.iter().all(|a| (0.0..=1.0).contains(a)));
+        assert!(values.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(coverage(-0.25, 1.0, true) > 0.5);
+        assert!(coverage(0.25, 1.0, true) < 0.5);
+    }
+}
