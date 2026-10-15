@@ -480,7 +480,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   static-source-contracts:
-    name: Static contracts for intentionally uncompiled frontends
+    name: Frontend source contracts and legacy GPUI formatting
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -544,7 +544,7 @@ jobs:
           {
             printf '%s\n' "### Intentional exclusions"
             printf '%s\n' "- \`gpui_bar\`: formatting + static binding assertion only; its git \`main\` dependencies are unpinned and it has no lockfile."
-            printf '%s\n' "- React/Vue UI: frozen dependency install, typecheck/build, audit in locked-web-frontends; Solid/Svelte: static contracts plus an isolated Solid startup regression, no browser or frontend build claimed."
+            printf '%s\n' "- React/Vue/Solid/Svelte UI: frozen dependency install, typecheck/build, and audit in locked-web-frontends; isolated startup/state-machine tests supplement compilation, but no browser execution is claimed."
             printf '%s\n' "- The six Tauri Rust hosts are format-checked and statically wired by \`tauri-host-contracts\`; that job explicitly documents why it does not claim compilation."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -555,7 +555,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        frontend: [react, vue]
+        frontend: [react, vue, solid, svelte]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
