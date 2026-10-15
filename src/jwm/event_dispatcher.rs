@@ -11834,6 +11834,132 @@ mod tests {
     }
 
     #[test]
+    fn master_resize_runtime_seeded_mixed_sequences_preserve_state() {
+        use crate::core::layout::LayoutEnum;
+        // Fixed seeds make every failure replayable. Exercise real arrange,
+        // focus, retag and resize paths rather than a second layout model.
+        for layout in LayoutEnum::all()
+            .iter()
+            .filter(|l| **l != LayoutEnum::FLOAT)
+        {
+            for seed in [0x51a7_u64, 0xc0ffee, 0xdeadbeef] {
+                let (mut jwm, mut backend, mon, keys) = master_resize_scene(layout.clone(), 4);
+                for &key in &keys {
+                    let hints = &mut jwm.state.clients[key].size_hints;
+                    hints.min_w = 80;
+                    hints.min_h = 60;
+                }
+                let original = jwm.state.monitors[mon].clone();
+                let mut rng = seed;
+                let mut tags = [1_u32; 4];
+                for step in 0..96 {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    // Repeatedly cross singleton, master-only and stack
+                    // topologies, including removal of the previous anchor.
+                    if step % 8 == 0 {
+                        let count = [1, 4, 2, 3][(step / 8) % 4];
+                        for (index, &key) in keys.iter().enumerate() {
+                            tags[index] = if index < count { 1 } else { 2 };
+                            jwm.move_client_to_tag(&mut backend, key, tags[index])
+                                .unwrap();
+                        }
+                    }
+                    let visible: Vec<_> = jwm
+                        .collect_tileable_clients(mon)
+                        .into_iter()
+                        .map(|(key, _, _)| key)
+                        .collect();
+                    let selected = visible[(rng as usize) % visible.len()];
+                    jwm.focus(&mut backend, Some(selected)).unwrap();
+                    jwm.arrange(&mut backend, Some(mon));
+                    let delta = [-0.2, -0.05, 0.05, 0.2][((rng >> 8) as usize) % 4];
+                    match step % 8 {
+                        0 => {
+                            jwm.reset_layout_size(&mut backend, &WMArgEnum::Int(0))
+                                .unwrap();
+                            if visible.len() == 1 {
+                                let before = live_rect(&jwm, selected);
+                                jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                                    .unwrap();
+                                let horizontal = live_rect(&jwm, selected);
+                                jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+                                    .unwrap();
+                                assert!(
+                                    horizontal.w < before.w,
+                                    "{} seed {seed} step {step}",
+                                    layout.0
+                                );
+                                assert!(
+                                    live_rect(&jwm, selected).h < horizontal.h,
+                                    "{} seed {seed} step {step}",
+                                    layout.0
+                                );
+                            }
+                        }
+                        1 | 3 | 5 => jwm
+                            .resize_horizontal(&mut backend, &WMArgEnum::Float(delta))
+                            .unwrap(),
+                        2 | 4 | 6 => jwm
+                            .resize_vertical(&mut backend, &WMArgEnum::Float(delta))
+                            .unwrap(),
+                        _ => jwm
+                            .reset_layout_size(&mut backend, &WMArgEnum::Int(0))
+                            .unwrap(),
+                    }
+                    let context = format!(
+                        "{} seed {seed:#x} step {step} op {} delta {delta} selected {selected:?} count {}",
+                        layout.0,
+                        step % 8,
+                        visible.len()
+                    );
+                    assert_eq!(jwm.get_selected_client_key(), Some(selected), "{context}");
+                    let monitor = &jwm.state.monitors[mon];
+                    assert_eq!(monitor.tag_set, original.tag_set, "{context}");
+                    assert_eq!(monitor.sel_tags, original.sel_tags, "{context}");
+                    assert_eq!(monitor.lt, original.lt, "{context}");
+                    assert_eq!(monitor.prev_lt, original.prev_lt, "{context}");
+                    assert_eq!(
+                        monitor.layout.n_master, original.layout.n_master,
+                        "{context}"
+                    );
+                    assert_eq!(monitor.layout.m_fact, original.layout.m_fact, "{context}");
+                    assert_eq!(monitor.layout.gap, original.layout.gap, "{context}");
+                    for (index, &key) in keys.iter().enumerate() {
+                        let client = &jwm.state.clients[key];
+                        assert_eq!(client.mon, Some(mon), "{context}");
+                        assert_eq!(client.state.tags, tags[index], "{context}");
+                        assert_eq!(client.state.client_fact, 1.0, "{context}");
+                        assert!(!client.state.is_floating, "{context}");
+                    }
+                    let geometry: Vec<_> =
+                        visible.iter().map(|&key| live_rect(&jwm, key)).collect();
+                    for rect in &geometry {
+                        assert!(
+                            rect.w >= 80 && rect.h >= 60,
+                            "{} seed {seed} step {step}: {rect:?}",
+                            layout.0
+                        );
+                    }
+                    // Intentional overlap (deck/monocle/vstack) and scrolling
+                    // offscreen columns are legal; idempotence is universal.
+                    jwm.arrange(&mut backend, Some(mon));
+                    assert_eq!(
+                        geometry,
+                        visible
+                            .iter()
+                            .map(|&key| live_rect(&jwm, key))
+                            .collect::<Vec<_>>(),
+                        "{} seed {seed} step {step}",
+                        layout.0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn master_resize_runtime_last_tile_tag_round_trip_retires_empty_topology() {
         use crate::core::layout::LayoutEnum;
         for layout in LayoutEnum::all()
