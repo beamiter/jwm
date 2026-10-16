@@ -8050,7 +8050,7 @@ mod tests {
     #[test]
     fn solar_drag_stops_at_output_boundary_without_camera_jump() {
         let (mut jwm, mut backend) = solar_input_fixture();
-        let mut other = WMMonitor::new();
+        let mut other = crate::core::models::WMMonitor::new();
         (
             other.geometry.m_x,
             other.geometry.m_y,
