@@ -103,12 +103,18 @@ struct Monitor {
     selected: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn default_client_fact() -> f32 {
+    1.0
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Client {
     xid: u32,
     tags: u32,
     monitor: usize,
+    #[serde(default = "default_client_fact")]
+    client_fact: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,6 +138,8 @@ impl RestartSnapshot {
             && self.clients.iter().all(|client| {
                 client.xid != 0
                     && ids.insert(client.xid)
+                    && client.client_fact.is_finite()
+                    && (0.25..=4.0).contains(&client.client_fact)
                     && client.tags != 0
                     && client.monitor < self.monitors.len()
             })
@@ -394,6 +402,7 @@ impl Jwm {
                 xid,
                 tags: client.state.tags,
                 monitor,
+                client_fact: client.state.client_fact,
             });
         }
         let captured: HashSet<_> = clients.iter().map(|client| client.xid).collect();
@@ -650,6 +659,7 @@ impl Jwm {
         let client = &mut self.state.clients[key];
         client.mon = Some(monitor);
         client.state.tags = tags;
+        client.state.client_fact = saved.client_fact;
         self.restart_state.adopted.insert(id);
         Ok(true)
     }
@@ -1025,6 +1035,7 @@ mod codec_tests {
                 xid: 42,
                 tags: 0b101,
                 monitor: 0,
+                client_fact: 2.5,
             }],
             selected_monitor: Some(0),
         }
@@ -1048,6 +1059,56 @@ mod codec_tests {
         let saved = snapshot();
         let bytes = saved.encode().expect("valid snapshot");
         assert_eq!(RestartSnapshot::decode(&bytes, &saved.intent), Some(saved));
+    }
+
+    #[test]
+    fn older_snapshots_default_missing_client_weight_to_one() {
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        value["clients"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_fact");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let restored = RestartSnapshot::decode(&bytes, &intent()).unwrap();
+        assert_eq!(restored.clients[0].client_fact, 1.0);
+    }
+
+    #[test]
+    fn invalid_client_weights_reject_the_entire_snapshot() {
+        for factor in [
+            0.0,
+            -1.0,
+            0.249,
+            4.001,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            let mut saved = snapshot();
+            saved.clients[0].client_fact = factor;
+            assert!(!saved.validate(), "accepted {factor}");
+            assert!(saved.encode().is_err());
+        }
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!("2"),
+            serde_json::json!(0),
+            serde_json::json!(5),
+        ] {
+            let mut saved = serde_json::to_value(snapshot()).unwrap();
+            saved["clients"][0]["client_fact"] = value;
+            assert!(
+                RestartSnapshot::decode(&serde_json::to_vec(&saved).unwrap(), &intent()).is_none()
+            );
+        }
+        for factor in [0.25, 1.0, 4.0] {
+            let mut saved = snapshot();
+            saved.clients[0].client_fact = factor;
+            assert_eq!(
+                RestartSnapshot::decode(&saved.encode().unwrap(), &intent()),
+                Some(saved)
+            );
+        }
     }
 
     #[test]

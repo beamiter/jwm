@@ -7316,8 +7316,26 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn x11_restart_invalid_weight_fails_before_any_property_write() {
+        for factor in [0.0, -1.0, 4.01, f32::NAN, f32::INFINITY] {
+            let (mut old, backend, key) = restart_fixture();
+            old.state.clients[key].state.client_fact = factor;
+            assert!(old.prepare_restart_state(&backend).is_err());
+            assert!(
+                backend
+                    .property_ops
+                    .restart_properties
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn x11_restart_wrong_window_generation_does_not_restore_recycled_xid() {
-        let (old, mut backend, _) = restart_fixture();
+        let (mut old, mut backend, old_key) = restart_fixture();
+        old.state.clients[old_key].state.client_fact = 2.5;
         let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
         backend
             .property_ops
@@ -7332,6 +7350,7 @@ mod unmanage_minimized_tests {
         fresh.restore_restart_monitors(&mut backend);
         let key = manage_window(&mut fresh, &mut backend, 0xab01);
         assert_eq!(fresh.state.clients[key].state.tags, 1);
+        assert_eq!(fresh.state.clients[key].state.client_fact, 1.0);
     }
     #[test]
     fn x11_restart_exact_tags_override_legacy_minimized_tags_and_keep_sticky() {
@@ -7911,6 +7930,46 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn x11_restart_restores_weighted_arranged_rectangles() {
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        set_class(&backend, "RestartFixture", "restart-fixture");
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        old.suppress_layout_animation = true;
+        for (id, weight) in [(201, 0.5), (202, 1.5), (203, 3.0)] {
+            let key = manage_window(&mut old, &mut backend, id);
+            old.state.clients[key].state.client_fact = weight;
+        }
+        let mon = old.state.monitor_order[0];
+        let monitor = &mut old.state.monitors[mon];
+        let pertag = monitor.pertag.as_mut().unwrap();
+        pertag.lts[pertag.cur_tag] = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+        pertag.n_masters[pertag.cur_tag] = 0;
+        monitor.reload_current_tag_context();
+        old.arrange(&mut backend, None);
+        let rectangles = |wm: &Jwm| {
+            [201, 202, 203].map(|id| {
+                let key = wm.wintoclient(WindowId::from_raw(id)).unwrap();
+                let g = &wm.state.clients[key].geometry;
+                Rect::new(g.x, g.y, g.w, g.h)
+            })
+        };
+        let before = rectangles(&old);
+        assert!(before[0].h < before[1].h && before[1].h < before[2].h);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        for id in [203, 202, 201] {
+            manage_window(&mut fresh, &mut backend, id);
+        }
+        fresh.finish_restart_adoption(&mut backend);
+        fresh.arrange(&mut backend, None);
+        assert_eq!(rectangles(&fresh), before);
+    }
+
+    #[test]
     fn x11_restart_two_monitor_state_roundtrips_after_reversed_enumeration() {
         let mut backend = ClientSpyBackend::new();
         backend.restart_identity = true;
@@ -7926,6 +7985,7 @@ mod unmanage_minimized_tests {
                 ));
                 client.mon = Some(mon);
                 client.state.tags = 1 << (index * 2);
+                client.state.client_fact = offset as f32 + index as f32 * 0.25;
                 client.class = "RestartFixture".into();
                 let key = old.insert_client(client);
                 keys.push(key);
@@ -7984,6 +8044,14 @@ mod unmanage_minimized_tests {
                 .map(|key| fresh.state.clients[*key].win.raw())
                 .collect();
             assert_eq!(ids, vec![102 + index as u64 * 10, 101 + index as u64 * 10]);
+            let weights: Vec<_> = fresh.state.monitor_clients[mon]
+                .iter()
+                .map(|key| fresh.state.clients[*key].state.client_fact)
+                .collect();
+            assert_eq!(
+                weights,
+                vec![2.0 + index as f32 * 0.25, 1.0 + index as f32 * 0.25]
+            );
             assert_eq!(
                 fresh.state.clients[monitor.sel.unwrap()].win.raw(),
                 102 + index as u64 * 10

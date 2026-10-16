@@ -3,7 +3,8 @@
 `Alt+Shift+R` (`restart`) on both `xcb` and `x11rb` replaces JWM while the X
 server keeps application windows alive. JWM hands the replacement process:
 
-- Each ordinary live window's complete tag bitmask and output identity.
+- Each ordinary live window's complete tag bitmask, output identity, and
+  per-window tiling weight (`client_fact`).
 - Each output's current and previous tag views.
 - Every tag's layout and previous layout, master count and fraction, gap, and
   bar preference, including the all-tags layout slot.
@@ -14,6 +15,12 @@ The one-restart snapshot takes precedence over new-window placement rules and
 closed-window memory. Ordinary minimized, sticky, and swallowed windows are
 included; their existing specialized state/admission handling still applies.
 Named scratchpads and shell bars/docks keep their own ownership paths.
+
+Window weights are restored only after the same XID and generation checks as
+tags and output placement, before arranging the adopted windows. Older snapshots
+without weights use `1.0`. Non-finite weights or values outside `0.25..=4.0`
+reject the entire snapshot; invalid live weights cancel capture before any
+property writes.
 
 Outputs are matched by unambiguous stable identity and connector, never by a
 reused monitor index. If an output is missing, its clients move to the nearest
