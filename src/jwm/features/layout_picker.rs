@@ -47,6 +47,11 @@ pub struct LayoutPickerState {
     /// The monitor and per-tag slot that own this live preview. Pure picker
     /// construction leaves it unset; the JWM opener supplies the context.
     pub(crate) owner: Option<(crate::core::models::MonitorKey, usize)>,
+    /// Previous-layout history at open and after the last live preview.
+    /// Each pair holds the live monitor value and the owner's saved tag value.
+    /// Comparing both avoids overwriting a newer independent history change.
+    pub(crate) origin_previous: Option<(LayoutEnum, LayoutEnum)>,
+    pub(crate) preview_previous: Option<(LayoutEnum, LayoutEnum)>,
     /// Bar preference before previewing, and the last value left by a preview.
     /// Comparing the latter preserves a newer independent toggle on cancel.
     pub(crate) origin_show_bar: Option<bool>,
@@ -72,6 +77,8 @@ impl LayoutPickerState {
             selected,
             origin: selected,
             owner: None,
+            origin_previous: None,
+            preview_previous: None,
             origin_show_bar: None,
             preview_show_bar: None,
             touched: Instant::now(),

@@ -8802,6 +8802,158 @@ mod tests {
         assert_eq!(*jwm.state.monitors[right].lt, LayoutEnum::MONOCLE);
     }
 
+    fn picker_with_tile_and_grid_history() -> (Jwm, RenderSpyBackend, crate::jwm::MonitorKey) {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::GRID)))
+            .unwrap();
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        (jwm, backend, monitor)
+    }
+
+    #[test]
+    fn layout_picker_cancel_restores_previous_history_for_active_inactive_and_roundtrip() {
+        use crate::core::layout::LayoutEnum;
+        for inactive in [false, true] {
+            for roundtrip in [false, true] {
+                let (mut jwm, mut backend, monitor) = picker_with_tile_and_grid_history();
+                let owner_tag = jwm.state.monitors[monitor].pertag.as_ref().unwrap().cur_tag;
+                let delta =
+                    LayoutEnum::DECK.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+                jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+                    .unwrap();
+                if roundtrip {
+                    jwm.layout_picker(&mut backend, &WMArgEnum::Int(-delta))
+                        .unwrap();
+                }
+                let unrelated = if inactive {
+                    jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+                    Some((
+                        jwm.state.monitors[monitor].lt.clone(),
+                        jwm.state.monitors[monitor].prev_lt.clone(),
+                    ))
+                } else {
+                    None
+                };
+                jwm.cancel_layout_picker(&mut backend);
+                let mon = &jwm.state.monitors[monitor];
+                let pertag = mon.pertag.as_ref().unwrap();
+                assert_eq!(*pertag.lts[owner_tag], LayoutEnum::TILE);
+                assert_eq!(*pertag.prev_lts[owner_tag], LayoutEnum::GRID);
+                if let Some(unrelated) = unrelated {
+                    assert_eq!((mon.lt.clone(), mon.prev_lt.clone()), unrelated);
+                    jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+                }
+                assert_eq!(*jwm.state.monitors[monitor].lt, LayoutEnum::TILE);
+                assert_eq!(*jwm.state.monitors[monitor].prev_lt, LayoutEnum::GRID);
+                jwm.lastlayout(&mut backend, &WMArgEnum::Int(0)).unwrap();
+                assert_eq!(*jwm.state.monitors[monitor].lt, LayoutEnum::GRID);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_picker_cancel_without_preview_keeps_previous_and_confirm_keeps_preview_history() {
+        use crate::core::layout::LayoutEnum;
+        let (mut jwm, mut backend, monitor) = picker_with_tile_and_grid_history();
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(*jwm.state.monitors[monitor].prev_lt, LayoutEnum::GRID);
+        let delta = LayoutEnum::DECK.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        jwm.confirm_layout_picker(&mut backend);
+        assert_eq!(*jwm.state.monitors[monitor].lt, LayoutEnum::DECK);
+        assert_eq!(*jwm.state.monitors[monitor].prev_lt, LayoutEnum::TILE);
+    }
+
+    #[test]
+    fn layout_picker_cancel_preserves_newer_history_even_when_current_preview_matches() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        // Live-only and saved-only mutations are both conflicts, even if the
+        // displayed layout still equals the picker selection.
+        for history_slot in 0..3 {
+            for via_tick in [false, true] {
+                let (mut jwm, mut backend, monitor) = picker_with_tile_and_grid_history();
+                let delta =
+                    LayoutEnum::DECK.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+                jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+                    .unwrap();
+                let mon = &mut jwm.state.monitors[monitor];
+                let tag = mon.pertag.as_ref().unwrap().cur_tag;
+                if history_slot != 1 {
+                    mon.prev_lt = Rc::new(LayoutEnum::TATAMI);
+                }
+                if history_slot != 0 {
+                    mon.pertag.as_mut().unwrap().prev_lts[tag] = Rc::new(LayoutEnum::TATAMI);
+                }
+                let before = jwm.state.monitors[monitor].clone();
+                if via_tick {
+                    jwm.tick_layout_picker(&mut backend, std::time::Instant::now());
+                } else {
+                    jwm.cancel_layout_picker(&mut backend);
+                }
+                assert!(jwm.features.system_ui.layout_picker().is_none());
+                assert_eq!(jwm.state.monitors[monitor], before);
+            }
+        }
+        let (mut jwm, mut backend, monitor) = picker_with_tile_and_grid_history();
+        let delta = LayoutEnum::DECK.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        let owner_tag = jwm.state.monitors[monitor].pertag.as_ref().unwrap().cur_tag;
+        jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+        jwm.state.monitors[monitor]
+            .pertag
+            .as_mut()
+            .unwrap()
+            .prev_lts[owner_tag] = Rc::new(LayoutEnum::TATAMI);
+        let before = jwm.state.monitors[monitor].clone();
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(jwm.state.monitors[monitor], before);
+    }
+
+    #[test]
+    fn layout_picker_cancel_preserves_a_newer_saved_current_layout() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let (mut jwm, mut backend, monitor) = picker_with_tile_and_grid_history();
+        let delta = LayoutEnum::DECK.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        let tag = jwm.state.monitors[monitor].pertag.as_ref().unwrap().cur_tag;
+        jwm.state.monitors[monitor].pertag.as_mut().unwrap().lts[tag] = Rc::new(LayoutEnum::TATAMI);
+        let before = jwm.state.monitors[monitor].clone();
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(jwm.state.monitors[monitor], before);
+    }
+
+    #[test]
+    fn layout_picker_cancel_after_owner_removal_cannot_touch_replacement_monitor_history() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+        let (mut jwm, mut backend, owner) = picker_with_tile_and_grid_history();
+        let delta = LayoutEnum::DECK.cycle_index() as i32 - LayoutEnum::TILE.cycle_index() as i32;
+        jwm.layout_picker(&mut backend, &WMArgEnum::Int(delta))
+            .unwrap();
+        let mut replacement = jwm.state.monitors[owner].clone();
+        replacement.lt = Rc::new(LayoutEnum::BSTACK);
+        replacement.prev_lt = Rc::new(LayoutEnum::MONOCLE);
+        let other = jwm.state.monitors.insert(replacement.clone());
+        jwm.state.monitors.remove(owner);
+        jwm.state.monitor_order.retain(|&key| key != owner);
+        jwm.state.monitor_order.push(other);
+        jwm.state.sel_mon = Some(other);
+        jwm.cancel_layout_picker(&mut backend);
+        assert_eq!(jwm.state.monitors[other], replacement);
+        assert!(jwm.features.system_ui.layout_picker().is_none());
+    }
+
     #[test]
     fn cancelling_layout_picker_preserves_a_newer_explicit_layout_command() {
         use crate::core::layout::LayoutEnum;

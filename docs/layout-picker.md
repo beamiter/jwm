@@ -34,7 +34,11 @@ Every step applies the layout to the real desktop behind the panel. There is no
 "preview" that can disagree with the result: what the strip highlights is what
 the windows are already doing, and confirming only takes the panel down.
 
-`Esc` puts back the layout that was current when the picker opened.
+`Esc` puts back the layout and previous-layout history from when the picker
+opened, so `lastlayout` still returns to the same earlier layout after cancel.
+This also holds when browsing already returned to the opening layout. The
+restore belongs to the opening monitor and tag; a newer independent layout or
+history change wins, and another monitor or tag is never overwritten.
 
 ## Four ways to commit
 
