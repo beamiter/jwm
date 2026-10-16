@@ -1264,15 +1264,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             let Some(bounds) = candidate.intersection(bar) else {
                 break;
             };
-            self.push_pill(
-                &mut scene,
-                bounds,
-                spec,
-                interaction,
-                palette,
-                Some(bar),
-                None,
-            );
+            self.push_pill(&mut scene, bounds, spec, interaction, palette, Some(bar));
             right_cursor = (bounds.x - gap).max(content_left);
         }
 
@@ -1305,11 +1297,13 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             self.push_pill(
                 &mut scene,
                 bounds,
-                PillSpec::from(control),
+                PillSpec {
+                    tag_palette: Some(tag_palette),
+                    ..PillSpec::from(control)
+                },
                 interaction,
                 palette,
                 Some(bar),
-                Some(tag_palette),
             );
             left_cursor = bounds.right() + gap;
         }
@@ -1325,7 +1319,6 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 interaction,
                 palette,
                 Some(bar),
-                None,
             );
             left_cursor = bounds.right() + gap;
         }
@@ -1343,7 +1336,6 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 interaction,
                 palette,
                 Some(bar),
-                None,
             );
             left_cursor = bounds.right() + gap;
         }
@@ -1711,7 +1703,6 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         interaction: &InteractionState,
         palette: Palette,
         clip: Option<Rect>,
-        tag_palette: Option<TagPalette>,
     ) {
         let bounds = clip
             .and_then(|clip| bounds.intersection(clip))
@@ -1720,7 +1711,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             return;
         }
         spec.state.hovered |= interaction.hovered == Some(spec.id);
-        let tag_colors = tag_palette.map(|palette| palette.colors(spec.state));
+        let tag_colors = spec.tag_palette.map(|palette| palette.colors(spec.state));
         let fill = if let Some(colors) = tag_colors {
             colors.fill
         } else if spec.state.urgent {
@@ -1874,6 +1865,7 @@ struct PillSpec {
     scroll_down: Option<UserAction>,
     state: VisualState,
     progress: Option<f32>,
+    tag_palette: Option<TagPalette>,
 }
 
 impl From<ControlSpec> for PillSpec {
@@ -1899,6 +1891,7 @@ impl From<ControlSpec> for PillSpec {
                 occupied: control.state.occupied || control.state.filled,
             },
             progress: control.progress.map(Percent::as_f32),
+            tag_palette: None,
         }
     }
 }
@@ -2560,8 +2553,10 @@ mod tests {
             occupied: true,
             ..TagState::default()
         }];
-        let mut interaction = InteractionState::default();
-        interaction.hovered = Some(NodeId::Tag(TagId::new(0).unwrap()));
+        let interaction = InteractionState {
+            hovered: Some(NodeId::Tag(TagId::new(0).unwrap())),
+            ..InteractionState::default()
+        };
         let mut sample = view(&tags, "client");
         sample.wallpaper_luminance = Some(255);
         let scene = engine().build(sample, Size::new(1600.0, 38.0), &interaction);

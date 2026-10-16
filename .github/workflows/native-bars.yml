@@ -291,6 +291,18 @@ jobs:
       - name: Check all targets
         run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
 
+      # Execute the pure regression tests already type-checked above. These
+      # tests do not launch toolkit windows or require a display server.
+      - name: Run adaptive toolkit regression tests
+        if: ${{ contains(fromJSON('["dioxus", "egui", "gtk4", "relm4"]'), matrix.name) }}
+        run: cargo test --manifest-path "${{ matrix.manifest }}" --all-targets
+
+      # Dependency builds do not execute xbar_gtk's own CSS/geometry tests.
+      # Reuse the GTK4 runner's installed libraries and run these explicitly.
+      - name: Run shared GTK widget regression tests
+        if: ${{ matrix.name == 'gtk4' }}
+        run: cargo test --manifest-path crates/xbar_core/crates/xbar_gtk/Cargo.toml --lib
+
   git-toolkits:
     name: Moving git toolkit (${{ matrix.name }})
     runs-on: ubuntu-latest
