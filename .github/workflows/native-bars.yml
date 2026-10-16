@@ -298,10 +298,11 @@ jobs:
         run: cargo test --manifest-path "${{ matrix.manifest }}" --all-targets
 
       # Dependency builds do not execute xbar_gtk's own CSS/geometry tests.
-      # Reuse the GTK4 runner's installed libraries and run these explicitly.
+      # Select its test target through the standalone GTK bar graph to avoid
+      # workspace discovery from the nested adapter manifest.
       - name: Run shared GTK widget regression tests
         if: ${{ matrix.name == 'gtk4' }}
-        run: cargo test --manifest-path crates/xbar_core/crates/xbar_gtk/Cargo.toml --lib
+        run: cargo test --manifest-path bars/gtk_bar/Cargo.toml -p xbar_gtk --lib
 
   git-toolkits:
     name: Moving git toolkit (${{ matrix.name }})
