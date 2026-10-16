@@ -365,18 +365,50 @@ pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
         gap: GAP,
     };
 
+    contextual_preview(layout, &params, &clients).frames
+}
+
+/// Hard limit for the picker, independent of the number of managed windows.
+pub const MAX_PREVIEW_CLIENTS: usize = 64;
+
+pub struct LayoutPreview {
+    pub frames: Vec<[f32; 4]>,
+    /// Minimum computed client width and height before viewport clipping.
+    /// These are estimates, not application minimum-size guarantees.
+    pub smallest: Option<(i32, i32)>,
+}
+
+/// Run the real geometry on a bounded snapshot of the selected output.
+/// Output origins are intentionally discarded: thumbnails are output-local.
+/// Scrolling uses one window per column as an illustrative arrangement;
+/// float is a cascade because that layout has no tiling geometry.
+pub fn contextual_preview(
+    layout: &LayoutEnum,
+    params: &LayoutParams,
+    clients: &[LayoutClient<usize>],
+) -> LayoutPreview {
+    let clients = &clients[..clients.len().min(MAX_PREVIEW_CLIENTS)];
+    let count = clients.len();
+    let width = params.screen_area.w.clamp(1, 65536);
+    let height = params.screen_area.h.clamp(1, 65536);
+    let params = LayoutParams {
+        screen_area: Rect::new(0, 0, width, height),
+        n_master: params.n_master,
+        m_fact: params.m_fact,
+        gap: bounded_gap(Rect::new(0, 0, width, height), params.gap),
+    };
     let mut results = match layout.0 {
-        "tile" => calculate_tile(&params, &clients),
-        "fibonacci" => calculate_fibonacci(&params, &clients),
-        "centeredmaster" => calculate_centered_master(&params, &clients),
-        "bstack" => calculate_bstack(&params, &clients),
-        "grid" => calculate_grid(&params, &clients),
-        "deck" => calculate_deck(&params, &clients),
-        "threecol" => calculate_three_col(&params, &clients),
-        "tatami" => calculate_tatami(&params, &clients),
-        "monocle" => calculate_monocle(&params, &clients),
-        "fullscreen" => calculate_fullscreen(&params, &clients),
-        "vstack" => calculate_vstack(&params, &clients),
+        "tile" => calculate_tile(&params, clients),
+        "fibonacci" => calculate_fibonacci(&params, clients),
+        "centeredmaster" => calculate_centered_master(&params, clients),
+        "bstack" => calculate_bstack(&params, clients),
+        "grid" => calculate_grid(&params, clients),
+        "deck" => calculate_deck(&params, clients),
+        "threecol" => calculate_three_col(&params, clients),
+        "tatami" => calculate_tatami(&params, clients),
+        "monocle" => calculate_monocle(&params, clients),
+        "fullscreen" => calculate_fullscreen(&params, clients),
+        "vstack" => calculate_vstack(&params, clients),
         "scrolling" => {
             // One window per column is what the strip is about; the focused
             // column sits centred and its neighbours are cut off by the
@@ -392,9 +424,9 @@ pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
                 .collect();
             let scrolling = ScrollingParams {
                 screen_area: params.screen_area,
-                column_width_ratio: 0.45,
+                column_width_ratio: params.m_fact,
                 column_width_factors: Vec::new(),
-                gap: GAP,
+                gap: params.gap,
                 viewport_x: 0.0,
             };
             calculate_scrolling(&scrolling, &columns, count / 2).0
@@ -402,24 +434,33 @@ pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
         // Float has no tiling function: nothing places these windows, so the
         // thumbnail shows the cascade a user ends up with by hand.
         _ => {
-            let step = (W / 12).min(H / 8);
+            let step = (width / 12).min(height / 8);
             (0..count)
                 .map(|i| {
                     let i = i as i32;
                     LayoutResult {
                         key: i as usize,
-                        rect: Rect::new(GAP + i * step, GAP + i * step, W / 2, (H * 5) / 9),
+                        rect: Rect::new(
+                            params.gap + i * step,
+                            params.gap + i * step,
+                            width / 2,
+                            (height * 5) / 9,
+                        ),
                     }
                 })
                 .collect()
         }
     };
 
+    let smallest = results
+        .iter()
+        .map(|r| (r.rect.w, r.rect.h))
+        .reduce(|(w, h), (rw, rh)| (w.min(rw), h.min(rh)));
     // Monocle stacks every window in the same place; drawing them all would
     // just thicken one outline.
     results.dedup_by(|a, b| a.rect == b.rect);
 
-    results
+    let frames = results
         .into_iter()
         .filter_map(|result| {
             let r = result.rect;
@@ -429,19 +470,20 @@ pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
             // Clip to the monitor: the scrolling strip runs off both edges.
             let x0 = r.x.max(0);
             let y0 = r.y.max(0);
-            let x1 = (r.x + r.w).min(W);
-            let y1 = (r.y + r.h).min(H);
-            if x1 - x0 < W / 40 || y1 - y0 < H / 40 {
+            let x1 = (r.x + r.w).min(width);
+            let y1 = (r.y + r.h).min(height);
+            if x1 <= x0 || y1 <= y0 {
                 return None;
             }
             Some([
-                x0 as f32 / W as f32,
-                y0 as f32 / H as f32,
-                (x1 - x0) as f32 / W as f32,
-                (y1 - y0) as f32 / H as f32,
+                x0 as f32 / width as f32,
+                y0 as f32 / height as f32,
+                (x1 - x0) as f32 / width as f32,
+                (y1 - y0) as f32 / height as f32,
             ])
         })
-        .collect()
+        .collect();
+    LayoutPreview { frames, smallest }
 }
 
 /// Protocol identifier → layout, as a status bar's `SetLayout` sends it.
@@ -1426,6 +1468,30 @@ mod tests {
     // -----------------------------------------------------------------------
     // LayoutEnum
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn contextual_preview_is_output_local_and_caps_input() {
+        let clients: Vec<_> = (0..1000)
+            .map(|key| LayoutClient {
+                key,
+                factor: 1.0,
+                border_w: 1,
+            })
+            .collect();
+        let mut params = LayoutParams {
+            screen_area: Rect::new(-1920, 200, 720, 1280),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 5,
+        };
+        let a = contextual_preview(&LayoutEnum::GRID, &params, &clients);
+        params.screen_area.x = 1000;
+        params.screen_area.y = -500;
+        let b = contextual_preview(&LayoutEnum::GRID, &params, &clients[..MAX_PREVIEW_CLIENTS]);
+        assert_eq!(a.frames, b.frames);
+        assert_eq!(a.smallest, b.smallest);
+        assert_eq!(a.frames.len(), MAX_PREVIEW_CLIENTS);
+    }
 
     #[test]
     fn test_layout_enum_symbol_tile() {

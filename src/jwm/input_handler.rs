@@ -379,6 +379,7 @@ impl Jwm {
         if self.dismiss_stale_layout_picker(backend) {
             return;
         }
+        self.refresh_layout_picker_context();
         self.system_ui_dirty = false;
         let active = self.features.system_ui.is_active();
         let viewport = self.system_ui_viewport();

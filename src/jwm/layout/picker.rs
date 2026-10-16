@@ -112,6 +112,53 @@ impl Jwm {
         Ok(())
     }
 
+    /// Read the same visible, non-floating client set as the tiling pipeline.
+    /// This is read-only: preview hints must never apply borders or size hints.
+    pub(crate) fn refresh_layout_picker_context(&mut self) {
+        let Some((monitor_key, _)) = self
+            .features
+            .system_ui
+            .layout_picker()
+            .and_then(|p| p.owner)
+        else {
+            return;
+        };
+        let Some(area) = self.monitor_work_area(monitor_key) else {
+            return;
+        };
+        let Some(monitor) = self.state.monitors.get(monitor_key) else {
+            return;
+        };
+        // Count all eligible windows without allocating one entry per window.
+        // Keep only the bounded geometry sample used by the thumbnail engine.
+        let mut count = 0;
+        let mut clients = Vec::new();
+        for &key in self.get_monitor_clients(monitor_key) {
+            let Some(client) = self.state.clients.get(key) else {
+                continue;
+            };
+            if client.state.is_floating || !self.is_client_visible_on_monitor(key, monitor_key) {
+                continue;
+            }
+            count += 1;
+            if clients.len() < crate::core::layout::MAX_PREVIEW_CLIENTS {
+                clients.push((client.state.client_fact, client.geometry.border_w));
+            }
+        }
+        let context = crate::jwm::features::layout_picker::PreviewContext {
+            count,
+            width: area.w.max(1),
+            height: area.h.max(1),
+            n_master: monitor.layout.n_master,
+            m_fact: monitor.layout.m_fact,
+            gap: monitor.layout.gap,
+            clients,
+        };
+        if let Some(picker) = self.features.system_ui.layout_picker_mut() {
+            picker.update_context(context);
+        }
+    }
+
     /// Step an already-open picker. Returns false when none is open.
     fn step_layout_picker(
         &mut self,

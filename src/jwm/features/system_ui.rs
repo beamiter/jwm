@@ -4164,11 +4164,10 @@ impl SystemUiState {
             // here: the headline, the selected layout's name as the caption
             // (the single `items` row), and the footer.
             Self::LayoutPicker(picker) => {
-                let layout = picker.selected_layout();
                 OverlayParts {
-                    title: "\u{f008}  LAYOUT".into(),
+                    title: format!("\u{f008}  {}", picker.context_title()),
                     query: None,
-                    items: vec![format!("{}   {}", layout.symbol(), layout.label())],
+                    items: vec![picker.selected_caption()],
                     icons: None,
                     selected: Some(0),
                     hint: "\u{f060}/\u{f061}  browse    Home/End / Pg  jump    Enter / middle / click  apply    Esc / right-click  cancel".into(),

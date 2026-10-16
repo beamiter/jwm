@@ -10,12 +10,27 @@
 //! click, or simply stopping — a tap of the cycle key that is not followed by
 //! another one commits on its own after [`AUTO_CONFIRM`].
 
-use crate::core::layout::{LayoutEnum, preview_frames, preview_window_count};
+use crate::core::layout::{
+    LayoutClient, LayoutEnum, LayoutParams, MAX_PREVIEW_CLIENTS, contextual_preview,
+    preview_frames, preview_window_count,
+};
 use std::time::{Duration, Instant};
 
 /// How long the picker waits, after the last interaction, before committing
 /// the highlighted layout on its own.
 pub const AUTO_CONFIRM: Duration = Duration::from_millis(2600);
+
+/// Bounded client data plus the actual total; all dimensions are logical pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewContext {
+    pub count: usize,
+    pub width: i32,
+    pub height: i32,
+    pub n_master: u32,
+    pub m_fact: f32,
+    pub gap: i32,
+    pub clients: Vec<(f32, i32)>,
+}
 
 #[derive(Debug, Clone)]
 pub struct LayoutPickerState {
@@ -23,6 +38,9 @@ pub struct LayoutPickerState {
     pub layouts: Vec<&'static LayoutEnum>,
     /// Thumbnail geometry per layout, parallel to `layouts`.
     pub previews: Vec<Vec<[f32; 4]>>,
+    /// Optional live snapshot; legacy construction still supports catalog previews.
+    context: Option<PreviewContext>,
+    estimates: Vec<Option<(i32, i32)>>,
     pub selected: usize,
     /// The layout that was current when the picker opened, restored on cancel.
     pub origin: usize,
@@ -49,12 +67,92 @@ impl LayoutPickerState {
         Self {
             layouts,
             previews,
+            context: None,
+            estimates: Vec::new(),
             selected,
             origin: selected,
             owner: None,
             origin_show_bar: None,
             preview_show_bar: None,
             touched: Instant::now(),
+        }
+    }
+
+    /// Refresh only when geometry inputs change, never from selection/countdown.
+    /// Does not touch origin, selected layout or the auto-confirm timer.
+    pub fn update_context(&mut self, mut context: PreviewContext) {
+        context.clients.truncate(MAX_PREVIEW_CLIENTS);
+        if self.context.as_ref() == Some(&context) {
+            return;
+        }
+        let params = LayoutParams {
+            screen_area: crate::core::types::Rect::new(0, 0, context.width, context.height),
+            n_master: context.n_master,
+            m_fact: context.m_fact,
+            gap: context.gap,
+        };
+        let clients: Vec<_> = context
+            .clients
+            .iter()
+            .take(MAX_PREVIEW_CLIENTS)
+            .enumerate()
+            .map(|(key, &(factor, border_w))| LayoutClient {
+                key,
+                factor,
+                border_w,
+            })
+            .collect();
+        self.previews.clear();
+        self.estimates.clear();
+        for layout in &self.layouts {
+            let preview = contextual_preview(layout, &params, &clients);
+            self.previews.push(preview.frames);
+            self.estimates.push(preview.smallest);
+        }
+        self.context = Some(context);
+    }
+
+    pub fn context_title(&self) -> String {
+        self.context.as_ref().map_or_else(
+            || "LAYOUT".into(),
+            |c| {
+                let sampled = if c.count > MAX_PREVIEW_CLIENTS {
+                    " (64 sampled)"
+                } else {
+                    ""
+                };
+                format!(
+                    "LAYOUT · {} tiled{} · {}×{}",
+                    c.count, sampled, c.width, c.height
+                )
+            },
+        )
+    }
+
+    pub fn selected_caption(&self) -> String {
+        let layout = self.selected_layout();
+        let name = format!("{}   {}", layout.symbol(), layout.label());
+        let Some(context) = &self.context else {
+            return name;
+        };
+        if context.count == 0 {
+            return format!("{name} · No tiled windows");
+        }
+        if layout.0 == "float" {
+            return format!("{name} · Illustrative cascade");
+        }
+        if layout.0 == "scrolling" {
+            return format!("{name} · One window/column estimate; scroll for more");
+        }
+        if layout.0 == "deck" && context.count > context.n_master as usize {
+            return format!("{name} · Overlapping stack; fewer visible tiles");
+        }
+        match self.estimates.get(self.selected).copied().flatten() {
+            Some((w, h)) if w < 240 || h < 160 => {
+                format!("{name} · ~{w}×{h} min · Try Scrolling / Deck")
+            }
+            Some((w, h)) => format!("{name} · ~{w}×{h} min tile"),
+            None => name,
         }
     }
 
@@ -140,6 +238,100 @@ impl LayoutPickerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context(count: usize, width: i32, height: i32) -> PreviewContext {
+        PreviewContext {
+            count,
+            width,
+            height,
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 5,
+            clients: vec![(1.0, 1); count.min(MAX_PREVIEW_CLIENTS)],
+        }
+    }
+
+    #[test]
+    fn contextual_empty_single_and_twenty_windows_are_bounded() {
+        for count in [0, 1, 20, 64, 100_000] {
+            for (width, height) in [(1920, 1080), (720, 1280), (1, 1)] {
+                let mut picker = LayoutPickerState::new(&LayoutEnum::TILE);
+                picker.update_context(context(count, width, height));
+                for preview in &picker.previews {
+                    assert!(preview.len() <= count.min(MAX_PREVIEW_CLIENTS));
+                    if count == 0 {
+                        assert!(preview.is_empty());
+                    }
+                    for &[x, y, w, h] in preview {
+                        assert!(x.is_finite() && y.is_finite());
+                        assert!(x >= 0.0 && y >= 0.0 && w > 0.0 && h > 0.0);
+                        assert!(x + w <= 1.001 && y + h <= 1.001);
+                    }
+                }
+                assert_eq!(picker.selected_layout(), &LayoutEnum::TILE);
+            }
+        }
+    }
+
+    #[test]
+    fn preview_uses_portrait_workarea_factors_and_master_settings() {
+        let mut picker = LayoutPickerState::new(&LayoutEnum::GRID);
+        picker.update_context(context(20, 1920, 1080));
+        let landscape = picker.previews.clone();
+        picker.update_context(context(20, 720, 1280));
+        assert_ne!(
+            landscape[LayoutEnum::GRID.cycle_index()],
+            picker.previews[LayoutEnum::GRID.cycle_index()]
+        );
+        let mut inputs = context(4, 1920, 1080);
+        picker.update_context(inputs.clone());
+        let equal = picker.previews[LayoutEnum::TILE.cycle_index()].clone();
+        inputs.clients[1].0 = 3.0;
+        picker.update_context(inputs.clone());
+        assert_ne!(equal, picker.previews[LayoutEnum::TILE.cycle_index()]);
+        let weighted = picker.previews.clone();
+        inputs.n_master = 2;
+        inputs.m_fact = 0.7;
+        inputs.gap = 20;
+        picker.update_context(inputs);
+        assert_ne!(weighted, picker.previews);
+    }
+
+    #[test]
+    fn refresh_preserves_cancel_origin_selection_and_deadline() {
+        let mut picker = LayoutPickerState::new(&LayoutEnum::GRID);
+        picker.step(1);
+        let selected = picker.selected;
+        let touched = picker.touched;
+        picker.update_context(context(20, 720, 1280));
+        assert_eq!(picker.origin_layout(), &LayoutEnum::GRID);
+        assert_eq!(picker.selected, selected);
+        assert_eq!(picker.touched, touched);
+        let allocation = picker.previews.as_ptr();
+        picker.update_context(context(20, 720, 1280));
+        assert_eq!(picker.previews.as_ptr(), allocation);
+        assert_eq!(picker.touched, touched);
+    }
+
+    #[test]
+    fn density_advice_is_explicit_and_never_selects_a_layout() {
+        let mut picker = LayoutPickerState::new(&LayoutEnum::TILE);
+        picker.update_context(context(20, 1280, 720));
+        assert!(picker.selected_caption().contains("Try Scrolling / Deck"));
+        assert_eq!(picker.selected_layout(), &LayoutEnum::TILE);
+        picker.select(LayoutEnum::SCROLLING.cycle_index());
+        assert!(
+            picker
+                .selected_caption()
+                .contains("estimate; scroll for more")
+        );
+        picker.select(LayoutEnum::DECK.cycle_index());
+        assert!(picker.selected_caption().contains("Overlapping stack"));
+        picker.update_context(context(100_000, 1280, 720));
+        assert!(picker.context_title().contains("100000 tiled (64 sampled)"));
+        picker.update_context(context(0, 1280, 720));
+        assert!(picker.selected_caption().contains("No tiled windows"));
+    }
 
     #[test]
     fn layout_picker_accepts_the_complete_ipc_delta_range() {
