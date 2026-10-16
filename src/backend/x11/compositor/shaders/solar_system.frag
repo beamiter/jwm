@@ -65,7 +65,9 @@ vec3 shade(vec2 pixel, out bool needs_aa){
  float pixels=max(min(resolution.x,resolution.y),1.);
  vec2 uv=(pixel-.5*resolution)/pixels;
  vec3 forward=normalize(-camera_eye),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);
- vec3 ray=normalize(forward*1.5+right*uv.x+up*uv.y);
+ // A slightly wider lens keeps the full system in square/portrait outputs.
+ float focal=resolution.x>=resolution.y*1.25?1.5:1.2*max(1.,resolution.x/max(resolution.y,1.));
+ vec3 ray=normalize(forward*focal+right*uv.x+up*uv.y);
  vec3 color=stars(ray);
  float nearest=1e5;int body=-1;
  for(int i=0;i<9;i++){
