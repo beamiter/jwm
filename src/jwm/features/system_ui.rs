@@ -219,6 +219,8 @@ pub enum SystemUiState {
         /// No complete catalog exists yet and the first background scan is in
         /// flight. A stale refresh never sets this: its old rows stay usable.
         indexing: bool,
+        /// Generational identities for the minimized-only recovery picker.
+        restore_targets: Option<Vec<(u64, crate::core::models::ClientKey)>>,
     },
     Info {
         title: String,
@@ -1107,6 +1109,7 @@ impl Clone for SystemUiState {
                 usage,
                 computed,
                 indexing,
+                restore_targets,
             } => Self::Launcher {
                 query: query.clone(),
                 entries: Arc::clone(entries),
@@ -1116,6 +1119,7 @@ impl Clone for SystemUiState {
                 usage: usage.clone(),
                 computed: computed.clone(),
                 indexing: *indexing,
+                restore_targets: restore_targets.clone(),
             },
             Self::Info {
                 title,
@@ -1365,11 +1369,62 @@ impl SystemUiState {
             usage,
             computed: None,
             indexing,
+            restore_targets: None,
         };
         // An empty query is not "no ranking": it is the moment the ranking
         // matters most, because the top row is one keystroke from launching.
         state.refresh_matches();
         state
+    }
+
+    /// Reuse window search without allowing calculator, commands or app rows.
+    pub fn open_restore_preview(
+        windows: Vec<crate::jwm::features::launcher::WindowEntry>,
+        targets: Vec<(u64, crate::core::models::ClientKey)>,
+    ) -> Self {
+        let mut state = Self::Launcher {
+            query: String::new(),
+            entries: Arc::from([]),
+            windows: windows
+                .into_iter()
+                .filter(|window| window.minimized)
+                .collect(),
+            matches: Vec::new(),
+            selected: 0,
+            usage: Default::default(),
+            computed: None,
+            indexing: false,
+            restore_targets: Some(targets),
+        };
+        state.refresh_matches();
+        state
+    }
+
+    pub fn is_restore_preview(&self) -> bool {
+        matches!(
+            self,
+            Self::Launcher {
+                restore_targets: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// `Some(None)` rejects a stale or absent selection, never falls back.
+    pub fn restore_preview_target(&self) -> Option<Option<crate::core::models::ClientKey>> {
+        let Self::Launcher {
+            restore_targets: Some(targets),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(self.selected_window().and_then(|id| {
+            targets
+                .iter()
+                .find(|(window, _)| *window == id)
+                .map(|(_, key)| *key)
+        }))
     }
 
     /// Replace the catalog used by an open launcher and re-run its current
@@ -1380,6 +1435,9 @@ impl SystemUiState {
     /// TTL refresh cannot make Enter target a different row under the user's
     /// fingers.
     pub fn set_launcher_entries(&mut self, new_entries: Arc<[LaunchEntry]>) -> bool {
+        if self.is_restore_preview() {
+            return false;
+        }
         enum Selection {
             Application(String),
             Window(u64),
@@ -4263,6 +4321,7 @@ impl SystemUiState {
                 selected,
                 computed,
                 indexing,
+                restore_targets,
                 ..
             } => {
                 if let Some(result) = computed {
@@ -4287,7 +4346,9 @@ impl SystemUiState {
                 // keeps a `None` — the text row is exactly what it was.
                 let mut row_icons: Vec<Option<String>> = Vec::new();
                 let items: Vec<String> = if matches.is_empty() {
-                    vec![if windows_only {
+                    vec![if restore_targets.is_some() {
+                        "  No matching minimized windows".into()
+                    } else if windows_only {
                         "  No matching windows".into()
                     } else if *indexing {
                         "  Indexing applications…".into()
@@ -4333,7 +4394,9 @@ impl SystemUiState {
                     total: matches.len(),
                 });
                 OverlayParts {
-                    title: if windows_only {
+                    title: if restore_targets.is_some() {
+                        "\u{f2d0}  RESTORE MINIMIZED WINDOW".into()
+                    } else if windows_only {
                         "\u{f2d0}  WINDOWS".into()
                     } else {
                         "\u{f135}  APPLICATIONS".into()
@@ -4344,9 +4407,12 @@ impl SystemUiState {
                     icons,
                     // `/` lists open windows; it cannot be arithmetic, so the
                     // two modes never compete for the same query.
-                    hint:
+                    hint: if restore_targets.is_some() {
+                        "Click/Enter  restore    ↑/↓  select    Esc  cancel".into()
+                    } else {
                         "Click/Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
-                            .into(),
+                            .into()
+                    },
                     scroll,
                 }
             }
@@ -4717,12 +4783,17 @@ impl SystemUiState {
                 selected,
                 usage,
                 computed,
+                restore_targets,
                 ..
             } => {
                 use crate::jwm::features::launcher;
 
                 *selected = 0;
-                let mode = launcher::parse_query(query);
+                let mode = if restore_targets.is_some() {
+                    launcher::QueryMode::Windows(query.trim().to_lowercase())
+                } else {
+                    launcher::parse_query(query)
+                };
                 // Arithmetic replaces the list rather than sharing it. A
                 // query with an operator in it is a question, not a search,
                 // and one Enter with one meaning beats two rows competing for
@@ -8050,6 +8121,7 @@ mod tests {
             usage: crate::jwm::features::launcher::UsageStore::default(),
             computed: None,
             indexing: false,
+            restore_targets: None,
         };
         state.refresh_matches();
 
@@ -8112,6 +8184,7 @@ mod tests {
             usage: crate::jwm::features::launcher::UsageStore::parse(usage),
             computed: None,
             indexing: false,
+            restore_targets: None,
         };
         state.refresh_matches();
         state
@@ -8304,6 +8377,7 @@ mod tests {
             usage: crate::jwm::features::launcher::UsageStore::default(),
             computed: None,
             indexing: false,
+            restore_targets: None,
         };
         state.refresh_matches();
 
@@ -8708,6 +8782,47 @@ mod tests {
             on_selected_monitor: true,
             minimized: false,
         }
+    }
+
+    #[test]
+    fn restore_preview_filters_visible_windows_and_keeps_selection_identity() {
+        let mut keys = slotmap::SlotMap::<crate::core::models::ClientKey, ()>::with_key();
+        let first = keys.insert(());
+        let second = keys.insert(());
+        let visible = test_window("visible", "app");
+        let mut hidden = test_window("hidden", "app");
+        hidden.minimized = true;
+        hidden.id = 43;
+        let mut another = hidden.clone();
+        another.id = 44;
+        let mut state = SystemUiState::open_restore_preview(
+            vec![visible, hidden, another],
+            vec![(43, first), (44, second)],
+        );
+        assert_eq!(state.overlay_parts().items.len(), 2);
+        assert_eq!(state.restore_preview_target(), Some(Some(first)));
+        state.move_selection(1);
+        assert_eq!(state.restore_preview_target(), Some(Some(second)));
+        assert_eq!(state.clone().restore_preview_target(), Some(Some(second)));
+        assert!(!state.set_launcher_entries(Arc::from([])));
+        assert!(state.selected_launch().is_none());
+        state.cancel();
+        assert!(!state.is_active());
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn restore_preview_empty_and_typed_commands_remain_window_only() {
+        let mut state = SystemUiState::open_restore_preview(Vec::new(), Vec::new());
+        assert!(state.overlay_parts().title.contains("RESTORE"));
+        assert!(state.overlay_parts().items[0].contains("minimized windows"));
+        assert!(state.overlay_parts().selected.is_none());
+        assert_eq!(state.restore_preview_target(), Some(None));
+        for ch in "1+1".chars() {
+            state.push_char(ch);
+        }
+        assert!(state.computed_result().is_none());
+        assert!(state.selected_launch().is_none());
     }
 
     #[test]

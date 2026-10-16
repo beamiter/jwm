@@ -264,6 +264,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "reload_wm",
         "restart",
         "restore",
+        "restore_preview",
         "restore_session",
         "save",
         "save_session",
@@ -1512,6 +1513,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?))
         }
         "app_launcher" | "launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
+        "restore_preview" => Ok((Jwm::restore_preview as WMFuncType, WMArgEnum::Int(0))),
         "control_center" | "hub" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
         "notification_center" | "notif_center" => {
             Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0)))

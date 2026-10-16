@@ -231,6 +231,9 @@ fn direct_command_from_launcher(
         return None;
     };
 
+    if state.is_restore_preview() {
+        return None;
+    }
     parse_direct_launcher_command(query, |program| {
         launcher_program_available(program, entries)
     })
@@ -1874,6 +1877,20 @@ impl Jwm {
             return Ok(true);
         }
         if let Some(window) = self.features.system_ui.selected_window() {
+            // A recycled native window ID must never restore another client.
+            // Also reject a client restored elsewhere while this snapshot was open.
+            if let Some(target) = self.features.system_ui.restore_preview_target() {
+                let valid = target.is_some_and(|key| {
+                    self.state
+                        .clients
+                        .get(key)
+                        .is_some_and(|client| client.win.raw() == window && client.state.is_hidden)
+                });
+                if !valid {
+                    self.close_system_ui(backend);
+                    return Ok(true);
+                }
+            }
             self.close_system_ui(backend);
             if let Err(error) = self.reveal_and_focus(
                 backend,
@@ -5377,6 +5394,83 @@ mod tests {
             usage: Default::default(),
             computed: None,
             indexing: false,
+            restore_targets: None,
+        }
+    }
+
+    #[test]
+    fn restore_preview_never_executes_typed_commands() {
+        let mut state =
+            crate::jwm::features::SystemUiState::open_restore_preview(Vec::new(), Vec::new());
+        for ch in "> sh -c true".chars() {
+            state.push_char(ch);
+        }
+        assert!(direct_command_from_launcher(&state).is_none());
+    }
+
+    #[test]
+    fn restore_preview_restores_only_the_selected_window() {
+        let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
+        let monitor = jwm.state.monitor_order[0];
+        let mut targets = Vec::new();
+        for raw in [0x997, 0x998] {
+            let win = WindowId::from_raw(raw);
+            let mut client = crate::core::models::WMClient::new(win);
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            client.state.is_hidden = true;
+            client.geometry.w = 400;
+            client.geometry.h = 300;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            targets.push((raw, key));
+        }
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::open_restore_preview(
+            jwm.launcher_window_snapshot(),
+            targets.clone(),
+        );
+        let chosen = jwm.features.system_ui.selected_window().unwrap();
+        assert!(jwm.activate_launcher_selection(&mut backend).unwrap());
+        for (raw, key) in targets {
+            assert_eq!(jwm.state.clients[key].state.is_hidden, raw != chosen);
+        }
+    }
+
+    #[test]
+    fn restore_preview_rejects_removed_or_already_restored_clients() {
+        for removed in [false, true] {
+            let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
+            let win = WindowId::from_raw(0x991);
+            let mut client = crate::core::models::WMClient::new(win);
+            client.state.is_hidden = true;
+            let key = jwm.insert_client(client);
+            let entry = crate::jwm::features::launcher::WindowEntry {
+                id: win.raw(),
+                title: "old".into(),
+                class: "app".into(),
+                instance: "app".into(),
+                tag: Some(0),
+                monitor: 0,
+                visible: false,
+                on_selected_monitor: true,
+                minimized: true,
+            };
+            jwm.features.system_ui = crate::jwm::features::SystemUiState::open_restore_preview(
+                vec![entry],
+                vec![(win.raw(), key)],
+            );
+            if removed {
+                jwm.state.clients.remove(key);
+                let replacement = crate::core::models::WMClient::new(win);
+                let replacement_key = jwm.insert_client(replacement);
+                assert_ne!(key, replacement_key);
+            } else {
+                jwm.state.clients[key].state.is_hidden = false;
+            }
+            let monitor = jwm.state.sel_mon;
+            assert!(jwm.activate_launcher_selection(&mut backend).unwrap());
+            assert_eq!(jwm.state.sel_mon, monitor);
+            assert!(!jwm.features.system_ui.is_active());
         }
     }
 

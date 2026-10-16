@@ -2842,6 +2842,31 @@ impl Jwm {
         Ok(())
     }
 
+    /// Present minimized windows without changing focus, tags or visibility.
+    /// Repeated invocations refresh the snapshot instead of toggling it away.
+    pub(crate) fn restore_preview(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.prepare_system_ui(backend, "restore preview", SystemUiPointerGrab::Buttons)?;
+        let windows: Vec<_> = self
+            .launcher_window_snapshot()
+            .into_iter()
+            .filter(|window| window.minimized)
+            .collect();
+        let targets = windows
+            .iter()
+            .filter_map(|window| {
+                self.wintoclient(crate::backend::common_define::WindowId::from_raw(window.id))
+                    .map(|key| (window.id, key))
+            })
+            .collect();
+        self.features.system_ui = SystemUiState::open_restore_preview(windows, targets);
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
     pub(crate) fn monitor_layout(
         &mut self,
         backend: &mut dyn Backend,
@@ -7403,6 +7428,27 @@ pub(crate) mod keyboard_grab_tests {
         let key = jwm.insert_client(client);
         jwm.attach_to_monitor(key, monitor);
         key
+    }
+
+    #[test]
+    fn restore_preview_reopens_without_restoring_and_cancel_preserves_windows() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let hidden = overview_window(&mut jwm, 0x995);
+        let visible = overview_window(&mut jwm, 0x996);
+        jwm.state.clients[hidden].state.is_hidden = true;
+        let monitor = jwm.state.sel_mon;
+        for _ in 0..2 {
+            jwm.restore_preview(&mut backend, &WMArgEnum::Int(0))
+                .unwrap();
+            assert_eq!(jwm.features.system_ui.selected_window(), Some(0x995));
+            assert!(jwm.state.clients[hidden].state.is_hidden);
+            assert!(!jwm.state.clients[visible].state.is_hidden);
+            assert_eq!(jwm.state.sel_mon, monitor);
+        }
+        jwm.close_system_ui(&mut backend);
+        assert!(jwm.state.clients[hidden].state.is_hidden);
+        assert!(!jwm.state.clients[visible].state.is_hidden);
     }
 
     /// Runs the real modal entry and drag cancellation with inert grab state.
