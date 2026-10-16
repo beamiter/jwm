@@ -43,6 +43,45 @@ It is not current weather, a single observation, or a climatological average.
 - Reuse guidance: https://science.nasa.gov/earth/faq/ (reuse including commercial
   use is permitted except where copyright is indicated; none indicated here).
 
+## Milky Way background
+
+Credit: NASA/Goddard Space Flight Center Scientific Visualization Studio.
+Gaia DR2: ESA/Gaia/DPAC. Visualization by Ernie Wright (USRA).
+
+This is NASA SVS's catalogue-derived faint-star map in galactic coordinates,
+not a photograph, live sky, nebula gas simulation, or view from the user's location.
+It omits the bright Hipparcos/Tycho foreground. Its stellar-density structure
+reveals the Milky Way and dark dust lanes. JWM uses a fixed, rotated decorative
+crop and reduced display brightness; it is not an astronomical orientation tool.
+No constellation overlays, logos, third-party photographs, or AI-generated pixels
+are included. No procedural stars are added when this texture is available.
+
+- Source: https://svs.gsfc.nasa.gov/4851/
+- Original: https://svs.gsfc.nasa.gov/vis/a000000/a004800/a004851/milkyway_2020_4k_gal.exr
+- Source SHA256: fad63b36aa632c691d521cd9d8b828de9d29b4c2784276eec44e54c6cb159a49
+- File: milkyway-nasa-gaia.jpg (2048 × 1024, 567,194 bytes)
+- File SHA256: 0c9247995a0f31eebe8ba49e3994d3fcc468c4cd4bf9a1555445141d81c8078e
+- Derivation: decode the 4096 × 2048 linear EXR using FFmpeg 7.1.5 to planar
+  float RGB, downsample each linear channel using Lanczos, clamp to [0,1],
+  apply the standard piecewise sRGB transfer, round to 8-bit, and encode JPEG
+  at quality 91, 4:4:4. Reproduction tool: scripts/prepare-astronomy-sky.py.
+  Source EXR is not bundled. JPEG decoding uses ordinary UNORM sampling;
+  the shader does not apply a second gamma transfer to the sky.
+- SVS usage: https://svs.gsfc.nasa.gov/help/ identifies its content as public
+  domain unless otherwise noted. The source item lists no copyright exception.
+- Gaia data credit guidance:
+  https://gea.esac.esa.int/archive/documentation/GDR2/Miscellaneous/sec_credit_and_citation_instructions/
+  Gaia data are open and free to use with credit to ESA/Gaia/DPAC. This source
+  credit is retained here alongside the NASA SVS credit; it is not a claim that
+  all ESA imagery is public domain.
+- Gaia acknowledgement: This work has made use of data from the European Space
+  Agency (ESA) mission Gaia, processed by the Gaia Data Processing and Analysis
+  Consortium (DPAC). Funding for the DPAC has been provided by national
+  institutions, in particular the institutions participating in the Gaia
+  Multilateral Agreement.
+- If this optional asset is missing or cannot be decoded, JWM retains its
+  original stationary procedural background instead of blocking the wallpaper.
+
 ## Usage and installation
 
 - NASA images and media usage guidance: https://www.nasa.gov/nasa-brand-center/images-and-media/

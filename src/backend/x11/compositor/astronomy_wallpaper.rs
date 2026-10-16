@@ -3,8 +3,8 @@ use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
     celestial_assignments, celestial_longitude, material_load_frame, presentation_offset,
-    resolve_cloud_texture, resolve_earth_texture, resolve_moon_texture, solar_direction,
-    viewing_longitude, wall_clock_seconds,
+    resolve_cloud_texture, resolve_earth_texture, resolve_moon_texture, resolve_sky_texture,
+    solar_direction, viewing_longitude, wall_clock_seconds,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -22,6 +22,8 @@ struct AstronomyProgram {
     moon_material: Option<glow::UniformLocation>,
     cloud_map: Option<glow::UniformLocation>,
     clouds_enabled: Option<glow::UniformLocation>,
+    sky_map: Option<glow::UniformLocation>,
+    sky_enabled: Option<glow::UniformLocation>,
     canvas_origin: Option<glow::UniformLocation>,
     resolution: Option<glow::UniformLocation>,
     sphere_radius: Option<glow::UniformLocation>,
@@ -38,6 +40,8 @@ impl AstronomyProgram {
                 moon_material: gl.get_uniform_location(program, "moon_material"),
                 cloud_map: gl.get_uniform_location(program, "cloud_map"),
                 clouds_enabled: gl.get_uniform_location(program, "clouds_enabled"),
+                sky_map: gl.get_uniform_location(program, "sky_map"),
+                sky_enabled: gl.get_uniform_location(program, "sky_enabled"),
                 canvas_origin: gl.get_uniform_location(program, "canvas_origin"),
                 resolution: gl.get_uniform_location(program, "resolution"),
                 sphere_radius: gl.get_uniform_location(program, "sphere_radius"),
@@ -58,6 +62,8 @@ pub(super) struct AstronomyWallpaper {
     moon_texture: Option<glow::Texture>,
     cloud_pending: Option<wallpaper::DeferredWallpaperLoad>,
     cloud_texture: Option<glow::Texture>,
+    sky_pending: Option<wallpaper::DeferredWallpaperLoad>,
+    sky_texture: Option<glow::Texture>,
     dual_material: bool,
     earth_period: u32,
     moon_period: u32,
@@ -177,15 +183,17 @@ impl AstronomyWallpaper {
     pub(super) fn due(&self) -> bool {
         self.deadline(Instant::now()) == Some(Duration::ZERO)
     }
-    fn take_failed_material(&mut self) -> [Option<glow::Texture>; 3] {
+    fn take_failed_material(&mut self) -> [Option<glow::Texture>; 4] {
         self.pending = None;
         self.moon_pending = None;
         self.cloud_pending = None;
+        self.sky_pending = None;
         self.failed = true;
         [
             self.texture.take(),
             self.moon_texture.take(),
             self.cloud_texture.take(),
+            self.sky_texture.take(),
         ]
     }
 
@@ -199,6 +207,10 @@ impl AstronomyWallpaper {
     }
 
     pub(super) unsafe fn cleanup(&mut self, gl: &glow::Context) {
+        self.pending = None;
+        self.moon_pending = None;
+        self.cloud_pending = None;
+        self.sky_pending = None;
         unsafe {
             for tex in self
                 .retired
@@ -206,6 +218,7 @@ impl AstronomyWallpaper {
                 .chain(self.texture.take())
                 .chain(self.moon_texture.take())
                 .chain(self.cloud_texture.take())
+                .chain(self.sky_texture.take())
             {
                 gl.delete_texture(tex);
             }
@@ -217,6 +230,45 @@ impl AstronomyWallpaper {
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    fn load_astronomy_sky_async(path: String) -> wallpaper::DeferredWallpaperLoad {
+        wallpaper::DeferredWallpaperLoad::new(move |cancelled| {
+            use std::sync::atomic::Ordering;
+            let img =
+                match crate::backend::compositor_common::image_source::open_regular_image_bounded(
+                    &path,
+                    4096,
+                    2048,
+                    16 * 1024 * 1024,
+                ) {
+                    Ok(img) => img,
+                    Err(error) => {
+                        log::warn!(
+                            "astronomy wallpaper: optional sky unavailable; using procedural sky: {error}"
+                        );
+                        return None;
+                    }
+                };
+            if cancelled.load(Ordering::Acquire) || img.width() != img.height().saturating_mul(2) {
+                return None;
+            }
+            let img = if img.width() > 2048 || img.height() > 1024 {
+                img.resize(2048, 1024, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+            if cancelled.load(Ordering::Acquire) {
+                return None;
+            }
+            let rgba = img.to_rgba8();
+            Some(WallpaperImageData {
+                width: rgba.width(),
+                height: rgba.height(),
+                rgba: rgba.into_raw(),
+                mode: WallpaperMode::Stretch,
+            })
+        })
+    }
+
     pub(crate) fn set_astronomy_output_identities(
         &mut self,
         outputs: &[crate::backend::api::OutputInfo],
@@ -294,6 +346,8 @@ impl<C: CompositorConnection> Compositor<C> {
             a.retired.extend(a.moon_texture.take());
             a.cloud_pending = None;
             a.retired.extend(a.cloud_texture.take());
+            a.sky_pending = None;
+            a.retired.extend(a.sky_texture.take());
             a.path = if enabled {
                 resolve_earth_texture(configured).unwrap_or_default()
             } else {
@@ -327,6 +381,12 @@ impl<C: CompositorConnection> Compositor<C> {
                         1024,
                         WallpaperMode::Stretch,
                     ));
+                }
+            }
+            // Resolve/decode once per material change; never perform file I/O per frame.
+            if enabled {
+                if let Some(path) = resolve_sky_texture() {
+                    a.sky_pending = Some(Self::load_astronomy_sky_async(path));
                 }
             }
             if enabled && dual {
@@ -385,19 +445,29 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.delete_texture(tex);
             }
         }
-        if !a.enabled || a.failed || !a.powered {
+        if a.failed {
+            unsafe {
+                a.fail_material(&self.gl);
+            }
+            return;
+        }
+        if !a.enabled || !a.powered {
             return;
         }
         // First adoption changes the entire material, so wait for a frame
         // whose prepare step already requested full repair/blur invalidation.
         // Unrelated client damage between animation ticks must stay static.
-        let (may_draw, poll_cloud) = material_load_frame(
+        let (may_draw, poll_optional) = material_load_frame(
             a.pending.is_some() || a.moon_pending.is_some(),
-            a.cloud_pending.is_some(),
+            a.cloud_pending.is_some() || a.sky_pending.is_some(),
             a.frame_changed,
         );
         if !may_draw {
             return;
+        }
+        // Upload helpers bind the active unit; compositor convention is unit zero.
+        unsafe {
+            self.gl.active_texture(glow::TEXTURE0);
         }
         if let Some(load) = a.pending.as_ref() {
             match load.try_recv() {
@@ -479,7 +549,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
             }
         }
-        if let Some(load) = a.cloud_pending.as_ref().filter(|_| poll_cloud) {
+        if let Some(load) = a.cloud_pending.as_ref().filter(|_| poll_optional) {
             match load.try_recv() {
                 Ok(data) => {
                     a.cloud_pending = None;
@@ -501,6 +571,32 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     a.cloud_pending = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(load) = a.sky_pending.as_ref().filter(|_| poll_optional) {
+            match load.try_recv() {
+                Ok(data) => {
+                    a.sky_pending = None;
+                    if data.width == data.height.saturating_mul(2) {
+                        a.sky_texture =
+                            Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                        if a.sky_texture.is_some() {
+                            unsafe {
+                                self.gl.bind_texture(glow::TEXTURE_2D, a.sky_texture);
+                                self.gl.tex_parameter_i32(
+                                    glow::TEXTURE_2D,
+                                    glow::TEXTURE_WRAP_S,
+                                    glow::REPEAT as i32,
+                                );
+                            }
+                        }
+                    }
+                    // Optional sky may fail without disabling either required surface.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    a.sky_pending = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -546,6 +642,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 program.clouds_enabled.as_ref(),
                 i32::from(a.cloud_texture.is_some()),
             );
+            gl.uniform_1_i32(program.sky_map.as_ref(), 2);
+            gl.uniform_1_i32(
+                program.sky_enabled.as_ref(),
+                i32::from(a.sky_texture.is_some()),
+            );
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, a.sky_texture);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, a.cloud_texture);
             gl.active_texture(glow::TEXTURE0);
@@ -603,6 +706,8 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 gl.disable(glow::SCISSOR_TEST);
             }
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
@@ -705,23 +810,30 @@ mod tests {
         let earth = glow::NativeTexture(std::num::NonZeroU32::new(1).unwrap());
         let moon = glow::NativeTexture(std::num::NonZeroU32::new(2).unwrap());
         let cloud = glow::NativeTexture(std::num::NonZeroU32::new(3).unwrap());
-        for (e, m, c) in [
-            (Some(earth), None, None),
-            (None, Some(moon), None),
-            (Some(earth), Some(moon), Some(cloud)),
+        let sky = glow::NativeTexture(std::num::NonZeroU32::new(4).unwrap());
+        for (e, m, c, s) in [
+            (Some(earth), None, None, Some(sky)),
+            (None, Some(moon), None, None),
+            (Some(earth), Some(moon), Some(cloud), Some(sky)),
         ] {
             let mut a = AstronomyWallpaper {
                 enabled: true,
                 texture: e,
                 moon_texture: m,
                 cloud_texture: c,
+                sky_texture: s,
                 ..Default::default()
             };
-            assert_eq!(a.take_failed_material(), [e, m, c]);
-            assert_eq!(a.take_failed_material(), [None, None, None]);
+            assert_eq!(a.take_failed_material(), [e, m, c, s]);
+            assert_eq!(a.take_failed_material(), [None, None, None, None]);
             assert!(a.failed);
             assert_eq!(a.deadline(Instant::now()), None);
-            assert!(a.pending.is_none() && a.moon_pending.is_none() && a.cloud_pending.is_none());
+            assert!(
+                a.pending.is_none()
+                    && a.moon_pending.is_none()
+                    && a.cloud_pending.is_none()
+                    && a.sky_pending.is_none()
+            );
         }
     }
 

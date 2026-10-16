@@ -230,7 +230,7 @@ pub(super) struct DeferredWallpaperLoad {
 }
 
 impl DeferredWallpaperLoad {
-    fn new(
+    pub(super) fn new(
         decode: impl FnOnce(&AtomicBool) -> Option<WallpaperImageData> + Send + 'static,
     ) -> Self {
         Self {

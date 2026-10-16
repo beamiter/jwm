@@ -9,6 +9,8 @@ uniform sampler2D earth_map;
 uniform bool moon_material;
 uniform sampler2D cloud_map;
 uniform bool clouds_enabled;
+uniform sampler2D sky_map;
+uniform bool sky_enabled;
 out vec4 frag_color;
 const float PI = 3.141592653589793;
 // Original, stationary decorative sky, not an observed star catalogue.
@@ -40,7 +42,7 @@ vec3 star_layer(vec2 pixel, float spacing, float seed, float brightness) {
     float visible = step(mix(0.82, 0.32, density), h);
     return tint * (core+glow) * brightness * visible * (0.35+0.65*h*h);
 }
-vec3 galaxy_background(vec2 pixel) {
+vec3 procedural_background(vec2 pixel) {
     vec2 uv = (pixel-resolution*0.5)/max(resolution.y,1.0);
     // Diagonal milky band with a soft dust lane, scaled by screen height.
     float along = dot(uv,vec2(0.94,0.342));
@@ -61,6 +63,20 @@ vec3 galaxy_background(vec2 pixel) {
     sky += star_layer(pixel,137.0,91.0,0.90);
     return sky;
 }
+
+vec3 galaxy_background(vec2 pixel) {
+    if (!sky_enabled) return procedural_background(pixel);
+    // NASA SVS/Gaia catalogue-derived diffuse sky, fixed decorative framing.
+    // This crop is not the observer's location, current sky or a telescope view.
+    vec2 uv = (pixel-resolution*0.5)/max(resolution.y,1.0);
+    vec2 g = vec2(dot(uv,vec2(0.94,0.342)),dot(uv,vec2(-0.342,0.94))-0.08);
+    vec2 sky_uv = vec2(0.57+g.x*0.22,0.5-g.y*0.44);
+    // Bundled JPEG already contains the linear-to-sRGB transfer. It is sampled
+    // as UNORM, like our body maps, then attenuated in display space deliberately
+    // to keep the catalogue-derived detail quiet behind the Earth and Moon.
+    return texture(sky_map,sky_uv).rgb*0.34;
+}
+
 void main() {
     vec2 pixel = gl_FragCoord.xy - canvas_origin;
     vec2 p = (pixel - resolution * 0.5) / max(sphere_radius, 1.0);

@@ -96,13 +96,27 @@ for es in (False,True):
   texture=Image.open(asset).convert('RGBA');data=C.create_string_buffer(texture.tobytes())
   gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
   textures[body]=tex.value
- # Match production texture units: surface map=0, static NASA cloud map=1.
+ # Match production texture units: surface=0, NASA clouds=1, optional sky=2.
  gl('glActiveTexture',None,[U])(0x84C1)
  cloud_tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(cloud_tex));gl('glBindTexture',None,[U,U])(0x0DE1,cloud_tex)
  for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
  clouds=Image.open(Path(os.environ.get('ASTRONOMY_TEST_CLOUD_TEXTURE',str(REPO/'assets/astronomy/earth-nasa-clouds.jpg')))).convert('RGBA');cloud_data=C.create_string_buffer(clouds.tobytes())
  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,clouds.width,clouds.height,0,0x1908,0x1401,cloud_data)
  unif1i(loc(prog,b'cloud_map'),1);unif1i(loc(prog,b'clouds_enabled'),1)
+ sky_path=Path(os.environ.get('ASTRONOMY_TEST_SKY_TEXTURE',str(REPO/'assets/astronomy/milkyway-nasa-gaia.jpg')))
+ sky_available=sky_path.is_file()
+ sky_tex=U()
+ gl('glActiveTexture',None,[U])(0x84C2)
+ if sky_available:
+  sky_texture=Image.open(sky_path).convert('RGBA')
+  assert sky_texture.width<=2048 and sky_texture.height<=1024, 'review texture must match production upload cap without a different resizer'
+  gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(sky_tex));gl('glBindTexture',None,[U,U])(0x0DE1,sky_tex)
+  for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
+  sky_data=C.create_string_buffer(sky_texture.tobytes())
+  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,sky_texture.width,sky_texture.height,0,0x1908,0x1401,sky_data)
+ else:
+  gl('glBindTexture',None,[U,U])(0x0DE1,0)
+ unif1i(loc(prog,b'sky_map'),2);unif1i(loc(prog,b'sky_enabled'),int(sky_available))
  gl('glActiveTexture',None,[U])(0x84C0)
  gl('glBindTexture',None,[U,U])(0x0DE1,textures['earth'])
  unif1i(loc(prog,b'earth_map'),0)
@@ -136,6 +150,7 @@ for es in (False,True):
    gl('glUniform3f',None,[I,F,F,F])(loc(hard_program,b'sun_direction'),*values[:3]);unif1f(loc(hard_program,b'view_longitude'),values[3])
    unif1i(loc(hard_program,b'earth_map'),0)
    unif1i(loc(hard_program,b'cloud_map'),1);unif1i(loc(hard_program,b'clouds_enabled'),1)
+   unif1i(loc(hard_program,b'sky_map'),2);unif1i(loc(hard_program,b'sky_enabled'),int(sky_available))
    gl('glDrawArrays',None,[U,I,I])(4,0,3)
    hard_pixels=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,hard_pixels)
    assert gl('glGetError',U,[])()==0
@@ -154,9 +169,18 @@ for es in (False,True):
    gl('glDeleteProgram',None,[U])(hard_program);gl('glDeleteShader',None,[U])(hard_fragment)
 
  # Fixed sky must never blink with clock/timezone updates. Corners are outside Earth.
- reference=images[0].crop((0,0,W//8,H//8)).convert('RGB')
- assert all(ImageChops.difference(reference,im.crop((0,0,W//8,H//8)).convert('RGB')).getbbox() is None for im in images)
- assert max(reference.convert('RGB').getextrema()[0]) > 40, 'missing stars'
+ sky_boxes=[(0,0,W//8,H//8),(W-W//8,0,W,H//8),
+            (0,H-H//8,W//8,H),(W-W//8,H-H//8,W,H)]
+ sky_references=[images[0].crop(box).convert('RGB') for box in sky_boxes]
+ for box,reference in zip(sky_boxes,sky_references):
+  assert all(ImageChops.difference(reference,im.crop(box).convert('RGB')).getbbox() is None for im in images), 'sky corner changes with time'
+ # A random star field need not put a bright star in one predetermined corner.
+ if sky_available:
+  # Gaia texture is diffuse catalogue light, not procedural point stars.
+  assert max(max(channel[1] for channel in im.getextrema()) for im in sky_references)>10, 'blank sky texture'
+  assert max(max(hi-lo for lo,hi in im.getextrema()) for im in sky_references)>5, 'sky texture lacks spatial detail'
+ else:
+  assert max(max(channel[1] for channel in im.getextrema()) for im in sky_references)>40, 'missing stars across all four sky corners'
  assert len({m['sha256'] for m in metrics})==len(cases)
  sheet=Image.new('RGB',(W*4,(H+28)*2),(16,19,25)); draw=ImageDraw.Draw(sheet)
  for i,im in enumerate(images[:8]):
@@ -190,11 +214,15 @@ for es in (False,True):
  enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
  scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
  clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
- def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=20,moon_minutes=30,offset_seconds=0):
+ def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=20,moon_minutes=30,offset_seconds=0,sky_enabled=None):
   target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
   assert current(d,target,target,ctx)
   gl('glViewport',None,[I,I,I,I])(0,0,width,height)
   unif1i(loc(prog,b'clouds_enabled'),int(clouds_enabled))
+  use_sky=sky_available if sky_enabled is None else sky_enabled and sky_available
+  gl('glActiveTexture',None,[U])(0x84C2);gl('glBindTexture',None,[U,U])(0x0DE1,sky_tex.value if use_sky else 0)
+  gl('glActiveTexture',None,[U])(0x84C0)
+  unif1i(loc(prog,b'sky_map'),2);unif1i(loc(prog,b'sky_enabled'),int(use_sky))
   disable(0x0C11);clear_color(7/255,11/255,19/255,1);clear(0x4000)
   plan=layout_plan(width,height,outputs,repair=repair)
   for draw_plan in plan:
@@ -295,6 +323,7 @@ for es in (False,True):
  # layout_image releases the EGL context after readback; make current before uniforms.
  assert current(d,surf,surf,ctx);gl('glUseProgram',None,[U])(prog)
  sky,_=layout_image(5120,1440,dual_outputs)
+ sky.save(ROOT/f'{kind}-galaxy-only.png')
  prog=production_program
  assert current(d,surf,surf,ctx);gl('glUseProgram',None,[U])(prog)
  moon=dual_reference.crop((2560,0,5120,1440)).convert('RGB');sky=sky.crop((2560,0,5120,1440)).convert('RGB')
@@ -329,9 +358,24 @@ for es in (False,True):
  assert ImageChops.difference(full.crop((320,0,640,240)).convert('RGB'),cloudless.crop((320,0,640,240)).convert('RGB')).getbbox() is None, 'Earth clouds affect Moon'
  assert ImageChops.difference(full.crop((0,0,320,240)).convert('RGB'),cloudless.crop((0,0,320,240)).convert('RGB')).getbbox() is not None, 'Cloud texture has no visible Earth effect'
  assert ImageChops.difference(full.crop((0,0,40,30)).convert('RGB'),cloudless.crop((0,0,40,30)).convert('RGB')).getbbox() is None, 'Cloud texture affects galaxy'
+ # Missing optional sky texture must safely use the stationary fallback.
+ fallback,_=layout_image(640,240,small_outputs,materials=materials,sky_enabled=False)
+ filename=f'{kind}-missing-sky-fallback.png';fallback.save(ROOT/filename);dual_metrics.append({'file':filename,'sky_enabled':False})
+ for center in (160,480):
+  body_box=(center-50,70,center+50,170)
+  difference=ImageChops.difference(full.crop(body_box).convert('RGB'),fallback.crop(body_box).convert('RGB'))
+  assert max(v[1] for v in difference.getextrema())<=1, 'sky toggle changed body interior'
+ if sky_available:
+  assert ImageChops.difference(full.crop((0,0,40,30)).convert('RGB'),fallback.crop((0,0,40,30)).convert('RGB')).getbbox() is not None, 'sky texture has no visible effect'
+ fallback_later,_=layout_image(640,240,small_outputs,materials=materials,sky_enabled=False,instant=BASE+180)
+ assert ImageChops.difference(fallback.crop((0,0,40,30)).convert('RGB'),fallback_later.crop((0,0,40,30)).convert('RGB')).getbbox() is None, 'fallback sky moved'
+ fallback_partial,_=layout_image(640,240,small_outputs,repair,materials=materials,sky_enabled=False)
+ expected=Image.new('RGBA',(640,240),(7,11,19,255));expected.paste(fallback.crop(box),box)
+ assert ImageChops.difference(expected.convert('RGB'),fallback_partial.convert('RGB')).getbbox() is None, 'fallback damage differs'
  reordered,_=layout_image(640,240,list(reversed(small_outputs)),materials=materials)
  assert ImageChops.difference(full.convert('RGB'),reordered.convert('RGB')).getbbox() is None, 'connector enumeration changed materials'
  results[kind]['dual_materials']={'frames':dual_metrics,'halo_pixels_equal_sky':halo_checked,'moon_surface_pixels':surface_checked,'moon_max_blue_minus_red':max_blue_excess,'mixed_material_repair':'PASS','reordered_outputs':'PASS','stationary_sky_both_materials':True,'clouds_earth_only':'PASS'}
+ results[kind]['optional_sky']={'texture_loaded':sky_available,'texture_sha256':hashlib.sha256(sky_path.read_bytes()).hexdigest() if sky_available else None,'missing_fallback':'PASS','stationary_fallback':'PASS','fallback_damage':'PASS'}
  results[kind]['layouts']=layout_metrics
  results[kind]['layout_pixel_assertions']='PASS: dual centers, portrait radius, gaps, negative clipping, repairs, mirror dedup, stable overlaps, outside-root'
  current(d,None,None,None)
