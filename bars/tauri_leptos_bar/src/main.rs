@@ -251,12 +251,12 @@ const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
 
 fn button_class(tag: &TagState) -> &'static str {
-    if tag.filled {
+    if tag.urgent {
+        "emoji-button state-urgent"
+    } else if tag.filled {
         "emoji-button state-filtered"
     } else if tag.selected {
         "emoji-button state-selected"
-    } else if tag.urgent {
-        "emoji-button state-urgent"
     } else if tag.occupied {
         "emoji-button state-occupied"
     } else {

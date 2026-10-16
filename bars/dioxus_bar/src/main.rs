@@ -87,6 +87,9 @@ struct RuntimeOwner {
 impl RuntimeOwner {
     fn new(shared_path: String) -> Self {
         let config = ModelConfig {
+            initial_theme: xbar_core::config::BarConfig::load_default()
+                .unwrap_or_default()
+                .theme,
             show_seconds: true,
             ..ModelConfig::default()
         };
@@ -310,12 +313,14 @@ fn css_rgba(color: Rgba) -> String {
 /// their own contrast and are left alone.
 ///
 /// Injected after the stylesheet, so equal specificity is enough to win; the
-/// per-tag rules are `!important` at three class selectors deep, so the two
-/// overrides that fight them match that weight exactly.
+/// per-tag rules use higher-specificity shared colors to override legacy
+/// per-index and interaction colors without changing other controls.
 fn mode_style(
     config: &xbar_core::config::BarConfig,
     translucent: bool,
     blur_status_bar: Option<bool>,
+    wallpaper_luminance: Option<u8>,
+    tag_theme: xbar_core::ThemeMode,
 ) -> String {
     let [r, g, b] = fallback_rgb(config.theme);
     let palette = Palette::for_theme(config.theme);
@@ -334,7 +339,7 @@ fn mode_style(
         xbar_core::ThemeMode::Light => "rgba(255,255,255,0.95)",
     };
 
-    format!(
+    let mut css = format!(
         ".button-row {{ background: {background}; }}
 body {{ color: {text}; }}
 .emoji-button.state-default {{ background: {idle}; border-color: {hovered}; color: {muted}; text-shadow: -1px 0 {outline}, 1px 0 {outline}, 0 -1px {outline}, 0 1px {outline}; }}
@@ -342,7 +347,28 @@ body {{ color: {text}; }}
 .emoji-button.state-default.pressed, .emoji-button.state-default:active {{ background: {hovered} !important; border-color: {hovered} !important; }}
 .button-row .emoji-button.state-occupied {{ color: {text} !important; }}
 .button-row .emoji-button.state-occupied::after {{ color: {muted}; }}"
-    )
+    );
+    let tags = xbar_core::tag_contrast::TagPalette::for_wallpaper(
+        tag_theme,
+        wallpaper_luminance,
+        config.presentation.tag_contrast,
+    );
+    for (class, colors) in [
+        ("default", tags.empty),
+        ("occupied", tags.occupied),
+        ("selected", tags.selected),
+        ("filtered", tags.selected),
+        ("urgent", tags.urgent),
+    ] {
+        let fill = css_rgba(colors.fill);
+        let foreground = css_rgba(colors.foreground);
+        let border = css_rgba(colors.stroke.map_or(colors.fill, |s| s.color));
+        let width = colors.stroke.map_or(0.0, |s| s.width);
+        css.push_str(&format!(
+            "\n:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.state-{class} {{ background: {fill} !important; color: {foreground} !important; border: {width}px solid {border} !important; text-shadow: none !important; opacity: 1 !important; box-shadow: none !important; }}"));
+    }
+    css.push_str(":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::before { display: none !important; }");
+    css
 }
 
 fn apply_monitor_geometry(geometry: MonitorGeometry, window: &DesktopContext) {
@@ -669,12 +695,12 @@ enum ButtonState {
 
 impl ButtonState {
     fn from_flags(is_filtered: bool, is_selected: bool, is_urg: bool, is_occ: bool) -> Self {
-        if is_filtered {
+        if is_urg {
+            ButtonState::Urgent
+        } else if is_filtered {
             ButtonState::Filtered
         } else if is_selected {
             ButtonState::Selected
-        } else if is_urg {
-            ButtonState::Urgent
         } else if is_occ {
             ButtonState::Occupied
         } else {
@@ -797,6 +823,14 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn urgent_wins_over_filled_and_selected() {
+        assert_eq!(
+            super::ButtonState::from_flags(true, true, true, true).to_css_class(),
+            "emoji-button state-urgent"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1051,6 +1085,8 @@ fn App() -> Element {
         &background_config,
         translucent(),
         bar_snapshot.read().blur_status_bar,
+        bar_snapshot.read().wallpaper_luminance,
+        bar_snapshot.read().theme,
     );
     rsx! {
         document::Style { "{STYLE_CSS}" }

@@ -182,6 +182,8 @@ struct BridgeInner {
     config: BridgeConfig,
     process_actions: Mutex<ProcessActionHandler>,
     glass: Mutex<GlassBackdrop>,
+    tag_contrast: xbar_core::tag_contrast::TagContrastMode,
+    tag_palette: Mutex<Option<xbar_core::tag_contrast::TagPalette>>,
 }
 
 /// The frosted backdrop, which a webview can only receive as an image file.
@@ -265,7 +267,7 @@ fn request_worker_stop<R: Runtime>(manager: &impl Manager<R>) {
 
 fn setup<R: Runtime>(
     app: &AppHandle<R>,
-    config: BridgeConfig,
+    mut config: BridgeConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if app.try_state::<BridgeState>().is_some() || app.try_state::<WorkerGuard>().is_some() {
         return Err("xbar Tauri bridge is already configured".into());
@@ -281,6 +283,8 @@ fn setup<R: Runtime>(
     let scale_factor = window.scale_factor()?;
     apply_window_baseline(&window, baseline, scale_factor)?;
 
+    let bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
+    config.model.initial_theme = bar_config.theme;
     let runtime = if config.shared_path.is_empty() {
         xbar_core::BarRuntime::new(config.model.clone())?
     } else {
@@ -295,6 +299,8 @@ fn setup<R: Runtime>(
         baseline,
         process_actions: Mutex::new(ProcessActionHandler::new(config.process_actions.clone())),
         glass: Mutex::new(glass_backdrop()),
+        tag_contrast: bar_config.presentation.tag_contrast,
+        tag_palette: Mutex::new(None),
         config,
     });
     let guard = spawn_worker(app.clone(), Arc::clone(&inner))?;
@@ -425,6 +431,7 @@ fn frontend_ready<R: Runtime>(
         .lock()
         .map_err(|error| format!("xbar frontend session lock poisoned: {error}"))?;
     if let Some(envelope) = session.replay() {
+        refresh_tag_palette(&app, &state.inner, &envelope.snapshot, true)?;
         return app
             .emit(&state.inner.config.state_event, envelope)
             .map_err(|error| format!("failed to replay xbar state: {error}"));
@@ -444,6 +451,9 @@ fn deliver_output<R: Runtime>(
     fail_on_issue: bool,
 ) -> Result<(), String> {
     let mut failures = Vec::new();
+    if let Err(error) = refresh_tag_palette(app, inner, &output.frame.snapshot, false) {
+        failures.push(error);
+    }
     for issue in &output.frame.update.issues {
         log::warn!("{issue}");
         if fail_on_issue {
@@ -626,6 +636,65 @@ fn refresh_glass<R: Runtime>(
     Ok(())
 }
 
+// The bridge serializes shared Rust colors, never a second contrast formula in JS.
+// A dedicated stylesheet leaves the backdrop and non-tag pills untouched.
+fn tag_palette_css(palette: xbar_core::tag_contrast::TagPalette) -> String {
+    let rgba = |c: xbar_core::presentation::Rgba| {
+        format!(
+            "rgba({}, {}, {}, {})",
+            (c.red * 255.0).round(),
+            (c.green * 255.0).round(),
+            (c.blue * 255.0).round(),
+            c.alpha
+        )
+    };
+    let mut css = String::new();
+    for (class, colors) in [
+        ("default", palette.empty),
+        ("occupied", palette.occupied),
+        ("selected", palette.selected),
+        ("filtered", palette.selected),
+        ("urgent", palette.urgent),
+    ] {
+        let fill = rgba(colors.fill);
+        let foreground = rgba(colors.foreground);
+        let border = rgba(colors.stroke.map_or(colors.fill, |s| s.color));
+        let width = colors.stroke.map_or(0.0, |s| s.width);
+        // :is gives these rules ID specificity over legacy nth-child/hover rules,
+        // while still matching every frontend's existing root class.
+        css.push_str(&format!(
+            ":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.state-{class} {{ background: {fill} !important; color: {foreground} !important; border: {width}px solid {border} !important; text-shadow: none !important; opacity: 1 !important; box-shadow: none !important; }}\n"));
+    }
+    css.push_str(":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::before { display: none !important; }");
+    css
+}
+
+fn refresh_tag_palette<R: Runtime>(
+    app: &AppHandle<R>,
+    inner: &BridgeInner,
+    snapshot: &xbar_core::BarSnapshot,
+    force: bool,
+) -> Result<(), String> {
+    let palette = xbar_core::tag_contrast::TagPalette::for_wallpaper(
+        snapshot.theme,
+        snapshot.wallpaper_luminance,
+        inner.tag_contrast,
+    );
+    let mut previous = inner
+        .tag_palette
+        .lock()
+        .map_err(|error| format!("tag palette lock poisoned: {error}"))?;
+    if !force && *previous == Some(palette) {
+        return Ok(());
+    }
+    let css = json_string(&tag_palette_css(palette));
+    main_window(app, &inner.config.window_label)?.eval(format!(
+        "(function(){{var e=document.getElementById('xbar-tag-contrast');if(!e){{e=document.createElement('style');e.id='xbar-tag-contrast';document.head.appendChild(e);}}e.textContent={css};}})()"
+    )).map_err(|error| format!("failed to install tag contrast: {error}"))?;
+    *previous = Some(palette);
+    Ok(())
+}
+
 fn solid_background_css([red, green, blue]: [u8; 3], opacity: f64) -> String {
     format!(
         "{DEFAULT_GLASS_SELECTOR} {{ background-color: rgba({red}, {green}, {blue}, {opacity}); background-image: none; }}"
@@ -635,6 +704,32 @@ fn solid_background_css([red, green, blue]: [u8; 3], opacity: f64) -> String {
 #[cfg(test)]
 mod background_tests {
     use super::*;
+
+    #[test]
+    fn tag_css_is_scoped_and_uses_the_shared_palette_for_all_states() {
+        use xbar_core::{
+            ThemeMode,
+            tag_contrast::{TagContrastMode, TagPalette},
+        };
+        let dark = TagPalette::for_wallpaper(ThemeMode::Dark, Some(0), TagContrastMode::Auto);
+        let light = TagPalette::for_wallpaper(ThemeMode::Dark, Some(255), TagContrastMode::Auto);
+        let css = tag_palette_css(dark);
+        for state in ["default", "occupied", "selected", "filtered", "urgent"] {
+            assert!(css.contains(&format!(".buttons-container .emoji-button.state-{state}")));
+        }
+        assert!(css.contains("opacity: 1 !important"));
+        assert!(css.contains("rgba(28, 28, 28, 0.94)"));
+        assert!(!css.contains("background-image"));
+        assert_ne!(css, tag_palette_css(light));
+        assert_eq!(
+            tag_palette_css(TagPalette::for_wallpaper(
+                ThemeMode::Dark,
+                Some(255),
+                TagContrastMode::Dark
+            )),
+            css
+        );
+    }
 
     #[test]
     fn opaque_fallback_clears_any_previous_image_without_fading_content() {

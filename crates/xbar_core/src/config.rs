@@ -251,6 +251,7 @@ struct FilePresentation {
     dock_separator_width: Option<f32>,
     left_fraction: Option<f32>,
     tag_labels: Option<Vec<String>>,
+    tag_contrast: Option<crate::tag_contrast::TagContrastMode>,
     icon_font: Option<String>,
     shell_routes: Option<Vec<String>>,
     #[serde(default)]
@@ -389,6 +390,9 @@ impl BarConfig {
         }
 
         let presentation = &mut config.presentation;
+        if let Some(mode) = file.presentation.tag_contrast {
+            presentation.tag_contrast = mode;
+        }
         apply_positive(
             "presentation.bar_height",
             file.presentation.bar_height,
@@ -818,6 +822,28 @@ tag_labels = ["a", "b", "c"]
             config.presentation.shell_routes,
             vec![crate::model::ShellRoute::Hub]
         );
+    }
+
+    #[test]
+    fn tag_contrast_defaults_and_overrides_are_backward_compatible() {
+        use crate::tag_contrast::TagContrastMode;
+        assert_eq!(
+            BarConfig::from_toml("").unwrap().presentation.tag_contrast,
+            TagContrastMode::Auto
+        );
+        for (key, mode) in [
+            ("auto", TagContrastMode::Auto),
+            ("theme", TagContrastMode::Theme),
+            ("dark", TagContrastMode::Dark),
+            ("light", TagContrastMode::Light),
+        ] {
+            let config =
+                BarConfig::from_toml(&format!("[presentation]\ntag_contrast = \"{key}\"")).unwrap();
+            assert_eq!(config.presentation.tag_contrast, mode);
+        }
+        assert!(BarConfig::from_toml("[presentation]\ntag_contrast = \"invalid\"").is_err());
+        let legacy: PresentationConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.tag_contrast, TagContrastMode::Auto);
     }
 
     #[test]

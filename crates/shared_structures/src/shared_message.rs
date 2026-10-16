@@ -297,6 +297,9 @@ pub struct SharedMessage {
     /// predating this field; consumers use their clear-background default.
     #[cfg_attr(feature = "serde", serde(default))]
     pub blur_status_bar: Option<bool>,
+    /// Wallpaper-only bar-region linear luminance (0 = black, 255 = white).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub wallpaper_luminance: Option<u8>,
 }
 
 /// `Default` 是廉价、可复现的零值（`timestamp == 0`），不含时钟副作用；
@@ -307,6 +310,7 @@ impl Default for SharedMessage {
         Self {
             timestamp: 0,
             blur_status_bar: None,
+            wallpaper_luminance: None,
             wm_session_id: 0,
             minimized_generation: 0,
             monitor_info: MonitorInfo::default(),

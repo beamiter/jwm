@@ -4,6 +4,7 @@
 pub(crate) mod animated_wallpaper;
 pub mod annotation_overlay;
 pub(crate) mod attention;
+pub(crate) mod bar_wallpaper;
 pub mod benchmark;
 pub(crate) mod border_style;
 pub mod capture;

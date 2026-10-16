@@ -2274,6 +2274,7 @@ impl<C: CompositorConnection> Compositor<C> {
             osd_boundary,
             pixmap_refresh,
             self.astronomy_wallpaper.deadline(now),
+            crate::backend::compositor_common::bar_wallpaper::next_wakeup(),
         ]
         .into_iter()
         .flatten()

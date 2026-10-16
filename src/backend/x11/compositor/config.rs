@@ -97,6 +97,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn needs_render(&self) -> bool {
         if self.needs_render
+            || crate::backend::compositor_common::bar_wallpaper::needs_frame()
             || self.damage_render_pending
             // Only when a capture is actually due. Reporting the whole
             // recording as "needs render" pinned both X11 loops to a 1 ms

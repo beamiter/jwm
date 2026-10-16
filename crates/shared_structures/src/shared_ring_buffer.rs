@@ -100,6 +100,7 @@ pub(crate) struct WireMessage {
     client_app_id: [u8; crate::MAX_APP_ID_LEN],
     ltsymbol: [u8; crate::MAX_LT_SYMBOL_LEN],
     // Byte 0: optional bar material (0 = absent, 1 = clear, 2 = frosted).
+    // Byte 1: wallpaper metric version (1 = linear luminance), byte 2: value.
     // Reusing reserved space keeps the v14 wire layout compatible.
     _reserved: [u8; 3],
     layout_count: u32,
@@ -241,8 +242,8 @@ impl From<&SharedMessage> for WireMessage {
                     Some(false) => 1,
                     Some(true) => 2,
                 },
-                0,
-                0,
+                u8::from(message.wallpaper_luminance.is_some()),
+                message.wallpaper_luminance.unwrap_or(0),
             ],
             layout_count: message.monitor_info.layout_count,
             layout_id: message.monitor_info.layout_id,
@@ -297,6 +298,7 @@ impl From<WireMessage> for SharedMessage {
                 2 => Some(true),
                 _ => None,
             },
+            wallpaper_luminance: (message._reserved[1] == 1).then_some(message._reserved[2]),
             wm_session_id: message.wm_session_id,
             minimized_generation: message.minimized_generation,
             monitor_info,
@@ -745,6 +747,33 @@ mod tests {
         assert_eq!(std::mem::offset_of!(WireCommand, anchor_w), 48);
         assert_eq!(std::mem::offset_of!(WireCommand, anchor_h), 52);
         assert_eq!(std::mem::offset_of!(WireCommand, timestamp), 56);
+    }
+
+    #[test]
+    fn wallpaper_metric_is_versioned_and_preserves_wire_layout() {
+        for value in 0..=u8::MAX {
+            let original = SharedMessage {
+                wallpaper_luminance: Some(value),
+                blur_status_bar: Some(false),
+                ..SharedMessage::default()
+            };
+            let wire = WireMessage::from(&original);
+            assert_eq!(wire._reserved, [1, 1, value]);
+            assert_eq!(SharedMessage::from(wire), original);
+        }
+        for version in 0..=u8::MAX {
+            if version == 1 {
+                continue;
+            }
+            let mut wire = WireMessage::from(&SharedMessage::default());
+            wire._reserved = [2, version, 255];
+            let decoded = SharedMessage::from(wire);
+            assert_eq!(decoded.wallpaper_luminance, None);
+            assert_eq!(decoded.blur_status_bar, Some(true));
+            assert_eq!(WireMessage::from(&decoded)._reserved, [2, 0, 0]);
+        }
+        assert_eq!(std::mem::offset_of!(WireMessage, _reserved), 277);
+        assert_eq!(std::mem::offset_of!(WireMessage, layout_count), 280);
     }
 
     #[test]

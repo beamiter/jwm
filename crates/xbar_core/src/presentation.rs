@@ -17,6 +17,7 @@ use crate::display::{BatteryThresholds, IconSet, UsageThresholds, VolumeThreshol
 use crate::model::{
     BarView, LayoutId, MAX_MODEL_TAGS, Percent, ShellRoute, TagId, UserAction, WindowToken,
 };
+use crate::tag_contrast::{TagContrastMode, TagPalette};
 
 /// A point in logical (DPI-independent) coordinates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -883,6 +884,8 @@ pub struct PresentationConfig {
     /// Labels are looked up only for the model-bounded visible tag indices;
     /// unused entries and source-vector spare capacity are never projected.
     pub tag_labels: Vec<String>,
+    /// Tag-only contrast policy; does not alter the bar background.
+    pub tag_contrast: TagContrastMode,
     /// Ordered layout catalog. Projection inspects at most
     /// [`crate::MAX_PROJECTED_CONFIG_ITEMS`] entries and keeps the first entry
     /// for each repeated layout identifier.
@@ -931,6 +934,7 @@ impl Default for PresentationConfig {
             dock_influence_radius: 52.0,
             dock_separator_width: 1.0,
             left_fraction: 0.42,
+            tag_contrast: TagContrastMode::default(),
             tag_labels: ["🖥", "🌐", "📁", "💬", "📝", "🎵", "⚙", "📊", "🏠"]
                 .into_iter()
                 .map(str::to_owned)
@@ -1194,6 +1198,8 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         let bar_height = finite_non_negative(self.config.bar_height).min(viewport.height);
         let bar = Rect::new(0.0, 0.0, viewport.width, bar_height);
         let palette = Palette::for_theme(theme);
+        let tag_palette =
+            TagPalette::for_wallpaper(theme, view.wallpaper_luminance, self.config.tag_contrast);
         let mut scene = Scene {
             viewport,
             clip,
@@ -1258,7 +1264,15 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             let Some(bounds) = candidate.intersection(bar) else {
                 break;
             };
-            self.push_pill(&mut scene, bounds, spec, interaction, palette, Some(bar));
+            self.push_pill(
+                &mut scene,
+                bounds,
+                spec,
+                interaction,
+                palette,
+                Some(bar),
+                None,
+            );
             right_cursor = (bounds.x - gap).max(content_left);
         }
 
@@ -1295,6 +1309,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 interaction,
                 palette,
                 Some(bar),
+                Some(tag_palette),
             );
             left_cursor = bounds.right() + gap;
         }
@@ -1310,6 +1325,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 interaction,
                 palette,
                 Some(bar),
+                None,
             );
             left_cursor = bounds.right() + gap;
         }
@@ -1327,6 +1343,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 interaction,
                 palette,
                 Some(bar),
+                None,
             );
             left_cursor = bounds.right() + gap;
         }
@@ -1694,6 +1711,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         interaction: &InteractionState,
         palette: Palette,
         clip: Option<Rect>,
+        tag_palette: Option<TagPalette>,
     ) {
         let bounds = clip
             .and_then(|clip| bounds.intersection(clip))
@@ -1702,7 +1720,10 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             return;
         }
         spec.state.hovered |= interaction.hovered == Some(spec.id);
-        let fill = if spec.state.urgent {
+        let tag_colors = tag_palette.map(|palette| palette.colors(spec.state));
+        let fill = if let Some(colors) = tag_colors {
+            colors.fill
+        } else if spec.state.urgent {
             palette.urgent
         } else if spec.state.selected {
             palette.selected
@@ -1713,9 +1734,11 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         } else {
             palette.pill
         };
-        // macOS keeps unselected items flat: occupancy shows as a translucent
-        // fill only, and a stroke is reserved for the urgent state.
-        let stroke = if spec.state.urgent {
+        // Tags use their explicit contrast boundary. Other controls retain
+        // the existing material with a stroke reserved for urgency.
+        let stroke = if let Some(colors) = tag_colors {
+            colors.stroke
+        } else if spec.state.urgent {
             Some(Stroke {
                 color: palette.urgent_stroke,
                 width: 1.0,
@@ -1740,7 +1763,9 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 bounds: text_bounds,
                 text,
                 size: self.font_size(),
-                color: if spec.state.selected {
+                color: if let Some(colors) = tag_colors {
+                    colors.foreground
+                } else if spec.state.selected {
                     palette.selected_text
                 } else {
                     palette.text
@@ -1868,7 +1893,8 @@ impl From<ControlSpec> for PillSpec {
             scroll_down: bindings.scroll_down,
             state: VisualState {
                 hovered: control.state.hovered,
-                selected: control.state.selected,
+                selected: control.state.selected
+                    || (matches!(control.id, NodeId::Tag(_)) && control.state.filled),
                 urgent: control.state.urgent,
                 occupied: control.state.occupied || control.state.filled,
             },
@@ -2140,6 +2166,7 @@ mod tests {
             wm_sequence: Some(1),
             wm_session_id: 7,
             blur_status_bar: None,
+            wallpaper_luminance: None,
             tags,
             active_tag: tags
                 .iter()
@@ -2441,7 +2468,7 @@ mod tests {
     }
 
     #[test]
-    fn occupied_tags_have_an_accent_stroke_unless_selected() {
+    fn tag_states_use_shared_contrast_palette() {
         let mut tags = vec![TagState::default(); 3];
         tags[1].occupied = true;
         tags[2].occupied = true;
@@ -2451,7 +2478,7 @@ mod tests {
             Size::new(1600.0, 38.0),
             &InteractionState::default(),
         );
-        let palette = Palette::for_theme(ThemeMode::Dark);
+        let palette = TagPalette::for_wallpaper(ThemeMode::Dark, None, TagContrastMode::Auto);
 
         let tag_rect = |index| {
             scene
@@ -2463,9 +2490,104 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(tag_rect(0), (palette.pill, None));
-        assert_eq!(tag_rect(1), (palette.occupied, None));
-        assert_eq!(tag_rect(2), (palette.selected, None));
+        assert_eq!(tag_rect(0), (palette.empty.fill, palette.empty.stroke));
+        assert_eq!(
+            tag_rect(1),
+            (palette.occupied.fill, palette.occupied.stroke)
+        );
+        assert_eq!(
+            tag_rect(2),
+            (palette.selected.fill, palette.selected.stroke)
+        );
+    }
+
+    #[test]
+    fn wallpaper_adaptation_changes_only_tag_paint_and_preserves_layout() {
+        let tags = vec![TagState::default(); 3];
+        let mut dark = view(&tags, "client");
+        dark.wallpaper_luminance = Some(0);
+        let mut bright = dark;
+        bright.wallpaper_luminance = Some(255);
+        let a = engine().build(dark, Size::new(1600.0, 38.0), &InteractionState::default());
+        let b = engine().build(
+            bright,
+            Size::new(1600.0, 38.0),
+            &InteractionState::default(),
+        );
+        assert_eq!(a.hits, b.hits);
+        assert_ne!(a.nodes, b.nodes);
+        let non_tags = |scene: &Scene| {
+            scene
+                .nodes
+                .iter()
+                .filter(|node| !matches!(node.id(), NodeId::Tag(_)))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            non_tags(&a),
+            non_tags(&b),
+            "including the bar background and every non-tag control"
+        );
+    }
+
+    #[test]
+    fn filled_only_tag_uses_selected_palette() {
+        let tags = vec![TagState {
+            filled: true,
+            ..TagState::default()
+        }];
+        let sample = view(&tags, "client");
+        let scene = engine().build(
+            sample,
+            Size::new(1600.0, 38.0),
+            &InteractionState::default(),
+        );
+        let expected = TagPalette::for_wallpaper(
+            sample.theme,
+            sample.wallpaper_luminance,
+            TagContrastMode::Auto,
+        )
+        .selected;
+        assert!(scene.nodes_for(NodeId::Tag(TagId::new(0).unwrap())).any(|node| matches!(node, SceneNode::RoundedRect { fill, state, .. } if *fill == expected.fill && state.selected)));
+    }
+
+    #[test]
+    fn urgent_selected_tags_share_the_actual_fill_foreground_pair() {
+        let tags = vec![TagState {
+            urgent: true,
+            selected: true,
+            occupied: true,
+            ..TagState::default()
+        }];
+        let mut interaction = InteractionState::default();
+        interaction.hovered = Some(NodeId::Tag(TagId::new(0).unwrap()));
+        let mut sample = view(&tags, "client");
+        sample.wallpaper_luminance = Some(255);
+        let scene = engine().build(sample, Size::new(1600.0, 38.0), &interaction);
+        let colors = TagPalette::for_wallpaper(
+            sample.theme,
+            sample.wallpaper_luminance,
+            TagContrastMode::Auto,
+        )
+        .urgent;
+        let mut found_fill = false;
+        let mut found_text = false;
+        for node in scene.nodes_for(NodeId::Tag(TagId::new(0).unwrap())) {
+            match node {
+                SceneNode::RoundedRect { fill, stroke, .. } => {
+                    assert_eq!(*fill, colors.fill);
+                    assert_eq!(*stroke, colors.stroke);
+                    found_fill = true;
+                }
+                SceneNode::Text { color, .. } => {
+                    assert_eq!(*color, colors.foreground);
+                    found_text = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(found_fill && found_text);
     }
 
     #[test]

@@ -239,7 +239,11 @@ impl Pill {
             self.label.set_size_request(self.text_width(&text), -1);
         }
 
-        set_class(&self.button, "selected", spec.state.selected);
+        set_class(
+            &self.button,
+            "selected",
+            spec.state.selected || (matches!(spec.id, NodeId::Tag(_)) && spec.state.filled),
+        );
         set_class(&self.button, "urgent", spec.state.urgent);
         // `LayoutEngine` folds both transport signals into one visual state.
         set_class(

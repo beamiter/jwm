@@ -87,6 +87,28 @@ pub(super) struct AstronomyWallpaper {
 }
 
 impl AstronomyWallpaper {
+    /// Material identity for cached wallpaper-only bar measurements. Animation
+    /// time is deliberately excluded; samples piggyback on animation frames.
+    pub(super) fn bar_metric_source(&self) -> (u64, bool) {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.enabled,
+            self.failed,
+            self.powered,
+            self.texture,
+            self.moon_texture,
+            self.cloud_texture,
+            self.sky_texture,
+            &self.layout,
+            &self.layout_outputs,
+            &self.body_overrides,
+            &self.output_identities,
+        )
+            .hash(&mut hash);
+        (hash.finish(), self.enabled && self.powered && !self.failed)
+    }
+
     /// Rebuild only on material layout/topology changes, never on ordinary damage.
     fn update_layout(
         &mut self,

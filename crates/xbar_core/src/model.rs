@@ -365,6 +365,9 @@ pub struct WmSnapshot {
     /// JWM bar material preference; absent from older producers means clear.
     #[serde(default)]
     pub blur_status_bar: Option<bool>,
+    /// Cached wallpaper-only bar-region linear luminance.
+    #[serde(default)]
+    pub wallpaper_luminance: Option<u8>,
     pub monitor: MonitorId,
     pub geometry: Option<MonitorGeometry>,
     pub layout_symbol: String,
@@ -1256,6 +1259,8 @@ pub struct BarView<'a> {
     pub wm_session_id: u64,
     /// JWM bar material preference; absent from older producers means clear.
     pub blur_status_bar: Option<bool>,
+    /// Cached wallpaper-only bar-region linear luminance.
+    pub wallpaper_luminance: Option<u8>,
     pub tags: &'a [TagState],
     pub active_tag: Option<TagId>,
     pub monitor: MonitorId,
@@ -1300,6 +1305,9 @@ pub struct BarSnapshot {
     /// JWM bar material preference; absent from older producers means clear.
     #[serde(default)]
     pub blur_status_bar: Option<bool>,
+    /// Cached wallpaper-only bar-region linear luminance.
+    #[serde(default)]
+    pub wallpaper_luminance: Option<u8>,
     pub tags: Vec<TagState>,
     pub active_tag: Option<TagId>,
     pub monitor: MonitorId,
@@ -1340,6 +1348,7 @@ impl BarSnapshot {
             wm_sequence: self.wm_sequence,
             wm_session_id: self.wm_session_id,
             blur_status_bar: self.blur_status_bar,
+            wallpaper_luminance: self.wallpaper_luminance,
             tags: &self.tags,
             active_tag: self.active_tag,
             monitor: self.monitor,
@@ -1425,6 +1434,7 @@ pub struct BarModel {
     wm_sequence: Option<u64>,
     wm_session_id: u64,
     blur_status_bar: Option<bool>,
+    wallpaper_luminance: Option<u8>,
     tags: Vec<TagState>,
     active_tag: Option<TagId>,
     monitor: MonitorId,
@@ -1469,6 +1479,7 @@ impl BarModel {
             wm_sequence: None,
             wm_session_id: 0,
             blur_status_bar: None,
+            wallpaper_luminance: None,
             tags: vec![TagState::default(); config.tag_count],
             active_tag: None,
             monitor: MonitorId::default(),
@@ -1509,6 +1520,7 @@ impl BarModel {
             wm_sequence: self.wm_sequence,
             wm_session_id: self.wm_session_id,
             blur_status_bar: self.blur_status_bar,
+            wallpaper_luminance: self.wallpaper_luminance,
             tags: &self.tags,
             active_tag: self.active_tag,
             monitor: self.monitor,
@@ -1548,6 +1560,7 @@ impl BarModel {
             wm_sequence: view.wm_sequence,
             wm_session_id: view.wm_session_id,
             blur_status_bar: view.blur_status_bar,
+            wallpaper_luminance: view.wallpaper_luminance,
             tags: view.tags.to_vec(),
             active_tag: view.active_tag,
             monitor: view.monitor,
@@ -1647,7 +1660,9 @@ impl BarModel {
         {
             dirty.set(DirtyBits::MINIMIZED_CHANGED);
         }
-        if self.blur_status_bar != snapshot.blur_status_bar {
+        if self.blur_status_bar != snapshot.blur_status_bar
+            || self.wallpaper_luminance != snapshot.wallpaper_luminance
+        {
             dirty.set(DirtyBits::THEME_CHANGED);
         }
         let geometry_changed = self.geometry != snapshot.geometry;
@@ -1659,6 +1674,7 @@ impl BarModel {
         self.wm_sequence = snapshot.sequence;
         self.wm_session_id = snapshot.wm_session_id;
         self.blur_status_bar = snapshot.blur_status_bar;
+        self.wallpaper_luminance = snapshot.wallpaper_luminance;
         self.tags = snapshot.tags;
         self.active_tag = next_active;
         self.monitor = snapshot.monitor;
@@ -1708,12 +1724,14 @@ impl BarModel {
             || !self.minimized_windows.is_empty()
             || self.minimized_overflow;
 
-        let background_changed = self.blur_status_bar.is_some();
+        let background_changed =
+            self.blur_status_bar.is_some() || self.wallpaper_luminance.is_some();
 
         self.wm_available = false;
         self.wm_sequence = None;
         self.wm_session_id = 0;
         self.blur_status_bar = None;
+        self.wallpaper_luminance = None;
         self.tags.fill(TagState::default());
         self.active_tag = None;
         self.monitor = MonitorId::default();
@@ -2082,6 +2100,27 @@ mod tests {
 
     fn percent(value: u8) -> Percent {
         Percent::from_whole(value).unwrap()
+    }
+
+    #[test]
+    fn wallpaper_metric_repaints_without_geometry_or_tag_changes() {
+        let mut model = BarModel::default();
+        let first = WmSnapshot {
+            wallpaper_luminance: Some(0),
+            ..WmSnapshot::default()
+        };
+        model.update_wm(first.clone());
+        assert_eq!(model.view().wallpaper_luminance, Some(0));
+        let same = model.update_wm(first);
+        assert!(!same.dirty.contains(DirtyBits::THEME_CHANGED));
+        let changed = model.update_wm(WmSnapshot {
+            wallpaper_luminance: Some(255),
+            ..WmSnapshot::default()
+        });
+        assert!(changed.dirty.contains(DirtyBits::THEME_CHANGED));
+        assert_eq!(model.snapshot().wallpaper_luminance, Some(255));
+        model.clear_wm();
+        assert_eq!(model.view().wallpaper_luminance, None);
     }
 
     #[test]

@@ -2,6 +2,8 @@ use iced::futures::{SinkExt, Stream};
 use iced::mouse;
 use iced::time;
 use iced::widget::container;
+use xbar_core::presentation::VisualState;
+use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // Current iced widgets use explicit boxing at heterogeneous Element boundaries.
 use iced::widget::{Space, Widget as _, button, rich_text, tooltip};
 use iced::widget::{mouse_area, span};
@@ -334,8 +336,8 @@ enum Message {
 
 struct IcedBar {
     tabs: [&'static str; 9],
-    tab_colors: [Color; 9],
     runtime: BarRuntime,
+    tag_contrast: TagContrastMode,
     schedule: RuntimeSchedule,
     process_actions: ProcessActionHandler,
     current_window_id: Option<Id>,
@@ -358,7 +360,6 @@ impl Default for IcedBar {
 }
 
 impl IcedBar {
-    const DEFAULT_COLOR: Color = color!(0x666666);
     const TAB_WIDTH: f32 = 38.0;
     const TAB_HEIGHT: f32 = 32.0;
     const TAB_SPACING: f32 = 8.0;
@@ -368,7 +369,12 @@ impl IcedBar {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
+        let bar_config = BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            BarConfig::default()
+        });
         let config = ModelConfig {
+            initial_theme: bar_config.theme,
             show_seconds: true,
             ..ModelConfig::default()
         };
@@ -385,10 +391,6 @@ impl IcedBar {
         // both modes; only the alpha differs. Translucent windows wash it to
         // the configured opacity so the compositor's blur shows through, solid
         // windows paint it fully opaque and ignore `background_opacity`.
-        let bar_config = BarConfig::load_default().unwrap_or_else(|error| {
-            warn!("falling back to the default bar config: {error}");
-            BarConfig::default()
-        });
         let translucent = TRANSLUCENT.get().copied().unwrap_or(false);
         let [r, g, b] = fallback_rgb(bar_config.theme);
         let alpha = xbar_core::background::bar_background_opacity(
@@ -399,18 +401,8 @@ impl IcedBar {
 
         Self {
             tabs: TAG_ICONS,
-            tab_colors: [
-                color!(0xFF6B6B), // red
-                color!(0x4ECDC4), // cyan
-                color!(0x45B7D1), // blue
-                color!(0x96CEB4), // green
-                color!(0xFECA57), // yellow
-                color!(0xFF9FF3), // pink
-                color!(0x54A0FF), // light blue
-                color!(0x5F27CD), // purple
-                color!(0x00D2D3), // teal
-            ],
             runtime,
+            tag_contrast: bar_config.presentation.tag_contrast,
             schedule: RuntimeSchedule::default(),
             process_actions: ProcessActionHandler::default(),
             current_window_id: None,
@@ -703,55 +695,29 @@ impl IcedBar {
     }
 
     // -------- Workspace pills --------
-    fn tag_visuals(&self, index: usize) -> (Color, f32, Color) {
-        let tag_color = self
-            .tab_colors
-            .get(index)
-            .copied()
-            .unwrap_or(Self::DEFAULT_COLOR);
-
+    fn tag_colors(&self, index: usize, hovered: bool) -> TagColors {
         let view = self.runtime.view();
-        if view.wm_available
-            && let Some(status) = view.tags.get(index)
-        {
-            if status.urgent {
-                return (
-                    Color::from_rgba(0.86, 0.21, 0.27, 1.0),
-                    2.0,
-                    Color::from_rgba(0.74, 0.13, 0.19, 1.0),
-                );
-            } else if status.filled {
-                return (tag_color.scale_alpha(1.0), 2.0, tag_color);
-            } else if status.selected {
-                return (tag_color.scale_alpha(0.7), 1.5, tag_color);
-            } else if status.occupied {
-                return (tag_color.scale_alpha(0.3), 1.0, tag_color.scale_alpha(0.6));
-            }
-        }
-
-        // default
-        (Color::WHITE.scale_alpha(0.9), 1.0, color!(0xDEE2E6))
+        let state = view
+            .tags
+            .get(index)
+            .filter(|_| view.wm_available)
+            .map(|tag| VisualState {
+                selected: tag.selected || tag.filled,
+                urgent: tag.urgent,
+                occupied: tag.occupied,
+                hovered,
+            })
+            .unwrap_or_default();
+        TagPalette::for_wallpaper(view.theme, view.wallpaper_luminance, self.tag_contrast)
+            .colors(state)
     }
 
     fn workspace_button<'a>(&self, index: usize, label: &'a str) -> Element<'a, Message> {
-        let (bg, border_w, border_c) = self.tag_visuals(index);
-        let view = self.runtime.view();
-        let is_selected = view.wm_available
-            && view
-                .tags
-                .get(index)
-                .is_some_and(|s| s.filled || s.selected || s.urgent);
-
-        let text_color = if is_selected {
-            // Yellow tag uses dark text for legibility
-            if index == 4 {
-                color!(0x333333)
-            } else {
-                Color::WHITE
-            }
-        } else {
-            color!(0x333333)
-        };
+        let colors = self.tag_colors(index, false);
+        let convert =
+            |c: xbar_core::presentation::Rgba| Color::from_rgba(c.red, c.green, c.blue, c.alpha);
+        let hover_colors = self.tag_colors(index, true);
+        let text_color = convert(colors.foreground);
 
         let radius = 6.0;
         button(
@@ -763,27 +729,15 @@ impl IcedBar {
         .width(Self::TAB_WIDTH)
         .height(Self::TAB_HEIGHT)
         .style(move |_theme: &Theme, status: button::Status| {
-            let mut background = bg;
-            let mut border_width = border_w;
-
-            match status {
-                button::Status::Hovered => {
-                    border_width = (border_w + 1.0).min(3.0);
-                    if background.a > 0.0 {
-                        background.a = (background.a + 0.08).min(1.0);
-                    } else {
-                        background = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
-                    }
-                }
-                button::Status::Pressed => {
-                    if background.a > 0.0 {
-                        background.a = (background.a + 0.12).min(1.0);
-                    } else {
-                        background = Color::from_rgba(0.9, 0.9, 0.9, 0.10);
-                    }
-                }
-                _ => {}
-            }
+            let painted = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                hover_colors
+            } else {
+                colors
+            };
+            let background = convert(painted.fill);
+            let border_c = convert(painted.stroke.map_or(painted.fill, |s| s.color));
+            let border_width = painted.stroke.map_or(0.0, |s| s.width);
+            let text_color = convert(painted.foreground);
 
             button::Style {
                 background: Some(Background::Color(background)),

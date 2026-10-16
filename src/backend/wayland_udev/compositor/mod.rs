@@ -4377,6 +4377,7 @@ impl WaylandCompositor {
     /// Returns true if the compositor has pending work that requires a new frame.
     pub(crate) fn needs_render(&self) -> bool {
         self.needs_render
+            || crate::backend::compositor_common::bar_wallpaper::needs_frame()
             // A recording that is due for its next capture. The udev loop gates
             // `handler.update` — and therefore every render — on this, so a
             // completely static desktop would otherwise produce no frames at all
@@ -4444,10 +4445,16 @@ impl WaylandCompositor {
             .osd_slot
             .next_envelope_change_at(Instant::now())
             .map(|at| at.saturating_duration_since(Instant::now()));
-        [recording, preview_lease, toast_boundary, osd_boundary]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            recording,
+            preview_lease,
+            toast_boundary,
+            osd_boundary,
+            crate::backend::compositor_common::bar_wallpaper::next_wakeup(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Clear the needs_render flag after a frame has been rendered.

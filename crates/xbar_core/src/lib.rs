@@ -279,3 +279,6 @@ mod tests {
         assert_eq!(changes, DirtyBits::all());
     }
 }
+
+/// Wallpaper-aware tag foreground and pill contrast policy.
+pub mod tag_contrast;

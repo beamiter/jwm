@@ -765,6 +765,7 @@ mod tests {
             wm_sequence: Some(7),
             wm_session_id: 11,
             blur_status_bar: None,
+            wallpaper_luminance: None,
             tags: vec![TagState::default()],
             active_tag: None,
             monitor: MonitorId(2),

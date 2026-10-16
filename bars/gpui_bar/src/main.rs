@@ -1,3 +1,5 @@
+use xbar_core::presentation::VisualState;
+use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // gpui_bar — gpui port of iced_bar.
 //
 // Feature parity with iced_bar:
@@ -69,9 +71,6 @@ const ICON_MON: &str = "\u{F0379}";
 const ICON_M0: &str = "\u{F02DA}";
 const ICON_M1: &str = "\u{F02DB}";
 
-const TAG_COLORS: [u32; 9] = [
-    0xFF6B6B, 0x4ECDC4, 0x45B7D1, 0x96CEB4, 0xFECA57, 0xFF9FF3, 0x54A0FF, 0x5F27CD, 0x00D2D3,
-];
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -79,6 +78,7 @@ const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 struct GpuiBar {
     runtime: BarRuntime,
+    tag_contrast: TagContrastMode,
     process_actions: ProcessActionHandler,
     active_geometry: Option<MonitorGeometry>,
     default_size: Option<gpui::Size<Pixels>>,
@@ -123,7 +123,9 @@ impl GpuiBar {
     ) -> Self {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
+        let bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
         let config = ModelConfig {
+            initial_theme: bar_config.theme,
             show_seconds: true,
             clock_minute_format: "%m-%d %H:%M".into(),
             clock_second_format: "%m-%d %H:%M:%S".into(),
@@ -140,6 +142,7 @@ impl GpuiBar {
 
         let mut this = Self {
             runtime,
+            tag_contrast: bar_config.presentation.tag_contrast,
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
             background,
@@ -340,42 +343,41 @@ fn monitor_num_to_icon(n: i32) -> String {
 // -------- Render -------------------------------------------------------------
 
 impl GpuiBar {
+    fn tag_colors(&self, index: usize, hovered: bool) -> TagColors {
+        let view = self.runtime.view();
+        let state = view
+            .tags
+            .get(index)
+            .filter(|_| view.wm_available)
+            .map(|tag| VisualState {
+                selected: tag.selected || tag.filled,
+                urgent: tag.urgent,
+                occupied: tag.occupied,
+                hovered,
+            })
+            .unwrap_or_default();
+        TagPalette::for_wallpaper(view.theme, view.wallpaper_luminance, self.tag_contrast)
+            .colors(state)
+    }
+
     fn render_tag(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let icon = TAG_ICONS[index];
-        let tag_color = TAG_COLORS[index];
-
-        let view = self.runtime.view();
-        let (bg, border_c, is_active) = if view.wm_available
-            && let Some(s) = view.tags.get(index)
-        {
-            if s.urgent {
-                (rgba_alpha(0xDB3645, 1.0), rgba_alpha(0xBC2130, 1.0), true)
-            } else if s.filled {
-                (rgba_alpha(tag_color, 1.0), rgba_alpha(tag_color, 1.0), true)
-            } else if s.selected {
-                (rgba_alpha(tag_color, 0.7), rgba_alpha(tag_color, 1.0), true)
-            } else if s.occupied {
-                (
-                    rgba_alpha(tag_color, 0.3),
-                    rgba_alpha(tag_color, 0.6),
-                    false,
-                )
-            } else {
-                (rgba_alpha(0xFFFFFF, 0.9), rgba_alpha(0xDEE2E6, 1.0), false)
-            }
-        } else {
-            (rgba_alpha(0xFFFFFF, 0.9), rgba_alpha(0xDEE2E6, 1.0), false)
+        let colors = self.tag_colors(index, false);
+        let convert = |c: xbar_core::presentation::Rgba| Rgba {
+            r: c.red,
+            g: c.green,
+            b: c.blue,
+            a: c.alpha,
         };
-
-        let text_color = if is_active {
-            if index == 4 {
-                rgba_alpha(0x333333, 1.0)
-            } else {
-                rgba_alpha(0xFFFFFF, 1.0)
-            }
-        } else {
-            rgba_alpha(0x333333, 1.0)
-        };
+        let hovered = self.tag_colors(index, true);
+        let hover_bg = convert(hovered.fill);
+        let hover_border = convert(hovered.stroke.map_or(hovered.fill, |s| s.color));
+        let hover_width = hovered.stroke.map_or(0.0, |s| s.width);
+        let hover_foreground = convert(hovered.foreground);
+        let border_width = colors.stroke.map_or(0.0, |s| s.width);
+        let bg = convert(colors.fill);
+        let border_c = convert(colors.stroke.map_or(colors.fill, |s| s.color));
+        let text_color = convert(colors.foreground);
 
         div()
             .id(SharedString::from(format!("tag-{}", index)))
@@ -387,11 +389,16 @@ impl GpuiBar {
             .rounded(px(6.))
             .bg(bg)
             .border_color(border_c)
-            .border_2()
+            .border(px(border_width))
             .text_color(text_color)
             .text_size(px(11.))
             .child(icon)
-            .hover(|s| s.opacity(0.85))
+            .hover(move |s| {
+                s.bg(hover_bg)
+                    .border_color(hover_border)
+                    .border(px(hover_width))
+                    .text_color(hover_foreground)
+            })
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 if let Some(tag) = TagId::new(index) {
                     this.dispatch_wm(UserAction::ViewTag(tag));

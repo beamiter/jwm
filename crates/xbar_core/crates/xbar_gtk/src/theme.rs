@@ -175,6 +175,40 @@ fn theme_rules(theme: ThemeMode, background_opacity: Option<f64>, translucent: b
     )
 }
 
+/// Generate tag styles from the shared policy, keeping CSS free of contrast math.
+fn tag_rules(theme: ThemeMode) -> String {
+    use xbar_core::tag_contrast::{TagContrastMode, TagPalette};
+    let scope = match theme {
+        ThemeMode::Dark => "window.theme-dark",
+        ThemeMode::Light => "window.theme-light",
+    };
+    let mut result = String::new();
+    for (class, mode) in [
+        ("tags-dark", TagContrastMode::Dark),
+        ("tags-light", TagContrastMode::Light),
+    ] {
+        let palette = TagPalette::for_wallpaper(theme, None, mode);
+        for (state, colors) in [
+            (":not(.selected):not(.urgent)", palette.empty),
+            (".occupied:not(.selected):not(.urgent)", palette.occupied),
+            (":hover:not(.selected):not(.urgent)", palette.hovered),
+            (".selected:not(.urgent)", palette.selected),
+            (".urgent", palette.urgent),
+        ] {
+            let border = colors
+                .stroke
+                .map_or_else(|| "transparent".to_owned(), |stroke| css(stroke.color));
+            // Keep GTK box sizing stable: only the inset part of a thicker
+            // stroke changes, never the one-pixel layout border.
+            let inset = colors
+                .stroke
+                .map_or(0.0, |stroke| (stroke.width - 1.0).max(0.0));
+            result.push_str(&format!("{scope} .bar-root.{class} .pill.tag{state} {{ background-color: {}; color: {}; border: 1px solid {border}; box-shadow: inset 0 0 0 {inset}px {border}; text-shadow: none; }}\n", css(colors.fill), css(colors.foreground)));
+        }
+    }
+    result
+}
+
 /// The complete stylesheet for one bar configuration and one window mode.
 ///
 /// Alpha capability is fixed at startup. Both material modes share this one
@@ -306,7 +340,9 @@ window.theme-dark {{
 {font}}}
 
 {dark}
-{light}",
+{light}
+{dark_tags}
+{light_tags}",
         font = font_rules(font, config.font_size.max(1.0)),
         corner_radius = metrics.corner_radius,
         dock_item_width = metrics.dock_item_width,
@@ -316,12 +352,27 @@ window.theme-dark {{
         dock_hover_scale = dock_hover_scale,
         dark = theme_rules(ThemeMode::Dark, background_opacity, translucent),
         light = theme_rules(ThemeMode::Light, background_opacity, translucent),
+        dark_tags = tag_rules(ThemeMode::Dark),
+        light_tags = tag_rules(ThemeMode::Light),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_tags_keep_fixed_geometry_and_urgent_precedence() {
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let rules = tag_rules(theme);
+            assert_eq!(rules.matches("border: 1px solid").count(), 10);
+            assert!(rules.contains("box-shadow: inset 0 0 0 1px"));
+            assert!(!rules.contains("border: 2px"));
+            assert!(!rules.contains(".bar-root {"));
+            assert!(rules.contains(".pill.tag.selected:not(.urgent)"));
+            assert!(rules.contains(".pill.tag.urgent"));
+        }
+    }
 
     #[test]
     fn root_material_classes_preserve_override_and_opaque_fallback() {

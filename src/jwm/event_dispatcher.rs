@@ -14422,6 +14422,11 @@ impl EventHandler for Jwm {
         // After the reload poll: a pending edit of the user's gets to land
         // before JWM writes its own per-tag layouts over the same file.
         self.flush_layout_persistence(backend, now);
+        let active_bar_monitors: Vec<i32> = self.secondary_bars.keys().copied().collect();
+        crate::backend::compositor_common::bar_wallpaper::retain_monitors(&active_bar_monitors);
+        for monitor in crate::backend::compositor_common::bar_wallpaper::take_changed_monitors() {
+            self.mark_bar_update_needed_if_visible(Some(monitor));
+        }
         self.flush_pending_bar_updates();
         // The layout picker commits on its own once the user stops browsing.
         // Ahead of the animation tick, whose panel flush then carries the

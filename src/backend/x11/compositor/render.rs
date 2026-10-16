@@ -5022,6 +5022,7 @@ impl<C: CompositorConnection> Compositor<C> {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        let bar_wallpaper_probe = crate::backend::compositor_common::bar_wallpaper::begin_frame();
         let bench_frame_start = std::time::Instant::now();
 
         // The WM removes an unmapped client from its live stacking list before
@@ -5056,7 +5057,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // leaves this flag permanently armed and both X11 loops poll at 1 ms.
         // Requests generated while preparing this frame are folded in again at
         // the unchanged-frame gate below.
-        let mut explicit_render = std::mem::take(&mut self.needs_render);
+        let mut explicit_render = std::mem::take(&mut self.needs_render) || bar_wallpaper_probe;
         let mut damage_wakeup = std::mem::take(&mut self.damage_render_pending);
         let astronomy_cfg = crate::config::CONFIG.load();
         let astronomy_occluded = if astronomy_cfg.behavior().wallpaper_effect == "astronomy"
@@ -6221,6 +6222,73 @@ impl<C: CompositorConnection> Compositor<C> {
 
         if !astronomy_occluded {
             self.draw_astronomy_wallpaper(use_scissor.then_some(damage_scissor));
+        }
+
+        // Wallpaper-only readback MUST precede the first client/overlay draw.
+        // Failed/partial probes queue a single full repair; static success is cached.
+        {
+            use std::hash::{Hash, Hasher};
+            let mut key = std::collections::hash_map::DefaultHasher::new();
+            (
+                self.screen_w,
+                self.screen_h,
+                self.wallpaper_texture,
+                self.wallpaper_mode as u8,
+                self.wallpaper_img_w,
+                self.wallpaper_img_h,
+                self.old_wallpaper_texture,
+            )
+                .hash(&mut key);
+            for m in &self.monitor_wallpapers {
+                (
+                    m.mon_x,
+                    m.mon_y,
+                    m.mon_w,
+                    m.mon_h,
+                    m.texture,
+                    m.mode as u8,
+                    m.img_w,
+                    m.img_h,
+                )
+                    .hash(&mut key);
+            }
+            let (astronomy_key, astronomy_dynamic) = self.astronomy_wallpaper.bar_metric_source();
+            astronomy_key.hash(&mut key);
+            let dynamic = astronomy_dynamic || self.wallpaper_transition_start.is_some();
+            // Do not change caller GL state, and never let a PBO or pack offset
+            // turn a bounded scanline into an out-of-bounds driver write.
+            let pack_safe =
+                crate::backend::compositor_common::bar_wallpaper::sample_due(key.finish(), dynamic)
+                    && unsafe {
+                        [
+                            glow::PIXEL_PACK_BUFFER_BINDING,
+                            glow::PACK_ROW_LENGTH,
+                            glow::PACK_SKIP_PIXELS,
+                            glow::PACK_SKIP_ROWS,
+                        ]
+                        .iter()
+                        .all(|&p| self.gl.get_parameter_i32(p) == 0)
+                    };
+            crate::backend::compositor_common::bar_wallpaper::sample_frame(
+                key.finish(),
+                dynamic,
+                (self.screen_w, self.screen_h),
+                use_scissor.then_some(damage_scissor),
+                first_visible == 0 && !astronomy_occluded && pack_safe,
+                |x, y, width| unsafe {
+                    let mut pixel = vec![0u8; width as usize * 4];
+                    self.gl.read_pixels(
+                        x,
+                        y,
+                        width,
+                        1,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut pixel)),
+                    );
+                    (self.gl.get_error() == glow::NO_ERROR).then_some(pixel)
+                },
+            );
         }
 
         // A restored X window is already at its final server-side geometry so

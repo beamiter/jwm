@@ -1,3 +1,5 @@
+use xbar_core::presentation::VisualState;
+use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // xilem_bar — xilem port of iced_bar.
 //
 // Feature parity goals with iced_bar:
@@ -486,8 +488,8 @@ enum WorkerEvent {
 }
 
 struct XilemBar {
-    tab_colors: [Color; 9],
     runtime: BarRuntime,
+    tag_contrast: TagContrastMode,
     schedule: RuntimeSchedule,
     process_actions: ProcessActionHandler,
     geometry_bridge: Arc<GeometryBridge>,
@@ -530,18 +532,8 @@ impl XilemBar {
         });
         let background_opacity = app_config.background_opacity;
         Self {
-            tab_colors: [
-                rgb(0xFF, 0x6B, 0x6B),
-                rgb(0x4E, 0xCD, 0xC4),
-                rgb(0x45, 0xB7, 0xD1),
-                rgb(0x96, 0xCE, 0xB4),
-                rgb(0xFE, 0xCA, 0x57),
-                rgb(0xFF, 0x9F, 0xF3),
-                rgb(0x54, 0xA0, 0xFF),
-                rgb(0x5F, 0x27, 0xCD),
-                rgb(0x00, 0xD2, 0xD3),
-            ],
             runtime,
+            tag_contrast: app_config.presentation.tag_contrast,
             schedule: RuntimeSchedule::default(),
             process_actions: ProcessActionHandler::default(),
             geometry_bridge,
@@ -652,39 +644,21 @@ impl XilemBar {
 
     // -------- View helpers -----------------------------------------------------
 
-    fn tag_visuals(&self, index: usize) -> (Color, f64, Color) {
-        let tag_color = *self.tab_colors.get(index).unwrap_or(&rgb(0x66, 0x66, 0x66));
+    fn tag_colors(&self, index: usize, hovered: bool) -> TagColors {
         let view = self.runtime.view();
-        if view.wm_available
-            && let Some(s) = view.tags.get(index)
-        {
-            if s.urgent {
-                return (self.theme.urgent_bg, 2.0, self.theme.urgent_border);
-            }
-            if s.filled {
-                return (tag_color, 2.0, tag_color);
-            }
-            if s.selected {
-                return (with_alpha(tag_color, 0.7), 1.5, tag_color);
-            }
-            if s.occupied {
-                return (
-                    with_alpha(tag_color, 0.22),
-                    1.5,
-                    with_alpha(tag_color, 0.95),
-                );
-            }
-        }
-        (self.theme.tag_inactive_bg, 1.0, with_alpha(tag_color, 0.9))
-    }
-
-    fn is_tag_active(&self, index: usize) -> bool {
-        let view = self.runtime.view();
-        view.wm_available
-            && view
-                .tags
-                .get(index)
-                .is_some_and(|s| s.filled || s.selected || s.urgent || s.occupied)
+        let state = view
+            .tags
+            .get(index)
+            .filter(|_| view.wm_available)
+            .map(|tag| VisualState {
+                selected: tag.selected || tag.filled,
+                urgent: tag.urgent,
+                occupied: tag.occupied,
+                hovered,
+            })
+            .unwrap_or_default();
+        TagPalette::for_wallpaper(view.theme, view.wallpaper_luminance, self.tag_contrast)
+            .colors(state)
     }
 
     fn workspace_tab_width(&self) -> f64 {
@@ -729,9 +703,6 @@ where
 struct Theme {
     fg: Color,
     subtle: Color,
-    tag_inactive_bg: Color,
-    tag_inactive_text: Color,
-    tag_active_text: Color,
     urgent_bg: Color,
     urgent_border: Color,
     green: Color,
@@ -749,9 +720,6 @@ impl Theme {
         Self {
             fg: Color::from_rgba8(0xCD, 0xD6, 0xF4, 255),
             subtle: Color::from_rgba8(0x9C, 0xA0, 0xB0, 255),
-            tag_inactive_bg: Color::from_rgba8(0x45, 0x47, 0x5A, 217),
-            tag_inactive_text: Color::from_rgba8(0xCD, 0xD6, 0xF4, 255),
-            tag_active_text: Color::WHITE,
             urgent_bg: Color::from_rgba8(0xDB, 0x36, 0x45, 255),
             urgent_border: Color::from_rgba8(0xBC, 0x21, 0x30, 255),
             green: Color::from_rgba8(0xA6, 0xE3, 0xA1, 255),
@@ -768,9 +736,6 @@ impl Theme {
         Self {
             fg: Color::from_rgba8(0x4C, 0x4F, 0x69, 255),
             subtle: Color::from_rgba8(0x6C, 0x6F, 0x85, 255),
-            tag_inactive_bg: Color::from_rgba8(0xCC, 0xD0, 0xDA, 217),
-            tag_inactive_text: Color::from_rgba8(0x4C, 0x4F, 0x69, 255),
-            tag_active_text: Color::WHITE,
             urgent_bg: Color::from_rgba8(0xD2, 0x0F, 0x39, 255),
             urgent_border: Color::from_rgba8(0xA8, 0x0B, 0x2E, 255),
             green: Color::from_rgba8(0x40, 0xA0, 0x2B, 255),
@@ -870,21 +835,34 @@ fn monitor_num_to_icon(n: i32) -> String {
 
 fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar> + use<> {
     let label_str = TAG_ICONS[index].to_string();
-    let (bg, border_w, border_c) = state.tag_visuals(index);
-    let is_active = state.is_tag_active(index);
-    let tab_width = state.workspace_tab_width();
-    let text_color = if is_active {
-        state.theme.tag_active_text
-    } else {
-        state.theme.tag_inactive_text
+    let colors = state.tag_colors(index, false);
+    let convert = |c: xbar_core::presentation::Rgba| {
+        Color::from_rgba8(
+            (c.red * 255.0).round() as u8,
+            (c.green * 255.0).round() as u8,
+            (c.blue * 255.0).round() as u8,
+            (c.alpha * 255.0).round() as u8,
+        )
     };
+    let bg = convert(colors.fill);
+    let border_w = colors.stroke.map_or(0.0, |s| f64::from(s.width));
+    let border_c = convert(colors.stroke.map_or(colors.fill, |s| s.color));
+    let text_color = convert(colors.foreground);
+    let tab_width = state.workspace_tab_width();
 
     let inner = label(label_str).text_size(TAB_FONT_SIZE).color(text_color);
-    sized_box(button(inner, move |s: &mut XilemBar| {
-        if let Some(tag) = TagId::new(index) {
-            s.dispatch_wm(UserAction::ViewTag(tag));
-        }
-    }))
+    sized_box(
+        button(inner, move |s: &mut XilemBar| {
+            if let Some(tag) = TagId::new(index) {
+                s.dispatch_wm(UserAction::ViewTag(tag));
+            }
+        })
+        // Local properties outrank Masonry's hover/active/focus theme stack.
+        // Keep the existing button padding and border geometry, but let only
+        // the shared material on the outer SizedBox paint the tag.
+        .prop(Background::Color(Color::TRANSPARENT))
+        .prop(BorderColor::new(Color::TRANSPARENT)),
+    )
     .dims(Dimensions::new(
         Dim::Fixed(Length::px(tab_width)),
         Dim::Stretch,

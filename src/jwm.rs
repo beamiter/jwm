@@ -2626,12 +2626,29 @@ impl Jwm {
             .and_then(|bar| bar.client_key)
             .and_then(|key| self.state.clients.get(key))
             .filter(|client| client.geometry.w > 0)
-            .map(|client| (client.geometry.x, client.geometry.y, client.geometry.w));
-        let (bar_x, bar_y, bar_width) = bar_geometry.unwrap_or((
+            .map(|client| {
+                (
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w,
+                    client.geometry.h,
+                )
+            });
+        let (bar_x, bar_y, bar_width, bar_height) = bar_geometry.unwrap_or((
             monitor.geometry.m_x + configured_pad,
             monitor.geometry.m_y + configured_pad,
             (monitor.geometry.m_w - 2 * configured_pad).max(1),
+            CONFIG.load().status_bar_height(),
         ));
+        self.message.wallpaper_luminance =
+            crate::backend::compositor_common::bar_wallpaper::register_and_read(
+                monitor.num,
+                bar_x,
+                bar_y,
+                bar_width,
+                bar_height,
+            );
+        self.message.blur_status_bar = Some(CONFIG.load().behavior().blur_status_bar);
         monitor_info_for_message.monitor_x = bar_x;
         monitor_info_for_message.monitor_y = bar_y;
         monitor_info_for_message.monitor_width = bar_width;

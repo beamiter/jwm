@@ -262,6 +262,14 @@ impl StatusBarBuilder {
         monitor_info.monitor_width = (monitor.geometry.m_w - 2 * pad).max(1);
         monitor_info.monitor_height = monitor.geometry.m_h;
         monitor_info.monitor_num = monitor.num;
+        message.wallpaper_luminance =
+            crate::backend::compositor_common::bar_wallpaper::register_and_read(
+                monitor.num,
+                monitor_info.monitor_x,
+                monitor_info.monitor_y,
+                monitor_info.monitor_width,
+                CONFIG.load().status_bar_height(),
+            );
         monitor_info.set_ltsymbol(&monitor.lt_symbol);
         // The bar builds its layout menu from what this compositor actually
         // offers, so it can neither hide a layout nor offer a dead one after

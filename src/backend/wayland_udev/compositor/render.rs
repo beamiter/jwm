@@ -2897,6 +2897,11 @@ impl WaylandCompositor {
         >,
         capture_view_required: bool,
     ) -> bool {
+        let bar_wallpaper_probe = crate::backend::compositor_common::bar_wallpaper::begin_frame();
+        if bar_wallpaper_probe {
+            self.needs_render = true;
+            self.force_full_damage_next = true;
+        }
         let previous_frame_was_deferred = previous_frame_requires_srgb_transition_snapshot(
             self.last_output_color_frame_state.as_ref(),
         );
@@ -3505,6 +3510,73 @@ impl WaylandCompositor {
             unsafe {
                 self.render_wallpaper(gl, &projection, damage_scissor);
             }
+        }
+
+        // output_fbo is a global logical-pixel canvas, not a scaled output
+        // target. Sample here, before clients and KMS external elements exist.
+        {
+            use std::hash::{Hash, Hasher};
+            let mut key = std::collections::hash_map::DefaultHasher::new();
+            (
+                self.screen_w,
+                self.screen_h,
+                self.wallpaper_texture,
+                self.wallpaper_mode as u8,
+                self.wallpaper_img_w,
+                self.wallpaper_img_h,
+                self.old_wallpaper_texture,
+            )
+                .hash(&mut key);
+            for m in &self.monitor_wallpapers {
+                (
+                    m.mon_x,
+                    m.mon_y,
+                    m.mon_w,
+                    m.mon_h,
+                    m.texture,
+                    m.mode as u8,
+                    m.img_w,
+                    m.img_h,
+                )
+                    .hash(&mut key);
+            }
+            let pack_safe = crate::backend::compositor_common::bar_wallpaper::sample_due(
+                key.finish(),
+                self.wallpaper_transition_start.is_some(),
+            ) && unsafe {
+                [
+                    ffi::PIXEL_PACK_BUFFER_BINDING,
+                    ffi::PACK_ROW_LENGTH,
+                    ffi::PACK_SKIP_PIXELS,
+                    ffi::PACK_SKIP_ROWS,
+                ]
+                .iter()
+                .all(|&p| {
+                    let mut value = 0;
+                    gl.GetIntegerv(p, &mut value);
+                    value == 0
+                })
+            };
+            crate::backend::compositor_common::bar_wallpaper::sample_frame(
+                key.finish(),
+                self.wallpaper_transition_start.is_some(),
+                (self.screen_w, self.screen_h),
+                damage_scissor.map(|s| (s[0], s[1], s[2], s[3])),
+                pack_safe,
+                |x, y, width| unsafe {
+                    let mut pixel = vec![0u8; width as usize * 4];
+                    gl.ReadPixels(
+                        x,
+                        y,
+                        width,
+                        1,
+                        ffi::RGBA,
+                        ffi::UNSIGNED_BYTE,
+                        pixel.as_mut_ptr().cast(),
+                    );
+                    (gl.GetError() == ffi::NO_ERROR).then_some(pixel)
+                },
+            );
         }
 
         // VRR: update state based on focused window

@@ -103,6 +103,7 @@ fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
         sequence: Some(sequence),
         wm_session_id,
         blur_status_bar: message.blur_status_bar,
+        wallpaper_luminance: message.wallpaper_luminance,
         monitor: MonitorId(info.monitor_num),
         geometry: MonitorGeometry::from_raw(
             info.monitor_x,
@@ -237,6 +238,20 @@ mod tests {
             .expect("consumer drop must leave the owner link intact");
         drop(reopened);
         owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn transport_preserves_wallpaper_metric_for_each_monitor() {
+        for (monitor, value) in [(0, None), (3, Some(0)), (-2, Some(255))] {
+            let mut message = SharedMessage {
+                wallpaper_luminance: value,
+                ..SharedMessage::default()
+            };
+            message.monitor_info.monitor_num = monitor;
+            let snapshot = snapshot_from_shared(message);
+            assert_eq!(snapshot.wallpaper_luminance, value);
+            assert_eq!(snapshot.monitor, MonitorId(monitor));
+        }
     }
 
     #[test]

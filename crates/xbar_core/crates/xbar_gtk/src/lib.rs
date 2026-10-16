@@ -19,6 +19,7 @@ use gtk4::{Label, Orientation};
 use xbar_core::config::BarConfig;
 use xbar_core::controls::BarPresentation;
 use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
+use xbar_core::tag_contrast::{TagContrastMode, TagPalette};
 use xbar_core::{BarSnapshot, ThemeMode};
 
 pub use crate::pill::{Dispatch, DispatchCompletion, Pill, PillRow, PillStyle};
@@ -99,6 +100,7 @@ pub struct BarSurface {
     trailing: PillRow,
     client_name: Label,
     minimized_dock: dock::MinimizedDock,
+    tag_contrast: TagContrastMode,
 }
 
 impl BarSurface {
@@ -129,6 +131,7 @@ impl BarSurface {
             trailing,
             client_name,
             minimized_dock,
+            tag_contrast: theme.presentation.tag_contrast,
         }
     }
 
@@ -147,6 +150,19 @@ impl BarSurface {
         } else {
             self.root.remove_css_class("frosted");
         }
+        let palette = TagPalette::for_wallpaper(
+            snapshot.theme,
+            snapshot.wallpaper_luminance,
+            self.tag_contrast,
+        );
+        let dark = TagPalette::for_wallpaper(snapshot.theme, None, TagContrastMode::Dark);
+        self.root.remove_css_class("tags-dark");
+        self.root.remove_css_class("tags-light");
+        self.root.add_css_class(if palette.empty == dark.empty {
+            "tags-dark"
+        } else {
+            "tags-light"
+        });
         let BarPresentation {
             tags,
             layout_button,
