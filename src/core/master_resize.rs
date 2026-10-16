@@ -50,18 +50,33 @@ impl<K> Default for ResizeContext<K> {
 }
 
 impl<K: Copy + Eq> ResizeContext<K> {
+    fn cancel_drag(&mut self) {
+        if let Some(original) = self.drag_snapshot.take() {
+            self.intent = original;
+        }
+    }
+
     pub fn sync_groups(&mut self, groups: Vec<Vec<K>>) {
         if self.groups != groups {
-            self.intent = None;
-            self.drag_snapshot = None;
+            // A new grouping invalidates a grab's old coordinate system, but
+            // the same live anchor still owns its normalized size intent.
+            self.cancel_drag();
         }
         self.groups = groups;
     }
 
     pub fn sync(&mut self, topology: Vec<K>, area: Rect, gap: i32, frames: Vec<ResizeFrame<K>>) {
         if self.topology != topology {
+            self.cancel_drag();
+        }
+        // Reordering, adding, or removing neighbours must not erase a manual
+        // size. The fresh native frames below remain the planner's only input.
+        // A missing anchor cannot transfer its intent to another client.
+        if self
+            .intent
+            .is_some_and(|intent| !topology.contains(&intent.client))
+        {
             self.intent = None;
-            self.drag_snapshot = None;
         }
         self.topology = topology;
         self.area = area;
@@ -594,7 +609,7 @@ mod tests {
         assert_eq!(out[1].rect, f[1].rect);
     }
     #[test]
-    fn context_resets_on_topology_only_not_arrange_or_output_motion() {
+    fn context_retains_anchor_across_membership_and_output_changes() {
         let f = vec![frame(1, 0, 0, 100, 100)];
         let mut c = ResizeContext::default();
         c.sync(vec![1], Rect::new(0, 0, 100, 100), 0, f.clone());
@@ -607,10 +622,107 @@ mod tests {
         c.sync(vec![1], Rect::new(-200, 100, 200, 300), 0, f.clone());
         assert_eq!(c.intent, Some(i));
         c.drag_snapshot = Some(Some(i));
-        c.sync(vec![2, 1], c.area, 0, f);
+        c.sync(vec![2, 1], c.area, 0, f.clone());
+        assert_eq!(c.intent, Some(i));
+        assert_eq!(c.drag_snapshot, None);
+        for topology in [vec![1, 2], vec![1, 3, 2], vec![1, 3], vec![1]] {
+            c.drag_snapshot = Some(Some(i));
+            c.sync(topology, c.area, 0, f.clone());
+            assert_eq!(c.intent, Some(i));
+            assert_eq!(c.drag_snapshot, None);
+        }
+        c.sync(vec![2], c.area, 0, vec![frame(2, 0, 0, 100, 100)]);
         assert_eq!(c.intent, None);
+        c.sync(vec![1, 2], c.area, 0, f);
+        assert_eq!(c.intent, None, "a removed anchor must not resurrect");
+    }
+    #[test]
+    fn grouping_changes_retain_intent_but_cancel_drag() {
+        let mut c = ResizeContext::default();
+        c.sync(vec![1, 2, 3], Rect::new(0, 0, 1000, 800), 0, vec![]);
+        let intent = ResizeIntent {
+            client: 2,
+            width: 0.6,
+            height: 0.4,
+        };
+        c.intent = Some(intent);
+        c.groups = vec![vec![1, 2], vec![3]];
+        c.drag_snapshot = Some(None);
+        c.sync_groups(c.groups.clone());
+        assert_eq!(c.drag_snapshot, Some(None));
+        for groups in [vec![vec![1], vec![2, 3]], vec![vec![3, 2], vec![1]], vec![]] {
+            c.drag_snapshot = Some(Some(intent));
+            c.sync_groups(groups);
+            assert_eq!(c.intent, Some(intent));
+            assert_eq!(c.drag_snapshot, None);
+        }
+    }
+
+    #[test]
+    fn topology_or_group_change_rolls_back_uncommitted_drag() {
+        let original = ResizeIntent {
+            client: 1,
+            width: 0.6,
+            height: 0.4,
+        };
+        let draft = ResizeIntent {
+            client: 2,
+            width: 0.8,
+            height: 0.9,
+        };
+        for grouped in [false, true] {
+            for saved in [None, Some(original)] {
+                let mut c = ResizeContext::default();
+                c.sync(vec![1, 2], Rect::new(0, 0, 1000, 800), 0, vec![]);
+                c.groups = vec![vec![1, 2]];
+                c.intent = Some(draft);
+                c.drag_snapshot = Some(saved);
+                if grouped {
+                    c.sync_groups(vec![vec![1], vec![2]]);
+                } else {
+                    c.sync(vec![2, 1, 3], c.area, 0, vec![]);
+                }
+                assert_eq!(c.intent, saved);
+                assert_eq!(c.drag_snapshot, None);
+            }
+        }
+        let mut c = ResizeContext {
+            topology: vec![1, 2],
+            intent: Some(draft),
+            drag_snapshot: Some(Some(original)),
+            ..ResizeContext::default()
+        };
+        c.sync(vec![2, 3], Rect::new(0, 0, 1000, 800), 0, vec![]);
+        assert_eq!(c.intent, None, "removed original anchor cannot be restored");
         assert_eq!(c.drag_snapshot, None);
     }
+
+    #[test]
+    fn retained_anchor_replans_from_fresh_frames_without_drift() {
+        let area = Rect::new(-200, 50, 1000, 800);
+        let mut c = ResizeContext::default();
+        let intent = ResizeIntent {
+            client: 1,
+            width: 0.6,
+            height: 0.4,
+        };
+        c.sync(vec![1], area, 0, vec![frame(1, -200, 50, 1000, 800)]);
+        c.intent = Some(intent);
+        let fresh = vec![frame(2, -200, 50, 500, 800), frame(1, 300, 50, 500, 800)];
+        let expected = exact_plan(area, 0, &fresh, intent, &fit).unwrap();
+        assert_eq!(expected[1].rect.w, 600);
+        assert_eq!(expected[1].rect.h, 320);
+        for _ in 0..20 {
+            c.sync(vec![2, 1], area, 0, fresh.clone());
+            assert_eq!(c.intent, Some(intent));
+            assert_eq!(
+                exact_plan(c.area, c.gap, &c.frames, c.intent.unwrap(), &fit).unwrap(),
+                expected
+            );
+            assert_eq!(c.frames, fresh);
+        }
+    }
+
     #[test]
     fn nonfinite_extreme_hints_and_degenerate_areas_are_rejected() {
         let f = [frame(1, 0, 0, 100, 100)];

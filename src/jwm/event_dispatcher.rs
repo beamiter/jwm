@@ -12462,7 +12462,7 @@ mod tests {
         }
     }
     #[test]
-    fn master_resize_runtime_scrolling_centers_final_focus_and_resets_column_regroup() {
+    fn master_resize_runtime_scrolling_centers_final_focus_and_retains_column_regroup() {
         use crate::core::layout::LayoutEnum;
         let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::SCROLLING, 3);
         jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(0.4))
@@ -12488,11 +12488,24 @@ mod tests {
                 .intent
                 .is_some()
         );
+        let intent = jwm.state.monitors[mon].layout_resizes[&scope].intent;
         let state = jwm.scrolling_state_for_monitor_mut(mon).unwrap();
         state.columns = vec![vec![keys[0], keys[1]], vec![keys[2]]];
         state.ensure_column_metadata();
         jwm.arrange(&mut backend, Some(mon));
-        assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
+        assert_eq!(
+            jwm.state.monitors[mon].layout_resizes[&scope].intent,
+            intent
+        );
+        check(&jwm, keys[2]);
+        let stable: Vec<_> = keys.iter().map(|&key| live_rect(&jwm, key)).collect();
+        jwm.arrange(&mut backend, Some(mon));
+        assert_eq!(
+            stable,
+            keys.iter()
+                .map(|&key| live_rect(&jwm, key))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -12680,14 +12693,220 @@ mod tests {
         jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
             .unwrap();
         assert!(jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
+        let intent = jwm.state.monitors[mon].layout_resizes[&scope].intent;
         jwm.state.monitor_clients.get_mut(mon).unwrap().reverse();
         for _ in 0..4 {
             jwm.arrange(&mut backend, Some(mon));
-            assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+            assert_eq!(
+                jwm.state.monitors[mon].layout_resizes[&scope].intent,
+                intent
+            );
         }
+        jwm.reset_layout_size(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
         jwm.state.monitors[mon].lt = std::rc::Rc::new(LayoutEnum::GRID);
         jwm.arrange(&mut backend, Some(mon));
         assert!(jwm.state.monitors[mon].layout_resizes.is_empty());
+    }
+
+    #[test]
+    fn master_resize_runtime_membership_retains_anchor_until_anchor_is_destroyed() {
+        use crate::core::layout::LayoutEnum;
+        use crate::core::types::Rect;
+        for layout in LayoutEnum::all()
+            .iter()
+            .filter(|l| **l != LayoutEnum::FLOAT)
+        {
+            let (mut jwm, mut backend, mon, keys) = master_resize_scene(layout.clone(), 4);
+            let anchor = keys[0];
+            jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                .unwrap();
+            jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+                .unwrap();
+            let scope = jwm.layout_resize_scope(mon).unwrap();
+            let intent = jwm.state.monitors[mon].layout_resizes[&scope].intent;
+            let added = add_maximize_test_client(
+                &mut jwm,
+                mon,
+                WindowId::from_raw(0x7200),
+                Rect::new(50, 50, 640, 480),
+                false,
+            );
+            jwm.state.clients[added].size_hints.hints_valid = true;
+            jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(anchor));
+            jwm.arrange(&mut backend, Some(mon));
+            assert_eq!(
+                jwm.state.monitors[mon].layout_resizes[&scope].intent,
+                intent
+            );
+            let removed = jwm.state.clients[keys[2]].win;
+            jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(removed))
+                .unwrap();
+            assert!(!jwm.state.clients.contains_key(keys[2]));
+            assert_eq!(
+                jwm.state.monitors[mon].layout_resizes[&scope].intent,
+                intent
+            );
+            jwm.state.monitor_clients.get_mut(mon).unwrap().reverse();
+            jwm.arrange(&mut backend, Some(mon));
+            assert_eq!(
+                jwm.state.monitors[mon].layout_resizes[&scope].intent,
+                intent
+            );
+            let remaining = [anchor, keys[1], keys[3], added];
+            let stable: Vec<_> = remaining.iter().map(|&key| live_rect(&jwm, key)).collect();
+            for _ in 0..4 {
+                jwm.arrange(&mut backend, Some(mon));
+                assert_eq!(
+                    stable,
+                    remaining
+                        .iter()
+                        .map(|&key| live_rect(&jwm, key))
+                        .collect::<Vec<_>>()
+                );
+            }
+            let removed = jwm.state.clients[anchor].win;
+            jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(removed))
+                .unwrap();
+            assert!(!jwm.state.clients.contains_key(anchor));
+            assert!(!jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
+        }
+    }
+
+    #[test]
+    fn master_resize_runtime_membership_change_cancels_provisional_drag() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::layout::LayoutEnum;
+        for has_prior in [false, true] {
+            let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 3);
+            let key = keys[0];
+            if has_prior {
+                jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                    .unwrap();
+            }
+            let scope = jwm.layout_resize_scope(mon).unwrap();
+            let prior = jwm.state.monitors[mon]
+                .layout_resizes
+                .get(&scope)
+                .and_then(|c| c.intent);
+            let mode = jwm.resize_drag_mode(key, ResizeEdge::Right);
+            jwm.start_pointer_drag(&mut backend, key, mode).unwrap();
+            let start = jwm.drag_ctl.unwrap().start_root;
+            master_resize_send_motion(&mut jwm, &mut backend, start.0 - 80.0, start.1);
+            assert_ne!(jwm.state.monitors[mon].layout_resizes[&scope].intent, prior);
+            jwm.state.monitor_clients.get_mut(mon).unwrap().reverse();
+            jwm.arrange(&mut backend, Some(mon));
+            master_resize_send_motion(&mut jwm, &mut backend, start.0 - 90.0, start.1);
+            assert!(jwm.drag_ctl.is_none());
+            assert_eq!(
+                jwm.state.monitors[mon]
+                    .layout_resizes
+                    .get(&scope)
+                    .and_then(|c| c.intent),
+                prior
+            );
+            assert!(!jwm.state.clients[key].state.is_floating);
+        }
+    }
+
+    #[test]
+    fn master_resize_runtime_destroyed_drag_owner_preserves_only_live_saved_anchor() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::layout::LayoutEnum;
+        for destroy_saved in [false, true] {
+            for activated in [false, true] {
+                for endpoint in 0..3 {
+                    let (mut jwm, mut backend, mon, keys) =
+                        master_resize_scene(LayoutEnum::TILE, 3);
+                    let saved = keys[0];
+                    let dragged = keys[1];
+                    jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                        .unwrap();
+                    let scope = jwm.layout_resize_scope(mon).unwrap();
+                    let original = jwm.state.monitors[mon].layout_resizes[&scope].intent;
+                    let mode = jwm.resize_drag_mode(dragged, ResizeEdge::Right);
+                    jwm.start_pointer_drag(&mut backend, dragged, mode).unwrap();
+                    let start = jwm.drag_ctl.unwrap().start_root;
+                    if activated {
+                        master_resize_send_motion(&mut jwm, &mut backend, start.0 - 80.0, start.1);
+                    }
+                    if destroy_saved {
+                        let window = jwm.state.clients[saved].win;
+                        jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(window))
+                            .unwrap();
+                    }
+                    let window = jwm.state.clients[dragged].win;
+                    jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(window))
+                        .unwrap();
+                    match endpoint {
+                        0 => master_resize_send_motion(
+                            &mut jwm,
+                            &mut backend,
+                            start.0 - 90.0,
+                            start.1,
+                        ),
+                        1 => jwm.cancel_pointer_drag(&mut backend),
+                        _ => master_resize_send_release(&mut jwm, &mut backend),
+                    }
+                    assert!(jwm.drag_ctl.is_none());
+                    assert!(!jwm.state.clients.contains_key(dragged));
+                    let retained = jwm.state.monitors[mon]
+                        .layout_resizes
+                        .get(&scope)
+                        .and_then(|c| c.intent);
+                    assert_eq!(retained, if destroy_saved { None } else { original });
+                    assert!(
+                        jwm.state.monitors[mon]
+                            .layout_resizes
+                            .get(&scope)
+                            .is_none_or(|c| c.drag_snapshot.is_none())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn master_resize_runtime_dead_drag_finish_validates_inactive_scope_anchor() {
+        use crate::backend::api::ResizeEdge;
+        use crate::core::layout::LayoutEnum;
+        for stale in 0..4 {
+            for release in [false, true] {
+                let (mut jwm, mut backend, mon, keys) = master_resize_scene(LayoutEnum::TILE, 3);
+                jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                    .unwrap();
+                let scope = jwm.layout_resize_scope(mon).unwrap();
+                let original = jwm.state.monitors[mon].layout_resizes[&scope].intent;
+                let mode = jwm.resize_drag_mode(keys[1], ResizeEdge::Right);
+                jwm.start_pointer_drag(&mut backend, keys[1], mode).unwrap();
+                jwm.state.monitors[mon].lt = std::rc::Rc::new(LayoutEnum::GRID);
+                match stale {
+                    1 => {
+                        let window = jwm.state.clients[keys[0]].win;
+                        jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(window))
+                            .unwrap();
+                    }
+                    2 => jwm.state.clients[keys[0]].state.tags = 2,
+                    3 => jwm.state.clients[keys[0]].mon = None,
+                    _ => {}
+                }
+                let window = jwm.state.clients[keys[1]].win;
+                jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(window))
+                    .unwrap();
+                if release {
+                    master_resize_send_release(&mut jwm, &mut backend);
+                } else {
+                    jwm.cancel_pointer_drag(&mut backend);
+                }
+                assert!(jwm.drag_ctl.is_none());
+                let retained = jwm.state.monitors[mon]
+                    .layout_resizes
+                    .get(&scope)
+                    .and_then(|c| c.intent);
+                assert_eq!(retained, if stale == 0 { original } else { None });
+            }
+        }
     }
 
     #[test]

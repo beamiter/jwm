@@ -166,13 +166,20 @@ order-dependent saved preferences. Ordinary focus and repeated arrange do not
 retarget or accumulate the transformation; every arrange starts with that
 layout's newly computed native geometry.
 
-Switching layouts or workspaces preserves their independent intentions and
-restores one when returning to the same topology. Output size/origin changes
-use the current usable area and size constraints, without stale absolute screen
-coordinates. Adding/removing/reordering tiled clients, moving them between
-monitors/workspaces, or changing scrolling column membership resets the affected
-context when it next arranges. A gesture invalidated by such a change cannot
-restore stale geometry or transfer its resize to another client.
+Switching layouts or workspaces preserves their independent intentions.
+Output size/origin changes use the current usable area and size constraints,
+without stale absolute screen coordinates. Adding/removing/reordering neighbours
+or changing scrolling column membership retains the same anchor's normalized
+size targets while that anchor remains in the tiled topology. Each change is
+replanned from fresh native geometry and may be limited by available space or
+size hints. If the anchor leaves that topology, its intention is discarded;
+returning later does not resurrect it. This includes hiding or moving the anchor
+out of the current workspace or monitor.
+
+A membership or grouping change cancels an active resize gesture and restores
+its pre-grab intention, provided the original anchor still belongs to the new
+topology. It never commits an unfinished drag or transfers its size to another
+client.
 
 These intentions survive mouse release and subsequent arrange calls for the
 current session. They are not session-restart persistence. Alt+Control+Home (or

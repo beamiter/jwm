@@ -493,6 +493,28 @@ impl Jwm {
             {
                 c.intent = original;
             }
+            // Finish can run after destruction or while a different scope is
+            // active. Validate against the recorded scope before arrange: the
+            // active layout alone cannot retire a stale inactive-scope anchor.
+            let stale_anchor = self
+                .state
+                .monitors
+                .get(mon)
+                .and_then(|m| m.layout_resizes.get(&scope))
+                .and_then(|c| c.intent)
+                .is_some_and(|intent| {
+                    !self.state.clients.get(intent.client).is_some_and(|client| {
+                        client.mon == Some(mon)
+                            && !client.state.is_floating
+                            && !client.state.is_hidden
+                            && !client.state.is_swallowed
+                            && (client.state.is_sticky || client.state.tags & scope.0 != 0)
+                            && self.get_monitor_clients(mon).contains(&intent.client)
+                    })
+                });
+            if stale_anchor && let Some(m) = self.state.monitors.get_mut(mon) {
+                m.layout_resizes.remove(&scope);
+            }
             self.prune_layout_resize(mon, scope);
             self.arrange(backend, Some(mon));
             self.broadcast_visible_window_states_on_monitor(backend, mon);

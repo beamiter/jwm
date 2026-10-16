@@ -285,18 +285,16 @@ impl Jwm {
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
+        // Tiled state belongs to the scope, not necessarily the dragged
+        // client: a different pre-grab anchor can survive this client's death.
+        // The shared finish path validates that saved anchor before retaining it.
+        if let DragMode::ResizeTiled(_, scope) = ctl.mode {
+            self.finish_tiled_resize(backend, ctl.mon, scope, true);
+            return;
+        }
         // The window may have disappeared before a modal takes over. End its
         // owner without reinserting a retired client key into monitor order.
         if !self.state.clients.contains_key(ctl.client) {
-            if let DragMode::ResizeTiled(_, scope) = ctl.mode
-                && let Some(monitor) = ctl.mon.and_then(|mon| self.state.monitors.get_mut(mon))
-            {
-                monitor.layout_resizes.remove(&scope);
-            }
-            return;
-        }
-        if let DragMode::ResizeTiled(_, scope) = ctl.mode {
-            self.finish_tiled_resize(backend, ctl.mon, scope, true);
             return;
         }
         if !ctl.activated {
