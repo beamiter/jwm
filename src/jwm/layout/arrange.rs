@@ -8,6 +8,9 @@ use log::{debug, warn};
 
 impl Jwm {
     pub(crate) fn arrangemon(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
+        if self.restart_adoption_in_progress() {
+            return;
+        }
         debug!("[arrangemon]");
 
         let (layout_type, layout_symbol) = if let Some(monitor) = self.state.monitors.get(mon_key) {
@@ -57,6 +60,9 @@ impl Jwm {
     }
 
     pub(crate) fn arrange(&mut self, backend: &mut dyn Backend, m_target: Option<MonitorKey>) {
+        if self.restart_adoption_in_progress() {
+            return;
+        }
         // A marker, not a diagnostic: this runs on every map, unmap, tag
         // switch and focus cycle, and the release default filter is `info`.
         // Keep it out of the session log.

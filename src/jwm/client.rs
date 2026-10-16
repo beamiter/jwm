@@ -2832,6 +2832,7 @@ mod unmanage_minimized_tests {
         force_unmapped: AtomicBool,
         fail_next_map: AtomicBool,
         fail_next_attributes: AtomicBool,
+        fail_attributes_for_window: Mutex<Option<WindowId>>,
         fail_attributes_on_call: AtomicUsize,
         attributes_calls: AtomicUsize,
         fail_geometry_on_call: AtomicUsize,
@@ -2979,6 +2980,7 @@ mod unmanage_minimized_tests {
         fn get_window_attributes(&self, win: WindowId) -> Result<WindowAttributes, BackendError> {
             let call = self.attributes_calls.fetch_add(1, Ordering::Relaxed) + 1;
             if self.fail_next_attributes.swap(false, Ordering::Relaxed)
+                || *self.fail_attributes_for_window.lock().unwrap() == Some(win)
                 || self.fail_attributes_on_call.load(Ordering::Relaxed) == call
             {
                 self.initial_iconic_operations
@@ -7927,6 +7929,230 @@ mod unmanage_minimized_tests {
             "startup must rediscover an existing dock without waiting for another property event"
         );
         assert!(fresh.monitor_work_area(mon).unwrap().y >= 96);
+    }
+
+    fn restart_shape_fixture(
+        layout: crate::core::layout::LayoutEnum,
+    ) -> (Jwm, ClientSpyBackend, Vec<ClientKey>) {
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        backend.supports_client_list = true;
+        set_class(&backend, "RestartShapeFixture", "restart-shape-fixture");
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        old.suppress_layout_animation = true;
+        let keys: Vec<_> = [301, 302, 303, 304]
+            .into_iter()
+            .map(|id| manage_window(&mut old, &mut backend, id))
+            .collect();
+        let mon = old.state.monitor_order[0];
+        let monitor = &mut old.state.monitors[mon];
+        let pertag = monitor.pertag.as_mut().unwrap();
+        pertag.lts[pertag.cur_tag] = std::rc::Rc::new(layout.clone());
+        pertag.n_masters[pertag.cur_tag] = 1;
+        monitor.reload_current_tag_context();
+        monitor.set_selected_client_for_current_tag(Some(keys[0]));
+        if layout == crate::core::layout::LayoutEnum::SCROLLING {
+            let scrolling = old.scrolling_state_for_monitor_mut_or_default(mon).unwrap();
+            scrolling.columns = vec![vec![keys[0], keys[1]], vec![keys[2], keys[3]]];
+            scrolling.column_width_factors = vec![0.75, 1.25];
+            scrolling.focused_clients = vec![Some(keys[0]), Some(keys[3])];
+            scrolling.focused_column = Some(0);
+            scrolling.attach_new_windows_to_focused_column = true;
+        }
+        old.arrange(&mut backend, None);
+        old.resize_horizontal(&mut backend, &crate::jwm::types::WMArgEnum::Float(-0.1))
+            .unwrap();
+        old.resize_vertical(&mut backend, &crate::jwm::types::WMArgEnum::Float(-0.1))
+            .unwrap();
+        *backend.window_ops.scanned_windows.lock().unwrap() =
+            [304, 303, 302, 301].map(WindowId::from_raw).to_vec();
+        (old, backend, keys)
+    }
+
+    fn restart_shape_rectangles(wm: &Jwm) -> [Rect; 4] {
+        [301, 302, 303, 304].map(|id| {
+            let key = wm.wintoclient(WindowId::from_raw(id)).unwrap();
+            let g = &wm.state.clients[key].geometry;
+            Rect::new(g.x, g.y, g.w, g.h)
+        })
+    }
+
+    #[test]
+    fn x11_restart_shapes_restore_on_first_completed_adoption_arrange() {
+        use crate::core::layout::LayoutEnum;
+        for layout in [LayoutEnum::TILE, LayoutEnum::SCROLLING, LayoutEnum::MONOCLE] {
+            let (old, mut backend, _) = restart_shape_fixture(layout.clone());
+            let before = restart_shape_rectangles(&old);
+            let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+            let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            fresh.suppress_layout_animation = true;
+            fresh.install_restart_state(&backend, &intent).unwrap();
+            assert!(fresh.restart_has_shapes());
+            fresh.setup_initial_windows(&mut backend).unwrap();
+            assert!(!fresh.restart_adoption_in_progress());
+            assert_eq!(restart_shape_rectangles(&fresh), before);
+            let mon = fresh.state.monitor_order[0];
+            let scope = fresh.layout_resize_scope(mon).unwrap();
+            let anchor = fresh.wintoclient(WindowId::from_raw(301)).unwrap();
+            assert_eq!(
+                fresh.state.monitors[mon].layout_resizes[&scope]
+                    .intent
+                    .unwrap()
+                    .client,
+                anchor
+            );
+            if layout == LayoutEnum::SCROLLING {
+                let state = fresh.scrolling_state_for_monitor(mon).unwrap();
+                let columns: Vec<Vec<_>> = state
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        column
+                            .iter()
+                            .map(|key| fresh.state.clients[*key].win)
+                            .collect()
+                    })
+                    .collect();
+                assert_eq!(
+                    columns,
+                    vec![
+                        vec![WindowId::from_raw(301), WindowId::from_raw(302)],
+                        vec![WindowId::from_raw(303), WindowId::from_raw(304)]
+                    ]
+                );
+                assert_eq!(state.column_width_factors, vec![0.75, 1.25]);
+                assert!(state.attach_new_windows_to_focused_column);
+            }
+            for _ in 0..4 {
+                fresh.arrange(&mut backend, None);
+                assert_eq!(restart_shape_rectangles(&fresh), before);
+            }
+        }
+    }
+
+    #[test]
+    fn x11_restart_shape_scan_error_releases_barrier_without_consuming_handoff() {
+        let (old, mut backend, _) =
+            restart_shape_fixture(crate::core::layout::LayoutEnum::SCROLLING);
+        let before = restart_shape_rectangles(&old);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        *backend
+            .window_ops
+            .fail_attributes_for_window
+            .lock()
+            .unwrap() = Some(WindowId::from_raw(303));
+        assert!(fresh.setup_initial_windows(&mut backend).is_err());
+        assert!(!fresh.restart_adoption_in_progress());
+        assert!(fresh.wintoclient(WindowId::from_raw(304)).is_some());
+        assert!(fresh.restart_has_shapes());
+        assert!(
+            backend
+                .property_ops
+                .get_restart_property(
+                    backend.root_window().unwrap(),
+                    crate::backend::api::RestartProperty::Snapshot
+                )
+                .unwrap()
+                .is_some()
+        );
+        *backend
+            .window_ops
+            .fail_attributes_for_window
+            .lock()
+            .unwrap() = None;
+        fresh.setup_initial_windows(&mut backend).unwrap();
+        assert!(!fresh.restart_adoption_in_progress());
+        assert_eq!(restart_shape_rectangles(&fresh), before);
+    }
+
+    #[test]
+    fn x11_restart_shape_manage_failure_releases_barrier_for_fresh_startup_retry() {
+        let (old, mut backend, _) =
+            restart_shape_fixture(crate::core::layout::LayoutEnum::SCROLLING);
+        let before = restart_shape_rectangles(&old);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut failed = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        failed.install_restart_state(&backend, &intent).unwrap();
+        backend
+            .window_ops
+            .fail_next_configure
+            .store(true, Ordering::Relaxed);
+        assert!(failed.setup_initial_windows(&mut backend).is_err());
+        assert!(!failed.restart_adoption_in_progress());
+        // Configure failure occurs after insertion, unlike the inspection failure
+        // above. Production startup retries with a new Jwm, not this object.
+        assert!(failed.wintoclient(WindowId::from_raw(304)).is_some());
+        assert!(
+            backend
+                .property_ops
+                .get_restart_property(
+                    backend.root_window().unwrap(),
+                    crate::backend::api::RestartProperty::Snapshot,
+                )
+                .unwrap()
+                .is_some()
+        );
+        drop(failed);
+        let mut retry = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        retry.suppress_layout_animation = true;
+        retry.install_restart_state(&backend, &intent).unwrap();
+        retry.setup_initial_windows(&mut backend).unwrap();
+        assert!(!retry.restart_adoption_in_progress());
+        assert_eq!(restart_shape_rectangles(&retry), before);
+    }
+
+    #[test]
+    fn x11_restart_shape_cannot_transfer_to_recycled_xid_after_verified_adoption() {
+        use crate::backend::api::RestartProperty;
+        let (old, mut backend, _) =
+            restart_shape_fixture(crate::core::layout::LayoutEnum::SCROLLING);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        for id in [301, 302, 303, 304] {
+            manage_window(&mut fresh, &mut backend, id);
+        }
+        let window = WindowId::from_raw(301);
+        let retired = fresh.wintoclient(window).unwrap();
+        fresh.unmanage(&mut backend, Some(retired), true).unwrap();
+        backend
+            .property_ops
+            .set_restart_property(
+                window,
+                RestartProperty::ClientGeneration,
+                b"unrelated-generation",
+            )
+            .unwrap();
+        let replacement = manage_window(&mut fresh, &mut backend, 301);
+        assert_ne!(retired, replacement);
+        fresh.finish_restart_adoption(&mut backend);
+        let mon = fresh.state.clients[replacement].mon.unwrap();
+        let scope = fresh.layout_resize_scope(mon).unwrap();
+        assert!(
+            fresh.state.monitors[mon]
+                .layout_resizes
+                .get(&scope)
+                .is_none_or(|context| context.intent.is_none())
+        );
+        let scrolling = fresh.scrolling_state_for_monitor(mon).unwrap();
+        assert!(
+            !scrolling
+                .columns
+                .iter()
+                .flatten()
+                .any(|key| *key == replacement)
+        );
+        assert!(
+            scrolling
+                .columns
+                .iter()
+                .flatten()
+                .any(|key| fresh.state.clients[*key].win == WindowId::from_raw(302))
+        );
     }
 
     #[test]

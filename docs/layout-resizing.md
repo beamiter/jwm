@@ -181,7 +181,10 @@ its pre-grab intention, provided the original anchor still belongs to the new
 topology. It never commits an unfinished drag or transfers its size to another
 client.
 
-These intentions survive mouse release and subsequent arrange calls for the
-current session. They are not session-restart persistence. Alt+Control+Home (or
+These intentions survive mouse release and subsequent arrange calls. Verified
+X11 restarts can also hand off committed normalized intentions and scrolling
+groups under the bounded, visible-membership rules in [restart state](restart-state.md).
+An unfinished drag contributes only its pre-grab intention; unavailable anchors
+or outputs are not assigned to another window. Alt+Control+Home (or
 `reset_layout_size`) discards the current intention and restores the native
 layout geometry, including vstack's original card size.

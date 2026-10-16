@@ -10,7 +10,8 @@ use crate::backend::api::{
 use crate::backend::common_define::WindowId;
 use crate::config::{CONFIG, MAX_N_MASTER};
 use crate::core::layout::LayoutEnum;
-use crate::core::models::{ClientKey, MonitorKey};
+use crate::core::master_resize::{ResizeContext, ResizeIntent};
+use crate::core::models::{ClientKey, MonitorKey, ScrollingState};
 use crate::core::types::Rect;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,7 @@ pub(crate) const RESTART_STATE_ENV: &str = "JWM_RESTART_STATE_V1";
 const VERSION: u32 = 1;
 const MAX_MONITORS: usize = 64;
 const MAX_CLIENTS: usize = 4096;
+const MAX_SHAPE_CONTEXTS: usize = 4096;
 const MAX_AGE_MS: u64 = 300_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +103,86 @@ struct Monitor {
     tags: Vec<Tag>,
     order: Vec<u32>,
     selected: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shapes: Vec<ShapeContext>,
+}
+
+/// Only normalized, committed layout intent crosses the exec boundary. A
+/// scrolling grouping and its resize anchor share one optional eviction unit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShapeContext {
+    tag_mask: u32,
+    layout: String,
+    resize: Option<ResizeAnchor>,
+    scrolling: Option<ScrollingShape>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResizeAnchor {
+    xid: u32,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScrollingShape {
+    columns: Vec<ScrollingColumn>,
+    focused_column: Option<usize>,
+    attach_new: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScrollingColumn {
+    clients: Vec<u32>,
+    width_factor: f32,
+    focused: Option<u32>,
+}
+
+fn canonical_shape_layout(name: &str) -> Option<&'static LayoutEnum> {
+    // from_name accepts spelling aliases (case/whitespace); wire scopes must
+    // be exact. Monocle is a valid resize scope despite not being is_tile().
+    LayoutEnum::from_name(name).filter(|layout| layout.0 == name && !layout.is_float())
+}
+
+fn exact_shape_tags(saved: u32, tagmask: u32) -> bool {
+    saved != 0 && saved & tagmask == saved
+}
+
+impl ShapeContext {
+    fn validate(&self, monitor_ids: &HashSet<u32>) -> bool {
+        let mut members = HashSet::new();
+        self.tag_mask != 0
+            && canonical_shape_layout(&self.layout).is_some()
+            && (self.resize.is_some() || self.scrolling.is_some())
+            && self.resize.as_ref().is_none_or(|anchor| {
+                monitor_ids.contains(&anchor.xid)
+                    && anchor.width.is_finite()
+                    && (0.0..=1.0).contains(&anchor.width)
+                    && anchor.height.is_finite()
+                    && (0.0..=1.0).contains(&anchor.height)
+            })
+            && self.scrolling.as_ref().is_none_or(|scrolling| {
+                self.layout == LayoutEnum::SCROLLING.0
+                    && scrolling.columns.len() <= MAX_CLIENTS
+                    && scrolling
+                        .focused_column
+                        .is_none_or(|index| index < scrolling.columns.len())
+                    && scrolling.columns.iter().all(|column| {
+                        !column.clients.is_empty()
+                            && column.width_factor.is_finite()
+                            && (0.25..=2.5).contains(&column.width_factor)
+                            && column
+                                .clients
+                                .iter()
+                                .all(|id| monitor_ids.contains(id) && members.insert(*id))
+                            && column.focused.is_none_or(|id| column.clients.contains(&id))
+                    })
+            })
+    }
 }
 
 fn default_client_fact() -> f32 {
@@ -133,6 +215,12 @@ impl RestartSnapshot {
             && self.monitors.len() <= MAX_MONITORS
             && self.clients.len() <= MAX_CLIENTS
             && self
+                .monitors
+                .iter()
+                .map(|monitor| monitor.shapes.len())
+                .sum::<usize>()
+                <= MAX_SHAPE_CONTEXTS
+            && self
                 .selected_monitor
                 .is_none_or(|index| index < self.monitors.len())
             && self.clients.iter().all(|client| {
@@ -149,6 +237,13 @@ impl RestartSnapshot {
                 .enumerate()
                 .all(|(monitor_index, monitor)| {
                     let mut ordered = HashSet::new();
+                    let mut scopes = HashSet::new();
+                    let monitor_ids: HashSet<_> = self
+                        .clients
+                        .iter()
+                        .filter(|client| client.monitor == monitor_index)
+                        .map(|client| client.xid)
+                        .collect();
                     monitor.output.stable_key.len() <= 1024
                         && monitor.output.connector.len() <= 1024
                         && monitor.output.rect[2] > 0
@@ -174,6 +269,10 @@ impl RestartSnapshot {
                         && monitor
                             .selected
                             .is_none_or(|id| monitor.order.contains(&id))
+                        && monitor.shapes.iter().all(|shape| {
+                            scopes.insert((shape.tag_mask, shape.layout.as_str()))
+                                && shape.validate(&monitor_ids)
+                        })
                         && monitor.tags.iter().all(|tag| {
                             LayoutEnum::from_name(&tag.layout).is_some()
                                 && LayoutEnum::from_name(&tag.alt).is_some()
@@ -194,6 +293,75 @@ impl RestartSnapshot {
             return Err("X11 restart snapshot exceeds property limit".into());
         }
         Ok(bytes)
+    }
+
+    /// Candidates arrive in descending importance. Validate the base before
+    /// touching optional state, then discard only a suffix of whole contexts.
+    /// Exact JSON costs avoid repeatedly serializing an oversized snapshot.
+    fn encode_with_shapes(
+        &mut self,
+        candidates: Vec<(usize, ShapeContext)>,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        let base = self.encode()?;
+        let mut size = base.len();
+        let monitor_ids: Vec<HashSet<_>> = (0..self.monitors.len())
+            .map(|index| {
+                self.clients
+                    .iter()
+                    .filter(|client| client.monitor == index)
+                    .map(|client| client.xid)
+                    .collect()
+            })
+            .collect();
+        let mut scopes = HashSet::new();
+        let mut retained = Vec::new();
+        let mut invalid = 0;
+        let mut omitted = 0;
+        for (index, shape) in candidates {
+            if !monitor_ids
+                .get(index)
+                .is_some_and(|ids| shape.validate(ids))
+                || !scopes.insert((index, shape.tag_mask, shape.layout.clone()))
+            {
+                invalid += 1;
+                continue;
+            }
+            if retained.len() == MAX_SHAPE_CONTEXTS {
+                omitted += 1;
+                continue;
+            }
+            let shapes = &mut self.monitors[index].shapes;
+            // The base omits an empty shapes field. Later entries add a comma.
+            let cost = serde_json::to_vec(&shape)?.len()
+                + if shapes.is_empty() {
+                    b",\"shapes\":[]".len()
+                } else {
+                    1
+                };
+            size += cost;
+            shapes.push(shape);
+            retained.push((index, cost));
+        }
+        while size > MAX_RESTART_PROPERTY_BYTES {
+            let (index, cost) = retained.pop().expect("base encoding already fits");
+            self.monitors[index].shapes.pop();
+            size -= cost;
+            omitted += 1;
+        }
+        if invalid != 0 {
+            log::warn!("[restart] skipped {invalid} invalid optional shape contexts");
+        }
+        if omitted != 0 {
+            log::warn!(
+                "[restart] omitted {omitted} lowest-priority optional shape contexts to fit snapshot bounds"
+            );
+        }
+        if retained.is_empty() {
+            return Ok(base);
+        }
+        let encoded = self.encode()?;
+        debug_assert_eq!(encoded.len(), size);
+        Ok(encoded)
     }
 
     fn decode(bytes: &[u8], intent: &RestartIntent) -> Option<Self> {
@@ -323,6 +491,8 @@ fn publish_restart_snapshot<E>(
 pub(crate) struct PendingRestartState {
     snapshot: Option<RestartSnapshot>,
     adopted: HashSet<u32>,
+    adopted_keys: HashMap<u32, ClientKey>,
+    pub(crate) adopting: bool,
 }
 
 fn xid(backend: &dyn Backend, window: WindowId) -> Option<u32> {
@@ -466,10 +636,11 @@ impl Jwm {
                     tags,
                     order,
                     selected,
+                    shapes: Vec::new(),
                 })
             })
             .collect::<Result<_, Box<dyn Error>>>()?;
-        let snapshot = RestartSnapshot {
+        let mut snapshot = RestartSnapshot {
             intent: intent.clone(),
             monitors,
             clients,
@@ -477,7 +648,11 @@ impl Jwm {
                 .iter()
                 .position(|(key, _)| Some(*key) == self.state.sel_mon),
         };
-        let encoded = snapshot.encode()?;
+        // A malformed/oversized base remains a hard failure. Optional capture
+        // cannot make otherwise valid client/tag/layout handoff unavailable.
+        snapshot.encode()?;
+        let shapes = self.capture_restart_shapes(backend, &live, &snapshot);
+        let encoded = snapshot.encode_with_shapes(shapes)?;
         let ids: Vec<_> = snapshot.clients.iter().map(|client| client.xid).collect();
         let result = publish_restart_snapshot(&ids, |step| -> Result<(), Box<dyn Error>> {
             match step {
@@ -525,6 +700,180 @@ impl Jwm {
             return Err(error);
         }
         Ok(Some(intent))
+    }
+
+    fn capture_restart_shapes(
+        &self,
+        backend: &dyn Backend,
+        live: &[(MonitorKey, Output)],
+        snapshot: &RestartSnapshot,
+    ) -> Vec<(usize, ShapeContext)> {
+        let saved_ids: HashMap<_, _> = snapshot
+            .clients
+            .iter()
+            .map(|client| (client.xid, client))
+            .collect();
+        let captured: HashMap<_, _> = self
+            .state
+            .clients
+            .iter()
+            .filter_map(|(key, client)| {
+                let id = xid(backend, client.win)?;
+                Some((key, *saved_ids.get(&id)?))
+            })
+            .collect();
+        let mut candidates = Vec::new();
+        let tagmask = CONFIG.load().tagmask();
+        let mut invalid_masks = 0;
+        for (index, (monitor_key, _)) in live.iter().enumerate() {
+            let monitor = &self.state.monitors[*monitor_key];
+            let eligible = |key: ClientKey, mask: u32| -> Option<u32> {
+                let client = self.state.clients.get(key)?;
+                let saved = captured.get(&key)?;
+                (saved.monitor == index
+                    && client.mon == Some(*monitor_key)
+                    && self
+                        .state
+                        .monitor_clients
+                        .get(*monitor_key)
+                        .is_some_and(|clients| clients.contains(&key))
+                    && !client.state.is_floating
+                    && !client.state.is_hidden
+                    && !client.state.is_swallowed
+                    && (client.state.is_sticky || saved.tags & mask != 0))
+                    .then_some(saved.xid)
+            };
+            let mut contexts: HashMap<(u32, &str), ShapeContext> = HashMap::new();
+            for (&(mask, layout), context) in &monitor.layout_resizes {
+                // Some(None) is an uncommitted first drag: it must not fall
+                // back to the in-progress intent.
+                let Some(intent) = context.drag_snapshot.unwrap_or(context.intent) else {
+                    continue;
+                };
+                let Some(id) = eligible(intent.client, mask) else {
+                    continue;
+                };
+                contexts
+                    .entry((mask, layout))
+                    .or_insert_with(|| ShapeContext {
+                        tag_mask: mask,
+                        layout: layout.to_owned(),
+                        resize: None,
+                        scrolling: None,
+                    })
+                    .resize = Some(ResizeAnchor {
+                    xid: id,
+                    width: intent.width,
+                    height: intent.height,
+                });
+            }
+            for (&(key, mask), scrolling) in &self.scrolling_states {
+                if key != *monitor_key {
+                    continue;
+                }
+                let mut columns = Vec::new();
+                let mut focused_column = None;
+                for (old_index, column) in scrolling.columns.iter().enumerate() {
+                    let clients: Vec<_> = column
+                        .iter()
+                        .filter_map(|key| eligible(*key, mask))
+                        .collect();
+                    if clients.is_empty() {
+                        continue;
+                    }
+                    if scrolling.focused_column == Some(old_index) {
+                        focused_column = Some(columns.len());
+                    }
+                    let focused = scrolling
+                        .focused_clients
+                        .get(old_index)
+                        .copied()
+                        .flatten()
+                        .and_then(|key| eligible(key, mask))
+                        .filter(|id| clients.contains(id));
+                    columns.push(ScrollingColumn {
+                        clients,
+                        width_factor: scrolling
+                            .column_width_factors
+                            .get(old_index)
+                            .copied()
+                            .unwrap_or(1.0),
+                        focused,
+                    });
+                }
+                if columns.is_empty() && !scrolling.attach_new_windows_to_focused_column {
+                    continue;
+                }
+                contexts
+                    .entry((mask, LayoutEnum::SCROLLING.0))
+                    .or_insert_with(|| ShapeContext {
+                        tag_mask: mask,
+                        layout: LayoutEnum::SCROLLING.0.to_owned(),
+                        resize: None,
+                        scrolling: None,
+                    })
+                    .scrolling = Some(ScrollingShape {
+                    columns,
+                    focused_column,
+                    attach_new: scrolling.attach_new_windows_to_focused_column,
+                });
+            }
+            for shape in contexts.into_values() {
+                if exact_shape_tags(shape.tag_mask, tagmask) {
+                    candidates.push((index, shape));
+                } else {
+                    invalid_masks += 1;
+                }
+            }
+        }
+        if invalid_masks != 0 {
+            log::warn!(
+                "[restart] skipped {invalid_masks} optional shape contexts with retired tag scopes"
+            );
+        }
+        candidates.sort_by(|(a_index, a), (b_index, b)| {
+            let priority = |index: usize, shape: &ShapeContext| {
+                let monitor = &self.state.monitors[live[index].0];
+                if shape.tag_mask != monitor.get_active_tags() {
+                    2
+                } else if shape.layout != monitor.lt.0 {
+                    1
+                } else {
+                    0
+                }
+            };
+            (
+                priority(*a_index, a),
+                snapshot.selected_monitor != Some(*a_index),
+                *a_index,
+                a.tag_mask,
+                a.layout.as_str(),
+            )
+                .cmp(&(
+                    priority(*b_index, b),
+                    snapshot.selected_monitor != Some(*b_index),
+                    *b_index,
+                    b.tag_mask,
+                    b.layout.as_str(),
+                ))
+        });
+        candidates
+    }
+
+    pub(crate) fn restart_has_shapes(&self) -> bool {
+        self.restart_state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot
+                    .monitors
+                    .iter()
+                    .any(|monitor| !monitor.shapes.is_empty())
+            })
+    }
+
+    pub(crate) fn restart_adoption_in_progress(&self) -> bool {
+        self.restart_state.adopting
     }
 
     /// Called after selection acquisition, but before setup/adoption. A failed
@@ -661,6 +1010,7 @@ impl Jwm {
         client.state.tags = tags;
         client.state.client_fact = saved.client_fact;
         self.restart_state.adopted.insert(id);
+        self.restart_state.adopted_keys.insert(id, key);
         Ok(true)
     }
 
@@ -780,6 +1130,105 @@ impl Jwm {
                 if let Some(stack) = self.state.monitor_stack.get_mut(key) {
                     stack.retain(|entry| *entry != selected);
                     stack.insert(0, selected);
+                }
+            }
+        }
+        self.restore_restart_shapes(backend);
+    }
+
+    /// A saved XID is usable only through the generation-verified slotmap key.
+    /// A new client reusing the XID or slot cannot inherit the old shape.
+    fn restore_restart_shapes(&mut self, backend: &dyn Backend) {
+        let Some(snapshot) = self.restart_state.snapshot.as_ref() else {
+            return;
+        };
+        let live = live_outputs(self, backend);
+        let outputs: Vec<_> = live.iter().map(|(_, output)| output.clone()).collect();
+        let sources: Vec<_> = snapshot
+            .monitors
+            .iter()
+            .map(|monitor| monitor.output.clone())
+            .collect();
+        let tagmask = CONFIG.load().tagmask();
+        let mut claimed = HashSet::new();
+        for saved in &snapshot.monitors {
+            let Some(index) = exact_output(&saved.output, &outputs, &sources) else {
+                continue;
+            };
+            if !claimed.insert(index) {
+                continue;
+            }
+            let monitor_key = live[index].0;
+            for shape in &saved.shapes {
+                // Clamping an exact scope could merge separate workspaces and
+                // let a retired tag overwrite a surviving tag's shape.
+                if !exact_shape_tags(shape.tag_mask, tagmask) {
+                    continue;
+                }
+                let Some(layout) = canonical_shape_layout(&shape.layout) else {
+                    continue;
+                };
+                let eligible = |id: u32| -> Option<ClientKey> {
+                    let key = *self.restart_state.adopted_keys.get(&id)?;
+                    let client = self.state.clients.get(key)?;
+                    (xid(backend, client.win) == Some(id)
+                        && client.mon == Some(monitor_key)
+                        && self
+                            .state
+                            .monitor_clients
+                            .get(monitor_key)
+                            .is_some_and(|clients| clients.contains(&key))
+                        && !client.state.is_floating
+                        && !client.state.is_hidden
+                        && !client.state.is_swallowed
+                        && (client.state.is_sticky || client.state.tags & shape.tag_mask != 0))
+                        .then_some(key)
+                };
+                let resize = shape.resize.as_ref().and_then(|anchor| {
+                    Some(ResizeIntent {
+                        client: eligible(anchor.xid)?,
+                        width: anchor.width,
+                        height: anchor.height,
+                    })
+                });
+                let scrolling = shape.scrolling.as_ref().map(|saved| {
+                    let mut restored = ScrollingState::new();
+                    restored.attach_new_windows_to_focused_column = saved.attach_new;
+                    for (old_index, column) in saved.columns.iter().enumerate() {
+                        let clients: Vec<_> = column
+                            .clients
+                            .iter()
+                            .filter_map(|id| eligible(*id))
+                            .collect();
+                        if clients.is_empty() {
+                            continue;
+                        }
+                        if saved.focused_column == Some(old_index) {
+                            restored.focused_column = Some(restored.columns.len());
+                        }
+                        let focused = column
+                            .focused
+                            .and_then(eligible)
+                            .filter(|key| clients.contains(key));
+                        restored.columns.push(clients);
+                        restored.column_width_factors.push(column.width_factor);
+                        restored.focused_clients.push(focused);
+                    }
+                    // Viewport/geometry is deliberately rebuilt by normal sync.
+                    restored
+                });
+                if let Some(scrolling) = scrolling {
+                    self.scrolling_states
+                        .insert((monitor_key, shape.tag_mask), scrolling);
+                }
+                if let Some(intent) = resize {
+                    self.state.monitors[monitor_key].layout_resizes.insert(
+                        (shape.tag_mask, layout.0),
+                        ResizeContext {
+                            intent: Some(intent),
+                            ..Default::default()
+                        },
+                    );
                 }
             }
         }
@@ -1030,6 +1479,7 @@ mod codec_tests {
                 tags: vec![tag; 4],
                 order: vec![42],
                 selected: Some(42),
+                shapes: Vec::new(),
             }],
             clients: vec![Client {
                 xid: 42,
@@ -1160,6 +1610,435 @@ mod codec_tests {
             RestartSnapshot::decode(&vec![b' '; MAX_RESTART_PROPERTY_BYTES + 1], &intent())
                 .is_none()
         );
+    }
+
+    fn shape(mask: u32) -> ShapeContext {
+        ShapeContext {
+            tag_mask: mask,
+            layout: "scrolling".into(),
+            resize: Some(ResizeAnchor {
+                xid: 42,
+                width: 0.6,
+                height: 0.7,
+            }),
+            scrolling: Some(ScrollingShape {
+                columns: vec![ScrollingColumn {
+                    clients: vec![42],
+                    width_factor: 1.5,
+                    focused: Some(42),
+                }],
+                focused_column: Some(0),
+                attach_new: true,
+            }),
+        }
+    }
+
+    #[test]
+    fn shape_codec_roundtrips_committed_metadata_without_runtime_geometry() {
+        let mut saved = snapshot();
+        saved.monitors[0].shapes.push(shape(0b101));
+        let bytes = saved.encode().unwrap();
+        assert_eq!(RestartSnapshot::decode(&bytes, &intent()), Some(saved));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let context = &value["monitors"][0]["shapes"][0];
+        assert_eq!(context["tag_mask"], 0b101);
+        assert_eq!(context["scrolling"]["attach_new"], true);
+        assert!(context.get("viewport_x").is_none());
+        assert!(context["resize"].get("frames").is_none());
+    }
+
+    #[test]
+    fn legacy_snapshots_omit_shapes_and_old_readers_fail_closed_on_new_shapes() {
+        let saved = snapshot();
+        let value = serde_json::to_value(&saved).unwrap();
+        assert!(value["monitors"][0].get("shapes").is_none());
+        assert_eq!(
+            RestartSnapshot::decode(&serde_json::to_vec(&value).unwrap(), &intent()),
+            Some(saved.clone())
+        );
+        // This is the actual previous monitor wire schema, with serde's same
+        // deny_unknown_fields rule, rather than a simulated parser.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyMonitor {
+            output: Output,
+            tag_set: [u32; 2],
+            sel_tags: usize,
+            cur_tag: usize,
+            prev_tag: usize,
+            tags: Vec<Tag>,
+            order: Vec<u32>,
+            selected: Option<u32>,
+        }
+        assert!(serde_json::from_value::<LegacyMonitor>(value["monitors"][0].clone()).is_ok());
+        let mut new = saved;
+        new.monitors[0].shapes.push(shape(1));
+        let value = serde_json::to_value(new).unwrap();
+        assert!(serde_json::from_value::<LegacyMonitor>(value["monitors"][0].clone()).is_err());
+    }
+
+    #[test]
+    fn shape_layouts_are_exact_canonical_nonfloat_including_monocle() {
+        for name in ["tile", "monocle", "fullscreen", "scrolling", "vstack"] {
+            let mut saved = snapshot();
+            let mut context = shape(1);
+            context.layout = name.into();
+            context.scrolling = None;
+            saved.monitors[0].shapes.push(context);
+            assert!(saved.encode().is_ok(), "rejected {name}");
+        }
+        for name in ["float", "unknown", "", " TILE", "Tile", "tile "] {
+            let mut saved = snapshot();
+            let mut context = shape(1);
+            context.layout = name.into();
+            context.scrolling = None;
+            saved.monitors[0].shapes.push(context);
+            assert!(saved.encode().is_err(), "accepted {name}");
+        }
+        let mut saved = snapshot();
+        let mut context = shape(1);
+        context.layout = "tile".into();
+        saved.monitors[0].shapes.push(context);
+        assert!(
+            !saved.validate(),
+            "scrolling metadata must have scrolling scope"
+        );
+    }
+
+    #[test]
+    fn shape_sizes_and_column_factors_have_finite_inclusive_bounds() {
+        for value in [-0.01, 1.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for width in [true, false] {
+                let mut saved = snapshot();
+                let mut context = shape(1);
+                let anchor = context.resize.as_mut().unwrap();
+                if width {
+                    anchor.width = value;
+                } else {
+                    anchor.height = value;
+                }
+                saved.monitors[0].shapes.push(context);
+                assert!(saved.encode().is_err());
+            }
+        }
+        for factor in [0.249, 2.501, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut saved = snapshot();
+            let mut context = shape(1);
+            context.scrolling.as_mut().unwrap().columns[0].width_factor = factor;
+            saved.monitors[0].shapes.push(context);
+            assert!(saved.encode().is_err());
+        }
+        for (width, height, factor) in [(0.0, 1.0, 0.25), (1.0, 0.0, 2.5)] {
+            let mut saved = snapshot();
+            let mut context = shape(1);
+            let anchor = context.resize.as_mut().unwrap();
+            anchor.width = width;
+            anchor.height = height;
+            context.scrolling.as_mut().unwrap().columns[0].width_factor = factor;
+            saved.monitors[0].shapes.push(context);
+            assert_eq!(
+                RestartSnapshot::decode(&saved.encode().unwrap(), &intent()),
+                Some(saved)
+            );
+        }
+    }
+
+    #[test]
+    fn shape_scope_membership_and_focus_are_strict() {
+        for case in 0..10 {
+            let mut saved = snapshot();
+            let mut context = shape(1);
+            match case {
+                0 => context.tag_mask = 0,
+                1 => context.resize.as_mut().unwrap().xid = 0,
+                2 => context.resize.as_mut().unwrap().xid = 99,
+                3 => context.scrolling.as_mut().unwrap().columns[0]
+                    .clients
+                    .clear(),
+                4 => context.scrolling.as_mut().unwrap().columns[0]
+                    .clients
+                    .push(42),
+                5 => {
+                    let scrolling = context.scrolling.as_mut().unwrap();
+                    scrolling.columns.push(scrolling.columns[0].clone());
+                }
+                6 => context.scrolling.as_mut().unwrap().columns[0].focused = Some(99),
+                7 => context.scrolling.as_mut().unwrap().focused_column = Some(1),
+                8 => context.scrolling.as_mut().unwrap().columns[0].clients = vec![99],
+                _ => {
+                    context.resize = None;
+                    context.scrolling = None;
+                }
+            }
+            saved.monitors[0].shapes.push(context);
+            assert!(!saved.validate(), "accepted case {case}");
+            assert!(
+                RestartSnapshot::decode(&serde_json::to_vec(&saved).unwrap(), &intent()).is_none()
+            );
+        }
+        let mut saved = snapshot();
+        saved.monitors[0].shapes = vec![shape(1), shape(1)];
+        assert!(!saved.validate());
+        // The same XID is valid in distinct exact scopes.
+        saved.monitors[0].shapes[1].tag_mask = 3;
+        assert!(saved.validate());
+        let mut second = saved.monitors[0].clone();
+        second.order.clear();
+        second.selected = None;
+        saved.monitors.push(second);
+        assert!(
+            !saved.validate(),
+            "shape XIDs cannot come from another monitor"
+        );
+    }
+
+    #[test]
+    fn empty_scrolling_attach_preference_is_meaningful() {
+        let mut saved = snapshot();
+        saved.monitors[0].shapes.push(ShapeContext {
+            tag_mask: 1,
+            layout: "scrolling".into(),
+            resize: None,
+            scrolling: Some(ScrollingShape {
+                columns: Vec::new(),
+                focused_column: None,
+                attach_new: true,
+            }),
+        });
+        assert_eq!(
+            RestartSnapshot::decode(&saved.encode().unwrap(), &intent()),
+            Some(saved)
+        );
+    }
+
+    #[test]
+    fn shape_unknown_fields_are_rejected_at_every_level() {
+        let mut saved = snapshot();
+        saved.monitors[0].shapes.push(shape(1));
+        for level in 0..4 {
+            let mut value = serde_json::to_value(&saved).unwrap();
+            let shape = &mut value["monitors"][0]["shapes"][0];
+            let object = match level {
+                0 => shape,
+                1 => &mut shape["resize"],
+                2 => &mut shape["scrolling"],
+                _ => &mut shape["scrolling"]["columns"][0],
+            };
+            object
+                .as_object_mut()
+                .unwrap()
+                .insert("future".into(), true.into());
+            assert!(
+                RestartSnapshot::decode(&serde_json::to_vec(&value).unwrap(), &intent()).is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_shape_scopes_are_dropped_not_clamped_when_tags_shrink() {
+        assert!(exact_shape_tags(0b101, 0b111));
+        assert!(exact_shape_tags(0x80000000, u32::MAX));
+        assert!(!exact_shape_tags(0b101, 0b011));
+        assert!(!exact_shape_tags(0, 0b111));
+        assert!(!exact_shape_tags(1, 0));
+    }
+
+    #[test]
+    fn shape_context_limit_is_global_across_monitors() {
+        let mut saved = snapshot();
+        saved.monitors[0].shapes = (1..=MAX_SHAPE_CONTEXTS as u32).map(shape).collect();
+        assert!(saved.validate());
+        let mut second = saved.monitors[0].clone();
+        second.order.clear();
+        second.selected = None;
+        second.shapes = vec![ShapeContext {
+            tag_mask: 1,
+            layout: "scrolling".into(),
+            resize: None,
+            scrolling: Some(ScrollingShape {
+                columns: Vec::new(),
+                focused_column: None,
+                attach_new: true,
+            }),
+        }];
+        saved.monitors.push(second);
+        assert!(!saved.validate());
+    }
+
+    #[test]
+    fn optional_budget_evicts_a_deterministic_suffix_of_whole_contexts() {
+        let mut saved = snapshot();
+        let base = saved.clone();
+        let candidates: Vec<_> = (1..=MAX_SHAPE_CONTEXTS as u32 + 1)
+            .map(|mask| (0, shape(mask)))
+            .collect();
+        let encoded = saved.encode_with_shapes(candidates.clone()).unwrap();
+        assert!(encoded.len() <= MAX_RESTART_PROPERTY_BYTES);
+        assert!(!saved.monitors[0].shapes.is_empty());
+        assert!(saved.monitors[0].shapes.len() < MAX_SHAPE_CONTEXTS);
+        for (index, shape) in saved.monitors[0].shapes.iter().enumerate() {
+            assert_eq!(shape, &candidates[index].1);
+            assert!(shape.resize.is_some() && shape.scrolling.is_some());
+        }
+        let retained = saved.monitors[0].shapes.len();
+        let mut over = saved.clone();
+        over.monitors[0].shapes.push(candidates[retained].1.clone());
+        assert!(over.encode().is_err());
+        let mut again = base.clone();
+        assert_eq!(again.encode_with_shapes(candidates).unwrap(), encoded);
+        let mut stripped = saved;
+        stripped.monitors[0].shapes.clear();
+        assert_eq!(stripped, base);
+        assert!(RestartSnapshot::decode(&encoded, &intent()).is_some());
+    }
+
+    #[test]
+    fn optional_budget_accounts_for_each_monitor_field_and_evicted_last_entry() {
+        let mut saved = snapshot();
+        let mut second = saved.monitors[0].clone();
+        second.output.stable_key = "panel-2".into();
+        second.output.connector = "DP-2".into();
+        second.order.clear();
+        second.selected = None;
+        saved.monitors.push(second);
+        let base = saved.clone();
+        let empty = |mask| ShapeContext {
+            tag_mask: mask,
+            layout: "scrolling".into(),
+            resize: None,
+            scrolling: Some(ScrollingShape {
+                columns: Vec::new(),
+                focused_column: None,
+                attach_new: true,
+            }),
+        };
+        let mut candidates = vec![(1, empty(1)), (0, shape(1))];
+        candidates.extend((2..1000).map(|mask| (0, shape(mask))));
+        // This lone low-priority entry must disappear with its field overhead
+        // if the other monitor already fills the snapshot budget.
+        candidates.push((1, empty(2)));
+        let bytes = saved.encode_with_shapes(candidates).unwrap();
+        assert_eq!(saved.monitors[1].shapes, vec![empty(1)]);
+        assert_eq!(
+            RestartSnapshot::decode(&bytes, &intent()),
+            Some(saved.clone())
+        );
+        for monitor in &mut saved.monitors {
+            monitor.shapes.clear();
+        }
+        assert_eq!(saved, base);
+    }
+
+    #[test]
+    fn invalid_optional_context_cannot_poison_valid_base_or_other_shapes() {
+        let mut saved = snapshot();
+        let mut invalid = shape(1);
+        invalid.resize.as_mut().unwrap().width = f64::NAN;
+        let encoded = saved
+            .encode_with_shapes(vec![
+                (0, invalid),
+                (1, shape(1)),
+                (0, shape(2)),
+                (0, shape(2)),
+            ])
+            .unwrap();
+        assert_eq!(saved.monitors[0].shapes, vec![shape(2)]);
+        assert!(RestartSnapshot::decode(&encoded, &intent()).is_some());
+        let mut invalid_base = snapshot();
+        invalid_base.clients[0].client_fact = f32::NAN;
+        assert!(
+            invalid_base
+                .encode_with_shapes(vec![(0, shape(1))])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_property_limit_base_survives_eviction_of_all_optional_shapes() {
+        let mut saved = snapshot();
+        for index in 1..=32 {
+            let mut monitor = saved.monitors[0].clone();
+            monitor.output.stable_key = format!("panel-{index}");
+            monitor.output.connector = format!("DP-{index}");
+            monitor.order.clear();
+            monitor.selected = None;
+            saved.monitors.push(monitor);
+        }
+        // ASCII padding has exactly its byte length in JSON. Recheck after
+        // each bounded field rather than serializing once per padding byte.
+        let mut remaining = MAX_RESTART_PROPERTY_BYTES - serde_json::to_vec(&saved).unwrap().len();
+        'padding: for index in 0..saved.monitors.len() {
+            for stable_key in [true, false] {
+                let output = &mut saved.monitors[index].output;
+                let field = if stable_key {
+                    &mut output.stable_key
+                } else {
+                    &mut output.connector
+                };
+                field.push_str(&"x".repeat(remaining.min(1024 - field.len())));
+                remaining = MAX_RESTART_PROPERTY_BYTES - serde_json::to_vec(&saved).unwrap().len();
+                if remaining == 0 {
+                    break 'padding;
+                }
+            }
+        }
+        assert_eq!(remaining, 0, "fixture needs enough bounded string capacity");
+        let base = saved.encode().unwrap();
+        assert_eq!(base.len(), MAX_RESTART_PROPERTY_BYTES);
+        assert_eq!(
+            RestartSnapshot::decode(&base, &intent()),
+            Some(saved.clone())
+        );
+        let original = saved.clone();
+        let encoded = saved.encode_with_shapes(vec![(0, shape(1))]).unwrap();
+        assert_eq!(encoded, base);
+        assert_eq!(
+            saved, original,
+            "every optional context and its field must be evicted"
+        );
+        assert!(
+            saved
+                .monitors
+                .iter()
+                .all(|monitor| monitor.shapes.is_empty())
+        );
+
+        // One extra valid ASCII byte crosses the strict property boundary.
+        let mut oversized = original;
+        let connector = &mut oversized.monitors.last_mut().unwrap().output.connector;
+        assert!(connector.len() < 1024);
+        connector.push('x');
+        assert!(oversized.validate());
+        let bytes = serde_json::to_vec(&oversized).unwrap();
+        assert_eq!(bytes.len(), MAX_RESTART_PROPERTY_BYTES + 1);
+        assert!(RestartSnapshot::decode(&bytes, &intent()).is_none());
+        assert!(oversized.encode_with_shapes(vec![(0, shape(1))]).is_err());
+        assert!(
+            oversized
+                .monitors
+                .iter()
+                .all(|monitor| monitor.shapes.is_empty())
+        );
+    }
+
+    #[test]
+    fn oversized_base_is_still_a_hard_failure_before_optional_mutation() {
+        let mut saved = snapshot();
+        saved.clients.clear();
+        for id in 1..=MAX_CLIENTS as u32 {
+            saved.clients.push(Client {
+                xid: id,
+                tags: 1,
+                monitor: 0,
+                client_fact: 1.0,
+            });
+        }
+        saved.monitors[0].order = saved.clients.iter().map(|client| client.xid).collect();
+        saved.monitors[0].selected = None;
+        assert!(saved.validate());
+        assert!(saved.encode_with_shapes(vec![(0, shape(1))]).is_err());
+        assert!(saved.monitors[0].shapes.is_empty());
     }
 
     #[test]

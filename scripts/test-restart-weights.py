@@ -29,15 +29,21 @@ use std::error::Error;
 use std::ops::{Index,IndexMut};
 #[derive(Clone,Copy,Debug,PartialEq,Eq)] struct Rect{x:i32,y:i32,w:i32,h:i32}
 impl Rect {fn new(x:i32,y:i32,w:i32,h:i32)->Self{Self{x,y,w,h}}}
-const VERSION:u32=1; const MAX_MONITORS:usize=64; const MAX_CLIENTS:usize=4096; const MAX_N_MASTER:u32=32;
-struct LayoutEnum; impl LayoutEnum {fn from_name(s:&str)->Option<Self>{["tile","float"].contains(&s).then_some(Self)}}
+const VERSION:u32=1; const MAX_MONITORS:usize=64; const MAX_CLIENTS:usize=4096; const MAX_N_MASTER:u32=32; const MAX_SHAPE_CONTEXTS:usize=4096;
+struct LayoutEnum(&'static str); impl LayoutEnum {
+const TILE:Self=Self("tile");const FLOAT:Self=Self("float");const SCROLLING:Self=Self("scrolling");
+fn from_name(s:&str)->Option<&'static Self>{match s {"tile"=>Some(&Self::TILE),"float"=>Some(&Self::FLOAT),"scrolling"=>Some(&Self::SCROLLING),_=>None}}
+fn is_float(&self)->bool{self.0=="float"}
+}
 ''']
-for name in ['RestartIntent','Output','Tag','Monitor','Client','RestartSnapshot']:
+for name in ['RestartIntent','Output','Tag','Monitor','ShapeContext','ResizeAnchor','ScrollingShape','ScrollingColumn','Client','RestartSnapshot']:
     body = item(restart, ('pub(crate) struct ' if name in ['RestartIntent','RestartSnapshot'] else 'struct ') + name)
     body = re.sub(r'\s*#\[serde[^\n]*\]\n', '\n', body)
     parts.append('#[derive(Clone,Debug,PartialEq)]\n' + body)
-parts.append('impl RestartSnapshot {' + item(restart, '    fn validate(') + '}')
-for name in ['default_client_fact','exact_output','fallback_output','legal_tags']:
+parts.append('impl ShapeContext {' + item(restart, '    fn validate(&self, monitor_ids:') + '}')
+snapshot_impl = restart[restart.index('impl RestartSnapshot {'):]
+parts.append('impl RestartSnapshot {' + item(snapshot_impl, '    fn validate(') + '}')
+for name in ['canonical_shape_layout','exact_shape_tags','default_client_fact','exact_output','fallback_output','legal_tags']:
     parts.append(item(restart, 'fn ' + name + '('))
 for name in ['LayoutClient','LayoutParams','LayoutResult']:
     parts.append('#[derive(Clone)]\n' + item(layout,'pub struct ' + name))
@@ -53,7 +59,7 @@ impl Index<usize> for Clients {type Output=LiveClient;fn index(&self,key:usize)-
 impl IndexMut<usize> for Clients {fn index_mut(&mut self,key:usize)->&mut LiveClient{&mut self.0[key]}}
 struct LiveMonitor; impl LiveMonitor {fn get_active_tags(&self)->u32{1}}
 struct State {clients:Clients,monitors:Vec<LiveMonitor>}
-struct Pending {snapshot:Option<RestartSnapshot>,adopted:HashSet<u32>}
+struct Pending {snapshot:Option<RestartSnapshot>,adopted:HashSet<u32>,adopted_keys:HashMap<u32,ClientKey>}
 struct Jwm {state:State,restart_state:Pending,outputs:Vec<(usize,Output)>}
 struct Config; static CONFIG:Config=Config; impl Config {fn load(&self)->&Self{self} fn tagmask(&self)->u32{7}}
 enum RestartProperty {ClientGeneration}
@@ -74,13 +80,13 @@ parts.append(r'''
 fn fixture()->(Jwm,Mock) {
  let outputs:Vec<_>=(0..2).map(|i|(i,Output{stable_key:format!("panel-{i}"),connector:format!("DP-{i}"),rect:[i as i32*1920,0,1920,1080]})).collect();
  let clients:Vec<_>=(0..4).map(|i|Client{xid:10+i,tags:1,monitor:(i/2) as usize,client_fact:[0.5,2.5,1.5,3.5][i as usize]}).collect();
- let monitors=outputs.iter().map(|(i,o)|Monitor{output:o.clone(),tag_set:[1,2],sel_tags:0,cur_tag:1,prev_tag:2,tags:vec![Tag{layout:"tile".into(),alt:"float".into(),n_master:0,m_fact:0.55,gap:8,show_bar:true};4],order:vec![10+*i as u32*2,11+*i as u32*2],selected:None}).collect();
+ let monitors=outputs.iter().map(|(i,o)|Monitor{output:o.clone(),tag_set:[1,2],sel_tags:0,cur_tag:1,prev_tag:2,tags:vec![Tag{layout:"tile".into(),alt:"float".into(),n_master:0,m_fact:0.55,gap:8,show_bar:true};4],order:vec![10+*i as u32*2,11+*i as u32*2],selected:None,shapes:vec![]}).collect();
  let intent=RestartIntent{version:1,pid:42,captured_ms:0,generation:"abc".into()};
  let markers=clients.iter().map(|c|(c.xid,b"abc".to_vec())).collect();
  let live=clients.iter().map(|c|LiveClient{win:c.xid,mon:Some(0),state:ClientState{tags:1,client_fact:1.0}}).collect();
  let snapshot=RestartSnapshot{intent,monitors,clients,selected_monitor:Some(0)};
  assert!(snapshot.validate());
- (Jwm{state:State{clients:Clients(live),monitors:vec![LiveMonitor,LiveMonitor]},restart_state:Pending{snapshot:Some(snapshot),adopted:HashSet::new()},outputs},Mock{markers,fail:false})
+ (Jwm{state:State{clients:Clients(live),monitors:vec![LiveMonitor,LiveMonitor]},restart_state:Pending{snapshot:Some(snapshot),adopted:HashSet::new(),adopted_keys:HashMap::new()},outputs},Mock{markers,fail:false})
 }
 #[test] fn invalid_weights_rejected_and_boundaries_valid() {
  let (mut wm,_)=fixture();let s=wm.restart_state.snapshot.as_mut().unwrap();

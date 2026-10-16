@@ -10,6 +10,8 @@ server keeps application windows alive. JWM hands the replacement process:
   bar preference, including the all-tags layout slot.
 - The managed client order (tiled group before floating group) and current
   selected window where it remains eligible for focus.
+- Optional committed physical resize intentions and scrolling column groups,
+  width factors, per-column focus, and new-window attachment mode.
 
 The one-restart snapshot takes precedence over new-window placement rules and
 closed-window memory. Ordinary minimized, sticky, and swallowed windows are
@@ -42,9 +44,12 @@ isolation boundary between clients on the same X server. Normal starts do not
 adopt abandoned restart snapshots, and applications are never relaunched.
 
 All property writes are checked and read back before destructive cleanup.
-An incomplete or oversized snapshot cancels restart and leaves the current
-JWM running, with an error toast and log. The snapshot limit is 64 KiB;
-partial state is never silently truncated. Startup consumes the snapshot only
+An incomplete or oversized base snapshot cancels restart and leaves the current
+JWM running, with an error toast and log. The snapshot limit remains 64 KiB.
+Optional shape contexts are lower priority: if they do not fit, complete contexts
+are omitted deterministically with a warning, preserving the base client, tag,
+layout, and order handoff. A scrolling grouping and its resize anchor are one
+atomic context; neither is partially truncated. Startup consumes the snapshot only
 after setup succeeds; bounded startup retries and the existing exec-failure
 fallback can reuse it. Cleanup errors are logged, and leftover properties
 cannot enable restoration without the matching one-shot intent.
@@ -53,12 +58,42 @@ Existing `[[layout.tags]]` persistence remains the durable default for future
 sessions. A restart snapshot also preserves current layout values when the
 configuration file is read-only. No configuration migration is required.
 
+## Committed layout shapes
+
+A shape belongs to an exact output identity, tag mask, and canonical layout.
+Resize targets are normalized fractions of today's usable output, with one
+verified live anchor; fresh native layout frames and size hints constrain them.
+Pixel rectangles and scrolling viewport offsets are not saved. Only the
+pre-grab intention is captured during an unfinished pointer resize.
+
+Scrolling preserves the order of surviving groups and members, each group's
+width and remembered focus, and the existing new-window attachment policy.
+Hidden, minimized, swallowed, floating, removed, or otherwise ineligible members
+are pruned under the existing visible-membership contract. There is no dormant
+hidden-column or hidden-anchor promise. New windows use ordinary insertion
+policy. The saved monitor selection retains normal precedence over column focus.
+
+Shape references must pass the existing generation check and retain the exact
+adopted runtime client identity. Missing or ambiguous outputs never transfer a
+shape to a fallback output. If configured tags change, an optional context whose
+exact mask is no longer legal is dropped rather than clipped into another scope.
+The base window placement fallback is unchanged.
+
+For a verified shape handoff, initial adoption defers layout arrangement until
+the root-child scan completes and order, groups, and intentions are restored.
+Both ordinary arrange and focus-triggered direct layout arrangement honor the
+barrier. A scan/manage error releases it and retains the handoff for the existing
+retry path; successful adoption then arranges from the complete restored state.
+
+Old snapshots without optional shapes still load. Older strict binaries reject
+new snapshots containing added fields and use ordinary window adoption on a
+downgrade; this transient handoff does not promise reverse-version compatibility.
+
 ## Scope
 
 This change does not alter Wayland restart behavior or promise to preserve
 Wayland/XWayland client connections across compositor replacement. It does not
-persist layout-local master resize intentions, scrolling column structure,
-full per-tag focus history, or a complete MRU stack. The manual
+persist full per-tag focus history or a complete MRU stack. The manual
 `save_session`/`restore_session` feature remains separate.
 
 Pure state/codec and mock-backend tests cover identity, hotplug matching,

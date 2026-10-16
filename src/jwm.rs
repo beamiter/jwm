@@ -1439,22 +1439,37 @@ impl Jwm {
             return Ok(());
         }
         info!("[setup_initial_windows] Scanning {} windows", windows.len());
-        for win in windows {
-            let disposition = {
-                let mut queries = BackendInitialWindowAdoptionQueries { backend };
-                inspect_initial_window(&mut queries, win)?
-            };
-            match disposition {
-                InitialWindowDisposition::Manage(geometry) => {
-                    self.manage(backend, win, &geometry)?
+        // A shape is meaningful only after the authoritative scan has adopted
+        // every surviving member. Do not arrange partial scrolling columns or
+        // erase a saved anchor while manage is still rebuilding membership.
+        let defer_arrange = self.restart_has_shapes();
+        self.restart_state.adopting = defer_arrange;
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            for win in windows {
+                let disposition = {
+                    let mut queries = BackendInitialWindowAdoptionQueries { backend };
+                    inspect_initial_window(&mut queries, win)?
+                };
+                match disposition {
+                    InitialWindowDisposition::Manage(geometry) => {
+                        self.manage(backend, win, &geometry)?
+                    }
+                    InitialWindowDisposition::ObserveUnmanaged => {
+                        self.refresh_unmanaged_x11_strut(backend, win);
+                    }
+                    InitialWindowDisposition::Gone | InitialWindowDisposition::Ignore => {}
                 }
-                InitialWindowDisposition::ObserveUnmanaged => {
-                    self.refresh_unmanaged_x11_strut(backend, win);
-                }
-                InitialWindowDisposition::Gone | InitialWindowDisposition::Ignore => {}
             }
+            self.finish_restart_adoption(backend);
+            Ok(())
+        })();
+        // Always release the barrier, including inspect/manage failures. The
+        // existing caller retains the generation-bound handoff on failure.
+        self.restart_state.adopting = false;
+        result?;
+        if defer_arrange {
+            self.arrange(backend, None);
         }
-        self.finish_restart_adoption(backend);
         Ok(())
     }
 
