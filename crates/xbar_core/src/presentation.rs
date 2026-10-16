@@ -1746,8 +1746,15 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             state: spec.state,
         });
 
+        // Preserve the original label box and placement for every state. Use
+        // the renderer's actual ink/logical height, including a 1px outline
+        // allowance, to avoid painting the dash over tall custom-font glyphs.
         let text_bounds = bounds.inset(self.horizontal_text_padding(), 0.0);
         let text = self.fit_text(&spec.text, text_bounds.width, 0.0);
+        let marker_fits = tag_colors.is_some() && spec.state.occupied && bounds.width >= 10.0 && {
+            let text_height = self.measurer.measure(&text, self.font_size()).height;
+            text_height.is_finite() && bounds.height >= text_height.max(0.0) + 12.0
+        };
         if !text.is_empty() && !text_bounds.is_empty() {
             scene.nodes.push(SceneNode::Text {
                 id: spec.id,
@@ -1762,6 +1769,27 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     palette.text
                 },
                 align: TextAlign::Center,
+                state: spec.state,
+            });
+        }
+
+        // Occupancy is independent of selection and urgency. A high-contrast
+        // bottom dash also distinguishes these states without relying on color.
+        if let Some(colors) = tag_colors
+            && spec.state.occupied
+            && marker_fits
+        {
+            let center_x = bounds.x + bounds.width * 0.5;
+            let marker_y = bounds.bottom() - 4.0;
+            scene.nodes.push(SceneNode::Polyline {
+                id: spec.id,
+                bounds: Rect::new(center_x - 3.0, marker_y - 1.0, 6.0, 2.0),
+                points: vec![
+                    Point::new(center_x - 2.0, marker_y),
+                    Point::new(center_x + 2.0, marker_y),
+                ],
+                color: colors.foreground,
+                width: 2.0,
                 state: spec.state,
             });
         }
@@ -1888,7 +1916,8 @@ impl From<ControlSpec> for PillSpec {
                 selected: control.state.selected
                     || (matches!(control.id, NodeId::Tag(_)) && control.state.filled),
                 urgent: control.state.urgent,
-                occupied: control.state.occupied || control.state.filled,
+                occupied: control.state.occupied
+                    || (!matches!(control.id, NodeId::Tag(_)) && control.state.filled),
             },
             progress: control.progress.map(Percent::as_f32),
             tag_palette: None,
@@ -2495,6 +2524,132 @@ mod tests {
     }
 
     #[test]
+    fn occupancy_marker_survives_every_state_without_moving_label_or_hit_target() {
+        for sample in [0, 255] {
+            for selected in [false, true] {
+                for urgent in [false, true] {
+                    for hovered in [false, true] {
+                        let mut pair = Vec::new();
+                        for occupied in [false, true] {
+                            let tags = vec![TagState {
+                                occupied,
+                                selected,
+                                urgent,
+                                ..TagState::default()
+                            }];
+                            let id = NodeId::Tag(TagId::new(0).unwrap());
+                            let interaction = InteractionState {
+                                hovered: hovered.then_some(id),
+                                ..InteractionState::default()
+                            };
+                            let mut sample_view = view(&tags, "client");
+                            sample_view.wallpaper_luminance = Some(sample);
+                            let scene =
+                                engine().build(sample_view, Size::new(1600.0, 38.0), &interaction);
+                            let expected = TagPalette::for_wallpaper(
+                                sample_view.theme,
+                                sample_view.wallpaper_luminance,
+                                TagContrastMode::Auto,
+                            )
+                            .colors(VisualState {
+                                occupied,
+                                selected,
+                                urgent,
+                                hovered,
+                            });
+                            let markers: Vec<_> = scene
+                                .nodes_for(id)
+                                .filter_map(|node| {
+                                    if let SceneNode::Polyline {
+                                        bounds,
+                                        color,
+                                        width,
+                                        ..
+                                    } = node
+                                    {
+                                        Some((*bounds, *color, *width))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            assert_eq!(markers.len(), usize::from(occupied));
+                            if occupied {
+                                assert_eq!(markers[0].0.width, 6.0);
+                                assert_eq!(markers[0].0.height, 2.0);
+                                assert_eq!(markers[0].1, expected.foreground);
+                                assert_eq!(markers[0].2, 2.0);
+                            }
+                            let label = scene
+                                .nodes_for(id)
+                                .find_map(|node| {
+                                    if let SceneNode::Text { bounds, .. } = node {
+                                        Some(*bounds)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap();
+                            pair.push((scene.hits, label));
+                        }
+                        assert_eq!(pair[0], pair[1]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cramped_tag_typography_keeps_original_label_bounds_and_occupied_material() {
+        struct TallGlyph(f32);
+        impl TextMeasurer for TallGlyph {
+            fn measure(&self, text: &str, size: f32) -> Size {
+                Size::new(text.chars().count() as f32 * size * 0.5, self.0)
+            }
+        }
+        let id = NodeId::Tag(TagId::new(0).unwrap());
+        let tags = vec![TagState {
+            occupied: true,
+            ..TagState::default()
+        }];
+        for (height, expected_marker) in [(18.0, true), (19.0, false), (30.0, false)] {
+            let engine = LayoutEngine::new(PresentationConfig::default(), TallGlyph(height));
+            let scene = engine.build(
+                view(&tags, "client"),
+                Size::new(1600.0, 42.0),
+                &InteractionState::default(),
+            );
+            let hit = scene.hits.iter().find(|hit| hit.id == id).unwrap();
+            let label_bounds = scene
+                .nodes_for(id)
+                .find_map(|node| {
+                    if let SceneNode::Text { bounds, .. } = node {
+                        Some(*bounds)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert_eq!(
+                label_bounds,
+                hit.bounds
+                    .inset(engine.config().pill_horizontal_padding, 0.0)
+            );
+            assert_eq!(
+                scene
+                    .nodes_for(id)
+                    .any(|node| matches!(node, SceneNode::Polyline { .. })),
+                expected_marker
+            );
+            let expected =
+                TagPalette::for_wallpaper(ThemeMode::Dark, None, TagContrastMode::Auto).occupied;
+            assert!(scene.nodes_for(id).any(
+                |node| matches!(node, SceneNode::RoundedRect { fill, .. } if *fill == expected.fill)
+            ));
+        }
+    }
+
+    #[test]
     fn wallpaper_adaptation_changes_only_tag_paint_and_preserves_layout() {
         let tags = vec![TagState::default(); 3];
         let mut dark = view(&tags, "client");
@@ -2543,6 +2698,14 @@ mod tests {
         )
         .selected;
         assert!(scene.nodes_for(NodeId::Tag(TagId::new(0).unwrap())).any(|node| matches!(node, SceneNode::RoundedRect { fill, state, .. } if *fill == expected.fill && state.selected)));
+        assert!(
+            scene
+                .nodes_for(NodeId::Tag(TagId::new(0).unwrap()))
+                .all(|node| {
+                    !node.visual_state().occupied && !matches!(node, SceneNode::Polyline { .. })
+                }),
+            "filled/selected without clients must remain visibly empty"
+        );
     }
 
     #[test]

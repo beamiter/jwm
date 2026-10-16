@@ -56,7 +56,7 @@ use masonry::core::{
 use masonry::imaging::Painter;
 use masonry::kurbo::{Axis, Point, Size};
 use masonry::layers::Tooltip;
-use masonry::layout::{Dim, LenReq, Length};
+use masonry::layout::{Dim, LenReq, Length, UnitPoint};
 use masonry::peniko::Color;
 use masonry::properties::{
     Background, BorderColor, BorderWidth, ContentColor, CornerRadius, Dimensions, Padding,
@@ -72,7 +72,7 @@ use xilem::core::{
 use xilem::style::Style;
 use xilem::view::{
     CrossAxisAlignment, FlexSpacer, PointerButton, button, button_any_pointer, flex, label,
-    sized_box, task_raw,
+    sized_box, task_raw, zstack, zstack_item,
 };
 use xilem::{EventLoop, ViewCtx, WidgetView, WindowOptions, Xilem};
 
@@ -836,6 +836,8 @@ fn monitor_num_to_icon(n: i32) -> String {
 fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar> + use<> {
     let label_str = TAG_ICONS[index].to_string();
     let colors = state.tag_colors(index, false);
+    let view = state.runtime.view();
+    let occupied = view.wm_available && view.tags.get(index).is_some_and(|tag| tag.occupied);
     let convert = |c: xbar_core::presentation::Rgba| {
         Color::from_rgba8(
             (c.red * 255.0).round() as u8,
@@ -851,7 +853,24 @@ fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar
     let tab_width = state.workspace_tab_width();
 
     let inner = label(label_str).text_size(TAB_FONT_SIZE).color(text_color);
-    sized_box(
+    let marker = sized_box(zstack(()))
+        .dims(Dimensions::new(
+            Dim::Fixed(Length::px(6.0)),
+            Dim::Fixed(Length::px(2.0)),
+        ))
+        .background(if occupied {
+            text_color
+        } else {
+            Color::TRANSPARENT
+        })
+        .corner_radius(Length::px(1.0));
+    // Paint the marker below the transparent button, so the full existing
+    // button remains the top pointer target. Empty tags keep identical bounds.
+    sized_box(zstack((
+        zstack_item(
+            sized_box(marker).padding(Padding::bottom(Length::px(3.0))),
+            UnitPoint::BOTTOM,
+        ),
         button(inner, move |s: &mut XilemBar| {
             if let Some(tag) = TagId::new(index) {
                 s.dispatch_wm(UserAction::ViewTag(tag));
@@ -861,8 +880,9 @@ fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar
         // Keep the existing button padding and border geometry, but let only
         // the shared material on the outer SizedBox paint the tag.
         .prop(Background::Color(Color::TRANSPARENT))
-        .prop(BorderColor::new(Color::TRANSPARENT)),
-    )
+        .prop(BorderColor::new(Color::TRANSPARENT))
+        .dims(Dimensions::new(Dim::Stretch, Dim::Stretch)),
+    )))
     .dims(Dimensions::new(
         Dim::Fixed(Length::px(tab_width)),
         Dim::Stretch,

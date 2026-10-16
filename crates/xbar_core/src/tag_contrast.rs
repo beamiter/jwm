@@ -52,8 +52,8 @@ impl TagPalette {
             },
         };
         let (empty, occupied, hovered, foreground) = match material {
-            ThemeMode::Dark => (28, 48, 60, Rgba::rgb8(255, 255, 255)),
-            ThemeMode::Light => (248, 224, 208, Rgba::rgb8(0, 0, 0)),
+            ThemeMode::Dark => (16, 64, 72, Rgba::rgb8(255, 255, 255)),
+            ThemeMode::Light => (248, 200, 188, Rgba::rgb8(0, 0, 0)),
         };
         let neutral = |level, occupied: bool| {
             let mut fill = Rgba::rgb8(level, level, level);
@@ -64,9 +64,9 @@ impl TagPalette {
                 stroke: Some(Stroke {
                     color: match (material, occupied) {
                         (ThemeMode::Dark, false) => Rgba::rgb8(160, 160, 160),
-                        (ThemeMode::Dark, true) => Rgba::rgb8(176, 176, 176),
+                        (ThemeMode::Dark, true) => Rgba::rgb8(224, 224, 224),
                         (ThemeMode::Light, false) => Rgba::rgb8(128, 128, 128),
-                        (ThemeMode::Light, true) => Rgba::rgb8(88, 88, 88),
+                        (ThemeMode::Light, true) => Rgba::rgb8(56, 56, 56),
                     },
                     width: if occupied { 1.5 } else { 1.0 },
                 }),

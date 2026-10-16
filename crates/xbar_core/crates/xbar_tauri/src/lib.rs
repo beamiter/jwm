@@ -652,6 +652,8 @@ fn tag_palette_css(palette: xbar_core::tag_contrast::TagPalette) -> String {
     for (class, colors) in [
         ("default", palette.empty),
         ("occupied", palette.occupied),
+        ("default:hover:not(:disabled)", palette.hovered),
+        ("occupied:hover:not(:disabled)", palette.hovered),
         ("selected", palette.selected),
         ("filtered", palette.selected),
         ("urgent", palette.urgent),
@@ -659,13 +661,21 @@ fn tag_palette_css(palette: xbar_core::tag_contrast::TagPalette) -> String {
         let fill = rgba(colors.fill);
         let foreground = rgba(colors.foreground);
         let border = rgba(colors.stroke.map_or(colors.fill, |s| s.color));
-        let width = colors.stroke.map_or(0.0, |s| s.width);
+        let inset = colors.stroke.map_or(0.0, |s| (s.width - 1.0).max(0.0));
         // :is gives these rules ID specificity over legacy nth-child/hover rules,
         // while still matching every frontend's existing root class.
         css.push_str(&format!(
-            ":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.state-{class} {{ background: {fill} !important; color: {foreground} !important; border: {width}px solid {border} !important; text-shadow: none !important; opacity: 1 !important; box-shadow: none !important; }}\n"));
+            ":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.state-{class} {{ background: {fill} !important; color: {foreground} !important; border: 1px solid {border} !important; text-shadow: none !important; opacity: 1 !important; box-shadow: inset 0 0 0 {inset}px {border} !important; }}\n"));
     }
-    css.push_str(":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::before { display: none !important; }");
+    css.push_str(r#"
+/* A 1px border plus the 2px inner offset puts the marker 3px above the outer edge.
+ * Absolute positioning and equal icon offsets preserve every tag's geometry. */
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button { transform: none !important; }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button .nf-icon { transform: translateY(-1px); }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::before { display: none !important; }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::after { content: "" !important; position: absolute !important; top: auto !important; right: auto !important; bottom: 2px !important; left: 50% !important; transform: translateX(-50%) !important; width: 6px !important; height: 2px !important; border: 0 !important; border-radius: 1px !important; padding: 0 !important; margin: 0 !important; background: currentColor !important; color: inherit !important; box-shadow: none !important; text-shadow: none !important; opacity: 1 !important; visibility: hidden !important; pointer-events: none !important; }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.has-clients::after { visibility: visible !important; }
+"#);
     css
 }
 
@@ -718,7 +728,13 @@ mod background_tests {
             assert!(css.contains(&format!(".buttons-container .emoji-button.state-{state}")));
         }
         assert!(css.contains("opacity: 1 !important"));
-        assert!(css.contains("rgba(28, 28, 28, 0.94)"));
+        assert!(css.contains(&format!(
+            "rgba({}, {}, {}, {})",
+            (dark.empty.fill.red * 255.0).round(),
+            (dark.empty.fill.green * 255.0).round(),
+            (dark.empty.fill.blue * 255.0).round(),
+            dark.empty.fill.alpha
+        )));
         assert!(!css.contains("background-image"));
         assert_ne!(css, tag_palette_css(light));
         assert_eq!(
@@ -729,6 +745,30 @@ mod background_tests {
             )),
             css
         );
+    }
+
+    #[test]
+    fn tag_marker_has_fixed_geometry_and_independent_occupancy() {
+        use xbar_core::{
+            ThemeMode,
+            tag_contrast::{TagContrastMode, TagPalette},
+        };
+        let css = tag_palette_css(TagPalette::for_wallpaper(
+            ThemeMode::Dark,
+            None,
+            TagContrastMode::Dark,
+        ));
+        assert_eq!(css.matches("border: 1px solid").count(), 7);
+        assert!(!css.contains("border: 2px"));
+        assert!(css.contains("box-shadow: inset 0 0 0 1px"));
+        assert!(css.contains("width: 6px !important; height: 2px !important"));
+        assert!(css.contains("visibility: hidden !important"));
+        assert!(
+            css.contains(".emoji-button.has-clients::after { visibility: visible !important; }")
+        );
+        assert!(css.contains("background: currentColor !important; color: inherit !important"));
+        assert!(css.contains("transform: none !important"));
+        assert!(css.contains(".state-occupied:hover:not(:disabled)"));
     }
 
     #[test]

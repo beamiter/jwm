@@ -356,6 +356,8 @@ body {{ color: {text}; }}
     for (class, colors) in [
         ("default", tags.empty),
         ("occupied", tags.occupied),
+        ("default:hover:not(:disabled)", tags.hovered),
+        ("occupied:hover:not(:disabled)", tags.hovered),
         ("selected", tags.selected),
         ("filtered", tags.selected),
         ("urgent", tags.urgent),
@@ -363,11 +365,19 @@ body {{ color: {text}; }}
         let fill = css_rgba(colors.fill);
         let foreground = css_rgba(colors.foreground);
         let border = css_rgba(colors.stroke.map_or(colors.fill, |s| s.color));
-        let width = colors.stroke.map_or(0.0, |s| s.width);
+        let inset = colors.stroke.map_or(0.0, |s| (s.width - 1.0).max(0.0));
         css.push_str(&format!(
-            "\n:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.state-{class} {{ background: {fill} !important; color: {foreground} !important; border: {width}px solid {border} !important; text-shadow: none !important; opacity: 1 !important; box-shadow: none !important; }}"));
+            "\n:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.state-{class} {{ background: {fill} !important; color: {foreground} !important; border: 1px solid {border} !important; text-shadow: none !important; opacity: 1 !important; box-shadow: inset 0 0 0 {inset}px {border} !important; }}"));
     }
-    css.push_str(":is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::before { display: none !important; }");
+    css.push_str(r#"
+/* A 1px border plus the 2px inner offset puts the marker 3px above the outer edge.
+ * Absolute positioning and equal icon offsets preserve every tag's geometry. */
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button { transform: none !important; }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button .nf-icon { transform: translateY(-1px); }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::before { display: none !important; }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button::after { content: "" !important; position: absolute !important; top: auto !important; right: auto !important; bottom: 2px !important; left: 50% !important; transform: translateX(-50%) !important; width: 6px !important; height: 2px !important; border: 0 !important; border-radius: 1px !important; padding: 0 !important; margin: 0 !important; background: currentColor !important; color: inherit !important; box-shadow: none !important; text-shadow: none !important; opacity: 1 !important; visibility: hidden !important; pointer-events: none !important; }
+:is(#xbar-tag-contrast, .button-row) .buttons-container .emoji-button.has-clients::after { visibility: visible !important; }
+"#);
     css
 }
 
@@ -719,13 +729,14 @@ impl ButtonState {
     }
 }
 
-fn get_button_class(index: usize, tags: &[TagState]) -> &'static str {
-    tags.get(index)
-        .map(|tag| {
-            ButtonState::from_flags(tag.filled, tag.selected, tag.urgent, tag.occupied)
-                .to_css_class()
-        })
-        .unwrap_or("emoji-button state-default")
+fn get_button_class(index: usize, tags: &[TagState]) -> String {
+    let Some(tag) = tags.get(index) else {
+        return "emoji-button state-default".to_owned();
+    };
+    let state =
+        ButtonState::from_flags(tag.filled, tag.selected, tag.urgent, tag.occupied).to_css_class();
+    let occupancy = if tag.occupied { " has-clients" } else { "" };
+    format!("{state}{occupancy}")
 }
 
 fn shared_path_from_environment() -> String {
@@ -823,6 +834,42 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn occupancy_class_survives_every_selection_and_urgency_combination() {
+        for flags in 0..16 {
+            let tag = TagState {
+                urgent: flags & 1 != 0,
+                filled: flags & 2 != 0,
+                selected: flags & 4 != 0,
+                occupied: flags & 8 != 0,
+            };
+            let classes = get_button_class(0, &[tag]);
+            assert_eq!(classes.contains("has-clients"), tag.occupied);
+            if tag.urgent {
+                assert!(classes.contains("state-urgent"));
+            }
+        }
+        assert_eq!(get_button_class(0, &[]), "emoji-button state-default");
+    }
+
+    #[test]
+    fn tag_css_reserves_a_fixed_marker_for_every_state() {
+        let config = xbar_core::config::BarConfig::default();
+        for theme in [xbar_core::ThemeMode::Dark, xbar_core::ThemeMode::Light] {
+            let css = mode_style(&config, true, None, None, theme);
+            assert_eq!(css.matches("border: 1px solid").count(), 7);
+            assert!(css.contains("width: 6px !important; height: 2px !important"));
+            assert!(css.contains("visibility: hidden !important"));
+            assert!(
+                css.contains(
+                    ".emoji-button.has-clients::after { visibility: visible !important; }"
+                )
+            );
+            assert!(css.contains("background: currentColor !important; color: inherit !important"));
+            assert!(css.contains("transform: none !important"));
+        }
+    }
+
     #[test]
     fn urgent_wins_over_filled_and_selected() {
         assert_eq!(

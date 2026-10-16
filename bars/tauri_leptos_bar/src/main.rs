@@ -250,18 +250,21 @@ const ICON_SHOT: &str = "\u{F0104}";
 const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
 
-fn button_class(tag: &TagState) -> &'static str {
-    if tag.urgent {
-        "emoji-button state-urgent"
+fn button_class(tag: &TagState) -> String {
+    let state = if tag.urgent {
+        "urgent"
     } else if tag.filled {
-        "emoji-button state-filtered"
+        "filtered"
     } else if tag.selected {
-        "emoji-button state-selected"
+        "selected"
     } else if tag.occupied {
-        "emoji-button state-occupied"
+        "occupied"
     } else {
-        "emoji-button state-default"
-    }
+        "default"
+    };
+    // Selection and urgency never hide whether the workspace has clients.
+    let occupancy = if tag.occupied { " has-clients" } else { "" };
+    format!("emoji-button state-{state}{occupancy}")
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -1376,6 +1379,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn occupancy_class_survives_every_selection_and_urgency_combination() {
+        for flags in 0..16 {
+            let tag = TagState {
+                urgent: flags & 1 != 0,
+                filled: flags & 2 != 0,
+                selected: flags & 4 != 0,
+                occupied: flags & 8 != 0,
+            };
+            let classes = button_class(&tag);
+            assert_eq!(classes.contains("has-clients"), tag.occupied);
+            if tag.urgent {
+                assert!(classes.contains("state-urgent"));
+            }
+        }
+    }
 
     #[test]
     fn dock_geometry_projects_negative_origin_at_two_x_scale() {

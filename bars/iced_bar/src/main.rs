@@ -5,7 +5,7 @@ use iced::widget::container;
 use xbar_core::presentation::VisualState;
 use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // Current iced widgets use explicit boxing at heterogeneous Element boundaries.
-use iced::widget::{Space, Widget as _, button, rich_text, tooltip};
+use iced::widget::{Space, Stack, Widget as _, button, rich_text, tooltip};
 use iced::widget::{mouse_area, span};
 use iced::{Font, stream, theme};
 
@@ -714,13 +714,15 @@ impl IcedBar {
 
     fn workspace_button<'a>(&self, index: usize, label: &'a str) -> Element<'a, Message> {
         let colors = self.tag_colors(index, false);
+        let view = self.runtime.view();
+        let occupied = view.wm_available && view.tags.get(index).is_some_and(|tag| tag.occupied);
         let convert =
             |c: xbar_core::presentation::Rgba| Color::from_rgba(c.red, c.green, c.blue, c.alpha);
         let hover_colors = self.tag_colors(index, true);
         let text_color = convert(colors.foreground);
 
         let radius = 6.0;
-        button(
+        let workspace = button(
             rich_text![span(label.to_string()).color(text_color)]
                 .size(18)
                 .on_link_click(std::convert::identity),
@@ -751,7 +753,35 @@ impl IcedBar {
             }
         })
         .on_press(Message::TabSelected(index))
-        .boxed()
+        .boxed();
+
+        // The passive overlay preserves the button's size and pointer events.
+        // Keep an identical transparent marker for empty tags to avoid jumps.
+        let marker = container(Space::new().width(6).height(2))
+            .width(6)
+            .height(2)
+            .style(move |_theme: &Theme| container::Style {
+                background: occupied.then_some(Background::Color(text_color)),
+                border: Border {
+                    radius: border::radius(1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let indicator = container(marker)
+            .width(Self::TAB_WIDTH)
+            .height(Self::TAB_HEIGHT)
+            .center_x(Self::TAB_WIDTH)
+            .align_bottom(Self::TAB_HEIGHT)
+            .padding(Padding {
+                bottom: 3.0,
+                ..Padding::ZERO
+            })
+            .boxed();
+        Stack::<Element<'a, Message>>::new()
+            .push(workspace)
+            .push(indicator)
+            .boxed()
     }
 
     // -------- Pills --------

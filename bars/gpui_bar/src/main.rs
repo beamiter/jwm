@@ -363,6 +363,8 @@ impl GpuiBar {
     fn render_tag(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let icon = TAG_ICONS[index];
         let colors = self.tag_colors(index, false);
+        let view = self.runtime.view();
+        let occupied = view.wm_available && view.tags.get(index).is_some_and(|tag| tag.occupied);
         let convert = |c: xbar_core::presentation::Rgba| Rgba {
             r: c.red,
             g: c.green,
@@ -381,6 +383,7 @@ impl GpuiBar {
 
         div()
             .id(SharedString::from(format!("tag-{}", index)))
+            .relative()
             .w(px(30.))
             .h(px(26.))
             .flex()
@@ -393,6 +396,21 @@ impl GpuiBar {
             .text_color(text_color)
             .text_size(px(11.))
             .child(icon)
+            // A shape cue survives selected/urgent/hover colors. Absolute
+            // positioning keeps both the icon and the click target unchanged.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(3.))
+                    .flex()
+                    .justify_center()
+                    .child(div().w(px(6.)).h(px(2.)).rounded(px(1.)).bg(Rgba {
+                        a: if occupied { 1.0 } else { 0.0 },
+                        ..text_color
+                    })),
+            )
             .hover(move |s| {
                 s.bg(hover_bg)
                     .border_color(hover_border)

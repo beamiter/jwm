@@ -52,6 +52,8 @@ pub struct Pill {
     label: Label,
     font: FontDescription,
     progress_area: DrawingArea,
+    /// A non-measuring overlay retained for empty and occupied tags alike.
+    occupancy_marker: Option<DrawingArea>,
     /// Shared with the draw function, and with the pointer controllers through
     /// `bindings`, so a pill updates in place instead of being rebuilt.
     progress: Rc<Cell<Option<f32>>>,
@@ -142,6 +144,47 @@ impl Pill {
         let overlay = Overlay::new();
         overlay.set_child(Some(&label));
         overlay.add_overlay(&progress_area);
+        let occupancy_marker = matches!(spec.id, NodeId::Tag(_)).then(|| {
+            // Do not alter the label's request or placement. Paint only when
+            // the actual allocated glyph ink leaves a clear bottom slot.
+            let marker = DrawingArea::new();
+            marker.add_css_class("occupancy-marker");
+            marker.set_can_target(false);
+            marker.set_draw_func({
+                let label = label.clone();
+                move |area, context, width, height| {
+                    let (ink, _) = label.layout().pixel_extents();
+                    let (_, layout_y) = label.layout_offsets();
+                    let bottom = layout_y as f32 + ink.y() as f32 + ink.height() as f32;
+                    let Some(bottom) =
+                        label.compute_point(area, &gtk4::graphene::Point::new(0.0, bottom))
+                    else {
+                        return;
+                    };
+                    let Some((x, y)) =
+                        occupancy_marker_origin(width, height, f64::from(bottom.y()))
+                    else {
+                        return;
+                    };
+                    let color = area.color();
+                    context.set_source_rgba(
+                        f64::from(color.red()),
+                        f64::from(color.green()),
+                        f64::from(color.blue()),
+                        f64::from(color.alpha()),
+                    );
+                    // A 4px segment plus round 1px caps is a 6x2 dash.
+                    context.set_line_width(2.0);
+                    context.set_line_cap(gtk4::cairo::LineCap::Round);
+                    context.move_to(x + 1.0, y + 1.0);
+                    context.line_to(x + 5.0, y + 1.0);
+                    let _ = context.stroke();
+                }
+            });
+            overlay.add_overlay(&marker);
+            overlay.set_measure_overlay(&marker, false);
+            marker
+        });
 
         let button = Button::new();
         button.set_child(Some(&overlay));
@@ -209,6 +252,7 @@ impl Pill {
             label,
             font,
             progress_area,
+            occupancy_marker,
             progress,
             bindings,
         };
@@ -245,12 +289,16 @@ impl Pill {
             spec.state.selected || (matches!(spec.id, NodeId::Tag(_)) && spec.state.filled),
         );
         set_class(&self.button, "urgent", spec.state.urgent);
-        // `LayoutEngine` folds both transport signals into one visual state.
-        set_class(
-            &self.button,
-            "occupied",
-            spec.state.occupied || spec.state.filled,
-        );
+        // `filled` means filter/selection, not the presence of clients.
+        let occupied =
+            spec.state.occupied || (!matches!(spec.id, NodeId::Tag(_)) && spec.state.filled);
+        set_class(&self.button, "occupied", occupied);
+        if let Some(marker) = &self.occupancy_marker {
+            // Opacity leaves the same overlay allocated in both states.
+            marker.set_opacity(if spec.state.occupied { 1.0 } else { 0.0 });
+            // Text changes can keep the same request but change ink extents.
+            marker.queue_draw();
+        }
         set_class(&self.button, "unavailable", !spec.available);
 
         *self.bindings.borrow_mut() = Bindings::from_spec(spec);
@@ -284,6 +332,33 @@ impl Pill {
         let left = ink.x().min(logical.x());
         let right = (ink.x() + ink.width()).max(logical.x() + logical.width());
         (right - left).max(0)
+    }
+}
+
+/// Marker coordinates inside the button's one-pixel layout border. Keeping a
+/// two-pixel inner bottom inset gives the shared three-pixel outer offset.
+/// Two pixels of air above the marker protect tall or shifted custom glyphs.
+fn occupancy_marker_origin(width: i32, height: i32, ink_bottom: f64) -> Option<(f64, f64)> {
+    let y = f64::from(height) - 4.0;
+    if width < 8 || height < 6 || !ink_bottom.is_finite() || ink_bottom + 2.0 > y {
+        return None;
+    }
+    Some(((f64::from(width) - 6.0) * 0.5, y))
+}
+
+#[cfg(test)]
+mod occupancy_tests {
+    use super::occupancy_marker_origin;
+
+    #[test]
+    fn allocated_ink_must_leave_clearance_without_changing_label_geometry() {
+        assert_eq!(occupancy_marker_origin(36, 30, 24.0), Some((15.0, 26.0)));
+        assert_eq!(occupancy_marker_origin(36, 30, 24.1), None);
+        assert_eq!(occupancy_marker_origin(36, 20, 16.0), None);
+        assert_eq!(occupancy_marker_origin(7, 30, 10.0), None);
+        assert_eq!(occupancy_marker_origin(36, 5, 0.0), None);
+        assert_eq!(occupancy_marker_origin(36, 30, f64::NAN), None);
+        assert_eq!(occupancy_marker_origin(36, 30, f64::INFINITY), None);
     }
 }
 

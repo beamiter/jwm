@@ -43,7 +43,15 @@ tag material. These options are read at startup, like the other bar config.
 Live WM wallpaper samples and runtime theme changes update the palette.
 
 The policy lives in `xbar_core::tag_contrast::TagPalette`. Empty and occupied tags
-use different near-opaque neutral surfaces. Selected/filled tags retain the
+use strongly separated near-opaque neutral surfaces. Occupied tags also carry a
+small, high-contrast bottom dash; empty tags have no dash. This cue stays visible
+when selected, urgent or hovered, so color is never the only occupancy signal.
+The cue follows actual occupancy, not the selected/filter `filled` flag.
+Scene renderers preserve the original icon box and use actual glyph metrics to
+show the dash only when the pill has 12px of vertical clearance beyond the
+measured glyph height. Oversized fonts or very short pills keep their original
+text placement and rely on the stronger occupied surface instead.
+Selected/filled tags retain the
 shared selected accent; urgent tags take precedence and retain the urgent
 accent. Text and borders come from that same policy. The bar's background,
 compositor mode, non-tag pills, hit targets and actions are unchanged.

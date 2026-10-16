@@ -158,11 +158,13 @@ const ICON_TIME = "\u{F0954}";
 const ICON_MON = "\u{F0379}";
 
 const getButtonClass = (tag: TagState): string => {
-  if (tag.urgent) return "emoji-button state-urgent";
-  if (tag.filled) return "emoji-button state-filtered";
-  if (tag.selected) return "emoji-button state-selected";
-  if (tag.occupied) return "emoji-button state-occupied";
-  return "emoji-button state-default";
+  const state = tag.urgent ? "urgent"
+    : tag.filled ? "filtered"
+    : tag.selected ? "selected"
+    : tag.occupied ? "occupied"
+    : "default";
+  // Keep the client marker independent of the winning background state.
+  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}`;
 };
 
 const formatBytes = (bytes: number): string => {
