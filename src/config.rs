@@ -5540,6 +5540,7 @@ mod tests {
         assert!(!serialized.contains("/walls/two.png"));
         let reloaded = Config {
             inner: toml::from_str(&serialized).unwrap(),
+            gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         assert!(reloaded.behavior().wallpaper_daily_pick.is_none());
         assert_eq!(
