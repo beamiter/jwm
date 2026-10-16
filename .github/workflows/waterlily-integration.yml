@@ -12,6 +12,7 @@ on:
       - src/config.rs
       - src/ipc.rs
       - src/jwm.rs
+      - src/jwm/event_dispatcher.rs
       - src/jwm/features/toggles.rs
       - waterlily/**
       - tools/validate_waterlily_shaders.py
@@ -30,6 +31,7 @@ on:
       - src/config.rs
       - src/ipc.rs
       - src/jwm.rs
+      - src/jwm/event_dispatcher.rs
       - src/jwm/features/toggles.rs
       - waterlily/**
       - tools/validate_waterlily_shaders.py
