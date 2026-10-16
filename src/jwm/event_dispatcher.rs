@@ -6597,6 +6597,60 @@ mod tests {
     }
 
     #[test]
+    fn queued_swipe_cannot_act_after_lock_or_configuration_change() {
+        let (mut jwm, monitor, _, _) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let before = jwm.state.monitors[monitor].get_active_tags();
+        let cfg = crate::config::CONFIG.load();
+        let signature = crate::config::gesture_swipe_signature(
+            &cfg.behavior().gesture_swipe,
+            cfg.behavior().gesture_swipe_threshold,
+        );
+        // A completed gesture is queued, then the lock takes ownership.
+        let queued = BackendEvent::GestureSwipeAction {
+            fingers: 3,
+            direction: "left",
+            config_signature: signature,
+        };
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        EventHandler::handle_event(&mut jwm, &mut backend, queued).unwrap();
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+        assert!(jwm.features.system_ui.is_locked());
+
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::Inactive;
+        EventHandler::handle_event(
+            &mut jwm,
+            &mut backend,
+            BackendEvent::GestureSwipeAction {
+                fingers: 3,
+                direction: "left",
+                config_signature: "old policy".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+
+        // Positive control: this fixture really has a usable bound action.
+        let expected = jwm.calculate_next_tag(1);
+        assert_ne!(expected, before);
+        let cfg = crate::config::CONFIG.load();
+        EventHandler::handle_event(
+            &mut jwm,
+            &mut backend,
+            BackendEvent::GestureSwipeAction {
+                fingers: 3,
+                direction: "left",
+                config_signature: crate::config::gesture_swipe_signature(
+                    &cfg.behavior().gesture_swipe,
+                    cfg.behavior().gesture_swipe_threshold,
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), expected);
+    }
+
+    #[test]
     fn no_panel_takes_the_screen_from_the_lock_card() {
         // Mutual exclusion stops at the lock screen. This covers more than the
         // keyboard, which never reaches an opener while locked: `jwm_remote`
@@ -14324,8 +14378,20 @@ impl EventHandler for Jwm {
             }
             BackendEvent::ClientMessage { .. } => {}
 
-            BackendEvent::GestureSwipeAction { fingers, direction } => {
-                self.handle_gesture_swipe(backend, fingers, direction);
+            BackendEvent::GestureSwipeAction {
+                fingers,
+                direction,
+                config_signature,
+            } => {
+                let cfg = crate::config::CONFIG.load();
+                if config_signature
+                    == crate::config::gesture_swipe_signature(
+                        &cfg.behavior().gesture_swipe,
+                        cfg.behavior().gesture_swipe_threshold,
+                    )
+                {
+                    self.handle_gesture_swipe(backend, fingers, direction);
+                }
             }
         }
 
@@ -14567,6 +14633,11 @@ impl Jwm {
         fingers: u32,
         direction: &str,
     ) {
+        // Check at dispatch as well as backend Begin: a lock can activate
+        // while a completed gesture is still queued.
+        if self.features.system_ui.is_locked() {
+            return;
+        }
         let cfg = crate::config::CONFIG.load();
         let bindings = &cfg.behavior().gesture_swipe;
         let entry = match bindings

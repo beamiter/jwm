@@ -2286,13 +2286,15 @@ pub enum BackendEvent {
         drawable: WindowId,
     },
 
-    // === Touchpad gesture events (Wayland only) ===
+    // === Native touchpad gesture events ===
     /// A configured 3+ finger swipe gesture has completed and was intercepted
     /// by the compositor (not forwarded to clients).
     GestureSwipeAction {
         fingers: u32,
         /// One of: "left", "right", "up", "down".
         direction: &'static str,
+        /// Policy at Begin, so queued actions cannot invoke a rebound command.
+        config_signature: String,
     },
 
     // === Workspace protocol events ===

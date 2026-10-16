@@ -6163,13 +6163,48 @@ impl Jwm {
     pub(crate) fn query_gesture_status(&self) -> serde_json::Value {
         let cfg = CONFIG.load();
         let bindings = &cfg.behavior().gesture_swipe;
-        let mut intercepted_fingers = bindings
+        let runtime = match self.runtime_backend.as_str() {
+            "x11rb" | "xcb" => {
+                #[cfg(feature = "x11-backends")]
+                {
+                    crate::backend::x11::gesture_input::runtime_status()
+                }
+                #[cfg(not(feature = "x11-backends"))]
+                {
+                    serde_json::json!({"operational": false, "state": "not_compiled"})
+                }
+            }
+            "wayland-udev" => serde_json::json!({
+                "operational": cfg!(feature = "backend-wayland-udev"),
+                "state": "native_libinput",
+                "device_supported": null,
+                "reason": "Requires a gesture-capable libinput touchpad",
+            }),
+            _ => serde_json::json!({
+                "operational": false,
+                "state": "unsupported_backend",
+                "reason": "This backend does not supply native swipe events",
+            }),
+        };
+        let operational = runtime
+            .get("operational")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let eligible = |binding: &&crate::config::GestureSwipeConfig| {
+            crate::config::gesture_swipe_binding_is_valid(binding)
+        };
+        let mut configured_fingers = bindings
             .iter()
-            .filter(|binding| binding.fingers >= 3)
+            .filter(eligible)
             .map(|binding| binding.fingers)
             .collect::<Vec<_>>();
-        intercepted_fingers.sort_unstable();
-        intercepted_fingers.dedup();
+        configured_fingers.sort_unstable();
+        configured_fingers.dedup();
+        let intercepted_fingers = if operational {
+            configured_fingers.clone()
+        } else {
+            Vec::new()
+        };
 
         let binding_details = bindings
             .iter()
@@ -6188,7 +6223,7 @@ impl Jwm {
                     "direction": binding.direction,
                     "function": binding.function,
                     "argument": binding.argument,
-                    "will_intercept": binding.fingers >= 3,
+                    "will_intercept": operational && eligible(&binding),
                     "scrolling_related": scrolling_related,
                 })
             })
@@ -6205,6 +6240,9 @@ impl Jwm {
             .count();
 
         serde_json::json!({
+            "backend": self.runtime_backend,
+            "runtime": runtime,
+            "configured_fingers": configured_fingers,
             "swipe_threshold": cfg.behavior().gesture_swipe_threshold,
             "binding_count": bindings.len(),
             "scrolling_binding_count": scrolling_binding_count,

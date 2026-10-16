@@ -89,7 +89,9 @@ fn gesture_swipe_should_intercept(
     fingers: u32,
     bindings: &[crate::config::GestureSwipeConfig],
 ) -> bool {
-    fingers >= 3 && bindings.iter().any(|binding| binding.fingers == fingers)
+    bindings.iter().any(|binding| {
+        binding.fingers == fingers && crate::config::gesture_swipe_binding_is_valid(binding)
+    })
 }
 
 /// Build the per-surface color plan for the frame's actual render target.
@@ -3793,14 +3795,11 @@ impl UdevBackend {
                                 fingers,
                                 &cfg.behavior().gesture_swipe,
                             );
-                            if intercept {
-                                state.gesture_swipe = crate::backend::wayland::state::GestureSwipeTracker {
-                                    fingers,
-                                    intercept: true,
-                                    dx: 0.0,
-                                    dy: 0.0,
-                                };
-                            } else if let Some(pointer) = state.seat.get_pointer() {
+                            state.gesture_swipe.begin(fingers, intercept);
+                            state.gesture_swipe.config_signature = crate::config::gesture_swipe_signature(
+                                &cfg.behavior().gesture_swipe, cfg.behavior().gesture_swipe_threshold,
+                            );
+                            if !intercept && let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_begin(
                                     state,
                                     &smithay::input::pointer::GestureSwipeBeginEvent {
@@ -3814,8 +3813,7 @@ impl UdevBackend {
                         InputEvent::GestureSwipeUpdate { event, .. } => {
                             if state.gesture_swipe.intercept {
                                 let d = event.delta();
-                                state.gesture_swipe.dx += d.x;
-                                state.gesture_swipe.dy += d.y;
+                                state.gesture_swipe.update(d.x, d.y);
                             } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_update(
                                     state,
@@ -3830,29 +3828,17 @@ impl UdevBackend {
                             if state.gesture_swipe.intercept {
                                 let cfg = crate::config::CONFIG.load();
                                 let threshold = cfg.behavior().gesture_swipe_threshold;
-                                let dx = state.gesture_swipe.dx;
-                                let dy = state.gesture_swipe.dy;
-                                let fingers = state.gesture_swipe.fingers;
-                                let cancelled = event.cancelled();
-                                state.gesture_swipe = Default::default();
-
-                                if !cancelled {
-                                    let direction: Option<&'static str> =
-                                        if dx.abs() > dy.abs() {
-                                            if dx.abs() >= threshold {
-                                                if dx > 0.0 { Some("right") } else { Some("left") }
-                                            } else { None }
-                                        } else if dy.abs() >= threshold {
-                                            if dy > 0.0 { Some("down") } else { Some("up") }
-                                        } else { None };
-                                    if let Some(dir) = direction {
-                                        pending_events.lock_safe().push_back(
-                                            BackendEvent::GestureSwipeAction {
-                                                fingers,
-                                                direction: dir,
-                                            },
-                                        );
-                                    }
+                                let config_signature = state.gesture_swipe.config_signature.clone();
+                                let policy_changed = config_signature != crate::config::gesture_swipe_signature(
+                                    &cfg.behavior().gesture_swipe, threshold,
+                                );
+                                if let Some((fingers, direction)) = state.gesture_swipe.finish(
+                                    event.cancelled() || state.session_locked || policy_changed,
+                                    threshold,
+                                ) {
+                                    pending_events.lock_safe().push_back(
+                                        BackendEvent::GestureSwipeAction { fingers, direction, config_signature },
+                                    );
                                 }
                             } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_end(
@@ -8332,6 +8318,18 @@ mod udev_backend_selection_tests {
         assert!(gesture_swipe_should_intercept(
             3,
             &[swipe_binding(3, "left")]
+        ));
+        assert!(gesture_swipe_should_intercept(
+            3,
+            &[swipe_binding(3, "LEFT")]
+        ));
+        assert!(!gesture_swipe_should_intercept(
+            6,
+            &[swipe_binding(6, "left")]
+        ));
+        assert!(!gesture_swipe_should_intercept(
+            3,
+            &[swipe_binding(3, "diagonal")]
         ));
     }
 

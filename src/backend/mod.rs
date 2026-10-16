@@ -14,6 +14,7 @@ pub mod clipboard_x11;
 pub mod common_define;
 pub mod edid;
 pub mod error;
+pub mod gesture_swipe;
 pub mod hdr_metadata;
 pub mod recording_admission;
 pub mod recording_completion;

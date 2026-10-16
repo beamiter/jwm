@@ -237,17 +237,7 @@ pub struct DndIcon {
     pub offset: Point<i32, Logical>,
 }
 
-/// In-progress touchpad swipe gesture, accumulated between Begin and End.
-/// When `intercept` is true, neither the corresponding Begin/Update/End nor
-/// any in-flight events should be forwarded to client surfaces; the WM has
-/// claimed the configured gesture.
-#[derive(Debug, Default, Clone)]
-pub struct GestureSwipeTracker {
-    pub fingers: u32,
-    pub intercept: bool,
-    pub dx: f64,
-    pub dy: f64,
-}
+pub use crate::backend::gesture_swipe::GestureSwipeTracker;
 
 #[derive(Debug, Default, Clone)]
 pub struct CaptureCounters {
@@ -7762,6 +7752,7 @@ mod protocol_hardening_tests {
         server.state.push_event(BackendEvent::GestureSwipeAction {
             fingers: 3,
             direction: "left",
+            config_signature: String::new(),
         });
         let events = server.state.pending_events.lock().unwrap();
         assert_eq!(events.len(), 1);

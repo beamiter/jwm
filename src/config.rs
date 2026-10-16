@@ -1393,11 +1393,13 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub scrolling_column_width_rules: Vec<String>,
 
-    // --- Touchpad gestures (Wayland only) ---
+    // --- Native touchpad gestures (Wayland udev and X11 XI2.4) ---
     /// Touchpad swipe-gesture bindings. 3+ finger swipes are intercepted only
     /// when their finger count has at least one configured binding; 1- and
-    /// 2-finger swipes continue to forward to clients.
-    #[serde(default)]
+    /// 2-finger swipes continue to forward to clients. By default, three-finger
+    /// left/right switches tags, up minimizes, and down opens restore preview.
+    /// An explicit [] disables these defaults.
+    #[serde(default = "default_gesture_swipe")]
     pub gesture_swipe: Vec<GestureSwipeConfig>,
     /// Minimum cumulative pixel delta along the dominant axis before a swipe
     /// triggers its action. Smaller = more sensitive. Default 80.
@@ -1423,6 +1425,36 @@ pub struct GestureSwipeConfig {
     /// Argument passed to the command. See ArgumentConfig.
     #[serde(default)]
     pub argument: ArgumentConfig,
+}
+
+fn default_gesture_swipe() -> Vec<GestureSwipeConfig> {
+    [
+        ("left", "loopview", 1),
+        ("right", "loopview", -1),
+        ("up", "minimize", 0),
+        ("down", "restore_preview", 0),
+    ]
+    .into_iter()
+    .map(|(direction, function, step)| GestureSwipeConfig {
+        fingers: 3,
+        direction: direction.into(),
+        function: function.into(),
+        argument: ArgumentConfig::Int(step),
+    })
+    .collect()
+}
+
+/// Valid native swipe admission, shared by backends and status reporting.
+pub(crate) fn gesture_swipe_binding_is_valid(binding: &GestureSwipeConfig) -> bool {
+    (3..=5).contains(&binding.fingers)
+        && ["left", "right", "up", "down"]
+            .iter()
+            .any(|direction| binding.direction.eq_ignore_ascii_case(direction))
+}
+
+/// Identity of the gesture policy captured at Begin and checked at dispatch.
+pub(crate) fn gesture_swipe_signature(bindings: &[GestureSwipeConfig], threshold: f64) -> String {
+    format!("{bindings:?}|{threshold:?}")
 }
 
 fn default_gesture_swipe_threshold() -> f64 {
@@ -2247,7 +2279,7 @@ impl Default for Config {
                     swallow_terminals: Vec::new(),
                     swallow_exceptions: Vec::new(),
                     scrolling_column_width_rules: Vec::new(),
-                    gesture_swipe: Vec::new(),
+                    gesture_swipe: default_gesture_swipe(),
                     gesture_swipe_threshold: default_gesture_swipe_threshold(),
                     do_not_disturb: false,
                     // Phase 6: Accessibility
@@ -6238,6 +6270,53 @@ mod tests {
 
         let diagnostics = config.diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn three_finger_swipes_default_to_tags_minimize_and_restore_preview() {
+        let cfg = Config::default();
+        let bindings = &cfg.behavior().gesture_swipe;
+        assert_eq!(bindings.len(), 4);
+        for (binding, (direction, function, step)) in bindings.iter().zip([
+            ("left", "loopview", 1),
+            ("right", "loopview", -1),
+            ("up", "minimize", 0),
+            ("down", "restore_preview", 0),
+        ]) {
+            assert_eq!(binding.fingers, 3);
+            assert_eq!(binding.direction, direction);
+            assert_eq!(binding.function, function);
+            assert!(matches!(binding.argument, ArgumentConfig::Int(value) if value == step));
+        }
+    }
+
+    #[test]
+    fn absent_swipe_bindings_use_defaults_but_explicit_empty_is_opt_out() {
+        let cfg = Config::default();
+        let serialized = toml::to_string(cfg.behavior()).unwrap();
+        let mut table: toml::Table = toml::from_str(&serialized).unwrap();
+        table.remove("gesture_swipe");
+        let missing: BehaviorConfig = toml::Value::Table(table.clone()).try_into().unwrap();
+        assert_eq!(missing.gesture_swipe.len(), 4);
+        table.insert("gesture_swipe".into(), toml::Value::Array(Vec::new()));
+        let disabled: BehaviorConfig = toml::Value::Table(table).try_into().unwrap();
+        assert!(disabled.gesture_swipe.is_empty());
+    }
+
+    #[test]
+    fn custom_swipe_bindings_are_not_merged_with_defaults() {
+        let mut cfg = Config::default();
+        cfg.inner.behavior.gesture_swipe = vec![GestureSwipeConfig {
+            fingers: 4,
+            direction: "up".into(),
+            function: "loopview".into(),
+            argument: ArgumentConfig::Int(-1),
+        }];
+        let serialized = toml::to_string(cfg.behavior()).unwrap();
+        let parsed: BehaviorConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.gesture_swipe.len(), 1);
+        assert_eq!(parsed.gesture_swipe[0].fingers, 4);
+        assert_eq!(parsed.gesture_swipe[0].direction, "up");
     }
 
     #[test]

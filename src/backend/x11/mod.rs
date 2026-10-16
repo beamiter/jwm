@@ -8,6 +8,7 @@
 pub mod compositor;
 #[path = "compositor/common/mod.rs"]
 pub mod compositor_common;
+pub(crate) mod gesture_input;
 pub(crate) mod root_wallpaper;
 pub(crate) mod scheduling;
 pub mod wm;

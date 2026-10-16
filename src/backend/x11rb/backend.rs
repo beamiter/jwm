@@ -1578,6 +1578,26 @@ impl Backend for X11rbBackend {
         }
         let handle = event_loop.handle();
 
+        // Native XI2.4 gesture stream, independent of the WM transport.
+        // Failure is nonfatal: ordinary pointer/keyboard handling stays intact.
+        match crate::backend::x11::gesture_input::GestureEventSource::new() {
+            Ok(source) => {
+                if let Err(error) = handle.insert_source(source, |event, _, data| {
+                    data.compositor_frame_consumed_this_dispatch = false;
+                    if let Err(error) = data.handler.handle_event(data.backend, event) {
+                        log::error!("Error handling touchpad gesture: {error:?}");
+                    }
+                }) {
+                    let message = error.to_string();
+                    // InsertError owns the source. Drop its connection before
+                    // logging, releasing any grab activated during setup.
+                    drop(error);
+                    log::warn!("Touchpad swipe input unavailable: {message}");
+                }
+            }
+            Err(error) => log::warn!("Touchpad swipe input unavailable: {error}"),
+        }
+
         // 1. 注册 X11 事件源
         let x11_source = if let Some(src) = self._init_event_source.take() {
             src
