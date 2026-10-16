@@ -8808,6 +8808,14 @@ mod tests {
         let mut jwm = jwm_with_monitor();
         let mut backend = RenderSpyBackend::new();
         let monitor = jwm.state.sel_mon.unwrap();
+        // The minimal monitor starts at slot 0 with an empty tag mask. Enter
+        // tag 1 before saving history so view(1) returns to the picker owner.
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 1);
+        assert_eq!(
+            jwm.state.monitors[monitor].pertag.as_ref().unwrap().cur_tag,
+            1
+        );
         jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::GRID)))
             .unwrap();
         jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))

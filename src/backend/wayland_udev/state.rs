@@ -7703,7 +7703,7 @@ mod protocol_hardening_tests {
             Some(app_surface.clone()),
             smithay::utils::SERIAL_COUNTER.next_serial(),
         );
-        assert_eq!(keyboard.current_focus(), Some(lock_surface));
+        assert_eq!(keyboard.current_focus(), Some(lock_surface.clone()));
         assert!(
             server
                 .state
@@ -7711,8 +7711,21 @@ mod protocol_hardening_tests {
                 .is_none()
         );
 
+        // A concurrent fork can retain a CLOEXEC socket until its exec. Closing
+        // our descriptor alone is not an endpoint-disconnect barrier. Keep a
+        // duplicate alive to exercise that case without timing or subprocesses.
+        let retained_peer = locker.peer.try_clone().expect("retain the locker endpoint");
+        locker
+            .peer
+            .shutdown(std::net::Shutdown::Both)
+            .expect("disconnect the locker endpoint");
         drop(locker);
         server.roundtrip();
+        assert!(
+            !lock_surface.is_alive(),
+            "process disconnect before key delivery"
+        );
+        drop(retained_peer);
         assert!(server.state.session_locked);
         assert!(locked_test_key(&mut server.state, true));
         assert!(locked_test_key(&mut server.state, false));
