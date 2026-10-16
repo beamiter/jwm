@@ -310,7 +310,6 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
         horizontal: bool,
-        fallback_to_master: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let WMArgEnum::Float(delta) = *arg else {
             return Ok(());
@@ -318,7 +317,7 @@ impl Jwm {
         if !delta.is_finite() || delta == 0.0 {
             return Ok(());
         }
-        let Some(mut key) = self.get_selected_client_key() else {
+        let Some(key) = self.get_selected_client_key() else {
             return Ok(());
         };
         let Some(c) = self.state.clients.get(key) else {
@@ -337,9 +336,7 @@ impl Jwm {
         let Some(scope) = self.layout_resize_scope(mon) else {
             return Ok(());
         };
-        if fallback_to_master
-            && (self.state.sel_mon != Some(mon) || !self.is_client_visible_on_monitor(key, mon))
-        {
+        if self.state.sel_mon != Some(mon) || !self.is_client_visible_on_monitor(key, mon) {
             return Ok(());
         }
         if c.state.is_floating || scope.1 == LayoutEnum::FLOAT.0 {
@@ -373,28 +370,14 @@ impl Jwm {
             self.broadcast_visible_window_states_on_monitor(backend, mon);
             return Ok(());
         }
-        if !self.is_layout_resize_target(key) {
-            if !fallback_to_master {
-                return Ok(());
-            }
-            // Horizontal actions resize the layout even while a stack tile has
-            // focus. Do not change selection or relax vertical/mouse targeting.
-            let tiles = self.collect_tileable_clients(mon);
-            if !tiles.iter().any(|&(candidate, _, _)| candidate == key) {
-                return Ok(());
-            }
-            let Some(target) =
-                tiles
-                    .into_iter()
-                    .map(|(candidate, _, _)| candidate)
-                    .find(|&candidate| {
-                        self.state.clients[candidate].mon == Some(mon)
-                            && self.is_layout_resize_target(candidate)
-                    })
-            else {
-                return Ok(());
-            };
-            key = target;
+        // Keyboard/IPC axes resize the selected tile, including stack clients.
+        // Pointer admission keeps its separate master-only compatibility rules.
+        if !self
+            .collect_tileable_clients(mon)
+            .iter()
+            .any(|&(candidate, _, _)| candidate == key)
+        {
+            return Ok(());
         }
         self.prime_layout_resize(backend, mon, scope);
         if let Some(context) = self
@@ -435,14 +418,14 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.resize_physical_axis(backend, arg, true, true)
+        self.resize_physical_axis(backend, arg, true)
     }
     pub(crate) fn resize_vertical(
         &mut self,
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.resize_physical_axis(backend, arg, false, false)
+        self.resize_physical_axis(backend, arg, false)
     }
     pub(crate) fn clear_current_layout_resize(&mut self) {
         if let Some(mon) = self.state.sel_mon

@@ -1,4 +1,4 @@
-# Resizing a master in any layout
+# Resizing the focused window in any layout
 
 The physical-axis resize actions work in every built-in layout, including a
 workspace containing only one client. Windows stay tiled. True application
@@ -12,10 +12,10 @@ Default bindings:
 
 | Binding | Action |
 | --- | --- |
-| Alt+Control+Left / Right | Shrink / grow master width by 2.5%; works with stack focus too |
+| Alt+Control+Left / Right | Shrink / grow focused window width by 2.5% |
 | Alt+Control+Up / Down | Shrink / grow height by 2.5% of usable output height |
 | Alt+Control+Home | Reset the current workspace/layout resize intention |
-| Alt+H / L | Shrink / grow master width by 2.5%; works with stack focus too |
+| Alt+H / L | Shrink / grow focused window width by 2.5% |
 | Alt+Shift+H / L | Grow / shrink height by 2.5% |
 | Alt+J / K | Next / previous window; focus within the current scrolling column |
 | Alt+Left / Right | Focus the left / right scrolling column; no-op outside scrolling |
@@ -32,15 +32,17 @@ jwm-tool msg resize_vertical --args '{"value":-0.025}'
 jwm-tool msg reset_layout_size
 ```
 
-`resize_horizontal` (Alt+H/L, Alt+Control+Left/Right, or IPC) uses an eligible
-focused master as before. With a tiled stack client focused, it resizes the
-first eligible visible master on the same monitor without moving focus.
-Floating selections, singletons and equal-rank layouts still resize the selected
-client. Hidden, other-workspace, fullscreen, fixed-size, PiP and maximized
-selections do not trigger a fallback. Existing bindings to `resize_horizontal`
-get this fix without configuration changes. Vertical resize and mouse rules
-are unchanged: Alt+Shift+H/L and Alt+Control+Up/Down still require an eligible
-selected target, so they do not resize a master from stack focus.
+`resize_horizontal` and `resize_vertical` (keyboard or IPC) resize the focused
+eligible window on both physical axes, including a tiled stack client. They do
+not change focus or substitute another master as the resize anchor. Singletons,
+equal-rank layouts and floating selections use the same focused-window rule.
+Hidden, other-workspace, other-monitor, fullscreen, fixed-size, PiP and realized
+maximize selections are ignored. Existing bindings to these actions get this
+behavior without configuration changes.
+
+Mouse admission is unchanged: eligible master drags resize within the layout;
+non-master drags keep the existing floating path. Keyboard eligibility is
+independent of that pointer policy.
 
 The H/L aliases use physical width and height in every layout. Shift+H grows
 height and Shift+L shrinks it, preserving the increase/decrease signs of the old
@@ -123,17 +125,17 @@ resize requests continue to obey `behavior.client_moveresize`; its default
 
 - A singleton can shrink with centered empty space and grow to its usable work
   area. This includes vstack: its initial half-size card is not a size ceiling.
-- With multiple clients, increasing the master's size reallocates space from
+- With multiple clients, increasing the focused tile's size reallocates space from
   neighbouring regions. A monotone coordinate transformation keeps each
   layout's existing rows, columns and ordering. Masters sharing a column can
   reflow together; only the selected target owns the resize intention.
 - An axis with no neighbouring region, such as a single full-height master,
   shrinks the target with centered empty space on that axis. It does not shrink
   every other column's height.
-- Tile, fibonacci, centeredmaster, bstack, deck and threecol use their existing
-  master group. With `n_master=0`, or in equal-rank layouts such as grid, tatami,
-  monocle, fullscreen and scrolling, the selected tiled client is the explicit
-  resize target. In vstack it is the selected main card.
+- Keyboard and IPC resizing use the selected tiled client in every layout,
+  regardless of its master/stack rank or `n_master`. In vstack it is the
+  selected main card. The existing master-group restriction applies only to
+  mouse admission in tile, fibonacci, centeredmaster, bstack, deck and threecol.
 - Monocle, fullscreen, deck's stack and vstack keep their intentional overlapping
   presentation. Resizing never introduces overlap between originally separated
   outer window frames. It does not convert these layouts into a different one.
