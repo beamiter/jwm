@@ -7915,7 +7915,10 @@ mod tests {
     fn solar_desktop_drag_orbits_and_release_retires_exactly_its_grab() {
         let (mut jwm, mut backend) = solar_input_fixture();
         jwm.try_solar_system_press(&mut backend, 1);
-        assert_eq!(jwm.solar_system_drag, Some((800, 500)));
+        assert_eq!(
+            jwm.solar_system_drag.map(|drag| drag.last),
+            Some((800, 500))
+        );
         *backend.input_ops.pointer.lock().unwrap() = (820.0, 510.0);
         jwm.tick_solar_system_drag(&mut backend);
         assert_eq!(backend.solar_deltas.len(), 1);
@@ -8014,6 +8017,84 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn solar_drag_normalizes_resolution_portrait_and_negative_origins() {
+        for (width, height, origin) in [
+            (1920, 1080, (0, 0)),
+            (2560, 1440, (0, 0)),
+            (3840, 2160, (-3840, -2160)),
+            (1080, 1920, (-1080, 0)),
+            (2160, 3840, (0, -3840)),
+        ] {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            let g = &mut jwm.state.monitors.values_mut().next().unwrap().geometry;
+            (g.m_x, g.m_y, g.m_w, g.m_h) = (origin.0, origin.1, width, height);
+            let start = (origin.0 + width / 2, origin.1 + height / 2);
+            *backend.input_ops.pointer.lock().unwrap() = (start.0 as f64, start.1 as f64);
+            jwm.try_solar_system_press(&mut backend, 1);
+            let step = width.min(height) / 10;
+            *backend.input_ops.pointer.lock().unwrap() =
+                ((start.0 + step) as f64, (start.1 - step) as f64);
+            jwm.tick_solar_system_drag(&mut backend);
+            assert_eq!(backend.solar_deltas.len(), 1);
+            let (a, e, z) = backend.solar_deltas[0];
+            assert!((a - 0.54).abs() < 0.00001);
+            assert!((e + 0.54).abs() < 0.00001);
+            assert_eq!(z, 0.0);
+            jwm.cancel_solar_system_drag(&mut backend);
+        }
+    }
+
+    #[test]
+    fn solar_drag_stops_at_output_boundary_without_camera_jump() {
+        let (mut jwm, mut backend) = solar_input_fixture();
+        let mut other = WMMonitor::new();
+        (
+            other.geometry.m_x,
+            other.geometry.m_y,
+            other.geometry.m_w,
+            other.geometry.m_h,
+        ) = (1920, 0, 3840, 2160);
+        jwm.state.monitors.insert(other);
+        *backend.input_ops.pointer.lock().unwrap() = (1919.0, 500.0);
+        jwm.try_solar_system_press(&mut backend, 1);
+        jwm.tick_solar_system_drag(&mut backend);
+        assert!(jwm.solar_system_drag.is_some());
+        assert!(backend.solar_deltas.is_empty());
+        *backend.input_ops.pointer.lock().unwrap() = (1920.0, 500.0);
+        jwm.tick_solar_system_drag(&mut backend);
+        assert!(jwm.solar_system_drag.is_none());
+        assert!(backend.solar_deltas.is_empty());
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        // A fresh gesture on the second output can start normally.
+        jwm.try_solar_system_press(&mut backend, 1);
+        assert!(jwm.solar_system_drag.is_some());
+        jwm.cancel_solar_system_drag(&mut backend);
+    }
+
+    #[test]
+    fn solar_drag_cancels_changed_output_even_without_motion() {
+        let (mut jwm, mut backend) = solar_input_fixture();
+        jwm.try_solar_system_press(&mut backend, 1);
+        jwm.state.monitors.values_mut().next().unwrap().geometry.m_w += 1;
+        jwm.tick_solar_system_drag(&mut backend);
+        assert!(jwm.solar_system_drag.is_none());
+        assert!(backend.solar_deltas.is_empty());
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
     }
 
     #[test]

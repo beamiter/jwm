@@ -5,13 +5,21 @@ uniform vec2 resolution;
 uniform vec3 camera_eye;
 uniform float orbit_phase[8];
 uniform float surface_phase;
+uniform float spin_phase[8];
 uniform sampler2D earth_map;
 uniform int earth_enabled;
 const float PI=3.14159265359;
 const float TAU=6.28318530718;
 const float orbit[8]=float[8](2.5,3.6,4.8,6.0,7.5,9.3,11.0,12.7);
 const float radius[9]=float[9](1.12,.23,.40,.46,.33,.90,.76,.58,.55);
-const vec3 ring_normal=vec3(.2540003,.9407419,.2257781);
+// Full right-hand-rule obliquities: >90 degrees naturally rotates retrograde.
+const float obliquity[8]=float[8](.034,177.4,23.44,25.19,3.1,26.7,97.8,28.3);
+vec3 body_axis(int body){
+ float tilt=obliquity[body-1]*PI/180.;
+ // Each illustrative orbit is inclined in the yz plane; tilt relative to it.
+ vec3 orbital_normal=normalize(vec3(0.,orbit[body-1],-.025*float(body)));
+ return vec3(sin(tilt),0.,0.)+cos(tilt)*orbital_normal;
+}
 float hash(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
 float noise(vec3 p){
  vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
@@ -21,14 +29,24 @@ float fbm(vec3 p){float n=0.,weight=.55;for(int j=0;j<4;j++){n+=weight*noise(p);
 vec3 center(int i){if(i==0)return vec3(0);float a=orbit_phase[i-1];return vec3(cos(a)*orbit[i-1],sin(a)*.025*float(i),sin(a)*orbit[i-1]);}
 float sphere(vec3 ro,vec3 rd,vec3 c,float r){vec3 q=ro-c;float b=dot(q,rd),d=b*b-dot(q,q)+r*r;if(d<0.)return 1e5;float t=-b-sqrt(d);if(t>0.)return t;t=-b+sqrt(d);return t>0.?t:1e5;}
 vec3 rotate_y(vec3 n,float a){float s=sin(a),c=cos(a);return vec3(c*n.x-s*n.z,n.y,s*n.x+c*n.z);}
+// World-to-body rigid transform. Only albedo enters this frame; normals,
+// Sun direction and terminator remain in world coordinates.
+vec3 surface_point(int body,vec3 n){
+ vec3 axis=body_axis(body);
+ vec3 x=normalize(cross(axis,vec3(0.,0.,1.)));
+ vec3 z=cross(x,axis);
+ return rotate_y(vec3(dot(n,x),dot(n,axis),dot(n,z)),spin_phase[body-1]);
+}
 float ring_opacity(float r){
+ // Outside the feathered annulus opacity is exactly zero.
+ if(r<=.96||r>=1.68)return 0.;
  float edge=smoothstep(.96,1.01,r)*(1.-smoothstep(1.61,1.68,r));
  float cassini=1.-.8*exp(-pow((r-1.43)/.022,2.));
  float structure=.59+.10*sin(r*129.)+.045*sin(r*337.);
  return clamp(edge*cassini*structure,0.,.85);
 }
 vec3 material(int body,vec3 n){
- vec3 q=rotate_y(n,surface_phase); // Integer phase multiple: seamless.
+ vec3 q=surface_point(body,n); // Body-fixed clouds and surface, no boiling noise.
  float fine=fbm(q*12.);
  if(body==1){float rocks=fbm(q*5.);return mix(vec3(.20,.18,.17),vec3(.55,.50,.43),rocks)*(.88+.18*fine);}
  if(body==2){float cloud=fbm(q*vec3(3.,11.,3.)+vec3(fbm(q*4.)*2.));return mix(vec3(.52,.34,.14),vec3(.95,.80,.53),smoothstep(.15,.85,cloud));}
@@ -60,8 +78,9 @@ vec3 stars(vec3 ray){
  float haze=pow(max(0.,1.-abs(ray.y*.75+ray.x*.3+.2)),8.);
  return vec3(.0008,.0013,.0028)+tint*star*.65+vec3(.001,.0016,.003)*haze;
 }
-vec3 shade(vec2 pixel, out bool needs_aa){
+vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  needs_aa=false;
+ vec3 ring_normal=body_axis(6);
  float pixels=max(min(resolution.x,resolution.y),1.);
  vec2 uv=(pixel-.5*resolution)/pixels;
  vec3 forward=normalize(-camera_eye),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);
@@ -76,6 +95,8 @@ vec3 shade(vec2 pixel, out bool needs_aa){
   if(along>0.&&abs(impact2-radius[i]*radius[i])<2.*radius[i]*footprint+footprint*footprint)needs_aa=true;
  }
  needs_aa=needs_aa||body>=0;
+ // The center sample is discarded for antialiased pixels; skip its material work.
+ if(classify&&needs_aa)return vec3(0);
  // Feathered guides on the real orbital plane: deliberately subordinate to planets.
  if(abs(ray.y)>.0001){float t=-camera_eye.y/ray.y;if(t>0.&&t<nearest){vec3 p=camera_eye+ray*t;float r=length(p.xz);float width=max(.004,t/pixels*.38);float guide=0.;for(int i=0;i<8;i++)guide=max(guide,exp(-pow((r-orbit[i])/width,2.)));color+=vec3(.007,.012,.019)*guide;}}
  if(body>=0){
@@ -117,10 +138,10 @@ vec3 tone(vec3 x){return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.,1.);}
 void main(){
  // Smooth sky/corona and analytic guides need one ray; only material/silhouette
  // pixels pay for four fixed subpixel rays. No frame-wide 4x shading multiplier.
- bool needs_aa;vec3 color=shade(gl_FragCoord.xy,needs_aa);
+ bool needs_aa;vec3 color=shade(gl_FragCoord.xy,true,needs_aa);
  if(needs_aa){color=vec3(0);for(int i=0;i<4;i++){
   vec2 offset=vec2(float(i&1),float(i>>1))*.5-.25;bool unused;
-  color+=shade(gl_FragCoord.xy+offset,unused)*.25;
+  color+=shade(gl_FragCoord.xy+offset,false,unused)*.25;
  }}
  frag_color=vec4(pow(tone(color),vec3(1./2.2)),1.);
 }

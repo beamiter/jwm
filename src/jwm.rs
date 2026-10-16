@@ -143,7 +143,7 @@ pub struct Jwm {
     /// drag threshold. See [`mouse_handler::DragCtl`].
     pub(crate) drag_ctl: Option<mouse_handler::DragCtl>,
     /// Owns a pointer grab only after a successful empty-desktop solar press.
-    pub(crate) solar_system_drag: Option<(i32, i32)>,
+    pub(crate) solar_system_drag: Option<mouse_handler::SolarSystemDrag>,
 
     /// A left press on a window-tab cell being watched as a reorder drag.
     /// Never arms a backend interaction, so it cannot collide with

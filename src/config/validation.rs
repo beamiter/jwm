@@ -1285,6 +1285,15 @@ impl Config {
         {
             diagnostics.error("behavior.wallpaper_astronomy_bodies", error, None);
         }
+        if !behavior.wallpaper_solar_spin_speed.is_finite()
+            || !(0.0..=10000.0).contains(&behavior.wallpaper_solar_spin_speed)
+        {
+            diagnostics.error(
+                "behavior.wallpaper_solar_spin_speed",
+                "expected finite self-spin multiplier in 0..=10000",
+                None,
+            );
+        }
         if behavior.wallpaper_sky_rotation_minutes > 525600 {
             diagnostics.error(
                 "behavior.wallpaper_sky_rotation_minutes",

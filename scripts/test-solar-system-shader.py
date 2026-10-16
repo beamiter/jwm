@@ -14,7 +14,7 @@ helper=ROOT/'solar_values.rs'
 helper.write_text('#[path='+json.dumps(str(REPO/'src/backend/compositor_common/solar_system.rs'))+'] mod solar;\n'+r"""
 fn main(){let a:Vec<f64>=std::env::args().skip(1).map(|s|s.parse().unwrap()).collect();
 let camera=solar::SolarCamera{azimuth:a[0] as f32,elevation:a[1] as f32,distance:a[2] as f32};
-let (phases,surface)=solar::scene_phases(a[3]);for x in camera.eye().into_iter().chain(phases).chain([surface]){print!("{} ",x);}}
+let (phases,surface)=solar::scene_phases(a[3]);for x in camera.eye().into_iter().chain(phases).chain([surface]).chain(solar::scene_spin_phases(a[3] * 718.035)){print!("{} ",x);}}
 """)
 rustc=os.environ.get('RUSTC') or shutil.which('rustc') or str(REPO.parent/'toolchain/bin/rustc')
 subprocess.run([rustc,'--edition','2024',str(helper),'-Awarnings','-o',str(ROOT/'solar_values')],check=True)
@@ -80,15 +80,23 @@ for es in (False,True):
  unif1i(loc(prog,b'earth_map'),0);unif1i(loc(prog,b'earth_enabled'),int(bool(earth_enabled)))
 
  samples=[]
- scenes= [('default',.4,.65,35,0),('orbit',1.2,.85,35,0),('below',2.,-.6,35,0),('zoom',.4,.65,13,0),('motion',.4,.65,35,20),('north',.4,1.45,35,0),('south',.4,-1.45,35,0),('near',.4,0.,5,0),('far',.4,.65,60,0),('ring-sun',-0.262,0.016,35,0),('phase-before',.4,.65,35,(2*math.pi-2.39996)/.12-.0001),('phase-after',.4,.65,35,(2*math.pi-2.39996)/.12+.0001),('surface-before',.4,.65,35,2*math.pi/.015-.0001),('surface-after',.4,.65,35,2*math.pi/.015+.0001)]
+ scenes= [('default',.4,.65,35,0),('orbit',1.2,.85,35,0),('below',2.,-.6,35,0),('zoom',.4,.65,13,0),('motion',.4,.65,35,20),('north',.4,1.45,35,0),('south',.4,-1.45,35,0),('near',.4,0.,5,0),('far',.4,.65,60,0),('ring-sun',-0.262,0.016,35,0),('phase-before',.4,.65,35,2.39996/.12-.0001),('phase-after',.4,.65,35,2.39996/.12+.0001),('surface-before',.4,.65,35,2*math.pi/.015-.0001),('surface-after',.4,.65,35,2*math.pi/.015+.0001)]
+ if not BENCH_ONLY:
+  scenes += [('spin-still',.4,.65,35,0),('spin-quarter',.4,.65,35,30),('spin-wrap-before',.4,.65,35,119.9999),('spin-wrap-after',.4,.65,35,120.0001)]
+ if os.environ.get('SOLAR_SPIN_VIDEO') and not es:
+  scenes += [(f'spin-frame-{i:03d}',.4,.65,35,i*3.) for i in range(40)]
  if BENCH_ONLY: scenes=scenes[:1]
  if os.environ.get('SOLAR_VIDEO') and not es:
   scenes += [(f'frame-{i:03d}',.4+i*.025,.65+.2*math.sin(i/20),35-6*math.sin(i/35),i*.15) for i in range(90)]
  for name,yaw,pitch,distance,t in scenes:
   values=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),*map(str,[yaw,pitch,distance,t])]).split()))
+  if name.startswith('spin-'):
+   fixed=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),*map(str,[yaw,pitch,distance,0])]).split()))
+   values[3:12]=fixed[3:12]
   unif3(loc(prog,b'camera_eye'),*values[:3])
   for i,phase in enumerate(values[3:11]): unif1f(loc(prog,f'orbit_phase[{i}]'.encode()),phase)
   unif1f(loc(prog,b'surface_phase'),values[11])
+  for i,phase in enumerate(values[12:20]): unif1f(loc(prog,f'spin_phase[{i}]'.encode()),phase)
   gl('glDrawArrays',None,[U,I,I])(4,0,3)
   buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
   assert gl('glGetError',U,[])()==0
@@ -96,9 +104,12 @@ for es in (False,True):
   assert im.getchannel('A').getextrema()==(255,255)
   im.save(ROOT/f'{kind}-{name}.png');samples.append(im)
  for im in samples[1:9]: assert sum(ImageStat.Stat(ImageChops.difference(samples[0],im)).mean[:3])>.1
- for prefix in ([] if BENCH_ONLY else ['phase','surface']):
+ for prefix in ([] if BENCH_ONLY else ['phase','surface','spin-wrap']):
   before=Image.open(ROOT/f'{kind}-{prefix}-before.png');after=Image.open(ROOT/f'{kind}-{prefix}-after.png')
   assert sum(ImageStat.Stat(ImageChops.difference(before,after)).mean[:3])<.03
+ if not BENCH_ONLY:
+  a=Image.open(ROOT/f'{kind}-spin-still.png');b=Image.open(ROOT/f'{kind}-spin-quarter.png')
+  assert sum(ImageStat.Stat(ImageChops.difference(a,b)).mean[:3])>.01, 'self-rotation must move surfaces at fixed orbit/camera'
  # A partial repair must not touch pixels outside the compositor scissor.
  gl('glClearColor',None,[F,F,F,F])(1.,0.,1.,1.);gl('glClear',None,[U])(0x4000)
  gl('glEnable',None,[U])(0x0C11);gl('glScissor',None,[I,I,I,I])(W//4,H//4,W//2,H//2)
@@ -110,6 +121,63 @@ for es in (False,True):
  for _ in range(6):
   start=time.perf_counter();gl('glDrawArrays',None,[U,I,I])(4,0,3);finish();timings.append((time.perf_counter()-start)*1000.)
  results[kind]={'renderer':renderer,'version':version,'samples':len(samples),'scissor_preserved':True,'median_full_frame_ms':statistics.median(timings),'resolution':[W,H]}
+
+ # Compile diagnostics from the actual production functions, not Python copies.
+ if not BENCH_ONLY:
+  def diagnostic_program(fragment):
+   shader=compile(fragment,0x8B30);program=gl('glCreateProgram',U,[])()
+   attach(program,vs);attach(program,shader);gl('glLinkProgram',None,[U])(program)
+   ok=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(program,0x8B82,C.byref(ok));assert ok.value
+   gl('glUseProgram',None,[U])(program)
+   return program
+  probe_source=source[:source.index('void main(){')].replace('uniform float orbit_phase[8];','float orbit_phase[8];')+'''
+uniform float orbit_before[8];
+uniform float orbit_after[8];
+void main(){
+ int body=int(gl_FragCoord.x)+1;
+ for(int i=0;i<8;i++)orbit_phase[i]=orbit_before[i];
+ vec3 p=center(body);
+ for(int i=0;i<8;i++)orbit_phase[i]=orbit_after[i];
+ vec3 angular=normalize(cross(p,center(body)-p));
+ vec3 axis=body_axis(body), x=normalize(cross(axis,vec3(0,0,1))),z=cross(x,axis);
+ float expected=cos(obliquity[body-1]*PI/180.);
+ bool ok=abs(dot(angular,axis)-expected)<.002;
+ ok=ok&&length(surface_point(body,axis)-vec3(0,1,0))<.0001;
+ vec3 local=normalize(vec3(.3,.4,.5));
+ vec3 turned=rotate_y(local,-spin_phase[body-1]);
+ vec3 world=x*turned.x+axis*turned.y+z*turned.z;
+ ok=ok&&length(surface_point(body,world)-local)<.0001;
+ // Positive body rotation has angular momentum along the chosen physical axis.
+ vec3 moved=rotate_y(local,-spin_phase[body-1]-.001);
+ vec3 next=x*moved.x+axis*moved.y+z*moved.z;
+ ok=ok&&dot(cross(world,next-world),axis)>0.;
+ frag_color=ok?vec4(0,1,0,1):vec4(1,0,0,1);
+}
+'''
+  probe=diagnostic_program(probe_source)
+  for label,t in [('orbit_before',0),('orbit_after',.1)]:
+   v=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),'0','0','35',str(t)]).split()))
+   for i,phase in enumerate(v[3:11]):unif1f(loc(probe,f'{label}[{i}]'.encode()),phase)
+  for i in range(8):unif1f(loc(probe,f'spin_phase[{i}]'.encode()),.7+i*.4)
+  gl('glViewport',None,[I,I,I,I])(0,0,8,1);gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  pixels=(C.c_ubyte*32)();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,8,1,0x1908,0x1401,pixels)
+  assert list(pixels)==[0,255,0,255]*8, ('actual axis/direction/rigid UV probes',list(pixels))
+  # Replace only albedo; changing spin must not rotate world lighting or shadows.
+  lighting=diagnostic_program(source.replace('material(body,n)','vec3(.5)'))
+  gl('glViewport',None,[I,I,I,I])(0,0,W,H)
+  unif2(loc(lighting,b'resolution'),W,H)
+  v=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),'.4','.65','35','0']).split()))
+  unif3(loc(lighting,b'camera_eye'),*v[:3])
+  for i,phase in enumerate(v[3:11]):unif1f(loc(lighting,f'orbit_phase[{i}]'.encode()),phase)
+  images=[]
+  for phase in (0.,2.):
+   for i in range(8):unif1f(loc(lighting,f'spin_phase[{i}]'.encode()),phase)
+   gl('glDrawArrays',None,[U,I,I])(4,0,3)
+   buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
+   images.append(bytes(buf))
+  assert images[0]==images[1], 'self-rotation must not move world-space illumination'
+  results[kind]['rigid_axis_direction_probes']=8
+  results[kind]['spin_independent_world_lighting']=True
 
  current(d,None,None,None)
  egl('eglDestroySurface',U,[P,P])(d,surf);egl('eglDestroyContext',U,[P,P])(d,ctx)

@@ -51,6 +51,37 @@ pub(crate) struct DragCtl {
     pub orig_maximize: crate::core::maximize::MaximizeSnapshot,
 }
 
+/// A desktop orbit gesture owns its starting output and pixel scale until release.
+/// Keeping this snapshot avoids jumps across mixed-resolution outputs or reconfiguration.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SolarSystemDrag {
+    output: MonitorKey,
+    bounds: (i32, i32, i32, i32),
+    pub(crate) last: (i32, i32),
+}
+
+impl SolarSystemDrag {
+    fn contains(bounds: (i32, i32, i32, i32), point: (i32, i32)) -> bool {
+        let (x, y, width, height) = bounds;
+        width > 0
+            && height > 0
+            && point.0 >= x
+            && point.1 >= y
+            && i64::from(point.0) < i64::from(x) + i64::from(width)
+            && i64::from(point.1) < i64::from(y) + i64::from(height)
+    }
+
+    fn delta(self, point: (i32, i32)) -> (f32, f32) {
+        // Preserve the original 1080p sensitivity; equal fractions of the
+        // shorter output edge rotate equally on 1440p, 4K and portrait outputs.
+        let scale = 5.4 / self.bounds.2.min(self.bounds.3) as f32;
+        (
+            (i64::from(point.0) - i64::from(self.last.0)) as f32 * scale,
+            (i64::from(point.1) - i64::from(self.last.1)) as f32 * scale,
+        )
+    }
+}
+
 impl Jwm {
     /// Retire only the grab we acquired; never release a modal/window owner.
     pub(crate) fn cancel_solar_system_drag(&mut self, backend: &mut dyn Backend) {
@@ -91,9 +122,20 @@ impl Jwm {
             return;
         }
         if button == 1 {
+            let Some((output, bounds)) = self.state.monitors.iter().find_map(|(key, m)| {
+                let g = &m.geometry;
+                let bounds = (g.m_x, g.m_y, g.m_w, g.m_h);
+                SolarSystemDrag::contains(bounds, (x, y)).then_some((key, bounds))
+            }) else {
+                return;
+            };
             // Default mask is release + motion on both X11 transports.
             if matches!(backend.input_ops().grab_pointer(0, None), Ok(true)) {
-                self.solar_system_drag = Some((x, y));
+                self.solar_system_drag = Some(SolarSystemDrag {
+                    output,
+                    bounds,
+                    last: (x, y),
+                });
             }
         } else {
             backend.compositor_solar_system_camera_delta(
@@ -105,7 +147,7 @@ impl Jwm {
     }
 
     pub(crate) fn tick_solar_system_drag(&mut self, backend: &mut dyn Backend) {
-        let Some((old_x, old_y)) = self.solar_system_drag else {
+        let Some(drag) = self.solar_system_drag else {
             return;
         };
         let Ok((x, y, mask, _)) = backend.input_ops().query_pointer_root() else {
@@ -118,14 +160,24 @@ impl Jwm {
             self.cancel_solar_system_drag(backend);
             return;
         }
-        if (x, y) != (old_x, old_y) {
-            let azimuth = (i64::from(x) - i64::from(old_x)) as f32 * 0.005;
-            let elevation = (i64::from(y) - i64::from(old_y)) as f32 * 0.005;
+        let same_output = self.state.monitors.get(drag.output).is_some_and(|m| {
+            let g = &m.geometry;
+            (g.m_x, g.m_y, g.m_w, g.m_h) == drag.bounds
+        });
+        if !same_output || !SolarSystemDrag::contains(drag.bounds, (x, y)) {
+            self.cancel_solar_system_drag(backend);
+            return;
+        }
+        if (x, y) != drag.last {
+            let (azimuth, elevation) = drag.delta((x, y));
             if !backend.compositor_solar_system_camera_delta(azimuth, elevation, 0.0) {
                 self.cancel_solar_system_drag(backend);
                 return;
             }
-            self.solar_system_drag = Some((x, y));
+            self.solar_system_drag = Some(SolarSystemDrag {
+                last: (x, y),
+                ..drag
+            });
         }
     }
 

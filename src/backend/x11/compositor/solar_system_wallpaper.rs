@@ -2,7 +2,7 @@
 use super::*;
 use crate::backend::compositor_common::{
     animated_wallpaper::{POWER_QUERY_INTERVAL, WallpaperClock},
-    solar_system::{SolarCamera, scene_phases},
+    solar_system::{SolarCamera, SolarSpinClock, scene_phases, scene_spin_phases},
 };
 use glow::HasContext;
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ struct SolarProgram {
     eye: Option<glow::UniformLocation>,
     phases: Option<glow::UniformLocation>,
     surface: Option<glow::UniformLocation>,
+    spins: Option<glow::UniformLocation>,
     earth_map: Option<glow::UniformLocation>,
     earth_enabled: Option<glow::UniformLocation>,
 }
@@ -29,11 +30,18 @@ pub(super) struct SolarSystemWallpaper {
     last_power_query: Option<Instant>,
     epoch: Option<Instant>,
     sample_seconds: f64,
+    spin_clock: SolarSpinClock,
+    sample_spin_seconds: f64,
     earth_pending: Option<wallpaper::DeferredWallpaperLoad>,
     earth_texture: Option<glow::Texture>,
     frame_changed: bool,
 }
 impl SolarSystemWallpaper {
+    fn sample_spin_for_frame(&mut self) {
+        if self.frame_changed {
+            self.sample_spin_seconds = self.spin_clock.seconds;
+        }
+    }
     pub(super) fn deadline(&self, now: Instant) -> Option<Duration> {
         if !self.enabled || self.failed {
             return None;
@@ -137,6 +145,10 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         if !enabled || a.failed {
+            if let Some(epoch) = a.epoch {
+                a.spin_clock
+                    .sample(now.saturating_duration_since(epoch).as_secs_f64(), 0.0);
+            }
             return changed;
         }
         if a.last_power_query
@@ -147,6 +159,19 @@ impl<C: CompositorConnection> Compositor<C> {
             a.powered = powered;
             a.last_power_query = Some(now);
         }
+        let epoch = *a.epoch.get_or_insert(now);
+        let spin_rate = if a.powered && !occluded {
+            crate::config::CONFIG
+                .load()
+                .behavior()
+                .wallpaper_solar_spin_speed
+        } else {
+            0.0
+        };
+        changed |= a.spin_clock.sample(
+            now.saturating_duration_since(epoch).as_secs_f64(),
+            spin_rate,
+        );
         a.clock.set_paused(!a.powered || occluded);
         if a.clock.tick(now) {
             let epoch = *a.epoch.get_or_insert(now);
@@ -154,6 +179,7 @@ impl<C: CompositorConnection> Compositor<C> {
             changed = true;
         }
         a.frame_changed = changed | std::mem::take(&mut a.camera_dirty);
+        a.sample_spin_for_frame();
         a.frame_changed
     }
     pub(super) fn draw_solar_system_wallpaper(&mut self) {
@@ -203,6 +229,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             eye: self.gl.get_uniform_location(program, "camera_eye"),
                             phases: self.gl.get_uniform_location(program, "orbit_phase[0]"),
                             surface: self.gl.get_uniform_location(program, "surface_phase"),
+                            spins: self.gl.get_uniform_location(program, "spin_phase[0]"),
                             earth_map: self.gl.get_uniform_location(program, "earth_map"),
                             earth_enabled: self.gl.get_uniform_location(program, "earth_enabled"),
                         }
@@ -236,6 +263,7 @@ impl<C: CompositorConnection> Compositor<C> {
             let (phases, surface) = scene_phases(a.sample_seconds);
             gl.uniform_1_f32_slice(p.phases.as_ref(), &phases);
             gl.uniform_1_f32(p.surface.as_ref(), surface);
+            gl.uniform_1_f32_slice(p.spins.as_ref(), &scene_spin_phases(a.sample_spin_seconds));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, a.earth_texture);
             gl.uniform_1_i32(p.earth_map.as_ref(), 0);
@@ -256,6 +284,22 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_damage_reuses_frozen_spin_uniforms() {
+        let mut a = SolarSystemWallpaper::default();
+        a.spin_clock.sample(0.0, 718.035);
+        a.spin_clock.sample(1.0, 718.035);
+        a.frame_changed = true;
+        a.sample_spin_for_frame();
+        let held = scene_spin_phases(a.sample_spin_seconds);
+        a.spin_clock.sample(1.01, 718.035);
+        a.frame_changed = false;
+        a.sample_spin_for_frame();
+        assert_eq!(scene_spin_phases(a.sample_spin_seconds), held);
+        a.frame_changed = true;
+        a.sample_spin_for_frame();
+        assert_ne!(scene_spin_phases(a.sample_spin_seconds), held);
+    }
     #[test]
     fn disabled_and_failed_states_stop_wakes() {
         let mut a = SolarSystemWallpaper::default();

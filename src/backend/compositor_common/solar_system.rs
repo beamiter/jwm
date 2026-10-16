@@ -46,7 +46,7 @@ mod tests {
         let (b, _) = scene_phases(1e9 + 1.0 / 15.0);
         for (a, b) in a.into_iter().zip(b) {
             assert!((0.0..=std::f32::consts::TAU).contains(&a));
-            let d = (b - a).rem_euclid(std::f32::consts::TAU);
+            let d = (a - b).rem_euclid(std::f32::consts::TAU);
             assert!(d > 0.0 && d < 0.01);
         }
         assert_eq!(scene_phases(f64::NAN), scene_phases(0.0));
@@ -99,11 +99,112 @@ pub(crate) fn scene_phases(seconds: f64) -> ([f32; 8], f32) {
     };
     let phases = std::array::from_fn(|i| {
         let k = (i + 1) as f64;
-        ((if i == 2 { 5.0 } else { k * 2.39996 }) + seconds * (0.12 / k.powf(0.65)))
+        ((if i == 2 { 5.0 } else { k * 2.39996 }) - seconds * (0.12 / k.powf(0.65)))
             .rem_euclid(std::f64::consts::TAU) as f32
     });
     (
         phases,
         (seconds * 0.015).rem_euclid(std::f64::consts::TAU) as f32,
     )
+}
+
+/// NASA GSFC sidereal periods (hours), magnitudes only: retrograde is encoded
+/// by the full obliquity (>90 degrees) in the shader, never by a second sign.
+/// https://nssdc.gsfc.nasa.gov/planetary/factsheet/
+pub(crate) const SPIN_HOURS: [f64; 8] = [1407.6, 5832.5, 23.9345, 24.6229, 9.9, 10.7, 17.2, 16.1];
+
+/// Physical elapsed seconds, independent from the decorative orbital clock.
+pub(crate) fn scene_spin_phases(seconds: f64) -> [f32; 8] {
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.0)
+    } else {
+        0.0
+    };
+    std::array::from_fn(|i| {
+        ((seconds.rem_euclid(SPIN_HOURS[i] * 3600.0) / (SPIN_HOURS[i] * 3600.0))
+            * std::f64::consts::TAU) as f32
+    })
+}
+
+/// Integrate the previously selected rate: changing speed or pausing never
+/// reinterprets uptime and therefore cannot teleport a surface longitude.
+#[derive(Default)]
+pub(crate) struct SolarSpinClock {
+    pub seconds: f64,
+    last: Option<f64>,
+    rate: f64,
+}
+impl SolarSpinClock {
+    pub(crate) fn sample(&mut self, now: f64, rate: f64) -> bool {
+        if !now.is_finite() || !rate.is_finite() || !(0.0..=10000.0).contains(&rate) {
+            return false;
+        }
+        if let Some(last) = self.last {
+            if now < last {
+                return false;
+            }
+            let next = self.seconds + (now - last) * self.rate;
+            if !next.is_finite() {
+                return false;
+            }
+            self.seconds = next;
+        }
+        let changed = self.rate != rate;
+        self.last = Some(now);
+        self.rate = rate;
+        changed
+    }
+}
+
+#[cfg(test)]
+mod spin_tests {
+    use super::*;
+    #[test]
+    fn physical_periods_independent_and_continuous() {
+        for i in 0..8 {
+            let period = SPIN_HOURS[i] * 3600.0;
+            assert!(scene_spin_phases(period)[i].abs() < 1e-5);
+            assert!(
+                (scene_spin_phases(period * 0.25)[i] - std::f32::consts::FRAC_PI_2).abs() < 1e-5
+            );
+            let before = scene_spin_phases(period - 0.001)[i];
+            let after = scene_spin_phases(period + 0.001)[i];
+            let step = (after as f64 - before as f64).rem_euclid(std::f64::consts::TAU);
+            assert!(step.min(std::f64::consts::TAU - step) < 0.00001);
+        }
+        let phases = scene_spin_phases(718.035 * 30.0);
+        assert!((phases[2] - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert!(phases[4] > phases[2] && phases[2] > phases[0] && phases[0] > phases[1]);
+        for seconds in [1e9, 1e12] {
+            let a = scene_spin_phases(seconds);
+            let b = scene_spin_phases(seconds + 718.035 / 15.0);
+            for (a, b) in a.into_iter().zip(b) {
+                let step = (b - a).rem_euclid(std::f32::consts::TAU);
+                assert!(step > 0.0 && step < 0.01);
+            }
+        }
+        assert_eq!(scene_spin_phases(f64::NAN), [0.0; 8]);
+    }
+    #[test]
+    fn changing_rate_and_pausing_preserves_phase() {
+        let mut clock = SolarSpinClock::default();
+        clock.sample(0.0, 718.035);
+        clock.sample(30.0, 0.0);
+        let held = clock.seconds;
+        clock.sample(300.0, 0.0);
+        assert_eq!(clock.seconds, held);
+        clock.sample(300.0, 1.0);
+        assert_eq!(clock.seconds, held);
+        clock.sample(301.0, 1.0);
+        assert_eq!(clock.seconds, held + 1.0);
+        assert!(!clock.sample(f64::NAN, 1.0));
+        assert!(!clock.sample(302.0, f64::INFINITY));
+        assert!(!clock.sample(299.0, 1.0));
+        assert_eq!(clock.seconds, held + 1.0);
+        assert!(!clock.sample(302.0, 10001.0));
+        clock.sample(302.0, 10000.0);
+        let valid = clock.seconds;
+        assert!(!clock.sample(f64::MAX, 10000.0));
+        assert_eq!(clock.seconds, valid);
+    }
 }

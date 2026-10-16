@@ -1323,6 +1323,11 @@ pub struct BehaviorConfig {
     /// Stable connector-name assignments for earth-moon layout (earth or moon).
     #[serde(default)]
     pub wallpaper_astronomy_bodies: std::collections::BTreeMap<String, String>,
+    /// Solar-system self-spin multiplier, finite 0..=10000.
+    /// 0 pauses spin; 1 is real time; 718.035 gives Earth a 120-second sidereal day.
+    /// Independent of orbital illustration and the Earth/Moon astronomy settings.
+    #[serde(default = "default_wallpaper_solar_spin_speed")]
+    pub wallpaper_solar_spin_speed: f64,
     /// Decorative galaxy travel: minutes per revolution, 0 disables, 1..=525600.
     #[serde(default = "default_wallpaper_sky_rotation_minutes")]
     pub wallpaper_sky_rotation_minutes: u32,
@@ -1780,6 +1785,10 @@ fn default_wallpaper_astronomy_layout() -> String {
 
 fn default_wallpaper_astronomy_timezone() -> String {
     "system".into()
+}
+
+fn default_wallpaper_solar_spin_speed() -> f64 {
+    718.035
 }
 
 fn default_wallpaper_sky_rotation_minutes() -> u32 {
@@ -2359,6 +2368,7 @@ impl Default for Config {
                     wallpaper_earth_texture: String::new(),
                     wallpaper_moon_texture: String::new(),
                     wallpaper_astronomy_bodies: std::collections::BTreeMap::new(),
+                    wallpaper_solar_spin_speed: default_wallpaper_solar_spin_speed(),
                     wallpaper_sky_rotation_minutes: default_wallpaper_sky_rotation_minutes(),
                     wallpaper_earth_view: default_wallpaper_earth_view(),
                     wallpaper_earth_latitude: default_wallpaper_earth_latitude(),
@@ -4542,6 +4552,12 @@ impl Config {
                 "# Earth-moon layout only: default \"\" uses the bundled NASA Moon texture.\n",
                 "# Example: wallpaper_moon_texture = \"/home/alice/Pictures/moon.jpg\"\n",
             )),
+            ("behavior", "wallpaper_solar_spin_speed") => Some(concat!(
+                "# Solar-system self-spin multiplier: finite number in 0..10000.\n",
+                "# Examples: 0 = paused spin; 1 = real time; 718.035 = default (Earth turns in 120s).\n",
+                "# Scales sidereal spin only; orbital illustration and Earth/Moon settings are independent.\n",
+                "# See docs/solar-system-wallpaper.md for the solar-system wallpaper settings.\n",
+            )),
             ("behavior", "wallpaper_sky_rotation_minutes") => Some(concat!(
                 "# Decorative galaxy travel: integer minutes per turn, 0..525600.\n",
                 "# Default 1440 = slow 24-hour panorama; 0 restores the stationary backdrop.\n",
@@ -5034,6 +5050,13 @@ impl Config {
                 } else {
                     self.inner.behavior.wallpaper_earth_longitude = degrees;
                 }
+            }
+            "behavior.wallpaper_solar_spin_speed" => {
+                let speed = value
+                    .as_f64()
+                    .filter(|speed| speed.is_finite() && (0.0..=10000.0).contains(speed))
+                    .ok_or_else(|| format!("{key} must be a finite number in 0..=10000"))?;
+                self.inner.behavior.wallpaper_solar_spin_speed = speed;
             }
             "behavior.wallpaper_sky_rotation_minutes" => {
                 let minutes = as_u32()?;
@@ -5532,6 +5555,129 @@ mod tests {
             picked.behavior().wallpaper_earth_texture,
             "/walls/earth.jpg"
         );
+    }
+
+    #[test]
+    fn solar_spin_defaults_roundtrip_and_updates_are_isolated() {
+        let mut config = Config::default();
+        assert_eq!(config.behavior().wallpaper_solar_spin_speed, 718.035);
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        table["behavior"]
+            .as_table_mut()
+            .unwrap()
+            .remove("wallpaper_solar_spin_speed");
+        let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
+        assert_eq!(legacy.behavior.wallpaper_solar_spin_speed, 718.035);
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!(0.5),
+            serde_json::json!(718.035),
+            serde_json::json!(10000),
+        ] {
+            config
+                .set_values(&[("behavior.wallpaper_solar_spin_speed".into(), value.clone())])
+                .unwrap();
+            let roundtrip: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            assert_eq!(
+                roundtrip.behavior.wallpaper_solar_spin_speed,
+                value.as_f64().unwrap()
+            );
+            assert_eq!(roundtrip.behavior.wallpaper_sky_rotation_minutes, 1440);
+            assert_eq!(roundtrip.behavior.wallpaper_earth_rotation_minutes, 1440);
+            assert_eq!(roundtrip.behavior.wallpaper_moon_rotation_minutes, 39343);
+            assert_eq!(roundtrip.behavior.wallpaper_earth_view, "fixed");
+            assert!(!config.diagnostics().has_errors());
+        }
+    }
+
+    #[test]
+    fn solar_spin_invalid_live_updates_leave_batch_unchanged() {
+        let mut config = Config::default();
+        let before = toml::to_string(&config.inner).unwrap();
+        for value in [
+            serde_json::json!(-0.000001),
+            serde_json::json!(10000.000001),
+            serde_json::json!(f64::MAX),
+            serde_json::json!(u64::MAX),
+            serde_json::json!("1"),
+            serde_json::json!("NaN"),
+            serde_json::json!("inf"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            // JSON represents non-finite floats as null; never accept those as zero.
+            serde_json::json!(f64::NAN),
+            serde_json::json!(f64::INFINITY),
+            serde_json::json!(f64::NEG_INFINITY),
+        ] {
+            let error = config
+                .set_values(&[
+                    (
+                        "behavior.wallpaper_sky_rotation_minutes".into(),
+                        serde_json::json!(20),
+                    ),
+                    ("behavior.wallpaper_solar_spin_speed".into(), value),
+                ])
+                .unwrap_err();
+            assert!(error.contains("behavior.wallpaper_solar_spin_speed"));
+            assert_eq!(toml::to_string(&config.inner).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn solar_spin_invalid_files_are_rejected_with_diagnostics() {
+        let path = temporary_config_path("solar-spin-invalid");
+        let original: toml::Table =
+            toml::from_str(&toml::to_string(&Config::default().inner).unwrap()).unwrap();
+        for bad in [
+            -0.000001,
+            10000.000001,
+            f64::MAX,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let mut table = original.clone();
+            table["behavior"]
+                .as_table_mut()
+                .unwrap()
+                .insert("wallpaper_solar_spin_speed".into(), toml::Value::Float(bad));
+            let text = toml::to_string(&table).unwrap();
+            let parsed: TomlConfig = toml::from_str(&text).unwrap();
+            let mut config = Config::default();
+            config.inner = parsed;
+            assert!(config.diagnostics().issues().iter().any(|issue| {
+                issue.path == "behavior.wallpaper_solar_spin_speed"
+                    && issue.level == ConfigDiagnosticLevel::Error
+            }));
+            std::fs::write(&path, text).unwrap();
+            assert!(Config::load_from_file(&path).is_err());
+            let diagnostics = Config::validate_config_file(&path).unwrap();
+            assert!(diagnostics.issues().iter().any(|issue| {
+                issue.path == "behavior.wallpaper_solar_spin_speed"
+                    && issue.level == ConfigDiagnosticLevel::Error
+            }));
+        }
+        for bad in [
+            toml::Value::String("1".into()),
+            toml::Value::Boolean(true),
+            toml::Value::Array(vec![]),
+        ] {
+            let mut table = original.clone();
+            table["behavior"]
+                .as_table_mut()
+                .unwrap()
+                .insert("wallpaper_solar_spin_speed".into(), bad);
+            let text = toml::to_string(&table).unwrap();
+            assert!(toml::from_str::<TomlConfig>(&text).is_err());
+            std::fs::write(&path, text).unwrap();
+            assert!(Config::load_from_file(&path).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -8079,6 +8225,7 @@ border_px = 3
             "wallpaper_effect",
             "wallpaper_earth_texture",
             "wallpaper_moon_texture",
+            "wallpaper_solar_spin_speed",
             "wallpaper_sky_rotation_minutes",
             "wallpaper_earth_view",
             "wallpaper_earth_latitude",
