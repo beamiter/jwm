@@ -105,6 +105,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // feed a 30 fps encoder; `compositor_frame_deadline` now sleeps
             // exactly until the next frame instead.
             || self.astronomy_wallpaper.due()
+            || self.solar_system_wallpaper.due()
             || self.recording_frame_due()
             || self.iconic_snapshot_recapture_pending()
         {

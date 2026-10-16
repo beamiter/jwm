@@ -2650,6 +2650,13 @@ impl SystemUiState {
             text: format!("\u{f0ac} {marker} Astronomy Earth"),
             data: RowData::Wallpaper,
         });
+        let solar = crate::jwm::features::wallpaper::SOLAR_SYSTEM_CHOICE;
+        let marker = if current == solar { "\u{f00c}" } else { " " };
+        rows.push(ListRow {
+            key: solar.into(),
+            text: format!("\u{f0ac} {marker} Solar System 3D · drag to orbit"),
+            data: RowData::Wallpaper,
+        });
         // Start on the wallpaper already in use, so Escape-ing out of the
         // panel and reopening does not lose the user's place.
         let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
@@ -2673,7 +2680,7 @@ impl SystemUiState {
     /// image decoder; applying a choice uses `selected_wallpaper_choice`.
     pub fn selected_wallpaper(&self) -> Option<&str> {
         self.selected_wallpaper_choice()
-            .filter(|key| *key != crate::jwm::features::wallpaper::ASTRONOMY_CHOICE)
+            .filter(|key| !crate::jwm::features::wallpaper::is_effect_choice(key))
     }
 
     /// Selection identity for committing; unlike the preview this includes effects.

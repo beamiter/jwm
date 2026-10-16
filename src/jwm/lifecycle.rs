@@ -1013,6 +1013,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         normal_exit_prepared: bool,
     ) -> Result<(), Box<dyn Error>> {
+        self.cancel_solar_system_drag(backend);
         info!("[cleanup] Starting essential cleanup (letting Rust handle memory)");
         // Before anything can fail: a layout changed seconds before a restart
         // is exactly the one the next process has to come back to.

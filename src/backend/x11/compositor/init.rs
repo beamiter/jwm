@@ -1289,6 +1289,7 @@ impl<C: CompositorConnection> Compositor<C> {
             scratch_wobbly_flat: Vec::new(),
             // Wallpaper (texture loaded asynchronously)
             astronomy_wallpaper: astronomy_wallpaper::AstronomyWallpaper::default(),
+            solar_system_wallpaper: solar_system_wallpaper::SolarSystemWallpaper::default(),
             wallpaper_texture: None,
             wallpaper_mode,
             wallpaper_requested_mode: wallpaper_mode,

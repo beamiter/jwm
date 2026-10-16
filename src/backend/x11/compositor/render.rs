@@ -5060,8 +5060,10 @@ impl<C: CompositorConnection> Compositor<C> {
         let mut explicit_render = std::mem::take(&mut self.needs_render) || bar_wallpaper_probe;
         let mut damage_wakeup = std::mem::take(&mut self.damage_render_pending);
         let astronomy_cfg = crate::config::CONFIG.load();
-        let astronomy_occluded = if astronomy_cfg.behavior().wallpaper_effect == "astronomy"
-            && !self.overview_active
+        let astronomy_occluded = if matches!(
+            astronomy_cfg.behavior().wallpaper_effect.as_str(),
+            "astronomy" | "solar-system"
+        ) && !self.overview_active
             && !self.overview_closing
             && !self.expose_active
             && self.expose_entries.is_empty()
@@ -5108,10 +5110,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 .collect();
             // Use this frame's monitor geometry, not Astronomy's cached draw
             // plan: prepare updates that cache only after this decision.
-            let per_output = matches!(
-                astronomy_cfg.behavior().wallpaper_astronomy_layout.as_str(),
-                "per-output" | "earth-moon"
-            );
+            let per_output = astronomy_cfg.behavior().wallpaper_effect == "astronomy"
+                && matches!(
+                    astronomy_cfg.behavior().wallpaper_astronomy_layout.as_str(),
+                    "per-output" | "earth-moon"
+                );
             let outputs: Vec<_> = if per_output {
                 self.monitor_wallpapers
                     .iter()
@@ -5131,7 +5134,8 @@ impl<C: CompositorConnection> Compositor<C> {
             false
         };
         drop(astronomy_cfg);
-        let astronomy_changed = self.prepare_astronomy_wallpaper(astronomy_occluded);
+        let astronomy_changed = self.prepare_astronomy_wallpaper(astronomy_occluded)
+            | self.prepare_solar_system_wallpaper(astronomy_occluded);
         explicit_render |= astronomy_changed;
 
         // Auto-enable profiler when benchmark is running
@@ -6222,6 +6226,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         if !astronomy_occluded {
             self.draw_astronomy_wallpaper(use_scissor.then_some(damage_scissor));
+            self.draw_solar_system_wallpaper();
         }
 
         // Wallpaper-only readback MUST precede the first client/overlay draw.
@@ -6254,7 +6259,10 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             let (astronomy_key, astronomy_dynamic) = self.astronomy_wallpaper.bar_metric_source();
             astronomy_key.hash(&mut key);
-            let dynamic = astronomy_dynamic || self.wallpaper_transition_start.is_some();
+            let (solar_key, solar_dynamic) = self.solar_system_wallpaper.bar_metric_source();
+            solar_key.hash(&mut key);
+            let dynamic =
+                astronomy_dynamic || solar_dynamic || self.wallpaper_transition_start.is_some();
             // Do not change caller GL state, and never let a PBO or pack offset
             // turn a bounded scanline into an out-of-bounds driver write.
             let pack_safe =

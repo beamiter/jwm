@@ -3816,6 +3816,11 @@ impl Jwm {
             }
         }
 
+        if !handled_by_wm && matches!(target, HitTarget::Background { .. }) && event_mask.is_empty()
+        {
+            self.try_solar_system_press(backend, detail_btn);
+        }
+
         Ok(if is_client_click && !handled_by_wm {
             PointerPressDisposition::Replay
         } else {

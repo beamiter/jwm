@@ -52,6 +52,83 @@ pub(crate) struct DragCtl {
 }
 
 impl Jwm {
+    /// Retire only the grab we acquired; never release a modal/window owner.
+    pub(crate) fn cancel_solar_system_drag(&mut self, backend: &mut dyn Backend) {
+        if self.solar_system_drag.take().is_some() {
+            if let Err(error) = backend.input_ops().ungrab_pointer() {
+                log::warn!("could not release solar wallpaper pointer: {error}");
+            }
+        }
+    }
+
+    fn solar_system_pointer_clear(&self, backend: &dyn Backend, x: i32, y: i32) -> bool {
+        backend.compositor_solar_system_interactive()
+            && self.drag_ctl.is_none()
+            && self.tab_drag.is_none()
+            && self.grab_holding_mode_on_screen().is_none()
+            && !self.features.system_ui.is_active()
+            && !self.point_is_locked(x as f64, y as f64)
+            && self.window_tab_at(x as f64, y as f64).is_none()
+            && self.state.monitors.values().any(|m| {
+                let g = &m.geometry;
+                x >= g.m_x && y >= g.m_y
+                    && i64::from(x) < i64::from(g.m_x) + i64::from(g.m_w)
+                    && i64::from(y) < i64::from(g.m_y) + i64::from(g.m_h)
+            })
+            // QueryPointer remains truthful while GrabPointer retargets events
+            // to root. Any real child, including unmanaged windows/bars, wins.
+            && matches!(backend.input_ops().window_under_pointer(), Ok(None))
+    }
+
+    pub(crate) fn try_solar_system_press(&mut self, backend: &mut dyn Backend, button: u8) {
+        if self.solar_system_drag.is_some() || !matches!(button, 1 | 4 | 5) {
+            return;
+        }
+        let Ok((x, y, _, _)) = backend.input_ops().query_pointer_root() else {
+            return;
+        };
+        if !self.solar_system_pointer_clear(backend, x, y) {
+            return;
+        }
+        if button == 1 {
+            // Default mask is release + motion on both X11 transports.
+            if matches!(backend.input_ops().grab_pointer(0, None), Ok(true)) {
+                self.solar_system_drag = Some((x, y));
+            }
+        } else {
+            backend.compositor_solar_system_camera_delta(
+                0.0,
+                0.0,
+                if button == 4 { 1.0 } else { -1.0 },
+            );
+        }
+    }
+
+    pub(crate) fn tick_solar_system_drag(&mut self, backend: &mut dyn Backend) {
+        let Some((old_x, old_y)) = self.solar_system_drag else {
+            return;
+        };
+        let Ok((x, y, mask, _)) = backend.input_ops().query_pointer_root() else {
+            self.cancel_solar_system_drag(backend);
+            return;
+        };
+        // X11 Button1Mask. Polling also catches a release lost during a mode
+        // transition, a stationary newly mapped window, and output power loss.
+        if mask & (1 << 8) == 0 || !self.solar_system_pointer_clear(backend, x, y) {
+            self.cancel_solar_system_drag(backend);
+            return;
+        }
+        if (x, y) != (old_x, old_y) {
+            let azimuth = (i64::from(x) - i64::from(old_x)) as f32 * 0.005;
+            let elevation = (i64::from(y) - i64::from(old_y)) as f32 * 0.005;
+            if !backend.compositor_solar_system_camera_delta(azimuth, elevation, 0.0) {
+                self.cancel_solar_system_drag(backend);
+                return;
+            }
+            self.solar_system_drag = Some((x, y));
+        }
+    }
+
     /// 开始鼠标拖动窗口（Alt+左键拖动）
     ///
     /// - 越过拖拽死区后，平铺窗口自动切换为浮动
@@ -171,7 +248,10 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // One pointer gesture owns its original geometry and cancel snapshot.
         // Repeated presses or client requests must not replace that owner.
-        if self.drag_ctl.is_some() || self.grab_holding_mode_on_screen().is_some() {
+        if self.solar_system_drag.is_some()
+            || self.drag_ctl.is_some()
+            || self.grab_holding_mode_on_screen().is_some()
+        {
             return Ok(());
         }
         let Some(client) = self.state.clients.get(client_key) else {

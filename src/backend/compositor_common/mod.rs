@@ -20,6 +20,8 @@ pub(crate) mod image_source;
 pub mod layout_strip;
 pub mod math;
 pub mod media;
+#[cfg(feature = "x11-backends")]
+pub(crate) mod solar_system;
 // Phase-one foundation: the cache is intentionally not connected to backend
 // behaviour until both X11 and Wayland can honour its pinned-iconic contract.
 #[allow(dead_code)]

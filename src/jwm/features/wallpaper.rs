@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 
 /// Picker-only identity. Never pass it to an image decoder or store it as a path.
 pub(crate) const ASTRONOMY_CHOICE: &str = "jwm-effect:astronomy";
+pub(crate) const SOLAR_SYSTEM_CHOICE: &str = "jwm-effect:solar-system";
+pub(crate) fn is_effect_choice(choice: &str) -> bool {
+    matches!(choice, ASTRONOMY_CHOICE | SOLAR_SYSTEM_CHOICE)
+}
 
 /// A fresh effect selection needs a resolved local texture (configured or
 /// bundled). Re-selecting an active effect does not discard its loaded image.
@@ -34,6 +38,9 @@ pub(crate) fn picker_current_at(
     use crate::backend::compositor_common::wallpaper::{
         daily_picker_wallpaper_at, resolve_wallpaper_for_tag_at,
     };
+    if behavior.wallpaper_effect == "solar-system" {
+        return SOLAR_SYSTEM_CHOICE;
+    }
     if behavior.wallpaper_effect == "astronomy" {
         return ASTRONOMY_CHOICE;
     }
@@ -222,6 +229,27 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solar_system_choice_is_selected_and_never_an_image() {
+        use crate::jwm::features::SystemUiState;
+        let config = crate::config::Config::default()
+            .with_validated_value(
+                "behavior.wallpaper_effect",
+                &serde_json::json!("solar-system"),
+            )
+            .unwrap();
+        assert_eq!(
+            picker_current_at(config.behavior(), 1, 0),
+            SOLAR_SYSTEM_CHOICE
+        );
+        let panel = SystemUiState::wallpaper_picker(&[], SOLAR_SYSTEM_CHOICE, "/walls");
+        assert_eq!(panel.selected_wallpaper_choice(), Some(SOLAR_SYSTEM_CHOICE));
+        assert_eq!(panel.selected_wallpaper(), None);
+        assert!(is_effect_choice(ASTRONOMY_CHOICE));
+        assert!(is_effect_choice(SOLAR_SYSTEM_CHOICE));
+        assert!(!is_effect_choice("/walls/solar-system.jpg"));
+    }
 
     #[test]
     fn astronomy_checks_resolved_texture_only_for_new_selection() {

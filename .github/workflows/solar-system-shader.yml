@@ -1,0 +1,53 @@
+name: Solar system shader
+on:
+  push:
+    paths:
+      - 'src/backend/x11/compositor/shaders/solar_system.frag'
+      - 'src/backend/compositor_common/solar_system.rs'
+      - 'assets/astronomy/earth-nasa-october.jpg'
+      - 'scripts/test-solar-system-shader.py'
+      - '.github/workflows/solar-system-shader.yml'
+  pull_request:
+    paths:
+      - 'src/backend/x11/compositor/shaders/solar_system.frag'
+      - 'src/backend/compositor_common/solar_system.rs'
+      - 'assets/astronomy/earth-nasa-october.jpg'
+      - 'scripts/test-solar-system-shader.py'
+      - '.github/workflows/solar-system-shader.yml'
+  workflow_dispatch:
+jobs:
+  mesa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      MESA_SHADER_CACHE_DISABLE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1-mesa-dri python3-pil
+      - name: Camera and bounded orbital math
+        run: |
+          rustc --edition 2024 --test src/backend/compositor_common/solar_system.rs -o /tmp/solar-camera-tests
+          /tmp/solar-camera-tests
+      - name: Desktop GL and GLES rendered landscape regression
+        run: /usr/bin/python3 scripts/test-solar-system-shader.py
+      - name: Portrait, pole, zoom and scissor regression
+        env:
+          PREVIEW_WIDTH: '540'
+          PREVIEW_HEIGHT: '960'
+          SOLAR_TEST_OUTPUT: /tmp/jwm-solar-portrait
+        run: /usr/bin/python3 scripts/test-solar-system-shader.py
+      - name: Optional Earth texture fallback
+        env:
+          SOLAR_NO_EARTH: '1'
+          SOLAR_TEST_OUTPUT: /tmp/jwm-solar-fallback
+        run: /usr/bin/python3 scripts/test-solar-system-shader.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: solar-system-mesa-frames
+          path: |
+            /tmp/jwm-solar-preview/*.png
+            /tmp/jwm-solar-preview/metrics.json
+            /tmp/jwm-solar-portrait/*.png
+            /tmp/jwm-solar-portrait/metrics.json

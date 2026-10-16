@@ -4529,7 +4529,7 @@ impl Config {
                 "# Example: wallpaper = \"/home/alice/Pictures/Wallpapers/forest.jpg\"\n",
             )),
             ("behavior", "wallpaper_effect") => Some(concat!(
-                "# Live effect: \"off\" (default) or \"astronomy\" (X11 compositor only).\n",
+                "# Live effect: \"off\" (default), \"astronomy\", or \"solar-system\" (X11 only).\n",
                 "# Astronomy draws above the static fallback; failures/disable restore it.\n",
                 "# Example: wallpaper_effect = \"astronomy\"\n",
             )),
@@ -4966,8 +4966,10 @@ impl Config {
             "behavior.wallpaper" => self.inner.behavior.wallpaper = as_string()?,
             "behavior.wallpaper_effect" => {
                 let effect = as_string()?;
-                if !["off", "astronomy"].contains(&effect.as_str()) {
-                    return Err("behavior.wallpaper_effect must be off or astronomy".into());
+                if !["off", "astronomy", "solar-system"].contains(&effect.as_str()) {
+                    return Err(
+                        "behavior.wallpaper_effect must be off, astronomy or solar-system".into(),
+                    );
                 }
                 self.inner.behavior.wallpaper_effect = effect;
             }
@@ -5445,6 +5447,36 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn solar_system_is_opt_in_and_preserves_astronomy_and_static_settings() {
+        let config = Config::default();
+        assert_eq!(config.behavior().wallpaper_effect, "off");
+        let solar = config
+            .with_validated_value(
+                "behavior.wallpaper_effect",
+                &serde_json::json!("solar-system"),
+            )
+            .unwrap();
+        assert_eq!(solar.behavior().wallpaper_effect, "solar-system");
+        assert_eq!(solar.behavior().wallpaper, config.behavior().wallpaper);
+        assert_eq!(
+            solar.behavior().wallpaper_earth_latitude,
+            config.behavior().wallpaper_earth_latitude
+        );
+        assert_eq!(
+            solar.behavior().wallpaper_earth_longitude,
+            config.behavior().wallpaper_earth_longitude
+        );
+        assert_eq!(
+            solar.behavior().wallpaper_sky_rotation_minutes,
+            config.behavior().wallpaper_sky_rotation_minutes
+        );
+        let back = solar
+            .with_validated_value("behavior.wallpaper_effect", &serde_json::json!("astronomy"))
+            .unwrap();
+        assert_eq!(back.behavior().wallpaper_effect, "astronomy");
     }
 
     #[test]

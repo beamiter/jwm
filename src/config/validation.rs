@@ -1213,11 +1213,11 @@ impl Config {
             &behavior.client_moveresize,
             &["always", "floating-only", "never"],
         );
-        if !["off", "astronomy"].contains(&behavior.wallpaper_effect.as_str()) {
+        if !["off", "astronomy", "solar-system"].contains(&behavior.wallpaper_effect.as_str()) {
             diagnostics.error(
                 "behavior.wallpaper_effect",
                 format!(
-                    "unknown effect {:?}; expected off or astronomy",
+                    "unknown effect {:?}; expected off, astronomy or solar-system",
                     behavior.wallpaper_effect
                 ),
                 None,

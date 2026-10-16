@@ -1235,6 +1235,7 @@ mod scratchpad_reveal_tests {
             restart_state: crate::jwm::restart_state::PendingRestartState::default(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
+            solar_system_drag: None,
             tab_drag: None,
             control_slider_drag: None,
             system_ui_scroll_drag_x: None,

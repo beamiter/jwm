@@ -3,6 +3,7 @@ mod astronomy_wallpaper;
 mod effects;
 mod expose;
 mod jelly_renderer;
+mod solar_system_wallpaper;
 #[cfg(all(test, feature = "wayland-backends"))]
 pub(crate) use jelly_renderer::check_pipeline_for_test as check_jelly_pipeline_for_test;
 mod overview;
@@ -881,6 +882,7 @@ where
     // --- Wallpaper ---
     /// Default wallpaper texture (used for monitors without a per-monitor override).
     astronomy_wallpaper: astronomy_wallpaper::AstronomyWallpaper,
+    solar_system_wallpaper: solar_system_wallpaper::SolarSystemWallpaper,
     wallpaper_texture: Option<glow::Texture>,
     /// Layout mode of the texture currently stored in `wallpaper_texture`.
     wallpaper_mode: WallpaperMode,
@@ -1333,6 +1335,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(tex);
             }
             self.astronomy_wallpaper.cleanup(&self.gl);
+            self.solar_system_wallpaper.cleanup(&self.gl);
             if let Some(tex) = self.wallpaper_texture.take() {
                 self.gl.delete_texture(tex);
             }

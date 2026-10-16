@@ -3121,6 +3121,21 @@ pub trait BackendDiagnostics: Send {
 
 /// Runtime controls for compositor-wide visual state.
 pub trait CompositorControl: Send {
+    /// True only while the selected solar wallpaper is rendered and powered.
+    fn compositor_solar_system_interactive(&self) -> bool {
+        false
+    }
+
+    /// Orbit in radians and zoom in wheel steps (positive moves inward).
+    fn compositor_solar_system_camera_delta(
+        &mut self,
+        _azimuth: f32,
+        _elevation: f32,
+        _zoom_steps: f32,
+    ) -> bool {
+        false
+    }
+
     fn compositor_set_color_temperature(&mut self, _temperature: f32) {}
     fn compositor_set_saturation(&mut self, _saturation: f32) {}
     fn compositor_set_brightness(&mut self, _brightness: f32) {}

@@ -368,6 +368,14 @@ macro_rules! delegate_compositor_capabilities {
         }
 
         impl crate::backend::api::CompositorControl for $backend {
+            fn compositor_solar_system_interactive(&self) -> bool {
+                self.compositor.as_ref().is_some_and(|c| c.solar_system_interactive())
+            }
+
+            fn compositor_solar_system_camera_delta(&mut self, azimuth: f32, elevation: f32, zoom_steps: f32) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.solar_system_camera_delta(azimuth, elevation, zoom_steps))
+            }
+
             fn compositor_set_color_temperature(&mut self, temperature: f32) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_color_temperature(temperature);

@@ -1020,7 +1020,7 @@ impl Jwm {
         };
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         // Effects are picker identities, never paths for directory discovery.
-        let worker_current = if current == wallpaper::ASTRONOMY_CHOICE {
+        let worker_current = if wallpaper::is_effect_choice(&current) {
             fallback
         } else {
             current.clone()
@@ -1551,19 +1551,20 @@ impl Jwm {
             return;
         };
         let astronomy = path == crate::jwm::features::wallpaper::ASTRONOMY_CHOICE;
-        if astronomy && crate::config::get_backend_family() == crate::config::BackendFamily::Wayland
-        {
+        let solar = path == crate::jwm::features::wallpaper::SOLAR_SYSTEM_CHOICE;
+        let effect = astronomy || solar;
+        if effect && crate::config::get_backend_family() == crate::config::BackendFamily::Wayland {
             set_wallpaper_picker_message(
                 &mut self.features.system_ui,
-                "Astronomy Earth requires the X11 compositor; choose an image on Wayland.",
+                "Live wallpapers require the X11 compositor; choose an image on Wayland.",
             );
             self.mark_system_ui_dirty();
             return;
         }
-        if astronomy && !backend.has_compositor() {
+        if effect && !backend.has_compositor() {
             set_wallpaper_picker_message(
                 &mut self.features.system_ui,
-                "Enable the X11 compositor to use Astronomy Earth.",
+                "Enable the X11 compositor to use live wallpapers.",
             );
             self.mark_system_ui_dirty();
             return;
@@ -1598,10 +1599,17 @@ impl Jwm {
                 return;
             }
         }
-        let result = if astronomy {
+        let effect_name = if solar {
+            "solar-system"
+        } else if astronomy {
+            "astronomy"
+        } else {
+            "off"
+        };
+        let result = if effect {
             CONFIG
                 .load()
-                .with_validated_value("behavior.wallpaper_effect", &serde_json::json!("astronomy"))
+                .with_validated_value("behavior.wallpaper_effect", &serde_json::json!(effect_name))
         } else {
             CONFIG
                 .load()
@@ -1619,14 +1627,14 @@ impl Jwm {
         info!("Wallpaper: {path}");
         self.broadcast_ipc_event(
             "config/changed",
-            serde_json::json!({ "key": "behavior.wallpaper_effect", "value": if astronomy { "astronomy" } else { "off" } }),
+            serde_json::json!({ "key": "behavior.wallpaper_effect", "value": effect_name }),
         );
-        if !astronomy && CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
+        if !effect && CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
             self.broadcast_ipc_event(
                 "config/wallpaper",
                 serde_json::json!({ "path": path, "scope": "today", "rotation": "daily" }),
             );
-        } else if !astronomy {
+        } else if !effect {
             self.broadcast_ipc_event(
                 "config/changed",
                 serde_json::json!({ "key": "behavior.wallpaper", "value": path }),
@@ -2564,6 +2572,7 @@ impl Jwm {
             // switcher when another client holds the pointer) taking over
             // from a grabbed panel simply stays more modal than it asked
             // to be, and `close_system_ui` hands both back.
+            self.cancel_solar_system_drag(backend);
             if let Some(pointer_mask) = pointer_grab.event_mask()
                 && !backend.input_ops().grab_pointer(pointer_mask, None)?
             {
@@ -2623,6 +2632,7 @@ impl Jwm {
             return Ok(true);
         };
 
+        self.cancel_solar_system_drag(backend);
         match backend.input_ops().grab_pointer(pointer_mask, None) {
             Ok(true) => {
                 self.features.deferred_grab = None;
@@ -3834,6 +3844,7 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
+        self.cancel_solar_system_drag(backend);
         match backend.input_ops().grab_pointer(pointer_mask, None) {
             Ok(true) => {}
             Ok(false) => {
@@ -3994,6 +4005,7 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
+        self.cancel_solar_system_drag(backend);
         match backend.input_ops().grab_pointer(pointer_mask, crosshair) {
             Ok(true) => {}
             Ok(false) => {
@@ -5117,6 +5129,7 @@ impl Jwm {
                     | EventMaskBits::BUTTON_RELEASE
                     | EventMaskBits::POINTER_MOTION)
                     .bits();
+                self.cancel_solar_system_drag(backend);
                 match backend.input_ops().grab_pointer(pointer_mask, None) {
                     Ok(true) => {}
                     Ok(false) => {

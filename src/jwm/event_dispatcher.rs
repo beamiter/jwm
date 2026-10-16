@@ -590,6 +590,10 @@ impl WMController for Jwm {
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, time: u32) {
+        if self.solar_system_drag.is_some() {
+            self.cancel_solar_system_drag(backend);
+            return;
+        }
         // A tab reorder drag ends with this release whatever consumes it.
         // The drag holds no grab, so a modal — a capture, expose, a panel —
         // can be entered mid-drag and swallow the release below; a drag left
@@ -965,6 +969,10 @@ impl WMController for Jwm {
         root_y: f64,
         time: u32,
     ) {
+        if self.solar_system_drag.is_some() {
+            self.tick_solar_system_drag(backend);
+            return;
+        }
         if self.features.system_ui.is_active() {
             self.last_mouse_root = (root_x, root_y);
             // The film strip follows the pointer, so the cell under it is the
@@ -2015,7 +2023,10 @@ impl Jwm {
         }
         // Reject re-entry before a different requester can change focus or
         // monitor selection. Explicit cancellation above still ends the owner.
-        if self.drag_ctl.is_some() || self.grab_holding_mode_on_screen().is_some() {
+        if self.solar_system_drag.is_some()
+            || self.drag_ctl.is_some()
+            || self.grab_holding_mode_on_screen().is_some()
+        {
             return;
         }
 
@@ -2753,6 +2764,11 @@ mod tests {
     #[derive(Default)]
     struct GrabSpyInputOps {
         pointer_grabs: AtomicUsize,
+        solar_query_enabled: std::sync::atomic::AtomicBool,
+        solar_button_mask: AtomicU32,
+        solar_pointer_child: Mutex<Option<WindowId>>,
+        solar_query_fails: std::sync::atomic::AtomicBool,
+        solar_grab_fails: std::sync::atomic::AtomicBool,
         pointer_ungrabs: AtomicUsize,
         allowed_events: Mutex<Vec<(crate::backend::api::AllowMode, u32)>>,
         /// Event-mask bits of the most recent grab; 0 before the first one.
@@ -2786,19 +2802,35 @@ mod tests {
         fn grab_pointer(&self, mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
             self.pointer_grabs.fetch_add(1, AtomicOrdering::Relaxed);
             self.last_pointer_mask.store(mask, AtomicOrdering::Relaxed);
-            Ok(true)
+            Ok(!self.solar_grab_fails.load(AtomicOrdering::Relaxed))
         }
         fn ungrab_pointer(&self) -> Result<(), BackendError> {
             self.pointer_ungrabs.fetch_add(1, AtomicOrdering::Relaxed);
             Ok(())
         }
         fn query_pointer_root(&self) -> Result<(i32, i32, u16, u16), BackendError> {
-            Ok((0, 0, 0, 0))
+            if self.solar_query_fails.load(AtomicOrdering::Relaxed) {
+                return Err(BackendError::Message("pointer query failed".into()));
+            }
+            if !self.solar_query_enabled.load(AtomicOrdering::Relaxed) {
+                return Ok((0, 0, 0, 0));
+            }
+            let (x, y) = *self.pointer.lock().unwrap();
+            Ok((
+                x as i32,
+                y as i32,
+                self.solar_button_mask.load(AtomicOrdering::Relaxed) as u16,
+                0,
+            ))
+        }
+        fn window_under_pointer(&self) -> Result<Option<WindowId>, BackendError> {
+            Ok(*self.solar_pointer_child.lock().unwrap())
         }
     }
 
     #[derive(Default)]
     struct GrabSpyKeyOps {
+        solar_modifiers: AtomicU32,
         keyboard_grabs: AtomicUsize,
         keyboard_ungrabs: AtomicUsize,
     }
@@ -2827,7 +2859,7 @@ mod tests {
         }
 
         fn clean_mods(&self, _raw_state: u16) -> Mods {
-            Mods::empty()
+            Mods::from_bits_truncate(self.solar_modifiers.load(AtomicOrdering::Relaxed) as _)
         }
 
         fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
@@ -2838,6 +2870,8 @@ mod tests {
     }
 
     struct RenderSpyBackend {
+        solar_ready: bool,
+        solar_deltas: Vec<(f32, f32, f32)>,
         recording_region_updates: Vec<(i32, i32, u32, u32)>,
         recording_overlay_updates: Vec<Option<(i32, i32, u32, u32)>>,
         capture_hint_updates: Vec<Option<String>>,
@@ -2895,6 +2929,8 @@ mod tests {
                 key_ops: GrabSpyKeyOps::default(),
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
+                solar_ready: false,
+                solar_deltas: Vec::new(),
                 recording_region_updates: Vec::new(),
                 recording_overlay_updates: Vec::new(),
                 capture_hint_updates: Vec::new(),
@@ -2933,6 +2969,16 @@ mod tests {
     impl CompositorBenchmark for RenderSpyBackend {}
     impl BackendDiagnostics for RenderSpyBackend {}
     impl CompositorControl for RenderSpyBackend {
+        fn compositor_solar_system_interactive(&self) -> bool {
+            self.solar_ready
+        }
+        fn compositor_solar_system_camera_delta(&mut self, a: f32, e: f32, z: f32) -> bool {
+            if !self.solar_ready {
+                return false;
+            }
+            self.solar_deltas.push((a, e, z));
+            true
+        }
         fn compositor_apply_config(&mut self) {
             self.compositor_config_applies += 1;
         }
@@ -3170,6 +3216,7 @@ mod tests {
             restart_state: crate::jwm::restart_state::PendingRestartState::default(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
+            solar_system_drag: None,
             tab_drag: None,
             control_slider_drag: None,
             system_ui_scroll_drag_x: None,
@@ -7839,6 +7886,221 @@ mod tests {
         jwm.s_w = 1920;
         jwm.s_h = 1080;
         jwm
+    }
+
+    fn solar_input_fixture() -> (Jwm, RenderSpyBackend) {
+        let mut jwm = jwm_with_monitor();
+        let mon = jwm
+            .state
+            .monitors
+            .get_mut(jwm.state.sel_mon.unwrap())
+            .unwrap();
+        mon.geometry.m_w = 1920;
+        mon.geometry.m_h = 1080;
+        let mut backend = RenderSpyBackend::new();
+        backend.solar_ready = true;
+        backend
+            .input_ops
+            .solar_query_enabled
+            .store(true, AtomicOrdering::Relaxed);
+        *backend.input_ops.pointer.lock().unwrap() = (800.0, 500.0);
+        backend
+            .input_ops
+            .solar_button_mask
+            .store(1 << 8, AtomicOrdering::Relaxed);
+        (jwm, backend)
+    }
+
+    #[test]
+    fn solar_desktop_drag_orbits_and_release_retires_exactly_its_grab() {
+        let (mut jwm, mut backend) = solar_input_fixture();
+        jwm.try_solar_system_press(&mut backend, 1);
+        assert_eq!(jwm.solar_system_drag, Some((800, 500)));
+        *backend.input_ops.pointer.lock().unwrap() = (820.0, 510.0);
+        jwm.tick_solar_system_drag(&mut backend);
+        assert_eq!(backend.solar_deltas.len(), 1);
+        assert!((backend.solar_deltas[0].0 - 0.1).abs() < 0.0001);
+        jwm.on_button_release(&mut backend, HitTarget::Background { output: None }, 0);
+        jwm.cancel_solar_system_drag(&mut backend);
+        assert!(jwm.solar_system_drag.is_none());
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(backend.track_releases, 0);
+    }
+
+    #[test]
+    fn solar_scroll_zooms_without_grabbing() {
+        let (mut jwm, mut backend) = solar_input_fixture();
+        jwm.try_solar_system_press(&mut backend, 4);
+        jwm.try_solar_system_press(&mut backend, 5);
+        assert_eq!(
+            backend.solar_deltas,
+            vec![(0.0, 0.0, 1.0), (0.0, 0.0, -1.0)]
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn solar_drag_cancels_on_readiness_loss_button_loss_child_or_query_error() {
+        for condition in 0..4 {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            jwm.try_solar_system_press(&mut backend, 1);
+            match condition {
+                0 => backend.solar_ready = false,
+                1 => backend
+                    .input_ops
+                    .solar_button_mask
+                    .store(0, AtomicOrdering::Relaxed),
+                2 => {
+                    *backend.input_ops.solar_pointer_child.lock().unwrap() =
+                        Some(WindowId::from_raw(123))
+                }
+                _ => backend
+                    .input_ops
+                    .solar_query_fails
+                    .store(true, AtomicOrdering::Relaxed),
+            }
+            jwm.tick_solar_system_drag(&mut backend);
+            assert!(jwm.solar_system_drag.is_none());
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_ungrabs
+                    .load(AtomicOrdering::Relaxed),
+                1
+            );
+            assert!(backend.solar_deltas.is_empty());
+        }
+    }
+
+    #[test]
+    fn solar_press_fails_closed_without_releasing_someone_elses_grab() {
+        for condition in 0..4 {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            match condition {
+                0 => backend.solar_ready = false,
+                1 => backend
+                    .input_ops
+                    .solar_grab_fails
+                    .store(true, AtomicOrdering::Relaxed),
+                2 => {
+                    *backend.input_ops.solar_pointer_child.lock().unwrap() =
+                        Some(WindowId::from_raw(123))
+                }
+                _ => backend
+                    .input_ops
+                    .solar_query_fails
+                    .store(true, AtomicOrdering::Relaxed),
+            }
+            jwm.try_solar_system_press(&mut backend, 1);
+            jwm.cancel_solar_system_drag(&mut backend);
+            assert!(jwm.solar_system_drag.is_none());
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_ungrabs
+                    .load(AtomicOrdering::Relaxed),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn solar_actual_press_dispatch_only_accepts_unmodified_background() {
+        for condition in 0..3 {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            if condition == 2 {
+                backend
+                    .key_ops
+                    .solar_modifiers
+                    .store(Mods::SHIFT.bits() as u32, AtomicOrdering::Relaxed);
+            }
+            let target = if condition == 1 {
+                HitTarget::Surface(WindowId::from_raw(456))
+            } else {
+                HitTarget::Background { output: None }
+            };
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::ButtonPress {
+                    target,
+                    state: 0,
+                    detail: 1,
+                    time: 10,
+                    root_x: 800.0,
+                    root_y: 500.0,
+                },
+            )
+            .unwrap();
+            assert_eq!(jwm.solar_system_drag.is_some(), condition == 0);
+            jwm.cancel_solar_system_drag(&mut backend);
+        }
+    }
+
+    #[test]
+    fn solar_actual_lifecycle_events_retire_owned_grab() {
+        for event in [
+            BackendEvent::WindowMapped(WindowId::from_raw(456)),
+            BackendEvent::OutputPowerSet {
+                output_name: "test".into(),
+                on: false,
+            },
+            BackendEvent::KeyPress {
+                keycode: 0,
+                state: 0,
+                time: 10,
+                repeat: false,
+            },
+        ] {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            jwm.try_solar_system_press(&mut backend, 1);
+            jwm.handle_event(&mut backend, event).unwrap();
+            assert!(jwm.solar_system_drag.is_none());
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_ungrabs
+                    .load(AtomicOrdering::Relaxed),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn solar_drag_schedules_poll_and_modal_transfer_does_not_release_new_owner() {
+        let (mut jwm, mut backend) = solar_input_fixture();
+        jwm.try_solar_system_press(&mut backend, 1);
+        assert!(jwm.maintenance_next_wakeup_at(std::time::Instant::now()) <= FRAME_INTERVAL);
+        // This is the transfer order used by every modal grab entrypoint.
+        jwm.cancel_solar_system_drag(&mut backend);
+        assert!(backend.input_ops().grab_pointer(0, None).unwrap());
+        jwm.tick_solar_system_drag(&mut backend);
+        jwm.cancel_solar_system_drag(&mut backend);
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            2
+        );
     }
 
     fn output_info(id: u64, x: i32) -> OutputInfo {
@@ -14083,6 +14345,9 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        if self.solar_system_drag.is_some() {
+            next = min_optional_duration(next, Some(FRAME_INTERVAL));
+        }
         next = min_optional_duration(next, self.features.wallpaper_rotation.next_wakeup(now));
         next = min_optional_duration(
             next,
@@ -14138,6 +14403,20 @@ impl EventHandler for Jwm {
         backend: &mut dyn Backend,
         event: BackendEvent,
     ) -> Result<(), BackendError> {
+        // Lifecycle changes end our grab before another subsystem can take it.
+        if matches!(
+            &event,
+            BackendEvent::OutputAdded(_)
+                | BackendEvent::OutputRemoved(_)
+                | BackendEvent::OutputChanged(_)
+                | BackendEvent::ScreenLayoutChanged
+                | BackendEvent::WindowCreated(_)
+                | BackendEvent::WindowMapped(_)
+                | BackendEvent::OutputPowerSet { .. }
+                | BackendEvent::KeyPress { .. }
+        ) {
+            self.cancel_solar_system_drag(backend);
+        }
         match event {
             // === 硬件与输出 ===
             BackendEvent::OutputAdded(info) => self.on_output_added(backend, info),
@@ -14389,6 +14668,7 @@ impl EventHandler for Jwm {
     }
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
+        self.tick_solar_system_drag(backend);
         let now = std::time::Instant::now();
         // Clear the counted completion level before inspecting any worker
         // queues. A worker that publishes after this point leaves the eventfd
