@@ -1,8 +1,9 @@
 //! Astronomy is a wallpaper material, rendered below every client window.
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
-    AstronomyDraw, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
-    resolve_earth_texture, solar_direction, viewing_longitude,
+    AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
+    celestial_assignments, material_load_frame, resolve_cloud_texture, resolve_earth_texture,
+    resolve_moon_texture, solar_direction, viewing_longitude, visual_rotation,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,9 @@ struct AstronomyProgram {
     sun_direction: Option<glow::UniformLocation>,
     view_longitude: Option<glow::UniformLocation>,
     earth_map: Option<glow::UniformLocation>,
+    moon_material: Option<glow::UniformLocation>,
+    cloud_map: Option<glow::UniformLocation>,
+    clouds_enabled: Option<glow::UniformLocation>,
     canvas_origin: Option<glow::UniformLocation>,
     resolution: Option<glow::UniformLocation>,
     sphere_radius: Option<glow::UniformLocation>,
@@ -30,6 +34,9 @@ impl AstronomyProgram {
                 sun_direction: gl.get_uniform_location(program, "sun_direction"),
                 view_longitude: gl.get_uniform_location(program, "view_longitude"),
                 earth_map: gl.get_uniform_location(program, "earth_map"),
+                moon_material: gl.get_uniform_location(program, "moon_material"),
+                cloud_map: gl.get_uniform_location(program, "cloud_map"),
+                clouds_enabled: gl.get_uniform_location(program, "clouds_enabled"),
                 canvas_origin: gl.get_uniform_location(program, "canvas_origin"),
                 resolution: gl.get_uniform_location(program, "resolution"),
                 sphere_radius: gl.get_uniform_location(program, "sphere_radius"),
@@ -45,6 +52,18 @@ pub(super) struct AstronomyWallpaper {
     configured_path: String,
     pending: Option<wallpaper::DeferredWallpaperLoad>,
     texture: Option<glow::Texture>,
+    moon_configured_path: String,
+    moon_pending: Option<wallpaper::DeferredWallpaperLoad>,
+    moon_texture: Option<glow::Texture>,
+    cloud_pending: Option<wallpaper::DeferredWallpaperLoad>,
+    cloud_texture: Option<glow::Texture>,
+    dual_material: bool,
+    earth_period: u32,
+    moon_period: u32,
+    output_identities: Vec<(String, i32, i32, u32, u32)>,
+    identities_changed: bool,
+    body_overrides: std::collections::BTreeMap<String, String>,
+    bodies: Vec<CelestialBody>,
     retired: Vec<glow::Texture>,
     program: Option<AstronomyProgram>,
     failed: bool,
@@ -70,7 +89,7 @@ impl AstronomyWallpaper {
         outputs: impl Iterator<Item = (i32, i32, u32, u32)> + Clone,
     ) -> bool {
         let a = self;
-        let per_output = layout == "per-output";
+        let per_output = matches!(layout, "per-output" | "earth-moon");
         let output_count = if enabled && per_output {
             outputs.clone().take(129).count()
         } else {
@@ -102,6 +121,38 @@ impl AstronomyWallpaper {
         }
         layout_changed
     }
+    fn update_bodies(
+        &mut self,
+        overrides: &std::collections::BTreeMap<String, String>,
+        layout_changed: bool,
+    ) -> bool {
+        let a = self;
+        let bodies_changed =
+            a.identities_changed || a.body_overrides != *overrides || layout_changed;
+        if bodies_changed {
+            let names: Vec<_> = a
+                .draw_plan
+                .iter()
+                .map(|canvas| {
+                    a.output_identities
+                        .iter()
+                        .find(|(_, x, y, w, h)| {
+                            canvas.origin
+                                == [*x as f32, a.layout_screen.1 as f32 - *y as f32 - *h as f32]
+                                && canvas.size == [*w as f32, *h as f32]
+                        })
+                        .map(|o| o.0.clone())
+                        .unwrap_or_else(|| {
+                            format!("geometry:{:?}:{:?}", canvas.origin, canvas.size)
+                        })
+                })
+                .collect();
+            a.bodies = celestial_assignments(&names, overrides);
+            a.body_overrides = overrides.clone();
+            a.identities_changed = false;
+        }
+        bodies_changed
+    }
     fn observe_power(&mut self, now: Instant, reply: Option<bool>) -> bool {
         let powered = reply == Some(true);
         let changed = self.powered != powered;
@@ -125,9 +176,36 @@ impl AstronomyWallpaper {
     pub(super) fn due(&self) -> bool {
         self.deadline(Instant::now()) == Some(Duration::ZERO)
     }
+    fn take_failed_material(&mut self) -> [Option<glow::Texture>; 3] {
+        self.pending = None;
+        self.moon_pending = None;
+        self.cloud_pending = None;
+        self.failed = true;
+        [
+            self.texture.take(),
+            self.moon_texture.take(),
+            self.cloud_texture.take(),
+        ]
+    }
+
+    /// A terminal required-image failure must not strand GPU allocations once wakes stop.
+    unsafe fn fail_material(&mut self, gl: &glow::Context) {
+        for texture in self.take_failed_material().into_iter().flatten() {
+            unsafe {
+                gl.delete_texture(texture);
+            }
+        }
+    }
+
     pub(super) unsafe fn cleanup(&mut self, gl: &glow::Context) {
         unsafe {
-            for tex in self.retired.drain(..).chain(self.texture.take()) {
+            for tex in self
+                .retired
+                .drain(..)
+                .chain(self.texture.take())
+                .chain(self.moon_texture.take())
+                .chain(self.cloud_texture.take())
+            {
                 gl.delete_texture(tex);
             }
             if let Some(program) = self.program.take() {
@@ -138,6 +216,26 @@ impl AstronomyWallpaper {
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    pub(crate) fn set_astronomy_output_identities(
+        &mut self,
+        outputs: &[crate::backend::api::OutputInfo],
+    ) {
+        let mut identities: Vec<_> = outputs
+            .iter()
+            .take(128)
+            .filter(|o| o.width > 0 && o.height > 0)
+            .map(|o| (o.name.clone(), o.x, o.y, o.width as u32, o.height as u32))
+            .collect();
+        // Mirrors with different connector names choose the first name consistently.
+        identities.sort_unstable();
+        let a = &mut self.astronomy_wallpaper;
+        if a.output_identities != identities {
+            a.output_identities = identities;
+            a.identities_changed = true;
+            self.needs_render = true;
+        }
+    }
+
     /// CPU/X11-only maintenance, deliberately before fullscreen/unchanged gates.
     pub(super) fn prepare_astronomy_wallpaper(&mut self, occluded: bool) -> bool {
         let now = Instant::now();
@@ -155,10 +253,27 @@ impl<C: CompositorConnection> Compositor<C> {
                 .iter()
                 .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h)),
         );
-        let changed = a.enabled != enabled || a.configured_path != *configured;
+        let dual = layout == "earth-moon";
+        let moon_configured = &cfg.behavior().wallpaper_moon_texture;
+        let overrides = &cfg.behavior().wallpaper_astronomy_bodies;
+        let bodies_changed = a.update_bodies(overrides, layout_changed);
+        let periods_changed = a.earth_period != cfg.behavior().wallpaper_earth_rotation_minutes
+            || a.moon_period != cfg.behavior().wallpaper_moon_rotation_minutes;
+        a.earth_period = cfg.behavior().wallpaper_earth_rotation_minutes;
+        a.moon_period = cfg.behavior().wallpaper_moon_rotation_minutes;
+        let changed = a.enabled != enabled
+            || a.configured_path != *configured
+            || a.moon_configured_path != *moon_configured
+            || a.dual_material != dual;
         if changed {
             a.enabled = enabled;
             a.configured_path = configured.clone();
+            a.moon_configured_path = moon_configured.clone();
+            a.dual_material = dual;
+            a.moon_pending = None;
+            a.retired.extend(a.moon_texture.take());
+            a.cloud_pending = None;
+            a.retired.extend(a.cloud_texture.take());
             a.path = if enabled {
                 resolve_earth_texture(configured).unwrap_or_default()
             } else {
@@ -182,9 +297,36 @@ impl<C: CompositorConnection> Compositor<C> {
                     "astronomy wallpaper: Earth texture unavailable; keeping static wallpaper"
                 );
             }
+            // The optional historic cloud composite is aligned with the bundled Earth map.
+            // Do not paint it over an explicitly configured user texture.
+            if enabled && configured.is_empty() {
+                if let Some(path) = resolve_cloud_texture() {
+                    a.cloud_pending = Some(Self::load_wallpaper_async(
+                        &path,
+                        2048,
+                        1024,
+                        WallpaperMode::Stretch,
+                    ));
+                }
+            }
+            if enabled && dual {
+                if let Some(path) = resolve_moon_texture(moon_configured) {
+                    a.moon_pending = Some(Self::load_wallpaper_async(
+                        &path,
+                        2048,
+                        1024,
+                        WallpaperMode::Stretch,
+                    ));
+                } else {
+                    a.failed = true;
+                    log::warn!(
+                        "astronomy wallpaper: Moon texture unavailable; keeping static wallpaper"
+                    );
+                }
+            }
         }
         if !a.enabled || a.failed {
-            return changed || layout_changed;
+            return changed || layout_changed || bodies_changed || periods_changed;
         }
         let power_changed = if a
             .last_power_query
@@ -208,7 +350,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 .unwrap_or_default()
                 .as_secs_f64();
         }
-        a.frame_changed = changed || layout_changed || power_changed || timezone_changed || tick;
+        a.frame_changed = changed
+            || layout_changed
+            || bodies_changed
+            || periods_changed
+            || power_changed
+            || timezone_changed
+            || tick;
         a.frame_changed
     }
 
@@ -226,7 +374,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // First adoption changes the entire material, so wait for a frame
         // whose prepare step already requested full repair/blur invalidation.
         // Unrelated client damage between animation ticks must stay static.
-        if a.pending.is_some() && !a.frame_changed {
+        let (may_draw, poll_cloud) = material_load_frame(
+            a.pending.is_some() || a.moon_pending.is_some(),
+            a.cloud_pending.is_some(),
+            a.frame_changed,
+        );
+        if !may_draw {
             return;
         }
         if let Some(load) = a.pending.as_ref() {
@@ -237,12 +390,16 @@ impl<C: CompositorConnection> Compositor<C> {
                         log::warn!(
                             "astronomy wallpaper: Earth texture must be equirectangular 2:1; keeping static wallpaper"
                         );
-                        a.failed = true;
+                        unsafe {
+                            a.fail_material(&self.gl);
+                        }
                         return;
                     }
                     a.texture = Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
                     if a.texture.is_none() {
-                        a.failed = true;
+                        unsafe {
+                            a.fail_material(&self.gl);
+                        }
                         return;
                     }
                     unsafe {
@@ -256,16 +413,87 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     a.pending = None;
-                    a.failed = true;
+                    unsafe {
+                        a.fail_material(&self.gl);
+                    }
                     log::warn!("astronomy wallpaper: Earth image failed; keeping static wallpaper");
                     return;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
             }
         }
+        if let Some(load) = a.moon_pending.as_ref() {
+            match load.try_recv() {
+                Ok(data) => {
+                    a.moon_pending = None;
+                    if data.width != data.height.saturating_mul(2) {
+                        log::warn!(
+                            "astronomy wallpaper: Moon texture must be equirectangular 2:1; keeping static wallpaper"
+                        );
+                        unsafe {
+                            a.fail_material(&self.gl);
+                        }
+                        return;
+                    }
+                    a.moon_texture = Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                    if a.moon_texture.is_none() {
+                        unsafe {
+                            a.fail_material(&self.gl);
+                        }
+                        return;
+                    }
+                    unsafe {
+                        self.gl.bind_texture(glow::TEXTURE_2D, a.moon_texture);
+                        self.gl.tex_parameter_i32(
+                            glow::TEXTURE_2D,
+                            glow::TEXTURE_WRAP_S,
+                            glow::REPEAT as i32,
+                        );
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    a.moon_pending = None;
+                    unsafe {
+                        a.fail_material(&self.gl);
+                    }
+                    log::warn!("astronomy wallpaper: Moon image failed; keeping static wallpaper");
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            }
+        }
+        if let Some(load) = a.cloud_pending.as_ref().filter(|_| poll_cloud) {
+            match load.try_recv() {
+                Ok(data) => {
+                    a.cloud_pending = None;
+                    if data.width == data.height.saturating_mul(2) {
+                        a.cloud_texture =
+                            Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                        if a.cloud_texture.is_some() {
+                            unsafe {
+                                self.gl.bind_texture(glow::TEXTURE_2D, a.cloud_texture);
+                                self.gl.tex_parameter_i32(
+                                    glow::TEXTURE_2D,
+                                    glow::TEXTURE_WRAP_S,
+                                    glow::REPEAT as i32,
+                                );
+                            }
+                        }
+                    }
+                    // Optional clouds may fail without disabling either required surface.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    a.cloud_pending = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         let Some(texture) = a.texture else {
             return;
         };
+        if a.dual_material && a.moon_texture.is_none() {
+            return;
+        }
         if a.program.is_none() {
             match unsafe { Self::create_program(&self.gl, VERTEX, FRAGMENT) } {
                 Ok(program) => {
@@ -275,12 +503,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     // Failure stops future animation wakes. Release the uploaded
                     // image now, while this draw owns a current GL context,
                     // rather than waiting indefinitely for another frame.
-                    if let Some(texture) = a.texture.take() {
-                        unsafe {
-                            self.gl.delete_texture(texture);
-                        }
+                    unsafe {
+                        a.fail_material(&self.gl);
                     }
-                    a.failed = true;
                     log::warn!(
                         "astronomy wallpaper shader failed; keeping static wallpaper: {error}"
                     );
@@ -299,11 +524,44 @@ impl<C: CompositorConnection> Compositor<C> {
             gl.uniform_3_f32(program.sun_direction.as_ref(), sun[0], sun[1], sun[2]);
             gl.uniform_1_f32(program.view_longitude.as_ref(), longitude);
             gl.uniform_1_i32(program.earth_map.as_ref(), 0);
+            gl.uniform_1_i32(program.cloud_map.as_ref(), 1);
+            gl.uniform_1_i32(
+                program.clouds_enabled.as_ref(),
+                i32::from(a.cloud_texture.is_some()),
+            );
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, a.cloud_texture);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.enable(glow::SCISSOR_TEST);
-            for canvas in &a.draw_plan {
+            for (index, canvas) in a.draw_plan.iter().enumerate() {
+                let moon = a.dual_material && a.bodies.get(index) == Some(&CelestialBody::Moon);
+                gl.uniform_1_i32(program.moon_material.as_ref(), i32::from(moon));
+                if a.dual_material {
+                    let period = if moon { a.moon_period } else { a.earth_period };
+                    gl.uniform_1_f32(
+                        program.view_longitude.as_ref(),
+                        visual_rotation(a.sample_unix, period),
+                    );
+                    // Decorative fixed studio light in view space; spin does not change solar time.
+                    // Legacy modes retain their UTC solar direction and timezone camera.
+                    let angle = visual_rotation(a.sample_unix, period);
+                    let (s, c) = angle.sin_cos();
+                    gl.uniform_3_f32(
+                        program.sun_direction.as_ref(),
+                        c * -0.35 + s * 0.88,
+                        0.32,
+                        -s * -0.35 + c * 0.88,
+                    );
+                } else {
+                    gl.uniform_1_f32(program.view_longitude.as_ref(), longitude);
+                    gl.uniform_3_f32(program.sun_direction.as_ref(), sun[0], sun[1], sun[2]);
+                }
+                gl.bind_texture(
+                    glow::TEXTURE_2D,
+                    if moon { a.moon_texture } else { Some(texture) },
+                );
                 let clip = if let Some(repair) = repair {
                     let Some(clip) = canvas.repair_clip(Some(repair)) else {
                         continue;
@@ -327,6 +585,9 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 gl.disable(glow::SCISSOR_TEST);
             }
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_vertex_array(None);
             gl.use_program(None);
@@ -372,6 +633,78 @@ mod tests {
         assert!(a.failed);
         assert!(a.update_layout(false, "per-output", (200, 200), outputs.into_iter()));
         assert!(a.draw_plan.is_empty());
+    }
+
+    #[test]
+    fn identities_follow_outputs_after_move_mirror_and_hotplug() {
+        use CelestialBody::*;
+        let mut a = AstronomyWallpaper::default();
+        let overrides = std::collections::BTreeMap::from([
+            ("DP-1".into(), "earth".into()),
+            ("HDMI-1".into(), "moon".into()),
+        ]);
+        a.output_identities = vec![
+            ("DP-1".into(), 100, 0, 100, 100),
+            ("HDMI-1".into(), 0, 0, 100, 100),
+        ];
+        a.update_layout(
+            true,
+            "earth-moon",
+            (200, 100),
+            [(0, 0, 100, 100), (100, 0, 100, 100)].into_iter(),
+        );
+        assert!(a.update_bodies(&overrides, true));
+        assert_eq!(a.bodies, [Moon, Earth]);
+        let ptr = a.bodies.as_ptr();
+        assert!(!a.update_bodies(&overrides, false));
+        assert_eq!(ptr, a.bodies.as_ptr());
+        a.output_identities = vec![("HDMI-1".into(), 0, 0, 100, 100)];
+        a.update_layout(
+            true,
+            "earth-moon",
+            (100, 100),
+            [(0, 0, 100, 100)].into_iter(),
+        );
+        a.update_bodies(&overrides, true);
+        assert_eq!(a.bodies, [Moon]);
+        // Duplicate geometries (mirrors) retain one deterministic canvas.
+        a.output_identities = vec![
+            ("DP-1".into(), 0, 0, 100, 100),
+            ("HDMI-1".into(), 0, 0, 100, 100),
+        ];
+        a.update_layout(
+            true,
+            "earth-moon",
+            (100, 100),
+            [(0, 0, 100, 100), (0, 0, 100, 100)].into_iter(),
+        );
+        a.update_bodies(&overrides, true);
+        assert_eq!(a.bodies, [Earth]);
+    }
+
+    #[test]
+    fn terminal_failure_releases_all_partial_materials_exactly_once() {
+        let earth = glow::NativeTexture(std::num::NonZeroU32::new(1).unwrap());
+        let moon = glow::NativeTexture(std::num::NonZeroU32::new(2).unwrap());
+        let cloud = glow::NativeTexture(std::num::NonZeroU32::new(3).unwrap());
+        for (e, m, c) in [
+            (Some(earth), None, None),
+            (None, Some(moon), None),
+            (Some(earth), Some(moon), Some(cloud)),
+        ] {
+            let mut a = AstronomyWallpaper {
+                enabled: true,
+                texture: e,
+                moon_texture: m,
+                cloud_texture: c,
+                ..Default::default()
+            };
+            assert_eq!(a.take_failed_material(), [e, m, c]);
+            assert_eq!(a.take_failed_material(), [None, None, None]);
+            assert!(a.failed);
+            assert_eq!(a.deadline(Instant::now()), None);
+            assert!(a.pending.is_none() && a.moon_pending.is_none() && a.cloud_pending.is_none());
+        }
     }
 
     #[test]

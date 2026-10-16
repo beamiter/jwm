@@ -2,7 +2,7 @@
 """Compile/link/render actual wallpaper on surfaceless Mesa desktop and GLES.
 No window system, installed dependencies only. Outputs PNGs and JSON metrics.
 """
-import ctypes as C, os, json, hashlib, subprocess, datetime, tempfile, shutil
+import ctypes as C, os, json, hashlib, subprocess, datetime, tempfile, shutil, math
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageChops, ImageStat
 os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE','1')
@@ -13,7 +13,7 @@ ROOT.mkdir(parents=True, exist_ok=True)
 SOURCE=REPO/'src/backend/x11/compositor/shaders/animated_wallpaper.frag'
 W,H=int(os.environ.get("PREVIEW_WIDTH",960)),int(os.environ.get("PREVIEW_HEIGHT",540))
 helper=ROOT/'astronomy_values.rs'
-helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\nfn main() { let a: Vec<String> = std::env::args().collect(); let t:f64=a[1].parse().unwrap(); let o:i32=a[2].parse().unwrap(); let v=astronomy::solar_direction(t); println!("{} {} {} {}", v[0], v[1], v[2], astronomy::viewing_longitude(t,o)); }')
+helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\nfn main() { let a: Vec<String> = std::env::args().collect(); let t:f64=a[1].parse().unwrap(); let o:i32=a[2].parse().unwrap(); if a.len()>3 { let minutes:u32=a[3].parse().unwrap(); let r=astronomy::visual_rotation(t,minutes); let (s,c)=r.sin_cos(); println!("{} {} {} {}", c* -0.35+s*0.88,0.32,-s* -0.35+c*0.88,r); return; } let v=astronomy::solar_direction(t); println!("{} {} {} {}", v[0], v[1], v[2], astronomy::viewing_longitude(t,o)); }')
 subprocess.run([shutil.which('rustc') or 'rustc', str(helper), '-Awarnings', '-o', str(ROOT/'astronomy_values')],check=True)
 # Invoke the production Rust geometry planner; do not copy coordinate policy to Python.
 planner=ROOT/'astronomy_plan.rs'
@@ -88,11 +88,23 @@ for es in (False,True):
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),W,H)
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),0,0)
  unif1f(loc(prog,b'sphere_radius'),layout_plan(W,H,[],False)[0]['radius'])
- tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex));gl('glBindTexture',None,[U,U])(0x0DE1,tex)
+ textures={}
  param=gl('glTexParameteri',None,[U,U,I])
+ for body,asset in [('earth',os.environ.get('ASTRONOMY_TEST_TEXTURE',str(REPO/'assets/astronomy/earth-nasa-january.jpg'))),('moon',str(REPO/'assets/astronomy/moon-nasa-lroc.jpg'))]:
+  tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex));gl('glBindTexture',None,[U,U])(0x0DE1,tex)
+  for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
+  texture=Image.open(asset).convert('RGBA');data=C.create_string_buffer(texture.tobytes())
+  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
+  textures[body]=tex.value
+ # Match production texture units: surface map=0, static NASA cloud map=1.
+ gl('glActiveTexture',None,[U])(0x84C1)
+ cloud_tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(cloud_tex));gl('glBindTexture',None,[U,U])(0x0DE1,cloud_tex)
  for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
- texture=Image.open(Path(os.environ.get('ASTRONOMY_TEST_TEXTURE', str(REPO/'assets/astronomy/earth-nasa-january.jpg')))).convert('RGBA');raw=texture.tobytes();data=C.create_string_buffer(raw)
- gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
+ clouds=Image.open(Path(os.environ.get('ASTRONOMY_TEST_CLOUD_TEXTURE',str(REPO/'assets/astronomy/earth-nasa-clouds.jpg')))).convert('RGBA');cloud_data=C.create_string_buffer(clouds.tobytes())
+ gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,clouds.width,clouds.height,0,0x1908,0x1401,cloud_data)
+ unif1i(loc(prog,b'cloud_map'),1);unif1i(loc(prog,b'clouds_enabled'),1)
+ gl('glActiveTexture',None,[U])(0x84C0)
+ gl('glBindTexture',None,[U,U])(0x0DE1,textures['earth'])
  unif1i(loc(prog,b'earth_map'),0)
  images=[];metrics=[]
  cases=[(h,z) for z in (0,8) for h in (0,6,12,18)]+[(12+1/60,0),(12+1,0),(6+1/54000,0),(6+1/3600,0)]
@@ -123,6 +135,7 @@ for es in (False,True):
    unif1f(loc(hard_program,b'sphere_radius'),radius)
    gl('glUniform3f',None,[I,F,F,F])(loc(hard_program,b'sun_direction'),*values[:3]);unif1f(loc(hard_program,b'view_longitude'),values[3])
    unif1i(loc(hard_program,b'earth_map'),0)
+   unif1i(loc(hard_program,b'cloud_map'),1);unif1i(loc(hard_program,b'clouds_enabled'),1)
    gl('glDrawArrays',None,[U,I,I])(4,0,3)
    hard_pixels=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,hard_pixels)
    assert gl('glGetError',U,[])()==0
@@ -177,13 +190,21 @@ for es in (False,True):
  enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
  scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
  clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
- def layout_image(width,height,outputs,repair=None):
+ def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True):
   target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
   assert current(d,target,target,ctx)
   gl('glViewport',None,[I,I,I,I])(0,0,width,height)
+  unif1i(loc(prog,b'clouds_enabled'),int(clouds_enabled))
   disable(0x0C11);clear_color(7/255,11/255,19/255,1);clear(0x4000)
   plan=layout_plan(width,height,outputs,repair=repair)
   for draw_plan in plan:
+   if materials is not None:
+    # Use the production plan's output coordinate, not enumeration order.
+    body=materials[tuple(draw_plan['origin'])]
+    unif1i(loc(prog,b'moon_material'),int(body=='moon'))
+    gl('glBindTexture',None,[U,U])(0x0DE1,textures[body])
+    values=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),str(instant),'0','30' if body=='moon' else '20']).split()))
+    gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3]);unif1f(loc(prog,b'view_longitude'),values[3])
    enable(0x0C11);scissor(*draw_plan['clip'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),*draw_plan['origin'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),*draw_plan['size'])
@@ -231,6 +252,72 @@ for es in (False,True):
  assert ImageChops.difference(first.convert('RGB'),second.convert('RGB')).getbbox() is None
  invalid,plan=layout_image(320,240,[(400,0,100,100)])
  assert not plan and invalid.getpixel((160,120))==(7,11,19,255)
+ # Mixed-material rendering with production rotation values and geometry.
+ dual_metrics=[]
+ assignments={(0,0):'earth',(2560,0):'moon'}
+ dual_outputs=[(0,0,2560,1440),(2560,0,2560,1440)]
+ for seconds in (0,1/15,1,10,60):
+  rendered,plan=layout_image(5120,1440,dual_outputs,materials=assignments,instant=BASE+120+seconds)
+  filename=f'{kind}-earth-moon-{seconds:g}s.png';rendered.save(ROOT/filename)
+  dual_metrics.append({'file':filename,'seconds':seconds,'plan':plan})
+  if seconds==0:
+   dual_reference=rendered
+   assert ImageChops.difference(rendered.crop((0,0,2560,1440)).convert('RGB'),rendered.crop((2560,0,5120,1440)).convert('RGB')).getbbox() is not None
+  else:
+   motion={}
+   for body,x in [('earth',0),('moon',2560)]:
+    delta=ImageChops.difference(dual_reference.crop((x,0,x+2560,1440)).convert('RGB'),rendered.crop((x,0,x+2560,1440)).convert('RGB'))
+    assert delta.getbbox() is not None, f'{body} failed to rotate'
+    motion[body]={'mean_abs_rgb':sum(ImageStat.Stat(delta).mean)/3,'max_abs_channel':max(v[1] for v in delta.getextrema())}
+    sky_box=(x,0,x+300,200)
+    assert ImageChops.difference(dual_reference.crop(sky_box).convert('RGB'),rendered.crop(sky_box).convert('RGB')).getbbox() is None, f'{body} sky moved'
+   dual_metrics[-1]['motion']=motion
+ # Moon must equal the exact decorative sky outside its silhouette (no halo).
+ sky_source=source.split('void main() {',1)[0]+'void main() { frag_color=vec4(galaxy_background(gl_FragCoord.xy-canvas_origin),1.0); }'
+ assert current(d,surf,surf,ctx)
+ sky_fragment=compile(sky_source,0x8B30);sky_program=gl('glCreateProgram',U,[])();attach(sky_program,vs);attach(sky_program,sky_fragment)
+ gl('glLinkProgram',None,[U])(sky_program);linked=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(sky_program,0x8B82,C.byref(linked));assert linked.value
+ production_program=prog;prog=sky_program
+ # layout_image releases the EGL context after readback; make current before uniforms.
+ assert current(d,surf,surf,ctx);gl('glUseProgram',None,[U])(prog)
+ sky,_=layout_image(5120,1440,dual_outputs)
+ prog=production_program
+ assert current(d,surf,surf,ctx);gl('glUseProgram',None,[U])(prog)
+ moon=dual_reference.crop((2560,0,5120,1440)).convert('RGB');sky=sky.crop((2560,0,5120,1440)).convert('RGB')
+ delta=ImageChops.difference(moon,sky)
+ # Two complete bands immediately outside the lunar radius, including bright stars.
+ radius=layout_plan(5120,1440,dual_outputs)[1]['radius']
+ halo_checked=0;surface_checked=0;max_blue_excess=0
+ for y in range(1440):
+  for x in range(2560):
+   distance=math.hypot(x+0.5-1280,y+0.5-720)
+   if radius+2 < distance < radius+12:
+    assert delta.getpixel((x,y))==(0,0,0), 'Moon has an atmospheric halo'
+    halo_checked+=1
+   if distance < radius-2:
+    rgb=moon.getpixel((x,y));max_blue_excess=max(max_blue_excess,rgb[2]-rgb[0])
+    surface_checked+=1
+ assert max_blue_excess <= 35, 'Moon blue tint exceeds NASA texture range'
+ for name,width,height,outputs,materials in [
+  ('mixed-portrait',3000,1920,[(0,0,1920,1080),(1920,0,1080,1920)],{(0,840):'earth',(1920,0):'moon'}),
+  ('hotplug-moon-only',1080,1920,[(0,0,1080,1920)],{(0,0):'moon'}),
+ ]:
+  rendered,plan=layout_image(width,height,outputs,materials=materials)
+  filename=f'{kind}-earth-moon-{name}.png';rendered.save(ROOT/filename)
+  dual_metrics.append({'file':filename,'plan':plan})
+ # A damage rectangle crosses the Earth/Moon output boundary.
+ materials={(0,0):'earth',(320,0):'moon'}
+ full,_=layout_image(640,240,small_outputs,materials=materials)
+ partial,_=layout_image(640,240,small_outputs,repair,materials=materials)
+ expected=Image.new('RGBA',(640,240),(7,11,19,255));expected.paste(full.crop(box),box)
+ assert ImageChops.difference(expected.convert('RGB'),partial.convert('RGB')).getbbox() is None, 'mixed-material damage differs from full frame'
+ cloudless,_=layout_image(640,240,small_outputs,materials=materials,clouds_enabled=False)
+ assert ImageChops.difference(full.crop((320,0,640,240)).convert('RGB'),cloudless.crop((320,0,640,240)).convert('RGB')).getbbox() is None, 'Earth clouds affect Moon'
+ assert ImageChops.difference(full.crop((0,0,320,240)).convert('RGB'),cloudless.crop((0,0,320,240)).convert('RGB')).getbbox() is not None, 'Cloud texture has no visible Earth effect'
+ assert ImageChops.difference(full.crop((0,0,40,30)).convert('RGB'),cloudless.crop((0,0,40,30)).convert('RGB')).getbbox() is None, 'Cloud texture affects galaxy'
+ reordered,_=layout_image(640,240,list(reversed(small_outputs)),materials=materials)
+ assert ImageChops.difference(full.convert('RGB'),reordered.convert('RGB')).getbbox() is None, 'connector enumeration changed materials'
+ results[kind]['dual_materials']={'frames':dual_metrics,'halo_pixels_equal_sky':halo_checked,'moon_surface_pixels':surface_checked,'moon_max_blue_minus_red':max_blue_excess,'mixed_material_repair':'PASS','reordered_outputs':'PASS','stationary_sky_both_materials':True,'clouds_earth_only':'PASS'}
  results[kind]['layouts']=layout_metrics
  results[kind]['layout_pixel_assertions']='PASS: dual centers, portrait radius, gaps, negative clipping, repairs, mirror dedup, stable overlaps, outside-root'
  current(d,None,None,None)
@@ -240,12 +327,34 @@ for es in (False,True):
 results['source_sha256']=hashlib.sha256(source.encode()).hexdigest()
 
 # Both real APIs must agree within one byte of raster/float rounding.
+api_max_error=0
 for a,b in zip(results['gl330']['metrics'],results['gles300']['metrics']):
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
- assert max(v[1] for v in delta.getextrema()) <= 1, (a['file'],delta.getextrema())
+ api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
+ assert api_max_error <= 1, (a['file'],delta.getextrema())
 for a,b in zip(results['gl330']['layouts'],results['gles300']['layouts']):
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
- assert max(v[1] for v in delta.getextrema()) <= 1, (a['file'],delta.getextrema())
+ api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
+ assert api_max_error <= 1, (a['file'],delta.getextrema())
+for a,b in zip(results['gl330']['dual_materials']['frames'],results['gles300']['dual_materials']['frames']):
+ delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
+ api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
+ assert api_max_error <= 1, (a['file'],delta.getextrema())
+# Optional retained baseline: report intentional appearance changes, while
+# geometry/timing compatibility remains checked above. Never claim old pixels
+# are unchanged merely because both current graphics APIs agree.
+if os.environ.get('ASTRONOMY_TEST_BASELINE_OUTPUT'):
+ baseline=Path(os.environ['ASTRONOMY_TEST_BASELINE_OUTPUT'])
+ compatibility=[]
+ for kind in ('gl330','gles300'):
+  for frame in results[kind]['metrics']:
+   old=baseline/frame['file']
+   if not old.is_file(): raise AssertionError(f'Missing baseline frame: {old}')
+   delta=ImageChops.difference(Image.open(old).convert('RGB'),Image.open(ROOT/frame['file']).convert('RGB'))
+   compatibility.append({'file':frame['file'],'pixel_identical':delta.getbbox() is None,'mean_abs_rgb':sum(ImageStat.Stat(delta).mean)/3,'max_abs_channel':max(v[1] for v in delta.getextrema())})
+ results['legacy_visual_comparison']=compatibility
+results['gl_gles_max_channel_difference']=api_max_error
+results['scope']='Actual surfaceless Mesa shader execution and production Rust rotation/geometry helpers; simulated output layouts. No hardware compositor, real hotplug, or device deployment tested.'
 print('PASS: GLSL/GLES, opaque frames, stationary sky, UTC motion, production multi-output plans; output:',ROOT)
 
 (ROOT/'earth-validation.json').write_text(json.dumps(results,indent=2)+'\n')

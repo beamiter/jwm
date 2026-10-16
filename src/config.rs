@@ -1317,10 +1317,22 @@ pub struct BehaviorConfig {
     /// Equirectangular Earth day texture; empty resolves the installed bundled asset.
     #[serde(default)]
     pub wallpaper_earth_texture: String,
-    /// Astronomy presentation timezone, independent of the OS timezone.
+    /// Equirectangular Moon texture; empty resolves the installed bundled asset.
+    #[serde(default)]
+    pub wallpaper_moon_texture: String,
+    /// Stable connector-name assignments for earth-moon layout (earth or moon).
+    #[serde(default)]
+    pub wallpaper_astronomy_bodies: std::collections::BTreeMap<String, String>,
+    /// Artistic Earth spin period in minutes, 1..=1440.
+    #[serde(default = "default_wallpaper_earth_rotation_minutes")]
+    pub wallpaper_earth_rotation_minutes: u32,
+    /// Artistic Moon spin period in minutes, 1..=1440.
+    #[serde(default = "default_wallpaper_moon_rotation_minutes")]
+    pub wallpaper_moon_rotation_minutes: u32,
+    /// Astronomy presentation timezone for span/per-output, independent of the OS timezone.
     #[serde(default = "default_wallpaper_timezone_offset_hours")]
     pub wallpaper_timezone_offset_hours: i32,
-    /// Astronomy placement: span the framebuffer, or one globe per output.
+    /// Astronomy placement: span, per-output Earth, or independent earth-moon canvases.
     /// Independent of wallpaper_mode, which scales static image wallpapers.
     #[serde(default = "default_wallpaper_astronomy_layout")]
     pub wallpaper_astronomy_layout: String,
@@ -1745,6 +1757,14 @@ fn default_particle_gravity() -> f32 {
 }
 fn default_wallpaper_astronomy_layout() -> String {
     "span".into()
+}
+
+fn default_wallpaper_earth_rotation_minutes() -> u32 {
+    20
+}
+
+fn default_wallpaper_moon_rotation_minutes() -> u32 {
+    30
 }
 
 fn default_wallpaper_timezone_offset_hours() -> i32 {
@@ -2298,6 +2318,10 @@ impl Default for Config {
                         .into_owned(),
                     wallpaper_effect: "off".into(),
                     wallpaper_earth_texture: String::new(),
+                    wallpaper_moon_texture: String::new(),
+                    wallpaper_astronomy_bodies: std::collections::BTreeMap::new(),
+                    wallpaper_earth_rotation_minutes: default_wallpaper_earth_rotation_minutes(),
+                    wallpaper_moon_rotation_minutes: default_wallpaper_moon_rotation_minutes(),
                     wallpaper_timezone_offset_hours: default_wallpaper_timezone_offset_hours(),
                     wallpaper_astronomy_layout: default_wallpaper_astronomy_layout(),
                     wallpaper_mode: default_wallpaper_mode(),
@@ -4796,9 +4820,9 @@ impl Config {
             }
             "behavior.wallpaper_astronomy_layout" => {
                 let layout = as_string()?;
-                if !["span", "per-output"].contains(&layout.as_str()) {
+                if !["span", "per-output", "earth-moon"].contains(&layout.as_str()) {
                     return Err(
-                        "behavior.wallpaper_astronomy_layout must be span or per-output".into(),
+                        "behavior.wallpaper_astronomy_layout must be span, per-output, or earth-moon".into(),
                     );
                 }
                 self.inner.behavior.wallpaper_astronomy_layout = layout;
@@ -4813,14 +4837,37 @@ impl Config {
                     })?;
                 self.inner.behavior.wallpaper_timezone_offset_hours = hours as i32;
             }
-            "behavior.wallpaper_earth_texture" => {
+            "behavior.wallpaper_astronomy_bodies" => {
+                let bodies: std::collections::BTreeMap<String, String> =
+                    serde_json::from_value(value.clone())
+                        .map_err(|_| format!("{key} must be a connector-to-body object"))?;
+                if let Some(error) = validation::wallpaper_astronomy_bodies_error(&bodies) {
+                    return Err(format!("{key}: {error}"));
+                }
+                self.inner.behavior.wallpaper_astronomy_bodies = bodies;
+            }
+            "behavior.wallpaper_earth_rotation_minutes"
+            | "behavior.wallpaper_moon_rotation_minutes" => {
+                let minutes = as_u32()?;
+                if !(1..=1440).contains(&minutes) {
+                    return Err(format!("{key} must be an integer in 1..=1440"));
+                }
+                if key == "behavior.wallpaper_earth_rotation_minutes" {
+                    self.inner.behavior.wallpaper_earth_rotation_minutes = minutes;
+                } else {
+                    self.inner.behavior.wallpaper_moon_rotation_minutes = minutes;
+                }
+            }
+            "behavior.wallpaper_earth_texture" | "behavior.wallpaper_moon_texture" => {
                 let path = as_string()?;
                 if path.contains('\0') || path.len() > MAX_WALLPAPER_ROTATION_PATH_BYTES {
-                    return Err(
-                        "behavior.wallpaper_earth_texture is not a valid bounded path".into(),
-                    );
+                    return Err(format!("{key} is not a valid bounded path"));
                 }
-                self.inner.behavior.wallpaper_earth_texture = path;
+                if key == "behavior.wallpaper_earth_texture" {
+                    self.inner.behavior.wallpaper_earth_texture = path;
+                } else {
+                    self.inner.behavior.wallpaper_moon_texture = path;
+                }
             }
             "behavior.wallpaper_mode" => {
                 let mode = as_string()?;
@@ -5259,6 +5306,172 @@ mod tests {
             picked.behavior().wallpaper_earth_texture,
             "/walls/earth.jpg"
         );
+    }
+
+    #[test]
+    fn earth_moon_schema_defaults_and_hot_updates_roundtrip() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string(&Config::default().inner).unwrap()).unwrap();
+        let behavior = table.get_mut("behavior").unwrap().as_table_mut().unwrap();
+        for key in [
+            "wallpaper_moon_texture",
+            "wallpaper_astronomy_bodies",
+            "wallpaper_earth_rotation_minutes",
+            "wallpaper_moon_rotation_minutes",
+        ] {
+            behavior.remove(key);
+        }
+        let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
+        assert!(legacy.behavior.wallpaper_moon_texture.is_empty());
+        assert!(legacy.behavior.wallpaper_astronomy_bodies.is_empty());
+        assert_eq!(legacy.behavior.wallpaper_earth_rotation_minutes, 20);
+        assert_eq!(legacy.behavior.wallpaper_moon_rotation_minutes, 30);
+        assert_eq!(legacy.behavior.wallpaper_astronomy_layout, "span");
+        let mut config = Config {
+            inner: legacy,
+            gesture_policy_generation: super::next_gesture_policy_generation(),
+        };
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_effect".into(),
+                    serde_json::json!("astronomy"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!("earth-moon"),
+                ),
+                (
+                    "behavior.wallpaper_moon_texture".into(),
+                    serde_json::json!("/walls/moon.jpg"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_bodies".into(),
+                    serde_json::json!({"DP-1":"earth", "HDMI-1":"moon"}),
+                ),
+                (
+                    "behavior.wallpaper_earth_rotation_minutes".into(),
+                    serde_json::json!(1),
+                ),
+                (
+                    "behavior.wallpaper_moon_rotation_minutes".into(),
+                    serde_json::json!(1440),
+                ),
+            ])
+            .unwrap();
+        let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        assert_eq!(loaded.behavior.wallpaper_astronomy_layout, "earth-moon");
+        assert_eq!(loaded.behavior.wallpaper_moon_texture, "/walls/moon.jpg");
+        assert_eq!(loaded.behavior.wallpaper_astronomy_bodies["DP-1"], "earth");
+        assert_eq!(loaded.behavior.wallpaper_astronomy_bodies["HDMI-1"], "moon");
+        assert_eq!(loaded.behavior.wallpaper_earth_rotation_minutes, 1);
+        assert_eq!(loaded.behavior.wallpaper_moon_rotation_minutes, 1440);
+        assert!(config.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn earth_moon_invalid_updates_are_atomic_and_toml_is_validated() {
+        let mut config = Config::default();
+        let before = toml::to_string(&config.inner).unwrap();
+        let oversized: std::collections::BTreeMap<String, String> = (0..129)
+            .map(|i| (format!("DP-{i}"), "earth".into()))
+            .collect();
+        let mut invalid = vec![
+            (
+                "wallpaper_astronomy_bodies",
+                serde_json::json!({"":"earth"}),
+            ),
+            (
+                "wallpaper_astronomy_bodies",
+                serde_json::json!({"DP-1":"mars"}),
+            ),
+            ("wallpaper_astronomy_bodies", serde_json::json!({"DP-1":1})),
+            (
+                "wallpaper_astronomy_bodies",
+                serde_json::json!({"DP\u{0}-1":"earth"}),
+            ),
+            (
+                "wallpaper_astronomy_bodies",
+                serde_json::json!({"x".repeat(257):"earth"}),
+            ),
+            ("wallpaper_astronomy_bodies", serde_json::json!(oversized)),
+            ("wallpaper_astronomy_bodies", serde_json::json!([])),
+            ("wallpaper_moon_texture", serde_json::json!("bad\u{0}path")),
+            (
+                "wallpaper_moon_texture",
+                serde_json::json!("x".repeat(super::MAX_WALLPAPER_ROTATION_PATH_BYTES + 1)),
+            ),
+        ];
+        for key in [
+            "wallpaper_earth_rotation_minutes",
+            "wallpaper_moon_rotation_minutes",
+        ] {
+            for bad in [
+                serde_json::json!(0),
+                serde_json::json!(1441),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(true),
+                serde_json::json!("20"),
+                serde_json::json!(u64::MAX),
+            ] {
+                invalid.push((key, bad));
+            }
+        }
+        for (key, bad) in invalid {
+            let key = format!("behavior.{key}");
+            assert!(
+                config
+                    .set_values(&[
+                        (
+                            "behavior.wallpaper_effect".into(),
+                            serde_json::json!("astronomy")
+                        ),
+                        (key.clone(), bad.clone()),
+                    ])
+                    .is_err(),
+                "accepted {key}={bad}"
+            );
+            assert_eq!(toml::to_string(&config.inner).unwrap(), before);
+            // Exercise TOML type/semantic validation separately from hot updates.
+            let mut raw = serde_json::to_value(&config.inner).unwrap();
+            raw["behavior"][key.strip_prefix("behavior.").unwrap()] = bad;
+            if let Ok(parsed) = serde_json::from_value::<TomlConfig>(raw) {
+                let encoded = toml::to_string(&parsed).unwrap();
+                let parsed: TomlConfig = toml::from_str(&encoded).unwrap();
+                let invalid_config = Config {
+                    inner: parsed,
+                    gesture_policy_generation: super::next_gesture_policy_generation(),
+                };
+                assert!(
+                    invalid_config
+                        .diagnostics()
+                        .issues()
+                        .iter()
+                        .any(|issue| issue.path == key
+                            && issue.level == ConfigDiagnosticLevel::Error),
+                    "{key}"
+                );
+            }
+        }
+        // Both limits are inclusive and connector assignments can be cleared.
+        let bounded: std::collections::BTreeMap<String, String> = (0..127)
+            .map(|i| (format!("DP-{i}"), "moon".into()))
+            .chain([("x".repeat(256), "earth".into())])
+            .collect();
+        config
+            .set_value(
+                "behavior.wallpaper_astronomy_bodies",
+                &serde_json::json!(bounded),
+            )
+            .unwrap();
+        config
+            .set_value(
+                "behavior.wallpaper_astronomy_bodies",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        assert!(config.behavior().wallpaper_astronomy_bodies.is_empty());
     }
 
     #[test]

@@ -253,6 +253,23 @@ fn validate_choice_ignore_ascii_case(
 }
 
 /// First collection error, shared by file diagnostics and hot overrides.
+pub(super) fn wallpaper_astronomy_bodies_error(
+    bodies: &std::collections::BTreeMap<String, String>,
+) -> Option<&'static str> {
+    if bodies.len() > 128 {
+        return Some("at most 128 connector assignments are allowed");
+    }
+    for (connector, body) in bodies {
+        if connector.is_empty() || connector.len() > 256 || connector.contains('\0') {
+            return Some("connector names must be nonempty, at most 256 bytes, and contain no NUL");
+        }
+        if !["earth", "moon"].contains(&body.as_str()) {
+            return Some("body assignments must be earth or moon");
+        }
+    }
+    None
+}
+
 pub(super) fn wallpaper_rotation_paths_error(
     paths: &[String],
     require_nonempty: bool,
@@ -1190,10 +1207,12 @@ impl Config {
                 None,
             );
         }
-        if !["span", "per-output"].contains(&behavior.wallpaper_astronomy_layout.as_str()) {
+        if !["span", "per-output", "earth-moon"]
+            .contains(&behavior.wallpaper_astronomy_layout.as_str())
+        {
             diagnostics.error(
                 "behavior.wallpaper_astronomy_layout",
-                "expected span or per-output",
+                "expected span, per-output, or earth-moon",
                 None,
             );
         }
@@ -1204,14 +1223,41 @@ impl Config {
                 None,
             );
         }
-        if behavior.wallpaper_earth_texture.contains('\0')
-            || behavior.wallpaper_earth_texture.len() > super::MAX_WALLPAPER_ROTATION_PATH_BYTES
-        {
-            diagnostics.error(
+        for (key, path) in [
+            (
                 "behavior.wallpaper_earth_texture",
-                "invalid or oversized texture path",
-                None,
-            );
+                &behavior.wallpaper_earth_texture,
+            ),
+            (
+                "behavior.wallpaper_moon_texture",
+                &behavior.wallpaper_moon_texture,
+            ),
+        ] {
+            if path.contains('\0') || path.len() > super::MAX_WALLPAPER_ROTATION_PATH_BYTES {
+                diagnostics.error(key, "invalid or oversized texture path", None);
+            }
+        }
+        if let Some(error) = wallpaper_astronomy_bodies_error(&behavior.wallpaper_astronomy_bodies)
+        {
+            diagnostics.error("behavior.wallpaper_astronomy_bodies", error, None);
+        }
+        for (key, minutes) in [
+            (
+                "behavior.wallpaper_earth_rotation_minutes",
+                behavior.wallpaper_earth_rotation_minutes,
+            ),
+            (
+                "behavior.wallpaper_moon_rotation_minutes",
+                behavior.wallpaper_moon_rotation_minutes,
+            ),
+        ] {
+            if !(1..=1440).contains(&minutes) {
+                diagnostics.error(
+                    key,
+                    "expected integer rotation period in 1..=1440 minutes",
+                    None,
+                );
+            }
         }
         if !["off", "daily"].contains(&behavior.wallpaper_rotation.as_str()) {
             diagnostics.error(

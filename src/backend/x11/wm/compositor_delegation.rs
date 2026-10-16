@@ -836,7 +836,9 @@ macro_rules! delegate_compositor_capabilities {
             }
 
             fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+                let outputs = crate::backend::api::OutputOps::enumerate_outputs(self.output_ops.as_ref());
                 if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_astronomy_output_identities(&outputs);
                     compositor.set_monitors(monitors);
                 }
             }

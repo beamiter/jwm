@@ -5107,7 +5107,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 .collect();
             // Use this frame's monitor geometry, not Astronomy's cached draw
             // plan: prepare updates that cache only after this decision.
-            let per_output = astronomy_cfg.behavior().wallpaper_astronomy_layout == "per-output";
+            let per_output = matches!(
+                astronomy_cfg.behavior().wallpaper_astronomy_layout.as_str(),
+                "per-output" | "earth-moon"
+            );
             let outputs: Vec<_> = if per_output {
                 self.monitor_wallpapers
                     .iter()

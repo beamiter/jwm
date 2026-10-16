@@ -714,6 +714,10 @@ build_and_install_jwm() {
     # Shared data is kept outside the executable and installed for both build modes.
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-january.jpg" \
         /usr/local/share/jwm/astronomy/earth-nasa-january.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/moon-nasa-lroc.jpg" \
+        /usr/local/share/jwm/astronomy/moon-nasa-lroc.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-clouds.jpg" \
+        /usr/local/share/jwm/astronomy/earth-nasa-clouds.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/README.md" \
         /usr/local/share/jwm/astronomy/README.md
 

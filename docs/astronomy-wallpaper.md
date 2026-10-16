@@ -1,4 +1,4 @@
-# Astronomy Earth wallpaper (X11)
+# Astronomy Earth and Moon wallpaper (X11)
 
 Astronomy is an optional material in JWM's existing wallpaper feature. It draws
 inside the compositor background pass, below all windows, with no new window,
@@ -55,9 +55,51 @@ For a persistent per-screen choice, set `wallpaper_astronomy_layout = "per-outpu
 in `[behavior]` and reload the configuration. Hot changes are session-only unless
 also written to the configuration file.
 
+## Earth on one output, Moon on another
+
+With `wallpaper_effect = "astronomy"`, the single enabling setting is
+`wallpaper_astronomy_layout = "earth-moon"`. Each output gets an independent
+canvas containing a complete spinning body; it does not crop a shared globe.
+For example, replace the connector names below with your actual outputs:
+
+```toml
+[behavior]
+wallpaper_effect = "astronomy"
+wallpaper_astronomy_layout = "earth-moon"
+wallpaper_earth_texture = "" # bundled Earth texture
+wallpaper_moon_texture = "" # bundled Moon texture
+wallpaper_earth_rotation_minutes = 20
+wallpaper_moon_rotation_minutes = 30
+wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
+```
+
+The explicit connector-name map guarantees stable body assignments across
+hotplug and restart. Without an explicit assignment, outputs sorted by connector
+name alternate Earth, Moon, Earth, Moon. A single output defaults to Earth unless
+explicitly assigned Moon. If you want a lone remaining Moon output to stay Moon
+after unplugging the Earth output, use the explicit map. Unknown/disconnected
+connector entries remain available for when that output returns.
+
+The map defaults to empty and accepts at most 128 entries. Connector names must
+be nonempty, at most 256 bytes, and contain no NUL; body names are exactly
+`earth` or `moon`. Each rotation period is an integer from 1 through 1440 minutes.
+The Moon texture setting defaults to empty for the bundled asset and follows the
+same bounded-path validation and lookup order as the Earth texture, using
+`moon-nasa-lroc.jpg` in place of `earth-nasa-january.jpg`. Mirrored outputs share
+one canvas; the alphabetically first connector supplies its body assignment. Layout, body map, textures,
+and rotation periods support normal reload and hot-config updates; hot changes
+are session-only unless saved to the configuration file. Static wallpapers,
+daily rotation, and the default `span` layout remain unchanged.
+
+Both spin periods are artistic animation choices, not a real lunar ephemeris,
+orbital simulation, or a depiction of the Moon's current phase. This mode uses
+a fixed decorative light relative to the view, with no UTC-based lighting. The UTC-based
+Earth view and presentation-timezone behavior described below apply to the
+older `span` and `per-output` modes only.
+
 ## Time and appearance
 
-UTC drives an approximate astronomical Sun direction, including seasonal
+In `span` and `per-output` modes, UTC drives an approximate astronomical Sun direction, including seasonal
 solar declination and equation of time. The true current system instant is sampled
 as UTC, without adding the presentation offset to solar calculations. The display
 timezone defaults to UTC+8 and is configurable with `wallpaper_timezone_offset_hours`;
@@ -65,7 +107,10 @@ it neither reads nor changes the operating-system timezone. This offset provides
 only a coarse starting viewing meridian, not a GPS location. The view completes
 one slow orbit per UTC day. This is an original presentation choice, not a
 claim to reproduce Apple's implementation. The night side is intentionally
-dark; there are no live clouds, weather or city-light observations. The stationary
+dark. A static NASA Blue Marble cloud composite adds cloud structure to the
+bundled Earth map; it is historical imagery, not current weather. Explicit custom
+Earth textures remain unmodified by this extra layer. There are no live clouds,
+weather or city-light observations. The stationary
 galaxy background is an artistic star field, not an astronomical catalogue or
 live sky observation.
 
@@ -99,6 +144,24 @@ This visualization is independently rendered; NASA has not reviewed or endorsed
 JWM. No NASA logo is included. The unchanged image and its attribution are bundled
 under `assets/astronomy`, installed as data rather than embedded in the executable,
 and do not create a runtime download dependency.
+
+The Moon map is the unchanged NASA SVS [CGI Moon Kit](https://svs.gsfc.nasa.gov/4720/)
+2048×1024 LROC color map (`moon-nasa-lroc.jpg`, 457,942 bytes).
+Credit: NASA’s Scientific Visualization Studio; LROC/LOLA.
+SHA256: `f7130a1822681fa7512d7dcfd40db8c10b9ba4f06777910348698260ed7a2170`.
+The optional cloud mask is NASA Goddard / Reto Stöckli’s 2002 Blue Marble
+composite, bundled unchanged at 2048×1024 as `earth-nasa-clouds.jpg`. It uses
+one extra texture sample on Earth (none on Moon), with a maximum 8 MiB RGBA
+upload. If it is missing or fails to load, both surface materials still work.
+
+The renderer uses linear-light surface shading, a restrained ocean glint and
+thin Earth limb, an airless lunar regolith lighting approximation, and an
+irregular decorative Milky Way band with dust lanes. These are visual models,
+not a physically calibrated atmosphere or terrain-displacement simulation.
+
+Full source and media-use attribution accompany all three images in
+`assets/astronomy/README.md`. Moon loading is also offline; if either required
+texture fails in Earth/Moon mode, the static wallpaper remains visible.
 
 ## Validation and limits
 

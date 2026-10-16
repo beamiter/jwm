@@ -4,6 +4,18 @@ use std::time::{Duration, Instant};
 /// Shared by picker admission and the compositor. Explicit paths are
 /// authoritative: a missing override never silently selects a bundled image.
 pub(crate) fn resolve_earth_texture(configured: &str) -> Option<String> {
+    resolve_body_texture(configured, "earth-nasa-january.jpg")
+}
+
+pub(crate) fn resolve_moon_texture(configured: &str) -> Option<String> {
+    resolve_body_texture(configured, "moon-nasa-lroc.jpg")
+}
+
+pub(crate) fn resolve_cloud_texture() -> Option<String> {
+    resolve_body_texture("", "earth-nasa-clouds.jpg")
+}
+
+fn resolve_body_texture(configured: &str, asset: &str) -> Option<String> {
     use std::path::PathBuf;
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -28,7 +40,8 @@ pub(crate) fn resolve_earth_texture(configured: &str) -> Option<String> {
     } else {
         None
     };
-    let candidates = earth_texture_candidates(
+    let candidates = body_texture_candidates(
+        asset,
         data_home.as_deref(),
         executable.as_deref(),
         &data_dirs,
@@ -38,26 +51,43 @@ pub(crate) fn resolve_earth_texture(configured: &str) -> Option<String> {
         .and_then(|path| path.into_os_string().into_string().ok())
 }
 
+#[cfg(test)]
 fn earth_texture_candidates(
     data_home: Option<&std::path::Path>,
     executable: Option<&std::path::Path>,
     data_dirs: &[std::path::PathBuf],
     source: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
-    const ASSET: &str = "jwm/astronomy/earth-nasa-january.jpg";
+    body_texture_candidates(
+        "earth-nasa-january.jpg",
+        data_home,
+        executable,
+        data_dirs,
+        source,
+    )
+}
+
+fn body_texture_candidates(
+    asset: &str,
+    data_home: Option<&std::path::Path>,
+    executable: Option<&std::path::Path>,
+    data_dirs: &[std::path::PathBuf],
+    source: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let asset_path = std::path::Path::new("jwm/astronomy").join(asset);
     let mut paths = Vec::new();
     if let Some(home) = data_home {
-        paths.push(home.join(ASSET));
+        paths.push(home.join(&asset_path));
     }
     if let Some(prefix) = executable
         .and_then(|path| path.parent())
         .and_then(|path| path.parent())
     {
-        paths.push(prefix.join("share").join(ASSET));
+        paths.push(prefix.join("share").join(&asset_path));
     }
-    paths.extend(data_dirs.iter().map(|path| path.join(ASSET)));
+    paths.extend(data_dirs.iter().map(|path| path.join(&asset_path)));
     if let Some(source) = source {
-        paths.push(source.join("assets/astronomy/earth-nasa-january.jpg"));
+        paths.push(source.join("assets/astronomy").join(asset));
     }
     paths
 }
@@ -861,5 +891,133 @@ mod layout_tests {
             None,
         );
         assert_eq!(p[0].clip, (0, 0, 100, 100));
+    }
+}
+
+/// Decorative, independently rotating materials; not a lunar ephemeris.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CelestialBody {
+    #[default]
+    Earth,
+    Moon,
+}
+
+/// Connector identity is independent of enumeration and desktop coordinates.
+/// Explicit assignments also survive a different set of connected displays.
+pub(crate) fn celestial_assignments(
+    names: &[String],
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Vec<CelestialBody> {
+    let mut sorted: Vec<&str> = names.iter().take(128).map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    names
+        .iter()
+        .take(128)
+        .map(|name| match overrides.get(name).map(String::as_str) {
+            Some("moon") => CelestialBody::Moon,
+            Some("earth") => CelestialBody::Earth,
+            _ => {
+                if sorted.binary_search(&name.as_str()).unwrap_or(0) % 2 == 0 {
+                    CelestialBody::Earth
+                } else {
+                    CelestialBody::Moon
+                }
+            }
+        })
+        .collect()
+}
+
+/// Reduce in f64 before casting, avoiding precision loss at Unix timestamps.
+pub(crate) fn visual_rotation(unix: f64, minutes: u32) -> f32 {
+    let period = f64::from(minutes.clamp(1, 1440)) * 60.0;
+    if !unix.is_finite() {
+        return 0.0;
+    }
+    (unix.rem_euclid(period) / period * std::f64::consts::TAU) as f32
+}
+
+#[cfg(test)]
+mod celestial_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+    #[test]
+    fn moon_asset_has_distinct_version_local_path_and_authoritative_override() {
+        let exe = std::path::Path::new("/versions/2/bin/jwm");
+        let paths = body_texture_candidates("moon-nasa-lroc.jpg", None, Some(exe), &[], None);
+        assert_eq!(
+            paths,
+            [std::path::PathBuf::from(
+                "/versions/2/share/jwm/astronomy/moon-nasa-lroc.jpg"
+            )]
+        );
+        assert_eq!(
+            resolve_earth_texture_from("/missing-moon.jpg", &paths, |p| p == paths[0]),
+            None
+        );
+    }
+    #[test]
+    fn connector_order_and_explicit_hotplug_assignments() {
+        use CelestialBody::*;
+        let map = BTreeMap::new();
+        assert_eq!(
+            celestial_assignments(&names(&["HDMI-1", "DP-1"]), &map),
+            [Moon, Earth]
+        );
+        assert_eq!(
+            celestial_assignments(&names(&["DP-1", "HDMI-1"]), &map),
+            [Earth, Moon]
+        );
+        assert_eq!(celestial_assignments(&names(&["HDMI-1"]), &map), [Earth]);
+        assert_eq!(
+            celestial_assignments(&names(&["A", "B", "C", "D"]), &map),
+            [Earth, Moon, Earth, Moon]
+        );
+        let map = BTreeMap::from([
+            ("HDMI-1".into(), "moon".into()),
+            ("DP-1".into(), "earth".into()),
+        ]);
+        assert_eq!(celestial_assignments(&names(&["HDMI-1"]), &map), [Moon]);
+        assert_eq!(
+            celestial_assignments(&names(&["HDMI-1", "DP-1"]), &map),
+            [Moon, Earth]
+        );
+    }
+    #[test]
+    fn independent_rotation_is_bounded_periodic_and_visible() {
+        let t = 1_791_000_000.0;
+        assert_eq!(visual_rotation(t, 20), visual_rotation(t + 1200.0, 20));
+        assert_ne!(visual_rotation(t + 10.0, 20), visual_rotation(t, 20));
+        assert_ne!(visual_rotation(t + 10.0, 20), visual_rotation(t + 10.0, 30));
+        assert_eq!(visual_rotation(f64::NAN, 0), 0.0);
+    }
+}
+
+/// Required-image adoption waits for full repair. Optional-image readiness must
+/// never suppress drawing an already-visible material on ordinary client damage.
+pub(crate) fn material_load_frame(
+    required_pending: bool,
+    optional_pending: bool,
+    frame_changed: bool,
+) -> (bool, bool) {
+    (
+        !required_pending || frame_changed,
+        optional_pending && frame_changed,
+    )
+}
+
+#[cfg(test)]
+mod material_load_tests {
+    use super::*;
+    #[test]
+    fn pending_clouds_never_expose_static_patches_between_ticks() {
+        assert_eq!(material_load_frame(false, true, true), (true, true));
+        assert_eq!(material_load_frame(false, true, false), (true, false));
+        assert_eq!(material_load_frame(true, true, false), (false, false));
+        assert_eq!(material_load_frame(true, true, true), (true, true));
+        assert_eq!(material_load_frame(false, false, false), (true, false));
     }
 }

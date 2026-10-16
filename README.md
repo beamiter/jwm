@@ -552,6 +552,7 @@ The built-in shell — the [control center](docs/control-center.md), native
 [media controls](docs/media-controls.md) driven from MPRIS, the
 [calendar](docs/calendar.md), the [application launcher](docs/launcher.md),
 the [wallpaper picker and its colour theming](docs/wallpaper.md),
+[per-output spinning Earth and Moon wallpapers](docs/astronomy-wallpaper.md#earth-on-one-output-moon-on-another),
 [clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md),
 the [resource rows](docs/resources.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per

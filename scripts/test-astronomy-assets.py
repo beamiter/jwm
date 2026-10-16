@@ -10,8 +10,22 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSET = Path("share/jwm/astronomy/earth-nasa-january.jpg")
-SHA256 = "99f5faad74efe985fbf1714c8be7296ca9999759a1215b65f99b7f1df278dde5"
+ASSET_DIR = Path("share/jwm/astronomy")
+ASSETS = {
+    "earth-nasa-clouds.jpg": "daddaad84d7a33bbbc86cdda3f591099f57cee8607b7bcf3b67eb7e4f7a1c793",
+    "earth-nasa-january.jpg": "99f5faad74efe985fbf1714c8be7296ca9999759a1215b65f99b7f1df278dde5",
+    "moon-nasa-lroc.jpg": "f7130a1822681fa7512d7dcfd40db8c10b9ba4f06777910348698260ed7a2170",
+}
+
+
+def check_assets(payload):
+    for name, digest in ASSETS.items():
+        asset = payload / ASSET_DIR / name
+        assert hashlib.sha256(asset.read_bytes()).hexdigest() == digest
+        assert asset.stat().st_mode & 0o777 == 0o644
+    credit = payload / ASSET_DIR / "README.md"
+    assert credit.is_file()
+    assert credit.stat().st_mode & 0o777 == 0o644
 
 
 def run(*args):
@@ -36,10 +50,7 @@ with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
         tar.extractall(base / "unpacked", filter="data")
     bundle = next((base / "unpacked").iterdir())
     payload = bundle / "payload/usr/local/lib/jwm/versions/astronomy-2"
-    assert hashlib.sha256((payload / ASSET).read_bytes()).hexdigest() == SHA256
-    assert (payload / ASSET.with_name("README.md")).is_file()
-    assert (payload / ASSET).stat().st_mode & 0o777 == 0o644
-    assert (payload / ASSET.with_name("README.md")).stat().st_mode & 0o777 == 0o644
+    check_assets(payload)
 
     # A pre-assets release has the original stable paths. Upgrade must remain
     # compatible with it; rollback must never leave a new executable paired
@@ -53,22 +64,77 @@ with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
     (old / "release-manifest.tsv").write_text("\n".join(
         line for line in manifest.splitlines() if "assets/astronomy/" not in line) + "\n")
     root = base / "root"
-    user_override = root / "home/test/.local/share/jwm/astronomy/earth-nasa-january.jpg"
-    user_override.parent.mkdir(parents=True)
-    user_override.write_text("user override remains untouched")
+    user_overrides = [root / "home/test/.local/share/jwm/astronomy" / name
+                      for name in ASSETS]
+    for user_override in user_overrides:
+        user_override.parent.mkdir(parents=True, exist_ok=True)
+        user_override.write_text("user override remains untouched")
     installer = str(bundle / "install-release.sh")
     run("bash", str(old / "install-release.sh"), "install", "--destdir", str(root))
     run("bash", installer, "install", "--destdir", str(root))
     live = root / "usr/local/bin/jwm"
     assert live.resolve().parent.parent.name == "astronomy-2"
-    live_asset = live.resolve().parent.parent / ASSET
-    assert hashlib.sha256(live_asset.read_bytes()).hexdigest() == SHA256
+    active_payload = live.resolve().parent.parent
+    live_assets = active_payload / ASSET_DIR
+    check_assets(active_payload)
     run("bash", installer, "rollback", "--destdir", str(root))
     assert live.resolve().parent.parent.name == "astronomy-1"
-    assert not (live.resolve().parent.parent / ASSET).exists()
-    assert live_asset.exists(), "rollback retains inactive release assets"
+    assert not (live.resolve().parent.parent / ASSET_DIR).exists()
+    check_assets(active_payload)  # Inactive release stays intact.
     run("bash", installer, "uninstall", "--all", "--destdir", str(root))
-    assert not live_asset.exists()
+    assert not live_assets.exists()
     assert not live.exists()
-    assert user_override.read_text() == "user override remains untouched"
-print("test-astronomy-assets: PASS (real package hash/modes, legacy upgrade, rollback, uninstall)")
+    for user_override in user_overrides:
+        assert user_override.read_text() == "user override remains untouched"
+
+    # Also preserve an Earth-only release when upgrading to Moon-capable JWM.
+    earth_only = base / "earth-only"
+    shutil.copytree(bundle, earth_only)
+    earth_payload = earth_only / "payload/usr/local/lib/jwm/versions/astronomy-2"
+    earth_payload.rename(earth_payload.with_name("astronomy-earth"))
+    earth_payload = earth_payload.with_name("astronomy-earth")
+    (earth_payload / ASSET_DIR / "moon-nasa-lroc.jpg").unlink()
+    (earth_payload / ASSET_DIR / "earth-nasa-clouds.jpg").unlink()
+    (earth_only / "VERSION").write_text("astronomy-earth\n")
+    (earth_only / "release-manifest.tsv").write_text("\n".join(
+        line for line in manifest.splitlines() if "moon-nasa-lroc.jpg" not in line and "earth-nasa-clouds.jpg" not in line) + "\n")
+    run("bash", str(earth_only / "install-release.sh"), "install", "--destdir", str(root))
+    run("bash", installer, "install", "--destdir", str(root))
+    check_assets(live.resolve().parent.parent)
+    run("bash", installer, "rollback", "--destdir", str(root))
+    restored_payload = live.resolve().parent.parent
+    assert restored_payload.name == "astronomy-earth"
+    assert not (restored_payload / ASSET_DIR / "moon-nasa-lroc.jpg").exists()
+    assert not (restored_payload / ASSET_DIR / "earth-nasa-clouds.jpg").exists()
+    assert hashlib.sha256((restored_payload / ASSET_DIR / "earth-nasa-january.jpg").read_bytes()).hexdigest() == ASSETS["earth-nasa-january.jpg"]
+    check_assets(active_payload)
+    run("bash", installer, "uninstall", "--all", "--destdir", str(root))
+    assert not live_assets.exists()
+    for user_override in user_overrides:
+        assert user_override.read_text() == "user override remains untouched"
+    # A surface-texture release must regain its cloud-free payload on rollback.
+    surfaces = base / "surfaces"
+    shutil.copytree(bundle, surfaces)
+    surface_payload = surfaces / "payload/usr/local/lib/jwm/versions/astronomy-2"
+    surface_payload.rename(surface_payload.with_name("astronomy-surfaces"))
+    surface_payload = surface_payload.with_name("astronomy-surfaces")
+    (surface_payload / ASSET_DIR / "earth-nasa-clouds.jpg").unlink()
+    (surfaces / "VERSION").write_text("astronomy-surfaces\n")
+    (surfaces / "release-manifest.tsv").write_text("\n".join(
+        line for line in manifest.splitlines() if "earth-nasa-clouds.jpg" not in line) + "\n")
+    run("bash", str(surfaces / "install-release.sh"), "install", "--destdir", str(root))
+    run("bash", installer, "install", "--destdir", str(root))
+    check_assets(live.resolve().parent.parent)
+    run("bash", installer, "rollback", "--destdir", str(root))
+    restored_payload = live.resolve().parent.parent
+    assert restored_payload.name == "astronomy-surfaces"
+    assert not (restored_payload / ASSET_DIR / "earth-nasa-clouds.jpg").exists()
+    for name, digest in ASSETS.items():
+        if name != "earth-nasa-clouds.jpg":
+            assert hashlib.sha256((restored_payload / ASSET_DIR / name).read_bytes()).hexdigest() == digest
+    check_assets(active_payload)
+    run("bash", installer, "uninstall", "--all", "--destdir", str(root))
+    assert not live_assets.exists()
+    for user_override in user_overrides:
+        assert user_override.read_text() == "user override remains untouched"
+print("test-astronomy-assets: PASS (Earth/Moon/cloud hashes/modes, legacy + Earth-only + Earth/Moon upgrade, rollback, uninstall)")
