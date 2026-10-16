@@ -853,7 +853,7 @@ fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar
     let tab_width = state.workspace_tab_width();
 
     let inner = label(label_str).text_size(TAB_FONT_SIZE).color(text_color);
-    let marker = sized_box(zstack(()))
+    let marker = sized_box(zstack::<XilemBar, (), _>(()))
         .dims(Dimensions::new(
             Dim::Fixed(Length::px(6.0)),
             Dim::Fixed(Length::px(2.0)),
