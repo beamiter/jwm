@@ -14,6 +14,10 @@ pub mod clipboard_x11;
 pub mod common_define;
 pub mod edid;
 pub mod error;
+// Currently published by the native X11 provider; the snapshot itself has no
+// dependency on platform implementation types.
+#[cfg(feature = "x11-backends")]
+pub(crate) mod gesture_status;
 pub mod gesture_swipe;
 pub mod hdr_metadata;
 pub mod recording_admission;

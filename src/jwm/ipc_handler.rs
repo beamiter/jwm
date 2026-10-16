@@ -6167,7 +6167,7 @@ impl Jwm {
             "x11rb" | "xcb" => {
                 #[cfg(feature = "x11-backends")]
                 {
-                    crate::backend::x11::gesture_input::runtime_status()
+                    crate::backend::gesture_status::runtime_status()
                 }
                 #[cfg(not(feature = "x11-backends"))]
                 {

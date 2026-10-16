@@ -8,7 +8,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
-use std::sync::{LazyLock, Mutex};
 
 use calloop::{EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory};
 use x11rb::connection::Connection;
@@ -19,6 +18,7 @@ use x11rb::protocol::{Event, xproto};
 use x11rb::rust_connection::RustConnection;
 
 use crate::backend::api::BackendEvent;
+use crate::backend::gesture_status::{RuntimeStatus, change_status};
 use crate::backend::gesture_swipe::GestureSwipeTracker;
 use crate::config::{CONFIG, GestureSwipeConfig, gesture_swipe_signature as config_signature};
 
@@ -31,48 +31,6 @@ const ANY_MODIFIER: u32 = 1 << 31;
 const POLL_BUDGET: usize = 128;
 
 type GestureResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-#[derive(Default)]
-struct RuntimeStatus {
-    available: bool,
-    server_version: Option<(u16, u16)>,
-    gesture_devices: usize,
-    active: bool,
-    state: String,
-    reason: Option<String>,
-}
-
-static RUNTIME_STATUS: LazyLock<Mutex<RuntimeStatus>> = LazyLock::new(|| {
-    Mutex::new(RuntimeStatus {
-        state: "not_initialized".into(),
-        ..RuntimeStatus::default()
-    })
-});
-
-/// Runtime capability, distinct from configuration intent. Even operational
-/// gestures can be suppressed by another client's active pointer grab.
-pub(crate) fn runtime_status() -> serde_json::Value {
-    let status = RUNTIME_STATUS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    serde_json::json!({
-        "available": status.available,
-        "server_version": status.server_version.map(|(major, minor)| format!("{major}.{minor}")),
-        "gesture_devices": status.gesture_devices,
-        "device_supported": status.gesture_devices > 0,
-        "active": status.active,
-        "operational": status.available && status.active && status.gesture_devices > 0,
-        "state": status.state,
-        "reason": status.reason,
-    })
-}
-
-fn change_status(update: impl FnOnce(&mut RuntimeStatus)) {
-    let mut status = RUNTIME_STATUS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    update(&mut status);
-}
 
 struct ActiveSwipe {
     source: u16,
