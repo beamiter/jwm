@@ -4483,54 +4483,143 @@ impl Config {
         out
     }
 
-    /// Post-process TOML output to add comments showing available options for enum-like fields.
+    /// Annotate generated TOML without changing settings. Exact keys and table
+    /// scopes keep examples from leaking into unrelated or array tables.
+    fn option_comment(section: &str, key: &str) -> Option<&'static str> {
+        match (section, key) {
+            ("behavior", "wallpaper") => Some(concat!(
+                "# Static fallback image. Generated default: jwm/wallpaper.jpg in your config directory.\n",
+                "# Set to \"\" for black when no static override/daily rotation applies.\n",
+                "# Example: wallpaper = \"/home/alice/Pictures/Wallpapers/forest.jpg\"\n",
+            )),
+            ("behavior", "wallpaper_effect") => Some(concat!(
+                "# Live effect: \"off\" (default) or \"astronomy\" (X11 compositor only).\n",
+                "# Astronomy draws above the static fallback; failures/disable restore it.\n",
+                "# Example: wallpaper_effect = \"astronomy\"\n",
+            )),
+            ("behavior", "wallpaper_earth_texture") => Some(concat!(
+                "# Astronomy Earth map: default \"\" uses the installed bundled NASA texture.\n",
+                "# Custom maps must be decodable 2:1 equirectangular images.\n",
+                "# Example: wallpaper_earth_texture = \"/home/alice/Pictures/earth.jpg\"\n",
+            )),
+            ("behavior", "wallpaper_moon_texture") => Some(concat!(
+                "# Earth-moon layout only: default \"\" uses the bundled NASA Moon texture.\n",
+                "# Example: wallpaper_moon_texture = \"/home/alice/Pictures/moon.jpg\"\n",
+            )),
+            ("behavior", "wallpaper_earth_rotation_minutes") => Some(concat!(
+                "# Earth-moon layout only: integer minutes per Earth turn, 1..525600.\n",
+                "# Default 1440 = 24 hours; example: wallpaper_earth_rotation_minutes = 20\n",
+            )),
+            ("behavior", "wallpaper_moon_rotation_minutes") => Some(concat!(
+                "# Earth-moon layout only: integer minutes per Moon turn, 1..525600.\n",
+                "# Default 39343 is about 27.3 days; example: wallpaper_moon_rotation_minutes = 30\n",
+            )),
+            ("behavior", "wallpaper_astronomy_timezone") => Some(concat!(
+                "# Earth-moon only: \"system\" (default) follows local timezone/DST;\n",
+                "# \"configured\" uses wallpaper_timezone_offset_hours. No OS timezone changes.\n",
+                "# Example for fixed UTC+8: wallpaper_astronomy_timezone = \"configured\"\n",
+            )),
+            ("behavior", "wallpaper_timezone_offset_hours") => Some(concat!(
+                "# Integer UTC offset, -12..14; default 8 (UTC+8), e.g. 0 for UTC.\n",
+                "# Always used by span/per-output. In earth-moon, used with \"configured\"\n",
+                "# or if system timezone lookup fails. This is a viewing meridian, not location.\n",
+            )),
+            ("behavior", "wallpaper_astronomy_layout") => Some(concat!(
+                "# Astronomy placement only; requires wallpaper_effect = \"astronomy\".\n",
+                "# \"span\" (default): one Earth across the framebuffer; \"per-output\": Earth per screen.\n",
+                "# \"earth-moon\": independent complete bodies per output (see connector map below).\n",
+                "# Example: wallpaper_astronomy_layout = \"earth-moon\"\n",
+            )),
+            ("behavior", "wallpaper_mode") => Some(concat!(
+                "# Static image scaling only (default \"fill\"); does not resize Astronomy bodies.\n",
+                "# fill: preserve aspect, crop to fill; fit: preserve aspect, show whole image with margins.\n",
+                "# stretch: fill without preserving aspect; center: unscaled, centered (may crop).\n",
+                "# Example: wallpaper_mode = \"fit\"\n",
+            )),
+            ("behavior", "wallpaper_rotation") => Some(concat!(
+                "# \"off\" (default) or \"daily\": advance by local calendar date, not every 24h of uptime.\n",
+                "# Automatic daily selection overrides static monitor/tag choices; Astronomy stays on top.\n",
+                "# Picking a static image disables Astronomy; with a nonempty daily collection the pick replaces\n",
+                "# only the global fallback, preserving monitor/tag choices. It lasts for today only\n",
+                "# (session-only; reload discards the pick), then daily rotation resumes.\n",
+                "# Example: wallpaper_rotation = \"daily\"\n",
+            )),
+            ("behavior", "wallpaper_rotation_paths") => Some(concat!(
+                "# Ordered unique image paths for daily rotation; default [] leaves static choices active.\n",
+                "# Example: wallpaper_rotation_paths = [\"/home/alice/Pictures/a.jpg\", \"/home/alice/Pictures/b.jpg\"]\n",
+            )),
+            ("behavior", "wallpaper_dir") => Some(concat!(
+                "# Picker directory. Default \"\": current image's directory, then ~/Pictures/Wallpapers, then ~/Pictures.\n",
+                "# Example: wallpaper_dir = \"/home/alice/Pictures/Wallpapers\"\n",
+            )),
+            ("behavior", "wallpaper_colors") => Some(concat!(
+                "# Default true: derive accent colors from wallpaper in memory.\n",
+                "# Example: wallpaper_colors = false  # reload to restore configured colors\n",
+            )),
+            ("behavior", "wallpaper_monitors") | ("behavior.wallpaper_monitors", "") => {
+                Some(concat!(
+                    "# Static overrides by zero-based monitor index; default []. Empty mode inherits wallpaper_mode.\n",
+                    "# Inline example in [behavior] (instead of array tables):\n",
+                    "# wallpaper_monitors = [{ monitor = 0, path = \"/home/alice/Pictures/a.jpg\", mode = \"fit\" }]\n",
+                ))
+            }
+            ("behavior", "wallpaper_tags") | ("behavior.wallpaper_tags", "") => Some(concat!(
+                "# Static overrides: zero-based tag/monitor; monitor = -1 matches any monitor. Default [].\n",
+                "# Priority: matching tag+monitor > tag+any monitor > monitor > global (automatic daily selection takes precedence).\n",
+                "# Inline example in [behavior] (instead of array tables):\n",
+                "# wallpaper_tags = [{ tag = 0, monitor = -1, path = \"/home/alice/Pictures/work.jpg\", mode = \"\" }]\n",
+            )),
+            ("behavior", "wallpaper_astronomy_bodies")
+            | ("behavior.wallpaper_astronomy_bodies", "") => Some(concat!(
+                "# Earth-moon only. Default empty map: connectors sorted by name alternate Earth/Moon.\n",
+                "# Explicit connector names keep assignments stable after hotplug/restart; replace these names.\n",
+                "# Values: \"earth\" or \"moon\". Inline example in [behavior] (instead of this subtable):\n",
+                "# wallpaper_astronomy_bodies = { \"DP-1\" = \"earth\", \"HDMI-1\" = \"moon\" }\n",
+                "# Subtable example below its header: \"DP-1\" = \"earth\"\n",
+            )),
+            ("behavior", "transition_mode") => Some(
+                "# available: slide, cube, fade, flip, zoom, stack, blinds, coverflow, helix, portal, book\n",
+            ),
+            ("behavior", "new_client_position") => {
+                Some("# available: master, tail, after_focused\n")
+            }
+            ("behavior", "colorblind_mode") => {
+                Some("# available: \"\" (disabled), deuteranopia, protanopia, tritanopia\n")
+            }
+            ("animation", "easing") => {
+                Some("# available: linear, ease-out, ease-in, ease-in-out, bounce, elastic\n")
+            }
+            ("animation", "speed") => Some("# available: slow, normal, fast, instant\n"),
+            _ => None,
+        }
+    }
+
+    /// Post-process serialized TOML. Reapplying this decoration is idempotent.
     fn add_option_comments(toml: &str) -> String {
-        let mut result = String::with_capacity(toml.len() + 512);
+        let mut result = String::with_capacity(toml.len() + 4096);
         let mut section = String::new();
         for line in toml.lines() {
             let trimmed = line.trim();
-
-            // Track current TOML section
-            if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+            let is_table = trimmed.starts_with('[');
+            if is_table {
                 section = trimmed.trim_matches(|c| c == '[' || c == ']').to_string();
             }
-
-            // transition_mode (in [behavior])
-            if section == "behavior" && trimmed.starts_with("transition_mode") {
-                result.push_str("# available: slide, cube, fade, flip, zoom, stack, blinds, coverflow, helix, portal, book\n");
+            let key = if is_table {
+                ""
+            } else {
+                trimmed.split_once('=').map_or("", |(key, _)| key.trim())
+            };
+            if (is_table || !key.is_empty())
+                && let Some(comment) = Self::option_comment(&section, key)
+                && !result.ends_with(comment)
+            {
+                result.push_str(comment);
             }
-            // wallpaper_mode (in [behavior])
-            else if section == "behavior" && trimmed.starts_with("wallpaper_mode") {
-                result.push_str("# available: fill, fit, stretch, center\n");
-            }
-            // new_client_position (in [behavior])
-            else if section == "behavior" && trimmed.starts_with("new_client_position") {
-                result.push_str("# available: master, tail, after_focused\n");
-            }
-            // colorblind_mode (in [behavior])
-            else if section == "behavior" && trimmed.starts_with("colorblind_mode") {
-                result.push_str(
-                    "# available: \"\" (disabled), deuteranopia, protanopia, tritanopia\n",
-                );
-            }
-            // easing (in [animation])
-            else if section == "animation" && trimmed.starts_with("easing") {
-                result.push_str(
-                    "# available: linear, ease-out, ease-in, ease-in-out, bounce, elastic\n",
-                );
-            }
-            // speed (in [animation])
-            else if section == "animation" && trimmed.starts_with("speed") {
-                result.push_str("# available: slow, normal, fast, instant\n");
-            }
-
             result.push_str(line);
             result.push('\n');
         }
-        // These comments are optional decoration. A serialized string may
-        // itself span lines and contain table/key-looking text; never let
-        // line-based annotation alter its value. Keep the serializer's exact
-        // output whenever semantic preservation cannot be established.
+        // A serialized string may span lines and contain table/key-looking
+        // text. Keep the original whenever decoration would change its value.
         match (
             toml::from_str::<toml::Table>(toml),
             toml::from_str::<toml::Table>(&result),
@@ -7656,6 +7745,94 @@ border_px = 3
             toml::from_str::<toml::Table>(&serialized).unwrap(),
             toml::from_str::<toml::Table>(&annotated).unwrap()
         );
+    }
+
+    #[test]
+    fn wallpaper_option_comments_cover_defaults_and_survive_reexport() {
+        let path = temporary_config_path("wallpaper-comments");
+        Config::generate_template(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "wallpaper",
+            "wallpaper_effect",
+            "wallpaper_earth_texture",
+            "wallpaper_moon_texture",
+            "wallpaper_earth_rotation_minutes",
+            "wallpaper_moon_rotation_minutes",
+            "wallpaper_astronomy_timezone",
+            "wallpaper_timezone_offset_hours",
+            "wallpaper_astronomy_layout",
+            "wallpaper_mode",
+            "wallpaper_rotation",
+            "wallpaper_rotation_paths",
+            "wallpaper_dir",
+            "wallpaper_colors",
+            "wallpaper_monitors",
+            "wallpaper_tags",
+        ] {
+            let comment = Config::option_comment("behavior", key).unwrap();
+            assert_eq!(first.matches(comment).count(), 1, "missing/duplicate {key}");
+        }
+        assert!(
+            first.contains(
+                Config::option_comment("behavior.wallpaper_astronomy_bodies", "").unwrap()
+            )
+        );
+        assert!(first.contains("wallpaper_mode = \"fill\""));
+        assert!(first.contains("wallpaper_astronomy_layout = \"span\""));
+        assert_eq!(Config::add_option_comments(&first), first);
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(
+            toml::to_string(&loaded.inner).unwrap(),
+            toml::to_string(&Config::default().inner).unwrap()
+        );
+        loaded.save_to_file(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn wallpaper_option_comments_keep_exact_keys_and_array_table_scope() {
+        let source = "[behavior]\nwallpaper_mode_extra = 'fill'\n[[other]]\nwallpaper_mode = 'fit'\n[behavior.wallpaper_astronomy_bodies]\n'DP-1' = 'earth'\n[[behavior.wallpaper_monitors]]\nmonitor = 0\npath = '/wall.jpg'\nmode = 'fit'\n";
+        let annotated = Config::add_option_comments(source);
+        assert!(!annotated.contains("# Static image scaling only"));
+        assert!(annotated.contains("# Earth-moon only. Default empty map:"));
+        assert!(annotated.contains("# Static overrides by zero-based monitor index"));
+        assert_eq!(Config::add_option_comments(&annotated), annotated);
+        assert_eq!(
+            toml::from_str::<toml::Table>(source).unwrap(),
+            toml::from_str::<toml::Table>(&annotated).unwrap()
+        );
+    }
+
+    #[test]
+    fn wallpaper_comment_example_is_valid_and_round_trips() {
+        let example: toml::Table =
+            toml::from_str(include_str!("../docs/examples/wallpaper.toml")).unwrap();
+        let mut config = Config::default();
+        let mut merged = toml::Value::try_from(&config.inner).unwrap();
+        merged["behavior"]
+            .as_table_mut()
+            .unwrap()
+            .extend(example["behavior"].as_table().unwrap().clone());
+        config.inner = merged.try_into().unwrap();
+        let path = temporary_config_path("wallpaper-comment-example");
+        config.save_to_file(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(
+            toml::to_string(&loaded.inner).unwrap(),
+            toml::to_string(&config.inner).unwrap()
+        );
+        assert_eq!(loaded.behavior().wallpaper_astronomy_layout, "earth-moon");
+        assert_eq!(
+            loaded.behavior().wallpaper_astronomy_bodies["HDMI-1"],
+            "moon"
+        );
+        assert_eq!(Config::add_option_comments(&first), first);
+        loaded.save_to_file(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

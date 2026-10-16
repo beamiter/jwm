@@ -1,0 +1,74 @@
+# Wallpaper example (TOML, not YAML).
+# Merge these keys into the existing [behavior] section of config_x11.toml;
+# do not add a second [behavior] or duplicate keys. Replace example paths/connectors.
+# Astronomy requires the X11 compositor. Native Wayland uses static wallpaper.
+[behavior]
+
+# Live effect: "off" (default) = static; "astronomy" = animated Earth/Moon.
+wallpaper_effect = "astronomy"
+# "span" (default): one Earth across the framebuffer.
+# "per-output": complete Earth on every screen.
+# "earth-moon": independent bodies on each screen, assigned below.
+wallpaper_astronomy_layout = "earth-moon"
+
+# Empty strings (defaults) load the installed bundled NASA textures.
+# Custom example: wallpaper_earth_texture = "/home/alice/Pictures/earth.jpg"
+# Custom maps must be decodable 2:1 equirectangular images.
+wallpaper_earth_texture = ""
+wallpaper_moon_texture = ""
+
+# Earth-moon only: integer minutes per turn, inclusive range 1..525600.
+# Defaults: Earth 1440 (24 hours); Moon 39343 (about 27.3 days).
+# For a faster decorative view, use Earth = 20 and Moon = 30.
+wallpaper_earth_rotation_minutes = 1440
+wallpaper_moon_rotation_minutes = 39343
+
+# Earth-moon only: "system" (default) follows local timezone, including DST.
+# For fixed UTC+8, change this to "configured" and keep the offset below at 8.
+wallpaper_astronomy_timezone = "system"
+# Integer hours, -12..14; default 8. No operating-system timezone changes.
+# span/per-output always use this offset; earth-moon uses it when configured
+# or when system timezone lookup fails. It is a viewing meridian, not GPS.
+wallpaper_timezone_offset_hours = 8
+
+# Earth-moon only: replace connector names with your actual output names.
+# Default {} alternates Earth/Moon by sorted connector name; a single output gets Earth.
+# Explicit assignments stay stable when another output disconnects.
+# If your config already has [behavior.wallpaper_astronomy_bodies], edit that
+# subtable instead: "DP-1" = "earth" and "HDMI-1" = "moon" on separate lines.
+# Use either the inline map below or the subtable, never both.
+wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
+
+# Static fallback, restored when Astronomy is off/unavailable.
+# Generated default is jwm/wallpaper.jpg in your config directory.
+# This example explicitly uses "" for black when no override/daily rotation applies.
+# Example: wallpaper = "/home/alice/Pictures/Wallpapers/forest.jpg"
+wallpaper = ""
+# Static images only; this does not resize Astronomy bodies. Default "fill".
+# fill = preserve aspect and crop; fit = show whole image with margins;
+# stretch = distort to fill; center = unscaled and centered (may crop).
+wallpaper_mode = "fill"
+
+# "off" (default) or "daily" (local calendar date, different images per output slot).
+# Automatic daily selection from a nonempty collection overrides static monitor/tag choices.
+# Astronomy stays on top; the daily fallback continues underneath.
+wallpaper_rotation = "off"
+# Example: ["/home/alice/Pictures/a.jpg", "/home/alice/Pictures/b.jpg"]
+wallpaper_rotation_paths = []
+# Picking a static image disables Astronomy. With a nonempty daily collection,
+# the manual pick replaces only the global fallback; monitor/tag overrides still apply.
+# It lasts for today in this session; reload discards it. The collection is retained.
+
+# Picker directory: default "" tries current image's directory,
+# then ~/Pictures/Wallpapers, then ~/Pictures.
+wallpaper_dir = ""
+# Default true: derive accent colors in memory. false + reload restores file colors.
+wallpaper_colors = true
+
+# Static override examples (default []); indices are zero-based.
+# Priority: tag+monitor > tag+any monitor > monitor > global; automatic daily selection overrides all.
+# Empty mode inherits wallpaper_mode; monitor = -1 matches any monitor for tags.
+# wallpaper_monitors = [{ monitor = 0, path = "/home/alice/Pictures/a.jpg", mode = "fit" }]
+# wallpaper_tags = [{ tag = 0, monitor = -1, path = "/home/alice/Pictures/work.jpg", mode = "" }]
+wallpaper_monitors = []
+wallpaper_tags = []
