@@ -1323,13 +1323,16 @@ pub struct BehaviorConfig {
     /// Stable connector-name assignments for earth-moon layout (earth or moon).
     #[serde(default)]
     pub wallpaper_astronomy_bodies: std::collections::BTreeMap<String, String>,
-    /// Artistic Earth spin period in minutes, 1..=1440.
+    /// Earth spin period in minutes, 1..=525600 (default: one day).
     #[serde(default = "default_wallpaper_earth_rotation_minutes")]
     pub wallpaper_earth_rotation_minutes: u32,
-    /// Artistic Moon spin period in minutes, 1..=1440.
+    /// Moon spin period in minutes, 1..=525600 (default: approximately 27.32 days).
     #[serde(default = "default_wallpaper_moon_rotation_minutes")]
     pub wallpaper_moon_rotation_minutes: u32,
-    /// Astronomy presentation timezone for span/per-output, independent of the OS timezone.
+    /// Timezone source for earth-moon: system (local timezone) or configured (offset below).
+    #[serde(default = "default_wallpaper_astronomy_timezone")]
+    pub wallpaper_astronomy_timezone: String,
+    /// Astronomy presentation timezone for span/per-output and configured earth-moon.
     #[serde(default = "default_wallpaper_timezone_offset_hours")]
     pub wallpaper_timezone_offset_hours: i32,
     /// Astronomy placement: span, per-output Earth, or independent earth-moon canvases.
@@ -1759,12 +1762,16 @@ fn default_wallpaper_astronomy_layout() -> String {
     "span".into()
 }
 
+fn default_wallpaper_astronomy_timezone() -> String {
+    "system".into()
+}
+
 fn default_wallpaper_earth_rotation_minutes() -> u32 {
-    20
+    1440
 }
 
 fn default_wallpaper_moon_rotation_minutes() -> u32 {
-    30
+    39343
 }
 
 fn default_wallpaper_timezone_offset_hours() -> i32 {
@@ -2322,6 +2329,7 @@ impl Default for Config {
                     wallpaper_astronomy_bodies: std::collections::BTreeMap::new(),
                     wallpaper_earth_rotation_minutes: default_wallpaper_earth_rotation_minutes(),
                     wallpaper_moon_rotation_minutes: default_wallpaper_moon_rotation_minutes(),
+                    wallpaper_astronomy_timezone: default_wallpaper_astronomy_timezone(),
                     wallpaper_timezone_offset_hours: default_wallpaper_timezone_offset_hours(),
                     wallpaper_astronomy_layout: default_wallpaper_astronomy_layout(),
                     wallpaper_mode: default_wallpaper_mode(),
@@ -4827,6 +4835,15 @@ impl Config {
                 }
                 self.inner.behavior.wallpaper_astronomy_layout = layout;
             }
+            "behavior.wallpaper_astronomy_timezone" => {
+                let timezone = as_string()?;
+                if !["system", "configured"].contains(&timezone.as_str()) {
+                    return Err(
+                        "behavior.wallpaper_astronomy_timezone must be system or configured".into(),
+                    );
+                }
+                self.inner.behavior.wallpaper_astronomy_timezone = timezone;
+            }
             "behavior.wallpaper_timezone_offset_hours" => {
                 let hours = value
                     .as_i64()
@@ -4849,8 +4866,8 @@ impl Config {
             "behavior.wallpaper_earth_rotation_minutes"
             | "behavior.wallpaper_moon_rotation_minutes" => {
                 let minutes = as_u32()?;
-                if !(1..=1440).contains(&minutes) {
-                    return Err(format!("{key} must be an integer in 1..=1440"));
+                if !(1..=525600).contains(&minutes) {
+                    return Err(format!("{key} must be an integer in 1..=525600"));
                 }
                 if key == "behavior.wallpaper_earth_rotation_minutes" {
                     self.inner.behavior.wallpaper_earth_rotation_minutes = minutes;
@@ -5318,14 +5335,16 @@ mod tests {
             "wallpaper_astronomy_bodies",
             "wallpaper_earth_rotation_minutes",
             "wallpaper_moon_rotation_minutes",
+            "wallpaper_astronomy_timezone",
         ] {
             behavior.remove(key);
         }
         let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
         assert!(legacy.behavior.wallpaper_moon_texture.is_empty());
         assert!(legacy.behavior.wallpaper_astronomy_bodies.is_empty());
-        assert_eq!(legacy.behavior.wallpaper_earth_rotation_minutes, 20);
-        assert_eq!(legacy.behavior.wallpaper_moon_rotation_minutes, 30);
+        assert_eq!(legacy.behavior.wallpaper_earth_rotation_minutes, 1440);
+        assert_eq!(legacy.behavior.wallpaper_moon_rotation_minutes, 39343);
+        assert_eq!(legacy.behavior.wallpaper_astronomy_timezone, "system");
         assert_eq!(legacy.behavior.wallpaper_astronomy_layout, "span");
         let mut config = Config {
             inner: legacy,
@@ -5370,6 +5389,53 @@ mod tests {
     }
 
     #[test]
+    fn earth_moon_period_boundaries_and_timezone_sources_roundtrip() {
+        let mut config = Config::default();
+        for minutes in [1, 20, 30, 1440, 1441, 39343, 525600] {
+            for key in [
+                "behavior.wallpaper_earth_rotation_minutes",
+                "behavior.wallpaper_moon_rotation_minutes",
+            ] {
+                config.set_value(key, &serde_json::json!(minutes)).unwrap();
+            }
+            let loaded: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            assert_eq!(loaded.behavior.wallpaper_earth_rotation_minutes, minutes);
+            assert_eq!(loaded.behavior.wallpaper_moon_rotation_minutes, minutes);
+            assert!(!config.diagnostics().has_errors());
+        }
+        for timezone in ["configured", "system"] {
+            config
+                .set_value(
+                    "behavior.wallpaper_astronomy_timezone",
+                    &serde_json::json!(timezone),
+                )
+                .unwrap();
+            let loaded: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            assert_eq!(loaded.behavior.wallpaper_astronomy_timezone, timezone);
+            assert_eq!(loaded.behavior.wallpaper_timezone_offset_hours, 8);
+            assert!(!config.diagnostics().has_errors());
+        }
+        // Explicit older artistic spin settings remain intact after loading.
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_earth_rotation_minutes".into(),
+                    serde_json::json!(20),
+                ),
+                (
+                    "behavior.wallpaper_moon_rotation_minutes".into(),
+                    serde_json::json!(30),
+                ),
+            ])
+            .unwrap();
+        let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        assert_eq!(loaded.behavior.wallpaper_earth_rotation_minutes, 20);
+        assert_eq!(loaded.behavior.wallpaper_moon_rotation_minutes, 30);
+    }
+
+    #[test]
     fn earth_moon_invalid_updates_are_atomic_and_toml_is_validated() {
         let mut config = Config::default();
         let before = toml::to_string(&config.inner).unwrap();
@@ -5408,7 +5474,7 @@ mod tests {
         ] {
             for bad in [
                 serde_json::json!(0),
-                serde_json::json!(1441),
+                serde_json::json!(525601),
                 serde_json::json!(-1),
                 serde_json::json!(1.5),
                 serde_json::json!(true),
@@ -5417,6 +5483,16 @@ mod tests {
             ] {
                 invalid.push((key, bad));
             }
+        }
+        for bad in [
+            serde_json::json!("local"),
+            serde_json::json!(""),
+            serde_json::json!("SYSTEM"),
+            serde_json::json!(true),
+            serde_json::json!(8),
+            serde_json::json!([]),
+        ] {
+            invalid.push(("wallpaper_astronomy_timezone", bad));
         }
         for (key, bad) in invalid {
             let key = format!("behavior.{key}");

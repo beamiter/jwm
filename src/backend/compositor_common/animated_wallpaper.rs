@@ -930,11 +930,40 @@ pub(crate) fn celestial_assignments(
 
 /// Reduce in f64 before casting, avoiding precision loss at Unix timestamps.
 pub(crate) fn visual_rotation(unix: f64, minutes: u32) -> f32 {
-    let period = f64::from(minutes.clamp(1, 1440)) * 60.0;
+    let period = f64::from(minutes.clamp(1, 525_600)) * 60.0;
     if !unix.is_finite() {
         return 0.0;
     }
     (unix.rem_euclid(period) / period * std::f64::consts::TAU) as f32
+}
+
+/// The timezone is a fixed observer meridian, not a second clock correction.
+/// UTC alone advances rotation; offset is added once as 15 degrees per hour.
+pub(crate) fn celestial_longitude(unix: f64, minutes: u32, utc_offset_seconds: i32) -> f32 {
+    let phase = f64::from(visual_rotation(unix, minutes));
+    let meridian =
+        f64::from(utc_offset_seconds.clamp(-86400, 86400)) / 86400.0 * std::f64::consts::TAU;
+    (phase + meridian).rem_euclid(std::f64::consts::TAU) as f32
+}
+
+pub(crate) fn presentation_offset(
+    use_system: bool,
+    configured_hours: i32,
+    system_offset: Option<i32>,
+) -> i32 {
+    if use_system {
+        if let Some(offset) = system_offset.filter(|o| (-86400..=86400).contains(o)) {
+            return offset;
+        }
+    }
+    configured_hours.clamp(-12, 14) * 3600
+}
+
+pub(crate) fn wall_clock_seconds(time: std::time::SystemTime) -> f64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs_f64(),
+        Err(error) => -error.duration().as_secs_f64(),
+    }
 }
 
 #[cfg(test)]
@@ -986,6 +1015,62 @@ mod celestial_tests {
             [Moon, Earth]
         );
     }
+    #[test]
+    fn wall_clock_periods_offsets_and_restart_are_independent() {
+        let tau = std::f32::consts::TAU;
+        let distance = |a: f32, b: f32| {
+            ((a - b + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI).abs()
+        };
+        for (period, offset) in [
+            (1440, 0),
+            (1440, 28800),
+            (39343, 0),
+            (20, 20700),
+            (525600, -12600),
+        ] {
+            let t = 1_791_000_123.25;
+            let initial = celestial_longitude(t, period, offset);
+            assert_eq!(initial, celestial_longitude(t, period, offset)); // fresh process has no uptime origin
+            assert!(
+                distance(
+                    initial,
+                    celestial_longitude(t + f64::from(period) * 60.0, period, offset)
+                ) < 1e-5
+            );
+            assert!(
+                distance(
+                    initial + tau / 4.0,
+                    celestial_longitude(t + f64::from(period) * 15.0, period, offset)
+                ) < 1e-5
+            );
+        }
+        // One timezone change is 15 degrees, independent of custom spin period.
+        for period in [20, 1440, 39343] {
+            let a = celestial_longitude(1000.0, period, 19800);
+            let b = celestial_longitude(1000.0, period, 23400);
+            assert!(distance(a + tau / 24.0, b) < 1e-5);
+        }
+        assert!(distance(celestial_longitude(-21600.0, 1440, 0), tau * 0.75) < 1e-5);
+        for t in [-1.0e12, 1.0e12, f64::MAX, f64::NAN, f64::INFINITY] {
+            assert!(celestial_longitude(t, 39343, 20700).is_finite());
+        }
+        assert_eq!(presentation_offset(true, 8, Some(19800)), 19800);
+        assert_eq!(presentation_offset(true, 8, Some(20700)), 20700);
+        assert_eq!(presentation_offset(true, 8, Some(-12600)), -12600);
+        assert_eq!(presentation_offset(true, 8, None), 28800);
+        assert_eq!(presentation_offset(true, 8, Some(i32::MAX)), 28800);
+        assert_eq!(presentation_offset(false, 8, Some(0)), 28800);
+        let epoch = std::time::UNIX_EPOCH;
+        assert_eq!(
+            wall_clock_seconds(epoch - std::time::Duration::from_millis(1500)),
+            -1.5
+        );
+        assert_eq!(
+            wall_clock_seconds(epoch + std::time::Duration::from_millis(1500)),
+            1.5
+        );
+    }
+
     #[test]
     fn independent_rotation_is_bounded_periodic_and_visible() {
         let t = 1_791_000_000.0;

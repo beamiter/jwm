@@ -1216,6 +1216,13 @@ impl Config {
                 None,
             );
         }
+        if !["system", "configured"].contains(&behavior.wallpaper_astronomy_timezone.as_str()) {
+            diagnostics.error(
+                "behavior.wallpaper_astronomy_timezone",
+                "expected system or configured",
+                None,
+            );
+        }
         if !(-12..=14).contains(&behavior.wallpaper_timezone_offset_hours) {
             diagnostics.error(
                 "behavior.wallpaper_timezone_offset_hours",
@@ -1251,10 +1258,10 @@ impl Config {
                 behavior.wallpaper_moon_rotation_minutes,
             ),
         ] {
-            if !(1..=1440).contains(&minutes) {
+            if !(1..=525600).contains(&minutes) {
                 diagnostics.error(
                     key,
-                    "expected integer rotation period in 1..=1440 minutes",
+                    "expected integer rotation period in 1..=525600 minutes",
                     None,
                 );
             }

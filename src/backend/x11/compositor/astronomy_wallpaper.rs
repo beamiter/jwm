@@ -2,11 +2,12 @@
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
-    celestial_assignments, material_load_frame, resolve_cloud_texture, resolve_earth_texture,
-    resolve_moon_texture, solar_direction, viewing_longitude, visual_rotation,
+    celestial_assignments, celestial_longitude, material_load_frame, presentation_offset,
+    resolve_cloud_texture, resolve_earth_texture, resolve_moon_texture, solar_direction,
+    viewing_longitude, wall_clock_seconds,
 };
 use glow::HasContext;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 const VERTEX: &str = "#version 330 core\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
 const FRAGMENT: &str = include_str!("shaders/animated_wallpaper.frag");
@@ -242,8 +243,27 @@ impl<C: CompositorConnection> Compositor<C> {
         let cfg = crate::config::CONFIG.load();
         let enabled = cfg.behavior().wallpaper_effect == "astronomy";
         let configured = &cfg.behavior().wallpaper_earth_texture;
-        let offset_seconds = cfg.behavior().wallpaper_timezone_offset_hours * 3600;
         let layout = &cfg.behavior().wallpaper_astronomy_layout;
+        let sample_unix = if enabled {
+            wall_clock_seconds(SystemTime::now())
+        } else {
+            0.0
+        };
+        let use_system_zone = enabled
+            && layout == "earth-moon"
+            && cfg.behavior().wallpaper_astronomy_timezone == "system";
+        let system_offset = if use_system_zone {
+            chrono::TimeZone::timestamp_opt(&chrono::Local, sample_unix.floor() as i64, 0)
+                .single()
+                .map(|time| time.offset().local_minus_utc())
+        } else {
+            None
+        };
+        let offset_seconds = presentation_offset(
+            use_system_zone,
+            cfg.behavior().wallpaper_timezone_offset_hours,
+            system_offset,
+        );
         let a = &mut self.astronomy_wallpaper;
         let layout_changed = a.update_layout(
             enabled,
@@ -345,10 +365,7 @@ impl<C: CompositorConnection> Compositor<C> {
         a.clock.set_paused(!a.powered || occluded);
         let tick = a.clock.tick(now);
         if tick {
-            a.sample_unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64();
+            a.sample_unix = sample_unix;
         }
         a.frame_changed = changed
             || layout_changed
@@ -540,13 +557,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 gl.uniform_1_i32(program.moon_material.as_ref(), i32::from(moon));
                 if a.dual_material {
                     let period = if moon { a.moon_period } else { a.earth_period };
-                    gl.uniform_1_f32(
-                        program.view_longitude.as_ref(),
-                        visual_rotation(a.sample_unix, period),
+                    let angle = celestial_longitude(
+                        a.sample_unix,
+                        period,
+                        if moon { 0 } else { a.sample_offset },
                     );
+                    gl.uniform_1_f32(program.view_longitude.as_ref(), angle);
                     // Decorative fixed studio light in view space; spin does not change solar time.
                     // Legacy modes retain their UTC solar direction and timezone camera.
-                    let angle = visual_rotation(a.sample_unix, period);
                     let (s, c) = angle.sin_cos();
                     gl.uniform_3_f32(
                         program.sun_direction.as_ref(),

@@ -68,8 +68,9 @@ wallpaper_effect = "astronomy"
 wallpaper_astronomy_layout = "earth-moon"
 wallpaper_earth_texture = "" # bundled Earth texture
 wallpaper_moon_texture = "" # bundled Moon texture
-wallpaper_earth_rotation_minutes = 20
-wallpaper_moon_rotation_minutes = 30
+wallpaper_earth_rotation_minutes = 1440 # 24 hours
+wallpaper_moon_rotation_minutes = 39343 # about 27.3 days
+wallpaper_astronomy_timezone = "system" # or "configured"
 wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
 ```
 
@@ -82,7 +83,7 @@ connector entries remain available for when that output returns.
 
 The map defaults to empty and accepts at most 128 entries. Connector names must
 be nonempty, at most 256 bytes, and contain no NUL; body names are exactly
-`earth` or `moon`. Each rotation period is an integer from 1 through 1440 minutes.
+`earth` or `moon`. Each rotation period is an integer from 1 through 525600 minutes.
 The Moon texture setting defaults to empty for the bundled asset and follows the
 same bounded-path validation and lookup order as the Earth texture, using
 `moon-nasa-lroc.jpg` in place of `earth-nasa-january.jpg`. Mirrored outputs share
@@ -91,11 +92,37 @@ and rotation periods support normal reload and hot-config updates; hot changes
 are session-only unless saved to the configuration file. Static wallpapers,
 daily rotation, and the default `span` layout remain unchanged.
 
-Both spin periods are artistic animation choices, not a real lunar ephemeris,
-orbital simulation, or a depiction of the Moon's current phase. This mode uses
-a fixed decorative light relative to the view, with no UTC-based lighting. The UTC-based
-Earth view and presentation-timezone behavior described below apply to the
-older `span` and `per-output` modes only.
+Earth defaults to a 24-hour presentation turn. Moon defaults to 39343 minutes
+(about 27.3 days), rounded from NASA's [655.720-hour sidereal rotation period](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html).
+These are independent, configurable periods; set e.g. 20 and 30 minutes for an
+accelerated decorative view. Existing explicit period settings are preserved;
+only missing settings receive the new defaults.
+
+Both phases are anchored to the current UTC system instant rather than process
+uptime, so restarting or resuming at the same instant reproduces the same angle.
+Earth adds a timezone-derived observer meridian exactly once; it does not shift
+UTC before advancing the clock. The default `wallpaper_astronomy_timezone = "system"`
+reads the system's current offset, including fractional hours and daylight saving.
+An offset change moves Earth's observer meridian but does not change either
+rotation period or Moon's phase. If a system offset cannot be resolved, the
+configured offset is used (default UTC+8). No OS clock or timezone is changed.
+
+For a fixed UTC+8 observer, including users who previously set an explicit offset,
+use both settings in `[behavior]`:
+
+```toml
+wallpaper_astronomy_timezone = "configured"
+wallpaper_timezone_offset_hours = 8
+```
+
+The offset is a coarse camera meridian, not a geographic location. The 24-hour
+Earth view is the requested civil-day presentation, not a claim to reproduce
+Earth's shorter sidereal rotation precisely. Moon's phase origin is a stable
+UTC epoch, not a calibrated lunar orientation or current lunar phase; tidal
+locking/orbits/libration are not simulated. This mode retains fixed decorative
+view-space lighting. Legacy `span` and `per-output` keep their existing UTC
+solar illumination and configured timezone behavior below, unaffected by the
+new timezone-source and rotation-period controls.
 
 ## Time and appearance
 
@@ -114,8 +141,9 @@ weather or city-light observations. The stationary
 galaxy background is an artistic star field, not an astronomical catalogue or
 live sky observation.
 
-Animation samples current UTC and the configured display offset at at most 15 Hz, even if other clients repaint
-faster. DPMS is sampled only while enabled, at two-second intervals. Standby,
+Regular animation ticks are capped at 15 Hz. Enabled prepare checks the current
+system instant and applicable timezone offset; a timezone change requests an
+immediate repaint. DPMS is sampled only while enabled, at two-second intervals. Standby,
 suspend, off, an unavailable extension or failed query pauses animation; retry
 continues every two seconds so wake/error recovery does not depend on input.
 The normal static wallpaper is retained when the animation cannot render.

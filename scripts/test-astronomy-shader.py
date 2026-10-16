@@ -13,7 +13,7 @@ ROOT.mkdir(parents=True, exist_ok=True)
 SOURCE=REPO/'src/backend/x11/compositor/shaders/animated_wallpaper.frag'
 W,H=int(os.environ.get("PREVIEW_WIDTH",960)),int(os.environ.get("PREVIEW_HEIGHT",540))
 helper=ROOT/'astronomy_values.rs'
-helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\nfn main() { let a: Vec<String> = std::env::args().collect(); let t:f64=a[1].parse().unwrap(); let o:i32=a[2].parse().unwrap(); if a.len()>3 { let minutes:u32=a[3].parse().unwrap(); let r=astronomy::visual_rotation(t,minutes); let (s,c)=r.sin_cos(); println!("{} {} {} {}", c* -0.35+s*0.88,0.32,-s* -0.35+c*0.88,r); return; } let v=astronomy::solar_direction(t); println!("{} {} {} {}", v[0], v[1], v[2], astronomy::viewing_longitude(t,o)); }')
+helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\nfn main() { let a: Vec<String> = std::env::args().collect(); let t:f64=a[1].parse().unwrap(); let o:i32=a[2].parse().unwrap(); if a.len()>3 { let minutes:u32=a[3].parse().unwrap(); let r=astronomy::celestial_longitude(t,minutes,o); let (s,c)=r.sin_cos(); println!("{} {} {} {}", c* -0.35+s*0.88,0.32,-s* -0.35+c*0.88,r); return; } let v=astronomy::solar_direction(t); println!("{} {} {} {}", v[0], v[1], v[2], astronomy::viewing_longitude(t,o)); }')
 subprocess.run([shutil.which('rustc') or 'rustc', str(helper), '-Awarnings', '-o', str(ROOT/'astronomy_values')],check=True)
 # Invoke the production Rust geometry planner; do not copy coordinate policy to Python.
 planner=ROOT/'astronomy_plan.rs'
@@ -190,7 +190,7 @@ for es in (False,True):
  enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
  scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
  clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
- def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True):
+ def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=20,moon_minutes=30,offset_seconds=0):
   target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
   assert current(d,target,target,ctx)
   gl('glViewport',None,[I,I,I,I])(0,0,width,height)
@@ -203,7 +203,7 @@ for es in (False,True):
     body=materials[tuple(draw_plan['origin'])]
     unif1i(loc(prog,b'moon_material'),int(body=='moon'))
     gl('glBindTexture',None,[U,U])(0x0DE1,textures[body])
-    values=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),str(instant),'0','30' if body=='moon' else '20']).split()))
+    values=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),str(instant),str(0 if body=='moon' else offset_seconds),str(moon_minutes if body=='moon' else earth_minutes)]).split()))
     gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3]);unif1f(loc(prog,b'view_longitude'),values[3])
    enable(0x0C11);scissor(*draw_plan['clip'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),*draw_plan['origin'])
@@ -272,6 +272,20 @@ for es in (False,True):
     sky_box=(x,0,x+300,200)
     assert ImageChops.difference(dual_reference.crop(sky_box).convert('RGB'),rendered.crop(sky_box).convert('RGB')).getbbox() is None, f'{body} sky moved'
    dual_metrics[-1]['motion']=motion
+ # Default wall-clock periods: Earth repeats after 24h; Moon advances independently.
+ defaults={}
+ for elapsed, zone in [(0,28800),(21600,28800),(86400,28800),(0,0)]:
+  rendered,_=layout_image(640,240,[(0,0,320,240),(320,0,320,240)],materials={(0,0):'earth',(320,0):'moon'},instant=BASE+elapsed,earth_minutes=1440,moon_minutes=39343,offset_seconds=zone)
+  name=f'{kind}-default-period-{elapsed}s-zone{zone}.png';rendered.save(ROOT/name)
+  defaults[(elapsed,zone)]=rendered
+  dual_metrics.append({'file':name,'seconds':elapsed,'offset_seconds':zone,'earth_minutes':1440,'moon_minutes':39343})
+ def crop_body(im,body): return im.crop((0,0,320,240) if body=='earth' else (320,0,640,240)).convert('RGB')
+ initial=defaults[(0,28800)]
+ assert ImageChops.difference(crop_body(initial,'earth'),crop_body(defaults[(86400,28800)],'earth')).getbbox() is None
+ assert ImageChops.difference(crop_body(initial,'earth'),crop_body(defaults[(21600,28800)],'earth')).getbbox() is not None
+ assert ImageChops.difference(crop_body(initial,'moon'),crop_body(defaults[(86400,28800)],'moon')).getbbox() is not None
+ assert ImageChops.difference(crop_body(initial,'moon'),crop_body(defaults[(0,0)],'moon')).getbbox() is None
+ assert ImageChops.difference(crop_body(initial,'earth'),crop_body(defaults[(0,0)],'earth')).getbbox() is not None
  # Moon must equal the exact decorative sky outside its silhouette (no halo).
  sky_source=source.split('void main() {',1)[0]+'void main() { frag_color=vec4(galaxy_background(gl_FragCoord.xy-canvas_origin),1.0); }'
  assert current(d,surf,surf,ctx)
