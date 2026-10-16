@@ -2073,11 +2073,42 @@ pub struct RuleConfig {
 #[derive(Clone)]
 pub struct Config {
     inner: TomlConfig,
+    // Runtime-only ownership identity: cloning an active snapshot preserves it,
+    // but loading/replacing the complete configuration cancels older gestures.
+    gesture_policy_generation: u64,
+}
+
+fn next_gesture_policy_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let mut current = NEXT.load(Ordering::Relaxed);
+    loop {
+        let next = current
+            .checked_add(1)
+            .expect("gesture policy generation exhausted");
+        match NEXT.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return current,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+impl Config {
+    pub(crate) fn gesture_swipe_signature(&self) -> String {
+        format!(
+            "{}|{}",
+            self.gesture_policy_generation,
+            gesture_swipe_signature(
+                &self.behavior().gesture_swipe,
+                self.behavior().gesture_swipe_threshold,
+            )
+        )
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            gesture_policy_generation: next_gesture_policy_generation(),
             inner: TomlConfig {
                 appearance: AppearanceConfig {
                     border_px: 3,
@@ -3050,7 +3081,10 @@ impl Config {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = read_config_text(path.as_ref())?;
         let config: TomlConfig = toml::from_str(&content)?;
-        let cfg = Self { inner: config };
+        let cfg = Self {
+            inner: config,
+            gesture_policy_generation: next_gesture_policy_generation(),
+        };
         let diagnostics = cfg.diagnostics();
         if diagnostics.has_errors() {
             return Err(ConfigError::Validation(diagnostics));
@@ -4601,11 +4635,16 @@ impl Config {
     pub fn validate_config_file<P: AsRef<Path>>(path: P) -> Result<ConfigDiagnostics, ConfigError> {
         let content = read_config_text(path.as_ref())?;
         let config: TomlConfig = toml::from_str(&content)?;
-        Ok(Self { inner: config }.diagnostics())
+        Ok(Self {
+            inner: config,
+            gesture_policy_generation: next_gesture_policy_generation(),
+        }
+        .diagnostics())
     }
 
     pub fn merge_config(&mut self, other: TomlConfig) {
         self.inner = other;
+        self.gesture_policy_generation = next_gesture_policy_generation();
     }
 
     /// Apply a single key/value override to the in-memory config without
@@ -5004,7 +5043,7 @@ impl Config {
         if config_path.exists() {
             let new_config = Self::load_from_file(&config_path)?;
             // load_from_file already ran semantic diagnostics.
-            self.inner = new_config.inner;
+            *self = new_config;
         }
         Ok(())
     }
@@ -5181,7 +5220,10 @@ mod tests {
         assert_eq!(legacy.behavior.wallpaper_timezone_offset_hours, 8);
         assert_eq!(legacy.behavior.wallpaper_astronomy_layout, "span");
         assert!(legacy.behavior.wallpaper_earth_texture.is_empty());
-        let mut config = Config { inner: legacy };
+        let mut config = Config {
+            inner: legacy,
+            gesture_policy_generation: super::next_gesture_policy_generation(),
+        };
         config.inner.behavior.wallpaper = "/walls/static.png".into();
         config.inner.behavior.wallpaper_rotation = "daily".into();
         config.inner.behavior.wallpaper_rotation_paths = vec!["/walls/day.png".into()];
@@ -5282,7 +5324,10 @@ mod tests {
         }
         config.inner.behavior.wallpaper_astronomy_layout = "fill".into();
         let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
-        let loaded = Config { inner: loaded };
+        let loaded = Config {
+            inner: loaded,
+            gesture_policy_generation: super::next_gesture_policy_generation(),
+        };
         assert!(
             loaded
                 .diagnostics()
@@ -5383,7 +5428,10 @@ mod tests {
         assert_eq!(legacy.behavior.wallpaper_rotation, "off");
         assert!(legacy.behavior.wallpaper_rotation_paths.is_empty());
 
-        let mut config = Config { inner: legacy };
+        let mut config = Config {
+            inner: legacy,
+            gesture_policy_generation: super::next_gesture_policy_generation(),
+        };
         config.inner.behavior.wallpaper_rotation = "daily".into();
         config.inner.behavior.wallpaper_rotation_paths =
             vec!["/walls/01.png".into(), "/walls/02.png".into()];
@@ -6338,6 +6386,59 @@ mod tests {
         assert!(diagnostics.issues().iter().any(|issue| {
             issue.path.ends_with(".function") && issue.message.contains("unknown IPC command")
         }));
+    }
+
+    #[test]
+    fn gesture_policy_identity_survives_clones_but_not_reload_or_aba() {
+        let path = temporary_config_path("gesture-policy-identity");
+        let initial = Config::default();
+        let original = initial.gesture_swipe_signature();
+        let clone = initial.clone();
+        assert_eq!(original, clone.gesture_swipe_signature());
+        let mut neutral = initial.clone();
+        neutral
+            .set_value("appearance.border_px", &serde_json::json!(4))
+            .unwrap();
+        assert_eq!(original, neutral.gesture_swipe_signature());
+
+        let bytes = toml::to_string(&initial.inner).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut active = Config::load_from_file(&path).unwrap();
+        assert_ne!(original, active.gesture_swipe_signature());
+        let loaded = active.gesture_swipe_signature();
+        active = Config::load_from_file(&path).unwrap();
+        assert_ne!(
+            loaded,
+            active.gesture_swipe_signature(),
+            "identical reload cancels old ownership"
+        );
+
+        let mut disabled = initial.inner.clone();
+        disabled.behavior.gesture_swipe.clear();
+        std::fs::write(&path, toml::to_string(&disabled).unwrap()).unwrap();
+        active = Config::load_from_file(&path).unwrap();
+        assert!(active.behavior().gesture_swipe.is_empty());
+        std::fs::write(&path, &bytes).unwrap();
+        active = Config::load_from_file(&path).unwrap();
+        assert_ne!(
+            loaded,
+            active.gesture_swipe_signature(),
+            "restoring A cannot revive an A gesture"
+        );
+        let restored = active.gesture_swipe_signature();
+        std::fs::write(&path, "[invalid").unwrap();
+        assert!(Config::load_from_file(&path).is_err());
+        assert_eq!(restored, active.gesture_swipe_signature());
+        assert!(
+            !toml::to_string(&active.inner)
+                .unwrap()
+                .contains("gesture_policy_generation")
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        let same_contents = active.inner.clone();
+        active.merge_config(same_contents);
+        assert_ne!(restored, active.gesture_swipe_signature());
     }
 
     #[test]
@@ -8042,7 +8143,10 @@ border_px = 3
             "layout": { "m_fact": 0.55, "n_master": 1, "tags_length": 9 }
         }))
         .unwrap();
-        let config = Config { inner };
+        let config = Config {
+            inner,
+            gesture_policy_generation: super::next_gesture_policy_generation(),
+        };
         let diagnostics = config.diagnostics();
         assert!(!diagnostics.has_errors(), "{diagnostics}");
         config

@@ -20,7 +20,9 @@ use x11rb::rust_connection::RustConnection;
 use crate::backend::api::BackendEvent;
 use crate::backend::gesture_status::{RuntimeStatus, change_status};
 use crate::backend::gesture_swipe::GestureSwipeTracker;
-use crate::config::{CONFIG, GestureSwipeConfig, gesture_swipe_signature as config_signature};
+#[cfg(test)]
+use crate::config::gesture_swipe_signature as config_signature;
+use crate::config::{CONFIG, GestureSwipeConfig};
 
 const ALL_DEVICES: u16 = 0;
 const ALL_MASTER_DEVICES: u16 = 1;
@@ -139,10 +141,7 @@ impl GestureEventSource {
     fn sync_config(&mut self) -> GestureResult<()> {
         let config = CONFIG.load();
         let counts = configured_counts(&config.behavior().gesture_swipe);
-        let signature = config_signature(
-            &config.behavior().gesture_swipe,
-            config.behavior().gesture_swipe_threshold,
-        );
+        let signature = config.gesture_swipe_signature();
         if self.config_signature == signature {
             return Ok(());
         }
@@ -290,10 +289,7 @@ impl GestureEventSource {
                         ActiveSwipe {
                             source: event.sourceid,
                             begin_time: event.time,
-                            config_signature: config_signature(
-                                &config.behavior().gesture_swipe,
-                                config.behavior().gesture_swipe_threshold,
-                            ),
+                            config_signature: config.gesture_swipe_signature(),
                             tracker,
                         },
                     );
@@ -326,11 +322,7 @@ impl GestureEventSource {
                     let config = CONFIG.load();
                     let behavior = config.behavior();
                     let cancelled = u32::from(event.flags) & 1 != 0
-                        || active.config_signature
-                            != config_signature(
-                                &behavior.gesture_swipe,
-                                behavior.gesture_swipe_threshold,
-                            );
+                        || active.config_signature != config.gesture_swipe_signature();
                     if let Some((fingers, direction)) = active
                         .tracker
                         .finish(cancelled, behavior.gesture_swipe_threshold)

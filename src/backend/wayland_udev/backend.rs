@@ -3796,9 +3796,7 @@ impl UdevBackend {
                                 &cfg.behavior().gesture_swipe,
                             );
                             state.gesture_swipe.begin(fingers, intercept);
-                            state.gesture_swipe.config_signature = crate::config::gesture_swipe_signature(
-                                &cfg.behavior().gesture_swipe, cfg.behavior().gesture_swipe_threshold,
-                            );
+                            state.gesture_swipe.config_signature = cfg.gesture_swipe_signature();
                             if !intercept && let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_begin(
                                     state,
@@ -3829,9 +3827,7 @@ impl UdevBackend {
                                 let cfg = crate::config::CONFIG.load();
                                 let threshold = cfg.behavior().gesture_swipe_threshold;
                                 let config_signature = state.gesture_swipe.config_signature.clone();
-                                let policy_changed = config_signature != crate::config::gesture_swipe_signature(
-                                    &cfg.behavior().gesture_swipe, threshold,
-                                );
+                                let policy_changed = config_signature != cfg.gesture_swipe_signature();
                                 if let Some((fingers, direction)) = state.gesture_swipe.finish(
                                     event.cancelled() || state.session_locked || policy_changed,
                                     threshold,

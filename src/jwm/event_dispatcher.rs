@@ -6602,10 +6602,7 @@ mod tests {
         let mut backend = RenderSpyBackend::new();
         let before = jwm.state.monitors[monitor].get_active_tags();
         let cfg = crate::config::CONFIG.load();
-        let signature = crate::config::gesture_swipe_signature(
-            &cfg.behavior().gesture_swipe,
-            cfg.behavior().gesture_swipe_threshold,
-        );
+        let signature = cfg.gesture_swipe_signature();
         // A completed gesture is queued, then the lock takes ownership.
         let queued = BackendEvent::GestureSwipeAction {
             fingers: 3,
@@ -6640,10 +6637,7 @@ mod tests {
             BackendEvent::GestureSwipeAction {
                 fingers: 3,
                 direction: "left",
-                config_signature: crate::config::gesture_swipe_signature(
-                    &cfg.behavior().gesture_swipe,
-                    cfg.behavior().gesture_swipe_threshold,
-                ),
+                config_signature: cfg.gesture_swipe_signature(),
             },
         )
         .unwrap();
@@ -14384,12 +14378,7 @@ impl EventHandler for Jwm {
                 config_signature,
             } => {
                 let cfg = crate::config::CONFIG.load();
-                if config_signature
-                    == crate::config::gesture_swipe_signature(
-                        &cfg.behavior().gesture_swipe,
-                        cfg.behavior().gesture_swipe_threshold,
-                    )
-                {
+                if config_signature == cfg.gesture_swipe_signature() {
                     self.handle_gesture_swipe(backend, fingers, direction);
                 }
             }
