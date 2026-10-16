@@ -1078,10 +1078,10 @@ impl Jwm {
             .filter_map(|key| {
                 let client = self.state.clients.get(*key)?;
                 let id = xid(backend, client.win)?;
-                self.restart_state
-                    .adopted
-                    .contains(&id)
-                    .then_some((id, *key))
+                // An XID can be reused after its original client was adopted.
+                // Only the still-live runtime key that passed the generation
+                // check may inherit that client's saved order or selection.
+                (self.restart_state.adopted_keys.get(&id) == Some(key)).then_some((id, *key))
             })
             .collect();
         for (monitor_key, clients) in self.state.monitor_clients.iter_mut() {

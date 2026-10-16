@@ -8156,6 +8156,120 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn x11_restart_order_and_selection_require_verified_runtime_identity() {
+        use crate::backend::api::RestartProperty;
+        use crate::core::layout::LayoutEnum;
+
+        for case in ["verified", "removed", "recycled", "unmarked", "moved"] {
+            let (old, mut backend, _) = restart_shape_fixture(LayoutEnum::SCROLLING);
+            let old_mon = old.state.monitor_order[0];
+            let saved_order: Vec<_> = old.state.monitor_clients[old_mon]
+                .iter()
+                .map(|key| old.state.clients[*key].win)
+                .collect();
+            let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+            let first = DummyOutputOps.enumerate_outputs().remove(0);
+            backend.output_ops.overrides = Some(vec![first, second_output()]);
+            let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            fresh.suppress_layout_animation = true;
+            fresh.install_restart_state(&backend, &intent).unwrap();
+            fresh.restore_restart_monitors(&mut backend);
+            for id in [304, 303, 302, 301] {
+                manage_window(&mut fresh, &mut backend, id);
+            }
+            let window = WindowId::from_raw(301);
+            let original = fresh.wintoclient(window).unwrap();
+            let mon = fresh.state.clients[original].mon.unwrap();
+            let other = fresh
+                .state
+                .monitor_order
+                .iter()
+                .copied()
+                .find(|key| *key != mon)
+                .unwrap();
+            let fallback = fresh.wintoclient(WindowId::from_raw(302)).unwrap();
+            let mut replacement = None;
+            if matches!(case, "removed" | "recycled" | "unmarked") {
+                fresh.unmanage(&mut backend, Some(original), true).unwrap();
+                if case == "recycled" {
+                    backend
+                        .property_ops
+                        .set_restart_property(
+                            window,
+                            RestartProperty::ClientGeneration,
+                            b"unrelated-generation",
+                        )
+                        .unwrap();
+                } else if case == "unmarked" {
+                    backend
+                        .property_ops
+                        .clear_restart_property(window, RestartProperty::ClientGeneration)
+                        .unwrap();
+                }
+                if case != "removed" {
+                    let key = manage_window(&mut fresh, &mut backend, 301);
+                    assert_ne!(key, original);
+                    assert_eq!(fresh.state.clients[key].mon, Some(mon));
+                    replacement = Some(key);
+                }
+            } else if case == "moved" {
+                fresh.sendmon(&mut backend, Some(original), Some(other));
+                assert_eq!(fresh.state.clients[original].mon, Some(other));
+            }
+            // A new client's ordinary focus policy can select the replacement.
+            // Choose a verified survivor so that an inherited selection cannot
+            // hide behind that unrelated, legitimate new-window behavior.
+            fresh.state.monitors[mon].set_selected_client_for_current_tag(Some(fallback));
+            fresh.finish_restart_adoption(&mut backend);
+
+            let expected_selection = if case == "verified" {
+                original
+            } else {
+                fallback
+            };
+            assert_eq!(
+                fresh.state.monitors[mon].sel,
+                Some(expected_selection),
+                "{case}"
+            );
+            let mut expected_order: Vec<_> = saved_order
+                .into_iter()
+                .filter(|id| case == "verified" || *id != window)
+                .collect();
+            if replacement.is_some() {
+                expected_order.push(window);
+            }
+            let actual_order: Vec<_> = fresh.state.monitor_clients[mon]
+                .iter()
+                .map(|key| fresh.state.clients[*key].win)
+                .collect();
+            assert_eq!(actual_order, expected_order, "{case}");
+            if case == "moved" {
+                assert_eq!(fresh.state.monitor_clients[other], vec![original]);
+                assert_eq!(fresh.state.clients[original].mon, Some(other));
+            } else {
+                assert!(fresh.state.monitor_clients[other].is_empty());
+            }
+            if let Some(replacement) = replacement {
+                let scrolling = fresh.scrolling_state_for_monitor(mon).unwrap();
+                assert!(
+                    !scrolling
+                        .columns
+                        .iter()
+                        .flatten()
+                        .any(|key| *key == replacement)
+                );
+            }
+
+            fresh.consume_restart_state(&backend, &intent);
+            fresh.state.monitors[mon].set_selected_client_for_current_tag(Some(fallback));
+            fresh.finish_restart_adoption(&mut backend);
+            assert_eq!(fresh.state.monitors[mon].sel, Some(fallback));
+            assert!(!fresh.restart_has_shapes());
+        }
+    }
+
+    #[test]
     fn x11_restart_restores_weighted_arranged_rectangles() {
         let mut backend = ClientSpyBackend::new();
         backend.restart_identity = true;
