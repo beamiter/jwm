@@ -1,6 +1,23 @@
 # Astronomy textures
 
-## Earth
+## Earth (default October surface)
+
+Credit: NASA Earth Observatory / Blue Marble Next Generation, October 2004.
+This is a fixed historical monthly surface composite, not live satellite imagery,
+current weather, or an automatically changing monthly map. October is selected
+for the autumn visual reference; sunlight still follows the actual UTC/date.
+
+- Source: https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-map/
+- Original 5400 × 2700 JPEG: https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/october/world.200410.3x5400x2700.jpg
+- File: earth-nasa-october.jpg (1,766,694 bytes, unchanged original)
+- SHA256: ccfd9b7a5e5ee601e1466556716bba50ea418f3a8e068ab0194ae0425815b1b0
+
+## Earth (retained January surface)
+
+The prior January image remains bundled and installed for explicit texture paths.
+An existing user-owned legacy January override in the data-home directory remains
+preferred over the bundled October default when no newer October override exists.
+
 
 Credit: NASA Earth Observatory / Blue Marble Next Generation, January 2004.
 This is a monthly surface composite, not live satellite imagery or weather.

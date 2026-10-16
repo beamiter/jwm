@@ -11,26 +11,69 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = Path("share/jwm/astronomy")
+JANUARY = "earth-nasa-january.jpg"
+OCTOBER = "earth-nasa-october.jpg"
 ASSETS = {
-    "milkyway-nasa-gaia.jpg": "0c9247995a0f31eebe8ba49e3994d3fcc468c4cd4bf9a1555445141d81c8078e",
-    "earth-nasa-clouds.jpg": "daddaad84d7a33bbbc86cdda3f591099f57cee8607b7bcf3b67eb7e4f7a1c793",
-    "earth-nasa-january.jpg": "99f5faad74efe985fbf1714c8be7296ca9999759a1215b65f99b7f1df278dde5",
+    OCTOBER: "ccfd9b7a5e5ee601e1466556716bba50ea418f3a8e068ab0194ae0425815b1b0",
+    JANUARY: "99f5faad74efe985fbf1714c8be7296ca9999759a1215b65f99b7f1df278dde5",
     "moon-nasa-lroc.jpg": "f7130a1822681fa7512d7dcfd40db8c10b9ba4f06777910348698260ed7a2170",
+    "earth-nasa-clouds.jpg": "daddaad84d7a33bbbc86cdda3f591099f57cee8607b7bcf3b67eb7e4f7a1c793",
+    "milkyway-nasa-gaia.jpg": "0c9247995a0f31eebe8ba49e3994d3fcc468c4cd4bf9a1555445141d81c8078e",
 }
+# Each historical release must have exactly the assets that existed then.
+# In particular, cloning today's bundle must not add October to old fixtures.
+HISTORICAL_ASSETS = {
+    "astronomy-1": (),
+    "astronomy-earth": (JANUARY,),
+    "astronomy-surfaces": (JANUARY, "moon-nasa-lroc.jpg"),
+    "astronomy-clouds": (JANUARY, "moon-nasa-lroc.jpg", "earth-nasa-clouds.jpg"),
+    "astronomy-galaxy": tuple(name for name in ASSETS if name != OCTOBER),
+}
+VERSION = "astronomy-2"
+VERSION_DIR = Path("usr/local/lib/jwm/versions")
 
 
-def check_assets(payload):
-    for name, digest in ASSETS.items():
-        asset = payload / ASSET_DIR / name
-        assert hashlib.sha256(asset.read_bytes()).hexdigest() == digest
-        assert asset.stat().st_mode & 0o777 == 0o644
-    credit = payload / ASSET_DIR / "README.md"
-    assert credit.is_file()
-    assert credit.stat().st_mode & 0o777 == 0o644
+def check_assets(payload, names=ASSETS):
+    directory = payload / ASSET_DIR
+    if not names:
+        assert not directory.exists(), directory
+        return
+    assert {path.name for path in directory.iterdir()} == set(names) | {"README.md"}, directory
+    for name in names:
+        asset = directory / name
+        assert hashlib.sha256(asset.read_bytes()).hexdigest() == ASSETS[name], asset
+        assert asset.stat().st_mode & 0o777 == 0o644, asset
+    credit = directory / "README.md"
+    assert credit.is_file(), credit
+    assert credit.stat().st_mode & 0o777 == 0o644, credit
 
 
 def run(*args):
-    subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, (args, result.stdout, result.stderr)
+
+
+def make_historical_bundle(bundle, destination, manifest, version, names):
+    shutil.copytree(bundle, destination)
+    original = destination / "payload" / VERSION_DIR / VERSION
+    payload = original.with_name(version)
+    original.rename(payload)
+    for name in set(ASSETS) - set(names):
+        (payload / ASSET_DIR / name).unlink()
+    if not names:
+        shutil.rmtree(payload / "share/jwm")
+    (destination / "VERSION").write_text(version + "\n")
+    lines = []
+    for line in manifest.splitlines():
+        if "assets/astronomy/" in line:
+            source_name = Path(line.split("\t")[1]).name
+            if not names or source_name not in set(names) | {"README.md"}:
+                continue
+        lines.append(line)
+    historical_manifest = "\n".join(lines) + "\n"
+    (destination / "release-manifest.tsv").write_text(historical_manifest)
+    assert OCTOBER not in historical_manifest, version
+    check_assets(payload, names)
 
 
 with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
@@ -45,127 +88,85 @@ with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
             binary.chmod(0o755)
     run("bash", str(ROOT / "scripts/package-release.sh"), "--no-build",
         "--target-dir", str(target.parent), "--output-dir", str(base / "dist"),
-        "--version", "astronomy-2", "--source-date-epoch", "0")
+        "--version", VERSION, "--source-date-epoch", "0")
     archive = next((base / "dist").glob("*.tar.gz"))
     with tarfile.open(archive) as tar:
         tar.extractall(base / "unpacked", filter="data")
     bundle = next((base / "unpacked").iterdir())
-    payload = bundle / "payload/usr/local/lib/jwm/versions/astronomy-2"
-    check_assets(payload)
-
-    # A pre-assets release has the original stable paths. Upgrade must remain
-    # compatible with it; rollback must never leave a new executable paired
-    # with a previous release's texture via an unversioned global asset link.
-    old = base / "old"
-    shutil.copytree(bundle, old)
-    old_payload = old / "payload/usr/local/lib/jwm/versions/astronomy-2"
-    old_payload.rename(old_payload.with_name("astronomy-1"))
-    shutil.rmtree(old_payload.with_name("astronomy-1") / "share/jwm")
-    (old / "VERSION").write_text("astronomy-1\n")
-    (old / "release-manifest.tsv").write_text("\n".join(
-        line for line in manifest.splitlines() if "assets/astronomy/" not in line) + "\n")
-    root = base / "root"
-    user_overrides = [root / "home/test/.local/share/jwm/astronomy" / name
-                      for name in ASSETS]
-    for user_override in user_overrides:
-        user_override.parent.mkdir(parents=True, exist_ok=True)
-        user_override.write_text("user override remains untouched")
+    check_assets(bundle / "payload" / VERSION_DIR / VERSION)
     installer = str(bundle / "install-release.sh")
-    run("bash", str(old / "install-release.sh"), "install", "--destdir", str(root))
-    run("bash", installer, "install", "--destdir", str(root))
-    live = root / "usr/local/bin/jwm"
-    assert live.resolve().parent.parent.name == "astronomy-2"
-    active_payload = live.resolve().parent.parent
-    live_assets = active_payload / ASSET_DIR
-    check_assets(active_payload)
-    run("bash", installer, "rollback", "--destdir", str(root))
-    assert live.resolve().parent.parent.name == "astronomy-1"
-    assert not (live.resolve().parent.parent / ASSET_DIR).exists()
-    check_assets(active_payload)  # Inactive release stays intact.
-    run("bash", installer, "uninstall", "--all", "--destdir", str(root))
-    assert not live_assets.exists()
-    assert not live.exists()
-    for user_override in user_overrides:
-        assert user_override.read_text() == "user override remains untouched"
 
-    # Also preserve an Earth-only release when upgrading to Moon-capable JWM.
-    earth_only = base / "earth-only"
-    shutil.copytree(bundle, earth_only)
-    earth_payload = earth_only / "payload/usr/local/lib/jwm/versions/astronomy-2"
-    earth_payload.rename(earth_payload.with_name("astronomy-earth"))
-    earth_payload = earth_payload.with_name("astronomy-earth")
-    (earth_payload / ASSET_DIR / "moon-nasa-lroc.jpg").unlink()
-    (earth_payload / ASSET_DIR / "earth-nasa-clouds.jpg").unlink()
-    (earth_payload / ASSET_DIR / "milkyway-nasa-gaia.jpg").unlink()
-    (earth_only / "VERSION").write_text("astronomy-earth\n")
-    (earth_only / "release-manifest.tsv").write_text("\n".join(
-        line for line in manifest.splitlines() if all(name not in line for name in ("moon-nasa-lroc.jpg", "earth-nasa-clouds.jpg", "milkyway-nasa-gaia.jpg"))) + "\n")
-    run("bash", str(earth_only / "install-release.sh"), "install", "--destdir", str(root))
-    run("bash", installer, "install", "--destdir", str(root))
-    check_assets(live.resolve().parent.parent)
-    run("bash", installer, "rollback", "--destdir", str(root))
-    restored_payload = live.resolve().parent.parent
-    assert restored_payload.name == "astronomy-earth"
-    assert not (restored_payload / ASSET_DIR / "moon-nasa-lroc.jpg").exists()
-    assert not (restored_payload / ASSET_DIR / "earth-nasa-clouds.jpg").exists()
-    assert not (restored_payload / ASSET_DIR / "milkyway-nasa-gaia.jpg").exists()
-    assert hashlib.sha256((restored_payload / ASSET_DIR / "earth-nasa-january.jpg").read_bytes()).hexdigest() == ASSETS["earth-nasa-january.jpg"]
-    check_assets(active_payload)
-    run("bash", installer, "uninstall", "--all", "--destdir", str(root))
-    assert not live_assets.exists()
-    for user_override in user_overrides:
-        assert user_override.read_text() == "user override remains untouched"
-    # A surface-texture release must regain its cloud-free payload on rollback.
-    surfaces = base / "surfaces"
-    shutil.copytree(bundle, surfaces)
-    surface_payload = surfaces / "payload/usr/local/lib/jwm/versions/astronomy-2"
-    surface_payload.rename(surface_payload.with_name("astronomy-surfaces"))
-    surface_payload = surface_payload.with_name("astronomy-surfaces")
-    (surface_payload / ASSET_DIR / "earth-nasa-clouds.jpg").unlink()
-    (surface_payload / ASSET_DIR / "milkyway-nasa-gaia.jpg").unlink()
-    (surfaces / "VERSION").write_text("astronomy-surfaces\n")
-    (surfaces / "release-manifest.tsv").write_text("\n".join(
-        line for line in manifest.splitlines() if "earth-nasa-clouds.jpg" not in line and "milkyway-nasa-gaia.jpg" not in line) + "\n")
-    run("bash", str(surfaces / "install-release.sh"), "install", "--destdir", str(root))
-    run("bash", installer, "install", "--destdir", str(root))
-    check_assets(live.resolve().parent.parent)
-    run("bash", installer, "rollback", "--destdir", str(root))
-    restored_payload = live.resolve().parent.parent
-    assert restored_payload.name == "astronomy-surfaces"
-    assert not (restored_payload / ASSET_DIR / "earth-nasa-clouds.jpg").exists()
-    assert not (restored_payload / ASSET_DIR / "milkyway-nasa-gaia.jpg").exists()
-    for name, digest in ASSETS.items():
-        if name not in ("earth-nasa-clouds.jpg", "milkyway-nasa-gaia.jpg"):
-            assert hashlib.sha256((restored_payload / ASSET_DIR / name).read_bytes()).hexdigest() == digest
-    check_assets(active_payload)
-    run("bash", installer, "uninstall", "--all", "--destdir", str(root))
-    assert not live_assets.exists()
-    for user_override in user_overrides:
-        assert user_override.read_text() == "user override remains untouched"
-    # The published Earth/Moon/cloud release predates the optional real sky.
-    clouds = base / "clouds"
-    shutil.copytree(bundle, clouds)
-    cloud_payload = clouds / "payload/usr/local/lib/jwm/versions/astronomy-2"
-    cloud_payload.rename(cloud_payload.with_name("astronomy-clouds"))
-    cloud_payload = cloud_payload.with_name("astronomy-clouds")
-    (cloud_payload / ASSET_DIR / "milkyway-nasa-gaia.jpg").unlink()
-    (clouds / "VERSION").write_text("astronomy-clouds\n")
-    (clouds / "release-manifest.tsv").write_text("\n".join(
-        line for line in manifest.splitlines() if "milkyway-nasa-gaia.jpg" not in line) + "\n")
-    run("bash", str(clouds / "install-release.sh"), "install", "--destdir", str(root))
-    run("bash", installer, "install", "--destdir", str(root))
-    check_assets(live.resolve().parent.parent)
-    run("bash", installer, "rollback", "--destdir", str(root))
-    restored_payload = live.resolve().parent.parent
-    assert restored_payload.name == "astronomy-clouds"
-    assert not (restored_payload / ASSET_DIR / "milkyway-nasa-gaia.jpg").exists()
-    for name, digest in ASSETS.items():
-        if name != "milkyway-nasa-gaia.jpg":
-            assert hashlib.sha256((restored_payload / ASSET_DIR / name).read_bytes()).hexdigest() == digest
-    check_assets(active_payload)
-    run("bash", installer, "uninstall", "--all", "--destdir", str(root))
-    assert not live_assets.exists()
-    for user_override in user_overrides:
-        assert user_override.read_text() == "user override remains untouched"
+    for old_version, old_names in HISTORICAL_ASSETS.items():
+        old = base / old_version
+        make_historical_bundle(bundle, old, manifest, old_version, old_names)
+        root = base / ("root-" + old_version)
+        user_home = root / "home/test"
+        preserved = {}
+        for name in ASSETS:
+            override = user_home / ".local/share/jwm/astronomy" / name
+            preserved[override] = ("user override remains untouched: " + name).encode()
+        # An explicit January path from the source installer remains usable;
+        # release installs must neither replace it nor add global October links.
+        legacy_january = root / "usr/local" / ASSET_DIR / JANUARY
+        preserved[legacy_january] = (ROOT / "assets/astronomy" / JANUARY).read_bytes()
+        custom_january = user_home / "wallpapers/custom-january.jpg"
+        preserved[custom_january] = b"custom January texture remains untouched"
+        for backend, explicit_path in (
+            ("x11", "/usr/local/share/jwm/astronomy/" + JANUARY),
+            ("wayland", "/home/test/wallpapers/custom-january.jpg"),
+        ):
+            config = user_home / ".config/jwm" / ("config_" + backend + ".toml")
+            preserved[config] = (
+                '[behavior]\nwallpaper_effect = "astronomy"\nwallpaper_earth_texture = "'
+                + explicit_path + '"\n'
+            ).encode()
+        for path, contents in preserved.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
 
-print("test-astronomy-assets: PASS (Earth/Moon/cloud/sky hashes/modes, legacy + Earth-only + Earth/Moon + Earth/Moon/cloud upgrade, rollback, uninstall)")
+        def check_preserved():
+            for path, contents in preserved.items():
+                assert path.read_bytes() == contents, (old_version, path)
+            global_assets = root / "usr/local" / ASSET_DIR
+            assert {path.name for path in global_assets.iterdir()} == {JANUARY}
+
+        live = root / "usr/local/bin/jwm"
+        old_payload = root / VERSION_DIR / old_version
+        active_payload = root / VERSION_DIR / VERSION
+        run("bash", str(old / "install-release.sh"), "install", "--destdir", str(root))
+        assert live.resolve().parent.parent == old_payload
+        check_assets(old_payload, old_names)
+        check_preserved()
+
+        run("bash", installer, "install", "--destdir", str(root))
+        assert live.resolve().parent.parent == active_payload
+        check_assets(active_payload)
+        check_assets(old_payload, old_names)
+        check_preserved()
+
+        run("bash", installer, "rollback", "--destdir", str(root))
+        assert live.resolve().parent.parent == old_payload
+        check_assets(old_payload, old_names)
+        check_assets(active_payload)  # The inactive October release stays intact.
+        check_preserved()
+
+        run("bash", installer, "uninstall", "--all", "--destdir", str(root))
+        assert not live.exists() and not live.is_symlink()
+        assert not old_payload.exists()
+        assert not active_payload.exists()
+        check_preserved()
+
+        # Also exercise fresh install and uninstall with October active, rather
+        # than only uninstalling it as an inactive release after rollback.
+        run("bash", installer, "install", "--destdir", str(root))
+        assert live.resolve().parent.parent == active_payload
+        check_assets(active_payload)
+        check_preserved()
+        run("bash", installer, "uninstall", "--all", "--destdir", str(root))
+        assert not live.exists() and not live.is_symlink()
+        assert not active_payload.exists()
+        check_preserved()
+
+print("test-astronomy-assets: PASS (October/January/Moon/cloud/sky hashes/modes; "
+      "5 historical upgrade/rollback/uninstall + fresh install/uninstall cases; "
+      "user overrides and explicit January paths)")

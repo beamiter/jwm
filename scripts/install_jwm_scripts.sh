@@ -712,6 +712,9 @@ build_and_install_jwm() {
     install_system_binary "$target_dir/jwm-remote" /usr/local/bin
 
     # Shared data is kept outside the executable and installed for both build modes.
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-october.jpg" \
+        /usr/local/share/jwm/astronomy/earth-nasa-october.jpg
+    # Preserve January for users with an explicit texture path.
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-january.jpg" \
         /usr/local/share/jwm/astronomy/earth-nasa-january.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/moon-nasa-lroc.jpg" \

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 /// Shared by picker admission and the compositor. Explicit paths are
 /// authoritative: a missing override never silently selects a bundled image.
 pub(crate) fn resolve_earth_texture(configured: &str) -> Option<String> {
-    resolve_body_texture(configured, "earth-nasa-january.jpg")
+    resolve_body_texture(configured, "earth-nasa-october.jpg")
 }
 
 pub(crate) fn resolve_moon_texture(configured: &str) -> Option<String> {
@@ -63,7 +63,7 @@ fn earth_texture_candidates(
     source: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
     body_texture_candidates(
-        "earth-nasa-january.jpg",
+        "earth-nasa-october.jpg",
         data_home,
         executable,
         data_dirs,
@@ -82,6 +82,11 @@ fn body_texture_candidates(
     let mut paths = Vec::new();
     if let Some(home) = data_home {
         paths.push(home.join(&asset_path));
+        if asset == "earth-nasa-october.jpg" {
+            // Preserve an existing user-owned legacy default override. Version
+            // assets still prefer October; explicit paths remain authoritative.
+            paths.push(home.join("jwm/astronomy/earth-nasa-january.jpg"));
+        }
     }
     if let Some(prefix) = executable
         .and_then(|path| path.parent())
@@ -197,31 +202,260 @@ mod tests {
     }
 }
 
-/// Approximate astronomical solar direction in Earth-fixed coordinates.
-/// UTC determines illumination. The configured display timezone only sets a viewing angle.
-pub(crate) fn solar_direction(unix_seconds: f64) -> [f32; 3] {
-    let days = unix_seconds / 86400.0 - 10957.5; // days since J2000 noon
-    let mean_longitude = (280.460 + 0.9856474 * days).to_radians();
-    let anomaly = (357.528 + 0.9856003 * days).to_radians();
-    let longitude =
-        mean_longitude + (1.915 * anomaly.sin() + 0.020 * (2.0 * anomaly).sin()).to_radians();
-    let obliquity = (23.439 - 0.0000004 * days).to_radians();
-    let declination = (obliquity.sin() * longitude.sin()).asin();
-    let right_ascension = (obliquity.cos() * longitude.sin()).atan2(longitude.cos());
-    let equation = (mean_longitude - right_ascension + std::f64::consts::PI)
-        .rem_euclid(std::f64::consts::TAU)
-        - std::f64::consts::PI;
-    let utc_angle = unix_seconds.rem_euclid(86400.0) / 86400.0 * std::f64::consts::TAU;
-    let subsolar = std::f64::consts::PI - utc_angle - equation;
+// Bounded NOAA/Meeus solar ephemeris. UTC is the physical clock; neither a
+// display timezone nor the optional decorative orbit enters these equations.
+// References: https://gml.noaa.gov/grad/solcalc/main.js and
+// https://gml.noaa.gov/grad/solcalc/calcdetails.html . The model is intended for
+// wallpaper/recreational use, with greatest accuracy around 1800-2100.
+const SOLAR_MIN_UNIX_SECONDS: f64 = -62_167_219_200.0; // 0000-01-01 UTC
+const SOLAR_MAX_UNIX_SECONDS: f64 = 32_503_680_000.0; // 3000-01-01 UTC
+const J2000_UNIX_SECONDS: f64 = 946_728_000.0;
+
+fn valid_solar_time(unix_seconds: f64) -> bool {
+    unix_seconds.is_finite()
+        && (SOLAR_MIN_UNIX_SECONDS..=SOLAR_MAX_UNIX_SECONDS).contains(&unix_seconds)
+}
+
+/// Returns (solar declination in radians, equation of time in minutes).
+/// Input is already validated or bounded by the caller.
+fn solar_ephemeris(unix_seconds: f64) -> (f64, f64) {
+    let t = (unix_seconds - J2000_UNIX_SECONDS) / (86_400.0 * 36_525.0);
+    let mean_longitude = (280.46646 + t * (36000.76983 + t * 0.0003032))
+        .rem_euclid(360.0)
+        .to_radians();
+    let anomaly = (357.52911 + t * (35999.05029 - 0.0001537 * t))
+        .rem_euclid(360.0)
+        .to_radians();
+    let eccentricity = 0.016708634 - t * (0.000042037 + 0.0000001267 * t);
+    let center = anomaly.sin() * (1.914602 - t * (0.004817 + 0.000014 * t))
+        + (2.0 * anomaly).sin() * (0.019993 - 0.000101 * t)
+        + (3.0 * anomaly).sin() * 0.000289;
+    let omega = (125.04 - 1934.136 * t).to_radians();
+    let apparent_longitude =
+        mean_longitude + (center - 0.00569 - 0.00478 * omega.sin()).to_radians();
+    let obliquity_seconds = 21.448 - t * (46.8150 + t * (0.00059 - t * 0.001813));
+    let obliquity =
+        (23.0 + (26.0 + obliquity_seconds / 60.0) / 60.0 + 0.00256 * omega.cos()).to_radians();
+    let declination = (obliquity.sin() * apparent_longitude.sin()).asin();
+    let y = (obliquity / 2.0).tan().powi(2);
+    let equation = y * (2.0 * mean_longitude).sin() - 2.0 * eccentricity * anomaly.sin()
+        + 4.0 * eccentricity * y * anomaly.sin() * (2.0 * mean_longitude).cos()
+        - 0.5 * y * y * (4.0 * mean_longitude).sin()
+        - 1.25 * eccentricity * eccentricity * (2.0 * anomaly).sin();
+    (declination, 4.0 * equation.to_degrees())
+}
+
+fn solar_direction_f64(unix_seconds: f64) -> [f64; 3] {
+    let (declination, equation_minutes) = solar_ephemeris(unix_seconds);
+    let utc_minutes = unix_seconds.rem_euclid(86_400.0) / 60.0;
+    let subsolar = (180.0 - (utc_minutes + equation_minutes) / 4.0).to_radians();
     [
-        (declination.cos() * subsolar.sin()) as f32,
-        declination.sin() as f32,
-        (declination.cos() * subsolar.cos()) as f32,
+        declination.cos() * subsolar.sin(),
+        declination.sin(),
+        declination.cos() * subsolar.cos(),
     ]
+}
+
+/// Unit solar direction in Earth-fixed coordinates: +X is 90°E, +Y north,
+/// and +Z Greenwich. UTC alone controls the physical illumination. Invalid
+/// clocks use J2000; finite extreme clocks are clamped to the supported range
+/// so shaders never receive NaN/Inf. Event diagnostics reject such clocks.
+pub(crate) fn solar_direction(unix_seconds: f64) -> [f32; 3] {
+    let bounded = if unix_seconds.is_finite() {
+        unix_seconds.clamp(SOLAR_MIN_UNIX_SECONDS, SOLAR_MAX_UNIX_SECONDS)
+    } else {
+        J2000_UNIX_SECONDS
+    };
+    solar_direction_f64(bounded).map(|component| component as f32)
+}
+
+/// Geographic center meridian in radians, east-positive. Fixed mode returns
+/// only the configured longitude and is independent of time, period, and
+/// timezone. Rotation is a deliberate presentation option, never solar time.
+/// Finite longitudes wrap to [-180°, 180°); invalid ones fall back to Guangzhou (113.28°E).
+pub(crate) fn earth_view_longitude(
+    unix_seconds: f64,
+    period_minutes: u32,
+    longitude_degrees: f64,
+    rotating: bool,
+) -> f32 {
+    let longitude = if longitude_degrees.is_finite() {
+        (longitude_degrees.rem_euclid(360.0) + 180.0).rem_euclid(360.0) - 180.0
+    } else {
+        113.28
+    };
+    let meridian = longitude.to_radians();
+    if rotating {
+        (meridian + f64::from(visual_rotation(unix_seconds, period_minutes)))
+            .rem_euclid(std::f64::consts::TAU) as f32
+    } else {
+        meridian as f32
+    }
+}
+
+fn observer_normal(latitude_degrees: f64, longitude_degrees: f64) -> Option<[f64; 3]> {
+    if !latitude_degrees.is_finite()
+        || !(-90.0..=90.0).contains(&latitude_degrees)
+        || !longitude_degrees.is_finite()
+    {
+        return None;
+    }
+    let latitude = latitude_degrees.to_radians();
+    let longitude = longitude_degrees.rem_euclid(360.0).to_radians();
+    Some([
+        latitude.cos() * longitude.sin(),
+        latitude.sin(),
+        latitude.cos() * longitude.cos(),
+    ])
+}
+
+fn solar_height(unix_seconds: f64, observer: [f64; 3]) -> f64 {
+    let sun = solar_direction_f64(unix_seconds);
+    (observer[0] * sun[0] + observer[1] * sun[1] + observer[2] * sun[2]).clamp(-1.0, 1.0)
+}
+
+/// Geometric solar-center elevation in degrees (no refraction or terrain).
+/// Diagnostics share the renderer's ephemeris. None means invalid coordinates
+/// or an epoch outside the supported range; east/north coordinates are positive.
+#[allow(dead_code)] // Diagnostic helper, intentionally not evaluated per frame.
+pub(crate) fn solar_elevation(
+    unix_seconds: f64,
+    latitude_degrees: f64,
+    longitude_degrees: f64,
+) -> Option<f64> {
+    if !valid_solar_time(unix_seconds) {
+        return None;
+    }
+    let observer = observer_normal(latitude_degrees, longitude_degrees)?;
+    Some(solar_height(unix_seconds, observer).asin().to_degrees())
+}
+
+#[allow(dead_code)] // Available to diagnostics without adding a wallpaper clock UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SolarDayStatus {
+    Normal,
+    PolarDay,
+    PolarNight,
+    /// Only one crossing occurs in this civil day near a polar transition.
+    Transition,
+    Invalid,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SunriseSunset {
+    /// Absolute UTC Unix seconds, restricted to the selected civil day.
+    pub(crate) sunrise: Option<f64>,
+    pub(crate) sunset: Option<f64>,
+    pub(crate) status: SolarDayStatus,
+}
+
+/// Apparent sunrise/sunset for the civil date containing `unix_seconds` at
+/// `utc_offset_seconds`. Offset zero selects a UTC day. The offset affects
+/// only the date interval, never solar physics; it is a fixed offset, not a
+/// timezone/DST database. Returned epochs lie in [local midnight, next midnight).
+/// Both coordinates use degrees, north/east positive. The -0.833° solar-center
+/// horizon includes nominal refraction and solar radius, without terrain or
+/// observer altitude. Actual observed events can differ with the atmosphere.
+/// Reference: https://gml.noaa.gov/grad/solcalc/solareqns.PDF .
+#[allow(dead_code)] // Daily diagnostic/test API; do not recompute it per frame.
+pub(crate) fn sunrise_sunset(
+    unix_seconds: f64,
+    latitude_degrees: f64,
+    longitude_degrees: f64,
+    utc_offset_seconds: i32,
+) -> SunriseSunset {
+    let invalid = SunriseSunset {
+        sunrise: None,
+        sunset: None,
+        status: SolarDayStatus::Invalid,
+    };
+    if !valid_solar_time(unix_seconds) || !(-86_400..=86_400).contains(&utc_offset_seconds) {
+        return invalid;
+    }
+    let Some(observer) = observer_normal(latitude_degrees, longitude_degrees) else {
+        return invalid;
+    };
+    let offset = f64::from(utc_offset_seconds);
+    let start = ((unix_seconds + offset) / 86_400.0).floor() * 86_400.0 - offset;
+    let end = start + 86_400.0;
+    if !valid_solar_time(start - 1.0) || !valid_solar_time(end + 1.0) {
+        return invalid;
+    }
+    let horizon = (-0.833_f64).to_radians().sin();
+    let height = |time| solar_height(time, observer) - horizon;
+    let slope = |time| height(time + 1.0) - height(time - 1.0);
+
+    // Locate the day's extrema first. A coarse sign-crossing scan alone can
+    // miss an arbitrarily short day/night near the polar circles. Splitting at
+    // refined turning points brackets those paired crossings as well as the
+    // seasonal single crossing at the geographic poles. Work is always bounded.
+    let mut boundaries = vec![start];
+    let mut previous_time = start;
+    let mut previous_slope = slope(start);
+    for step in 1..=48 {
+        let time = start + f64::from(step) * 1800.0;
+        let next_slope = slope(time);
+        if previous_slope.is_sign_positive() != next_slope.is_sign_positive() {
+            let mut left = previous_time;
+            let mut right = time;
+            for _ in 0..32 {
+                let middle = (left + right) / 2.0;
+                if slope(middle).is_sign_positive() == previous_slope.is_sign_positive() {
+                    left = middle;
+                } else {
+                    right = middle;
+                }
+            }
+            boundaries.push((left + right) / 2.0);
+        }
+        previous_time = time;
+        previous_slope = next_slope;
+    }
+    boundaries.push(end);
+    let mut result = SunriseSunset {
+        sunrise: None,
+        sunset: None,
+        status: SolarDayStatus::Normal,
+    };
+    for segment in boundaries.windows(2) {
+        let mut left = segment[0];
+        let mut right = segment[1];
+        let left_height = height(left);
+        let right_height = height(right);
+        if (left_height < 0.0) == (right_height < 0.0) {
+            continue;
+        }
+        let rising = left_height < right_height;
+        for _ in 0..40 {
+            let middle = (left + right) / 2.0;
+            if (height(middle) < 0.0) == (left_height < 0.0) {
+                left = middle;
+            } else {
+                right = middle;
+            }
+        }
+        let event = (left + right) / 2.0;
+        if event >= start && event < end {
+            if rising {
+                result.sunrise.get_or_insert(event);
+            } else {
+                result.sunset.get_or_insert(event);
+            }
+        }
+    }
+    result.status = match (result.sunrise, result.sunset) {
+        (Some(_), Some(_)) => SolarDayStatus::Normal,
+        (None, None) if height((start + end) / 2.0) >= 0.0 => SolarDayStatus::PolarDay,
+        (None, None) => SolarDayStatus::PolarNight,
+        _ => SolarDayStatus::Transition,
+    };
+    result
 }
 
 /// Timezone-derived central meridian, plus one gentle orbit per day. This is
 /// a presentation choice, never an inferred GPS location or physical spin rate.
+#[allow(dead_code)] // Legacy view helper retained for compatibility and regressions.
 pub(crate) fn viewing_longitude(unix_seconds: f64, utc_offset_seconds: i32) -> f32 {
     let zone = f64::from(utc_offset_seconds.clamp(-86400, 86400)) / 86400.0;
     ((zone + unix_seconds.rem_euclid(86400.0) / 86400.0) * std::f64::consts::TAU) as f32
@@ -254,6 +488,353 @@ mod astronomy_tests {
         assert!((delta - 2.0 * std::f32::consts::PI / 3.0).abs() < 0.0001);
         let minute = viewing_longitude(t + 60.0, 0) - viewing_longitude(t, 0);
         assert!((minute - std::f32::consts::TAU / 1440.0).abs() < 0.0001);
+    }
+}
+
+#[cfg(test)]
+mod fixed_earth_solar_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_geographic_view_is_exact_and_independent_of_all_clocks() {
+        let expected = 120.0_f64.to_radians() as f32;
+        for epoch in [
+            0.0,
+            -1.0,
+            1773979200.0,
+            1782014400.0,
+            1797825600.0,
+            f64::MIN,
+            f64::MAX,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            for period in [0, 1, 20, 1440, u32::MAX] {
+                assert_eq!(earth_view_longitude(epoch, period, 120.0, false), expected);
+            }
+        }
+        assert_eq!(
+            earth_view_longitude(0.0, 1440, -75.0, false),
+            -75.0_f64.to_radians() as f32
+        );
+        assert_eq!(earth_view_longitude(0.0, 1440, 480.0, false), expected);
+        assert_eq!(
+            earth_view_longitude(0.0, 1440, f64::NAN, false),
+            113.28_f64.to_radians() as f32
+        );
+        let a = earth_view_longitude(0.0, 20, 120.0, true);
+        let b = earth_view_longitude(300.0, 20, 120.0, true);
+        assert!((b - a - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(a, earth_view_longitude(1200.0, 20, 120.0, true));
+    }
+
+    #[test]
+    fn guangzhou_october_16_2026_matches_noaa_reference() {
+        // Guangzhou 23.13N, 113.28E, UTC+8. Original NOAA main.js outputs:
+        // sunrise 06:24:00.330, sunset 18:00:39.315 on 2026-10-16 local.
+        let noon = 1792123200.0; // 12:00 local = 04:00 UTC
+        let events = sunrise_sunset(noon, 23.13, 113.28, 28800);
+        assert_eq!(events.status, SolarDayStatus::Normal);
+        assert!((events.sunrise.unwrap() - 1792103040.3304005).abs() < 2.0);
+        assert!((events.sunset.unwrap() - 1792144839.315497).abs() < 2.0);
+        assert!((solar_elevation(noon, 23.13, 113.28).unwrap() - 57.85385099862216).abs() < 1e-7);
+        assert!(
+            (solar_elevation(1792137600.0, 23.13, 113.28).unwrap() - 25.803977802722727).abs()
+                < 1e-7
+        );
+        for epoch in [noon - 86400.0, noon, noon + 3600.0, noon + 86400.0] {
+            assert_eq!(
+                earth_view_longitude(epoch, 1440, 113.28, false),
+                113.28_f64.to_radians() as f32
+            );
+        }
+    }
+
+    #[test]
+    fn dated_elevations_match_independently_executed_noaa_reference() {
+        // Executed NOAA's original calcAzEl (2026-10-16 fetch) with only
+        // calcRefraction replaced by () => 0 to compare geometric elevation.
+        // https://gml.noaa.gov/grad/solcalc/main.js
+        // SHA256: 3832956f24724eafacf9e18173b9299b1554d6252bed0784d9c9aca6d9f54856
+        // 2026 March equinox, June/December solstices; north and south sites.
+        for (epoch, lat, lon, expected) in [
+            (1773979200.0, 25.0, 120.0, 64.75910220704091),
+            (1774008000.0, 51.4779, 0.0, 38.45483406531001),
+            (1782014400.0, 25.0, 120.0, 88.38777021293001),
+            (1797825600.0, 25.0, 120.0, 41.56144455343402),
+            (1782007200.0, -33.8688, 151.2093, 32.688553110071865),
+            (1797818400.0, -33.8688, 151.2093, 79.4558602767185),
+            (1782043200.0, 78.2232, 15.6469, 34.757266958605335),
+            (1797854400.0, 78.2232, 15.6469, -12.091992749311473),
+            (1782043200.0, -77.8419, 166.6863, -35.205787132094855),
+            (1797854400.0, -77.8419, 166.6863, 11.561341285591766),
+            (1066419030.0, 39.742476, -105.1786, 39.87207442406391),
+        ] {
+            let elevation = solar_elevation(epoch, lat, lon).unwrap();
+            assert!(
+                (elevation - expected).abs() < 1e-7,
+                "{epoch}: {elevation} != {expected}"
+            );
+            let n = observer_normal(lat, lon).unwrap();
+            let sun = solar_direction(epoch);
+            let render_elevation = n
+                .iter()
+                .zip(sun)
+                .map(|(a, b)| a * f64::from(b))
+                .sum::<f64>()
+                .clamp(-1.0, 1.0)
+                .asin()
+                .to_degrees();
+            assert!((render_elevation - expected).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn dated_sunrise_sunset_matches_noaa_and_uses_shared_horizon() {
+        // Absolute UTC epochs from original NOAA calcSunriseSet, not this
+        // implementation. NOAA uses a two-pass estimate; our root solve must
+        // agree within two seconds and actually cross the -0.833° horizon.
+        // 2026-03-20/06-21/12-21 at 25N120E, Greenwich, Sydney, Honolulu,
+        // Kathmandu (+05:45), and 1960-03-20 (pre-Unix epoch).
+        for (epoch, lat, lon, offset, rise, set) in [
+            (
+                1773979200.0,
+                25.0,
+                120.0,
+                28800,
+                1773957866.1994998,
+                1774001459.714086,
+            ),
+            (
+                1782014400.0,
+                25.0,
+                120.0,
+                28800,
+                1781989856.3846817,
+                1782039153.9537055,
+            ),
+            (
+                1797825600.0,
+                25.0,
+                120.0,
+                28800,
+                1797806421.7518003,
+                1797844527.266731,
+            ),
+            (
+                1774008000.0,
+                51.4779,
+                0.0,
+                0,
+                1773986571.9350252,
+                1774030380.1133838,
+            ),
+            (
+                1782007200.0,
+                -33.8688,
+                151.2093,
+                36000,
+                1781989197.381741,
+                1782024829.9832215,
+            ),
+            (
+                1797818400.0,
+                -33.8688,
+                151.2093,
+                39600,
+                1797792038.8622048,
+                1797843925.6230288,
+            ),
+            (
+                1790128800.0,
+                -33.8688,
+                151.2093,
+                36000,
+                1790106238.1055963,
+                1790149917.526964,
+            ),
+            (
+                1774044000.0,
+                21.3069,
+                -157.8583,
+                -36000,
+                1774024510.9442751,
+                1774068155.8681252,
+            ),
+            (
+                1773987300.0,
+                27.7172,
+                85.324,
+                20700,
+                1773966180.5554543,
+                1774009789.2530448,
+            ),
+            (
+                -308779200.0,
+                25.0,
+                120.0,
+                28800,
+                -308800530.5695675,
+                -308756937.60305375,
+            ),
+        ] {
+            let events = sunrise_sunset(epoch, lat, lon, offset);
+            assert_eq!(events.status, SolarDayStatus::Normal, "{events:?}");
+            assert!(
+                (events.sunrise.unwrap() - rise).abs() < 2.0,
+                "{events:?} vs {rise}"
+            );
+            assert!(
+                (events.sunset.unwrap() - set).abs() < 2.0,
+                "{events:?} vs {set}"
+            );
+            for (event, sign) in [
+                (events.sunrise.unwrap(), 1.0),
+                (events.sunset.unwrap(), -1.0),
+            ] {
+                assert!((solar_elevation(event, lat, lon).unwrap() + 0.833).abs() < 1e-7);
+                assert!((solar_elevation(event + 30.0, lat, lon).unwrap() + 0.833) * sign > 0.0);
+                assert!((solar_elevation(event - 30.0, lat, lon).unwrap() + 0.833) * sign < 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn local_civil_dates_include_east_west_and_dateline_events() {
+        for (epoch, lat, lon, offset) in [
+            (1773979200.0, 25.0, 120.0, 28800),
+            (1774044000.0, 21.3069, -157.8583, -36000),
+            (1773957600.0, 1.8721, -157.4278, 50400), // Kiritimati March 20 local
+        ] {
+            let start =
+                ((epoch + f64::from(offset)) / 86400.0_f64).floor() * 86400.0 - f64::from(offset);
+            let expected = sunrise_sunset(epoch, lat, lon, offset);
+            for sample in [start, start + 1.0, start + 43200.0, start + 86399.0] {
+                assert_eq!(sunrise_sunset(sample, lat, lon, offset), expected);
+            }
+            for event in [expected.sunrise.unwrap(), expected.sunset.unwrap()] {
+                assert!(event >= start && event < start + 86400.0);
+            }
+        }
+        let kiribati = sunrise_sunset(1773957600.0, 1.8721, -157.4278, 50400);
+        // NOAA evaluated on March 19 UTC gives the March 20 local events.
+        assert!((kiribati.sunrise.unwrap() - 1773938045.8095474).abs() < 2.0);
+        assert!((kiribati.sunset.unwrap() - 1773981632.8051462).abs() < 2.0);
+    }
+
+    #[test]
+    fn polar_day_and_night_swap_hemispheres_at_solstices() {
+        for (epoch, north_status, south_status) in [
+            (
+                1782043200.0,
+                SolarDayStatus::PolarDay,
+                SolarDayStatus::PolarNight,
+            ),
+            (
+                1797854400.0,
+                SolarDayStatus::PolarNight,
+                SolarDayStatus::PolarDay,
+            ),
+        ] {
+            for (lat, status) in [
+                (78.2232, north_status),
+                (90.0, north_status),
+                (-77.8419, south_status),
+                (-90.0, south_status),
+            ] {
+                let events = sunrise_sunset(epoch, lat, 15.0, 0);
+                assert_eq!(events.status, status, "{lat}: {events:?}");
+                assert_eq!(events.sunrise, None);
+                assert_eq!(events.sunset, None);
+            }
+        }
+    }
+
+    #[test]
+    fn short_polar_night_is_not_missed_between_coarse_samples() {
+        // On 2026-06-21 at this polar-circle latitude, sunset and sunrise are
+        // less than four minutes apart, between the half-hour sample points.
+        let events = sunrise_sunset(1782043200.0, 65.729, 60.0, 0);
+        assert_eq!(events.status, SolarDayStatus::Normal);
+        let sunset = events.sunset.unwrap();
+        let sunrise = events.sunrise.unwrap();
+        assert!(sunrise > sunset && sunrise - sunset < 240.0);
+        assert!(solar_elevation((sunset + sunrise) / 2.0, 65.729, 60.0).unwrap() < -0.833);
+        assert!(solar_elevation(sunset - 60.0, 65.729, 60.0).unwrap() > -0.833);
+        assert!(solar_elevation(sunrise + 60.0, 65.729, 60.0).unwrap() > -0.833);
+    }
+
+    #[test]
+    fn geographic_pole_seasonal_crossing_has_one_event() {
+        // North Pole 2026-03-18: refraction makes apparent sunrise precede
+        // the equinox, and there is no sunset on this civil date.
+        let events = sunrise_sunset(1773792000.0, 90.0, 0.0, 0);
+        assert_eq!(events.status, SolarDayStatus::Transition);
+        assert_eq!(events.sunset, None);
+        let sunrise = events.sunrise.unwrap();
+        assert!((solar_elevation(sunrise, 90.0, 0.0).unwrap() + 0.833).abs() < 1e-7);
+        assert!(solar_elevation(sunrise - 3600.0, 90.0, 0.0).unwrap() < -0.833);
+        assert!(solar_elevation(sunrise + 3600.0, 90.0, 0.0).unwrap() > -0.833);
+    }
+
+    #[test]
+    fn clock_and_coordinate_failures_are_bounded_and_finite() {
+        for epoch in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+        ] {
+            let sun = solar_direction(epoch);
+            assert!(sun.iter().all(|c| c.is_finite()));
+            assert!((sun.iter().map(|c| c * c).sum::<f32>() - 1.0).abs() < 1e-6);
+            assert_eq!(
+                sunrise_sunset(epoch, 25.0, 120.0, 28800).status,
+                SolarDayStatus::Invalid
+            );
+            assert_eq!(solar_elevation(epoch, 25.0, 120.0), None);
+            assert!(earth_view_longitude(epoch, 0, f64::MAX, true).is_finite());
+        }
+        for (lat, lon, offset) in [
+            (f64::NAN, 120.0, 0),
+            (91.0, 120.0, 0),
+            (-91.0, 120.0, 0),
+            (25.0, f64::INFINITY, 0),
+            (25.0, 120.0, i32::MIN),
+            (25.0, 120.0, i32::MAX),
+        ] {
+            assert_eq!(
+                sunrise_sunset(1773979200.0, lat, lon, offset).status,
+                SolarDayStatus::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn physical_sun_has_no_timezone_or_decorative_rotation_dependency() {
+        let epoch = 1773979200.0;
+        let sun = solar_direction(epoch);
+        for offset in [-43200, 0, 19800, 28800, 50400] {
+            for period in [1, 20, 1440, 525600] {
+                let _display_offset = presentation_offset(true, 0, Some(offset));
+                let _decorative = earth_view_longitude(epoch, period, 120.0, true);
+                assert_eq!(
+                    earth_view_longitude(epoch, period, 120.0, false),
+                    120.0_f64.to_radians() as f32
+                );
+                assert_eq!(solar_direction(epoch), sun);
+            }
+        }
+        // Applying timezone to physics would move the lit meridian by 120°.
+        let incorrectly_shifted = solar_direction(epoch + 28800.0);
+        assert!(
+            sun.iter()
+                .zip(incorrectly_shifted)
+                .map(|(a, b)| a * b)
+                .sum::<f32>()
+                < -0.4
+        );
     }
 }
 
@@ -567,11 +1148,12 @@ mod asset_tests {
         assert_eq!(
             paths,
             [
+                "/home/u/.local/share/jwm/astronomy/earth-nasa-october.jpg",
                 "/home/u/.local/share/jwm/astronomy/earth-nasa-january.jpg",
-                "/usr/local/lib/jwm/versions/2/share/jwm/astronomy/earth-nasa-january.jpg",
-                "/usr/local/share/jwm/astronomy/earth-nasa-january.jpg",
-                "/usr/share/jwm/astronomy/earth-nasa-january.jpg",
-                "/source/assets/astronomy/earth-nasa-january.jpg",
+                "/usr/local/lib/jwm/versions/2/share/jwm/astronomy/earth-nasa-october.jpg",
+                "/usr/local/share/jwm/astronomy/earth-nasa-october.jpg",
+                "/usr/share/jwm/astronomy/earth-nasa-october.jpg",
+                "/source/assets/astronomy/earth-nasa-october.jpg",
             ]
             .map(PathBuf::from)
         );
@@ -582,6 +1164,10 @@ mod asset_tests {
         assert_eq!(
             resolve_earth_texture_from("", &paths, |p| p == paths[1]),
             Some(paths[1].clone())
+        );
+        assert_eq!(
+            resolve_earth_texture_from("", &paths, |p| p == paths[2]),
+            Some(paths[2].clone())
         );
         assert_eq!(resolve_earth_texture_from("", &paths, |_| false), None);
     }
@@ -607,6 +1193,49 @@ mod asset_tests {
         );
     }
     #[test]
+    fn explicit_legacy_january_asset_remains_authoritative() {
+        let january = "/versions/current/share/jwm/astronomy/earth-nasa-january.jpg";
+        let candidates = [PathBuf::from("/bundled/earth-nasa-october.jpg")];
+        assert_eq!(
+            resolve_earth_texture_from(january, &candidates, |_| true),
+            Some(PathBuf::from(january))
+        );
+        assert_eq!(
+            resolve_earth_texture_from(january, &candidates, |p| p == candidates[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn ordinary_upgrade_prefers_october_over_installed_january() {
+        let paths = earth_texture_candidates(
+            Some(Path::new("/home/u/.local/share")),
+            Some(Path::new("/usr/local/lib/jwm/versions/2/bin/jwm")),
+            &[PathBuf::from("/usr/local/share")],
+            None,
+        );
+        let installed = [
+            PathBuf::from(
+                "/usr/local/lib/jwm/versions/2/share/jwm/astronomy/earth-nasa-october.jpg",
+            ),
+            PathBuf::from(
+                "/usr/local/lib/jwm/versions/2/share/jwm/astronomy/earth-nasa-january.jpg",
+            ),
+            PathBuf::from("/usr/local/share/jwm/astronomy/earth-nasa-january.jpg"),
+        ];
+        assert_eq!(
+            resolve_earth_texture_from("", &paths, |p| installed.iter().any(|item| item == p)),
+            Some(installed[0].clone())
+        );
+        assert_eq!(
+            resolve_earth_texture_from(installed[1].to_str().unwrap(), &paths, |p| installed
+                .iter()
+                .any(|item| item == p)),
+            Some(installed[1].clone())
+        );
+    }
+
+    #[test]
     fn installed_asset_selection_changes_with_release_prefix() {
         for version in ["1", "2", "1"] {
             let exe = PathBuf::from(format!("/releases/{version}/bin/jwm"));
@@ -614,7 +1243,7 @@ mod asset_tests {
             assert_eq!(
                 resolve_earth_texture_from("", &paths, |_| true),
                 Some(PathBuf::from(format!(
-                    "/releases/{version}/share/jwm/astronomy/earth-nasa-january.jpg"
+                    "/releases/{version}/share/jwm/astronomy/earth-nasa-october.jpg"
                 )))
             );
         }

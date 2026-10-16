@@ -2,9 +2,9 @@
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
-    celestial_assignments, celestial_longitude, material_load_frame, presentation_offset,
-    resolve_cloud_texture, resolve_earth_texture, resolve_moon_texture, resolve_sky_texture,
-    solar_direction, viewing_longitude, wall_clock_seconds,
+    celestial_assignments, celestial_longitude, earth_view_longitude, material_load_frame,
+    presentation_offset, resolve_cloud_texture, resolve_earth_texture, resolve_moon_texture,
+    resolve_sky_texture, solar_direction, wall_clock_seconds,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -18,6 +18,7 @@ struct AstronomyProgram {
     program: glow::Program,
     sun_direction: Option<glow::UniformLocation>,
     view_longitude: Option<glow::UniformLocation>,
+    view_latitude: Option<glow::UniformLocation>,
     earth_map: Option<glow::UniformLocation>,
     moon_material: Option<glow::UniformLocation>,
     cloud_map: Option<glow::UniformLocation>,
@@ -36,6 +37,7 @@ impl AstronomyProgram {
                 program,
                 sun_direction: gl.get_uniform_location(program, "sun_direction"),
                 view_longitude: gl.get_uniform_location(program, "view_longitude"),
+                view_latitude: gl.get_uniform_location(program, "view_latitude"),
                 earth_map: gl.get_uniform_location(program, "earth_map"),
                 moon_material: gl.get_uniform_location(program, "moon_material"),
                 cloud_map: gl.get_uniform_location(program, "cloud_map"),
@@ -66,6 +68,9 @@ pub(super) struct AstronomyWallpaper {
     sky_texture: Option<glow::Texture>,
     dual_material: bool,
     earth_period: u32,
+    earth_rotating: bool,
+    earth_latitude: f64,
+    earth_longitude: f64,
     moon_period: u32,
     output_identities: Vec<(String, i32, i32, u32, u32)>,
     identities_changed: bool,
@@ -87,6 +92,17 @@ pub(super) struct AstronomyWallpaper {
 }
 
 impl AstronomyWallpaper {
+    /// Camera-only updates do not reload surfaces or reset animation clocks.
+    fn update_earth_view(&mut self, rotating: bool, latitude: f64, longitude: f64) -> bool {
+        let changed = self.earth_rotating != rotating
+            || self.earth_latitude != latitude
+            || self.earth_longitude != longitude;
+        self.earth_rotating = rotating;
+        self.earth_latitude = latitude;
+        self.earth_longitude = longitude;
+        changed
+    }
+
     /// Material identity for cached wallpaper-only bar measurements. Animation
     /// time is deliberately excluded; samples piggyback on animation frames.
     pub(super) fn bar_metric_source(&self) -> (u64, bool) {
@@ -351,6 +367,11 @@ impl<C: CompositorConnection> Compositor<C> {
         let moon_configured = &cfg.behavior().wallpaper_moon_texture;
         let overrides = &cfg.behavior().wallpaper_astronomy_bodies;
         let bodies_changed = a.update_bodies(overrides, layout_changed);
+        let view_changed = a.update_earth_view(
+            cfg.behavior().wallpaper_earth_view == "rotating",
+            cfg.behavior().wallpaper_earth_latitude,
+            cfg.behavior().wallpaper_earth_longitude,
+        );
         let periods_changed = a.earth_period != cfg.behavior().wallpaper_earth_rotation_minutes
             || a.moon_period != cfg.behavior().wallpaper_moon_rotation_minutes;
         a.earth_period = cfg.behavior().wallpaper_earth_rotation_minutes;
@@ -428,7 +449,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         if !a.enabled || a.failed {
-            return changed || layout_changed || bodies_changed || periods_changed;
+            return changed || layout_changed || bodies_changed || periods_changed || view_changed;
         }
         let power_changed = if a
             .last_power_query
@@ -453,6 +474,7 @@ impl<C: CompositorConnection> Compositor<C> {
             || layout_changed
             || bodies_changed
             || periods_changed
+            || view_changed
             || power_changed
             || timezone_changed
             || tick;
@@ -652,7 +674,12 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         };
         let sun = solar_direction(a.sample_unix);
-        let longitude = viewing_longitude(a.sample_unix, a.sample_offset);
+        let longitude = earth_view_longitude(
+            a.sample_unix,
+            a.earth_period,
+            a.earth_longitude,
+            a.earth_rotating,
+        );
         unsafe {
             let gl = &self.gl;
             gl.use_program(Some(program.program));
@@ -680,16 +707,19 @@ impl<C: CompositorConnection> Compositor<C> {
             for (index, canvas) in a.draw_plan.iter().enumerate() {
                 let moon = a.dual_material && a.bodies.get(index) == Some(&CelestialBody::Moon);
                 gl.uniform_1_i32(program.moon_material.as_ref(), i32::from(moon));
-                if a.dual_material {
-                    let period = if moon { a.moon_period } else { a.earth_period };
-                    let angle = celestial_longitude(
-                        a.sample_unix,
-                        period,
-                        if moon { 0 } else { a.sample_offset },
-                    );
+                gl.uniform_1_f32(
+                    program.view_latitude.as_ref(),
+                    if moon {
+                        0.18
+                    } else {
+                        a.earth_latitude.to_radians() as f32
+                    },
+                );
+                if moon {
+                    let angle = celestial_longitude(a.sample_unix, a.moon_period, 0);
                     gl.uniform_1_f32(program.view_longitude.as_ref(), angle);
-                    // Decorative fixed studio light in view space; spin does not change solar time.
-                    // Legacy modes retain their UTC solar direction and timezone camera.
+                    // Moon remains a decorative rotating presentation, not a lunar phase model.
+                    // Every Earth canvas uses the physical UTC Sun, in either view mode.
                     let (s, c) = angle.sin_cos();
                     gl.uniform_3_f32(
                         program.sun_direction.as_ref(),
@@ -742,6 +772,26 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn camera_reload_changes_only_framing_and_requests_one_repaint() {
+        let mut a = super::AstronomyWallpaper {
+            sample_unix: 1792108800.0,
+            earth_period: 20,
+            moon_period: 30,
+            ..Default::default()
+        };
+        assert!(a.update_earth_view(false, 25.0, 120.0));
+        assert!(!a.update_earth_view(false, 25.0, 120.0));
+        assert!(a.update_earth_view(false, -33.8, 151.2));
+        assert!(a.update_earth_view(true, -33.8, 151.2));
+        assert!(!a.update_earth_view(true, -33.8, 151.2));
+        assert_eq!(
+            (a.sample_unix, a.earth_period, a.moon_period),
+            (1792108800.0, 20, 30)
+        );
+        assert!(a.pending.is_none() && a.moon_pending.is_none());
+    }
+
     use super::*;
 
     #[test]

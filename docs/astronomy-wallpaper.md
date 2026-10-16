@@ -12,7 +12,10 @@ limitation and leaves the existing static wallpaper selected.
 [behavior]
 wallpaper_effect = "astronomy" # "off" is the backwards-compatible default
 wallpaper_earth_texture = "" # bundled NASA Earth texture
-wallpaper_timezone_offset_hours = 8 # presentation timezone, integer -12..14
+wallpaper_earth_view = "fixed" # default; "rotating" enables the period below
+wallpaper_earth_latitude = 23.13 # Guangzhou city-level framing, not device location
+wallpaper_earth_longitude = 113.28 # degrees east; stays fixed as time passes
+wallpaper_timezone_offset_hours = 8 # retained compatibility setting, integer -12..14
 wallpaper_astronomy_layout = "span" # "per-output" shows one complete globe per screen
 ```
 
@@ -26,11 +29,12 @@ path never silently falls back to the bundle. Changing these fields uses normal
 config reload. Display-timezone changes repaint without reloading the texture.
 
 With an empty texture setting, both picker and renderer use this order:
-1. `$XDG_DATA_HOME/jwm/astronomy/earth-nasa-january.jpg` (default `~/.local/share`).
-2. `../share/jwm/astronomy/earth-nasa-january.jpg` relative to the real executable's
+1. `$XDG_DATA_HOME/jwm/astronomy/earth-nasa-october.jpg` (default `~/.local/share`).
+2. A legacy `$XDG_DATA_HOME/jwm/astronomy/earth-nasa-january.jpg` override, if present.
+3. `../share/jwm/astronomy/earth-nasa-october.jpg` relative to the real executable's
    directory. Managed releases therefore use their own immutable version assets.
-3. Each absolute `$XDG_DATA_DIRS` entry (default `/usr/local/share:/usr/share`).
-4. Debug builds only: the compile-time source checkout's `assets/astronomy`.
+4. Each absolute `$XDG_DATA_DIRS` entry (default `/usr/local/share:/usr/share`).
+5. Debug builds only: the compile-time source checkout's `assets/astronomy`.
 
 There is no current-working-directory lookup. Source installs place the image
 and credit in `/usr/local/share/jwm/astronomy`. Release upgrades preserve the
@@ -44,7 +48,7 @@ missing prerequisite.
 `wallpaper_astronomy_layout = "span"` is the default: one globe is centered on
 the X framebuffer and spans adjacent monitors. Choose `"per-output"` to show a
 complete globe on each output, using that output's size and position. All globes
-share the same current UTC instant, display timezone, and texture. Coordinates
+share the same current UTC instant, geographic camera, and texture. Coordinates
 use framebuffer pixels.
 
 This setting controls Astronomy placement only. `wallpaper_mode` still controls
@@ -59,7 +63,8 @@ also written to the configuration file.
 
 With `wallpaper_effect = "astronomy"`, the single enabling setting is
 `wallpaper_astronomy_layout = "earth-moon"`. Each output gets an independent
-canvas containing a complete spinning body; it does not crop a shared globe.
+canvas containing a complete body; it does not crop a shared globe. Earth stays
+fixed by default, while Moon retains its independently rotating presentation.
 For example, replace the connector names below with your actual outputs:
 
 ```toml
@@ -68,7 +73,10 @@ wallpaper_effect = "astronomy"
 wallpaper_astronomy_layout = "earth-moon"
 wallpaper_earth_texture = "" # bundled Earth texture
 wallpaper_moon_texture = "" # bundled Moon texture
-wallpaper_earth_rotation_minutes = 1440 # 24 hours
+wallpaper_earth_view = "fixed" # "rotating" opts into Earth camera rotation
+wallpaper_earth_latitude = 23.13
+wallpaper_earth_longitude = 113.28
+wallpaper_earth_rotation_minutes = 1440 # used only by rotating Earth view
 wallpaper_moon_rotation_minutes = 39343 # about 27.3 days
 wallpaper_astronomy_timezone = "system" # or "configured"
 wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
@@ -86,60 +94,66 @@ be nonempty, at most 256 bytes, and contain no NUL; body names are exactly
 `earth` or `moon`. Each rotation period is an integer from 1 through 525600 minutes.
 The Moon texture setting defaults to empty for the bundled asset and follows the
 same bounded-path validation and lookup order as the Earth texture, using
-`moon-nasa-lroc.jpg` in place of `earth-nasa-january.jpg`. Mirrored outputs share
+`moon-nasa-lroc.jpg` in place of `earth-nasa-october.jpg`. Mirrored outputs share
 one canvas; the alphabetically first connector supplies its body assignment. Layout, body map, textures,
 and rotation periods support normal reload and hot-config updates; hot changes
 are session-only unless saved to the configuration file. Static wallpapers,
 daily rotation, and the default `span` layout remain unchanged.
 
-Earth defaults to a 24-hour presentation turn. Moon defaults to 39343 minutes
-(about 27.3 days), rounded from NASA's [655.720-hour sidereal rotation period](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html).
-These are independent, configurable periods; set e.g. 20 and 30 minutes for an
-accelerated decorative view. Existing explicit period settings are preserved;
-only missing settings receive the new defaults.
+## Fixed geographic view and real daylight
 
-Both phases are anchored to the current UTC system instant rather than process
-uptime, so restarting or resuming at the same instant reproduces the same angle.
-Earth adds a timezone-derived observer meridian exactly once; it does not shift
-UTC before advancing the clock. The default `wallpaper_astronomy_timezone = "system"`
-reads the system's current offset, including fractional hours and daylight saving.
-An offset change moves Earth's observer meridian but does not change either
-rotation period or Moon's phase. If a system offset cannot be resolved, the
-configured offset is used (default UTC+8). No OS clock or timezone is changed.
+Every Earth canvas now defaults to `wallpaper_earth_view = "fixed"`. Latitude
+23.13°N and longitude 113.28°E frame Guangzhou, using the city-level point from
+[UNGEGN / China Institute of Toponymy](https://ungegn.un.org/dashboard/cities/details?id=2049).
+This is not a precise home/device location. Configure latitude within
+−90..90 and longitude within −180..180 (finite degrees, east positive). The
+camera and land stay fixed throughout the day; UTC, date and Earth's seasonal
+tilt move the sunlight and day/night boundary independently. All three layouts
+use the same policy. Reload/hot updates change framing without decoding textures.
 
-For a fixed UTC+8 observer, including users who previously set an explicit offset,
-use both settings in `[behavior]`:
+The explicit `"rotating"` view retains accelerated camera tours:
+`wallpaper_earth_rotation_minutes = 1440` makes one turn per day, or use 20 for
+a twenty-minute tour. Existing period values remain stored, but do not move a
+fixed camera. The configured longitude is the tour's epoch origin; UTC drives
+phase, independently of timezone. This is camera motion, not an accelerated
+physical Sun. Earth always uses the actual current solar illumination.
 
-```toml
-wallpaper_astronomy_timezone = "configured"
-wallpaper_timezone_offset_hours = 8
-```
+Moon defaults to 39343 minutes (about 27.3 days), rounded from NASA's
+[655.720-hour sidereal rotation period](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html).
+Its decorative studio lighting and UTC-anchored phase are preserved; lunar
+orbits, tidal locking, libration and current lunar phase are not simulated.
+Restart/resume at the same instant restores the same view without accumulated
+animation drift. Timezone/DST changes never rotate Earth or move the Sun.
+`wallpaper_astronomy_timezone` and `wallpaper_timezone_offset_hours` remain
+compatibility settings; there is no user-facing sunrise/sunset clock. Neither
+changes the OS timezone or clock.
 
-The offset is a coarse camera meridian, not a geographic location. The 24-hour
-Earth view is the requested civil-day presentation, not a claim to reproduce
-Earth's shorter sidereal rotation precisely. Moon's phase origin is a stable
-UTC epoch, not a calibrated lunar orientation or current lunar phase; tidal
-locking/orbits/libration are not simulated. This mode retains fixed decorative
-view-space lighting. Legacy `span` and `per-output` keep their existing UTC
-solar illumination and configured timezone behavior below, unaffected by the
-new timezone-source and rotation-period controls.
+The Sun is calculated locally from UTC and the date, using solar declination
+and the equation of time, following [NOAA calculation details](https://gml.noaa.gov/grad/solcalc/calcdetails.html)
+and its [solar equations](https://gml.noaa.gov/grad/solcalc/solareqns.PDF).
+The internal sunrise/sunset test/diagnostic helper uses that same ephemeris
+and the conventional −0.833° geometric solar-center horizon (approximate
+refraction and solar radius). Its caller supplies a numeric offset to select the
+local civil day (the Guangzhou fixtures use UTC+8). Results distinguish polar
+day/night and transition days.
+No location API, online weather service or calendar of guessed clock times is
+used. The Guangzhou fixtures use the above city point; UTC+8 alone would be insufficient.
+Terrain, altitude and actual atmospheric refraction are not modeled, so these
+are approximate events, not guaranteed observed sunrise/sunset times. The globe's
+terminator comes directly from its surface-normal/Sun dot product; it is never
+warped to force a timezone-wide sunrise time. The shader adds a narrow artistic
+twilight and a sunlight-dependent atmosphere rather than a screen-space mask.
 
-## Time and appearance
-
-In `span` and `per-output` modes, UTC drives an approximate astronomical Sun direction, including seasonal
-solar declination and equation of time. The true current system instant is sampled
-as UTC, without adding the presentation offset to solar calculations. The display
-timezone defaults to UTC+8 and is configurable with `wallpaper_timezone_offset_hours`;
-it neither reads nor changes the operating-system timezone. This offset provides
-only a coarse starting viewing meridian, not a GPS location. The view completes
-one slow orbit per UTC day. This is an original presentation choice, not a
-claim to reproduce Apple's implementation. The night side is intentionally
-dark. A static NASA Blue Marble cloud composite adds cloud structure to the
-bundled Earth map; it is historical imagery, not current weather. Explicit custom
-Earth textures remain unmodified by this extra layer. There are no live clouds,
-weather or city-light observations. The stationary
-galaxy background is an artistic star field, not an astronomical catalogue or
-live sky observation.
+This is an original renderer inspired by the fixed-location, time-dependent
+presentation in the supplied iPhone reference. Apple describes its astronomy
+wallpapers as updating with live conditions in its
+[iOS 17 feature overview](https://www.apple.com/mideast/ios/ios-17/a/pdf/iOS_All_New_Features_en-JO.pdf).
+No Apple UI, assets, watermark or proprietary implementation is copied.
+The existing NASA surface and static Blue Marble cloud composite remain offline,
+historical imagery, not current weather. Custom Earth maps do not receive the
+extra cloud layer. There are no live cloud or city-light observations. The
+stationary NASA/Gaia-derived galaxy backdrop retains decorative framing rather
+than representing the observer's live sky.
 
 Regular animation ticks are capped at 15 Hz. Enabled prepare checks the current
 system instant and applicable timezone offset; a timezone change requests an
@@ -161,11 +175,14 @@ claim has been established for the user's hardware.
 
 ## Source image and usage
 
-The bundled image is NASA's Blue Marble Next Generation January 2004 monthly
-surface composite, not real-time satellite imagery. Source: NASA Earth
+The default image is NASA's Blue Marble Next Generation October 2004 monthly
+surface composite, not real-time satellite imagery. The surface does not switch
+automatically with the month. The prior January image remains bundled/installed
+under its original filename for explicit choices, and user-owned override files
+are never changed or removed. Source: NASA Earth
 Observatory, [Blue Marble Next Generation base map](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-map/).
-[Original 5400×2700 JPEG](https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/january/world.200401.3x5400x2700.jpg).
-SHA256: `99f5faad74efe985fbf1714c8be7296ca9999759a1215b65f99b7f1df278dde5`.
+[Original 5400×2700 JPEG](https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/bmng-base/october/world.200410.3x5400x2700.jpg).
+SHA256: `ccfd9b7a5e5ee601e1466556716bba50ea418f3a8e068ab0194ae0425815b1b0`.
 
 NASA source material is acknowledged under its [images and media guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/).
 This visualization is independently rendered; NASA has not reviewed or endorsed
@@ -187,19 +204,24 @@ thin Earth limb, an airless lunar regolith lighting approximation, and an
 irregular decorative Milky Way band with dust lanes. These are visual models,
 not a physically calibrated atmosphere or terrain-displacement simulation.
 
-Full source and media-use attribution accompany all three images in
+Full source and media-use attribution accompany all bundled images in
 `assets/astronomy/README.md`. Moon loading is also offline; if either required
 texture fails in Earth/Moon mode, the static wallpaper remains visible.
 
 ## Validation and limits
 
 The actual fragment shader compiles, links and renders in Mesa surfaceless EGL
-on desktop GLSL 330 and GLES 300. Twelve corresponding RGBA frame pairs match
-exactly and remain opaque; UTC 00/06/12/18, UTC+0/+8, frame-to-frame motion and
-5120×1440 single-globe previews were checked. Landmarks/hemisphere orientation
+on desktop GLSL 330 and GLES 300. Corresponding RGBA frames match
+exactly and remain opaque. Coverage includes dated Guangzhou UTC+8
+00/06/12/18 views, fixed-camera controls with a frozen Sun, seasonal northern/
+southern/polar views, explicit rotating Earth, legacy controls, and
+5120×1440 single-globe previews. Landmarks/hemisphere orientation
 were visually inspected. These are real shader tests, not compositor runtime
 or NVIDIA driver verification. CPU tests cover clock cap/pause/resume, clipping,
-union coverage, equinox/solstice lighting and timezone view separation.
+union coverage, fixed/rotating view separation, NOAA-reference solar positions,
+approximate sunrise/sunset, polar transitions, civil-date boundaries and invalid
+clocks. The sunrise/sunset helper is test/diagnostic-only, not extra work in each
+render frame.
 
 Config/picker regressions and X11 integration must pass repository CI before
 release. Local full Cargo tests are blocked by the uncached workspace `drm`
@@ -223,7 +245,8 @@ ASTRONOMY_TEST_OUTPUT=/tmp/jwm-astronomy-preview python3 scripts/test-astronomy-
 
 The shader test defaults to the repository's bundled texture and writes frames
 and metrics to its output directory. Fixed UTC/offset cases are regressions;
-the presentation preview at 2026-10-15T14:01:14Z uses display offset UTC+8.
+the Guangzhou contact sheet shows 2026-10-16 at 06:00, 12:00, 18:00 and
+00:00 UTC+8 using the documented city coordinates.
 Neither test modifies the OS clock or timezone. Asset tests use placeholder
 executables and private temporary install roots; they do not validate a live
 compositor binary. Full config/picker tests still require the Cargo workspace

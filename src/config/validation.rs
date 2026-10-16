@@ -188,6 +188,22 @@ fn require_f32_range(
     }
 }
 
+fn require_f64_range(
+    diagnostics: &mut ConfigDiagnostics,
+    path: &str,
+    value: f64,
+    min: f64,
+    max: f64,
+) {
+    if !value.is_finite() || !(min..=max).contains(&value) {
+        diagnostics.error(
+            path,
+            format!("value {value} must be finite and in the required range [{min}, {max}]"),
+            None,
+        );
+    }
+}
+
 fn validate_positive_f32(diagnostics: &mut ConfigDiagnostics, path: &str, value: f32) {
     if !value.is_finite() || value <= 0.0 {
         diagnostics.error(
@@ -1216,6 +1232,27 @@ impl Config {
                 None,
             );
         }
+        if !["fixed", "rotating"].contains(&behavior.wallpaper_earth_view.as_str()) {
+            diagnostics.error(
+                "behavior.wallpaper_earth_view",
+                "expected fixed or rotating",
+                None,
+            );
+        }
+        require_f64_range(
+            &mut diagnostics,
+            "behavior.wallpaper_earth_latitude",
+            behavior.wallpaper_earth_latitude,
+            -90.0,
+            90.0,
+        );
+        require_f64_range(
+            &mut diagnostics,
+            "behavior.wallpaper_earth_longitude",
+            behavior.wallpaper_earth_longitude,
+            -180.0,
+            180.0,
+        );
         if !["system", "configured"].contains(&behavior.wallpaper_astronomy_timezone.as_str()) {
             diagnostics.error(
                 "behavior.wallpaper_astronomy_timezone",
