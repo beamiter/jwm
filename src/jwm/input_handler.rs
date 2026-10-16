@@ -4388,7 +4388,8 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{
-        LockEscape, choose_system_ui_viewport, lock_escape, parse_direct_launcher_command,
+        LockEscape, choose_system_ui_viewport, direct_command_from_launcher, lock_escape,
+        parse_direct_launcher_command,
     };
     use crate::Jwm;
     use crate::backend::api::{

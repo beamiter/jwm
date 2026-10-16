@@ -84,7 +84,7 @@ struct ActiveSwipe {
 /// Insert once into the backend's calloop loop, forwarding each BackendEvent
 /// to its normal handler. Configuration changes are applied before sleeping;
 /// disabled bindings retain the socket, so enabling again needs no new source.
-pub struct GestureEventSource {
+pub(crate) struct GestureEventSource {
     conn: RustConnection,
     root: u32,
     grabbed: bool,
@@ -100,7 +100,7 @@ pub struct GestureEventSource {
 impl GestureEventSource {
     /// A missing XI2.4 server or conflicting grab is a nonfatal feature failure:
     /// the caller should log this error and continue running its normal backend.
-    pub fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         change_status(|status| {
             *status = RuntimeStatus {
                 state: "connecting".into(),
