@@ -8,6 +8,9 @@ REPO=Path(__file__).resolve().parents[1]
 ROOT=Path(os.environ.get('SOLAR_TEST_OUTPUT','/tmp/jwm-solar-preview')); ROOT.mkdir(parents=True,exist_ok=True)
 SOURCE=Path(os.environ.get('SOLAR_SHADER',str(REPO/'src/backend/x11/compositor/shaders/solar_system.frag')))
 BENCH_ONLY=bool(os.environ.get('SOLAR_BENCH_ONLY'))
+for i in range(10001):
+ x=i/10000.; exact=x/12.92 if x<=.04045 else ((x+.055)/1.055)**2.4
+ assert abs(x*(x*(x*.305306011+.682171111)+.012522878)-exact)<.0017
 W,H=int(os.environ.get("PREVIEW_WIDTH",960)),int(os.environ.get("PREVIEW_HEIGHT",540))
 # Exercise the production f64 phase reduction and camera basis, not Python copies.
 helper=ROOT/'solar_values.rs'
@@ -79,13 +82,25 @@ for es in (False,True):
  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
  unif1i(loc(prog,b'earth_map'),0);unif1i(loc(prog,b'earth_enabled'),int(bool(earth_enabled)))
 
+ for unit,key,filename in [(1,'cloud','earth-nasa-clouds.jpg'),(2,'sky','milkyway-nasa-gaia.jpg')]:
+  tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex))
+  gl('glActiveTexture',None,[U])(0x84C0+unit);gl('glBindTexture',None,[U,U])(0x0DE1,tex)
+  for keyparam,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,keyparam,val)
+  path=REPO/'assets/astronomy'/filename
+  enabled=path.is_file() and not os.environ.get('SOLAR_NO_'+key.upper())
+  texture=Image.open(path).convert('RGBA') if enabled else Image.new('RGBA',(1,1),(0,0,0,255))
+  data=C.create_string_buffer(texture.tobytes())
+  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
+  unif1i(loc(prog,(key+'_map').encode()),unit);unif1i(loc(prog,(key+'_enabled').encode()),int(enabled))
+ gl('glActiveTexture',None,[U])(0x84C0)
+
  samples=[]
  scenes= [('default',.4,.65,35,0),('orbit',1.2,.85,35,0),('below',2.,-.6,35,0),('zoom',.4,.65,13,0),('motion',.4,.65,35,20),('north',.4,1.45,35,0),('south',.4,-1.45,35,0),('near',.4,0.,5,0),('far',.4,.65,60,0),('ring-sun',-0.262,0.016,35,0),('phase-before',.4,.65,35,2.39996/.12-.0001),('phase-after',.4,.65,35,2.39996/.12+.0001),('surface-before',.4,.65,35,2*math.pi/.015-.0001),('surface-after',.4,.65,35,2*math.pi/.015+.0001)]
  if not BENCH_ONLY:
   scenes += [('spin-still',.4,.65,35,0),('spin-quarter',.4,.65,35,30),('spin-wrap-before',.4,.65,35,119.9999),('spin-wrap-after',.4,.65,35,120.0001)]
  if os.environ.get('SOLAR_SPIN_VIDEO') and not es:
   scenes += [(f'spin-frame-{i:03d}',.4,.65,35,i*3.) for i in range(40)]
- if BENCH_ONLY: scenes=scenes[:1]
+ if BENCH_ONLY: scenes=[scenes[7] if os.environ.get("SOLAR_BENCH_NEAR") else scenes[0]]
  if os.environ.get('SOLAR_VIDEO') and not es:
   scenes += [(f'frame-{i:03d}',.4+i*.025,.65+.2*math.sin(i/20),35-6*math.sin(i/35),i*.15) for i in range(90)]
  for name,yaw,pitch,distance,t in scenes:
@@ -130,6 +145,28 @@ for es in (False,True):
    ok=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(program,0x8B82,C.byref(ok));assert ok.value
    gl('glUseProgram',None,[U])(program)
    return program
+  # Actual production materials on diagnostic close-up spheres (not a camera view).
+  atlas=diagnostic_program(source[:source.index('void main(){')]+r"""
+void main(){
+ vec2 cell=vec2(resolution.x/4.,resolution.y/2.);
+ ivec2 index=ivec2(gl_FragCoord.xy/cell);
+ int body=index.x+4*index.y+1;
+ vec2 uv=(mod(gl_FragCoord.xy,cell)-cell*.5)/(min(cell.x,cell.y)*.43);
+ float rr=dot(uv,uv);vec3 color=vec3(.003);
+ if(rr<1.){vec3 n=vec3(uv,sqrt(1.-rr));vec3 albedo=material(body,n);
+  float diffuse=max(0.,dot(n,normalize(vec3(-.45,.55,1.))));
+  color=pow(albedo,vec3(2.2))*(.13+2.3*diffuse);}
+ frag_color=vec4(pow(tone(color),vec3(1./2.2)),1.);
+}
+""")
+  unif2(loc(atlas,b'resolution'),W,H)
+  for key,unit in [('earth',0),('cloud',1),('sky',2)]:
+   unif1i(loc(atlas,(key+'_map').encode()),unit)
+   enabled=(REPO/'assets/astronomy'/dict(earth='earth-nasa-october.jpg',cloud='earth-nasa-clouds.jpg',sky='milkyway-nasa-gaia.jpg')[key]).is_file() and not os.environ.get('SOLAR_NO_'+key.upper())
+   unif1i(loc(atlas,(key+'_enabled').encode()),int(enabled))
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
+  Image.frombytes('RGBA',(W,H),bytes(buf)).transpose(Image.Transpose.FLIP_TOP_BOTTOM).save(ROOT/f'{kind}-material-closeups.png')
   probe_source=source[:source.index('void main(){')].replace('uniform float orbit_phase[8];','float orbit_phase[8];')+'''
 uniform float orbit_before[8];
 uniform float orbit_after[8];
@@ -181,7 +218,7 @@ void main(){
 
  current(d,None,None,None)
  egl('eglDestroySurface',U,[P,P])(d,surf);egl('eglDestroyContext',U,[P,P])(d,ctx)
-for name in (['default'] if BENCH_ONLY else ['default','orbit','below','zoom','motion','north','south','near','far','ring-sun']):
+for name in (['near' if os.environ.get('SOLAR_BENCH_NEAR') else 'default'] if BENCH_ONLY else ['default','orbit','below','zoom','motion','north','south','near','far','ring-sun','material-closeups']):
  a=Image.open(ROOT/f'gl330-{name}.png');b=Image.open(ROOT/f'gles300-{name}.png')
  assert max(v[1] for v in ImageChops.difference(a,b).getextrema())<=2
 (ROOT/'metrics.json').write_text(json.dumps(results,indent=2));print(json.dumps(results,indent=2))

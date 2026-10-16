@@ -14,10 +14,22 @@ to configuration. Camera elevation and zoom are bounded, with no pole singularit
 This is a stylized 3D illustration: the Sun and eight planets have
 exaggerated sizes, orbital distances and speeds for readability, rather than
 scientific scale or real ephemerides. Perspective, sphere occlusion, sun-facing
-lighting and Saturn's ring depth are computed in 3D. The Earth reuses the already bundled NASA October map with its
-existing attribution; missing or failed optional Earth imagery falls back to a
-procedural material. Other surfaces are original procedural materials, including
-layered gas belts and clouds. No new third-party assets are introduced.
+lighting and Saturn's ring depth are computed in 3D. Earth reuses the bundled NASA
+October surface and historical MODIS cloud composite. The background reuses the
+NASA SVS / ESA Gaia stellar-density panorama, including its dark dust lanes. It is
+a fixed decorative celestial orientation, not a nearby nebula simulation, live
+sky, current weather, or date-specific astronomical view. Existing attribution
+is retained in `assets/astronomy/README.md`; no new third-party assets are added.
+
+Each of these optional textures loads off-thread at no more than 2048 × 1024.
+Successful loads are adopted only on a new full material frame, preserving
+scissored repairs; missing/invalid imagery falls back independently to procedural
+materials. The sky uses one texture lookup only for visible background pixels,
+with sRGB decoding before the Solar tone mapper. The Earth cloud luminance is a
+visual opacity mask in the same body-fixed coordinates as its surface. Venus has
+an opaque pale cloud deck; Jupiter has unequal, sheared cloud zones and a curled
+storm; Saturn has softer, low-contrast bands. These other clouds are original,
+fixed-cost procedural illustrations, not measured atmospheric data.
 
 Each planet now rotates independently as a rigid body around its own tilted axis.
 Sidereal spin periods and obliquities follow the
@@ -59,7 +71,9 @@ alignment and
 scissored repair, and saves PNGs plus metrics under `/tmp/jwm-solar-preview`.
 Set `SOLAR_SPIN_VIDEO=1` for a fixed-camera, fixed-orbit self-rotation preview
 (three displayed seconds per saved frame), or `PREVIEW_WIDTH=540 PREVIEW_HEIGHT=960` for portrait coverage, or `SOLAR_VIDEO=1`
-to write ninety orbit/zoom preview frames. `SOLAR_NO_EARTH=1` verifies the procedural
-fallback. `SOLAR_BENCH_ONLY=1` records six synchronized full-frame draw timings;
-software Mesa results are not hardware frame-rate claims. A dedicated GitHub workflow runs the
+to write ninety orbit/zoom preview frames. `SOLAR_NO_EARTH=1`, `SOLAR_NO_CLOUD=1`, and `SOLAR_NO_SKY=1` independently verify
+optional-image fallbacks. The saved `material-closeups` images show the actual
+production material functions on diagnostic spheres, not alternate camera views. `SOLAR_BENCH_ONLY=1` records six synchronized full-frame draw timings;
+`SOLAR_BENCH_NEAR=1` selects the close camera benchmark. Software Mesa results
+are not hardware frame-rate claims. A dedicated GitHub workflow runs the
 landscape and portrait regressions.

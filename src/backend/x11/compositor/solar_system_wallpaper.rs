@@ -1,4 +1,4 @@
-//! Fixed-cost solar-system wallpaper; optional bundled Earth map loads off-thread.
+//! Fixed-cost solar system; optional bundled surface/cloud/sky maps load off-thread.
 use super::*;
 use crate::backend::compositor_common::{
     animated_wallpaper::{POWER_QUERY_INTERVAL, WallpaperClock},
@@ -16,6 +16,10 @@ struct SolarProgram {
     spins: Option<glow::UniformLocation>,
     earth_map: Option<glow::UniformLocation>,
     earth_enabled: Option<glow::UniformLocation>,
+    cloud_map: Option<glow::UniformLocation>,
+    cloud_enabled: Option<glow::UniformLocation>,
+    sky_map: Option<glow::UniformLocation>,
+    sky_enabled: Option<glow::UniformLocation>,
 }
 #[derive(Default)]
 pub(super) struct SolarSystemWallpaper {
@@ -34,6 +38,10 @@ pub(super) struct SolarSystemWallpaper {
     sample_spin_seconds: f64,
     earth_pending: Option<wallpaper::DeferredWallpaperLoad>,
     earth_texture: Option<glow::Texture>,
+    cloud_pending: Option<wallpaper::DeferredWallpaperLoad>,
+    cloud_texture: Option<glow::Texture>,
+    sky_pending: Option<wallpaper::DeferredWallpaperLoad>,
+    sky_texture: Option<glow::Texture>,
     frame_changed: bool,
 }
 impl SolarSystemWallpaper {
@@ -66,6 +74,8 @@ impl SolarSystemWallpaper {
             self.powered,
             self.failed,
             self.earth_texture,
+            self.cloud_texture,
+            self.sky_texture,
             self.camera.azimuth.to_bits(),
             self.camera.elevation.to_bits(),
             self.camera.distance.to_bits(),
@@ -73,14 +83,27 @@ impl SolarSystemWallpaper {
             .hash(&mut h);
         (h.finish(), self.enabled && self.powered && !self.failed)
     }
+    fn take_materials(&mut self) -> [Option<glow::Texture>; 3] {
+        self.earth_pending = None;
+        self.cloud_pending = None;
+        self.sky_pending = None;
+        [
+            self.earth_texture.take(),
+            self.cloud_texture.take(),
+            self.sky_texture.take(),
+        ]
+    }
+    // A partial repair must neither start a decode nor adopt a completed material.
+    fn poll_material<T>(frame_changed: bool, receive: impl FnOnce() -> T) -> Option<T> {
+        frame_changed.then(receive)
+    }
     pub(super) unsafe fn cleanup(&mut self, gl: &glow::Context) {
         if let Some(p) = self.program.take() {
             unsafe {
                 gl.delete_program(p.program);
             }
         }
-        self.earth_pending = None;
-        if let Some(texture) = self.earth_texture.take() {
+        for texture in self.take_materials().into_iter().flatten() {
             unsafe {
                 gl.delete_texture(texture);
             }
@@ -143,6 +166,32 @@ impl<C: CompositorConnection> Compositor<C> {
                     ));
                 }
             }
+            a.cloud_pending = None;
+            if enabled && a.cloud_texture.is_none() {
+                if let Some(path) =
+                    crate::backend::compositor_common::animated_wallpaper::resolve_cloud_texture()
+                {
+                    a.cloud_pending = Some(Self::load_wallpaper_async(
+                        &path,
+                        2048,
+                        1024,
+                        WallpaperMode::Stretch,
+                    ));
+                }
+            }
+            a.sky_pending = None;
+            if enabled && a.sky_texture.is_none() {
+                if let Some(path) =
+                    crate::backend::compositor_common::animated_wallpaper::resolve_sky_texture()
+                {
+                    a.sky_pending = Some(Self::load_wallpaper_async(
+                        &path,
+                        2048,
+                        1024,
+                        WallpaperMode::Stretch,
+                    ));
+                }
+            }
         }
         if !enabled || a.failed {
             if let Some(epoch) = a.epoch {
@@ -190,8 +239,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // Adopt only on a full material frame, never on unrelated partial client damage.
         if a.frame_changed {
             if let Some(load) = a.earth_pending.as_ref() {
-                match load.try_recv() {
-                    Ok(data) => {
+                match SolarSystemWallpaper::poll_material(a.frame_changed, || load.try_recv()) {
+                    Some(Ok(data)) => {
                         a.earth_pending = None;
                         if data.width == data.height.saturating_mul(2) {
                             unsafe {
@@ -212,8 +261,66 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
                         }
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => a.earth_pending = None,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                        a.earth_pending = None
+                    }
+                    Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
+                }
+            }
+            if let Some(load) = a.cloud_pending.as_ref() {
+                match SolarSystemWallpaper::poll_material(a.frame_changed, || load.try_recv()) {
+                    Some(Ok(data)) => {
+                        a.cloud_pending = None;
+                        if data.width == data.height.saturating_mul(2) {
+                            unsafe {
+                                self.gl.active_texture(glow::TEXTURE0);
+                            }
+                            a.cloud_texture =
+                                Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                            if let Some(texture) = a.cloud_texture {
+                                unsafe {
+                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                                    self.gl.tex_parameter_i32(
+                                        glow::TEXTURE_2D,
+                                        glow::TEXTURE_WRAP_S,
+                                        glow::REPEAT as i32,
+                                    );
+                                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                        a.cloud_pending = None
+                    }
+                    Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
+                }
+            }
+            if let Some(load) = a.sky_pending.as_ref() {
+                match SolarSystemWallpaper::poll_material(a.frame_changed, || load.try_recv()) {
+                    Some(Ok(data)) => {
+                        a.sky_pending = None;
+                        if data.width == data.height.saturating_mul(2) {
+                            unsafe {
+                                self.gl.active_texture(glow::TEXTURE0);
+                            }
+                            a.sky_texture =
+                                Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                            if let Some(texture) = a.sky_texture {
+                                unsafe {
+                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                                    self.gl.tex_parameter_i32(
+                                        glow::TEXTURE_2D,
+                                        glow::TEXTURE_WRAP_S,
+                                        glow::REPEAT as i32,
+                                    );
+                                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => a.sky_pending = None,
+                    Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
                 }
             }
         }
@@ -232,12 +339,15 @@ impl<C: CompositorConnection> Compositor<C> {
                             spins: self.gl.get_uniform_location(program, "spin_phase[0]"),
                             earth_map: self.gl.get_uniform_location(program, "earth_map"),
                             earth_enabled: self.gl.get_uniform_location(program, "earth_enabled"),
+                            cloud_map: self.gl.get_uniform_location(program, "cloud_map"),
+                            cloud_enabled: self.gl.get_uniform_location(program, "cloud_enabled"),
+                            sky_map: self.gl.get_uniform_location(program, "sky_map"),
+                            sky_enabled: self.gl.get_uniform_location(program, "sky_enabled"),
                         }
                     });
                 }
                 Err(error) => {
-                    a.earth_pending = None;
-                    if let Some(texture) = a.earth_texture.take() {
+                    for texture in a.take_materials().into_iter().flatten() {
                         unsafe {
                             self.gl.delete_texture(texture);
                         }
@@ -271,9 +381,24 @@ impl<C: CompositorConnection> Compositor<C> {
                 p.earth_enabled.as_ref(),
                 i32::from(a.earth_texture.is_some()),
             );
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, a.cloud_texture);
+            gl.uniform_1_i32(p.cloud_map.as_ref(), 1);
+            gl.uniform_1_i32(
+                p.cloud_enabled.as_ref(),
+                i32::from(a.cloud_texture.is_some()),
+            );
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, a.sky_texture);
+            gl.uniform_1_i32(p.sky_map.as_ref(), 2);
+            gl.uniform_1_i32(p.sky_enabled.as_ref(), i32::from(a.sky_texture.is_some()));
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
         }
@@ -284,6 +409,45 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_material_polling_is_frozen_during_partial_damage() {
+        let mut polls = 0;
+        assert_eq!(
+            SolarSystemWallpaper::poll_material(false, || {
+                polls += 1;
+                42
+            }),
+            None
+        );
+        assert_eq!(polls, 0);
+        assert_eq!(
+            SolarSystemWallpaper::poll_material(true, || {
+                polls += 1;
+                42
+            }),
+            Some(42)
+        );
+        assert_eq!(polls, 1);
+    }
+    #[test]
+    fn optional_handles_invalidate_bar_identity_and_release_once() {
+        let mut a = SolarSystemWallpaper::default();
+        let earth = glow::NativeTexture(std::num::NonZeroU32::new(1).unwrap());
+        let cloud = glow::NativeTexture(std::num::NonZeroU32::new(2).unwrap());
+        let sky = glow::NativeTexture(std::num::NonZeroU32::new(3).unwrap());
+        a.earth_texture = Some(earth);
+        let old = a.bar_metric_source().0;
+        a.cloud_texture = Some(cloud);
+        assert_ne!(a.bar_metric_source().0, old);
+        let old = a.bar_metric_source().0;
+        a.sky_texture = Some(sky);
+        assert_ne!(a.bar_metric_source().0, old);
+        a.cloud_pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| None));
+        a.sky_pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| None));
+        assert_eq!(a.take_materials(), [Some(earth), Some(cloud), Some(sky)]);
+        assert_eq!(a.take_materials(), [None, None, None]);
+        assert!(a.earth_pending.is_none() && a.cloud_pending.is_none() && a.sky_pending.is_none());
+    }
     #[test]
     fn partial_damage_reuses_frozen_spin_uniforms() {
         let mut a = SolarSystemWallpaper::default();

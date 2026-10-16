@@ -83,7 +83,9 @@ are included. No procedural stars are added when this texture is available.
   apply the standard piecewise sRGB transfer, round to 8-bit, and encode JPEG
   at quality 91, 4:4:4. Reproduction tool: scripts/prepare-astronomy-sky.py.
   Source EXR is not bundled. JPEG decoding uses ordinary UNORM sampling;
-  the shader does not apply a second gamma transfer to the sky.
+  the Astronomy Earth/Moon shader does not apply a second gamma transfer to the
+  sky. Solar System decodes this sRGB sample to linear light before applying its
+  scene-wide tone mapper and output transfer, at reduced exposure.
 - SVS usage: https://svs.gsfc.nasa.gov/help/ identifies its content as public
   domain unless otherwise noted. The source item lists no copyright exception.
 - Gaia data credit guidance:

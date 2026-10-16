@@ -8,6 +8,10 @@ uniform float surface_phase;
 uniform float spin_phase[8];
 uniform sampler2D earth_map;
 uniform int earth_enabled;
+uniform sampler2D cloud_map;
+uniform int cloud_enabled;
+uniform sampler2D sky_map;
+uniform int sky_enabled;
 const float PI=3.14159265359;
 const float TAU=6.28318530718;
 const float orbit[8]=float[8](2.5,3.6,4.8,6.0,7.5,9.3,11.0,12.7);
@@ -47,31 +51,61 @@ float ring_opacity(float r){
 }
 vec3 material(int body,vec3 n){
  vec3 q=surface_point(body,n); // Body-fixed clouds and surface, no boiling noise.
- float fine=fbm(q*12.);
+ float fine=body==1?fbm(q*12.):0.;
  if(body==1){float rocks=fbm(q*5.);return mix(vec3(.20,.18,.17),vec3(.55,.50,.43),rocks)*(.88+.18*fine);}
- if(body==2){float cloud=fbm(q*vec3(3.,11.,3.)+vec3(fbm(q*4.)*2.));return mix(vec3(.52,.34,.14),vec3(.95,.80,.53),smoothstep(.15,.85,cloud));}
+ if(body==2){
+  // Venus is an opaque, pale cloud deck in visible light, not exposed orange rock.
+  float flow=fbm(q*vec3(3.,7.,3.));
+  float cloud=fbm(q*vec3(7.,18.,7.)+vec3(flow*2.,0.,flow));
+  return mix(vec3(.72,.66,.51),vec3(.94,.90,.76),smoothstep(.12,.86,cloud))*(.97+.03*flow);
+ }
  if(body==3){
   vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
   vec3 base=earth_enabled!=0?texture(earth_map,uv).rgb:mix(vec3(.025,.13,.32),vec3(.13,.27,.10),smoothstep(.48,.57,fbm(q*5.)));
-  float clouds=smoothstep(.58,.74,fbm(rotate_y(q,.12)*vec3(8.,12.,8.)));
-  return mix(base,vec3(.91,.95,1.),clouds*.65);
+  float clouds=cloud_enabled!=0?smoothstep(.12,.88,texture(cloud_map,uv).r):smoothstep(.58,.74,fbm(q*vec3(8.,12.,8.)));
+  return mix(base,vec3(.94,.96,.98),clouds*.88);
  }
  if(body==4){float rock=fbm(q*4.);float dust=fbm(q*13.);return mix(vec3(.27,.10,.05),vec3(.71,.38,.19),rock)*(.82+.25*dust)+vec3(.2)*smoothstep(.88,.96,abs(q.y));}
  if(body==5||body==6){
-  // Broad flowing belts with small-scale turbulence, rather than hard stripes.
-  float warp=fbm(q*vec3(4.,8.,4.));float latitude=q.y+.035*sin(q.x*8.+warp*5.)+.035*(warp-.5);
-  float belts=.5+.32*sin(latitude*(body==5?25.:32.)+1.8*warp)+.09*sin(latitude*79.+warp*5.);
-  vec3 pale=body==5?vec3(.84,.76,.66):vec3(.86,.78,.61);
-  vec3 dark=body==5?vec3(.57,.40,.27):vec3(.70,.60,.43);
-  vec3 base=mix(dark,pale,smoothstep(-.18,1.18,belts));
-  base*=.97+.05*noise(q*vec3(30.,80.,30.));
-  if(body==5){float longitude=atan(q.z,q.x);float spot=exp(-pow((longitude-.6)/.24,2.)-pow((q.y+.23)/.09,2.));base=mix(base,vec3(.63,.25,.12),spot*.75);}
+  // Unequal latitude zones with body-fixed shear and curled storm edges.
+  // All noise is spatial; no time coordinate can make the clouds boil.
+  float eddy=fbm(q*vec3(9.,16.,9.));
+  float shear=noise(q*vec3(4.,28.,4.));
+  float lat=q.y+.075*(eddy-.5)+.020*sin(q.x*15.+q.z*9.+eddy*9.);
+  float zones=noise(vec3(lat*11.,2.3,7.1));
+  float wisps=noise(q*vec3(25.,95.,25.)+vec3(eddy*4.,shear,eddy*3.));
+  float belts=smoothstep(.08,.92,zones+.24*(eddy-.5));
+  vec3 pale=body==5?vec3(.91,.85,.73):vec3(.88,.81,.65);
+  vec3 dark=body==5?vec3(.60,.41,.27):vec3(.79,.71,.55);
+  vec3 base=mix(dark,pale,belts);
+  base*=.91+.13*wisps+.06*eddy;
+  if(body==5){
+   float longitude=atan(q.z,q.x);
+   float dx=atan(sin(longitude-.6),cos(longitude-.6))/.25;
+   float dy=(q.y+.23)/.095;
+   float rr=length(vec2(dx,dy));
+   float curl=sin(atan(dy,dx)*2.+rr*9.+eddy*4.);
+   float spot=1.-smoothstep(.65,1.15,rr+.06*curl);
+   vec3 storm=mix(vec3(.64,.31,.19),vec3(.79,.50,.31),.5+.22*curl);
+   base=mix(base,storm,spot*.88);
+  }
   return base;
  }
  float bands=.5+.2*sin(q.y*16.+fbm(q*vec3(4.,14.,4.))*1.3);
  return body==7?mix(vec3(.32,.63,.66),vec3(.42,.70,.73),bands):mix(vec3(.035,.18,.52),vec3(.10,.32,.68),bands);
 }
 vec3 stars(vec3 ray){
+ if(sky_enabled!=0){
+  // Fixed decorative celestial orientation, independent of orbit and spin.
+  vec3 q=rotate_y(ray,.8);
+  q=vec3(q.x,.8660254*q.y-.5*q.z,.5*q.y+.8660254*q.z);
+  vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
+  vec3 encoded=texture(sky_map,uv).rgb;
+  // Cubic sRGB-to-linear fit avoids three per-pixel powers in the full sky.
+  // Maximum absolute linear error < .0017 before the .18 exposure scale.
+  vec3 linear=encoded*(encoded*(encoded*.305306011+.682171111)+.012522878);
+  return vec3(.0005,.0007,.0011)+linear*.18;
+ }
  vec3 grid=ray*350.,cell=floor(grid);float chance=hash(cell);
  float d=length(fract(grid)-.5);float star=smoothstep(.993,1.,chance)*exp(-d*d*100.);
  vec3 tint=mix(vec3(.56,.69,1.),vec3(1.,.81,.58),hash(cell+19.));
@@ -87,7 +121,7 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  // A slightly wider lens keeps the full system in square/portrait outputs.
  float focal=resolution.x>=resolution.y*1.25?1.5:1.2*max(1.,resolution.x/max(resolution.y,1.));
  vec3 ray=normalize(forward*focal+right*uv.x+up*uv.y);
- vec3 color=stars(ray);
+
  float nearest=1e5;int body=-1;
  for(int i=0;i<9;i++){
   vec3 c=center(i);float t=sphere(camera_eye,ray,c,radius[i]);if(t<nearest){nearest=t;body=i;}
@@ -97,6 +131,7 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  needs_aa=needs_aa||body>=0;
  // The center sample is discarded for antialiased pixels; skip its material work.
  if(classify&&needs_aa)return vec3(0);
+ vec3 color=body<0?stars(ray):vec3(0);
  // Feathered guides on the real orbital plane: deliberately subordinate to planets.
  if(abs(ray.y)>.0001){float t=-camera_eye.y/ray.y;if(t>0.&&t<nearest){vec3 p=camera_eye+ray*t;float r=length(p.xz);float width=max(.004,t/pixels*.38);float guide=0.;for(int i=0;i<8;i++)guide=max(guide,exp(-pow((r-orbit[i])/width,2.)));color+=vec3(.007,.012,.019)*guide;}}
  if(body>=0){
