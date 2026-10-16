@@ -120,8 +120,24 @@ physical Sun. Earth always uses the actual current solar illumination.
 
 Moon defaults to 39343 minutes (about 27.3 days), rounded from NASA's
 [655.720-hour sidereal rotation period](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html).
-Its decorative studio lighting and UTC-anchored phase are preserved; lunar
-orbits, tidal locking, libration and current lunar phase are not simulated.
+Current lunar illumination is always enabled and follows the actual UTC instant,
+independently of this decorative texture spin. The terminator progresses smoothly
+through new, waxing, full and waning phases, with waxing lit on the right and
+waning on the left. Timezone changes and local midnight do not reset the phase.
+The faint night-side fill is artistic, not a prediction of earthshine.
+
+The calculation uses [Schlyter’s short Sun/Moon orbital model](https://stjarnhimlen.se/comp/ppcomp.html)
+with all listed major lunar longitude/latitude/distance perturbations and finite
+Sun distance, rather than an average calendar-month cycle. This is a low-precision
+contemporary wallpaper model, not a navigation or eclipse ephemeris. Tests check
+2026 [USNO primary phases](https://aa.usno.navy.mil/api/moon/phases/year?year=2026)
+and NASA illumination within 0.5 percentage point; that fixture tolerance is not
+a guaranteed all-date error bound. TT–UTC, aberration, observer parallax, tidal
+locking and libration are omitted. Invalid clocks or dates outside 1900–2100
+use a deterministic 2000-01-01 UTC phase fallback to keep GPU uniforms finite.
+The stable horizontal presentation does not
+model Guangzhou’s changing local-horizon tilt or the celestial bright-limb angle;
+the configured spin deliberately continues to reveal the whole lunar texture.
 Restart/resume at the same instant restores the same view without accumulated
 animation drift. Timezone/DST changes never rotate Earth or move the Sun.
 `wallpaper_astronomy_timezone` and `wallpaper_timezone_offset_hours` remain

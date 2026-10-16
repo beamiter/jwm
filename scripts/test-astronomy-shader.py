@@ -21,7 +21,11 @@ fn main() {
  let (sun,longitude)=match mode.as_str() {
   // Explicit historical controls retain the baseline files and old pixel comparisons.
   "legacy-clock" => (astronomy::solar_direction(t),astronomy::viewing_longitude(t,a[2].parse().unwrap())),
-  "legacy-studio" | "moon" => {
+  "moon" => {
+   let r=astronomy::celestial_longitude(t,a[3].parse().unwrap(),0);
+   (astronomy::lunar_sun_direction(t,r),r)
+  },
+  "legacy-studio" => {
    let r=astronomy::celestial_longitude(t,a[3].parse().unwrap(),a[2].parse().unwrap());
    let (s,c)=r.sin_cos(); ([c* -0.35+s*0.88,0.32,-s* -0.35+c*0.88],r)
   },
@@ -314,7 +318,7 @@ for es in (False,True):
  assert ImageChops.difference(first.convert('RGB'),second.convert('RGB')).getbbox() is None
  invalid,plan=layout_image(320,240,[(400,0,100,100)])
  assert not plan and invalid.getpixel((160,120))==(7,11,19,255)
- # Explicit rotating Earth (physical sunlight) plus unchanged studio-lit Moon.
+ # Explicit rotating Earth (physical sunlight) plus UTC-phase Moon.
  dual_metrics=[]
  assignments={(0,0):'earth',(2560,0):'moon'}
  dual_outputs=[(0,0,2560,1440),(2560,0,2560,1440)]
@@ -514,6 +518,20 @@ for es in (False,True):
  assert ImageChops.difference(expected.convert('RGB'),fallback_partial.convert('RGB')).getbbox() is None, 'fallback damage differs'
  reordered,_=layout_image(640,240,list(reversed(small_outputs)),materials=materials)
  assert ImageChops.difference(full.convert('RGB'),reordered.convert('RGB')).getbbox() is None, 'connector enumeration changed materials'
+ # Actual dated phase renders use production orbital/light and sphere transforms.
+ lunar_frames=[]
+ for label,stamp in [('new','2026-10-10T15:50:00+00:00'),('waxing-crescent','2026-10-16T11:00:00+00:00'),('first-quarter','2026-10-18T16:12:00+00:00'),('full','2026-10-26T04:12:00+00:00'),('last-quarter','2026-11-01T20:28:00+00:00')]:
+  instant=datetime.datetime.fromisoformat(stamp).timestamp()
+  rendered,plan=layout_image(640,480,[(0,0,640,480)],materials={(0,0):'moon'},instant=instant)
+  name=f'{kind}-lunar-{label}.png';rendered.save(ROOT/name)
+  # Interior hemispheres avoid silhouette/star contamination.
+  left=sum(ImageStat.Stat(rendered.crop((190,190,310,290)).convert('RGB')).mean)/3
+  right=sum(ImageStat.Stat(rendered.crop((330,190,450,290)).convert('RGB')).mean)/3
+  lunar_frames.append({'file':name,'utc':stamp,'left_brightness':left,'right_brightness':right})
+  if label in ('waxing-crescent','first-quarter'): assert right > left*2, (label,left,right)
+  if label=='last-quarter': assert left > right*2, (label,left,right)
+ assert sum(lunar_frames[0][k] for k in ('left_brightness','right_brightness')) < sum(lunar_frames[3][k] for k in ('left_brightness','right_brightness'))*0.2, 'new moon too bright'
+ results[kind]['lunar_phases']={'frames':lunar_frames,'waxing_right_waning_left':'PASS','new_full_contrast':'PASS'}
  results[kind]['dual_materials']={'frames':dual_metrics,'halo_pixels_equal_sky':halo_checked,'moon_surface_pixels':surface_checked,'moon_max_blue_minus_red':max_blue_excess,'mixed_material_repair':'PASS','reordered_outputs':'PASS','stationary_sky_both_materials':True,'clouds_earth_only':'PASS'}
  results[kind]['optional_sky']={'texture_loaded':sky_available,'texture_sha256':hashlib.sha256(sky_path.read_bytes()).hexdigest() if sky_available else None,'missing_fallback':'PASS','stationary_fallback':'PASS','fallback_damage':'PASS'}
  results[kind]['layouts']=layout_metrics
@@ -539,7 +557,7 @@ for a,b in zip(results['gl330']['dual_materials']['frames'],results['gles300']['
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
  api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
  assert api_max_error <= 1, (a['file'],delta.getextrema())
-for group in ('fixed_earth','seasonal_earth','rotating_earth'):
+for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases'):
  for a,b in zip(results['gl330'][group]['frames'],results['gles300'][group]['frames']):
   delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
   api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
@@ -557,20 +575,22 @@ if os.environ.get('ASTRONOMY_TEST_BASELINE_OUTPUT'):
    delta=ImageChops.difference(Image.open(old).convert('RGB'),Image.open(ROOT/frame['file']).convert('RGB'))
    compatibility.append({'file':frame['file'],'pixel_identical':delta.getbbox() is None,'mean_abs_rgb':sum(ImageStat.Stat(delta).mean)/3,'max_abs_channel':max(v[1] for v in delta.getextrema())})
  results['legacy_visual_comparison']=compatibility
- # Same dated instants and same unchanged Moon periods. Do not compare new
+ # Same dated instants and unchanged Earth behavior. Do not compare new
  # fixed Earth imagery with the old studio-lit Earth and call it a regression.
  unchanged=[]
  for kind in ('gl330','gles300'):
-  controls=[(f'{kind}-earth-moon-{seconds:g}s.png',(2560,0,5120,1440)) for seconds in (0,1/15,1,10,60)]
-  controls += [(f'{kind}-default-period-{elapsed}s-zone{zone}.png',(320,0,640,240)) for elapsed,zone in ((0,28800),(21600,28800),(86400,28800),(0,0))]
+  controls=[(f'{kind}-earth-moon-{seconds:g}s.png',(0,0,2560,1440)) for seconds in (0,1/15,1,10,60)]
+  controls += [(f'{kind}-default-period-{elapsed}s-zone{zone}.png',(0,0,320,240)) for elapsed,zone in ((0,28800),(21600,28800),(86400,28800),(0,0))]
   controls.append((f'{kind}-galaxy-only.png',None))
+  for group in ('fixed_earth','seasonal_earth','rotating_earth'):
+   controls.extend((frame['file'],None) for frame in results[kind][group]['frames'])
   for filename,crop in controls:
    old=Image.open(baseline/filename).convert('RGB');new=Image.open(ROOT/filename).convert('RGB')
    if crop is not None: old=old.crop(crop);new=new.crop(crop)
    delta=ImageChops.difference(old,new);maximum=max(v[1] for v in delta.getextrema())
-   assert maximum<=1, (filename,'Moon/galaxy baseline changed',delta.getextrema())
-   unchanged.append({'file':filename,'scope':'moon-and-sky' if crop else 'galaxy-only','crop':crop,'pixel_identical':delta.getbbox() is None,'max_abs_channel':maximum})
- results['retained_moon_galaxy_baseline']=unchanged
+   assert maximum<=1, (filename,'Earth/galaxy baseline changed',delta.getextrema())
+   unchanged.append({'file':filename,'scope':'earth-and-sky' if crop or 'galaxy-only' not in filename else 'galaxy-only','crop':crop,'pixel_identical':delta.getbbox() is None,'max_abs_channel':maximum})
+ results['retained_earth_galaxy_baseline']=unchanged
 results['gl_gles_max_channel_difference']=api_max_error
 results['scope']='Actual surfaceless Mesa shader execution and production Rust UTC-solar/fixed-view/rotation/geometry helpers; exact dated fixed and seasonal/polar renders; simulated output layouts. No hardware compositor, real hotplug, or device deployment tested.'
 print('PASS: GLSL/GLES, fixed Guangzhou UTC day/night, seasonal/polar dusk, explicit rotation, opaque frames, stationary sky, production multi-output plans; output:',ROOT)

@@ -2,9 +2,9 @@
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
-    celestial_assignments, celestial_longitude, earth_view_longitude, material_load_frame,
-    presentation_offset, resolve_cloud_texture, resolve_earth_texture, resolve_moon_texture,
-    resolve_sky_texture, solar_direction, wall_clock_seconds,
+    celestial_assignments, celestial_longitude, earth_view_longitude, lunar_sun_direction,
+    material_load_frame, presentation_offset, resolve_cloud_texture, resolve_earth_texture,
+    resolve_moon_texture, resolve_sky_texture, solar_direction, wall_clock_seconds,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -718,15 +718,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 if moon {
                     let angle = celestial_longitude(a.sample_unix, a.moon_period, 0);
                     gl.uniform_1_f32(program.view_longitude.as_ref(), angle);
-                    // Moon remains a decorative rotating presentation, not a lunar phase model.
-                    // Every Earth canvas uses the physical UTC Sun, in either view mode.
-                    let (s, c) = angle.sin_cos();
-                    gl.uniform_3_f32(
-                        program.sun_direction.as_ref(),
-                        c * -0.35 + s * 0.88,
-                        0.32,
-                        -s * -0.35 + c * 0.88,
-                    );
+                    // UTC phase is independent of artistic texture spin and timezone.
+                    let light = lunar_sun_direction(a.sample_unix, angle);
+                    gl.uniform_3_f32(program.sun_direction.as_ref(), light[0], light[1], light[2]);
                 } else {
                     gl.uniform_1_f32(program.view_longitude.as_ref(), longitude);
                     gl.uniform_3_f32(program.sun_direction.as_ref(), sun[0], sun[1], sun[2]);

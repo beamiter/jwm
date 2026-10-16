@@ -1579,6 +1579,88 @@ pub(crate) fn celestial_longitude(unix: f64, minutes: u32, utc_offset_seconds: i
     (phase + meridian).rem_euclid(std::f64::consts::TAU) as f32
 }
 
+/// Geocentric lunar illumination in a stable waxing-right/waning-left view.
+/// Short orbital model with the major lunar perturbations from Paul Schlyter:
+/// https://stjarnhimlen.se/comp/ppcomp.html (sections 3–9).
+/// UTC seconds, never civil date/timezone or the decorative rotation period.
+/// Intended for contemporary wallpaper, not eclipse prediction: ignores TT−UT,
+/// aberration, topocentric parallax, libration and local-horizon orientation.
+pub(crate) fn lunar_phase_light(unix: f64) -> [f32; 3] {
+    // Guard the low-precision elements and all downstream GPU uniforms. Outside
+    // 1900–2100 (or with an invalid clock), use a deterministic J2000 fallback.
+    let unix = if unix.is_finite() && (-2208988800.0..4133980800.0).contains(&unix) {
+        unix
+    } else {
+        946684800.0
+    };
+    let d = (unix - 946598400.0) / 86400.0; // 1999-12-31 00:00 UTC
+    let rad = |v: f64| v.rem_euclid(360.0).to_radians();
+    let orbit = |m: f64, e: f64| {
+        let mut eccentric = m + e * m.sin() * (1.0 + e * m.cos());
+        for _ in 0..5 {
+            eccentric -= (eccentric - e * eccentric.sin() - m) / (1.0 - e * eccentric.cos());
+        }
+        let x = eccentric.cos() - e;
+        let y = (1.0 - e * e).sqrt() * eccentric.sin();
+        (y.atan2(x), x.hypot(y))
+    };
+    let ms = rad(356.0470 + 0.9856002585 * d);
+    let ws = rad(282.9404 + 4.70935e-5 * d);
+    let (vs, rs) = orbit(ms, 0.016709 - 1.151e-9 * d);
+    let sun_lon = vs + ws;
+    let node = rad(125.1228 - 0.0529538083 * d);
+    let inclination = rad(5.1454);
+    let wm = rad(318.0634 + 0.1643573223 * d);
+    let mm = rad(115.3654 + 13.0649929509 * d);
+    let (vm, rm) = orbit(mm, 0.054900);
+    let argument = vm + wm;
+    let x = node.cos() * argument.cos() - node.sin() * argument.sin() * inclination.cos();
+    let y = node.sin() * argument.cos() + node.cos() * argument.sin() * inclination.cos();
+    let z = argument.sin() * inclination.sin();
+    let elongation = mm + wm + node - ms - ws;
+    let f = mm + wm;
+    let lon_correction = -1.274 * (mm - 2.0 * elongation).sin() + 0.658 * (2.0 * elongation).sin()
+        - 0.186 * ms.sin()
+        - 0.059 * (2.0 * mm - 2.0 * elongation).sin()
+        - 0.057 * (mm - 2.0 * elongation + ms).sin()
+        + 0.053 * (mm + 2.0 * elongation).sin()
+        + 0.046 * (2.0 * elongation - ms).sin()
+        + 0.041 * (mm - ms).sin()
+        - 0.035 * elongation.sin()
+        - 0.031 * (mm + ms).sin()
+        - 0.015 * (2.0 * f - 2.0 * elongation).sin()
+        + 0.011 * (mm - 4.0 * elongation).sin();
+    let lat_correction = -0.173 * (f - 2.0 * elongation).sin()
+        - 0.055 * (mm - f - 2.0 * elongation).sin()
+        - 0.046 * (mm + f - 2.0 * elongation).sin()
+        + 0.033 * (f + 2.0 * elongation).sin()
+        + 0.017 * (2.0 * mm + f).sin();
+    let lon = y.atan2(x) + lon_correction.to_radians();
+    let lat = z.atan2(x.hypot(y)) + lat_correction.to_radians();
+    let distance =
+        60.2666 * rm - 0.58 * (mm - 2.0 * elongation).cos() - 0.46 * (2.0 * elongation).cos();
+    let sun_distance = rs * 149597870.7 / 6378.14; // AU → Earth radii
+    let delta = lon - sun_lon;
+    let cos_elongation = (lat.cos() * delta.cos()).clamp(-1.0, 1.0);
+    // Moon→Sun dotted with Moon→Earth; retain finite solar distance.
+    let light_z = ((distance - sun_distance * cos_elongation)
+        / (sun_distance * sun_distance + distance * distance
+            - 2.0 * sun_distance * distance * cos_elongation)
+            .sqrt())
+    .clamp(-1.0, 1.0);
+    let light_x = (1.0 - light_z * light_z).sqrt().copysign(delta.sin());
+    [light_x as f32, 0.0, light_z as f32]
+}
+
+/// Same orthonormal transform as the shader's earth_normal. Rotate the light
+/// together with normals so artistic surface spin cannot rotate the terminator.
+pub(crate) fn lunar_sun_direction(unix: f64, longitude: f32) -> [f32; 3] {
+    let [x, _, z] = lunar_phase_light(unix);
+    let (sl, cl) = 0.18_f32.sin_cos();
+    let (s, c) = longitude.sin_cos();
+    [c * x + s * cl * z, sl * z, -s * x + c * cl * z]
+}
+
 pub(crate) fn presentation_offset(
     use_system: bool,
     configured_hours: i32,
@@ -1737,5 +1819,82 @@ mod material_load_tests {
         assert_eq!(material_load_frame(true, true, false), (false, false));
         assert_eq!(material_load_frame(true, true, true), (true, true));
         assert_eq!(material_load_frame(false, false, false), (true, false));
+    }
+}
+
+#[cfg(test)]
+mod lunar_phase_tests {
+    use super::*;
+
+    #[test]
+    fn usno_2026_primary_phases_and_nasa_current_illumination() {
+        // USNO UTC primary phases; quarters are longitude events, not exactly
+        // 50% physical illumination due to lunar latitude and solar distance.
+        // https://aa.usno.navy.mil/api/moon/phases/year?year=2026
+        for (unix, expected, waxing) in [
+            (1791647400.0, 0.0, None),
+            (1792339920.0, 0.5, Some(true)),
+            (1792987920.0, 1.0, None),
+            (1793564880.0, 0.5, Some(false)),
+            // NASA SVS mooninfo_2026.json: 2026-10-16 11:00 UT, 29.78%.
+            (1792148400.0, 0.2978, Some(true)),
+        ] {
+            let light = lunar_phase_light(unix);
+            let fraction = (1.0 + light[2]) / 2.0;
+            assert!((fraction - expected).abs() < 0.005, "{unix}: {fraction}");
+            if let Some(waxing) = waxing {
+                assert_eq!(light[0] > 0.0, waxing);
+            }
+            assert!((light.iter().map(|v| v * v).sum::<f32>() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn utc_and_local_midnight_are_continuous_not_phase_resets() {
+        for midnight in [1792080000.0, 1792108800.0] {
+            // UTC+8, UTC
+            let before = lunar_phase_light(midnight - 1.0);
+            let after = lunar_phase_light(midnight + 1.0);
+            assert!(
+                before
+                    .iter()
+                    .zip(after)
+                    .all(|(a, b)| (a - b).abs() < 0.00002)
+            );
+        }
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1e15,
+            1e15,
+            f64::MAX,
+            -f64::MAX,
+            -1.0,
+            0.0,
+        ] {
+            assert!(lunar_phase_light(value).iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn artistic_spin_does_not_change_camera_relative_phase() {
+        let t = 1792148400.0;
+        let expected = lunar_phase_light(t);
+        for period in [1, 30, 39343, 525600] {
+            let angle = celestial_longitude(t, period, 0);
+            let light = lunar_sun_direction(t, angle);
+            let (s, c) = angle.sin_cos();
+            let x = c * light[0] - s * light[2];
+            let z = s * light[0] + c * light[2];
+            let (sl, cl) = 0.18_f32.sin_cos();
+            let recovered = [x, cl * light[1] - sl * z, sl * light[1] + cl * z];
+            assert!(
+                recovered
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| (a - b).abs() < 1e-6)
+            );
+        }
     }
 }
