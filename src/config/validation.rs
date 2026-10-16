@@ -1285,6 +1285,13 @@ impl Config {
         {
             diagnostics.error("behavior.wallpaper_astronomy_bodies", error, None);
         }
+        if behavior.wallpaper_sky_rotation_minutes > 525600 {
+            diagnostics.error(
+                "behavior.wallpaper_sky_rotation_minutes",
+                "expected integer rotation period in 0..=525600 minutes",
+                None,
+            );
+        }
         for (key, minutes) in [
             (
                 "behavior.wallpaper_earth_rotation_minutes",

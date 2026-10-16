@@ -1323,6 +1323,9 @@ pub struct BehaviorConfig {
     /// Stable connector-name assignments for earth-moon layout (earth or moon).
     #[serde(default)]
     pub wallpaper_astronomy_bodies: std::collections::BTreeMap<String, String>,
+    /// Decorative galaxy travel: minutes per revolution, 0 disables, 1..=525600.
+    #[serde(default = "default_wallpaper_sky_rotation_minutes")]
+    pub wallpaper_sky_rotation_minutes: u32,
     /// Earth camera: "fixed" (default) or "rotating" for the legacy spin.
     #[serde(default = "default_wallpaper_earth_view")]
     pub wallpaper_earth_view: String,
@@ -1777,6 +1780,10 @@ fn default_wallpaper_astronomy_layout() -> String {
 
 fn default_wallpaper_astronomy_timezone() -> String {
     "system".into()
+}
+
+fn default_wallpaper_sky_rotation_minutes() -> u32 {
+    1440
 }
 
 fn default_wallpaper_earth_view() -> String {
@@ -2352,6 +2359,7 @@ impl Default for Config {
                     wallpaper_earth_texture: String::new(),
                     wallpaper_moon_texture: String::new(),
                     wallpaper_astronomy_bodies: std::collections::BTreeMap::new(),
+                    wallpaper_sky_rotation_minutes: default_wallpaper_sky_rotation_minutes(),
                     wallpaper_earth_view: default_wallpaper_earth_view(),
                     wallpaper_earth_latitude: default_wallpaper_earth_latitude(),
                     wallpaper_earth_longitude: default_wallpaper_earth_longitude(),
@@ -4534,6 +4542,11 @@ impl Config {
                 "# Earth-moon layout only: default \"\" uses the bundled NASA Moon texture.\n",
                 "# Example: wallpaper_moon_texture = \"/home/alice/Pictures/moon.jpg\"\n",
             )),
+            ("behavior", "wallpaper_sky_rotation_minutes") => Some(concat!(
+                "# Decorative galaxy travel: integer minutes per turn, 0..525600.\n",
+                "# Default 1440 = slow 24-hour panorama; 0 restores the stationary backdrop.\n",
+                "# UTC anchored, independent of Earth/Moon rotation and display timezone.\n",
+            )),
             ("behavior", "wallpaper_earth_view") => Some(concat!(
                 "# Earth camera: \"fixed\" (default) anchors the map while real UTC sunlight changes.\n",
                 "# \"rotating\" restores the legacy spin, using wallpaper_earth_rotation_minutes.\n",
@@ -5020,6 +5033,13 @@ impl Config {
                     self.inner.behavior.wallpaper_earth_longitude = degrees;
                 }
             }
+            "behavior.wallpaper_sky_rotation_minutes" => {
+                let minutes = as_u32()?;
+                if minutes > 525600 {
+                    return Err(format!("{key} must be an integer in 0..=525600"));
+                }
+                self.inner.behavior.wallpaper_sky_rotation_minutes = minutes;
+            }
             "behavior.wallpaper_earth_rotation_minutes"
             | "behavior.wallpaper_moon_rotation_minutes" => {
                 let minutes = as_u32()?;
@@ -5480,6 +5500,44 @@ mod tests {
             picked.behavior().wallpaper_earth_texture,
             "/walls/earth.jpg"
         );
+    }
+
+    #[test]
+    fn sky_rotation_defaults_hot_updates_and_validation() {
+        let mut config = Config::default();
+        assert_eq!(config.behavior().wallpaper_sky_rotation_minutes, 1440);
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+        table["behavior"]
+            .as_table_mut()
+            .unwrap()
+            .remove("wallpaper_sky_rotation_minutes");
+        let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
+        assert_eq!(legacy.behavior.wallpaper_sky_rotation_minutes, 1440);
+        for minutes in [0, 1, 1440, 525600] {
+            config
+                .set_values(&[(
+                    "behavior.wallpaper_sky_rotation_minutes".into(),
+                    serde_json::json!(minutes),
+                )])
+                .unwrap();
+            assert_eq!(config.behavior().wallpaper_sky_rotation_minutes, minutes);
+            let roundtrip: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            assert_eq!(roundtrip.behavior.wallpaper_sky_rotation_minutes, minutes);
+        }
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(525601),
+            serde_json::json!(1.5),
+            serde_json::json!("slow"),
+        ] {
+            assert!(
+                config
+                    .set_values(&[("behavior.wallpaper_sky_rotation_minutes".into(), value)])
+                    .is_err()
+            );
+        }
     }
 
     #[test]
@@ -7989,6 +8047,7 @@ border_px = 3
             "wallpaper_effect",
             "wallpaper_earth_texture",
             "wallpaper_moon_texture",
+            "wallpaper_sky_rotation_minutes",
             "wallpaper_earth_view",
             "wallpaper_earth_latitude",
             "wallpaper_earth_longitude",

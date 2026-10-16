@@ -4,7 +4,7 @@ use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
     celestial_assignments, celestial_longitude, earth_view_longitude, lunar_sun_direction,
     material_load_frame, presentation_offset, resolve_cloud_texture, resolve_earth_texture,
-    resolve_moon_texture, resolve_sky_texture, solar_direction, wall_clock_seconds,
+    resolve_moon_texture, resolve_sky_texture, sky_rotation, solar_direction, wall_clock_seconds,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -25,6 +25,7 @@ struct AstronomyProgram {
     clouds_enabled: Option<glow::UniformLocation>,
     sky_map: Option<glow::UniformLocation>,
     sky_enabled: Option<glow::UniformLocation>,
+    sky_rotation: Option<glow::UniformLocation>,
     canvas_origin: Option<glow::UniformLocation>,
     resolution: Option<glow::UniformLocation>,
     sphere_radius: Option<glow::UniformLocation>,
@@ -44,6 +45,7 @@ impl AstronomyProgram {
                 clouds_enabled: gl.get_uniform_location(program, "clouds_enabled"),
                 sky_map: gl.get_uniform_location(program, "sky_map"),
                 sky_enabled: gl.get_uniform_location(program, "sky_enabled"),
+                sky_rotation: gl.get_uniform_location(program, "sky_rotation"),
                 canvas_origin: gl.get_uniform_location(program, "canvas_origin"),
                 resolution: gl.get_uniform_location(program, "resolution"),
                 sphere_radius: gl.get_uniform_location(program, "sphere_radius"),
@@ -67,6 +69,7 @@ pub(super) struct AstronomyWallpaper {
     sky_pending: Option<wallpaper::DeferredWallpaperLoad>,
     sky_texture: Option<glow::Texture>,
     dual_material: bool,
+    sky_period: u32,
     earth_period: u32,
     earth_rotating: bool,
     earth_latitude: f64,
@@ -372,7 +375,10 @@ impl<C: CompositorConnection> Compositor<C> {
             cfg.behavior().wallpaper_earth_latitude,
             cfg.behavior().wallpaper_earth_longitude,
         );
-        let periods_changed = a.earth_period != cfg.behavior().wallpaper_earth_rotation_minutes
+        let sky_changed = a.sky_period != cfg.behavior().wallpaper_sky_rotation_minutes;
+        a.sky_period = cfg.behavior().wallpaper_sky_rotation_minutes;
+        let periods_changed = sky_changed
+            || a.earth_period != cfg.behavior().wallpaper_earth_rotation_minutes
             || a.moon_period != cfg.behavior().wallpaper_moon_rotation_minutes;
         a.earth_period = cfg.behavior().wallpaper_earth_rotation_minutes;
         a.moon_period = cfg.behavior().wallpaper_moon_rotation_minutes;
@@ -691,6 +697,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 program.clouds_enabled.as_ref(),
                 i32::from(a.cloud_texture.is_some()),
             );
+            let roll = sky_rotation(a.sample_unix, a.sky_period);
+            gl.uniform_2_f32(program.sky_rotation.as_ref(), roll[0], roll[1]);
             gl.uniform_1_i32(program.sky_map.as_ref(), 2);
             gl.uniform_1_i32(
                 program.sky_enabled.as_ref(),

@@ -18,6 +18,10 @@ helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common
 fn main() {
  let a:Vec<String>=std::env::args().skip(1).collect();
  let mode=&a[0]; let t:f64=a[1].parse().unwrap();
+ if mode=="sky" {
+  let r=astronomy::sky_rotation(t,a[2].parse().unwrap());
+  println!("{} {}",r[0],r[1]); return;
+ }
  let (sun,longitude)=match mode.as_str() {
   // Explicit historical controls retain the baseline files and old pixel comparisons.
   "legacy-clock" => (astronomy::solar_direction(t),astronomy::viewing_longitude(t,a[2].parse().unwrap())),
@@ -247,11 +251,13 @@ for es in (False,True):
  enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
  scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
  clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
- def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=1440,moon_minutes=39343,offset_seconds=0,sky_enabled=None,earth_rotating=False,earth_latitude=DEFAULT_LATITUDE,earth_longitude=DEFAULT_LONGITUDE,frozen_sun=None,legacy_earth=False):
+ def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=1440,moon_minutes=39343,offset_seconds=0,sky_enabled=None,earth_rotating=False,earth_latitude=DEFAULT_LATITUDE,earth_longitude=DEFAULT_LONGITUDE,frozen_sun=None,legacy_earth=False,sky_minutes=0,sky_seconds=None):
   target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
   assert current(d,target,target,ctx)
   gl('glViewport',None,[I,I,I,I])(0,0,width,height)
   unif1i(loc(prog,b'clouds_enabled'),int(clouds_enabled))
+  roll=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),'sky',str(instant if sky_seconds is None else sky_seconds),str(sky_minutes)]).split()))
+  gl('glUniform2f',None,[I,F,F])(loc(prog,b'sky_rotation'),*roll)
   use_sky=sky_available if sky_enabled is None else sky_enabled and sky_available
   gl('glActiveTexture',None,[U])(0x84C2);gl('glBindTexture',None,[U,U])(0x0DE1,sky_tex.value if use_sky else 0)
   gl('glActiveTexture',None,[U])(0x84C0)
@@ -534,6 +540,31 @@ for es in (False,True):
  results[kind]['lunar_phases']={'frames':lunar_frames,'waxing_right_waning_left':'PASS','new_full_contrast':'PASS'}
  results[kind]['dual_materials']={'frames':dual_metrics,'halo_pixels_equal_sky':halo_checked,'moon_surface_pixels':surface_checked,'moon_max_blue_minus_red':max_blue_excess,'mixed_material_repair':'PASS','reordered_outputs':'PASS','stationary_sky_both_materials':True,'clouds_earth_only':'PASS'}
  results[kind]['optional_sky']={'texture_loaded':sky_available,'texture_sha256':hashlib.sha256(sky_path.read_bytes()).hexdigest() if sky_available else None,'missing_fallback':'PASS','stationary_fallback':'PASS','fallback_damage':'PASS'}
+ # Motion controls keep physical body time fixed while varying only sky UTC.
+ motion_frames=[]
+ for textured in (False,True):
+  moving=[]
+  for seconds in (0,1/15,60,21600,86400,86400-0.001,86400+0.001,37152-0.001,37152+0.001,43200-0.001,43200+0.001):
+   im,_=layout_image(1920,540,[(0,0,960,540),(960,0,960,540)],materials={(0,0):'earth',(960,0):'moon'},sky_minutes=1440,sky_seconds=seconds,sky_enabled=textured)
+   filename=f'{kind}-sky-motion-{textured}-{seconds:g}.png';im.save(ROOT/filename)
+   motion_frames.append({'file':filename,'sky_seconds':seconds,'textured':textured})
+   moving.append(im.convert('RGB'))
+  assert ImageChops.difference(moving[0],moving[4]).getbbox() is None, 'sky period/restart did not repeat'
+  assert max(v[1] for v in ImageChops.difference(moving[5],moving[6]).getextrema())<=1, 'sky jumps across phase wrap'
+  for before,after in ((7,8),(9,10)):
+   assert max(v[1] for v in ImageChops.difference(moving[before],moving[after]).getextrema())<=1, 'sky jumps across longitude seam/atan branch'
+  assert ImageChops.difference(moving[0].crop((0,0,300,100)),moving[2].crop((0,0,300,100))).getbbox() is not None, 'sky did not move after one minute'
+  for center in (480,1440):
+   body_box=(center-100,170,center+100,370)
+   assert all(ImageChops.difference(moving[0].crop(body_box),im.crop(body_box)).getbbox() is None for im in moving[1:]), 'sky motion altered Earth/Moon interior'
+  disabled,_=layout_image(1920,540,[(0,0,960,540),(960,0,960,540)],materials={(0,0):'earth',(960,0):'moon'},sky_minutes=0,sky_seconds=21600,sky_enabled=textured)
+  disabled_later,_=layout_image(1920,540,[(0,0,960,540),(960,0,960,540)],materials={(0,0):'earth',(960,0):'moon'},sky_minutes=0,sky_seconds=86400,sky_enabled=textured)
+  assert ImageChops.difference(disabled.convert('RGB'),disabled_later.convert('RGB')).getbbox() is None, 'disabled sky moves'
+  for seconds in (0,21600):
+   wide_image,_=layout_image(1920,540,[(0,0,1920,540)],sky_minutes=1440,sky_seconds=seconds,sky_enabled=textured)
+   filename=f'{kind}-sky-ultrawide-{textured}-{seconds}.png';wide_image.save(ROOT/filename)
+   motion_frames.append({'file':filename,'sky_seconds':seconds,'textured':textured,'aspect':'32:9'})
+ results[kind]['sky_motion']={'frames':motion_frames,'period_wrap_restart':'PASS','body_interiors':'PASS','static_disable':'PASS','one_minute_motion':'PASS'}
  results[kind]['layouts']=layout_metrics
  results[kind]['layout_pixel_assertions']='PASS: dual centers, portrait radius, gaps, negative clipping, repairs, mirror dedup, stable overlaps, outside-root'
  current(d,None,None,None)
@@ -557,7 +588,7 @@ for a,b in zip(results['gl330']['dual_materials']['frames'],results['gles300']['
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
  api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
  assert api_max_error <= 1, (a['file'],delta.getextrema())
-for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases'):
+for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion'):
  for a,b in zip(results['gl330'][group]['frames'],results['gles300'][group]['frames']):
   delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
   api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))

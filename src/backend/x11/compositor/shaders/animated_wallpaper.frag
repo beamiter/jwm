@@ -12,10 +12,12 @@ uniform sampler2D cloud_map;
 uniform bool clouds_enabled;
 uniform sampler2D sky_map;
 uniform bool sky_enabled;
+// (cos, sin), or (0, 0) for the exact original stationary framing.
+uniform vec2 sky_rotation;
 out vec4 frag_color;
 const float PI = 3.141592653589793;
-// Original, stationary decorative sky, not an observed star catalogue.
-// No time input, twinkle, extra textures or sample loops: stars remain calm.
+// Original decorative fallback, not an observed star catalogue.
+// Coherent slow drift only: no twinkle, extra textures or sample loops.
 float sky_hash(vec2 p) {
     vec3 q = fract(vec3(p.xyx) * 0.1031);
     q += dot(q, q.yzx + 33.33);
@@ -66,15 +68,36 @@ vec3 procedural_background(vec2 pixel) {
 }
 
 vec3 galaxy_background(vec2 pixel) {
-    if (!sky_enabled) return procedural_background(pixel);
-    // NASA SVS/Gaia catalogue-derived diffuse sky, fixed decorative framing.
-    // This crop is not the observer's location, current sky or a telescope view.
+    bool moving = dot(sky_rotation, sky_rotation) > 0.5;
+    // Preserve the original static framing exactly when motion is disabled.
+    if (!moving && !sky_enabled) return procedural_background(pixel);
     vec2 uv = (pixel-resolution*0.5)/max(resolution.y,1.0);
     vec2 g = vec2(dot(uv,vec2(0.94,0.342)),dot(uv,vec2(-0.342,0.94))-0.08);
     vec2 sky_uv = vec2(0.57+g.x*0.22,0.5-g.y*0.44);
-    // Bundled JPEG already contains the linear-to-sRGB transfer. It is sampled
-    // as UNORM, like our body maps, then attenuated in display space deliberately
-    // to keep the catalogue-derived detail quiet behind the Earth and Moon.
+    if (moving) {
+        // Travel through the panorama, rather than spinning the canvas. The
+        // aspect-correct ray stays within the texture poles on ultrawide views.
+        vec3 ray = normalize(vec3(g*(0.44*PI), 1.0));
+        ray.xz = mat2(sky_rotation.x, -sky_rotation.y,
+                      sky_rotation.y, sky_rotation.x) * ray.xz;
+        sky_uv = vec2(0.57 + atan(ray.x,ray.z)/(2.0*PI),
+                      0.5 - asin(clamp(ray.y,-1.0,1.0))/PI);
+        if (!sky_enabled) {
+            // A periodic spatial fallback: both sides meet at the same sample
+            // and first derivative. Blend over the whole circumference so no
+            // seam, reset or hard cut enters the view as new sky drifts in.
+            float circumference = max(resolution.y,1.0)/0.22;
+            float x = fract(sky_uv.x)*circumference;
+            vec2 p = vec2(x, (0.5-sky_uv.y)*max(resolution.y,1.0)/0.44
+                            + resolution.y*0.5);
+            return mix(procedural_background(p),
+                       procedural_background(p-vec2(circumference,0.0)),
+                       smoothstep(0.0,circumference,x));
+        }
+    }
+    // NASA SVS/Gaia catalogue panorama, decorative rather than a live sky.
+    // Horizontal REPEAT joins catalogue longitude; latitude stays in [0,1].
+    // The bundled JPEG is sampled as UNORM and dimmed in display space.
     return texture(sky_map,sky_uv).rgb*0.34;
 }
 

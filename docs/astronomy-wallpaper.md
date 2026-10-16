@@ -12,6 +12,7 @@ limitation and leaves the existing static wallpaper selected.
 [behavior]
 wallpaper_effect = "astronomy" # "off" is the backwards-compatible default
 wallpaper_earth_texture = "" # bundled NASA Earth texture
+wallpaper_sky_rotation_minutes = 1440 # slow 24-hour galaxy travel; 0 = static
 wallpaper_earth_view = "fixed" # default; "rotating" enables the period below
 wallpaper_earth_latitude = 23.13 # Guangzhou city-level framing, not device location
 wallpaper_earth_longitude = 113.28 # degrees east; stays fixed as time passes
@@ -168,7 +169,7 @@ No Apple UI, assets, watermark or proprietary implementation is copied.
 The existing NASA surface and static Blue Marble cloud composite remain offline,
 historical imagery, not current weather. Custom Earth maps do not receive the
 extra cloud layer. There are no live cloud or city-light observations. The
-stationary NASA/Gaia-derived galaxy backdrop retains decorative framing rather
+NASA/Gaia-derived galaxy backdrop retains decorative framing rather
 than representing the observer's live sky.
 
 Regular animation ticks are capped at 15 Hz. Enabled prepare checks the current
@@ -267,3 +268,31 @@ Neither test modifies the OS clock or timezone. Asset tests use placeholder
 executables and private temporary install roots; they do not validate a live
 compositor binary. Full config/picker tests still require the Cargo workspace
 and its existing dependencies.
+
+## Slow galaxy motion
+
+`wallpaper_sky_rotation_minutes = 1440` is the default: one calm panoramic circuit
+per 24 hours. Set it to `0` to restore the exact original stationary framing,
+`720` for a 12-hour circuit, or `60` for a visibly faster one-hour preview. The range
+is integer `0..=525600`; normal config reload applies it without texture reload.
+This controls only the background, not Guangzhou's fixed Earth camera, solar
+lighting, lunar phase or either body's rotation period.
+
+The angle uses absolute Unix UTC time, with a full turn reduced in double
+precision before computing the two rotation components. Restarting at the same
+time reproduces the same sky; display timezone and DST have no effect. Sleep
+and occlusion pause rendering, then resume at the current UTC orientation.
+Changing the system clock or period can reposition the sky intentionally.
+
+Motion pans through the full panorama: old sky leaves the edge as new sectors
+enter. The aspect-correct rectilinear ray yaws through the equirectangular
+catalogue, keeping latitude inside the poles even on ultrawide screens. This
+slightly changes edge framing relative to the old static crop. The procedural
+fallback uses a smoothly blended periodic spatial field so its stars and dust
+travel together without a hard reset. Neither is
+an observational planetarium or a simulation of the sky above Guangzhou.
+There is no twinkle, new texture, extra texture fetch, file I/O or new timer:
+the procedural fallback evaluates its field twice to blend its wrap seam;
+frames reuse the existing capped 15 FPS wallpaper schedule and power/occlusion
+gates. The phase wrap is continuous. Static mode retains the existing schedule
+because UTC sunlight and lunar lighting still update.

@@ -1,6 +1,19 @@
 //! Bounded, display-independent timing for the optional X11 wallpaper layer.
 use std::time::{Duration, Instant};
 
+/// Decorative sky travel, anchored to Unix UTC rather than process uptime.
+/// Reduce in f64 before trigonometry: never upload a large epoch as an f32.
+/// Zero is an explicit static sentinel, preserving the original crop exactly.
+pub(crate) fn sky_rotation(unix_seconds: f64, minutes: u32) -> [f32; 2] {
+    if minutes == 0 || !unix_seconds.is_finite() {
+        return [0.0, 0.0];
+    }
+    let period = f64::from(minutes.min(525600)) * 60.0;
+    let phase = unix_seconds.rem_euclid(period) / period * std::f64::consts::TAU;
+    let (sin, cos) = phase.sin_cos();
+    [cos as f32, sin as f32]
+}
+
 /// Shared by picker admission and the compositor. Explicit paths are
 /// authoritative: a missing override never silently selects a bundled image.
 pub(crate) fn resolve_earth_texture(configured: &str) -> Option<String> {
@@ -1896,5 +1909,34 @@ mod lunar_phase_tests {
                     .all(|(a, b)| (a - b).abs() < 1e-6)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sky_motion_tests {
+    use super::sky_rotation;
+    #[test]
+    fn sky_travel_is_bounded_periodic_and_restart_independent() {
+        for t in [-2208988800.125, -0.125, 0.0, 1792108800.125, 4102444800.125] {
+            for minutes in [1, 1440, 525600] {
+                let a = sky_rotation(t, minutes);
+                assert_eq!(a, sky_rotation(t, minutes));
+                let b = sky_rotation(t + f64::from(minutes) * 60.0, minutes);
+                for i in 0..2 {
+                    assert!((a[i] - b[i]).abs() < 1e-6);
+                }
+                assert!((a[0] * a[0] + a[1] * a[1] - 1.0).abs() < 1e-6);
+            }
+            assert_eq!(sky_rotation(t, 0), [0.0, 0.0]);
+        }
+        for t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(sky_rotation(t, 1440), [0.0, 0.0]);
+        }
+        let before = sky_rotation(86400.0 - 0.001, 1440);
+        let after = sky_rotation(86400.0 + 0.001, 1440);
+        for i in 0..2 {
+            assert!((before[i] - after[i]).abs() < 1e-6);
+        }
+        assert!((sky_rotation(21600.0, 1440)[1] - 1.0).abs() < 1e-6);
     }
 }
