@@ -69,7 +69,7 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
 
-      - name: Rotation, solar clock and lunar phase regressions
+      - name: Rotation, pointer gestures, solar clock and lunar phase regressions
         shell: bash
         run: |
           set -euo pipefail
@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$ASTRONOMY_TEST_OUTPUT"
-          # One invocation covers both APIs, all-axis views, true-time lighting,
+          # One invocation covers both APIs, all-axis views, mouse trackball, true-time lighting,
           # map minification, silhouettes and multi-output/portrait layouts.
           /usr/bin/python3 scripts/test-astronomy-shader.py \
             2>&1 | tee "$ASTRONOMY_TEST_OUTPUT/render-tests.log"

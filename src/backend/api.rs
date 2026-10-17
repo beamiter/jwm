@@ -2176,9 +2176,17 @@ pub enum BackendEvent {
     },
     ButtonRelease {
         target: HitTarget,
+        /// The released X11-style button number; a secondary release must not
+        /// finish an ongoing left-button wallpaper gesture.
+        detail: u8,
         time: u32,
         root_x: f64,
         root_y: f64,
+    },
+    /// Internal X11 fence: all pointer events queued before this requested
+    /// watchdog token have been dispatched, including reply-prefetched events.
+    PointerEventsDrained {
+        token: u64,
     },
     MotionNotify {
         target: HitTarget,
@@ -2468,6 +2476,12 @@ pub trait InputOps: Send {
     }
 
     fn query_pointer_root(&self) -> Result<(i32, i32, u16, u16), BackendError>;
+
+    /// Request an ordered native event-queue fence after a pointer query.
+    /// None means the backend has no deferred input queue to fence.
+    fn request_pointer_event_drain(&self) -> Option<u64> {
+        None
+    }
     fn warp_pointer_to_window(&self, _win: WindowId, _x: i16, _y: i16) -> Result<(), BackendError> {
         Ok(())
     }
@@ -3121,6 +3135,31 @@ pub trait BackendDiagnostics: Send {
 
 /// Runtime controls for compositor-wide visual state.
 pub trait CompositorControl: Send {
+    /// Begin a direct globe gesture only when the event point hits a rendered,
+    /// powered Earth or Moon. The WM owns the pointer grab and event routing.
+    fn compositor_astronomy_begin_drag(&mut self, _root_x: f64, _root_y: f64) -> bool {
+        false
+    }
+
+    /// Undo a just-started capture when the WM could not acquire the pointer;
+    /// this must preserve the prior pose/clock instead of committing a drag.
+    fn compositor_astronomy_abort_drag(&mut self) {}
+
+    /// Rotate the captured globe from an ordered pointer event. False means
+    /// the compositor invalidated the gesture and the WM should retire its grab.
+    fn compositor_astronomy_drag_motion(&mut self, _root_x: f64, _root_y: f64) -> bool {
+        false
+    }
+
+    /// Read-only watchdog check; polling must never advance to a future pointer
+    /// position ahead of already queued button/motion events.
+    fn compositor_astronomy_drag_active(&self) -> bool {
+        false
+    }
+
+    /// Retain the current globe pose, retire the gesture, and resume its clock.
+    fn compositor_astronomy_end_drag(&mut self) {}
+
     /// True only while the selected solar wallpaper is rendered and powered.
     fn compositor_solar_system_interactive(&self) -> bool {
         false

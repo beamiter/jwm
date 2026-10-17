@@ -2012,6 +2012,7 @@ fn process_input_event_windowed<B: InputBackend>(
                     .unwrap()
                     .push_back(BackendEvent::ButtonRelease {
                         target: hit.unwrap_or(HitTarget::Background { output }),
+                        detail: detail_btn,
                         time: time.millis(),
                         root_x: x,
                         root_y: y,
@@ -2240,6 +2241,7 @@ fn process_input_event_windowed<B: InputBackend>(
                     });
                     pending.push_back(BackendEvent::ButtonRelease {
                         target: HitTarget::Background { output },
+                        detail,
                         time: time.millis(),
                         root_x: x,
                         root_y: y,

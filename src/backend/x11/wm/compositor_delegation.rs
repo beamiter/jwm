@@ -368,6 +368,30 @@ macro_rules! delegate_compositor_capabilities {
         }
 
         impl crate::backend::api::CompositorControl for $backend {
+            fn compositor_astronomy_begin_drag(&mut self, root_x: f64, root_y: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.astronomy_begin_drag(root_x, root_y))
+            }
+
+            fn compositor_astronomy_abort_drag(&mut self) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.astronomy_abort_drag();
+                }
+            }
+
+            fn compositor_astronomy_drag_motion(&mut self, root_x: f64, root_y: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.astronomy_drag_motion(root_x, root_y))
+            }
+
+            fn compositor_astronomy_drag_active(&self) -> bool {
+                self.compositor.as_ref().is_some_and(|c| c.astronomy_drag_active())
+            }
+
+            fn compositor_astronomy_end_drag(&mut self) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.astronomy_end_drag();
+                }
+            }
+
             fn compositor_solar_system_interactive(&self) -> bool {
                 self.compositor.as_ref().is_some_and(|c| c.solar_system_interactive())
             }

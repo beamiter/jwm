@@ -34,6 +34,7 @@ use crate::backend::x11::wm::key_repeat::{ClassicKeyRepeat, KeyIdentity, RawKeyE
 use crate::backend::x11::wm::managed_unmap::{
     ManagedUnmapDisposition, ManagedUnmapTracker, SharedManagedUnmaps,
 };
+use crate::backend::x11::wm::pointer_event_drain::PointerEventDrain;
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, ProtocolErrorClass,
@@ -516,6 +517,7 @@ pub struct XcbBackend {
     cursor_provider: Box<dyn CursorProvider>,
     color_allocator: Box<dyn ColorAllocator>,
     pending: VecDeque<BackendEvent>,
+    pointer_drain: Arc<PointerEventDrain>,
     interaction: Option<XcbInteraction>,
     shared_compositor_conn: Option<Arc<XcbSharedCompositorConnection>>,
     compositor: Option<XcbSharedCompositor>,
@@ -607,6 +609,16 @@ fn raw_key_event(event: &xcb::Event) -> RawKeyEvent {
             synthetic: event.response_type() & 0x80 != 0,
         }),
         _ => RawKeyEvent::Other,
+    }
+}
+
+fn pointer_release_event(target: HitTarget, event: &x::ButtonReleaseEvent) -> BackendEvent {
+    BackendEvent::ButtonRelease {
+        target,
+        detail: event.detail(),
+        time: event.time(),
+        root_x: f64::from(event.root_x()),
+        root_y: f64::from(event.root_y()),
     }
 }
 
@@ -788,9 +800,15 @@ mod key_repeat_tests {
 /// generic fd source can sleep indefinitely even though an event is ready.
 struct XcbEventSource {
     conn: Arc<xcb::Connection>,
+    pointer_drain: Arc<PointerEventDrain>,
     prefetched: Vec<(xcb::Event, bool)>,
     key_repeat: ClassicKeyRepeat,
     wake_token: Option<Token>,
+}
+
+enum XcbSourceEvent {
+    Events(Vec<(xcb::Event, bool)>),
+    PointerEventsDrained(u64),
 }
 
 /// The log level for an asynchronous protocol error, graded by the rule the
@@ -821,9 +839,10 @@ fn xcb_async_protocol_error_level(error: &xcb::ProtocolError) -> log::Level {
 }
 
 impl XcbEventSource {
-    fn new(conn: Arc<xcb::Connection>) -> Self {
+    fn new(conn: Arc<xcb::Connection>, pointer_drain: Arc<PointerEventDrain>) -> Self {
         Self {
             conn,
+            pointer_drain,
             prefetched: Vec::new(),
             key_repeat: ClassicKeyRepeat::default(),
             wake_token: None,
@@ -831,11 +850,17 @@ impl XcbEventSource {
     }
 
     fn prefetch_queued_before_sleep(&mut self) -> XcbResult<bool> {
+        let mut remaining = XCB_EVENT_BATCH_LIMIT;
+        self.prefetch_queued_with_budget(&mut remaining)
+    }
+
+    fn prefetch_queued_with_budget(&mut self, remaining: &mut usize) -> XcbResult<bool> {
         if !self.prefetched.is_empty() {
             return Ok(true);
         }
 
-        for _ in 0..XCB_EVENT_BATCH_LIMIT {
+        while *remaining > 0 {
+            *remaining -= 1;
             match self.conn.poll_for_queued_event() {
                 Ok(Some(event)) => {
                     let repeat = self.key_repeat.observe(raw_key_event(&event));
@@ -865,7 +890,7 @@ impl XcbEventSource {
 }
 
 impl EventSource for XcbEventSource {
-    type Event = Vec<(xcb::Event, bool)>;
+    type Event = XcbSourceEvent;
     type Metadata = ();
     type Ret = ();
     type Error = BackendError;
@@ -883,8 +908,11 @@ impl EventSource for XcbEventSource {
     {
         let conn = &self.conn;
         let key_repeat = &mut self.key_repeat;
-        let events =
-            collect_xcb_event_batch(&mut self.prefetched, || match conn.poll_for_event() {
+        let mut remaining =
+            XCB_EVENT_BATCH_LIMIT - self.prefetched.len().min(XCB_EVENT_BATCH_LIMIT);
+        let events = collect_xcb_event_batch(&mut self.prefetched, || {
+            remaining -= 1;
+            match conn.poll_for_event() {
                 Ok(Some(event)) => {
                     let repeat = key_repeat.observe(raw_key_event(&event));
                     XcbBatchPoll::Event((event, repeat))
@@ -902,9 +930,18 @@ impl EventSource for XcbEventSource {
                     key_repeat.observe(RawKeyEvent::Other);
                     XcbBatchPoll::Fatal(xcb_err(error))
                 }
-            })?;
+            }
+        })?;
         if !events.is_empty() {
-            callback(events, &mut ());
+            callback(XcbSourceEvent::Events(events), &mut ());
+        }
+        // Delivering the batch may perform synchronous replies and prefetch
+        // more input. Only the post-callback empty check can satisfy a probe.
+        if self.pointer_drain.requested() {
+            let empty = !self.prefetch_queued_with_budget(&mut remaining)?;
+            if let Some(token) = self.pointer_drain.complete_if_empty(empty) {
+                callback(XcbSourceEvent::PointerEventsDrained(token), &mut ());
+            }
         }
         Ok(PostAction::Continue)
     }
@@ -913,6 +950,7 @@ impl EventSource for XcbEventSource {
         if !self
             .prefetch_queued_before_sleep()
             .map_err(|error| calloop::Error::OtherError(Box::new(error)))?
+            && !self.pointer_drain.requested()
         {
             return Ok(None);
         }
@@ -1332,7 +1370,13 @@ impl XcbBackend {
             numlock_mask.clone(),
             managed_unmaps.clone(),
         ));
-        let input_ops = Box::new(XcbInputOps::new(conn.clone(), ids.clone(), root));
+        let pointer_drain = Arc::new(PointerEventDrain::default());
+        let input_ops = Box::new(XcbInputOps::new(
+            conn.clone(),
+            ids.clone(),
+            root,
+            pointer_drain.clone(),
+        ));
         let property_ops = Box::new(XcbPropertyOps::new(conn.clone(), ids.clone(), atoms));
         let output_ops = Box::new(XcbOutputOps::new(
             conn.clone(),
@@ -1445,6 +1489,7 @@ impl XcbBackend {
             cursor_provider,
             color_allocator,
             pending: VecDeque::new(),
+            pointer_drain,
             interaction: None,
             shared_compositor_conn,
             compositor,
@@ -1851,12 +1896,10 @@ impl XcbBackend {
                 root_y: ev.root_y() as f64,
                 time: ev.time(),
             }),
-            xcb::Event::X(x::Event::ButtonRelease(ev)) => Some(BackendEvent::ButtonRelease {
-                target: self.hit_target(ev.event(), ev.child()),
-                time: ev.time(),
-                root_x: ev.root_x() as f64,
-                root_y: ev.root_y() as f64,
-            }),
+            xcb::Event::X(x::Event::ButtonRelease(ev)) => Some(pointer_release_event(
+                self.hit_target(ev.event(), ev.child()),
+                &ev,
+            )),
             xcb::Event::X(x::Event::MotionNotify(ev)) => Some(BackendEvent::MotionNotify {
                 target: self.hit_target(ev.event(), ev.child()),
                 root_x: ev.root_x() as f64,
@@ -2732,31 +2775,46 @@ impl Backend for XcbBackend {
         }
 
         handle
-            .insert_source(XcbEventSource::new(self.conn.clone()), |events, _, data| {
-                data.compositor_frame_consumed_this_dispatch = false;
-                let mut pending_motion = None;
-                let mut pending_configure = None;
-                for (event, repeat) in events {
-                    if let Some(mapped) = data.backend.map_event(event, repeat) {
-                        data.dispatch_backend_event(
-                            mapped,
-                            &mut pending_motion,
-                            &mut pending_configure,
-                            "XCB event",
-                        );
+            .insert_source(
+                XcbEventSource::new(self.conn.clone(), self.pointer_drain.clone()),
+                |event, _, data| {
+                    data.compositor_frame_consumed_this_dispatch = false;
+                    let events = match event {
+                        XcbSourceEvent::Events(events) => events,
+                        XcbSourceEvent::PointerEventsDrained(token) => {
+                            if let Err(error) = data.handler.handle_event(
+                                data.backend,
+                                BackendEvent::PointerEventsDrained { token },
+                            ) {
+                                log::error!("Error handling pointer queue fence: {error}");
+                            }
+                            return;
+                        }
+                    };
+                    let mut pending_motion = None;
+                    let mut pending_configure = None;
+                    for (event, repeat) in events {
+                        if let Some(mapped) = data.backend.map_event(event, repeat) {
+                            data.dispatch_backend_event(
+                                mapped,
+                                &mut pending_motion,
+                                &mut pending_configure,
+                                "XCB event",
+                            );
+                        }
+                        while let Some(mapped) = data.backend.pending.pop_front() {
+                            data.dispatch_backend_event(
+                                mapped,
+                                &mut pending_motion,
+                                &mut pending_configure,
+                                "queued XCB event",
+                            );
+                        }
                     }
-                    while let Some(mapped) = data.backend.pending.pop_front() {
-                        data.dispatch_backend_event(
-                            mapped,
-                            &mut pending_motion,
-                            &mut pending_configure,
-                            "queued XCB event",
-                        );
-                    }
-                }
-                data.flush_pending_motion(&mut pending_motion, "XCB event");
-                data.flush_pending_configure(&mut pending_configure, "XCB event");
-            })
+                    data.flush_pending_motion(&mut pending_motion, "XCB event");
+                    data.flush_pending_configure(&mut pending_configure, "XCB event");
+                },
+            )
             .map_err(|e| BackendError::Message(format!("Failed to insert XCB source: {e}")))?;
 
         let signals = Signals::new(&[Signal::SIGCHLD])?;
@@ -3533,15 +3591,29 @@ struct XcbInputOps {
     conn: Arc<xcb::Connection>,
     ids: XcbIdRegistry,
     root: x::Window,
+    pointer_drain: Arc<PointerEventDrain>,
 }
 
 impl XcbInputOps {
-    fn new(conn: Arc<xcb::Connection>, ids: XcbIdRegistry, root: x::Window) -> Self {
-        Self { conn, ids, root }
+    fn new(
+        conn: Arc<xcb::Connection>,
+        ids: XcbIdRegistry,
+        root: x::Window,
+        pointer_drain: Arc<PointerEventDrain>,
+    ) -> Self {
+        Self {
+            conn,
+            ids,
+            root,
+            pointer_drain,
+        }
     }
 }
 
 impl InputOps for XcbInputOps {
+    fn request_pointer_event_drain(&self) -> Option<u64> {
+        Some(self.pointer_drain.request())
+    }
     fn set_cursor(&self, _kind: StdCursorKind) -> XcbResult<()> {
         Ok(())
     }
@@ -6237,6 +6309,193 @@ mod parity_tests {
     const X11_COMPOSITOR_POSTPROCESS_SRC: &str = include_str!("../x11/compositor/postprocess.rs");
 
     #[test]
+    fn native_pointer_queue_fence_preserves_release_payloads_and_reply_prefetch() {
+        use super::{PointerEventDrain, XcbEventSource, XcbSourceEvent, pointer_release_event};
+        use crate::backend::api::HitTarget;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use x11rb::protocol::xproto::{self, ConnectionExt, EventMask};
+        use xcb::Xid;
+
+        #[derive(Default)]
+        struct Observed {
+            releases: Vec<BackendEvent>,
+            fences: Vec<(u64, usize)>,
+            inject_on_motion: bool,
+            injected_token: Option<u64>,
+        }
+
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let (conn, screen) = xcb::Connection::connect(Some(x11.name())).unwrap();
+        let conn = Arc::new(conn);
+        let root = conn
+            .get_setup()
+            .roots()
+            .nth(screen as usize)
+            .unwrap()
+            .root();
+        conn.check_request(conn.send_request_checked(&x::ChangeWindowAttributes {
+            window: root,
+            value_list: &[x::Cw::EventMask(
+                x::EventMask::BUTTON_RELEASE | x::EventMask::POINTER_MOTION,
+            )],
+        }))
+        .unwrap();
+        let (driver, _) = x11rb::connect(Some(x11.name())).unwrap();
+        let driver = Arc::new(driver);
+        let drain = Arc::new(PointerEventDrain::default());
+        let source = XcbEventSource::new(conn.clone(), drain.clone());
+        let mut event_loop = calloop::EventLoop::<Observed>::try_new().unwrap();
+        let callback_conn = conn.clone();
+        let callback_driver = driver.clone();
+        let callback_drain = drain.clone();
+        event_loop
+            .handle()
+            .insert_source(source, move |event, _, observed| {
+                match event {
+                    XcbSourceEvent::PointerEventsDrained(token) => {
+                        observed.fences.push((token, observed.releases.len()));
+                    }
+                    XcbSourceEvent::Events(events) => {
+                        for (event, _) in events {
+                            match event {
+                                xcb::Event::X(x::Event::ButtonRelease(release)) => {
+                                    assert!(
+                                        pointer_hit_window(
+                                            root.resource_id(),
+                                            None,
+                                            release.event().resource_id(),
+                                            release.child().resource_id()
+                                        )
+                                        .is_none()
+                                    );
+                                    observed.releases.push(pointer_release_event(
+                                        HitTarget::Background { output: None },
+                                        &release,
+                                    ));
+                                }
+                                xcb::Event::X(x::Event::MotionNotify(_))
+                                    if observed.inject_on_motion =>
+                                {
+                                    observed.inject_on_motion = false;
+                                    callback_driver
+                                        .send_event(
+                                            false,
+                                            root.resource_id(),
+                                            EventMask::BUTTON_RELEASE,
+                                            xproto::ButtonReleaseEvent {
+                                                response_type: xproto::BUTTON_RELEASE_EVENT,
+                                                detail: 3,
+                                                root: root.resource_id(),
+                                                event: root.resource_id(),
+                                                root_x: -17,
+                                                root_y: 213,
+                                                time: 9999,
+                                                same_screen: true,
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .unwrap();
+                                    callback_driver.get_input_focus().unwrap().reply().unwrap();
+                                    // The synchronous callback fills libxcb's queue
+                                    // after this dispatch collected its original batch.
+                                    callback_conn
+                                        .wait_for_reply(
+                                            callback_conn.send_request(&x::GetInputFocus {}),
+                                        )
+                                        .unwrap();
+                                    observed.injected_token = Some(callback_drain.request());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|error| error.error)
+            .unwrap();
+
+        for index in 0..65_u32 {
+            driver
+                .send_event(
+                    false,
+                    root.resource_id(),
+                    EventMask::BUTTON_RELEASE,
+                    xproto::ButtonReleaseEvent {
+                        response_type: xproto::BUTTON_RELEASE_EVENT,
+                        detail: (index % 3 + 1) as u8,
+                        root: root.resource_id(),
+                        event: root.resource_id(),
+                        root_x: index as i16 - 200,
+                        root_y: 317,
+                        time: 1000 + index,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        driver.get_input_focus().unwrap().reply().unwrap();
+        conn.wait_for_reply(conn.send_request(&x::GetInputFocus {}))
+            .unwrap();
+        let token = drain.request();
+        let mut observed = Observed::default();
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert_eq!(observed.releases.len(), 64, "one bounded native dispatch");
+        assert!(
+            observed.fences.is_empty(),
+            "budget exhaustion is not a drain"
+        );
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert_eq!(observed.fences, [(token, 65)]);
+        for (index, release) in observed.releases.iter().enumerate() {
+            assert!(matches!(release, BackendEvent::ButtonRelease {
+                detail, time, root_x, root_y, ..
+            } if *detail == (index % 3 + 1) as u8 && *time == 1000 + index as u32
+                && *root_x == index as f64 - 200.0 && *root_y == 317.0));
+        }
+
+        observed = Observed {
+            inject_on_motion: true,
+            ..Default::default()
+        };
+        driver
+            .send_event(
+                false,
+                root.resource_id(),
+                EventMask::POINTER_MOTION,
+                xproto::MotionNotifyEvent {
+                    response_type: xproto::MOTION_NOTIFY_EVENT,
+                    root: root.resource_id(),
+                    event: root.resource_id(),
+                    root_x: 30,
+                    root_y: 40,
+                    same_screen: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        driver.get_input_focus().unwrap().reply().unwrap();
+        conn.wait_for_reply(conn.send_request(&x::GetInputFocus {}))
+            .unwrap();
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert!(observed.injected_token.is_some());
+        assert!(observed.releases.is_empty() && observed.fences.is_empty());
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert_eq!(observed.fences, [(observed.injected_token.unwrap(), 1)]);
+        assert!(matches!(
+            observed.releases[0],
+            BackendEvent::ButtonRelease {
+                detail: 3,
+                time: 9999,
+                root_x: -17.0,
+                root_y: 213.0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn root_pointer_warp_round_trip() {
         use super::{InputOps, XcbInputOps};
         use std::sync::Arc;
@@ -6249,7 +6508,12 @@ mod parity_tests {
             .nth(screen as usize)
             .unwrap()
             .root();
-        let ops = XcbInputOps::new(Arc::new(conn), XcbIdRegistry::new(1), root);
+        let ops = XcbInputOps::new(
+            Arc::new(conn),
+            XcbIdRegistry::new(1),
+            root,
+            Default::default(),
+        );
         let previous = ops.get_pointer_position().unwrap();
         for point in [(40.0, 50.0), (160.0, 120.0)] {
             ops.warp_pointer(point.0, point.1).unwrap();
@@ -6671,9 +6935,12 @@ mod parity_tests {
             assert_eq!(level(&error), log::Level::Warn, "{what}");
         }
 
-        // Both event-loop sites grade through it instead of logging an error.
+        // The sleep hook delegates to the same bounded prefetch used by the
+        // post-callback drain fence. Both polling sites grade errors alike.
+        let sleep = impl_body_after(XCB_BACKEND_SRC, "fn prefetch_queued_before_sleep(");
+        assert!(sleep.contains("self.prefetch_queued_with_budget(&mut remaining)"));
         let error_log = guarded_production_needle(format!("log::{}!(\"", "error"));
-        for site in ["fn prefetch_queued_before_sleep(", "fn process_events<F>("] {
+        for site in ["fn prefetch_queued_with_budget(", "fn process_events<F>("] {
             let body = impl_body_after(XCB_BACKEND_SRC, site);
             assert!(
                 body.contains("xcb_async_protocol_error_level(&error)")
@@ -8012,7 +8279,7 @@ mod parity_tests {
                 && x11rb_bounded_poll.contains("X11BoundedPoll::BudgetExhausted"),
             "x11rb ignored raw events must consume a finite fairness budget"
         );
-        let x11rb_prefetch = impl_body_after(X11RB_BACKEND_SRC, "fn prefetch_before_sleep");
+        let x11rb_prefetch = impl_body_after(X11RB_BACKEND_SRC, "fn prefetch_with_budget");
         assert!(
             x11rb_prefetch.contains("self.pending.push_front(event)")
                 && x11rb_prefetch.contains("X11BoundedPoll::BudgetExhausted => Ok(true)"),
@@ -8034,7 +8301,7 @@ mod parity_tests {
                 && xcb_source.contains("self.wake_token"),
             "XCB must synthesize a calloop readiness event when libxcb's queue is non-empty"
         );
-        let xcb_prefetch = impl_body_after(XCB_BACKEND_SRC, "fn prefetch_queued_before_sleep");
+        let xcb_prefetch = impl_body_after(XCB_BACKEND_SRC, "fn prefetch_queued_with_budget");
         assert!(
             xcb_prefetch.contains("self.conn.poll_for_queued_event()")
                 && xcb_prefetch.contains("self.prefetched.push(event)"),
@@ -8043,12 +8310,16 @@ mod parity_tests {
         let xcb_process = impl_body_after(XCB_BACKEND_SRC, "fn process_events");
         assert!(
             xcb_process.contains("collect_xcb_event_batch(&mut self.prefetched")
-                && xcb_process.contains("callback(events, &mut ())"),
+                && xcb_process.contains("callback(XcbSourceEvent::Events(events), &mut ())"),
             "XCB dispatch must use the bounded batch while preserving its callback contract"
         );
         // Split the contract string so this assertion cannot satisfy itself
         // through include_str! when the production constructor is removed.
-        let queue_aware_ctor = ["XcbEvent", "Source::new(self.conn.clone())"].concat();
+        let queue_aware_ctor = [
+            "XcbEvent",
+            "Source::new(self.conn.clone(), self.pointer_drain.clone())",
+        ]
+        .concat();
         assert!(
             XCB_BACKEND_SRC.matches(&queue_aware_ctor).count() == 1,
             "the XCB backend must use its queue-aware source instead of a raw-fd-only Generic source"

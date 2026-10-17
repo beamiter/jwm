@@ -142,8 +142,8 @@ pub struct Jwm {
     /// `_NET_WM_MOVERESIZE` request, engaged once the pointer crosses the
     /// drag threshold. See [`mouse_handler::DragCtl`].
     pub(crate) drag_ctl: Option<mouse_handler::DragCtl>,
-    /// Owns a pointer grab only after a successful empty-desktop solar press.
-    pub(crate) solar_system_drag: Option<mouse_handler::SolarSystemDrag>,
+    /// Owns a pointer grab only after a successful desktop wallpaper press.
+    pub(crate) wallpaper_drag: Option<mouse_handler::WallpaperDrag>,
 
     /// A left press on a window-tab cell being watched as a reorder drag.
     /// Never arms a backend interaction, so it cannot collide with
@@ -1371,7 +1371,7 @@ impl Jwm {
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
-            solar_system_drag: None,
+            wallpaper_drag: None,
             tab_drag: None,
             control_slider_drag: None,
             system_ui_scroll_drag_x: None,
@@ -1707,7 +1707,7 @@ impl Jwm {
         _backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.cancel_solar_system_drag(_backend);
+        self.cancel_wallpaper_drag(_backend);
         info!("[restart] Preparing seamless restart");
         self.running.store(false, Ordering::SeqCst);
         self.is_restarting.store(true, Ordering::SeqCst);

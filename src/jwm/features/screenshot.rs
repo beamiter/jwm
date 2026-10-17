@@ -1289,7 +1289,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         screenshot_path: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.cancel_solar_system_drag(backend);
+        self.cancel_wallpaper_drag(backend);
         // End the old pointer owner before this selector acquires its grabs.
         self.cancel_pointer_drag(backend);
         let keyboard_grabbed = if let Some(root) = backend.root_window() {

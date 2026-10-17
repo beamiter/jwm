@@ -2598,7 +2598,7 @@ impl Jwm {
             // switcher when another client holds the pointer) taking over
             // from a grabbed panel simply stays more modal than it asked
             // to be, and `close_system_ui` hands both back.
-            self.cancel_solar_system_drag(backend);
+            self.cancel_wallpaper_drag(backend);
             if let Some(pointer_mask) = pointer_grab.event_mask()
                 && !backend.input_ops().grab_pointer(pointer_mask, None)?
             {
@@ -2658,7 +2658,7 @@ impl Jwm {
             return Ok(true);
         };
 
-        self.cancel_solar_system_drag(backend);
+        self.cancel_wallpaper_drag(backend);
         match backend.input_ops().grab_pointer(pointer_mask, None) {
             Ok(true) => {
                 self.features.deferred_grab = None;
@@ -3874,7 +3874,7 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
-        self.cancel_solar_system_drag(backend);
+        self.cancel_wallpaper_drag(backend);
         match backend.input_ops().grab_pointer(pointer_mask, None) {
             Ok(true) => {}
             Ok(false) => {
@@ -4035,7 +4035,7 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
-        self.cancel_solar_system_drag(backend);
+        self.cancel_wallpaper_drag(backend);
         match backend.input_ops().grab_pointer(pointer_mask, crosshair) {
             Ok(true) => {}
             Ok(false) => {
@@ -5159,7 +5159,7 @@ impl Jwm {
                     | EventMaskBits::BUTTON_RELEASE
                     | EventMaskBits::POINTER_MOTION)
                     .bits();
-                self.cancel_solar_system_drag(backend);
+                self.cancel_wallpaper_drag(backend);
                 match backend.input_ops().grab_pointer(pointer_mask, None) {
                     Ok(true) => {}
                     Ok(false) => {

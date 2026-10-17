@@ -195,6 +195,58 @@ the config file for restart persistence. Invalid axes, angles or modes reject
 the whole batch without partially changing the scene. Orientation changes
 reuse loaded textures and request a frame using the current system instant.
 
+## Drag Earth or Moon with the mouse
+
+Direct manipulation is enabled automatically for a rendered Astronomy globe
+on either X11 transport; no extra configuration or modifier key is needed.
+
+1. Place the pointer on the visible surface of Earth or Moon, on uncovered desktop.
+2. Hold the left mouse button and drag horizontally, vertically or diagonally.
+   Dragging around the edge also rolls the globe. Release and grab again to
+   continue a turn through either pole or inspect the opposite hemisphere.
+3. Release the left button to keep the resulting pose. A fixed view stays there;
+   a rotating view resumes its configured tour smoothly from that pose.
+
+Only the body under the initial press is selected. Earth and Moon keep independent
+manual orientations; if the same body appears on several outputs, those copies
+share its orientation. A press on empty sky does not begin a gesture. Existing
+window, bar, tab, modal, lock-screen and configured mouse-binding handling takes
+priority, so dragging a window or selecting text does not rotate the wallpaper.
+The feature does not create a focusable window. The initial desktop click keeps
+normal monitor-selection behavior; subsequent drag motion does not change focus
+or select another body.
+
+An active gesture captures the pointer. It may continue outside the globe,
+across an existing window or onto another output, using the original globe's
+pixel radius throughout. A virtual sphere joins a smooth outer trackball surface
+near the limb, avoiding a sudden sensitivity clamp. Equivalent motion as a
+fraction of the globe radius gives the same rotation on 1080p, 4K and portrait
+outputs. Motion is anchored to the initial press rather than accumulated from
+every input event, so coalescing a burst of mouse events does not change its
+final orientation. The release position is included even if the last motion
+was not displayed yet.
+
+While held, the selected body's decorative tour pauses at the displayed pose,
+but the actual Sun direction and lunar phase continue to use the current system
+instant. The other body and sky retain their own animation. Releasing rebases
+the selected tour at the current instant instead of snapping back to its old
+epoch orientation. Timezone changes do not add another offset to the light.
+
+The manual orientation lasts for this running session and does not rewrite
+latitude, longitude, roll or rotation-axis settings. Changing a body's configured
+orientation, fixed/rotating mode or period resets that body's manual offset;
+reloading identical values preserves it. Restart restores the configured pose
+and its current-time tour. Layout changes, output removal, unavailable rendering,
+screen locking and modal capture retire an active drag safely. Layout/material
+changes retain the current pose where possible rather than leaving a pointer
+grab attached to a disappearing canvas.
+
+Pointer updates have a separate, coalesced cadence capped at 60 Hz. Holding the
+pointer still does not keep that fast cadence running: real-light updates use
+the normal low-power schedule, and release retires the interaction wake after
+its final frame. Texture, cloud and shader resources are reused throughout a
+gesture; the background cache and sampled-bar identity follow accepted poses.
+
 ## Fixed geographic view and real daylight
 
 Every Earth canvas now defaults to `wallpaper_earth_view = "fixed"`. Latitude
@@ -202,9 +254,10 @@ Every Earth canvas now defaults to `wallpaper_earth_view = "fixed"`. Latitude
 [UNGEGN / China Institute of Toponymy](https://ungegn.un.org/dashboard/cities/details?id=2049).
 This is not a precise home/device location. Configure latitude within
 −90..90 and longitude within −180..180 (finite degrees, east positive). The
-camera and land stay fixed throughout the day; UTC, date and Earth's seasonal
-tilt move the sunlight and day/night boundary independently. All three layouts
-use the same policy. Reload/hot updates change framing without decoding textures.
+camera and land stay fixed throughout the day unless manually dragged; UTC,
+date and Earth's seasonal tilt move the sunlight and day/night boundary
+independently. All three layouts use the same policy. Reload/hot updates change
+framing without decoding textures.
 
 The explicit `"rotating"` view retains accelerated camera tours:
 `wallpaper_earth_rotation_minutes = 1440` makes one turn per day, or use 20 for
@@ -212,7 +265,8 @@ a twenty-minute tour. Existing period values remain stored, but do not move a
 fixed camera. Latitude, longitude and roll define the initial camera; the axis
 defines its full circular tour. Absolute Unix UTC time drives the phase,
 independently of timezone. Changing the period or axis may reposition the tour
-immediately; a restart at the same instant restores the same orientation.
+immediately and clears that body's manual offset. With no manual interaction,
+a restart at the same instant restores the same orientation.
 Earth's Sun direction stays in geographic coordinates while the camera moves,
 so the same geographic location keeps its real day/night state in every view.
 An accelerated tour never accelerates the physical Sun.
@@ -253,8 +307,9 @@ timezone or crossing a DST boundary therefore keeps the same physical
 illumination for the same instant. Choosing a different geographic Earth center
 changes which part of that correctly lit globe is visible.
 
-Restart/resume restores the current real phase and orientation without
-accumulating animation drift or replaying the time spent asleep. Timezone/DST
+Resume restores the current real phase and tour with any retained session
+orientation; restart restores the configured orientation. Neither accumulates
+animation drift or replays the time spent asleep. Timezone/DST
 changes request a repaint but never rotate Earth or move the Sun.
 `wallpaper_astronomy_timezone` and `wallpaper_timezone_offset_hours` remain
 compatibility settings; there is no user-facing sunrise/sunset clock. Neither
@@ -288,8 +343,8 @@ NASA/Gaia-derived galaxy backdrop retains decorative framing rather
 than representing the observer's live sky.
 
 Regular animation ticks adapt between 1 and 15 Hz. Only visible bodies whose
-views are rotating contribute their decorative speed to the cadence; fixed
-Earth and Moon still update real illumination at least once per second while
+views are rotating and are not currently held contribute their decorative speed
+to the cadence; fixed Earth and Moon still update real illumination at least once per second while
 active. Enabled prepare checks the current
 system instant and applicable timezone offset; a timezone change requests an
 immediate repaint. DPMS is sampled only while enabled, at two-second intervals. Standby,
@@ -305,7 +360,8 @@ Daily static selection continues in the background and is restored on disable.
 Transparent bars see the actual globe. Bars using sampled-wallpaper fallback
 continue to show their static sample. Frosted bars invalidate their blur cache
 on each animation update, which costs more than clear bars. Fifteen Hz bounds
-animation updates, not repaint work demanded by other windows. No GPU power
+automatic animation updates; pointer-driven poses use the separate 60 Hz cap.
+Other windows may still require additional repaints. No GPU power
 claim has been established for the user's hardware.
 
 ## Source image and usage
@@ -357,6 +413,16 @@ union coverage, fixed/rotating view separation, NOAA-reference solar positions,
 approximate sunrise/sunset, polar transitions, civil-date boundaries and invalid
 clocks. The sunrise/sunset helper is test/diagnostic-only, not extra work in each
 render frame.
+
+Pointer regressions additionally cover surface tracking in all drag directions,
+rolled and polar starting poses, off-globe motion, same-endpoint event coalescing,
+long holds, release rebasing after clock corrections, and 20,000 successive
+gestures without scale/shear drift. Renderer tests cover visible-circle hit
+testing, clipped/overlapping outputs, radius-normalized coordinates, independent
+body offsets, final-motion consumption and retirement of interaction wakeups.
+The GL/GLES script feeds the production trackball into the actual shader and
+checks geographic landmarks, current sunlight, lunar phase contours and texture
+gradients. WM tests cover desktop admission and pointer-grab ownership separately.
 
 Config/picker regressions and X11 integration run through the Cargo workspace
 with its locked dependencies. Software rendering exercises shader and framebuffer

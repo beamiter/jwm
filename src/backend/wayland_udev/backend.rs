@@ -3215,6 +3215,7 @@ impl UdevBackend {
                             } else {
                                 pending_events.lock_safe().push_back(BackendEvent::ButtonRelease {
                                     target: hit.unwrap_or(HitTarget::Background { output }),
+                                    detail: detail_btn,
                                     time: time.millis(),
                                     root_x: x,
                                     root_y: y,
@@ -3702,6 +3703,7 @@ impl UdevBackend {
                                     });
                                     pending.push_back(BackendEvent::ButtonRelease {
                                         target: HitTarget::Background { output },
+                                        detail,
                                         time: time.millis(),
                                         root_x: x,
                                         root_y: y,
