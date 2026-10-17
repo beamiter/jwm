@@ -18,6 +18,19 @@ helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common
 fn main() {
  let a:Vec<String>=std::env::args().skip(1).collect();
  let mode=&a[0]; let t:f64=a[1].parse().unwrap();
+ if mode=="earth-frame" || mode=="moon-frame" {
+  let view=astronomy::CelestialView {
+   rotating:a[3]=="true", latitude:a[4].parse().unwrap(),
+   longitude:a[5].parse().unwrap(), roll:a[6].parse().unwrap(),
+   axis:[a[7].parse().unwrap(),a[8].parse().unwrap(),a[9].parse().unwrap()],
+  };
+  let matrix=view.matrix(t,a[2].parse().unwrap());
+  let sun=if mode=="moon-frame" {
+   astronomy::transform_direction(&matrix,astronomy::lunar_phase_light(t))
+  } else {astronomy::solar_direction(t)};
+  for value in sun.iter().chain(matrix.iter()) { print!("{} ",value); }
+  println!(); return;
+ }
  if mode=="sky" {
   let r=astronomy::sky_rotation(t,a[2].parse().unwrap());
   println!("{} {}",r[0],r[1]); return;
@@ -45,6 +58,12 @@ def astronomy_values(instant,mode='earth',minutes=1440,longitude=DEFAULT_LONGITU
  args=[mode,str(instant)]
  args.extend([str(minutes),str(longitude),str(rotating).lower()] if mode=='earth' else [str(offset_seconds),str(minutes)])
  return list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),*args]).split()))
+def celestial_frame(instant,body='earth',minutes=1440,rotating=False,latitude=DEFAULT_LATITUDE,longitude=DEFAULT_LONGITUDE,roll=0,axis=(0,1,0)):
+ # Matrix order, axis normalization and lunar-light rotation all come from Rust.
+ args=[f'{body}-frame',instant,minutes,str(rotating).lower(),latitude,longitude,roll,*axis]
+ values=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),*map(str,args)]).split()))
+ assert len(values)==12 and all(math.isfinite(v) for v in values)
+ return values[:3],values[3:]
 # Invoke the production Rust geometry planner; do not copy coordinate policy to Python.
 planner=ROOT/'astronomy_plan.rs'
 planner.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\n'+r"""
@@ -115,12 +134,16 @@ for es in (False,True):
  vao=U();gl('glGenVertexArrays',None,[I,C.POINTER(U)])(1,C.byref(vao));gl('glBindVertexArray',None,[U])(vao)
  gl('glViewport',None,[I,I,I,I])(0,0,W,H)
  loc=gl('glGetUniformLocation',I,[U,C.c_char_p]); unif1i=gl('glUniform1i',None,[I,I]);unif1f=gl('glUniform1f',None,[I,F])
- assert loc(prog,b'view_latitude')>=0 and loc(prog,b'view_longitude')>=0 and loc(prog,b'sun_direction')>=0, 'physical camera/lighting uniforms are inactive'
+ assert loc(prog,b'view_to_body')>=0 and loc(prog,b'sun_direction')>=0, 'physical camera/lighting uniforms are inactive'
+ def upload_view(program,matrix):
+  gl('glUniformMatrix3fv',None,[I,I,C.c_ubyte,C.POINTER(F)])(loc(program,b'view_to_body'),1,0,(F*9)(*matrix))
+ def fixed_view(program,latitude,longitude,roll=0):
+  upload_view(program,celestial_frame(0,latitude=latitude,longitude=longitude,roll=roll)[1])
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),W,H)
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),0,0)
  unif1f(loc(prog,b'sphere_radius'),layout_plan(W,H,[],False)[0]['radius'])
  # Historical controls use the exact previous 0.18-radian camera latitude.
- unif1f(loc(prog,b'view_latitude'),0.18)
+ fixed_view(prog,math.degrees(0.18),0)
  textures={}
  param=gl('glTexParameteri',None,[U,U,I])
  for body,asset in [('earth',os.environ.get('ASTRONOMY_TEST_TEXTURE',str(REPO/'assets/astronomy/earth-nasa-october.jpg'))),('moon',str(REPO/'assets/astronomy/moon-nasa-lroc.jpg'))]:
@@ -160,7 +183,7 @@ for es in (False,True):
  cases=[(h,z) for z in (0,8) for h in (0,6,12,18)]+[(12+1/60,0),(12+1,0),(6+1/54000,0),(6+1/3600,0)]
  for hour,zone in cases:
   values=astronomy_values(BASE+hour*3600,mode='legacy-clock',offset_seconds=zone*3600)
-  gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3]);unif1f(loc(prog,b'view_longitude'),values[3])
+  gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3]);fixed_view(prog,math.degrees(0.18),math.degrees(values[3]))
   gl('glDrawArrays',None,[U,I,I])(4,0,3)
   buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
   assert gl('glGetError',U,[])()==0
@@ -183,8 +206,8 @@ for es in (False,True):
    gl('glUniform2f',None,[I,F,F])(loc(hard_program,b'resolution'),W,H)
    radius=layout_plan(W,H,[],False)[0]['radius']
    unif1f(loc(hard_program,b'sphere_radius'),radius)
-   unif1f(loc(hard_program,b'view_latitude'),0.18)
-   gl('glUniform3f',None,[I,F,F,F])(loc(hard_program,b'sun_direction'),*values[:3]);unif1f(loc(hard_program,b'view_longitude'),values[3])
+   fixed_view(hard_program,math.degrees(0.18),math.degrees(values[3]))
+   gl('glUniform3f',None,[I,F,F,F])(loc(hard_program,b'sun_direction'),*values[:3])
    unif1i(loc(hard_program,b'earth_map'),0)
    unif1i(loc(hard_program,b'cloud_map'),1);unif1i(loc(hard_program,b'clouds_enabled'),1)
    unif1i(loc(hard_program,b'sky_map'),2);unif1i(loc(hard_program,b'sky_enabled'),int(sky_available))
@@ -238,8 +261,8 @@ for es in (False,True):
  gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),0,0)
  unif1f(loc(prog,b'sphere_radius'),layout_plan(5120,1440,[],False)[0]['radius'])
  values=astronomy_values(PREVIEW_INSTANT)
- unif1f(loc(prog,b'view_latitude'),math.radians(DEFAULT_LATITUDE))
- gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3]);unif1f(loc(prog,b'view_longitude'),values[3])
+ fixed_view(prog,DEFAULT_LATITUDE,math.degrees(values[3]))
+ gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*values[:3])
  gl('glDrawArrays',None,[U,I,I])(4,0,3)
  buf=(C.c_ubyte*(5120*1440*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,5120,1440,0x1908,0x1401,buf)
  assert gl('glGetError',U,[])()==0
@@ -254,7 +277,7 @@ for es in (False,True):
  enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
  scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
  clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
- def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=1440,moon_minutes=39343,offset_seconds=0,sky_enabled=None,earth_rotating=False,earth_latitude=DEFAULT_LATITUDE,earth_longitude=DEFAULT_LONGITUDE,frozen_sun=None,legacy_earth=False,sky_minutes=0,sky_seconds=None):
+ def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=1440,moon_minutes=39343,offset_seconds=0,sky_enabled=None,earth_rotating=False,earth_latitude=DEFAULT_LATITUDE,earth_longitude=DEFAULT_LONGITUDE,frozen_sun=None,legacy_earth=False,sky_minutes=0,sky_seconds=None,earth_roll=0,earth_axis=(0,1,0),moon_latitude=math.degrees(0.18),moon_longitude=0,moon_roll=0,moon_axis=(0,1,0),moon_rotating=True):
   target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
   assert current(d,target,target,ctx)
   gl('glViewport',None,[I,I,I,I])(0,0,width,height)
@@ -272,14 +295,16 @@ for es in (False,True):
    body='earth' if materials is None else materials[tuple(draw_plan['origin'])]
    unif1i(loc(prog,b'moon_material'),int(body=='moon'))
    gl('glBindTexture',None,[U,U])(0x0DE1,textures[body])
-   if body=='moon' or legacy_earth:
-    values=astronomy_values(instant,mode='moon' if body=='moon' else 'legacy-studio',minutes=moon_minutes if body=='moon' else earth_minutes,offset_seconds=0 if body=='moon' else offset_seconds)
-    latitude=0.18
+   if body=='moon':
+    lighting,matrix=celestial_frame(instant,body='moon',minutes=moon_minutes,rotating=moon_rotating,latitude=moon_latitude,longitude=moon_longitude,roll=moon_roll,axis=moon_axis)
+   elif legacy_earth:
+    values=astronomy_values(instant,mode='legacy-studio',minutes=earth_minutes,offset_seconds=offset_seconds)
+    lighting=values[:3]
+    matrix=celestial_frame(instant,latitude=math.degrees(0.18),longitude=math.degrees(values[3]))[1]
    else:
-    values=astronomy_values(instant,minutes=earth_minutes,longitude=earth_longitude,rotating=earth_rotating)
-    latitude=math.radians(earth_latitude)
-   gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*(frozen_sun if body=='earth' and frozen_sun is not None else values[:3]))
-   unif1f(loc(prog,b'view_longitude'),values[3]);unif1f(loc(prog,b'view_latitude'),latitude)
+    lighting,matrix=celestial_frame(instant,minutes=earth_minutes,longitude=earth_longitude,latitude=earth_latitude,roll=earth_roll,axis=earth_axis,rotating=earth_rotating)
+   gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*(frozen_sun if body=='earth' and frozen_sun is not None else lighting))
+   upload_view(prog,matrix)
    enable(0x0C11);scissor(*draw_plan['clip'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),*draw_plan['origin'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),*draw_plan['size'])
@@ -311,12 +336,18 @@ for es in (False,True):
  checker_texture=upload_filter_fixture(checker)
  average_texture=upload_filter_fixture(Image.new('RGBA',(1,1),(128,128,128,255)))
  earth_texture=textures['earth'];filter_metrics=[]
- for label,longitude,latitude in [('equator',0,0),('longitude-seam',180,0),('north-pole',0,90),('south-pole',0,-90)]:
-  lat,lon=math.radians(latitude),math.radians(longitude)
-  lighting=(math.sin(lon)*math.cos(lat),math.sin(lat),math.cos(lon)*math.cos(lat))
+ for label,longitude,latitude,roll,axis,rotating in [
+  ('equator',0,0,0,(0,1,0),False),('longitude-seam',180,0,0,(0,1,0),False),
+  ('north-pole',0,90,0,(0,1,0),False),('south-pole',0,-90,0,(0,1,0),False),
+  ('rolled-seam',180,0,67,(0,1,0),False),
+  ('oblique-spin',113,37,28,(.25,.5,.75),True),
+  ('reverse-polar-spin',-125,87,-72,(-.25,-.5,-.75),True),
+ ]:
+  _,matrix=celestial_frame(BASE+120,longitude=longitude,latitude=latitude,roll=roll,axis=axis,rotating=rotating,minutes=20)
+  lighting=matrix[6:9]
   def filter_frame(texture):
    textures['earth']=texture
-   return layout_image(256,192,[(0,0,256,192)],clouds_enabled=False,sky_enabled=False,earth_latitude=latitude,earth_longitude=longitude,frozen_sun=lighting)[0]
+   return layout_image(256,192,[(0,0,256,192)],clouds_enabled=False,sky_enabled=False,earth_latitude=latitude,earth_longitude=longitude,earth_roll=roll,earth_axis=axis,earth_rotating=rotating,earth_minutes=20,frozen_sun=lighting)[0]
   filtered=filter_frame(checker_texture)
   expected=filter_frame(average_texture)
   assert current(d,surf,surf,ctx)
@@ -332,7 +363,7 @@ for es in (False,True):
   assert unfiltered_error>5 and filtered_error<unfiltered_error/10, (label,'mipmap negative control did not alias',unfiltered_error)
   name=f'{kind}-texture-minification-{label}.png';filtered.save(ROOT/name)
   unfiltered.save(ROOT/f'{kind}-texture-minification-{label}-unfiltered.png')
-  filter_metrics.append({'file':name,'view_longitude':longitude,'view_latitude':latitude,'filtered_mean_error':filtered_error,'unfiltered_mean_error':unfiltered_error})
+  filter_metrics.append({'file':name,'view_longitude':longitude,'view_latitude':latitude,'view_roll':roll,'rotation_axis':axis,'rotating':rotating,'filtered_mean_error':filtered_error,'unfiltered_mean_error':unfiltered_error})
  textures['earth']=earth_texture
  assert current(d,surf,surf,ctx)
  gl('glBindTexture',None,[U,U])(0x0DE1,earth_texture)
@@ -620,6 +651,146 @@ void main() {
   if label=='last-quarter': assert left > right*2, (label,left,right)
  assert sum(lunar_frames[0][k] for k in ('left_brightness','right_brightness')) < sum(lunar_frames[3][k] for k in ('left_brightness','right_brightness'))*0.2, 'new moon too bright'
  results[kind]['lunar_phases']={'frames':lunar_frames,'waxing_right_waning_left':'PASS','new_full_contrast':'PASS'}
+ # Full 3D camera regression: production Rust supplies every matrix and light.
+ # These frames cover all signed cardinal axes, oblique axes, both poles and
+ # screen roll. A uniform lunar albedo isolates the actual phase contour from
+ # the deliberately moving texture, rather than comparing different maria.
+ orientation_cases=[
+  ('equator',0,0,0,(0,1,0),False),
+  ('roll-90',23.13,113.28,90,(0,1,0),False),
+  ('roll-180',23.13,113.28,180,(0,1,0),False),
+  ('north-pole',90,-90,35,(0,1,0),False),
+  ('south-pole',-90,170,-37,(0,1,0),False),
+  ('spin-x',23.13,113.28,17,(1,0,0),True),
+  ('spin-minus-x',23.13,113.28,17,(-1,0,0),True),
+  ('spin-y',23.13,113.28,17,(0,1,0),True),
+  ('spin-minus-y',23.13,113.28,17,(0,-1,0),True),
+  ('spin-z',23.13,113.28,17,(0,0,1),True),
+  ('spin-minus-z',23.13,113.28,17,(0,0,-1),True),
+  ('oblique',63,-157,128,(.25,.5,.75),True),
+  ('oblique-reverse',63,-157,128,(-.25,-.5,-.75),True),
+ ]
+ orientation_instant=datetime.datetime.fromisoformat('2026-10-16T11:02:17+00:00').timestamp()
+ orientation_frames=[];orientation_images=[];orientation_suns=[]
+ for label,latitude,longitude,roll,axis,rotating in orientation_cases:
+  options={'earth_latitude':latitude,'earth_longitude':longitude,'earth_roll':roll,'earth_axis':axis,'earth_rotating':rotating,'earth_minutes':20,
+           'moon_latitude':latitude,'moon_longitude':longitude,'moon_roll':roll,'moon_axis':axis,'moon_rotating':rotating,'moon_minutes':20}
+  output,_=layout_image(640,240,small_outputs,materials=materials,instant=orientation_instant,**options)
+  filename=f'{kind}-orientation-{label}.png';output.save(ROOT/filename)
+  sun,matrix=celestial_frame(orientation_instant,minutes=20,latitude=latitude,longitude=longitude,roll=roll,axis=axis,rotating=rotating)
+  orientation_suns.append(sun)
+  orientation_frames.append({'file':filename,'case':label,'latitude':latitude,'longitude':longitude,'roll':roll,'axis':axis,'rotating':rotating,'matrix_column_major':matrix,'earth_sun_body':sun})
+  orientation_images.append((output,[f'{label} | Earth + Moon | {kind}',f'latitude {latitude:g}, longitude {longitude:g}, roll {roll:g} | axis {axis}']))
+ assert all(sun==orientation_suns[0] for sun in orientation_suns), 'Earth sunlight depends on a presentation axis or roll'
+ assert len({hashlib.sha256(im.tobytes()).hexdigest() for im,_ in orientation_images})==len(orientation_cases), 'a signed axis, pole or roll case did not change the visible geography'
+ contact_sheet(orientation_images,f'{kind}-all-direction-contact-sheet.png',columns=3)
+ moon_texture=textures['moon']
+ uniform_moon=upload_filter_fixture(Image.new('RGBA',(1,1),(160,160,160,255)))
+ textures['moon']=uniform_moon
+ phase_contour_metrics=[]
+ for phase_stamp in ('2026-10-18T16:12:00+00:00','2026-10-26T04:12:00+00:00','2026-11-01T20:28:00+00:00'):
+  instant=datetime.datetime.fromisoformat(phase_stamp).timestamp()
+  phase_reference=None;phase_max_error=0
+  for label,latitude,longitude,roll,axis,rotating in orientation_cases:
+   output,_=layout_image(320,240,[(0,0,320,240)],materials={(0,0):'moon'},instant=instant,moon_minutes=20,moon_latitude=latitude,moon_longitude=longitude,moon_roll=roll,moon_axis=axis,moon_rotating=rotating)
+   if phase_reference is None: phase_reference=output
+   delta=ImageChops.difference(phase_reference.convert('RGB'),output.convert('RGB'))
+   maximum=max(v[1] for v in delta.getextrema());phase_max_error=max(phase_max_error,maximum)
+   assert maximum<=1, (phase_stamp,label,'decorative orientation changed the real lunar phase contour',maximum)
+  phase_contour_metrics.append({'utc':phase_stamp,'orientations':len(orientation_cases),'max_abs_channel':phase_max_error})
+ textures['moon']=moon_texture
+ assert current(d,surf,surf,ctx)
+ gl('glDeleteTextures',None,[I,C.POINTER(U)])(1,C.byref(U(uniform_moon)))
+ # Read geographic normals and light from the real shader transform. Inverse
+ # projection below uses the transpose of Rust's orthonormal matrix, never an
+ # independently reimplemented yaw/pitch/roll formula.
+ def transform(matrix,vector):
+  return tuple(sum(matrix[column*3+row]*vector[column] for column in range(3)) for row in range(3))
+ def inverse_transform(matrix,vector):
+  return tuple(sum(matrix[column*3+row]*vector[row] for row in range(3)) for column in range(3))
+ def unit(vector):
+  length=math.sqrt(sum(v*v for v in vector));return tuple(v/length for v in vector)
+ def uv_of(vector):
+  x,y,z=unit(vector);return ((.5+math.atan2(x,z)/math.tau)%1,.5-math.asin(max(-1,min(1,y)))/math.pi)
+ probe_source=source.split('void main() {',1)[0]+r"""
+uniform vec3 probe_normal;
+uniform vec3 probe_dx;
+uniform vec3 probe_dy;
+uniform vec4 probe_expected_gradients;
+uniform bool gradient_probe;
+void main() {
+ vec3 n=earth_normal(probe_normal);
+ if (gradient_probe) {
+  vec2 dx=equirect_gradient(n,earth_normal(probe_dx));
+  vec2 dy=equirect_gradient(n,earth_normal(probe_dy));
+  vec4 error=abs(vec4(dx,dy)-probe_expected_gradients);
+  bool ok=max(max(error.x,error.y),max(error.z,error.w))<.00002;
+  frag_color=ok?vec4(0,1,0,1):vec4(1,0,0,1);
+ } else {
+  frag_color=vec4(n*.5+.5,dot(n,normalize(sun_direction))*.5+.5);
+ }
+}
+"""
+ probe_fragment=compile(probe_source,0x8B30);probe_program=gl('glCreateProgram',U,[])()
+ attach(probe_program,vs);attach(probe_program,probe_fragment);gl('glLinkProgram',None,[U])(probe_program)
+ linked=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(probe_program,0x8B82,C.byref(linked));assert linked.value
+ gl('glUseProgram',None,[U])(probe_program);gl('glViewport',None,[I,I,I,I])(0,0,1,1);disable(0x0C11)
+ def probe_pixel(matrix,sun,normal,derivatives=None,expected_gradients=None):
+  upload_view(probe_program,matrix)
+  for name,vector in [('sun_direction',sun),('probe_normal',normal)]:
+   gl('glUniform3f',None,[I,F,F,F])(loc(probe_program,name.encode()),*vector)
+  unif1i(loc(probe_program,b'gradient_probe'),int(derivatives is not None))
+  if derivatives is not None:
+   for name,vector in zip(('probe_dx','probe_dy'),derivatives):
+    gl('glUniform3f',None,[I,F,F,F])(loc(probe_program,name.encode()),*vector)
+   gl('glUniform4f',None,[I,F,F,F,F])(loc(probe_program,b'probe_expected_gradients'),*expected_gradients)
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  pixel=(C.c_ubyte*4)();read(0,0,1,1,0x1908,0x1401,pixel)
+  assert gl('glGetError',U,[])()==0
+  return list(pixel)
+ geographic_probes=[(0,0,1),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,-1),unit((.7,.4,-.6))]
+ geographic_checks=0;gradient_checks=0;moon_light_checks=0
+ for label,latitude,longitude,roll,axis,rotating in orientation_cases:
+  sun,matrix=celestial_frame(orientation_instant,minutes=20,latitude=latitude,longitude=longitude,roll=roll,axis=axis,rotating=rotating)
+  for body_normal in geographic_probes:
+   actual=probe_pixel(matrix,sun,inverse_transform(matrix,body_normal))
+   lighting=sum(v*s for v,s in zip(body_normal,unit(sun)))
+   expected=[round((v*.5+.5)*255) for v in (*body_normal,lighting)]
+   assert max(abs(a-b) for a,b in zip(actual,expected))<=1, (label,'UTC sunlight changed for a geographic location',actual,expected)
+   geographic_checks+=1
+  moon_sun,moon_matrix=celestial_frame(orientation_instant,body='moon',minutes=20,latitude=latitude,longitude=longitude,roll=roll,axis=axis,rotating=rotating)
+  phase_sun,_=celestial_frame(orientation_instant,body='moon',latitude=0,longitude=0)
+  for view_normal in ((0,0,1),(.6,0,.8),(-.6,0,.8),(0,.6,.8),(0,-.6,.8)):
+   actual=probe_pixel(moon_matrix,moon_sun,view_normal)[3]
+   expected=round((sum(v*s for v,s in zip(view_normal,unit(phase_sun)))*.5+.5)*255)
+   assert abs(actual-expected)<=1, (label,'Moon screen-space phase light changed',actual,expected)
+   moon_light_checks+=1
+  # Independent central differences of spherical UV coordinates catch an
+  # unrotated derivative even when the sampled centre normal is correct.
+  for x,y in ((.13,.07),(-.31,.22),(.41,-.36)):
+   normal=(x,y,math.sqrt(1-x*x-y*y));scale=.007
+   derivatives=((scale,0,-x*scale/normal[2]),(0,scale,-y*scale/normal[2]))
+   expected=[];epsilon=.001
+   for derivative in derivatives:
+    before=uv_of(transform(matrix,tuple(n-epsilon*dn for n,dn in zip(normal,derivative))))
+    after=uv_of(transform(matrix,tuple(n+epsilon*dn for n,dn in zip(normal,derivative))))
+    expected.extend((math.remainder(after[0]-before[0],1)/(2*epsilon),(after[1]-before[1])/(2*epsilon)))
+   actual=probe_pixel(matrix,sun,normal,derivatives,expected)
+   assert actual==[0,255,0,255], (label,'transformed analytic derivatives disagree with finite differences',x,y,actual,expected)
+   gradient_checks+=1
+ gl('glDeleteProgram',None,[U])(probe_program);gl('glDeleteShader',None,[U])(probe_fragment)
+ gl('glUseProgram',None,[U])(prog);gl('glViewport',None,[I,I,I,I])(0,0,W,H)
+ # The same physical instant represented on either side of the date line is
+ # still the same image. A timezone is not a second rotation or Sun clock.
+ timezone_frames=[];timezone_reference=None
+ for stamp in ('2026-10-16T11:02:17+00:00','2026-10-16T19:02:17+08:00','2026-10-17T01:02:17+14:00','2026-10-15T23:02:17-12:00'):
+  local_time=datetime.datetime.fromisoformat(stamp)
+  assert local_time.timestamp()==orientation_instant
+  output,_=layout_image(640,240,small_outputs,materials=materials,instant=local_time.timestamp(),offset_seconds=int(local_time.utcoffset().total_seconds()),earth_rotating=True,earth_axis=(.25,.5,.75),earth_roll=47,earth_minutes=20,moon_axis=(-.75,.25,.5),moon_roll=-71,moon_minutes=13)
+  if timezone_reference is None: timezone_reference=output
+  assert ImageChops.difference(timezone_reference.convert('RGB'),output.convert('RGB')).getbbox() is None, ('timezone shifted real Sun/Moon lighting',stamp)
+  timezone_frames.append({'local_datetime':stamp,'utc_datetime':local_time.astimezone(datetime.timezone.utc).isoformat(),'pixel_identical':True})
+ results[kind]['all_direction_rotation']={'frames':orientation_frames,'geographic_light_gpu_probes':geographic_checks,'moon_screen_light_gpu_probes':moon_light_checks,'transformed_gradient_finite_difference_probes':gradient_checks,'moon_phase_contours':phase_contour_metrics,'equivalent_timezone_frames':timezone_frames,'all_signed_axes_poles_roll':'PASS','earth_geographic_utc_light':'PASS','moon_real_phase_under_rotation':'PASS'}
  results[kind]['dual_materials']={'frames':dual_metrics,'halo_pixels_equal_sky':halo_checked,'moon_surface_pixels':surface_checked,'moon_max_blue_minus_red':max_blue_excess,'mixed_material_repair':'PASS','reordered_outputs':'PASS','stationary_sky_both_materials':True,'clouds_earth_only':'PASS'}
  results[kind]['optional_sky']={'texture_loaded':sky_available,'texture_sha256':hashlib.sha256(sky_path.read_bytes()).hexdigest() if sky_available else None,'missing_fallback':'PASS','stationary_fallback':'PASS','fallback_damage':'PASS'}
  # Motion controls keep physical body time fixed while varying only sky UTC.
@@ -670,7 +841,7 @@ for a,b in zip(results['gl330']['dual_materials']['frames'],results['gles300']['
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
  api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
  assert api_max_error <= 1, (a['file'],delta.getextrema())
-for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion','texture_filtering'):
+for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion','texture_filtering','all_direction_rotation'):
  for a,b in zip(results['gl330'][group]['frames'],results['gles300'][group]['frames']):
   delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
   api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
@@ -705,8 +876,8 @@ if os.environ.get('ASTRONOMY_TEST_BASELINE_OUTPUT'):
    unchanged.append({'file':filename,'scope':'earth-and-sky' if crop or 'galaxy-only' not in filename else 'galaxy-only','crop':crop,'pixel_identical':delta.getbbox() is None,'max_abs_channel':maximum})
  results['retained_earth_galaxy_baseline']=unchanged
 results['gl_gles_max_channel_difference']=api_max_error
-results['scope']='Actual surfaceless Mesa shader execution and production Rust UTC-solar/fixed-view/rotation/geometry helpers; exact dated fixed and seasonal/polar renders; simulated output layouts. No hardware compositor, real hotplug, or device deployment tested.'
-print('PASS: GLSL/GLES, fixed Guangzhou UTC day/night, seasonal/polar dusk, explicit rotation, opaque frames, stationary sky, production multi-output plans; output:',ROOT)
+results['scope']='Actual surfaceless Mesa shader execution and production Rust UTC-solar/3D-orientation/geometry helpers; signed axes, poles and roll, geographic light and real lunar phase invariants, transformed finite-difference gradient probes, equivalent civil timestamps, exact dated seasonal renders and simulated output layouts. No hardware compositor, real hotplug, or device deployment tested.'
+print('PASS: GLSL/GLES, all-direction rotation, geographic UTC sunlight, rotation-independent lunar phase, transformed gradients, civil-time equivalence, opaque frames and production multi-output plans; output:',ROOT)
 
 (ROOT/'earth-validation.json').write_text(json.dumps(results,indent=2)+'\n')
 print(json.dumps(results,indent=2))

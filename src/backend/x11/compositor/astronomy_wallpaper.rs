@@ -1,11 +1,11 @@
 //! Astronomy is a wallpaper material, rendered below every client window.
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
-    AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
-    astronomy_frame_interval, celestial_assignments, celestial_longitude, earth_view_longitude,
-    lunar_sun_direction, material_load_frame, presentation_offset, resolve_cloud_texture,
-    resolve_earth_texture, resolve_moon_texture, resolve_sky_texture, sky_rotation,
-    solar_direction, wall_clock_seconds,
+    AstronomyDraw, CelestialBody, CelestialView, POWER_QUERY_INTERVAL, WallpaperClock,
+    astronomy_draw_plan, astronomy_frame_interval, celestial_assignments, lunar_phase_light,
+    material_load_frame, presentation_offset, resolve_cloud_texture, resolve_earth_texture,
+    resolve_moon_texture, resolve_sky_texture, sky_rotation, solar_direction, transform_direction,
+    wall_clock_seconds,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -18,8 +18,7 @@ const FRAGMENT: &str = include_str!("shaders/animated_wallpaper.frag");
 struct AstronomyProgram {
     program: glow::Program,
     sun_direction: Option<glow::UniformLocation>,
-    view_longitude: Option<glow::UniformLocation>,
-    view_latitude: Option<glow::UniformLocation>,
+    view_to_body: Option<glow::UniformLocation>,
     earth_map: Option<glow::UniformLocation>,
     moon_material: Option<glow::UniformLocation>,
     cloud_map: Option<glow::UniformLocation>,
@@ -38,8 +37,7 @@ impl AstronomyProgram {
             Self {
                 program,
                 sun_direction: gl.get_uniform_location(program, "sun_direction"),
-                view_longitude: gl.get_uniform_location(program, "view_longitude"),
-                view_latitude: gl.get_uniform_location(program, "view_latitude"),
+                view_to_body: gl.get_uniform_location(program, "view_to_body"),
                 earth_map: gl.get_uniform_location(program, "earth_map"),
                 moon_material: gl.get_uniform_location(program, "moon_material"),
                 cloud_map: gl.get_uniform_location(program, "cloud_map"),
@@ -73,9 +71,8 @@ pub(super) struct AstronomyWallpaper {
     dual_material: bool,
     sky_period: u32,
     earth_period: u32,
-    earth_rotating: bool,
-    earth_latitude: f64,
-    earth_longitude: f64,
+    earth_view: CelestialView,
+    moon_view: CelestialView,
     moon_period: u32,
     output_identities: Vec<(String, i32, i32, u32, u32)>,
     identities_changed: bool,
@@ -98,14 +95,57 @@ pub(super) struct AstronomyWallpaper {
 
 impl AstronomyWallpaper {
     /// Camera-only updates do not reload surfaces or reset animation clocks.
-    fn update_earth_view(&mut self, rotating: bool, latitude: f64, longitude: f64) -> bool {
-        let changed = self.earth_rotating != rotating
-            || self.earth_latitude != latitude
-            || self.earth_longitude != longitude;
-        self.earth_rotating = rotating;
-        self.earth_latitude = latitude;
-        self.earth_longitude = longitude;
+    fn update_views(&mut self, earth: CelestialView, moon: CelestialView) -> bool {
+        let changed = self.earth_view != earth || self.moon_view != moon;
+        self.earth_view = earth;
+        self.moon_view = moon;
         changed
+    }
+
+    /// Only visible, rotating bodies contribute to the animation cadence.
+    /// A hidden fast Moon must not keep an Earth-only desktop at 15 Hz.
+    fn frame_interval(&self) -> Duration {
+        let mut earth_visible = false;
+        let mut moon_visible = false;
+        let mut radius = 0.0_f32;
+        for (index, canvas) in self.draw_plan.iter().enumerate() {
+            radius = radius.max(canvas.radius);
+            if self.dual_material && self.bodies.get(index) == Some(&CelestialBody::Moon) {
+                moon_visible = true;
+            } else {
+                earth_visible = true;
+            }
+        }
+        astronomy_frame_interval(
+            radius,
+            (earth_visible && self.earth_view.rotating).then_some(self.earth_period),
+            (moon_visible && self.moon_view.rotating).then_some(self.moon_period),
+            self.sky_period,
+        )
+    }
+
+    /// Sample one real instant for both bodies on every material repaint.
+    /// Timezone changes invalidate the frame, never offset the UTC light clock.
+    fn update_clock(
+        &mut self,
+        now: Instant,
+        unix: f64,
+        offset_seconds: i32,
+        occluded: bool,
+        invalidated: bool,
+    ) -> bool {
+        let timezone_changed = self.sample_offset != offset_seconds;
+        self.sample_offset = offset_seconds;
+        self.clock.set_interval(self.frame_interval());
+        self.clock
+            .set_paused(!self.enabled || !self.powered || occluded || self.draw_plan.is_empty());
+        let tick = self.clock.tick(now);
+        self.frame_changed = invalidated || timezone_changed || tick;
+        if self.frame_changed {
+            self.sample_unix = unix;
+            self.cache.invalidate();
+        }
+        self.frame_changed
     }
 
     /// Material identity for cached wallpaper-only bar measurements. Animation
@@ -127,6 +167,16 @@ impl AstronomyWallpaper {
             &self.output_identities,
         )
             .hash(&mut hash);
+        for view in [self.earth_view, self.moon_view] {
+            view.rotating.hash(&mut hash);
+            for degrees in [view.latitude, view.longitude, view.roll] {
+                degrees.to_bits().hash(&mut hash);
+            }
+            for component in view.axis {
+                component.to_bits().hash(&mut hash);
+            }
+        }
+        (self.earth_period, self.moon_period).hash(&mut hash);
         (hash.finish(), self.enabled && self.powered && !self.failed)
     }
 
@@ -350,9 +400,7 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             0.0
         };
-        let use_system_zone = enabled
-            && layout == "earth-moon"
-            && cfg.behavior().wallpaper_astronomy_timezone == "system";
+        let use_system_zone = enabled && cfg.behavior().wallpaper_astronomy_timezone == "system";
         let system_offset = if use_system_zone {
             chrono::TimeZone::timestamp_opt(&chrono::Local, sample_unix.floor() as i64, 0)
                 .single()
@@ -378,10 +426,21 @@ impl<C: CompositorConnection> Compositor<C> {
         let moon_configured = &cfg.behavior().wallpaper_moon_texture;
         let overrides = &cfg.behavior().wallpaper_astronomy_bodies;
         let bodies_changed = a.update_bodies(overrides, layout_changed);
-        let view_changed = a.update_earth_view(
-            cfg.behavior().wallpaper_earth_view == "rotating",
-            cfg.behavior().wallpaper_earth_latitude,
-            cfg.behavior().wallpaper_earth_longitude,
+        let view_changed = a.update_views(
+            CelestialView {
+                rotating: cfg.behavior().wallpaper_earth_view == "rotating",
+                latitude: cfg.behavior().wallpaper_earth_latitude,
+                longitude: cfg.behavior().wallpaper_earth_longitude,
+                roll: cfg.behavior().wallpaper_earth_roll,
+                axis: cfg.behavior().wallpaper_earth_rotation_axis,
+            },
+            CelestialView {
+                rotating: cfg.behavior().wallpaper_moon_view == "rotating",
+                latitude: cfg.behavior().wallpaper_moon_latitude,
+                longitude: cfg.behavior().wallpaper_moon_longitude,
+                roll: cfg.behavior().wallpaper_moon_roll,
+                axis: cfg.behavior().wallpaper_moon_rotation_axis,
+            },
         );
         let sky_changed = a.sky_period != cfg.behavior().wallpaper_sky_rotation_minutes;
         a.sky_period = cfg.behavior().wallpaper_sky_rotation_minutes;
@@ -475,37 +534,13 @@ impl<C: CompositorConnection> Compositor<C> {
             false
         };
 
-        let timezone_changed = a.sample_offset != offset_seconds;
-        if timezone_changed {
-            a.sample_offset = offset_seconds;
-            a.clock = WallpaperClock::default();
-        }
-        a.clock.set_interval(astronomy_frame_interval(
-            a.draw_plan
-                .iter()
-                .map(|canvas| canvas.radius)
-                .fold(0.0_f32, f32::max),
-            a.earth_rotating.then_some(a.earth_period),
-            a.dual_material.then_some(a.moon_period),
-            a.sky_period,
-        ));
-        a.clock.set_paused(!a.powered || occluded);
-        let tick = a.clock.tick(now);
-        if tick {
-            a.sample_unix = sample_unix;
-        }
-        a.frame_changed = changed
+        let invalidated = changed
             || layout_changed
             || bodies_changed
             || periods_changed
             || view_changed
-            || power_changed
-            || timezone_changed
-            || tick;
-        if a.frame_changed {
-            a.cache.invalidate();
-        }
-        a.frame_changed
+            || power_changed;
+        a.update_clock(now, sample_unix, offset_seconds, occluded, invalidated)
     }
 
     /// Called with a current context, after the normal static wallpaper pass.
@@ -737,17 +772,20 @@ impl<C: CompositorConnection> Compositor<C> {
         let cache_state = cached.then(|| unsafe { a.cache.begin(&self.gl) });
         let repair = if cached { None } else { repair };
         let sun = solar_direction(a.sample_unix);
-        let longitude = earth_view_longitude(
-            a.sample_unix,
-            a.earth_period,
-            a.earth_longitude,
-            a.earth_rotating,
-        );
+        // Compute each body's orthonormal basis once per material frame, not
+        // once per output or fragment. Decorative motion never advances UTC.
+        let earth_basis = a.earth_view.matrix(a.sample_unix, a.earth_period);
+        let moon_frame = (a.dual_material && a.bodies.contains(&CelestialBody::Moon)).then(|| {
+            let basis = a.moon_view.matrix(a.sample_unix, a.moon_period);
+            // Retain the real Earth-observer phase while presenting any
+            // lunar surface orientation: dot(M*n, M*light) == dot(n, light).
+            let light = transform_direction(&basis, lunar_phase_light(a.sample_unix));
+            (basis, light)
+        });
+        let earth_frame = (earth_basis, sun);
         unsafe {
             let gl = &self.gl;
             gl.use_program(Some(program.program));
-            gl.uniform_3_f32(program.sun_direction.as_ref(), sun[0], sun[1], sun[2]);
-            gl.uniform_1_f32(program.view_longitude.as_ref(), longitude);
             gl.uniform_1_i32(program.earth_map.as_ref(), 0);
             gl.uniform_1_i32(program.cloud_map.as_ref(), 1);
             gl.uniform_1_i32(
@@ -772,24 +810,13 @@ impl<C: CompositorConnection> Compositor<C> {
             for (index, canvas) in a.draw_plan.iter().enumerate() {
                 let moon = a.dual_material && a.bodies.get(index) == Some(&CelestialBody::Moon);
                 gl.uniform_1_i32(program.moon_material.as_ref(), i32::from(moon));
-                gl.uniform_1_f32(
-                    program.view_latitude.as_ref(),
-                    if moon {
-                        0.18
-                    } else {
-                        a.earth_latitude.to_radians() as f32
-                    },
-                );
-                if moon {
-                    let angle = celestial_longitude(a.sample_unix, a.moon_period, 0);
-                    gl.uniform_1_f32(program.view_longitude.as_ref(), angle);
-                    // UTC phase is independent of artistic texture spin and timezone.
-                    let light = lunar_sun_direction(a.sample_unix, angle);
-                    gl.uniform_3_f32(program.sun_direction.as_ref(), light[0], light[1], light[2]);
+                let (basis, light) = if moon {
+                    moon_frame.as_ref().unwrap_or(&earth_frame)
                 } else {
-                    gl.uniform_1_f32(program.view_longitude.as_ref(), longitude);
-                    gl.uniform_3_f32(program.sun_direction.as_ref(), sun[0], sun[1], sun[2]);
-                }
+                    &earth_frame
+                };
+                gl.uniform_matrix_3_f32_slice(program.view_to_body.as_ref(), false, basis);
+                gl.uniform_3_f32(program.sun_direction.as_ref(), light[0], light[1], light[2]);
                 gl.bind_texture(
                     glow::TEXTURE_2D,
                     if moon { a.moon_texture } else { Some(texture) },
@@ -839,27 +866,227 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn camera_reload_changes_only_framing_and_requests_one_repaint() {
-        let mut a = super::AstronomyWallpaper {
-            sample_unix: 1792108800.0,
+    use super::*;
+
+    fn active_wallpaper() -> AstronomyWallpaper {
+        AstronomyWallpaper {
+            enabled: true,
+            powered: true,
             earth_period: 20,
             moon_period: 30,
+            draw_plan: astronomy_draw_plan((1920, 1080), &[], false, None),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn camera_reload_changes_only_framing_and_requests_one_repaint() {
+        let mut a = AstronomyWallpaper {
+            sample_unix: 1792108800.0,
+            texture: Some(glow::NativeTexture(std::num::NonZeroU32::new(1).unwrap())),
+            moon_texture: Some(glow::NativeTexture(std::num::NonZeroU32::new(2).unwrap())),
+            ..active_wallpaper()
+        };
+        let textures = (a.texture, a.moon_texture);
+        let mut earth = CelestialView {
+            latitude: 25.0,
+            longitude: 120.0,
             ..Default::default()
         };
-        assert!(a.update_earth_view(false, 25.0, 120.0));
-        assert!(!a.update_earth_view(false, 25.0, 120.0));
-        assert!(a.update_earth_view(false, -33.8, 151.2));
-        assert!(a.update_earth_view(true, -33.8, 151.2));
-        assert!(!a.update_earth_view(true, -33.8, 151.2));
+        let mut moon = CelestialView::default();
+        assert!(a.update_views(earth, moon));
+        assert!(!a.update_views(earth, moon));
+        let key = a.bar_metric_source().0;
+        earth.roll = 45.0;
+        earth.axis = [1.0, 1.0, -0.5];
+        earth.rotating = true;
+        assert!(a.update_views(earth, moon));
+        assert_ne!(a.bar_metric_source().0, key);
+        assert!(!a.update_views(earth, moon));
+        moon.latitude = -90.0;
+        moon.longitude = 180.0;
+        moon.roll = -120.0;
+        moon.axis = [-1.0, 0.0, 0.0];
+        moon.rotating = true;
+        assert!(a.update_views(earth, moon));
+        assert!(!a.update_views(earth, moon));
         assert_eq!(
             (a.sample_unix, a.earth_period, a.moon_period),
             (1792108800.0, 20, 30)
         );
+        assert_eq!((a.texture, a.moon_texture), textures);
         assert!(a.pending.is_none() && a.moon_pending.is_none());
+        assert!(a.retired.is_empty());
     }
 
-    use super::*;
+    #[test]
+    fn fixed_and_hidden_bodies_do_not_raise_render_cadence() {
+        let mut a = active_wallpaper();
+        a.earth_period = 1;
+        a.moon_period = 1;
+        a.moon_view.rotating = true;
+        a.bodies = vec![CelestialBody::Moon];
+        // A Moon assignment is ignored outside earth-moon layout.
+        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        a.earth_view.rotating = true;
+        assert_eq!(
+            a.frame_interval(),
+            crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL
+        );
+        a.dual_material = true;
+        a.moon_view.rotating = false;
+        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        a.moon_view.rotating = true;
+        a.moon_period = 39343;
+        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        a.bodies = vec![CelestialBody::Earth];
+        a.earth_view.rotating = false;
+        a.moon_period = 1;
+        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        a.sky_period = 1;
+        assert_eq!(
+            a.frame_interval(),
+            crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn timezone_and_midnight_changes_preserve_one_real_lighting_instant() {
+        let mut a = active_wallpaper();
+        let now = Instant::now();
+        a.earth_view = CelestialView {
+            rotating: true,
+            latitude: 80.0,
+            longitude: -175.0,
+            roll: 67.0,
+            axis: [0.4, -0.3, 1.0],
+        };
+        let local_times = [
+            "2026-10-17T00:05:00+08:00",
+            "2026-10-16T16:05:00Z",
+            "2026-10-16T12:05:00-04:00",
+            "2026-10-16T21:50:00+05:45",
+        ];
+        let mut first_frame = None;
+        for (index, local) in local_times.into_iter().enumerate() {
+            let local = chrono::DateTime::parse_from_rfc3339(local).unwrap();
+            assert!(a.update_clock(
+                now + Duration::from_millis(index as u64 * 10),
+                local.timestamp() as f64,
+                local.offset().local_minus_utc(),
+                false,
+                false,
+            ));
+            let frame = (
+                a.sample_unix,
+                a.earth_view.matrix(a.sample_unix, a.earth_period),
+                solar_direction(a.sample_unix),
+                lunar_phase_light(a.sample_unix),
+            );
+            if let Some(expected) = first_frame {
+                assert_eq!(frame, expected);
+            } else {
+                first_frame = Some(frame);
+            }
+        }
+        // A timezone repaint never resets the capped monotonic frame clock.
+        assert!(!a.update_clock(
+            now + Duration::from_millis(31),
+            a.sample_unix + 0.031,
+            a.sample_offset,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn repeated_dst_local_hour_advances_the_sun_by_the_real_elapsed_hour() {
+        let mut a = active_wallpaper();
+        let now = Instant::now();
+        let before = chrono::DateTime::parse_from_rfc3339("2026-11-01T01:30:00-04:00").unwrap();
+        let after = chrono::DateTime::parse_from_rfc3339("2026-11-01T01:30:00-05:00").unwrap();
+        assert_eq!(after.timestamp() - before.timestamp(), 3600);
+        assert!(a.update_clock(
+            now,
+            before.timestamp() as f64,
+            before.offset().local_minus_utc(),
+            false,
+            false,
+        ));
+        let sun = solar_direction(a.sample_unix);
+        assert!(a.update_clock(
+            now + Duration::from_secs(3600),
+            after.timestamp() as f64,
+            after.offset().local_minus_utc(),
+            false,
+            false,
+        ));
+        assert_eq!(a.sample_unix, after.timestamp() as f64);
+        assert_ne!(sun, solar_direction(a.sample_unix));
+        assert_eq!(
+            solar_direction(a.sample_unix),
+            solar_direction(before.timestamp() as f64 + 3600.0)
+        );
+    }
+
+    #[test]
+    fn control_updates_and_resume_take_fresh_time_without_catchup_frames() {
+        let mut a = active_wallpaper();
+        let now = Instant::now();
+        let unix = 1792108800.0;
+        assert!(a.update_clock(now, unix, 28800, false, false));
+        assert!(!a.update_clock(
+            now + Duration::from_millis(10),
+            unix + 0.01,
+            28800,
+            false,
+            false
+        ));
+        // A hot camera edit before the next tick must not render stale sunlight.
+        let mut earth = a.earth_view;
+        earth.roll = 90.0;
+        let edited = a.update_views(earth, a.moon_view);
+        assert!(a.update_clock(
+            now + Duration::from_millis(20),
+            unix + 0.02,
+            28800,
+            false,
+            edited
+        ));
+        assert_eq!(a.sample_unix, unix + 0.02);
+        // Cover occlusion, backwards wall-clock correction and a long suspend.
+        assert!(!a.update_clock(now + Duration::from_secs(1), unix + 1.0, 28800, true, false));
+        assert!(a.update_clock(
+            now + Duration::from_secs(2),
+            unix - 3600.0,
+            28800,
+            false,
+            false
+        ));
+        assert_eq!(a.sample_unix, unix - 3600.0);
+        assert!(!a.update_clock(
+            now + Duration::from_secs(3),
+            unix - 3599.0,
+            28800,
+            true,
+            false
+        ));
+        assert!(a.update_clock(
+            now + Duration::from_secs(7200),
+            unix + 7200.0,
+            28800,
+            false,
+            false
+        ));
+        assert_eq!(a.sample_unix, unix + 7200.0);
+        assert!(!a.update_clock(
+            now + Duration::from_secs(7200),
+            unix + 7200.0,
+            28800,
+            false,
+            false
+        ));
+    }
 
     #[test]
     fn layout_updates_preserve_image_lifecycle_and_ignore_stable_frames() {

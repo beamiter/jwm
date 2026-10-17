@@ -268,6 +268,21 @@ fn validate_choice_ignore_ascii_case(
     }
 }
 
+/// First axis error, shared by file diagnostics and hot overrides.
+pub(super) fn wallpaper_rotation_axis_error(axis: &[f64; 3]) -> Option<&'static str> {
+    if axis
+        .iter()
+        .any(|component| !component.is_finite() || !(-1.0..=1.0).contains(component))
+    {
+        return Some("rotation axis components must be finite numbers in -1..=1");
+    }
+    // Check components directly: squaring a valid subnormal axis underflows.
+    if axis.iter().copied().map(f64::abs).fold(0.0, f64::max) == 0.0 {
+        return Some("rotation axis must have at least one nonzero component");
+    }
+    None
+}
+
 /// First collection error, shared by file diagnostics and hot overrides.
 pub(super) fn wallpaper_astronomy_bodies_error(
     bodies: &std::collections::BTreeMap<String, String>,
@@ -1232,27 +1247,68 @@ impl Config {
                 None,
             );
         }
-        if !["fixed", "rotating"].contains(&behavior.wallpaper_earth_view.as_str()) {
-            diagnostics.error(
+        for (key, view) in [
+            (
                 "behavior.wallpaper_earth_view",
-                "expected fixed or rotating",
-                None,
-            );
+                &behavior.wallpaper_earth_view,
+            ),
+            (
+                "behavior.wallpaper_moon_view",
+                &behavior.wallpaper_moon_view,
+            ),
+        ] {
+            if !["fixed", "rotating"].contains(&view.as_str()) {
+                diagnostics.error(key, "expected fixed or rotating", None);
+            }
         }
-        require_f64_range(
-            &mut diagnostics,
-            "behavior.wallpaper_earth_latitude",
-            behavior.wallpaper_earth_latitude,
-            -90.0,
-            90.0,
-        );
-        require_f64_range(
-            &mut diagnostics,
-            "behavior.wallpaper_earth_longitude",
-            behavior.wallpaper_earth_longitude,
-            -180.0,
-            180.0,
-        );
+        for (key, degrees, limit) in [
+            (
+                "behavior.wallpaper_earth_latitude",
+                behavior.wallpaper_earth_latitude,
+                90.0,
+            ),
+            (
+                "behavior.wallpaper_earth_longitude",
+                behavior.wallpaper_earth_longitude,
+                180.0,
+            ),
+            (
+                "behavior.wallpaper_earth_roll",
+                behavior.wallpaper_earth_roll,
+                180.0,
+            ),
+            (
+                "behavior.wallpaper_moon_latitude",
+                behavior.wallpaper_moon_latitude,
+                90.0,
+            ),
+            (
+                "behavior.wallpaper_moon_longitude",
+                behavior.wallpaper_moon_longitude,
+                180.0,
+            ),
+            (
+                "behavior.wallpaper_moon_roll",
+                behavior.wallpaper_moon_roll,
+                180.0,
+            ),
+        ] {
+            require_f64_range(&mut diagnostics, key, degrees, -limit, limit);
+        }
+        for (key, axis) in [
+            (
+                "behavior.wallpaper_earth_rotation_axis",
+                &behavior.wallpaper_earth_rotation_axis,
+            ),
+            (
+                "behavior.wallpaper_moon_rotation_axis",
+                &behavior.wallpaper_moon_rotation_axis,
+            ),
+        ] {
+            if let Some(error) = wallpaper_rotation_axis_error(axis) {
+                diagnostics.error(key, error, None);
+            }
+        }
         if !["system", "configured"].contains(&behavior.wallpaper_astronomy_timezone.as_str()) {
             diagnostics.error(
                 "behavior.wallpaper_astronomy_timezone",

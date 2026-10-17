@@ -16,6 +16,8 @@ wallpaper_sky_rotation_minutes = 1440 # slow 24-hour galaxy travel; 0 = static
 wallpaper_earth_view = "fixed" # default; "rotating" enables the period below
 wallpaper_earth_latitude = 23.13 # Guangzhou city-level framing, not device location
 wallpaper_earth_longitude = 113.28 # degrees east; stays fixed as time passes
+wallpaper_earth_roll = 0.0 # initial orientation around the viewing direction
+wallpaper_earth_rotation_axis = [0.0, 1.0, 0.0] # used by "rotating" only
 wallpaper_timezone_offset_hours = 8 # retained compatibility setting, integer -12..14
 wallpaper_astronomy_layout = "span" # "per-output" shows one complete globe per screen
 ```
@@ -30,6 +32,7 @@ path never silently falls back to the bundle. Changing these fields uses normal
 config reload. Display-timezone changes repaint without reloading the texture.
 
 With an empty texture setting, both picker and renderer use this order:
+
 1. `$XDG_DATA_HOME/jwm/astronomy/earth-nasa-october.jpg` (default `~/.local/share`).
 2. A legacy `$XDG_DATA_HOME/jwm/astronomy/earth-nasa-january.jpg` override, if present.
 3. `../share/jwm/astronomy/earth-nasa-october.jpg` relative to the real executable's
@@ -77,7 +80,14 @@ wallpaper_moon_texture = "" # bundled Moon texture
 wallpaper_earth_view = "fixed" # "rotating" opts into Earth camera rotation
 wallpaper_earth_latitude = 23.13
 wallpaper_earth_longitude = 113.28
+wallpaper_earth_roll = 0.0
+wallpaper_earth_rotation_axis = [0.0, 1.0, 0.0]
 wallpaper_earth_rotation_minutes = 1440 # used only by rotating Earth view
+wallpaper_moon_view = "rotating" # "fixed" stops texture motion, not the lunar phase
+wallpaper_moon_latitude = 10.313240312354818 # original 0.18-radian tilt
+wallpaper_moon_longitude = 0.0
+wallpaper_moon_roll = 0.0
+wallpaper_moon_rotation_axis = [0.0, 1.0, 0.0]
 wallpaper_moon_rotation_minutes = 39343 # about 27.3 days
 wallpaper_astronomy_timezone = "system" # or "configured"
 wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
@@ -96,10 +106,94 @@ be nonempty, at most 256 bytes, and contain no NUL; body names are exactly
 The Moon texture setting defaults to empty for the bundled asset and follows the
 same bounded-path validation and lookup order as the Earth texture, using
 `moon-nasa-lroc.jpg` in place of `earth-nasa-october.jpg`. Mirrored outputs share
-one canvas; the alphabetically first connector supplies its body assignment. Layout, body map, textures,
-and rotation periods support normal reload and hot-config updates; hot changes
+one canvas; the alphabetically first connector supplies its body assignment.
+Layout, body map, textures, orientation, axes and rotation periods support normal
+reload and hot-config updates; hot changes
 are session-only unless saved to the configuration file. Static wallpapers,
 daily rotation, and the default `span` layout remain unchanged.
+
+## Rotation in every direction
+
+Earth and Moon each have independent latitude, longitude, roll, rotation axis,
+period and fixed/rotating controls. Latitude and longitude select the initial
+center; roll turns the initial image around that viewing direction, clockwise
+for positive values and counterclockwise for negative values. These finite
+degree values accept latitude `-90..=90` and longitude/roll `-180..=180`, including
+the poles and a fully upside-down view.
+
+`wallpaper_earth_rotation_axis` and `wallpaper_moon_rotation_axis` select an
+arbitrary axis through the body's center. Each is a three-number TOML/JSON array
+`[x, y, z]`, with every component finite and in `-1..=1`, and at least one nonzero.
+JWM normalizes the vector, so `[0.5, 0.5, 0]` and `[1, 1, 0]` describe the same
+direction. Negating every component reverses the tour; changing vector length
+does not change its speed. Rotation uses an axis-angle transform and supports a
+complete turn through the poles without clamping the animated latitude.
+
+The axes are fixed in **body coordinates**: `+X` points toward the equator at
+90° east, `+Y` toward the north pole, and `+Z` toward the equator at zero longitude.
+They are not always the screen's horizontal, vertical and depth axes. The examples
+below use initial latitude, longitude and roll all set to zero so the axes align
+with the reference view:
+
+| Axis value | Tour from the reference view |
+| --- | --- |
+| `[0.0, 1.0, 0.0]` | Horizontal sweep around the north/south polar axis; legacy default |
+| `[1.0, 0.0, 0.0]` | Vertical sweep through the poles |
+| `[1.0, 1.0, 0.0]` | Diagonal tour |
+| `[-1.0, -1.0, 0.0]` | The same diagonal tour in reverse |
+| `[0.0, 0.0, 1.0]` | Rotation around the reference view's line of sight |
+
+For other initial centers, `[0, 0, 1]` still means the body's zero-longitude axis.
+Use `wallpaper_earth_roll` or `wallpaper_moon_roll` to set the initial screen
+orientation for any center. A tour rotates that entire initial camera basis
+around the chosen body axis, preserving all three directions as a rigid frame.
+
+For example, merge these keys into the existing `[behavior]` section to give
+Earth a vertical tour and Moon a reversed diagonal tour:
+
+```toml
+wallpaper_earth_view = "rotating"
+wallpaper_earth_latitude = 0.0
+wallpaper_earth_longitude = 0.0
+wallpaper_earth_roll = 0.0
+wallpaper_earth_rotation_axis = [1.0, 0.0, 0.0]
+wallpaper_earth_rotation_minutes = 20
+
+wallpaper_moon_view = "rotating"
+wallpaper_moon_latitude = 0.0
+wallpaper_moon_longitude = 0.0
+wallpaper_moon_roll = 0.0
+wallpaper_moon_rotation_axis = [-1.0, -1.0, 0.0]
+wallpaper_moon_rotation_minutes = 30
+```
+
+Set either axis to `[0.0, 1.0, 0.0]` for the horizontal example, or
+`[1.0, 1.0, 0.0]` for the forward diagonal example. Set
+`wallpaper_moon_view = "fixed"` to stop Moon texture motion while the current
+lunar phase continues updating. Fixed mode uses the configured latitude,
+longitude and roll directly; it does not hold the last frame of a moving tour.
+The axis and period remain stored for a later return to rotating mode.
+
+To apply a vertical Earth tour immediately in the running session, the repository's
+existing CLI accepts a batch through `jwm-tool`:
+
+```sh
+jwm-tool msg set_config_batch --args '{"values":{
+  "behavior.wallpaper_earth_view":"rotating",
+  "behavior.wallpaper_earth_latitude":0,
+  "behavior.wallpaper_earth_longitude":0,
+  "behavior.wallpaper_earth_roll":0,
+  "behavior.wallpaper_earth_rotation_axis":[1,0,0],
+  "behavior.wallpaper_earth_rotation_minutes":20
+}}'
+jwm-tool msg set_config --args '{"key":"behavior.wallpaper_moon_view","value":"fixed"}'
+```
+
+The wallpaper effect must already be enabled, and Moon appears in the
+`earth-moon` layout. These IPC updates are session-only; save the same keys in
+the config file for restart persistence. Invalid axes, angles or modes reject
+the whole batch without partially changing the scene. Orientation changes
+reuse loaded textures and request a frame using the current system instant.
 
 ## Fixed geographic view and real daylight
 
@@ -115,14 +209,20 @@ use the same policy. Reload/hot updates change framing without decoding textures
 The explicit `"rotating"` view retains accelerated camera tours:
 `wallpaper_earth_rotation_minutes = 1440` makes one turn per day, or use 20 for
 a twenty-minute tour. Existing period values remain stored, but do not move a
-fixed camera. The configured longitude is the tour's epoch origin; UTC drives
-phase, independently of timezone. This is camera motion, not an accelerated
-physical Sun. Earth always uses the actual current solar illumination.
+fixed camera. Latitude, longitude and roll define the initial camera; the axis
+defines its full circular tour. Absolute Unix UTC time drives the phase,
+independently of timezone. Changing the period or axis may reposition the tour
+immediately; a restart at the same instant restores the same orientation.
+Earth's Sun direction stays in geographic coordinates while the camera moves,
+so the same geographic location keeps its real day/night state in every view.
+An accelerated tour never accelerates the physical Sun.
 
 Moon defaults to 39343 minutes (about 27.3 days), rounded from NASA's
 [655.720-hour sidereal rotation period](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html).
-Current lunar illumination is always enabled and follows the actual UTC instant,
-independently of this decorative texture spin. The terminator progresses smoothly
+Moon's default view remains `"rotating"`; choosing `"fixed"` preserves a selected
+texture view while keeping the live phase. Current lunar illumination always
+follows the actual UTC instant, independently of decorative texture rotation,
+axis, latitude, longitude or roll. The terminator progresses smoothly
 through new, waxing, full and waning phases, with waxing lit on the right and
 waning on the left. Timezone changes and local midnight do not reset the phase.
 The faint night-side fill is artistic, not a prediction of earthshine.
@@ -136,11 +236,26 @@ and NASA illumination within 0.5 percentage point; that fixture tolerance is not
 a guaranteed all-date error bound. TT–UTC, aberration, observer parallax, tidal
 locking and libration are omitted. Invalid clocks or dates outside 1900–2100
 use a deterministic 2000-01-01 UTC phase fallback to keep GPU uniforms finite.
-The stable horizontal presentation does not
-model Guangzhou’s changing local-horizon tilt or the celestial bright-limb angle;
-the configured spin deliberately continues to reveal the whole lunar texture.
-Restart/resume at the same instant restores the same view without accumulated
-animation drift. Timezone/DST changes never rotate Earth or move the Sun.
+The stable horizontal phase presentation does not model Guangzhou's changing
+local-horizon tilt or the celestial bright-limb angle. JWM transforms the lunar
+light and surface normal through the same orientation, so the current illuminated
+fraction and waxing/waning side remain stable while the texture turns in any
+direction. This is an artistic whole-texture presentation, not the phase an
+observer would see while physically flying around the Moon.
+
+### Current local time, timezone changes and resume
+
+The system clock supplies one current instant shared by both bodies and every
+output. Local time is another representation of that instant: for example,
+12:00 in UTC+8 is evaluated as 04:00 UTC on the same date. JWM does not add the
+timezone offset again to the Sun or Moon calculation. Changing the displayed
+timezone or crossing a DST boundary therefore keeps the same physical
+illumination for the same instant. Choosing a different geographic Earth center
+changes which part of that correctly lit globe is visible.
+
+Restart/resume restores the current real phase and orientation without
+accumulating animation drift or replaying the time spent asleep. Timezone/DST
+changes request a repaint but never rotate Earth or move the Sun.
 `wallpaper_astronomy_timezone` and `wallpaper_timezone_offset_hours` remain
 compatibility settings; there is no user-facing sunrise/sunset clock. Neither
 changes the OS timezone or clock.
@@ -172,7 +287,10 @@ extra cloud layer. There are no live cloud or city-light observations. The
 NASA/Gaia-derived galaxy backdrop retains decorative framing rather
 than representing the observer's live sky.
 
-Regular animation ticks are capped at 15 Hz. Enabled prepare checks the current
+Regular animation ticks adapt between 1 and 15 Hz. Only visible bodies whose
+views are rotating contribute their decorative speed to the cadence; fixed
+Earth and Moon still update real illumination at least once per second while
+active. Enabled prepare checks the current
 system instant and applicable timezone offset; a timezone change requests an
 immediate repaint. DPMS is sampled only while enabled, at two-second intervals. Standby,
 suspend, off, an unavailable extension or failed query pauses animation; retry
@@ -240,12 +358,10 @@ approximate sunrise/sunset, polar transitions, civil-date boundaries and invalid
 clocks. The sunrise/sunset helper is test/diagnostic-only, not extra work in each
 render frame.
 
-Config/picker regressions and X11 integration must pass repository CI before
-release. Local full Cargo tests are blocked by the uncached workspace `drm`
-dependency; no dependency changes were made. DPMS hardware transitions,
-compositor framebuffer state, live blur/damage and multi-output deployment need
-runtime verification with rollback. Keep the previous executable and static
-wallpaper configuration before any authorized local deployment.
+Config/picker regressions and X11 integration run through the Cargo workspace
+with its locked dependencies. Software rendering exercises shader and framebuffer
+behavior; physical DPMS transitions, live blur/damage, different GPU drivers and
+multi-output deployment also need verification in a running desktop session.
 
 ### Reproduce validation
 
@@ -266,8 +382,17 @@ the Guangzhou contact sheet shows 2026-10-16 at 06:00, 12:00, 18:00 and
 00:00 UTC+8 using the documented city coordinates.
 Neither test modifies the OS clock or timezone. Asset tests use placeholder
 executables and private temporary install roots; they do not validate a live
-compositor binary. Full config/picker tests still require the Cargo workspace
-and its existing dependencies.
+compositor binary. With the repository's native build dependencies and Mesa EGL
+installed, run the full config/picker and renderer regressions with:
+
+```sh
+EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 JWM_REQUIRE_HEADLESS_GL=1 \
+  scripts/test.sh --lib --bins --tests
+```
+
+The wrapper already supplies `--locked`; append `--offline` only if all locked
+dependencies are cached. The suite includes real shell and IPC tests, so it
+requires a test environment that allows their local sockets and child processes.
 
 ## Slow galaxy motion
 

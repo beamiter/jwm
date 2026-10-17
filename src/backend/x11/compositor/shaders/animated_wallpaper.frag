@@ -4,8 +4,9 @@ uniform vec2 resolution;
 uniform vec2 canvas_origin;
 uniform float sphere_radius;
 uniform vec3 sun_direction;
-uniform float view_longitude;
-uniform float view_latitude;
+// Orthonormal camera-to-body basis, computed once on the CPU per material frame.
+// Normals, texture differentials, sunlight and reflections share this basis.
+uniform mat3 view_to_body;
 uniform sampler2D earth_map;
 uniform bool moon_material;
 uniform sampler2D cloud_map;
@@ -123,12 +124,9 @@ vec3 galaxy_background(vec2 pixel) {
     return textureGrad(sky_map,sky_uv,sky_dx,sky_dy).rgb*0.34;
 }
 
-// One shared Earth-fixed transform keeps the camera, map and atmosphere aligned.
+// All three axes remain defined at the poles and through a complete revolution.
 vec3 earth_normal(vec3 n) {
-    float latitude = view_latitude;
-    n.yz = mat2(cos(latitude), -sin(latitude), sin(latitude), cos(latitude)) * n.yz;
-    float c = cos(view_longitude), s = sin(view_longitude);
-    return vec3(c*n.x + s*n.z, n.y, -s*n.x + c*n.z);
+    return view_to_body * n;
 }
 vec3 atmosphere(vec2 p, float radius2) {
     if (moon_material) return vec3(0.0);
@@ -151,9 +149,7 @@ void main() {
     }
     vec3 n = vec3(p, sqrt(max(0.0, 1.0 - radius2)));
     if (radius2 > 1.0) n.xy *= inversesqrt(radius2);
-    // Configured fixed geographic camera; never infer location from timezone.
-    float latitude = view_latitude;
-    float c = cos(view_longitude), s = sin(view_longitude);
+    // Orientation changes the view; Earth sunlight remains in geographic space.
     vec3 earth_n = earth_normal(n);
     vec2 uv = vec2(0.5 + atan(earth_n.x, earth_n.z)/(2.0*PI),
                    0.5 - asin(clamp(earth_n.y, -1.0, 1.0))/PI);
@@ -204,7 +200,7 @@ void main() {
     vec3 color_linear = albedo * irradiance;
     // Ocean classification from the bundled colour map, no added imagery.
     float ocean = water * (1.0-cloud);
-    vec3 view_world = vec3(s*cos(latitude), sin(latitude), c*cos(latitude));
+    vec3 view_world = view_to_body * vec3(0.0, 0.0, 1.0);
     vec3 half_vector = normalize(sun_direction) + view_world;
     half_vector *= inversesqrt(max(dot(half_vector, half_vector), 0.000001));
     float specular = pow(max(dot(earth_n, half_vector), 0.0), 80.0);

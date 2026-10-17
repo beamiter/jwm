@@ -367,10 +367,123 @@ pub(crate) fn solar_direction(unix_seconds: f64) -> [f32; 3] {
     solar_direction_f64(bounded).map(|component| component as f32)
 }
 
+/// Camera orientation for an Earth or Moon material, independent of its clock.
+/// Angles are degrees; latitude/longitude select the central surface point and
+/// positive roll turns the displayed surface clockwise. The animation axis is
+/// expressed in body coordinates: +X is 90°E, +Y north and +Z the prime meridian.
+/// Negating an axis reverses the tour without changing its period.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CelestialView {
+    pub rotating: bool,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub roll: f64,
+    pub axis: [f64; 3],
+}
+
+impl Default for CelestialView {
+    fn default() -> Self {
+        Self {
+            rotating: false,
+            latitude: 0.0,
+            longitude: 0.0,
+            roll: 0.0,
+            axis: [0.0, 1.0, 0.0],
+        }
+    }
+}
+
+impl CelestialView {
+    /// Column-major camera→body rotation, directly suitable for a GLSL mat3.
+    ///
+    /// M = R(axis, phase) · Ry(longitude) · Rx(-latitude) · Rz(roll).
+    /// The default north axis preserves the existing longitude-only tour.
+    /// Rodrigues rotation avoids an Euler-angle accumulator or pole singularity;
+    /// every frame is derived from the same absolute UTC instant, including after
+    /// pause, restart or a wall-clock correction. This is presentation motion:
+    /// never use its phase as the physical time passed to the ephemerides.
+    pub(crate) fn matrix(self, unix_seconds: f64, period_minutes: u32) -> [f32; 9] {
+        let radians = |degrees: f64| {
+            if degrees.is_finite() {
+                degrees.rem_euclid(360.0).to_radians()
+            } else {
+                0.0
+            }
+        };
+        let latitude = if self.latitude.is_finite() {
+            self.latitude.clamp(-90.0, 90.0).to_radians()
+        } else {
+            0.0
+        };
+        let (slat, clat) = latitude.sin_cos();
+        let (slon, clon) = radians(self.longitude).sin_cos();
+        let (sroll, croll) = radians(self.roll).sin_cos();
+        // Scaling before squaring handles both subnormal and near-f64::MAX
+        // vectors. Malformed internal callers get the safe default north axis.
+        let scale = self.axis.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let axis = if self.axis.iter().all(|v| v.is_finite()) && scale > 0.0 {
+            let scaled = self.axis.map(|v| v / scale);
+            let length = scaled.iter().map(|v| v * v).sum::<f64>().sqrt();
+            scaled.map(|v| v / length)
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let (sphase, cphase) = if self.rotating {
+            visual_rotation_f64(unix_seconds, period_minutes).sin_cos()
+        } else {
+            (0.0, 1.0)
+        };
+        let mut matrix = [0.0; 9];
+        for (column, [x, y, z]) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+            .into_iter()
+            .enumerate()
+        {
+            let rolled_x = croll * x - sroll * y;
+            let rolled_y = sroll * x + croll * y;
+            let tilted_y = clat * rolled_y + slat * z;
+            let tilted_z = -slat * rolled_y + clat * z;
+            let body = [
+                clon * rolled_x + slon * tilted_z,
+                tilted_y,
+                -slon * rolled_x + clon * tilted_z,
+            ];
+            let rotated = if self.rotating {
+                let dot = axis.iter().zip(body).map(|(a, b)| a * b).sum::<f64>();
+                let cross = [
+                    axis[1] * body[2] - axis[2] * body[1],
+                    axis[2] * body[0] - axis[0] * body[2],
+                    axis[0] * body[1] - axis[1] * body[0],
+                ];
+                std::array::from_fn(|i| {
+                    body[i] * cphase + cross[i] * sphase + axis[i] * dot * (1.0 - cphase)
+                })
+            } else {
+                body
+            };
+            for (row, value) in rotated.into_iter().enumerate() {
+                matrix[column * 3 + row] = value as f32;
+            }
+        }
+        matrix
+    }
+}
+
+/// Transform a direction with the same column-major matrix used by the shader.
+/// For the Moon, transform the UTC phase light together with the surface normals:
+/// dot(M·normal, M·light) = dot(normal, light), preserving the visible real phase
+/// while decorative rotation reveals any part of the texture. Earth sunlight
+/// instead stays in its geographic body frame, so each place keeps real daylight.
+pub(crate) fn transform_direction(matrix: &[f32; 9], vector: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|row| {
+        matrix[row] * vector[0] + matrix[3 + row] * vector[1] + matrix[6 + row] * vector[2]
+    })
+}
+
 /// Geographic center meridian in radians, east-positive. Fixed mode returns
 /// only the configured longitude and is independent of time, period, and
 /// timezone. Rotation is a deliberate presentation option, never solar time.
 /// Finite longitudes wrap to [-180°, 180°); invalid ones fall back to Guangzhou (113.28°E).
+#[allow(dead_code)] // Longitude-only compatibility helper and independent regression baseline.
 pub(crate) fn earth_view_longitude(
     unix_seconds: f64,
     period_minutes: u32,
@@ -388,6 +501,352 @@ pub(crate) fn earth_view_longitude(
             .rem_euclid(std::f64::consts::TAU) as f32
     } else {
         meridian as f32
+    }
+}
+
+#[cfg(test)]
+mod celestial_view_tests {
+    use super::*;
+
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a.into_iter().zip(b).map(|(a, b)| a * b).sum()
+    }
+
+    fn assert_direction(actual: [f32; 3], expected: [f32; 3]) {
+        assert!(
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 2e-6),
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+
+    fn camera_direction(matrix: &[f32; 9], body: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|column| {
+            dot(
+                [
+                    matrix[column * 3],
+                    matrix[column * 3 + 1],
+                    matrix[column * 3 + 2],
+                ],
+                body,
+            )
+        })
+    }
+
+    #[test]
+    fn cardinal_axes_and_roll_cover_horizontal_vertical_and_screen_rotation() {
+        let default = CelestialView::default();
+        assert_eq!(
+            default.matrix(0.0, 1),
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
+        for (axis, vector, expected) in [
+            ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ] {
+            let view = CelestialView {
+                rotating: true,
+                axis,
+                ..default
+            };
+            assert_direction(transform_direction(&view.matrix(15.0, 1), vector), expected);
+        }
+        // A positive roll maps a camera-right ray to body-up: the image turns clockwise.
+        let rolled = CelestialView {
+            roll: 90.0,
+            ..default
+        }
+        .matrix(0.0, 1);
+        assert_direction(
+            transform_direction(&rolled, [1.0, 0.0, 0.0]),
+            [0.0, 1.0, 0.0],
+        );
+        assert_direction(
+            transform_direction(&rolled, [0.0, 0.0, 1.0]),
+            [0.0, 0.0, 1.0],
+        );
+    }
+
+    #[test]
+    fn diagonal_axis_cycles_coordinates_and_normalization_ignores_scale() {
+        let view = CelestialView {
+            rotating: true,
+            axis: [1.0; 3],
+            ..CelestialView::default()
+        };
+        let matrix = view.matrix(20.0, 1); // 120° around the body diagonal.
+        for (vector, expected) in [
+            ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+        ] {
+            assert_direction(transform_direction(&matrix, vector), expected);
+        }
+        for scale in [
+            f64::MAX,
+            1e100,
+            1.0,
+            1e-100,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+        ] {
+            assert_eq!(
+                CelestialView {
+                    axis: [scale; 3],
+                    ..view
+                }
+                .matrix(20.0, 1),
+                matrix
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_north_axis_keeps_existing_geography_and_rotation_direction() {
+        for latitude in [-90.0_f64, -33.8, 0.0, 23.13, 90.0] {
+            for longitude in [-180.0, -75.0, 113.28, 180.0] {
+                for rotating in [false, true] {
+                    let view = CelestialView {
+                        rotating,
+                        latitude,
+                        longitude,
+                        ..CelestialView::default()
+                    };
+                    for unix in [-1.0, 0.0, 1_792_148_400.125] {
+                        for period in [1, 20, 1440, 39343] {
+                            let matrix = view.matrix(unix, period);
+                            let (s, c) =
+                                earth_view_longitude(unix, period, longitude, rotating).sin_cos();
+                            let (sl, cl) = (latitude.to_radians() as f32).sin_cos();
+                            for normal in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+                                // Independent old shader transform, including the latitude sign.
+                                let [x, y, z] = normal;
+                                let (y, z) = (cl * y + sl * z, -sl * y + cl * z);
+                                assert_direction(
+                                    transform_direction(&matrix, normal),
+                                    [c * x + s * z, y, -s * x + c * z],
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pole_views_oblique_axes_and_roll_remain_proper_orthonormal_rotations() {
+        for latitude in [-90.0, -89.999, 0.0, 23.13, 89.999, 90.0] {
+            for axis in [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, -2.0, 3.0],
+                [f64::MAX, 0.0, f64::MAX],
+            ] {
+                for roll in [-180.0, -123.25, 0.0, 37.0, 180.0] {
+                    let matrix = CelestialView {
+                        rotating: true,
+                        latitude,
+                        longitude: 113.28,
+                        roll,
+                        axis,
+                    }
+                    .matrix(1_792_148_400.125, 17);
+                    let columns: [[f32; 3]; 3] = std::array::from_fn(|column| {
+                        [
+                            matrix[column * 3],
+                            matrix[column * 3 + 1],
+                            matrix[column * 3 + 2],
+                        ]
+                    });
+                    for (i, a) in columns.into_iter().enumerate() {
+                        for (j, b) in columns.into_iter().enumerate() {
+                            let expected = if i == j { 1.0 } else { 0.0 };
+                            assert!((dot(a, b) - expected).abs() < 3e-7, "{matrix:?}");
+                        }
+                    }
+                    let [a, b, c] = columns;
+                    let cross = [
+                        a[1] * b[2] - a[2] * b[1],
+                        a[2] * b[0] - a[0] * b[2],
+                        a[0] * b[1] - a[1] * b[0],
+                    ];
+                    assert!((dot(cross, c) - 1.0).abs() < 3e-7); // No mirror or scale.
+                }
+            }
+        }
+        for (latitude, expected) in [(90.0, [0.0, 1.0, 0.0]), (-90.0, [0.0, -1.0, 0.0])] {
+            let matrix = CelestialView {
+                latitude,
+                longitude: 113.28,
+                roll: 57.0,
+                ..CelestialView::default()
+            }
+            .matrix(0.0, 1);
+            assert_direction(transform_direction(&matrix, [0.0, 0.0, 1.0]), expected);
+        }
+    }
+
+    #[test]
+    fn reverse_axis_periodicity_and_restart_use_the_absolute_clock() {
+        let view = CelestialView {
+            rotating: true,
+            latitude: -47.5,
+            longitude: 152.0,
+            roll: 63.0,
+            axis: [1.0, -2.0, 0.5],
+        };
+        let reverse = CelestialView {
+            axis: view.axis.map(|v| -v),
+            ..view
+        };
+        for period in [1, 20, 1440, 39343, 525600] {
+            let unix = 1_792_148_400.125;
+            let initial = view.matrix(unix, period);
+            assert_eq!(initial, view.matrix(unix, period));
+            assert_eq!(
+                initial,
+                view.matrix(unix + f64::from(period) * 60.0, period)
+            );
+            assert!(
+                initial
+                    .into_iter()
+                    .zip(reverse.matrix(-unix, period))
+                    .all(|(a, b)| (a - b).abs() < 1e-7)
+            );
+            assert_ne!(
+                initial,
+                view.matrix(unix + f64::from(period) * 15.0, period)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_internal_inputs_have_finite_deterministic_fallbacks() {
+        let fixed = CelestialView {
+            latitude: 23.13,
+            longitude: 113.28,
+            roll: 17.0,
+            axis: [1.0, 2.0, 3.0],
+            ..CelestialView::default()
+        };
+        for unix in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN,
+            f64::MAX,
+            -1.0,
+            0.0,
+        ] {
+            for period in [0, 1, 525600, u32::MAX] {
+                assert_eq!(fixed.matrix(unix, period), fixed.matrix(0.0, 1));
+                assert!(
+                    CelestialView {
+                        rotating: true,
+                        ..fixed
+                    }
+                    .matrix(unix, period)
+                    .into_iter()
+                    .all(f32::is_finite)
+                );
+            }
+        }
+        for axis in [
+            [0.0; 3],
+            [f64::NAN, 1.0, 0.0],
+            [0.0, f64::INFINITY, 0.0],
+            [f64::NEG_INFINITY, 1.0, 2.0],
+        ] {
+            let view = CelestialView {
+                rotating: true,
+                axis,
+                ..fixed
+            };
+            assert_eq!(
+                view.matrix(1792148400.125, 20),
+                CelestialView {
+                    axis: [0.0, 1.0, 0.0],
+                    ..view
+                }
+                .matrix(1792148400.125, 20)
+            );
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                CelestialView {
+                    latitude: invalid,
+                    longitude: invalid,
+                    roll: invalid,
+                    ..CelestialView::default()
+                }
+                .matrix(0.0, 1),
+                CelestialView::default().matrix(0.0, 1)
+            );
+        }
+        for degrees in [f64::MIN, f64::MAX] {
+            assert!(
+                CelestialView {
+                    rotating: true,
+                    latitude: degrees,
+                    longitude: degrees,
+                    roll: degrees,
+                    axis: [degrees; 3]
+                }
+                .matrix(f64::MAX, u32::MAX)
+                .into_iter()
+                .all(f32::is_finite)
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_tours_preserve_geographic_daylight_and_the_current_lunar_phase() {
+        let geographic = [0.3, -0.4, 0.75_f32.sqrt()];
+        let normals = [[0.0, 0.0, 1.0], [0.6, 0.0, 0.8], [0.0, -0.8, 0.6]];
+        for unix in [
+            1_774_008_000.0,
+            1_782_043_200.0,
+            1_792_148_400.0,
+            1_792_987_920.0,
+        ] {
+            let sun = solar_direction(unix);
+            let phase = lunar_phase_light(unix);
+            let earth_light = dot(geographic, sun);
+            for axis in [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+                [1.0, -2.0, 3.0],
+            ] {
+                for period in [1, 20, 39343] {
+                    let matrix = CelestialView {
+                        rotating: true,
+                        latitude: 90.0,
+                        longitude: -73.0,
+                        roll: 137.0,
+                        axis,
+                    }
+                    .matrix(unix, period);
+                    let recovered =
+                        transform_direction(&matrix, camera_direction(&matrix, geographic));
+                    assert!((dot(recovered, sun) - earth_light).abs() < 3e-7);
+                    let lunar_light = transform_direction(&matrix, phase);
+                    assert_direction(camera_direction(&matrix, lunar_light), phase);
+                    for normal in normals {
+                        assert!(
+                            (dot(transform_direction(&matrix, normal), lunar_light)
+                                - dot(normal, phase))
+                            .abs()
+                                < 3e-7
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1382,15 +1841,32 @@ mod timezone_boundary_tests {
         clock.set_paused(false);
         assert!(clock.tick(now));
         let t = 1774051200.0;
-        let initial = (solar_direction(t), viewing_longitude(t, 28800));
+        let view = CelestialView {
+            rotating: true,
+            latitude: 23.13,
+            longitude: 113.28,
+            roll: 37.0,
+            axis: [1.0, -2.0, 3.0],
+        };
+        let sample = |unix| {
+            (
+                solar_direction(unix),
+                lunar_phase_light(unix),
+                view.matrix(unix, 17),
+            )
+        };
+        let initial = sample(t);
         for jump in [86400.0 * 90.0, -86400.0 * 90.0] {
             clock.set_paused(true);
             assert!(!clock.tick(now + Duration::from_secs(3600)));
             clock.set_paused(false);
             assert!(clock.tick(now + Duration::from_secs(3600)));
-            assert_ne!(solar_direction(t + jump), initial.0);
+            let resumed = sample(t + jump);
+            assert_ne!(resumed.0, initial.0);
+            assert_ne!(resumed.1, initial.1);
+            assert_ne!(resumed.2, initial.2);
             // Reversing a wall-clock correction restores the original sample.
-            assert_eq!((solar_direction(t), viewing_longitude(t, 28800)), initial);
+            assert_eq!(sample(t), initial);
         }
     }
 }
@@ -1661,15 +2137,20 @@ pub(crate) fn celestial_assignments(
 
 /// Reduce in f64 before casting, avoiding precision loss at Unix timestamps.
 pub(crate) fn visual_rotation(unix: f64, minutes: u32) -> f32 {
+    visual_rotation_f64(unix, minutes) as f32
+}
+
+fn visual_rotation_f64(unix: f64, minutes: u32) -> f64 {
     let period = f64::from(minutes.clamp(1, 525_600)) * 60.0;
     if !unix.is_finite() {
         return 0.0;
     }
-    (unix.rem_euclid(period) / period * std::f64::consts::TAU) as f32
+    unix.rem_euclid(period) / period * std::f64::consts::TAU
 }
 
 /// The timezone is a fixed observer meridian, not a second clock correction.
 /// UTC alone advances rotation; offset is added once as 15 degrees per hour.
+#[allow(dead_code)] // Longitude-only compatibility helper; current views use CelestialView.
 pub(crate) fn celestial_longitude(unix: f64, minutes: u32, utc_offset_seconds: i32) -> f32 {
     let phase = f64::from(visual_rotation(unix, minutes));
     let meridian =
@@ -1750,8 +2231,10 @@ pub(crate) fn lunar_phase_light(unix: f64) -> [f32; 3] {
     [light_x as f32, 0.0, light_z as f32]
 }
 
-/// Same orthonormal transform as the shader's earth_normal. Rotate the light
-/// together with normals so artistic surface spin cannot rotate the terminator.
+/// Legacy latitude-0.18/longitude transform for the original shader probes.
+/// Rotate the light together with normals so spin cannot rotate the terminator;
+/// current rendering uses transform_direction with the complete CelestialView.
+#[allow(dead_code)] // Legacy lunar transform retained as an independent regression baseline.
 pub(crate) fn lunar_sun_direction(unix: f64, longitude: f32) -> [f32; 3] {
     let [x, _, z] = lunar_phase_light(unix);
     let (sl, cl) = 0.18_f32.sin_cos();
