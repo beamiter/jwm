@@ -561,6 +561,7 @@ mod tests {
                 },
             }],
             row_icons: Vec::new(),
+            source_rows: None,
             selected: 0,
             message: String::new(),
             prompt: None,

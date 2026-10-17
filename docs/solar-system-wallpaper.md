@@ -31,6 +31,13 @@ an opaque pale cloud deck; Jupiter has unequal, sheared cloud zones and a curled
 storm; Saturn has softer, low-contrast bands. These other clouds are original,
 fixed-cost procedural illustrations, not measured atmospheric data.
 
+Image materials use mipmaps and trilinear minification, with analytic texture
+gradients that remain stable at longitude seams and near the poles. This reduces
+moiré and flickering when detailed maps shrink onto a distant planet. Mipmaps
+are generated once when the material is adopted and add approximately one-third
+to its texture storage. A failed mipmap generation keeps the base image and
+falls back to linear sampling. The full-resolution scene cache is unchanged.
+
 Each planet now rotates independently as a rigid body around its own tilted axis.
 Sidereal spin periods and obliquities follow the
 [NASA GSFC planetary fact sheets](https://nssdc.gsfc.nasa.gov/planetary/factsheet/).

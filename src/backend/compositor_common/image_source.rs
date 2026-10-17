@@ -30,6 +30,23 @@ pub(crate) fn open_regular_image(
     )
 }
 
+/// Also return the identity of the descriptor whose bytes were decoded. A
+/// cache must bind its pixels to this source, not only to pathname metadata
+/// that can change while a symlink or directory entry is being replaced.
+#[cfg(any(feature = "x11-backends", feature = "wayland-backends"))]
+pub(crate) fn open_regular_image_with_metadata(
+    path: impl AsRef<Path>,
+) -> image::ImageResult<(image::DynamicImage, std::fs::Metadata)> {
+    open_image_source_with_limits(
+        path.as_ref(),
+        WALLPAPER_MAX_DIMENSION,
+        WALLPAPER_MAX_DIMENSION,
+        WALLPAPER_MAX_BYTES,
+        WALLPAPER_MAX_OUTPUT,
+        WALLPAPER_MAX_ALLOC,
+    )
+}
+
 /// Strict source/dimension bounds for bundled sky images and user replacements.
 /// The 64 MiB decoder budget remains best-effort for codec-internal allocations;
 /// decoded output and any orientation copy are explicitly reserved below.
@@ -74,6 +91,20 @@ fn open_image_with_limits(
     max_output: u64,
     max_alloc: u64,
 ) -> image::ImageResult<image::DynamicImage> {
+    open_image_source_with_limits(
+        path, max_width, max_height, max_bytes, max_output, max_alloc,
+    )
+    .map(|(image, _)| image)
+}
+
+fn open_image_source_with_limits(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+    max_bytes: u64,
+    max_output: u64,
+    max_alloc: u64,
+) -> image::ImageResult<(image::DynamicImage, std::fs::Metadata)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -121,7 +152,7 @@ fn open_image_with_limits(
     decoder.set_limits(limits)?;
     let mut decoded = image::DynamicImage::from_decoder(decoder)?;
     decoded.apply_orientation(orientation);
-    Ok(decoded)
+    Ok((decoded, metadata))
 }
 
 #[cfg(test)]

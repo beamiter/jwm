@@ -17,18 +17,20 @@ wallpaper_astronomy_layout = "earth-moon"
 wallpaper_earth_texture = ""
 wallpaper_moon_texture = ""
 
-# Earth-moon only: integer minutes per turn, inclusive range 1..525600.
+# Integer minutes per turn, inclusive range 1..525600.
+# Earth applies in every Astronomy layout when its view is "rotating".
+# Moon applies in the earth-moon layout. Earth defaults to a fixed view.
 # Defaults: Earth 1440 (24 hours); Moon 39343 (about 27.3 days).
-# For a faster decorative view, use Earth = 20 and Moon = 30.
+# For a faster decorative view, use "rotating", Earth = 20 and Moon = 30.
+wallpaper_earth_view = "fixed"
 wallpaper_earth_rotation_minutes = 1440
 wallpaper_moon_rotation_minutes = 39343
 
-# Earth-moon only: "system" (default) follows local timezone, including DST.
-# For fixed UTC+8, change this to "configured" and keep the offset below at 8.
+# Compatibility settings; they do not change the viewing longitude or sunlight.
+# Earth uses wallpaper_earth_longitude and the fixed/rotating view above.
+# Celestial illumination follows the actual UTC instant.
 wallpaper_astronomy_timezone = "system"
 # Integer hours, -12..14; default 8. No operating-system timezone changes.
-# span/per-output always use this offset; earth-moon uses it when configured
-# or when system timezone lookup fails. It is a viewing meridian, not GPS.
 wallpaper_timezone_offset_hours = 8
 
 # Earth-moon only: replace connector names with your actual output names.
@@ -41,13 +43,20 @@ wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
 
 # Static fallback, restored when Astronomy is off/unavailable.
 # Generated default is jwm/wallpaper.jpg in your config directory.
-# This example explicitly uses "" for black when no override/daily rotation applies.
+# With no override/daily rotation, "" loads no static image and shows the
+# backend's default desktop background (theme-dependent without the compositor).
 # Example: wallpaper = "/home/alice/Pictures/Wallpapers/forest.jpg"
 wallpaper = ""
 # Static images only; this does not resize Astronomy bodies. Default "fill".
 # fill = preserve aspect and crop; fit = show whole image with margins;
 # stretch = distort to fill; center = unscaled and centered (may crop).
 wallpaper_mode = "fill"
+
+# Smooth transitions for global and independent monitor/tag image replacements.
+# The old image stays visible until the new decode/upload succeeds.
+# Default true / 500 ms. Disabling releases the old transition textures.
+wallpaper_crossfade = true
+wallpaper_crossfade_duration_ms = 500
 
 # "off" (default) or "daily" (local calendar date, different images per output slot).
 # Automatic daily selection from a nonempty collection overrides static monitor/tag choices.

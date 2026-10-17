@@ -268,16 +268,16 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
                             a.earth_texture =
                                 Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
-                            if let Some(texture) = a.earth_texture {
-                                unsafe {
-                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                                    self.gl.tex_parameter_i32(
-                                        glow::TEXTURE_2D,
-                                        glow::TEXTURE_WRAP_S,
-                                        glow::REPEAT as i32,
-                                    );
-                                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                            if let Some(texture) = a.earth_texture
+                                && !unsafe {
+                                    procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                        &self.gl, texture,
+                                    )
                                 }
+                            {
+                                log::warn!(
+                                    "solar-system wallpaper: mipmaps unavailable; retaining base texture"
+                                );
                             }
                         }
                     }
@@ -298,16 +298,16 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
                             a.cloud_texture =
                                 Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
-                            if let Some(texture) = a.cloud_texture {
-                                unsafe {
-                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                                    self.gl.tex_parameter_i32(
-                                        glow::TEXTURE_2D,
-                                        glow::TEXTURE_WRAP_S,
-                                        glow::REPEAT as i32,
-                                    );
-                                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                            if let Some(texture) = a.cloud_texture
+                                && !unsafe {
+                                    procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                        &self.gl, texture,
+                                    )
                                 }
+                            {
+                                log::warn!(
+                                    "solar-system wallpaper: mipmaps unavailable; retaining base texture"
+                                );
                             }
                         }
                     }
@@ -328,16 +328,16 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
                             a.sky_texture =
                                 Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
-                            if let Some(texture) = a.sky_texture {
-                                unsafe {
-                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                                    self.gl.tex_parameter_i32(
-                                        glow::TEXTURE_2D,
-                                        glow::TEXTURE_WRAP_S,
-                                        glow::REPEAT as i32,
-                                    );
-                                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                            if let Some(texture) = a.sky_texture
+                                && !unsafe {
+                                    procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                        &self.gl, texture,
+                                    )
                                 }
+                            {
+                                log::warn!(
+                                    "solar-system wallpaper: mipmaps unavailable; retaining base texture"
+                                );
                             }
                         }
                     }

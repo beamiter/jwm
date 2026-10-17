@@ -2,7 +2,7 @@
 
 use crate::config::{BehaviorConfig, WallpaperTagConfig};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WallpaperMode {
     Fill,
     Fit,
@@ -91,11 +91,35 @@ pub(crate) fn uses_global_wallpaper_fallback(
     !daily_rotation && resolved_path == global_path && resolved_mode == global_mode
 }
 
+#[derive(Clone)]
 pub(crate) struct WallpaperImageData {
-    pub(crate) rgba: Vec<u8>,
+    /// Shared by the bounded CPU cache and completed loads. Reusing a decoded
+    /// image must not copy a full-resolution pixel buffer for every output.
+    pub(crate) rgba: std::sync::Arc<[u8]>,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) mode: WallpaperMode,
+}
+
+/// An output owns its previous texture until its replacement fade completes.
+/// Keeping layout with the texture avoids stretching the old image when a tag
+/// switch also changes Fill/Fit/Center mode.
+#[derive(Clone, Copy)]
+pub(crate) struct WallpaperTransition<T> {
+    pub(crate) texture: T,
+    pub(crate) mode: WallpaperMode,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) started: std::time::Instant,
+}
+
+impl<T> WallpaperTransition<T> {
+    pub(crate) fn progress(&self, now: std::time::Instant, duration_ms: u64) -> f32 {
+        wallpaper_fade(
+            now.saturating_duration_since(self.started).as_secs_f32()
+                / (duration_ms.max(1) as f32 / 1000.0),
+        )
+    }
 }
 
 /// Long-edge bound of the wallpaper picker's side-preview thumbnail, matched

@@ -80,6 +80,7 @@ for es in (False,True):
  earth_enabled=earth.is_file() and not os.environ.get('SOLAR_NO_EARTH')
  texture=Image.open(earth).convert('RGBA') if earth_enabled else Image.new('RGBA',(1,1),(0,0,0,255));data=C.create_string_buffer(texture.tobytes())
  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
+ gl('glGenerateMipmap',None,[U])(0x0DE1);param(0x0DE1,0x2801,0x2703)
  unif1i(loc(prog,b'earth_map'),0);unif1i(loc(prog,b'earth_enabled'),int(bool(earth_enabled)))
 
  for unit,key,filename in [(1,'cloud','earth-nasa-clouds.jpg'),(2,'sky','milkyway-nasa-gaia.jpg')]:
@@ -91,6 +92,7 @@ for es in (False,True):
   texture=Image.open(path).convert('RGBA') if enabled else Image.new('RGBA',(1,1),(0,0,0,255))
   data=C.create_string_buffer(texture.tobytes())
   gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
+  gl('glGenerateMipmap',None,[U])(0x0DE1);param(0x0DE1,0x2801,0x2703)
   unif1i(loc(prog,(key+'_map').encode()),unit);unif1i(loc(prog,(key+'_enabled').encode()),int(enabled))
  gl('glActiveTexture',None,[U])(0x84C0)
 
@@ -153,7 +155,7 @@ void main(){
  int body=index.x+4*index.y+1;
  vec2 uv=(mod(gl_FragCoord.xy,cell)-cell*.5)/(min(cell.x,cell.y)*.43);
  float rr=dot(uv,uv);vec3 color=vec3(.003);
- if(rr<1.){vec3 n=vec3(uv,sqrt(1.-rr));vec3 albedo=material(body,n);
+ if(rr<1.){vec3 n=vec3(uv,sqrt(1.-rr));vec3 albedo=material(body,n,vec3(0),vec3(0));
   float diffuse=max(0.,dot(n,normalize(vec3(-.45,.55,1.))));
   color=pow(albedo,vec3(2.2))*(.13+2.3*diffuse);}
  frag_color=vec4(pow(tone(color),vec3(1./2.2)),1.);
@@ -200,7 +202,7 @@ void main(){
   pixels=(C.c_ubyte*32)();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,8,1,0x1908,0x1401,pixels)
   assert list(pixels)==[0,255,0,255]*8, ('actual axis/direction/rigid UV probes',list(pixels))
   # Replace only albedo; changing spin must not rotate world lighting or shadows.
-  lighting=diagnostic_program(source.replace('material(body,n)','vec3(.5)'))
+  lighting=diagnostic_program(source.replace('material(body,n,normal_dx,normal_dy)','vec3(.5)'))
   gl('glViewport',None,[I,I,I,I])(0,0,W,H)
   unif2(loc(lighting,b'resolution'),W,H)
   v=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),'.4','.65','35','0']).split()))
@@ -215,6 +217,40 @@ void main(){
   assert images[0]==images[1], 'self-rotation must not move world-space illumination'
   results[kind]['rigid_axis_direction_probes']=8
   results[kind]['spin_independent_world_lighting']=True
+  # Production spherical UV gradients must keep longitude detail across atan's
+  # wrap, including close to both poles, independently of derivative quads.
+  gradient_source=source[:source.index('void main(){')]+r"""
+void main(){
+ float longitude=PI+(gl_FragCoord.x-3.3)*.001;
+ float latitude=gl_FragCoord.x<2.?-1.56:gl_FragCoord.x>6.?1.56:0.;
+ float sl=sin(longitude),cl=cos(longitude),sp=sin(latitude),cp=cos(latitude);
+ vec3 n=vec3(cp*cl,sp,cp*sl);
+ vec3 dx=vec3(-cp*sl,0.,cp*cl)*.001;
+ vec3 dy=vec3(-sp*cl,cp,-sp*sl)*.001;
+ vec2 gx=equirect_gradient(n,dx),gy=equirect_gradient(n,dy);
+ bool ok=length(gx-vec2(.001/TAU,0.))<.000001;
+ ok=ok&&length(gy-vec2(0.,-.001/PI))<.000001;
+ vec2 uv=vec2(.5+atan(n.z,n.x)/TAU,.5-asin(clamp(n.y,-1.,1.))/PI);
+ ok=ok&&textureGrad(earth_map,uv,gx,gy).r>.85;
+ frag_color=ok?vec4(0,1,0,1):vec4(1,0,0,1);
+}
+"""
+  gradient_program=diagnostic_program(gradient_source)
+  gl('glActiveTexture',None,[U])(0x84C0)
+  wrap_texture=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(wrap_texture))
+  gl('glBindTexture',None,[U,U])(0x0DE1,wrap_texture)
+  for key,val in ((0x2801,0x2703),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
+  wrap_row=bytes(v for x in range(1024) for v in (round(128+100*math.cos(2*math.pi*(x+.5)/1024)),0,0,255))
+  data=C.create_string_buffer(wrap_row*512)
+  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x8058,1024,512,0,0x1908,0x1401,data)
+  gl('glGenerateMipmap',None,[U])(0x0DE1)
+  unif1i(loc(gradient_program,b'earth_map'),0)
+  gl('glViewport',None,[I,I,I,I])(0,0,8,1);gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  pixels=(C.c_ubyte*32)();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,8,1,0x1908,0x1401,pixels)
+  assert list(pixels)==[0,255,0,255]*8, ('seam/pole explicit texture gradients',list(pixels))
+  assert gl('glGetError',U,[])()==0
+  gl('glDeleteTextures',None,[I,C.POINTER(U)])(1,C.byref(wrap_texture))
+  results[kind]['gradient_wrap_probes']=8
 
  current(d,None,None,None)
  egl('eglDestroySurface',U,[P,P])(d,surf);egl('eglDestroyContext',U,[P,P])(d,ctx)

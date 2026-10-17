@@ -43,6 +43,189 @@ fn unavailable(reason: &str) {
     eprintln!("SKIP: {reason}");
 }
 
+/// Exercise the exact production mipmap adoption on both APIs. A high-frequency
+/// source must converge to its area average; the conservative error fallback
+/// must still expose the intact base image and restore the caller's binding.
+unsafe fn equirectangular_mipmaps_preserve_state_and_base_fallback(gl: &glow::Context, es: bool) {
+    unsafe {
+        let source = gl.create_texture().unwrap();
+        let sentinel = gl.create_texture().unwrap();
+        let output = gl.create_texture().unwrap();
+        let target = gl.create_framebuffer().unwrap();
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(output));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            8,
+            4,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(output),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE
+        );
+        gl.active_texture(glow::TEXTURE3);
+        gl.bind_texture(glow::TEXTURE_2D, Some(source));
+        let pixels: Vec<_> = (0..64 * 32)
+            .flat_map(|index| {
+                let value = if index % 2 == 0 { 0 } else { 255 };
+                [value, value, value, 255]
+            })
+            .collect();
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            64,
+            32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&pixels)),
+        );
+        gl.bind_texture(glow::TEXTURE_2D, Some(sentinel));
+        assert!(cache::prepare_equirectangular_texture(gl, source));
+        assert_eq!(
+            gl.get_parameter_i32(glow::ACTIVE_TEXTURE),
+            glow::TEXTURE3 as i32
+        );
+        assert_eq!(
+            gl.get_parameter_texture(glow::TEXTURE_BINDING_2D),
+            Some(sentinel)
+        );
+        assert_eq!(
+            gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING),
+            Some(target)
+        );
+        gl.bind_texture(glow::TEXTURE_2D, Some(source));
+        for (parameter, expected) in [
+            (glow::TEXTURE_WRAP_S, glow::REPEAT),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR),
+        ] {
+            assert_eq!(
+                gl.get_tex_parameter_i32(glow::TEXTURE_2D, parameter),
+                expected as i32
+            );
+        }
+
+        let prefix = if es {
+            "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+        } else {
+            "#version 330 core\n"
+        };
+        let vertex = gl.create_shader(glow::VERTEX_SHADER).unwrap();
+        gl.shader_source(vertex, &format!("{prefix}void main(){{vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0,1);}}"));
+        gl.compile_shader(vertex);
+        assert!(
+            gl.get_shader_compile_status(vertex),
+            "{}",
+            gl.get_shader_info_log(vertex)
+        );
+        let fragment = gl.create_shader(glow::FRAGMENT_SHADER).unwrap();
+        gl.shader_source(fragment, &format!("{prefix}uniform sampler2D map;out vec4 color;void main(){{vec2 uv=vec2((floor(gl_FragCoord.x)*8.+.5)/64.+1.,-.5);color=textureLod(map,uv,2.);}}"));
+        gl.compile_shader(fragment);
+        assert!(
+            gl.get_shader_compile_status(fragment),
+            "{}",
+            gl.get_shader_info_log(fragment)
+        );
+        let program = gl.create_program().unwrap();
+        gl.attach_shader(program, vertex);
+        gl.attach_shader(program, fragment);
+        gl.link_program(program);
+        assert!(
+            gl.get_program_link_status(program),
+            "{}",
+            gl.get_program_info_log(program)
+        );
+        gl.use_program(Some(program));
+        gl.uniform_1_i32(gl.get_uniform_location(program, "map").as_ref(), 3);
+        let vao = gl.create_vertex_array().unwrap();
+        gl.bind_vertex_array(Some(vao));
+        gl.viewport(0, 0, 8, 4);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.disable(glow::BLEND);
+        for fallback in [false, true] {
+            if fallback {
+                // A reported GL error must conservatively keep the original
+                // image usable. This injects an error, not a simulated OOM.
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, -1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(sentinel));
+                assert!(!cache::prepare_equirectangular_texture(gl, source));
+                assert_eq!(
+                    gl.get_parameter_texture(glow::TEXTURE_BINDING_2D),
+                    Some(sentinel)
+                );
+                gl.bind_texture(glow::TEXTURE_2D, Some(source));
+                assert_eq!(
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER),
+                    glow::LINEAR as i32
+                );
+                assert_eq!(
+                    gl.get_tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL),
+                    0
+                );
+            }
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            let mut rendered = [0u8; 8 * 4 * 4];
+            gl.read_pixels(
+                0,
+                0,
+                8,
+                4,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut rendered)),
+            );
+            for pixel in rendered.chunks_exact(4) {
+                assert_eq!(pixel[3], 255);
+                if fallback {
+                    assert_eq!(
+                        &pixel[..3],
+                        &[0, 0, 0],
+                        "base image survives error fallback"
+                    );
+                } else {
+                    assert!(
+                        pixel[..3].iter().all(|v| (127..=128).contains(v)),
+                        "mipmaps must average alternating texels: {pixel:?}"
+                    );
+                }
+            }
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+        }
+        gl.use_program(None);
+        gl.bind_vertex_array(None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.delete_vertex_array(vao);
+        gl.delete_program(program);
+        gl.delete_shader(vertex);
+        gl.delete_shader(fragment);
+        gl.delete_framebuffer(target);
+        for texture in [source, sentinel, output] {
+            gl.delete_texture(texture);
+        }
+        eprintln!("PASS: equirectangular mipmap pixels, state, repeat, and base fallback");
+    }
+}
+
 #[test]
 fn surfaceless_frame_cache_state_pixels_precision_and_resize() {
     unsafe {
@@ -90,6 +273,7 @@ fn surfaceless_frame_cache_state_pixels_precision_and_resize() {
                 gl.get_parameter_string(glow::RENDERER),
                 gl.get_parameter_string(glow::VERSION)
             );
+            equirectangular_mipmaps_preserve_state_and_base_fallback(&gl, es);
             // Include SDR postprocessing: both HDR flags are false, but the
             // scene destination is RGB10_A2 and must retain all ten bits.
             for (hdr, output_ten_bit, postprocess_active) in [

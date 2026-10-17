@@ -252,9 +252,9 @@ struct WallpaperBlendPlan {
 /// Select the layers for one output.
 ///
 /// An output with a monitor override never participates in the global
-/// transition. Global fallbacks draw the old image opaque and the new image
-/// over it at `progress`; this is the correct interpolation for ordinary
-/// source-over alpha blending and avoids dimming halfway through the fade.
+/// transition. Fades add the weighted old and new images over black. Drawing
+/// the old image fully opaque would leave it visible outside a Fit/Center
+/// replacement until the final frame, followed by a visible jump.
 fn wallpaper_blend_plan(
     has_monitor_override: bool,
     has_current_global: bool,
@@ -274,7 +274,7 @@ fn wallpaper_blend_plan(
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
         WallpaperBlendPlan {
-            old_global_opacity: Some(1.0),
+            old_global_opacity: Some(1.0 - progress),
             current_opacity: has_current_global.then_some(progress),
         }
     } else {
@@ -5458,9 +5458,19 @@ impl<C: CompositorConnection> Compositor<C> {
                         let uploaded = Self::upload_wallpaper_texture(&self.gl, &data);
                         mw.load_failed = uploaded.is_none();
                         if let Some((tex, w, h)) = uploaded {
+                            if let Some(stale) = mw.previous.take() {
+                                unsafe { self.gl.delete_texture(stale.texture); }
+                            }
                             if let Some(previous) = mw.texture.replace(tex) {
+                                if self.wallpaper_crossfade {
+                                    mw.previous = Some(crate::backend::compositor_common::wallpaper::WallpaperTransition {
+                                        texture: previous, mode: mw.mode, width: mw.img_w, height: mw.img_h,
+                                        started: std::time::Instant::now(),
+                                    });
+                                } else {
                                 unsafe {
                                     self.gl.delete_texture(previous);
+                                }
                                 }
                             }
                             mw.img_w = w;
@@ -6048,7 +6058,9 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            // Wallpaper pixels and their Fit/Center margins form an opaque
+            // desktop, including during additive crossfades.
+            self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
 
@@ -6095,6 +6107,12 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl
                         .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
                     self.gl.active_texture(glow::TEXTURE0);
+                    // The framebuffer was cleared to black. Add the weighted
+                    // layers so differing aspect ratios fade their margins too.
+                    // Keep the backdrop's opaque alpha even on floating-point
+                    // targets, where an additive alpha sum would not clamp.
+                    self.gl
+                        .blend_func_separate(glow::ONE, glow::ONE, glow::ZERO, glow::ONE);
 
                     if !self.monitor_wallpapers.is_empty() {
                         // Per-monitor wallpaper rendering uses the intersection
@@ -6103,13 +6121,42 @@ impl<C: CompositorConnection> Compositor<C> {
                         // for even a tiny window update.
                         for mw in &self.monitor_wallpapers {
                             let has_monitor_override = mw.texture.is_some();
-                            let blend = wallpaper_blend_plan(
-                                has_monitor_override,
-                                self.wallpaper_texture.is_some(),
-                                self.old_wallpaper_texture.is_some(),
-                                global_transition_progress,
-                            );
-                            if blend.old_global_opacity.is_none() && blend.current_opacity.is_none()
+                            let output_progress = mw.previous.as_ref().map(|previous| {
+                                previous.progress(
+                                    std::time::Instant::now(),
+                                    self.wallpaper_crossfade_duration_ms,
+                                )
+                            });
+                            let blend = if let Some(progress) = output_progress {
+                                let target = wallpaper_blend_plan(
+                                    has_monitor_override,
+                                    self.wallpaper_texture.is_some(),
+                                    self.old_wallpaper_texture.is_some(),
+                                    global_transition_progress,
+                                );
+                                // A global fallback can itself be mid-fade.
+                                // Fade toward that complete canvas, not only
+                                // its newest texture (which would jump when
+                                // the output's earlier fade finishes).
+                                WallpaperBlendPlan {
+                                    old_global_opacity: target
+                                        .old_global_opacity
+                                        .map(|weight| weight * progress),
+                                    current_opacity: target
+                                        .current_opacity
+                                        .map(|weight| weight * progress),
+                                }
+                            } else {
+                                wallpaper_blend_plan(
+                                    has_monitor_override,
+                                    self.wallpaper_texture.is_some(),
+                                    self.old_wallpaper_texture.is_some(),
+                                    global_transition_progress,
+                                )
+                            };
+                            if blend.old_global_opacity.is_none()
+                                && blend.current_opacity.is_none()
+                                && mw.previous.is_none()
                             {
                                 continue;
                             }
@@ -6127,6 +6174,9 @@ impl<C: CompositorConnection> Compositor<C> {
                             };
                             self.gl.enable(glow::SCISSOR_TEST);
                             self.gl.scissor(scissor.0, scissor.1, scissor.2, scissor.3);
+                            // Mirrored/overlapping outputs keep last-writer
+                            // semantics rather than add their colors together.
+                            self.gl.clear(glow::COLOR_BUFFER_BIT);
 
                             let area = (
                                 mw.mon_x as f32,
@@ -6134,6 +6184,17 @@ impl<C: CompositorConnection> Compositor<C> {
                                 mw.mon_w as f32,
                                 mw.mon_h as f32,
                             );
+
+                            if let Some(previous) = &mw.previous {
+                                self.draw_wallpaper_layer(
+                                    previous.texture,
+                                    previous.mode,
+                                    previous.width,
+                                    previous.height,
+                                    area,
+                                    1.0 - output_progress.unwrap_or(1.0),
+                                );
+                            }
 
                             // A monitor override is independent of the global
                             // transition. Fallback outputs draw the old global
@@ -6215,6 +6276,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
                     // Restore the shared window program state for subsequent
                     // scene draws.
+                    self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
                     self.gl
                         .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
@@ -6254,6 +6316,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     m.mode as u8,
                     m.img_w,
                     m.img_h,
+                    m.previous.as_ref().map(|previous| previous.texture),
                 )
                     .hash(&mut key);
             }
@@ -6261,8 +6324,13 @@ impl<C: CompositorConnection> Compositor<C> {
             astronomy_key.hash(&mut key);
             let (solar_key, solar_dynamic) = self.solar_system_wallpaper.bar_metric_source();
             solar_key.hash(&mut key);
-            let dynamic =
-                astronomy_dynamic || solar_dynamic || self.wallpaper_transition_start.is_some();
+            let dynamic = astronomy_dynamic
+                || solar_dynamic
+                || self.wallpaper_transition_start.is_some()
+                || self
+                    .monitor_wallpapers
+                    .iter()
+                    .any(|wallpaper| wallpaper.previous.is_some());
             // Do not change caller GL state, and never let a PBO or pack offset
             // turn a bounded scanline into an out-of-bounds driver write.
             let pack_safe =
@@ -9136,9 +9204,9 @@ mod tests {
     }
 
     #[test]
-    fn global_fallback_draws_opaque_old_then_progressive_new() {
+    fn global_fallback_adds_weighted_old_and_new_including_fit_margins() {
         let plan = wallpaper_blend_plan(false, true, true, Some(0.4));
-        assert_eq!(plan.old_global_opacity, Some(1.0));
+        assert_eq!(plan.old_global_opacity, Some(0.6));
         assert_eq!(plan.current_opacity, Some(0.4));
 
         // This is also the plan for the global-only path when no monitor

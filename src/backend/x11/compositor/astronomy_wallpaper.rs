@@ -312,7 +312,7 @@ impl<C: CompositorConnection> Compositor<C> {
             Some(WallpaperImageData {
                 width: rgba.width(),
                 height: rgba.height(),
-                rgba: rgba.into_raw(),
+                rgba: rgba.into_raw().into(),
                 mode: WallpaperMode::Stretch,
             })
         })
@@ -572,12 +572,15 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                         return;
                     }
-                    unsafe {
-                        self.gl.bind_texture(glow::TEXTURE_2D, a.texture);
-                        self.gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_WRAP_S,
-                            glow::REPEAT as i32,
+                    if let Some(texture) = a.texture
+                        && !unsafe {
+                            procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                &self.gl, texture,
+                            )
+                        }
+                    {
+                        log::warn!(
+                            "astronomy wallpaper: mipmaps unavailable; retaining base texture"
                         );
                     }
                 }
@@ -613,12 +616,15 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                         return;
                     }
-                    unsafe {
-                        self.gl.bind_texture(glow::TEXTURE_2D, a.moon_texture);
-                        self.gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_WRAP_S,
-                            glow::REPEAT as i32,
+                    if let Some(texture) = a.moon_texture
+                        && !unsafe {
+                            procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                &self.gl, texture,
+                            )
+                        }
+                    {
+                        log::warn!(
+                            "astronomy wallpaper: mipmaps unavailable; retaining base texture"
                         );
                     }
                 }
@@ -641,15 +647,16 @@ impl<C: CompositorConnection> Compositor<C> {
                     if data.width == data.height.saturating_mul(2) {
                         a.cloud_texture =
                             Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
-                        if a.cloud_texture.is_some() {
-                            unsafe {
-                                self.gl.bind_texture(glow::TEXTURE_2D, a.cloud_texture);
-                                self.gl.tex_parameter_i32(
-                                    glow::TEXTURE_2D,
-                                    glow::TEXTURE_WRAP_S,
-                                    glow::REPEAT as i32,
-                                );
+                        if let Some(texture) = a.cloud_texture
+                            && !unsafe {
+                                procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                    &self.gl, texture,
+                                )
                             }
+                        {
+                            log::warn!(
+                                "astronomy wallpaper: mipmaps unavailable; retaining base texture"
+                            );
                         }
                     }
                     // Optional clouds may fail without disabling either required surface.
@@ -668,15 +675,16 @@ impl<C: CompositorConnection> Compositor<C> {
                     if data.width == data.height.saturating_mul(2) {
                         a.sky_texture =
                             Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
-                        if a.sky_texture.is_some() {
-                            unsafe {
-                                self.gl.bind_texture(glow::TEXTURE_2D, a.sky_texture);
-                                self.gl.tex_parameter_i32(
-                                    glow::TEXTURE_2D,
-                                    glow::TEXTURE_WRAP_S,
-                                    glow::REPEAT as i32,
-                                );
+                        if let Some(texture) = a.sky_texture
+                            && !unsafe {
+                                procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                    &self.gl, texture,
+                                )
                             }
+                        {
+                            log::warn!(
+                                "astronomy wallpaper: mipmaps unavailable; retaining base texture"
+                            );
                         }
                     }
                     // Optional sky may fail without disabling either required surface.

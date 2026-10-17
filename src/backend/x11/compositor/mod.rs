@@ -1344,6 +1344,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 if let Some(tex) = mw.texture {
                     self.gl.delete_texture(tex);
                 }
+                if let Some(previous) = mw.previous {
+                    self.gl.delete_texture(previous.texture);
+                }
             }
             // Phase 3.5: Clean up old wallpaper crossfade texture
             if let Some(tex) = self.old_wallpaper_texture.take() {

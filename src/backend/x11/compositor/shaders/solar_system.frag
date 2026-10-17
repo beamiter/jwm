@@ -14,6 +14,13 @@ uniform sampler2D sky_map;
 uniform int sky_enabled;
 const float PI=3.14159265359;
 const float TAU=6.28318530718;
+// Explicit spherical lookup derivatives preserve longitude wrap continuity and
+// remain defined inside ray-hit branches and adaptive antialiasing samples.
+vec2 equirect_gradient(vec3 n,vec3 dn){
+ float longitude_scale=max(dot(n.xz,n.xz),.00000001);
+ float latitude_scale=max(length(n.xz),.0001);
+ return vec2((n.x*dn.z-n.z*dn.x)/(TAU*longitude_scale),-dn.y/(PI*latitude_scale));
+}
 const float orbit[8]=float[8](2.5,3.6,4.8,6.0,7.5,9.3,11.0,12.7);
 const float radius[9]=float[9](1.12,.23,.40,.46,.33,.90,.76,.58,.55);
 // Full right-hand-rule obliquities: >90 degrees naturally rotates retrograde.
@@ -49,7 +56,7 @@ float ring_opacity(float r){
  float structure=.59+.10*sin(r*129.)+.045*sin(r*337.);
  return clamp(edge*cassini*structure,0.,.85);
 }
-vec3 material(int body,vec3 n){
+vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
  vec3 q=surface_point(body,n); // Body-fixed clouds and surface, no boiling noise.
  float fine=body==1?fbm(q*12.):0.;
  if(body==1){float rocks=fbm(q*5.);return mix(vec3(.20,.18,.17),vec3(.55,.50,.43),rocks)*(.88+.18*fine);}
@@ -61,8 +68,10 @@ vec3 material(int body,vec3 n){
  }
  if(body==3){
   vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
-  vec3 base=earth_enabled!=0?texture(earth_map,uv).rgb:mix(vec3(.025,.13,.32),vec3(.13,.27,.10),smoothstep(.48,.57,fbm(q*5.)));
-  float clouds=cloud_enabled!=0?smoothstep(.12,.88,texture(cloud_map,uv).r):smoothstep(.58,.74,fbm(q*vec3(8.,12.,8.)));
+  vec2 uv_dx=equirect_gradient(q,surface_point(body,normal_dx));
+  vec2 uv_dy=equirect_gradient(q,surface_point(body,normal_dy));
+  vec3 base=earth_enabled!=0?textureGrad(earth_map,uv,uv_dx,uv_dy).rgb:mix(vec3(.025,.13,.32),vec3(.13,.27,.10),smoothstep(.48,.57,fbm(q*5.)));
+  float clouds=cloud_enabled!=0?smoothstep(.12,.88,textureGrad(cloud_map,uv,uv_dx,uv_dy).r):smoothstep(.58,.74,fbm(q*vec3(8.,12.,8.)));
   return mix(base,vec3(.94,.96,.98),clouds*.88);
  }
  if(body==4){float rock=fbm(q*4.);float dust=fbm(q*13.);return mix(vec3(.27,.10,.05),vec3(.71,.38,.19),rock)*(.82+.25*dust)+vec3(.2)*smoothstep(.88,.96,abs(q.y));}
@@ -94,13 +103,16 @@ vec3 material(int body,vec3 n){
  float bands=.5+.2*sin(q.y*16.+fbm(q*vec3(4.,14.,4.))*1.3);
  return body==7?mix(vec3(.32,.63,.66),vec3(.42,.70,.73),bands):mix(vec3(.035,.18,.52),vec3(.10,.32,.68),bands);
 }
-vec3 stars(vec3 ray){
+vec3 stars(vec3 ray,vec3 ray_dx,vec3 ray_dy){
  if(sky_enabled!=0){
   // Fixed decorative celestial orientation, independent of orbit and spin.
   vec3 q=rotate_y(ray,.8);
   q=vec3(q.x,.8660254*q.y-.5*q.z,.5*q.y+.8660254*q.z);
+  vec3 q_dx=rotate_y(ray_dx,.8),q_dy=rotate_y(ray_dy,.8);
+  q_dx=vec3(q_dx.x,.8660254*q_dx.y-.5*q_dx.z,.5*q_dx.y+.8660254*q_dx.z);
+  q_dy=vec3(q_dy.x,.8660254*q_dy.y-.5*q_dy.z,.5*q_dy.y+.8660254*q_dy.z);
   vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
-  vec3 encoded=texture(sky_map,uv).rgb;
+  vec3 encoded=textureGrad(sky_map,uv,equirect_gradient(q,q_dx),equirect_gradient(q,q_dy)).rgb;
   // Cubic sRGB-to-linear fit avoids three per-pixel powers in the full sky.
   // Maximum absolute linear error < .0017 before the .18 exposure scale.
   vec3 linear=encoded*(encoded*(encoded*.305306011+.682171111)+.012522878);
@@ -120,7 +132,9 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  vec3 forward=normalize(-camera_eye),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);
  // A slightly wider lens keeps the full system in square/portrait outputs.
  float focal=resolution.x>=resolution.y*1.25?1.5:1.2*max(1.,resolution.x/max(resolution.y,1.));
- vec3 ray=normalize(forward*focal+right*uv.x+up*uv.y);
+ vec3 view=forward*focal+right*uv.x+up*uv.y;
+ float inverse_length=inversesqrt(dot(view,view));
+ vec3 ray=view*inverse_length;
 
  float nearest=1e5;int body=-1;
  for(int i=0;i<9;i++){
@@ -131,7 +145,9 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  needs_aa=needs_aa||body>=0;
  // The center sample is discarded for antialiased pixels; skip its material work.
  if(classify&&needs_aa)return vec3(0);
- vec3 color=body<0?stars(ray):vec3(0);
+ vec3 ray_dx=(right-ray*dot(ray,right))*(inverse_length/pixels);
+ vec3 ray_dy=(up-ray*dot(ray,up))*(inverse_length/pixels);
+ vec3 color=body<0?stars(ray,ray_dx,ray_dy):vec3(0);
  // Feathered guides on the real orbital plane: deliberately subordinate to planets.
  if(abs(ray.y)>.0001){float t=-camera_eye.y/ray.y;if(t>0.&&t<nearest){vec3 p=camera_eye+ray*t;float r=length(p.xz);float width=max(.004,t/pixels*.38);float guide=0.;for(int i=0;i<8;i++)guide=max(guide,exp(-pow((r-orbit[i])/width,2.)));color+=vec3(.007,.012,.019)*guide;}}
  if(body>=0){
@@ -143,7 +159,17 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
   } else {
    vec3 light=normalize(-p);float cosine=dot(n,light);float diffuse=max(0.,cosine);
    if(body==6){float denom=dot(light,ring_normal);if(abs(denom)>.001){float t=dot(c-p,ring_normal)/denom;if(t>.001){float r=length(p+light*t-c);diffuse*=1.-ring_opacity(r)*.8;}}}
-   vec3 albedo=material(body,n);float rim=pow(1.-max(0.,dot(n,-ray)),3.);
+   vec3 normal_dx=vec3(0),normal_dy=vec3(0);
+   if(body==3){
+    // Differentiate the sphere intersection analytically. Neighbor fragments
+    // may hit another body or only sky, so implicit material derivatives are unsafe.
+    float incidence=dot(n,ray);
+    float limit=sqrt(min(1.,nearest*inverse_length/(pixels*radius[body])));
+    incidence=incidence<0.?min(incidence,-limit):max(incidence,limit);
+    normal_dx=(ray_dx-ray*(dot(n,ray_dx)/incidence))*(nearest/radius[body]);
+    normal_dy=(ray_dy-ray*(dot(n,ray_dy)/incidence))*(nearest/radius[body]);
+   }
+   vec3 albedo=material(body,n,normal_dx,normal_dy);float rim=pow(1.-max(0.,dot(n,-ray)),3.);
    // A restrained cool fill keeps the night hemisphere readable in an illustration.
    color=pow(albedo,vec3(2.2))*(.13+2.3*diffuse)+pow(albedo,vec3(2.2))*vec3(.025,.04,.07)*max(0.,dot(n,-ray));
    if(body==3){float spec=pow(max(0.,dot(reflect(-light,n),-ray)),32.);color+=vec3(.32,.48,.65)*spec*diffuse;color+=vec3(.025,.12,.32)*rim*(.2+diffuse);}

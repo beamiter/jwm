@@ -316,7 +316,12 @@ impl WaylandCompositor {
         if self.debug_hud_enabled || self.debug_hud_extended {
             return Some("debug HUD requires composition");
         }
-        if self.wallpaper_transition_start.is_some() {
+        if self.wallpaper_transition_start.is_some()
+            || self
+                .monitor_wallpapers
+                .iter()
+                .any(|wallpaper| wallpaper.previous.is_some())
+        {
             return Some("wallpaper transition requires composition");
         }
         if self.zoom_to_fit_window.is_some() {
@@ -455,7 +460,12 @@ impl WaylandCompositor {
             return true;
         }
         // Wallpaper crossfade in progress
-        if self.wallpaper_transition_start.is_some() {
+        if self.wallpaper_transition_start.is_some()
+            || self
+                .monitor_wallpapers
+                .iter()
+                .any(|wallpaper| wallpaper.previous.is_some())
+        {
             return true;
         }
         // Pending wallpaper loads need polling

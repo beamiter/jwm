@@ -6,14 +6,22 @@ middle click applies and closes; `Esc` — or `Alt+Ctrl+W` again — closes
 without changing anything. The wallpaper already in use is marked and starts
 selected, so reopening the panel does not lose your place.
 
+Type to search by filename, path or effect name. Matching ignores case, supports
+Unicode, and requires every space-separated word to match. `Space` enters search
+text; `Enter` or a click applies. `Backspace` edits the query, while `Home`/`End`,
+`PageUp`/`PageDown`, arrows and scrolling navigate the filtered results. The title
+shows the current row and match count. A directory scan completing while you
+type preserves your query and a still-matching selection.
+
 The highlighted candidate is also shown: a thumbnail card sits to the right
 of the list, vertically centered on it, and tracks both arrow-key and
 pointer selection. Thumbnails decode asynchronously on the wallpaper
-loader's worker pool, downscaled to a 480-pixel long edge, so held-down
-arrows never queue decodes — the latest highlight wins. The image is
-aspect-fit into a 480×360 frame and never upscaled, and on outputs too
-narrow to fit the frame the picker stays exactly the text list it always
-was. There is no placeholder or spinner: until the thumbnail lands — or if
+loader's worker pool, downscaled to a 480-pixel long edge. Only the latest
+pending preview is retained; replaced requests are cancelled instead of
+building an unbounded decode queue. The image is aspect-fit into a frame up to
+480×360 and never upscaled. The frame shrinks to the available space and is
+hidden only when there is too little room for a useful preview.
+There is no placeholder or spinner: until the thumbnail lands — or if
 the file cannot be decoded — the picker looks unchanged. A left-click or
 middle click on the preview applies the highlighted wallpaper — the pointer
 twin of `Enter` — and closes the picker the same way a list-row click does.
@@ -33,7 +41,14 @@ back to `~/Pictures/Wallpapers`, then `~/Pictures`. A leading `~` is expanded.
 case-insensitively by name (names that differ only in case keep a fixed
 order), and capped at 200 entries. Selection keeps at most 400 candidates
 in memory while reading the directory, retaining the first 200 names in
-global order even when better names arrive at the end of the scan.
+global order even when better names arrive at the end of the scan, within the
+100,000 raw-entry scan limit. The current wallpaper is kept even if it falls
+outside those names or lives in another directory; when necessary it replaces
+the last retained item without exceeding the 200-image cap.
+The status distinguishes an empty folder from a
+read error, reports skipped entries and warns when a cap is reached. Search
+covers the retained image list (up to 200 images), plus the built-in effects;
+it does not search beyond that cap or recurse into subdirectories.
 The directory is read on a worker thread:
 the panel opens at once with a `Scanning…` status line and the rows fill in
 when the listing lands, so an enormous pictures directory or a slow network
@@ -95,6 +110,27 @@ jwm-tool msg set_config --args '{"key": "behavior.wallpaper_mode", "value": "fit
 
 `wallpaper_mode` accepts `fill`, `fit`, `stretch`, or `center`, and rejects
 anything else rather than silently falling back.
+
+### Image quality and transitions
+
+The composited X11 and Wayland paths reuse recently decoded images in a bounded
+64 MiB / 24-entry cache. Repeat requests share the resized pixels; changing the
+source file, mode or required sampling size obtains the appropriate new image.
+Transparent PNG/WebP pixels are composited over black before filtering, avoiding
+hidden-color fringes. These settings control successful image replacements,
+including independent monitor/tag wallpapers:
+
+```toml
+[behavior]
+wallpaper_crossfade = true
+wallpaper_crossfade_duration_ms = 500
+```
+
+The old image keeps its own layout until the replacement is ready. Smoothstep
+timing and complementary layer weights fade both the image and Fit/Center
+margins. Failed decodes retain the working image. See
+[Wallpaper pipeline and validation](wallpaper-pipeline.md) for cache limits,
+source identity, resource lifetime and reproducible rendering checks.
 
 ## Daily rotation and different screens
 
