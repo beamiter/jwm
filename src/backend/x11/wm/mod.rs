@@ -27,6 +27,8 @@ pub(crate) mod managed_unmap;
 pub(crate) mod maximize_restore;
 /// Strict codec for JWM's private minimized-client exec-restart snapshot.
 pub(crate) mod minimized_restore;
+/// Ordered completion of a missing-button watchdog after native input drains.
+pub(crate) mod pointer_event_drain;
 
 #[derive(Clone, Copy)]
 pub struct WindowTypeAtoms<A> {

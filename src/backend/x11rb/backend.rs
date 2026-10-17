@@ -45,6 +45,7 @@ use crate::backend::x11::wm::interactive_resize::{
     interactive_move_origin, interactive_resize_geometry,
 };
 use crate::backend::x11::wm::managed_unmap::{ManagedUnmapTracker, SharedManagedUnmaps};
+use crate::backend::x11::wm::pointer_event_drain::PointerEventDrain;
 use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, SigchldBlockedForSpawns, primary_refresh};
 
 use self::{
@@ -94,6 +95,7 @@ pub struct X11rbBackend {
     _init_event_source: Option<X11EventSource>,
     /// Live overlay identity consumed by the already-registered event source.
     event_overlay_x11: Arc<AtomicU32>,
+    pointer_drain: Arc<PointerEventDrain>,
 
     interaction: Option<X11Interaction>,
 
@@ -558,7 +560,13 @@ impl X11rbBackend {
             managed_unmaps.clone(),
         ));
 
-        let x11_input_ops = X11InputOps::new(conn.clone(), screen.root, ids.clone());
+        let pointer_drain = Arc::new(PointerEventDrain::default());
+        let x11_input_ops = X11InputOps::new(
+            conn.clone(),
+            screen.root,
+            ids.clone(),
+            pointer_drain.clone(),
+        );
         let input_ops: Box<dyn InputOps> = Box::new(x11_input_ops.clone());
         let property_ops: Box<dyn PropertyOps> = Box::new(X11PropertyOps::new(
             conn.clone(),
@@ -662,6 +670,7 @@ impl X11rbBackend {
             Arc::clone(&event_overlay_x11),
             ids.clone(),
             managed_unmaps.clone(),
+            pointer_drain.clone(),
         );
 
         let mut backend = Self {
@@ -685,6 +694,7 @@ impl X11rbBackend {
             color_allocator,
             _init_event_source: Some(event_source),
             event_overlay_x11,
+            pointer_drain,
             interaction: None,
             compositor,
             compositor_desired: X11CompositorDesiredState::default(),
@@ -1609,6 +1619,7 @@ impl Backend for X11rbBackend {
                 Arc::clone(&self.event_overlay_x11),
                 self.ids.clone(),
                 self.managed_unmaps.clone(),
+                self.pointer_drain.clone(),
             )
         };
 
@@ -2825,6 +2836,7 @@ mod cursor {
 }
 
 mod event_source {
+    use super::PointerEventDrain;
     use std::collections::VecDeque;
     use std::os::unix::io::{AsRawFd, BorrowedFd};
     use std::sync::{
@@ -2937,6 +2949,7 @@ mod event_source {
         overlay_x11: Arc<AtomicU32>,
         ids: X11IdRegistry,
         managed_unmaps: SharedManagedUnmaps,
+        pointer_drain: Arc<PointerEventDrain>,
         key_repeat: ClassicKeyRepeat,
         // Events produced beyond the single one returned by map_event (e.g. a
         // _NET_WM_STATE ClientMessage carrying two state atoms). Drained first.
@@ -2954,6 +2967,7 @@ mod event_source {
             overlay_x11: Arc<AtomicU32>,
             ids: X11IdRegistry,
             managed_unmaps: SharedManagedUnmaps,
+            pointer_drain: Arc<PointerEventDrain>,
         ) -> Self {
             Self {
                 conn,
@@ -2962,6 +2976,7 @@ mod event_source {
                 overlay_x11,
                 ids,
                 managed_unmaps,
+                pointer_drain,
                 key_repeat: ClassicKeyRepeat::default(),
                 pending: VecDeque::new(),
                 wake_token: None,
@@ -3064,6 +3079,7 @@ mod event_source {
                 }),
                 XEvent::ButtonRelease(e) => Some(BackendEvent::ButtonRelease {
                     target: self.hit_target_from_pointer_event(e.event, e.child),
+                    detail: e.detail,
                     time: e.time,
                     root_x: e.root_x as f64,
                     root_y: e.root_y as f64,
@@ -3362,12 +3378,19 @@ mod event_source {
         }
 
         fn prefetch_before_sleep(&mut self) -> Result<bool, ConnectionError> {
+            let mut raw_attempts_remaining = X11_EVENT_RAW_POLL_LIMIT;
+            self.prefetch_with_budget(&mut raw_attempts_remaining)
+        }
+
+        fn prefetch_with_budget(
+            &mut self,
+            raw_attempts_remaining: &mut usize,
+        ) -> Result<bool, ConnectionError> {
             if !self.pending.is_empty() {
                 return Ok(true);
             }
 
-            let mut raw_attempts_remaining = X11_EVENT_RAW_POLL_LIMIT;
-            match self.poll_event(&mut raw_attempts_remaining)? {
+            match self.poll_event(raw_attempts_remaining)? {
                 X11BoundedPoll::Event(event) => {
                     // map_event may have appended the second half of a two-atom
                     // _NET_WM_STATE request.  Put the first event back at the
@@ -3454,6 +3477,14 @@ mod event_source {
             if let Some(m) = pending_motion.take() {
                 callback(m, &mut ());
             }
+            // Motion callbacks can themselves perform round trips. Fence only
+            // after rechecking with the remainder of this dispatch's raw budget.
+            if self.pointer_drain.requested() {
+                let empty = !self.prefetch_with_budget(&mut raw_attempts_remaining)?;
+                if let Some(token) = self.pointer_drain.complete_if_empty(empty) {
+                    callback(BackendEvent::PointerEventsDrained { token }, &mut ());
+                }
+            }
             Ok(PostAction::Continue)
         }
 
@@ -3461,6 +3492,7 @@ mod event_source {
             if !self
                 .prefetch_before_sleep()
                 .map_err(|error| calloop::Error::OtherError(Box::new(error)))?
+                && !self.pointer_drain.requested()
             {
                 return Ok(None);
             }
@@ -3628,6 +3660,161 @@ mod event_source {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         #[test]
+        fn native_pointer_queue_fence_preserves_release_payloads_and_reply_prefetch() {
+            use super::super::ids::X11IdRegistry;
+            use super::{Atoms, BackendEvent, PointerEventDrain, X11EventSource};
+            use crate::backend::api::HitTarget;
+            use std::sync::Arc;
+            use std::time::Duration;
+            use x11rb::connection::Connection;
+            use x11rb::protocol::xproto::{ConnectionExt, EventMask};
+
+            #[derive(Default)]
+            struct Observed {
+                releases: Vec<BackendEvent>,
+                fences: Vec<(u64, usize)>,
+                inject_on_motion: bool,
+                injected_token: Option<u64>,
+            }
+
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let (conn, screen) = x11rb::connect(Some(x11.name())).unwrap();
+            let conn = Arc::new(conn);
+            let root = conn.setup().roots[screen].root;
+            conn.change_window_attributes(
+                root,
+                &xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let atoms = Atoms::new(&*conn).unwrap().reply().unwrap();
+            let drain = Arc::new(PointerEventDrain::default());
+            let source = X11EventSource::new(
+                conn.clone(),
+                atoms,
+                root,
+                Arc::new(AtomicU32::new(0)),
+                X11IdRegistry::new(1),
+                Default::default(),
+                drain.clone(),
+            );
+            let mut event_loop = calloop::EventLoop::<Observed>::try_new().unwrap();
+            let callback_conn = conn.clone();
+            let callback_drain = drain.clone();
+            event_loop
+                .handle()
+                .insert_source(source, move |event, _, observed| {
+                    match event {
+                        release @ BackendEvent::ButtonRelease { .. } => {
+                            observed.releases.push(release)
+                        }
+                        BackendEvent::PointerEventsDrained { token } => {
+                            observed.fences.push((token, observed.releases.len()));
+                        }
+                        BackendEvent::MotionNotify { .. } if observed.inject_on_motion => {
+                            observed.inject_on_motion = false;
+                            let release = xproto::ButtonReleaseEvent {
+                                response_type: xproto::BUTTON_RELEASE_EVENT,
+                                detail: 3,
+                                root,
+                                event: root,
+                                root_x: -17,
+                                root_y: 213,
+                                time: 9999,
+                                same_screen: true,
+                                ..Default::default()
+                            };
+                            callback_conn
+                                .send_event(false, root, EventMask::BUTTON_RELEASE, release)
+                                .unwrap();
+                            // This callback's synchronous reply moves the release
+                            // into x11rb after the source observed an empty queue.
+                            callback_conn.get_input_focus().unwrap().reply().unwrap();
+                            observed.injected_token = Some(callback_drain.request());
+                        }
+                        _ => {}
+                    }
+                })
+                .map_err(|error| error.error)
+                .unwrap();
+
+            for index in 0..65_u32 {
+                conn.send_event(
+                    false,
+                    root,
+                    EventMask::BUTTON_RELEASE,
+                    xproto::ButtonReleaseEvent {
+                        response_type: xproto::BUTTON_RELEASE_EVENT,
+                        detail: (index % 3 + 1) as u8,
+                        root,
+                        event: root,
+                        root_x: index as i16 - 200,
+                        root_y: 317,
+                        time: 1000 + index,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            conn.get_input_focus().unwrap().reply().unwrap();
+            let token = drain.request();
+            let mut observed = Observed::default();
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert_eq!(observed.releases.len(), 64, "one bounded native dispatch");
+            assert!(
+                observed.fences.is_empty(),
+                "budget exhaustion is not a drain"
+            );
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert_eq!(observed.fences, [(token, 65)]);
+            for (index, release) in observed.releases.iter().enumerate() {
+                assert!(matches!(release, BackendEvent::ButtonRelease {
+                    target: HitTarget::Background { .. }, detail, time, root_x, root_y
+                } if *detail == (index % 3 + 1) as u8 && *time == 1000 + index as u32
+                    && *root_x == index as f64 - 200.0 && *root_y == 317.0));
+            }
+
+            observed = Observed {
+                inject_on_motion: true,
+                ..Default::default()
+            };
+            conn.send_event(
+                false,
+                root,
+                EventMask::POINTER_MOTION,
+                xproto::MotionNotifyEvent {
+                    response_type: xproto::MOTION_NOTIFY_EVENT,
+                    root,
+                    event: root,
+                    root_x: 30,
+                    root_y: 40,
+                    same_screen: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.get_input_focus().unwrap().reply().unwrap();
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert!(observed.injected_token.is_some());
+            assert!(observed.releases.is_empty() && observed.fences.is_empty());
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert_eq!(observed.fences, [(observed.injected_token.unwrap(), 1)]);
+            assert!(matches!(
+                observed.releases[0],
+                BackendEvent::ButtonRelease {
+                    detail: 3,
+                    time: 9999,
+                    root_x: -17.0,
+                    root_y: 213.0,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
         fn property_deletions_reach_policy_for_kinds_that_act_on_absence() {
             // A dock that deletes `_NET_WM_STRUT_PARTIAL` must release its
             // reservation, and a client that deletes `WM_NORMAL_HINTS` must
@@ -3718,6 +3905,7 @@ mod event_source {
                 root,
                 Arc::new(AtomicU32::new(0)),
                 ids,
+                Default::default(),
                 Default::default(),
             );
 
@@ -4227,6 +4415,7 @@ mod ewmh_facade {
 }
 
 mod input_ops {
+    use super::PointerEventDrain;
     use crate::backend::error::BackendError;
     use std::sync::Arc;
     use x11rb::connection::Connection;
@@ -4249,6 +4438,7 @@ mod input_ops {
         conn: Arc<C>,
         root_x11: u32,
         ids: X11IdRegistry,
+        pointer_drain: Arc<PointerEventDrain>,
     }
 
     impl<C: Connection> Clone for X11InputOps<C> {
@@ -4257,16 +4447,23 @@ mod input_ops {
                 conn: self.conn.clone(),
                 root_x11: self.root_x11,
                 ids: self.ids.clone(),
+                pointer_drain: self.pointer_drain.clone(),
             }
         }
     }
 
     impl<C: Connection + Send + Sync + 'static> X11InputOps<C> {
-        pub(super) fn new(conn: Arc<C>, root_x11: u32, ids: X11IdRegistry) -> Self {
+        pub(super) fn new(
+            conn: Arc<C>,
+            root_x11: u32,
+            ids: X11IdRegistry,
+            pointer_drain: Arc<PointerEventDrain>,
+        ) -> Self {
             Self {
                 conn,
                 root_x11,
                 ids,
+                pointer_drain,
             }
         }
 
@@ -4300,6 +4497,9 @@ mod input_ops {
     }
 
     impl<C: Connection + Send + Sync + 'static> InputOpsTrait for X11InputOps<C> {
+        fn request_pointer_event_drain(&self) -> Option<u64> {
+            Some(self.pointer_drain.request())
+        }
         fn get_pointer_position(&self) -> Result<(f64, f64), BackendError> {
             let reply = self.query_pointer()?;
             // X11  f64
@@ -4403,7 +4603,12 @@ mod input_ops {
             let display = x11.name();
             let (conn, screen) = x11rb::connect(Some(display)).unwrap();
             let root = conn.setup().roots[screen].root;
-            let ops = X11InputOps::new(Arc::new(conn), root, X11IdRegistry::new(1));
+            let ops = X11InputOps::new(
+                Arc::new(conn),
+                root,
+                X11IdRegistry::new(1),
+                Default::default(),
+            );
             let previous = ops.get_pointer_position().unwrap();
             for point in [(40.0, 50.0), (160.0, 120.0)] {
                 ops.warp_pointer(point.0, point.1).unwrap();
@@ -4466,7 +4671,12 @@ mod input_ops {
                 .unwrap()
                 .check()
                 .unwrap();
-            let ops = X11InputOps::new(conn.clone(), root, X11IdRegistry::new(1));
+            let ops = X11InputOps::new(
+                conn.clone(),
+                root,
+                X11IdRegistry::new(1),
+                Default::default(),
+            );
             let mask = (EventMaskBits::BUTTON_PRESS
                 | EventMaskBits::BUTTON_RELEASE
                 | EventMaskBits::POINTER_MOTION)

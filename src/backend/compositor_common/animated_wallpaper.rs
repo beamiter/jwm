@@ -479,6 +479,526 @@ pub(crate) fn transform_direction(matrix: &[f32; 9], vector: [f32; 3]) -> [f32; 
     })
 }
 
+/// A proper camera rotation retained between mouse gestures. Keeping a unit
+/// quaternion in f64 avoids scale/shear drift after many successive drags;
+/// only the final shader matrix is rounded to f32.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CelestialRotation {
+    // Scalar first, then the three imaginary components.
+    quaternion: [f64; 4],
+}
+
+impl Default for CelestialRotation {
+    fn default() -> Self {
+        Self {
+            quaternion: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+impl CelestialRotation {
+    fn normalized(quaternion: [f64; 4]) -> Self {
+        let scale = quaternion.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        if scale == 0.0 || !quaternion.iter().all(|v| v.is_finite()) {
+            return Self::default();
+        }
+        let scaled = quaternion.map(|v| v / scale);
+        let norm = scaled.iter().map(|v| v * v).sum::<f64>().sqrt();
+        // q and -q are the same rotation. A consistent sign also gives stable
+        // equality for independently reconstructed poses.
+        let sign = if scaled[0] < 0.0 { -1.0 } else { 1.0 };
+        Self {
+            quaternion: scaled.map(|v| sign * v / norm),
+        }
+    }
+
+    /// Reconstruct a rotation from a column-major shader basis. The input is
+    /// expected to be orthonormal (up to f32 rounding); malformed internal
+    /// callers get identity instead of propagating invalid GPU uniforms.
+    pub(crate) fn from_matrix(matrix: &[f32; 9]) -> Self {
+        if !matrix.iter().all(|v| v.is_finite()) {
+            return Self::default();
+        }
+        let m = matrix.map(f64::from);
+        let columns: [[f64; 3]; 3] =
+            std::array::from_fn(|column| std::array::from_fn(|row| m[column * 3 + row]));
+        for (i, a) in columns.iter().enumerate() {
+            for (j, b) in columns.iter().enumerate() {
+                let dot = a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+                if (dot - if i == j { 1.0 } else { 0.0 }).abs() > 1e-3 {
+                    return Self::default();
+                }
+            }
+        }
+        let determinant = m[0] * (m[4] * m[8] - m[7] * m[5]) - m[3] * (m[1] * m[8] - m[7] * m[2])
+            + m[6] * (m[1] * m[5] - m[4] * m[2]);
+        if determinant <= 0.0 {
+            return Self::default();
+        }
+        let trace = m[0] + m[4] + m[8];
+        let quaternion = if trace > 0.0 {
+            let scale = (trace + 1.0).sqrt() * 2.0;
+            [
+                scale * 0.25,
+                (m[5] - m[7]) / scale,
+                (m[6] - m[2]) / scale,
+                (m[1] - m[3]) / scale,
+            ]
+        } else if m[0] > m[4] && m[0] > m[8] {
+            let scale = (1.0 + m[0] - m[4] - m[8]).sqrt() * 2.0;
+            [
+                (m[5] - m[7]) / scale,
+                scale * 0.25,
+                (m[3] + m[1]) / scale,
+                (m[6] + m[2]) / scale,
+            ]
+        } else if m[4] > m[8] {
+            let scale = (1.0 + m[4] - m[0] - m[8]).sqrt() * 2.0;
+            [
+                (m[6] - m[2]) / scale,
+                (m[3] + m[1]) / scale,
+                scale * 0.25,
+                (m[7] + m[5]) / scale,
+            ]
+        } else {
+            let scale = (1.0 + m[8] - m[0] - m[4]).sqrt() * 2.0;
+            [
+                (m[1] - m[3]) / scale,
+                (m[6] + m[2]) / scale,
+                (m[7] + m[5]) / scale,
+                scale * 0.25,
+            ]
+        };
+        Self::normalized(quaternion)
+    }
+
+    pub(crate) fn matrix(self) -> [f32; 9] {
+        let [w, x, y, z] = self.quaternion;
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + w * z),
+            2.0 * (x * z - w * y),
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+            2.0 * (x * z + w * y),
+            2.0 * (y * z - w * x),
+            1.0 - 2.0 * (x * x + y * y),
+        ]
+        .map(|v| v as f32)
+    }
+
+    /// Matrix product self · rhs: rhs acts on a direction first.
+    pub(crate) fn compose(self, rhs: Self) -> Self {
+        let [a, x, y, z] = self.quaternion;
+        let [b, u, v, w] = rhs.quaternion;
+        Self::normalized([
+            a * b - x * u - y * v - z * w,
+            a * u + b * x + y * w - z * v,
+            a * v + b * y + z * u - x * w,
+            a * w + b * z + x * v - y * u,
+        ])
+    }
+
+    pub(crate) fn inverse(self) -> Self {
+        let [w, x, y, z] = self.quaternion;
+        Self {
+            quaternion: [w, -x, -y, -z],
+        }
+    }
+
+    fn between(from: [f64; 3], to: [f64; 3]) -> Self {
+        let dot = from
+            .iter()
+            .zip(to)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .clamp(-1.0, 1.0);
+        let cross = [
+            from[1] * to[2] - from[2] * to[1],
+            from[2] * to[0] - from[0] * to[2],
+            from[0] * to[1] - from[1] * to[0],
+        ];
+        let norm = cross[0].hypot(cross[1]).hypot(cross[2]);
+        if norm > 0.0 {
+            // atan2 stays well-conditioned near both zero and half a turn;
+            // 1 + dot would lose precision at antipodal rim positions.
+            let (sine, cosine) = (0.5 * norm.atan2(dot)).sin_cos();
+            return Self::normalized([
+                cosine,
+                cross[0] / norm * sine,
+                cross[1] / norm * sine,
+                cross[2] / norm * sine,
+            ]);
+        }
+        if dot >= 0.0 {
+            return Self::default();
+        }
+        // An exact antipode can occur for extreme off-canvas coordinates.
+        // Choose the least-aligned basis direction for a deterministic axis.
+        let axis = if from[0].abs() <= from[1].abs() && from[0].abs() <= from[2].abs() {
+            [0.0, from[2], -from[1]]
+        } else if from[1].abs() <= from[2].abs() {
+            [-from[2], 0.0, from[0]]
+        } else {
+            [from[1], -from[0], 0.0]
+        };
+        Self::normalized([0.0, axis[0], axis[1], axis[2]])
+    }
+}
+
+/// A press-anchored virtual trackball, in radius-normalized camera coordinates
+/// (+X right, +Y up). A sphere joins a hyperbolic sheet with matching slope,
+/// so sensitivity remains continuous near the limb and outside the globe.
+/// Every endpoint is evaluated against the same press pose: coalescing mouse
+/// motion cannot change the result or accumulate intermediate rounding errors.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CelestialArcball {
+    start: [f64; 2],
+    start_vector: [f64; 3],
+    orientation: CelestialRotation,
+}
+
+impl CelestialArcball {
+    fn project(point: [f64; 2]) -> Option<[f64; 3]> {
+        let [x, y] = point;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let distance = x.hypot(y);
+        let z = if distance <= std::f64::consts::FRAC_1_SQRT_2 {
+            (1.0 - distance * distance).sqrt()
+        } else {
+            0.5 / distance
+        };
+        // Scale before normalizing so even finite off-canvas coordinates near
+        // f64::MAX cannot overflow the vector length.
+        let scale = x.abs().max(y.abs()).max(z);
+        let scaled = [x / scale, y / scale, z / scale];
+        let length = scaled[0].hypot(scaled[1]).hypot(scaled[2]);
+        Some(scaled.map(|v| v / length))
+    }
+
+    pub(crate) fn new(start: [f64; 2], orientation: CelestialRotation) -> Option<Self> {
+        Some(Self {
+            start,
+            start_vector: Self::project(start)?,
+            orientation,
+        })
+    }
+
+    pub(crate) fn orientation_at(&self, point: [f64; 2]) -> Option<CelestialRotation> {
+        let current = Self::project(point)?;
+        if point == self.start {
+            return Some(self.orientation);
+        }
+        // The shader maps camera normals to the body. Apply the inverse of
+        // visible surface motion so the grabbed surface follows the pointer:
+        // M(new) · n(cursor) = M(press) · n(press).
+        Some(
+            self.orientation
+                .compose(CelestialRotation::between(current, self.start_vector)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod celestial_drag_tests {
+    use super::*;
+
+    fn assert_direction(actual: [f32; 3], expected: [f32; 3]) {
+        assert!(
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 2e-6),
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+
+    fn assert_basis(actual: [f32; 9], expected: [f32; 9]) {
+        assert!(
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 2e-6),
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+
+    fn assert_proper_rotation(matrix: [f32; 9]) {
+        let columns: [[f64; 3]; 3] =
+            std::array::from_fn(|c| std::array::from_fn(|r| f64::from(matrix[c * 3 + r])));
+        for (i, a) in columns.iter().enumerate() {
+            for (j, b) in columns.iter().enumerate() {
+                let dot = a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+                assert!((dot - if i == j { 1.0 } else { 0.0 }).abs() < 2e-7);
+            }
+        }
+        let [a, b, c] = columns;
+        let determinant = a[0] * (b[1] * c[2] - b[2] * c[1]) - b[0] * (a[1] * c[2] - a[2] * c[1])
+            + c[0] * (a[1] * b[2] - a[2] * b[1]);
+        assert!((determinant - 1.0).abs() < 2e-7);
+    }
+
+    #[test]
+    fn surface_follows_horizontal_vertical_and_diagonal_drag_in_any_pose() {
+        let endpoints = [
+            [0.5, 0.0],
+            [-0.5, 0.0],
+            [0.0, 0.5],
+            [0.0, -0.5],
+            [0.45, 0.45],
+            [-0.45, 0.45],
+            [0.45, -0.45],
+            [-0.45, -0.45],
+        ];
+        for latitude in [-90.0, -47.5, 0.0, 23.13, 90.0] {
+            let view = CelestialView {
+                rotating: true,
+                latitude,
+                longitude: 113.28,
+                roll: 71.0,
+                axis: [0.25, -0.5, 0.75],
+            };
+            let initial = CelestialRotation::from_matrix(&view.matrix(1_792_148_400.0, 20));
+            for start in [[0.0_f64, 0.0_f64], [0.2, -0.1]] {
+                let sphere_normal = |p: [f64; 2]| {
+                    [
+                        p[0] as f32,
+                        p[1] as f32,
+                        (1.0 - p[0] * p[0] - p[1] * p[1]).sqrt() as f32,
+                    ]
+                };
+                let landmark = transform_direction(&initial.matrix(), sphere_normal(start));
+                let drag = CelestialArcball::new(start, initial).unwrap();
+                for endpoint in endpoints {
+                    let moved = drag.orientation_at(endpoint).unwrap().matrix();
+                    assert_direction(
+                        transform_direction(&moved, sphere_normal(endpoint)),
+                        landmark,
+                    );
+                    assert_proper_rotation(moved);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_does_not_depend_on_event_coalescing_or_retraced_motion() {
+        let initial = CelestialRotation::from_matrix(
+            &CelestialView {
+                latitude: 90.0,
+                roll: -135.0,
+                ..CelestialView::default()
+            }
+            .matrix(0.0, 1),
+        );
+        let start = [0.2, -0.35];
+        let end = [-1.75, 1.25];
+        let drag = CelestialArcball::new(start, initial).unwrap();
+        let expected = drag.orientation_at(end).unwrap();
+        for i in 0..256 {
+            let phase = f64::from(i) * 0.2;
+            let _ = drag.orientation_at([phase.sin() * 3.0, phase.cos() * 2.0]);
+        }
+        assert_eq!(drag.orientation_at(end), Some(expected));
+        assert_eq!(drag.orientation_at(start), Some(initial));
+        assert!(drag.orientation_at([f64::NAN, 0.0]).is_none());
+        assert_eq!(drag.orientation_at(end), Some(expected));
+    }
+
+    #[test]
+    fn repeated_grabs_reach_every_hemisphere_and_can_roll() {
+        for endpoint in [[0.5, 0.0], [-0.5, 0.0], [0.0, 0.5], [0.0, -0.5]] {
+            let mut orientation = CelestialRotation::default();
+            for step in 1..=12 {
+                orientation = CelestialArcball::new([0.0, 0.0], orientation)
+                    .unwrap()
+                    .orientation_at(endpoint)
+                    .unwrap();
+                if step == 6 {
+                    assert_direction(
+                        transform_direction(&orientation.matrix(), [0.0, 0.0, 1.0]),
+                        [0.0, 0.0, -1.0],
+                    );
+                }
+                assert_proper_rotation(orientation.matrix());
+            }
+            assert_basis(orientation.matrix(), CelestialRotation::default().matrix());
+        }
+        let edge_drag = CelestialArcball::new([0.7, 0.0], CelestialRotation::default())
+            .unwrap()
+            .orientation_at([0.0, 0.7])
+            .unwrap()
+            .matrix();
+        // An edge sweep also rotates around camera Z; it is not constrained to
+        // an accumulated longitude/latitude pair.
+        assert!((edge_drag[1] - edge_drag[3]).abs() > 0.5);
+    }
+
+    #[test]
+    fn composition_inverse_and_half_turn_roundtrip_match_shader_order() {
+        let poses = [
+            CelestialView::default(),
+            CelestialView {
+                latitude: 90.0,
+                ..CelestialView::default()
+            },
+            CelestialView {
+                longitude: 180.0,
+                ..CelestialView::default()
+            },
+            CelestialView {
+                roll: 180.0,
+                ..CelestialView::default()
+            },
+            CelestialView {
+                latitude: -90.0,
+                longitude: 180.0,
+                roll: -90.0,
+                ..CelestialView::default()
+            },
+            CelestialView {
+                latitude: 42.0,
+                longitude: -73.0,
+                roll: 125.0,
+                ..CelestialView::default()
+            },
+        ];
+        for view in poses {
+            let basis = view.matrix(0.0, 1);
+            let a = CelestialRotation::from_matrix(&basis);
+            assert_basis(a.matrix(), basis);
+            assert_basis(
+                a.inverse().compose(a).matrix(),
+                CelestialRotation::default().matrix(),
+            );
+            for other in poses {
+                let b = CelestialRotation::from_matrix(&other.matrix(0.0, 1));
+                for v in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+                    assert_direction(
+                        transform_direction(&a.compose(b).matrix(), v),
+                        transform_direction(&a.matrix(), transform_direction(&b.matrix(), v)),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn releasing_rebases_the_live_tour_without_snapping_or_freezing_sunlight() {
+        let view = CelestialView {
+            rotating: true,
+            latitude: 23.13,
+            longitude: 113.28,
+            roll: 57.0,
+            axis: [-0.25, 0.5, 0.75],
+        };
+        let press_unix = 1_792_148_400.0;
+        let release_unix = press_unix + 21_605.0;
+        let period = 20;
+        let press = CelestialRotation::from_matrix(&view.matrix(press_unix, period));
+        let drag = CelestialArcball::new([-0.2, 0.15], press).unwrap();
+        let dragged = drag.orientation_at([0.45, -0.3]).unwrap();
+        let release = CelestialRotation::from_matrix(&view.matrix(release_unix, period));
+        let offset = release.inverse().compose(dragged);
+        assert_basis(release.compose(offset).matrix(), dragged.matrix());
+        let next = CelestialRotation::from_matrix(&view.matrix(release_unix + 1e-3, period));
+        // A millisecond after release should advance by only the configured
+        // angular speed, rather than jumping to the original epoch pose.
+        let max_step = (std::f64::consts::TAU * 1e-3 / (f64::from(period) * 60.0)) as f32 + 2e-7;
+        assert!(
+            next.compose(offset)
+                .matrix()
+                .into_iter()
+                .zip(dragged.matrix())
+                .all(|(a, b)| (a - b).abs() <= max_step)
+        );
+        let later = CelestialRotation::from_matrix(&view.matrix(release_unix + 300.0, period));
+        assert_ne!(later.compose(offset).matrix(), dragged.matrix());
+        assert_ne!(solar_direction(release_unix), solar_direction(press_unix));
+        assert_ne!(
+            lunar_phase_light(release_unix),
+            lunar_phase_light(press_unix)
+        );
+        assert_eq!(drag.orientation_at([0.45, -0.3]), Some(dragged));
+    }
+
+    #[test]
+    fn many_successive_gestures_never_accumulate_scale_shear_or_reflection() {
+        let mut orientation = CelestialRotation::default();
+        for i in 0..20_000 {
+            let phase = f64::from(i) * 0.37;
+            orientation = CelestialArcball::new([0.15, -0.2], orientation)
+                .unwrap()
+                .orientation_at([phase.sin() * 0.8, phase.cos() * 0.8])
+                .unwrap();
+            if i % 100 == 0 {
+                assert_proper_rotation(orientation.matrix());
+            }
+        }
+        assert_proper_rotation(orientation.matrix());
+        assert_basis(
+            orientation.inverse().compose(orientation).matrix(),
+            CelestialRotation::default().matrix(),
+        );
+    }
+
+    #[test]
+    fn limb_join_is_continuous_and_outside_coordinates_remain_finite() {
+        let drag = CelestialArcball::new([0.0, 0.0], CelestialRotation::default()).unwrap();
+        let join = std::f64::consts::FRAC_1_SQRT_2;
+        let before = drag.orientation_at([join - 1e-7, 0.0]).unwrap().matrix();
+        let after = drag.orientation_at([join + 1e-7, 0.0]).unwrap().matrix();
+        assert_basis(before, after);
+        for point in [
+            [0.0, 0.0],
+            [1.0, -1.0],
+            [1e6, -1e6],
+            [f64::MAX, f64::MAX],
+            [-f64::MAX, 0.0],
+        ] {
+            assert_proper_rotation(drag.orientation_at(point).unwrap().matrix());
+        }
+        let antipode = CelestialArcball::new([f64::MAX, 0.0], CelestialRotation::default())
+            .unwrap()
+            .orientation_at([-f64::MAX, 0.0])
+            .unwrap()
+            .matrix();
+        assert_proper_rotation(antipode);
+        assert_direction(
+            transform_direction(&antipode, [-1.0, 0.0, 0.0]),
+            [1.0, 0.0, 0.0],
+        );
+        for point in [
+            [f64::NAN, 0.0],
+            [0.0, f64::INFINITY],
+            [f64::NEG_INFINITY, 1.0],
+        ] {
+            assert!(CelestialArcball::new(point, CelestialRotation::default()).is_none());
+            assert!(drag.orientation_at(point).is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_internal_matrices_fall_back_to_identity() {
+        for matrix in [
+            [0.0; 9],
+            [f32::NAN; 9],
+            [f32::INFINITY; 9],
+            [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0],
+            [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        ] {
+            assert_eq!(
+                CelestialRotation::from_matrix(&matrix),
+                CelestialRotation::default()
+            );
+        }
+    }
+}
+
 /// Geographic center meridian in radians, east-positive. Fixed mode returns
 /// only the configured longitude and is independent of time, period, and
 /// timezone. Rotation is a deliberate presentation option, never solar time.

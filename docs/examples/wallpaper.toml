@@ -11,6 +11,12 @@ wallpaper_effect = "astronomy"
 # "earth-moon": independent bodies on each screen, assigned below.
 wallpaper_astronomy_layout = "earth-moon"
 
+# Mouse: hold left button on the visible Earth/Moon and drag in any direction.
+# Edge drags also roll; release keeps the pose and resumes any automatic tour.
+# Starts only on uncovered globe surface; window/bar bindings keep priority.
+# Manual poses are session-only and independent per body; no extra enable key.
+# Changing a body's orientation/mode/period resets its manual pose.
+
 # Empty strings (defaults) load the installed bundled NASA textures.
 # Custom example: wallpaper_earth_texture = "/home/alice/Pictures/earth.jpg"
 # Custom maps must be decodable 2:1 equirectangular images.

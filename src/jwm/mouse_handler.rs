@@ -51,93 +51,151 @@ pub(crate) struct DragCtl {
     pub orig_maximize: crate::core::maximize::MaximizeSnapshot,
 }
 
-/// A desktop orbit gesture owns its starting output and pixel scale until release.
-/// Keeping this snapshot avoids jumps across mixed-resolution outputs or reconfiguration.
+/// A desktop gesture owns its starting output until release. Astronomy keeps
+/// the compositor's original globe scale even across other outputs/windows;
+/// the solar-system camera retains its existing output-local orbit behavior.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SolarSystemDrag {
+pub(crate) struct WallpaperDrag {
     output: MonitorKey,
     bounds: (i32, i32, i32, i32),
-    pub(crate) last: (i32, i32),
+    pub(crate) last: (f64, f64),
+    kind: WallpaperDragKind,
+    cancel_probe: Option<u64>,
 }
 
-impl SolarSystemDrag {
-    fn contains(bounds: (i32, i32, i32, i32), point: (i32, i32)) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WallpaperDragKind {
+    Astronomy,
+    SolarSystem,
+}
+
+impl WallpaperDrag {
+    fn contains(bounds: (i32, i32, i32, i32), point: (f64, f64)) -> bool {
         let (x, y, width, height) = bounds;
         width > 0
             && height > 0
-            && point.0 >= x
-            && point.1 >= y
-            && i64::from(point.0) < i64::from(x) + i64::from(width)
-            && i64::from(point.1) < i64::from(y) + i64::from(height)
+            && point.0.is_finite()
+            && point.1.is_finite()
+            && point.0 >= f64::from(x)
+            && point.1 >= f64::from(y)
+            && point.0 < f64::from(x) + f64::from(width)
+            && point.1 < f64::from(y) + f64::from(height)
     }
 
-    fn delta(self, point: (i32, i32)) -> (f32, f32) {
+    fn delta(self, point: (f64, f64)) -> (f32, f32) {
         // Preserve the original 1080p sensitivity; equal fractions of the
         // shorter output edge rotate equally on 1440p, 4K and portrait outputs.
         let scale = 5.4 / self.bounds.2.min(self.bounds.3) as f32;
         (
-            (i64::from(point.0) - i64::from(self.last.0)) as f32 * scale,
-            (i64::from(point.1) - i64::from(self.last.1)) as f32 * scale,
+            (point.0 - self.last.0) as f32 * scale,
+            (point.1 - self.last.1) as f32 * scale,
         )
     }
 }
 
 impl Jwm {
     /// Retire only the grab we acquired; never release a modal/window owner.
-    pub(crate) fn cancel_solar_system_drag(&mut self, backend: &mut dyn Backend) {
-        if self.solar_system_drag.take().is_some() {
+    pub(crate) fn cancel_wallpaper_drag(&mut self, backend: &mut dyn Backend) {
+        if let Some(drag) = self.wallpaper_drag.take() {
+            if drag.kind == WallpaperDragKind::Astronomy {
+                backend.compositor_astronomy_end_drag();
+            }
             if let Err(error) = backend.input_ops().ungrab_pointer() {
-                log::warn!("could not release solar wallpaper pointer: {error}");
+                log::warn!("could not release wallpaper pointer: {error}");
             }
         }
     }
 
-    fn solar_system_pointer_clear(&self, backend: &dyn Backend, x: i32, y: i32) -> bool {
-        backend.compositor_solar_system_interactive()
-            && self.drag_ctl.is_none()
+    fn wallpaper_pointer_unowned(&self) -> bool {
+        self.drag_ctl.is_none()
             && self.tab_drag.is_none()
             && self.grab_holding_mode_on_screen().is_none()
             && !self.features.system_ui.is_active()
-            && !self.point_is_locked(x as f64, y as f64)
-            && self.window_tab_at(x as f64, y as f64).is_none()
-            && self.state.monitors.values().any(|m| {
-                let g = &m.geometry;
-                x >= g.m_x && y >= g.m_y
-                    && i64::from(x) < i64::from(g.m_x) + i64::from(g.m_w)
-                    && i64::from(y) < i64::from(g.m_y) + i64::from(g.m_h)
-            })
-            // QueryPointer remains truthful while GrabPointer retargets events
-            // to root. Any real child, including unmanaged windows/bars, wins.
-            && matches!(backend.input_ops().window_under_pointer(), Ok(None))
     }
 
-    pub(crate) fn try_solar_system_press(&mut self, backend: &mut dyn Backend, button: u8) {
-        if self.solar_system_drag.is_some() || !matches!(button, 1 | 4 | 5) {
+    fn wallpaper_pointer_clear(&self, x: f64, y: f64) -> bool {
+        self.wallpaper_pointer_unowned()
+            && !self.point_is_locked(x, y)
+            && self.window_tab_at(x, y).is_none()
+            && self.state.monitors.values().any(|m| {
+                let g = &m.geometry;
+                WallpaperDrag::contains((g.m_x, g.m_y, g.m_w, g.m_h), (x, y))
+            })
+    }
+
+    fn wallpaper_drag_output_valid(&self, drag: WallpaperDrag) -> bool {
+        self.state.monitors.get(drag.output).is_some_and(|m| {
+            let g = &m.geometry;
+            (g.m_x, g.m_y, g.m_w, g.m_h) == drag.bounds
+        })
+    }
+
+    fn astronomy_drag_valid(&self, backend: &dyn Backend, drag: WallpaperDrag) -> bool {
+        self.wallpaper_pointer_unowned()
+            && self.wallpaper_drag_output_valid(drag)
+            && !self.point_is_locked(
+                f64::from(drag.bounds.0) + f64::from(drag.bounds.2) * 0.5,
+                f64::from(drag.bounds.1) + f64::from(drag.bounds.3) * 0.5,
+            )
+            && backend.compositor_astronomy_drag_active()
+    }
+
+    /// Called only after configured mouse bindings and ordinary surface/tab/UI
+    /// dispatch have declined an unmodified background press.
+    pub(crate) fn try_wallpaper_press(&mut self, backend: &mut dyn Backend, button: u8) {
+        if self.wallpaper_drag.is_some() || !matches!(button, 1 | 4 | 5) {
             return;
         }
-        let Ok((x, y, _, _)) = backend.input_ops().query_pointer_root() else {
-            return;
+        let solar = backend.compositor_solar_system_interactive();
+        let (x, y) = if solar {
+            // Preserve the solar camera's live-pointer behavior.
+            let Ok((x, y, _, _)) = backend.input_ops().query_pointer_root() else {
+                return;
+            };
+            (f64::from(x), f64::from(y))
+        } else {
+            // This is the press event itself. The server may already have
+            // processed a fast drag/release or a second, queued gesture.
+            self.last_mouse_root
         };
-        if !self.solar_system_pointer_clear(backend, x, y) {
+        // Astronomy admission uses the original Background event, whose X11
+        // target already accounts for children. A live child query could see
+        // the far end of a fast drag and reject the valid earlier root press.
+        if !self.wallpaper_pointer_clear(x, y)
+            || (solar && !matches!(backend.input_ops().window_under_pointer(), Ok(None)))
+        {
             return;
         }
         if button == 1 {
             let Some((output, bounds)) = self.state.monitors.iter().find_map(|(key, m)| {
                 let g = &m.geometry;
                 let bounds = (g.m_x, g.m_y, g.m_w, g.m_h);
-                SolarSystemDrag::contains(bounds, (x, y)).then_some((key, bounds))
+                WallpaperDrag::contains(bounds, (x, y)).then_some((key, bounds))
             }) else {
+                return;
+            };
+            let kind = if solar {
+                WallpaperDragKind::SolarSystem
+            } else if backend.compositor_astronomy_begin_drag(x, y) {
+                WallpaperDragKind::Astronomy
+            } else {
                 return;
             };
             // Default mask is release + motion on both X11 transports.
             if matches!(backend.input_ops().grab_pointer(0, None), Ok(true)) {
-                self.solar_system_drag = Some(SolarSystemDrag {
+                self.wallpaper_drag = Some(WallpaperDrag {
                     output,
                     bounds,
                     last: (x, y),
+                    kind,
+                    cancel_probe: None,
                 });
+            } else if kind == WallpaperDragKind::Astronomy {
+                // A refused grab cannot leave a frozen globe behind, and
+                // must never ungrab whichever subsystem already owns it.
+                backend.compositor_astronomy_abort_drag();
             }
-        } else {
+        } else if solar {
             backend.compositor_solar_system_camera_delta(
                 0.0,
                 0.0,
@@ -146,36 +204,135 @@ impl Jwm {
         }
     }
 
-    pub(crate) fn tick_solar_system_drag(&mut self, backend: &mut dyn Backend) {
-        let Some(drag) = self.solar_system_drag else {
+    /// Advance only from ordered astronomy motion/release events. Continuing
+    /// a grab does not hit-test another body or change scale at an output seam.
+    pub(crate) fn move_wallpaper_drag(
+        &mut self,
+        backend: &mut dyn Backend,
+        root_x: f64,
+        root_y: f64,
+    ) {
+        let Some(drag) = self.wallpaper_drag else {
             return;
         };
-        let Ok((x, y, mask, _)) = backend.input_ops().query_pointer_root() else {
-            self.cancel_solar_system_drag(backend);
-            return;
-        };
-        // X11 Button1Mask. Polling also catches a release lost during a mode
-        // transition, a stationary newly mapped window, and output power loss.
-        if mask & (1 << 8) == 0 || !self.solar_system_pointer_clear(backend, x, y) {
-            self.cancel_solar_system_drag(backend);
+        if drag.kind == WallpaperDragKind::SolarSystem {
+            self.tick_wallpaper_drag(backend);
             return;
         }
-        let same_output = self.state.monitors.get(drag.output).is_some_and(|m| {
-            let g = &m.geometry;
-            (g.m_x, g.m_y, g.m_w, g.m_h) == drag.bounds
+        if !root_x.is_finite()
+            || !root_y.is_finite()
+            || !self.astronomy_drag_valid(backend, drag)
+            || self.point_is_locked(root_x, root_y)
+        {
+            self.cancel_wallpaper_drag(backend);
+            return;
+        }
+        if (root_x, root_y) == drag.last {
+            return;
+        }
+        if !backend.compositor_astronomy_drag_motion(root_x, root_y) {
+            self.cancel_wallpaper_drag(backend);
+            return;
+        }
+        self.wallpaper_drag = Some(WallpaperDrag {
+            last: (root_x, root_y),
+            ..drag
         });
-        if !same_output || !SolarSystemDrag::contains(drag.bounds, (x, y)) {
-            self.cancel_solar_system_drag(backend);
+    }
+
+    pub(crate) fn release_wallpaper_drag(&mut self, backend: &mut dyn Backend, button: u8) {
+        if button != 1 {
             return;
         }
-        if (x, y) != drag.last {
-            let (azimuth, elevation) = drag.delta((x, y));
+        if self
+            .wallpaper_drag
+            .is_some_and(|drag| drag.kind == WallpaperDragKind::Astronomy)
+        {
+            // A fast drag can end without a final MotionNotify. Commit the
+            // release event's endpoint before retaining the resulting pose.
+            let (x, y) = self.last_mouse_root;
+            self.move_wallpaper_drag(backend, x, y);
+        }
+        self.cancel_wallpaper_drag(backend);
+    }
+
+    fn defer_wallpaper_pointer_cancel(&mut self, backend: &mut dyn Backend) {
+        if self
+            .wallpaper_drag
+            .is_none_or(|drag| drag.cancel_probe.is_some())
+        {
+            return;
+        }
+        if let Some(token) = backend.input_ops().request_pointer_event_drain() {
+            if let Some(drag) = self.wallpaper_drag.as_mut() {
+                drag.cancel_probe = Some(token);
+            }
+        } else {
+            self.cancel_wallpaper_drag(backend);
+        }
+    }
+
+    pub(crate) fn wallpaper_pointer_events_drained(
+        &mut self,
+        backend: &mut dyn Backend,
+        token: u64,
+    ) {
+        if self
+            .wallpaper_drag
+            .is_some_and(|drag| drag.cancel_probe == Some(token))
+        {
+            self.cancel_wallpaper_drag(backend);
+        }
+    }
+
+    pub(crate) fn tick_wallpaper_drag(&mut self, backend: &mut dyn Backend) {
+        let Some(drag) = self.wallpaper_drag else {
+            return;
+        };
+        if drag.kind == WallpaperDragKind::Astronomy && !self.astronomy_drag_valid(backend, drag) {
+            self.cancel_wallpaper_drag(backend);
+            return;
+        }
+        let Ok((x, y, mask, _)) = backend.input_ops().query_pointer_root() else {
+            if drag.kind == WallpaperDragKind::Astronomy {
+                self.defer_wallpaper_pointer_cancel(backend);
+            } else {
+                self.cancel_wallpaper_drag(backend);
+            }
+            return;
+        };
+        let point = (f64::from(x), f64::from(y));
+        // X11 Button1Mask. The astronomy watchdog only detects cancellation;
+        // integrating this live position would skip queued event endpoints.
+        if drag.kind == WallpaperDragKind::Astronomy {
+            if self.point_is_locked(point.0, point.1) {
+                self.cancel_wallpaper_drag(backend);
+            } else if mask & (1 << 8) == 0 {
+                // The QueryPointer round trip may itself prefetch the release.
+                // Only a subsequent native queue fence may retire this owner;
+                // otherwise a timer between bounded batches drops its endpoint.
+                self.defer_wallpaper_pointer_cancel(backend);
+            }
+            return;
+        }
+        if mask & (1 << 8) == 0
+            || !backend.compositor_solar_system_interactive()
+            || !self.wallpaper_pointer_clear(point.0, point.1)
+            || !matches!(backend.input_ops().window_under_pointer(), Ok(None))
+            || !self.wallpaper_drag_output_valid(drag)
+            || !WallpaperDrag::contains(drag.bounds, point)
+        {
+            self.cancel_wallpaper_drag(backend);
+            return;
+        }
+        if point != drag.last {
+            let (azimuth, elevation) = drag.delta(point);
             if !backend.compositor_solar_system_camera_delta(azimuth, elevation, 0.0) {
-                self.cancel_solar_system_drag(backend);
+                self.cancel_wallpaper_drag(backend);
                 return;
             }
-            self.solar_system_drag = Some(SolarSystemDrag {
-                last: (x, y),
+            self.wallpaper_drag = Some(WallpaperDrag {
+                last: point,
                 ..drag
             });
         }
@@ -300,7 +457,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // One pointer gesture owns its original geometry and cancel snapshot.
         // Repeated presses or client requests must not replace that owner.
-        if self.solar_system_drag.is_some()
+        if self.wallpaper_drag.is_some()
             || self.drag_ctl.is_some()
             || self.grab_holding_mode_on_screen().is_some()
         {
@@ -819,6 +976,7 @@ mod tests {
             &mut jwm,
             &mut backend,
             HitTarget::Background { output: None },
+            1,
             0,
         );
 
@@ -925,6 +1083,7 @@ mod tests {
             &mut jwm,
             &mut backend,
             HitTarget::Background { output: None },
+            1,
             0,
         );
 
@@ -1030,6 +1189,7 @@ mod tests {
                 &mut jwm,
                 &mut backend,
                 HitTarget::Background { output: None },
+                1,
                 0,
             );
             assert!(jwm.drag_ctl.is_none());

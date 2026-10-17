@@ -3444,10 +3444,7 @@ impl Jwm {
         // intercept: a capture or a region drag must not reach behind a shade
         // either.
         if !self.features.monitor_lock.is_empty() {
-            let (x, y) = backend
-                .input_ops()
-                .get_pointer_position()
-                .unwrap_or(self.last_mouse_root);
+            let (x, y) = self.last_mouse_root;
             if self.point_is_locked(x, y) {
                 return Ok(PointerPressDisposition::Consumed);
             }
@@ -3726,10 +3723,9 @@ impl Jwm {
             .and_then(|wid| self.wintoclient(wid))
             .is_some();
         if !clicked_a_managed_window {
-            let (x, y) = backend
-                .input_ops()
-                .get_pointer_position()
-                .unwrap_or(self.last_mouse_root);
+            // Like globe admission and capture selection, tab hit-testing
+            // belongs to this press, even if QueryPointer has advanced.
+            let (x, y) = self.last_mouse_root;
             if MouseButton::from_u8(detail_btn) == MouseButton::Middle {
                 // Middle-click closes the window the cell stands for.
                 if self.close_window_tab(backend, x, y)? {
@@ -3826,7 +3822,7 @@ impl Jwm {
 
         if !handled_by_wm && matches!(target, HitTarget::Background { .. }) && event_mask.is_empty()
         {
-            self.try_solar_system_press(backend, detail_btn);
+            self.try_wallpaper_press(backend, detail_btn);
         }
 
         Ok(if is_client_click && !handled_by_wm {
