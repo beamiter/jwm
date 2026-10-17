@@ -2855,6 +2855,7 @@ mod event_source {
     use crate::backend::error::BackendError;
     use crate::backend::x11::wm::key_repeat::{ClassicKeyRepeat, KeyIdentity, RawKeyEvent};
     use crate::backend::x11::wm::managed_unmap::{ManagedUnmapDisposition, SharedManagedUnmaps};
+    use crate::backend::x11::wm::pointer_motion::coalesce_pointer_motion;
     use crate::backend::x11::wm::{
         ClientMessageAtoms, ClientMessageKind, PropertyKindAtoms, ProtocolErrorClass,
         classify_client_message, expand_net_wm_state_requests, forwards_property_notify,
@@ -2953,7 +2954,9 @@ mod event_source {
         key_repeat: ClassicKeyRepeat,
         // Events produced beyond the single one returned by map_event (e.g. a
         // _NET_WM_STATE ClientMessage carrying two state atoms). Drained first.
-        pending: VecDeque<BackendEvent>,
+        // The bool retains a raw motion's left-button bit across before_sleep
+        // prefetch, before conversion discards its X11 state field.
+        pending: VecDeque<(BackendEvent, bool)>,
         // Token used to turn an event already buffered inside x11rb into a
         // synthetic calloop readiness notification before the loop sleeps.
         wake_token: Option<Token>,
@@ -3270,7 +3273,7 @@ mod event_source {
                                 })
                             } else {
                                 for event in events.drain(1..) {
-                                    self.pending.push_back(event);
+                                    self.pending.push_back((event, false));
                                 }
                                 events.into_iter().next()
                             }
@@ -3361,7 +3364,7 @@ mod event_source {
         fn poll_event(
             &mut self,
             raw_attempts_remaining: &mut usize,
-        ) -> Result<X11BoundedPoll<BackendEvent>, ConnectionError> {
+        ) -> Result<X11BoundedPoll<(BackendEvent, bool)>, ConnectionError> {
             if let Some(ev) = self.pending.pop_front() {
                 return Ok(X11BoundedPoll::Event(ev));
             }
@@ -3370,8 +3373,12 @@ mod event_source {
                 let Some(event) = self.conn.poll_for_event()? else {
                     return Ok(X11RawPoll::Empty);
                 };
+                let left_button_held = matches!(
+                    &event,
+                    XEvent::MotionNotify(motion) if motion.state.bits() & (1 << 8) != 0
+                );
                 Ok(match self.map_event(event) {
-                    Some(event) => X11RawPoll::Event(event),
+                    Some(event) => X11RawPoll::Event((event, left_button_held)),
                     None => X11RawPoll::Ignored,
                 })
             })
@@ -3430,27 +3437,23 @@ mod event_source {
 
             for _ in 0..X11_EVENT_DISPATCH_LIMIT {
                 match self.poll_event(&mut raw_attempts_remaining) {
-                    Ok(X11BoundedPoll::Event(event)) => {
+                    Ok(X11BoundedPoll::Event((event, left_button_held))) => {
                         match &event {
-                            BackendEvent::MotionNotify { target, .. } => {
-                                // Coalesce motion events - only keep the latest one.
-                                // This dramatically reduces processing overhead during
-                                // drags. But coalescing must not collapse motion across
-                                // different targets: if the new event hits a different
-                                // window/background than the one pending, flush the
-                                // pending one first so its target isn't silently lost.
-                                if let Some(BackendEvent::MotionNotify {
-                                    target: prev_target,
-                                    ..
-                                }) = &pending_motion
+                            BackendEvent::MotionNotify { .. } => {
+                                // Hover still coalesces, but held-left excursions
+                                // must survive or an out-and-back drag becomes a
+                                // planet click. Raw/dispatch fairness stays bounded;
+                                // rendering independently merges poses at 60 Hz.
+                                for motion in coalesce_pointer_motion(
+                                    &mut pending_motion,
+                                    event,
+                                    left_button_held,
+                                )
+                                .into_iter()
+                                .flatten()
                                 {
-                                    if prev_target != target {
-                                        if let Some(m) = pending_motion.take() {
-                                            callback(m, &mut ());
-                                        }
-                                    }
+                                    callback(motion, &mut ());
                                 }
-                                pending_motion = Some(event);
                             }
                             _ => {
                                 // For non-motion events, first flush any pending motion
@@ -3811,6 +3814,137 @@ mod event_source {
                     root_y: 213.0,
                     ..
                 }
+            ));
+        }
+
+        #[test]
+        fn native_left_drag_excursions_survive_coalescing_prefetch_and_a_full_batch() {
+            use super::super::ids::X11IdRegistry;
+            use super::{Atoms, BackendEvent, PointerEventDrain, X11EventSource};
+            use std::sync::Arc;
+            use std::time::Duration;
+            use x11rb::connection::Connection;
+            use x11rb::protocol::xproto::{ConnectionExt, EventMask};
+
+            let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+            let (conn, screen) = x11rb::connect(Some(x11.name())).unwrap();
+            let conn = Arc::new(conn);
+            let root = conn.setup().roots[screen].root;
+            conn.change_window_attributes(
+                root,
+                &xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::POINTER_MOTION | EventMask::BUTTON_RELEASE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let atoms = Atoms::new(&*conn).unwrap().reply().unwrap();
+            let mut source = X11EventSource::new(
+                conn.clone(),
+                atoms,
+                root,
+                Arc::new(AtomicU32::new(0)),
+                X11IdRegistry::new(1),
+                Default::default(),
+                Arc::new(PointerEventDrain::default()),
+            );
+            // At index 32 the pointer makes a large excursion, then returns
+            // before release. Coalescing held motion would erase this evidence.
+            for index in 0..65_u32 {
+                conn.send_event(
+                    false,
+                    root,
+                    EventMask::POINTER_MOTION,
+                    xproto::MotionNotifyEvent {
+                        response_type: xproto::MOTION_NOTIFY_EVENT,
+                        root,
+                        event: root,
+                        root_x: if index == 32 { 300 } else { 100 },
+                        root_y: 100,
+                        time: 1000 + index,
+                        state: xproto::KeyButMask::BUTTON1,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            conn.send_event(
+                false,
+                root,
+                EventMask::BUTTON_RELEASE,
+                xproto::ButtonReleaseEvent {
+                    response_type: xproto::BUTTON_RELEASE_EVENT,
+                    root,
+                    event: root,
+                    detail: 1,
+                    root_x: 100,
+                    root_y: 100,
+                    time: 1065,
+                    state: xproto::KeyButMask::BUTTON1,
+                    same_screen: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            conn.get_input_focus().unwrap().reply().unwrap();
+            let mut budget = X11_EVENT_RAW_POLL_LIMIT;
+            assert!(source.prefetch_with_budget(&mut budget).unwrap());
+            let mut event_loop = calloop::EventLoop::<Vec<BackendEvent>>::try_new().unwrap();
+            event_loop
+                .handle()
+                .insert_source(source, |event, _, observed| observed.push(event))
+                .map_err(|error| error.error)
+                .unwrap();
+            let mut observed = Vec::new();
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert_eq!(
+                observed.len(),
+                64,
+                "held motion still obeys native dispatch fairness"
+            );
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert_eq!(observed.len(), 66);
+            for (index, event) in observed[..65].iter().enumerate() {
+                assert!(
+                    matches!(event, BackendEvent::MotionNotify { root_x, root_y: 100.0, time, .. }
+                    if *root_x == if index == 32 { 300.0 } else { 100.0 } && *time == 1000 + index as u32)
+                );
+            }
+            assert!(matches!(
+                observed[65],
+                BackendEvent::ButtonRelease {
+                    detail: 1,
+                    time: 1065,
+                    ..
+                }
+            ));
+
+            // Button-up hover retains its existing same-target compression.
+            observed.clear();
+            for root_x in [100, 300, 100] {
+                conn.send_event(
+                    false,
+                    root,
+                    EventMask::POINTER_MOTION,
+                    xproto::MotionNotifyEvent {
+                        response_type: xproto::MOTION_NOTIFY_EVENT,
+                        root,
+                        event: root,
+                        root_x,
+                        root_y: 100,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            conn.get_input_focus().unwrap().reply().unwrap();
+            event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+            assert_eq!(observed.len(), 1);
+            assert!(matches!(
+                observed[0],
+                BackendEvent::MotionNotify { root_x: 100.0, .. }
             ));
         }
 

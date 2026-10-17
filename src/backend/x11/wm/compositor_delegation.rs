@@ -392,8 +392,44 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_astronomy_zoom(&mut self, root_x: f64, root_y: f64, steps: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.astronomy_zoom(root_x, root_y, steps))
+            }
+
             fn compositor_solar_system_interactive(&self) -> bool {
                 self.compositor.as_ref().is_some_and(|c| c.solar_system_interactive())
+            }
+
+            fn compositor_solar_system_begin_drag(&mut self, root_x: f64, root_y: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.solar_system_begin_drag(root_x, root_y))
+            }
+
+            fn compositor_solar_system_abort_drag(&mut self) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.solar_system_abort_drag();
+                }
+            }
+
+            fn compositor_solar_system_drag_motion(&mut self, root_x: f64, root_y: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.solar_system_drag_motion(root_x, root_y))
+            }
+
+            fn compositor_solar_system_drag_active(&self) -> bool {
+                self.compositor.as_ref().is_some_and(|c| c.solar_system_drag_active())
+            }
+
+            fn compositor_solar_system_end_drag(&mut self, activate_click: bool) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.solar_system_end_drag(activate_click);
+                }
+            }
+
+            fn compositor_solar_system_zoom(&mut self, root_x: f64, root_y: f64, steps: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.solar_system_zoom(root_x, root_y, steps))
+            }
+
+            fn compositor_solar_system_leave_closeup(&mut self, root_x: f64, root_y: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.solar_system_leave_closeup(root_x, root_y))
             }
 
             fn compositor_solar_system_camera_delta(&mut self, azimuth: f32, elevation: f32, zoom_steps: f32) -> bool {

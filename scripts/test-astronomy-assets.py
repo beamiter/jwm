@@ -17,19 +17,23 @@ ASSETS = {
     OCTOBER: "ccfd9b7a5e5ee601e1466556716bba50ea418f3a8e068ab0194ae0425815b1b0",
     JANUARY: "99f5faad74efe985fbf1714c8be7296ca9999759a1215b65f99b7f1df278dde5",
     "moon-nasa-lroc.jpg": "f7130a1822681fa7512d7dcfd40db8c10b9ba4f06777910348698260ed7a2170",
+    "moon-nasa-lroc-8k.jpg": "821831cacac483ebb5390e1c6b4039b6274f7d1f9c10b3c35259496af6b0cac0",
     "earth-nasa-clouds.jpg": "daddaad84d7a33bbbc86cdda3f591099f57cee8607b7bcf3b67eb7e4f7a1c793",
     "milkyway-nasa-gaia.jpg": "0c9247995a0f31eebe8ba49e3994d3fcc468c4cd4bf9a1555445141d81c8078e",
+    "galaxy-nasa-4k.png": "f92ee3d1eff038c93200a79f0a0496edb4bb37cf397de676d7d57c1e85cc8d94",
 }
 # Each historical release must have exactly the assets that existed then.
-# In particular, cloning today's bundle must not add October to old fixtures.
+# Keep these lists explicit: deriving them from today's asset map silently
+# backports newly added detail/sky textures into historical release fixtures.
 HISTORICAL_ASSETS = {
     "astronomy-1": (),
     "astronomy-earth": (JANUARY,),
     "astronomy-surfaces": (JANUARY, "moon-nasa-lroc.jpg"),
     "astronomy-clouds": (JANUARY, "moon-nasa-lroc.jpg", "earth-nasa-clouds.jpg"),
-    "astronomy-galaxy": tuple(name for name in ASSETS if name != OCTOBER),
+    "astronomy-galaxy": (JANUARY, "moon-nasa-lroc.jpg", "earth-nasa-clouds.jpg", "milkyway-nasa-gaia.jpg"),
+    "astronomy-october": (OCTOBER, JANUARY, "moon-nasa-lroc.jpg", "earth-nasa-clouds.jpg", "milkyway-nasa-gaia.jpg"),
 }
-VERSION = "astronomy-2"
+VERSION = "astronomy-cosmos"
 VERSION_DIR = Path("usr/local/lib/jwm/versions")
 
 
@@ -72,7 +76,12 @@ def make_historical_bundle(bundle, destination, manifest, version, names):
         lines.append(line)
     historical_manifest = "\n".join(lines) + "\n"
     (destination / "release-manifest.tsv").write_text(historical_manifest)
-    assert OCTOBER not in historical_manifest, version
+    historical_sources = {
+        Path(line.split("\t")[1]).name
+        for line in historical_manifest.splitlines()
+        if line.startswith("repo-file\tassets/astronomy/")
+    }
+    assert historical_sources == (set(names) | {"README.md"} if names else set()), version
     check_assets(payload, names)
 
 
@@ -147,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
         run("bash", installer, "rollback", "--destdir", str(root))
         assert live.resolve().parent.parent == old_payload
         check_assets(old_payload, old_names)
-        check_assets(active_payload)  # The inactive October release stays intact.
+        check_assets(active_payload)  # Inactive detail/panorama assets stay version-local.
         check_preserved()
 
         run("bash", installer, "uninstall", "--all", "--destdir", str(root))
@@ -156,7 +165,7 @@ with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
         assert not active_payload.exists()
         check_preserved()
 
-        # Also exercise fresh install and uninstall with October active, rather
+        # Also exercise fresh install and uninstall with the cosmos assets active, rather
         # than only uninstalling it as an inactive release after rollback.
         run("bash", installer, "install", "--destdir", str(root))
         assert live.resolve().parent.parent == active_payload
@@ -167,6 +176,6 @@ with tempfile.TemporaryDirectory(prefix="jwm-astronomy-assets-") as tmp:
         assert not active_payload.exists()
         check_preserved()
 
-print("test-astronomy-assets: PASS (October/January/Moon/cloud/sky hashes/modes; "
-      "5 historical upgrade/rollback/uninstall + fresh install/uninstall cases; "
+print("test-astronomy-assets: PASS (Earth/Moon/8K/cloud/panorama hashes/modes; "
+      "6 historical upgrade/rollback/uninstall + fresh install/uninstall cases; "
       "user overrides and explicit January paths)")

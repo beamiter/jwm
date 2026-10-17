@@ -29,6 +29,8 @@ pub(crate) mod maximize_restore;
 pub(crate) mod minimized_restore;
 /// Ordered completion of a missing-button watchdog after native input drains.
 pub(crate) mod pointer_event_drain;
+/// Preserve left-button excursions while batching ordinary pointer hover.
+pub(crate) mod pointer_motion;
 
 #[derive(Clone, Copy)]
 pub struct WindowTypeAtoms<A> {

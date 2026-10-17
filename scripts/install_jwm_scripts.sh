@@ -719,10 +719,14 @@ build_and_install_jwm() {
         /usr/local/share/jwm/astronomy/earth-nasa-january.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/moon-nasa-lroc.jpg" \
         /usr/local/share/jwm/astronomy/moon-nasa-lroc.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/moon-nasa-lroc-8k.jpg" \
+        /usr/local/share/jwm/astronomy/moon-nasa-lroc-8k.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-clouds.jpg" \
         /usr/local/share/jwm/astronomy/earth-nasa-clouds.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/milkyway-nasa-gaia.jpg" \
         /usr/local/share/jwm/astronomy/milkyway-nasa-gaia.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/galaxy-nasa-4k.png" \
+        /usr/local/share/jwm/astronomy/galaxy-nasa-4k.png
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/README.md" \
         /usr/local/share/jwm/astronomy/README.md
 

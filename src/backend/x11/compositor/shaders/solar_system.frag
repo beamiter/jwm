@@ -3,6 +3,9 @@
 out vec4 frag_color;
 uniform vec2 resolution;
 uniform vec3 camera_eye;
+uniform mat3 camera_basis;
+uniform int camera_basis_enabled;
+uniform float camera_focal;
 uniform float orbit_phase[8];
 uniform float surface_phase;
 uniform float spin_phase[8];
@@ -37,6 +40,38 @@ float noise(vec3 p){
  return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),f.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);
 }
 float fbm(vec3 p){float n=0.,weight=.55;for(int j=0;j<4;j++){n+=weight*noise(p);p=p*2.03+vec3(4.7,9.2,1.8);weight*=.48;}return n;}
+// Spatial detail fades in only when its wavelength spans enough screen pixels.
+// It is body-fixed and has no time input: approaching a planet reveals existing
+// structure instead of adding boiling noise or a distant shimmer.
+float detail_weight(float footprint,float frequency){return 1.-smoothstep(.10,.65,footprint*frequency);}
+float surface_detail(vec3 q,float footprint){
+ float detail=0.,weight=.55,frequency=32.;
+ for(int octave=0;octave<5;octave++){
+  float visible=detail_weight(footprint,frequency);
+  if(visible<.001)break;
+  detail+=weight*visible*(noise(q*frequency+vec3(4.7,9.2,1.8)*float(octave))-.5);
+  weight*=.5;frequency*=2.03;
+ }
+ return detail;
+}
+float crater_detail(vec3 q,float footprint){
+ float height=0.,frequency=9.,weight=.65;
+ for(int octave=0;octave<3;octave++){
+  float visible=detail_weight(footprint,frequency*5.);
+  if(visible<.001)break;
+  vec3 p=q*frequency,cell=floor(p);
+  vec3 offset=vec3(hash(cell+3.),hash(cell+17.),hash(cell+41.))*.24-.12;
+  float radius=.13+.11*hash(cell+71.);
+  float distance=length(fract(p)-.5-offset)/radius;
+  // Compact support inside each cell prevents a cell edge discontinuity.
+  float bowl=-.55*(1.-smoothstep(.12,.94,distance));
+  float rim=.28*exp(-pow((distance-.98)/.13,2.));
+  float support=1.-smoothstep(1.05,1.25,distance);
+  height+=weight*visible*(bowl+rim)*support;
+  frequency*=3.;weight*=.48;
+ }
+ return height;
+}
 vec3 center(int i){if(i==0)return vec3(0);float a=orbit_phase[i-1];return vec3(cos(a)*orbit[i-1],sin(a)*.025*float(i),sin(a)*orbit[i-1]);}
 float sphere(vec3 ro,vec3 rd,vec3 c,float r){vec3 q=ro-c;float b=dot(q,rd),d=b*b-dot(q,q)+r*r;if(d<0.)return 1e5;float t=-b-sqrt(d);if(t>0.)return t;t=-b+sqrt(d);return t>0.?t:1e5;}
 vec3 rotate_y(vec3 n,float a){float s=sin(a),c=cos(a);return vec3(c*n.x-s*n.z,n.y,s*n.x+c*n.z);}
@@ -58,13 +93,15 @@ float ring_opacity(float r){
 }
 vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
  vec3 q=surface_point(body,n); // Body-fixed clouds and surface, no boiling noise.
+ float footprint=max(length(normal_dx),length(normal_dy));
+ float detail=surface_detail(q,footprint);
  float fine=body==1?fbm(q*12.):0.;
- if(body==1){float rocks=fbm(q*5.);return mix(vec3(.20,.18,.17),vec3(.55,.50,.43),rocks)*(.88+.18*fine);}
+ if(body==1){float rocks=fbm(q*5.);float craters=crater_detail(q,footprint);return mix(vec3(.20,.18,.17),vec3(.55,.50,.43),rocks)*(.88+.18*fine+.27*detail+.45*craters);}
  if(body==2){
   // Venus is an opaque, pale cloud deck in visible light, not exposed orange rock.
   float flow=fbm(q*vec3(3.,7.,3.));
   float cloud=fbm(q*vec3(7.,18.,7.)+vec3(flow*2.,0.,flow));
-  return mix(vec3(.72,.66,.51),vec3(.94,.90,.76),smoothstep(.12,.86,cloud))*(.97+.03*flow);
+  return mix(vec3(.72,.66,.51),vec3(.94,.90,.76),smoothstep(.12,.86,cloud))*(.97+.03*flow+.07*detail);
  }
  if(body==3){
   vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
@@ -72,9 +109,9 @@ vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
   vec2 uv_dy=equirect_gradient(q,surface_point(body,normal_dy));
   vec3 base=earth_enabled!=0?textureGrad(earth_map,uv,uv_dx,uv_dy).rgb:mix(vec3(.025,.13,.32),vec3(.13,.27,.10),smoothstep(.48,.57,fbm(q*5.)));
   float clouds=cloud_enabled!=0?smoothstep(.12,.88,textureGrad(cloud_map,uv,uv_dx,uv_dy).r):smoothstep(.58,.74,fbm(q*vec3(8.,12.,8.)));
-  return mix(base,vec3(.94,.96,.98),clouds*.88);
+  return mix(base*(1.+.06*detail),vec3(.94,.96,.98),clouds*.88);
  }
- if(body==4){float rock=fbm(q*4.);float dust=fbm(q*13.);return mix(vec3(.27,.10,.05),vec3(.71,.38,.19),rock)*(.82+.25*dust)+vec3(.2)*smoothstep(.88,.96,abs(q.y));}
+ if(body==4){float rock=fbm(q*4.);float dust=fbm(q*13.);float craters=crater_detail(q,footprint);return mix(vec3(.27,.10,.05),vec3(.71,.38,.19),rock)*(.82+.25*dust+.22*detail+.34*craters)+vec3(.2)*smoothstep(.88,.96,abs(q.y));}
  if(body==5||body==6){
   // Unequal latitude zones with body-fixed shear and curled storm edges.
   // All noise is spatial; no time coordinate can make the clouds boil.
@@ -82,12 +119,12 @@ vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
   float shear=noise(q*vec3(4.,28.,4.));
   float lat=q.y+.075*(eddy-.5)+.020*sin(q.x*15.+q.z*9.+eddy*9.);
   float zones=noise(vec3(lat*11.,2.3,7.1));
-  float wisps=noise(q*vec3(25.,95.,25.)+vec3(eddy*4.,shear,eddy*3.));
+  float wisps=mix(.5,noise(q*vec3(25.,95.,25.)+vec3(eddy*4.,shear,eddy*3.)),detail_weight(footprint,95.));
   float belts=smoothstep(.08,.92,zones+.24*(eddy-.5));
   vec3 pale=body==5?vec3(.91,.85,.73):vec3(.88,.81,.65);
   vec3 dark=body==5?vec3(.60,.41,.27):vec3(.79,.71,.55);
   vec3 base=mix(dark,pale,belts);
-  base*=.91+.13*wisps+.06*eddy;
+  base*=.91+.13*wisps+.06*eddy+.12*detail;
   if(body==5){
    float longitude=atan(q.z,q.x);
    float dx=atan(sin(longitude-.6),cos(longitude-.6))/.25;
@@ -101,40 +138,30 @@ vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
   return base;
  }
  float bands=.5+.2*sin(q.y*16.+fbm(q*vec3(4.,14.,4.))*1.3);
- return body==7?mix(vec3(.32,.63,.66),vec3(.42,.70,.73),bands):mix(vec3(.035,.18,.52),vec3(.10,.32,.68),bands);
+ return (body==7?mix(vec3(.32,.63,.66),vec3(.42,.70,.73),bands):mix(vec3(.035,.18,.52),vec3(.10,.32,.68),bands))*(1.+.08*detail);
 }
+// JWM_COSMIC_SKY_INCLUDE
 vec3 stars(vec3 ray,vec3 ray_dx,vec3 ray_dy){
- if(sky_enabled!=0){
-  // Fixed decorative celestial orientation, independent of orbit and spin.
-  vec3 q=rotate_y(ray,.8);
-  q=vec3(q.x,.8660254*q.y-.5*q.z,.5*q.y+.8660254*q.z);
-  vec3 q_dx=rotate_y(ray_dx,.8),q_dy=rotate_y(ray_dy,.8);
-  q_dx=vec3(q_dx.x,.8660254*q_dx.y-.5*q_dx.z,.5*q_dx.y+.8660254*q_dx.z);
-  q_dy=vec3(q_dy.x,.8660254*q_dy.y-.5*q_dy.z,.5*q_dy.y+.8660254*q_dy.z);
-  vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
-  vec3 encoded=textureGrad(sky_map,uv,equirect_gradient(q,q_dx),equirect_gradient(q,q_dy)).rgb;
-  // Cubic sRGB-to-linear fit avoids three per-pixel powers in the full sky.
-  // Maximum absolute linear error < .0017 before the .18 exposure scale.
-  vec3 linear=encoded*(encoded*(encoded*.305306011+.682171111)+.012522878);
-  return vec3(.0005,.0007,.0011)+linear*.18;
- }
- vec3 grid=ray*350.,cell=floor(grid);float chance=hash(cell);
- float d=length(fract(grid)-.5);float star=smoothstep(.993,1.,chance)*exp(-d*d*100.);
- vec3 tint=mix(vec3(.56,.69,1.),vec3(1.,.81,.58),hash(cell+19.));
- float haze=pow(max(0.,1.-abs(ray.y*.75+ray.x*.3+.2)),8.);
- return vec3(.0008,.0013,.0028)+tint*star*.65+vec3(.001,.0016,.003)*haze;
+ return cosmic_sky(ray,ray_dx,ray_dy,sky_enabled!=0);
+}
+vec3 solar_ray(vec2 pixel,out float inverse_length,out vec3 right,out vec3 up){
+ float pixels=max(min(resolution.x,resolution.y),1.);
+ vec2 uv=(pixel-.5*resolution)/pixels;
+ vec3 forward;
+ // A slightly wider lens keeps the full system in square/portrait outputs.
+ float focal=resolution.x>=resolution.y*1.25?1.5:1.2*max(1.,resolution.x/max(resolution.y,1.));
+ if(camera_basis_enabled!=0){right=camera_basis[0];up=camera_basis[1];forward=camera_basis[2];focal=max(camera_focal,.01);}
+ else{forward=normalize(-camera_eye);right=normalize(cross(forward,vec3(0,1,0)));up=cross(right,forward);}
+ vec3 view=forward*focal+right*uv.x+up*uv.y;
+ inverse_length=inversesqrt(dot(view,view));
+ return view*inverse_length;
 }
 vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  needs_aa=false;
  vec3 ring_normal=body_axis(6);
  float pixels=max(min(resolution.x,resolution.y),1.);
- vec2 uv=(pixel-.5*resolution)/pixels;
- vec3 forward=normalize(-camera_eye),right=normalize(cross(forward,vec3(0,1,0))),up=cross(right,forward);
- // A slightly wider lens keeps the full system in square/portrait outputs.
- float focal=resolution.x>=resolution.y*1.25?1.5:1.2*max(1.,resolution.x/max(resolution.y,1.));
- vec3 view=forward*focal+right*uv.x+up*uv.y;
- float inverse_length=inversesqrt(dot(view,view));
- vec3 ray=view*inverse_length;
+ float inverse_length;vec3 right,up;
+ vec3 ray=solar_ray(pixel,inverse_length,right,up);
 
  float nearest=1e5;int body=-1;
  for(int i=0;i<9;i++){
@@ -142,7 +169,6 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
   vec3 offset=c-camera_eye;float along=dot(offset,ray);float impact2=dot(offset,offset)-along*along;float footprint=along/pixels*1.5;
   if(along>0.&&abs(impact2-radius[i]*radius[i])<2.*radius[i]*footprint+footprint*footprint)needs_aa=true;
  }
- needs_aa=needs_aa||body>=0;
  // The center sample is discarded for antialiased pixels; skip its material work.
  if(classify&&needs_aa)return vec3(0);
  vec3 ray_dx=(right-ray*dot(ray,right))*(inverse_length/pixels);
@@ -160,9 +186,10 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
    vec3 light=normalize(-p);float cosine=dot(n,light);float diffuse=max(0.,cosine);
    if(body==6){float denom=dot(light,ring_normal);if(abs(denom)>.001){float t=dot(c-p,ring_normal)/denom;if(t>.001){float r=length(p+light*t-c);diffuse*=1.-ring_opacity(r)*.8;}}}
    vec3 normal_dx=vec3(0),normal_dy=vec3(0);
-   if(body==3){
+   {
     // Differentiate the sphere intersection analytically. Neighbor fragments
     // may hit another body or only sky, so implicit material derivatives are unsafe.
+    // All surfaces use this footprint to reveal filtered detail on approach.
     float incidence=dot(n,ray);
     float limit=sqrt(min(1.,nearest*inverse_length/(pixels*radius[body])));
     incidence=incidence<0.?min(incidence,-limit):max(incidence,limit);
@@ -197,8 +224,8 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
 }
 vec3 tone(vec3 x){return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.,1.);}
 void main(){
- // Smooth sky/corona and analytic guides need one ray; only material/silhouette
- // pixels pay for four fixed subpixel rays. No frame-wide 4x shading multiplier.
+ // Filtered interior materials need one ray; silhouettes and thin rings pay for
+ // four fixed subpixel rays. Enlarged planets do not multiply all material work.
  bool needs_aa;vec3 color=shade(gl_FragCoord.xy,true,needs_aa);
  if(needs_aa){color=vec3(0);for(int i=0;i<4;i++){
   vec2 offset=vec2(float(i&1),float(i>>1))*.5-.25;bool unused;
