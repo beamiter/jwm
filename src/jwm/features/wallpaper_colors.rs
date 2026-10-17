@@ -127,7 +127,8 @@ fn same_color(a: [f32; 4], b: [f32; 4]) -> bool {
 /// colours are configured rather than falling back to something arbitrary.
 #[must_use]
 pub fn palette_from_rgba(rgba: &[u8]) -> Option<Palette> {
-    let mut buckets: std::collections::HashMap<u16, Bucket> = std::collections::HashMap::new();
+    // A fixed 12-bit histogram avoids per-pixel hashing and heap allocations.
+    let mut buckets = [Bucket::default(); 4096];
     for pixel in rgba.chunks_exact(4) {
         // Anything see-through is a corner or a soft edge, not a colour the
         // wallpaper actually shows.
@@ -150,17 +151,21 @@ pub fn palette_from_rgba(rgba: &[u8]) -> Option<Palette> {
         let key = (u16::from(pixel[0] >> 4) << 8)
             | (u16::from(pixel[1] >> 4) << 4)
             | u16::from(pixel[2] >> 4);
-        let bucket = buckets.entry(key).or_default();
+        let bucket = &mut buckets[usize::from(key)];
         bucket.weight += f64::from(weight);
         for (sum, channel) in bucket.sums.iter_mut().zip(rgb) {
             *sum += f64::from(channel) * f64::from(weight);
         }
     }
 
-    let mut ranked: Vec<(u16, Bucket)> = buckets.into_iter().collect();
-    // The key breaks ties so the same wallpaper always themes the same way;
-    // hash order alone would not.
-    ranked.sort_by(|(left_key, left), (right_key, right)| {
+    // Sort only the occupied bins. Key ordering makes ties deterministic.
+    let mut ranked: Vec<(u16, Bucket)> = buckets
+        .into_iter()
+        .enumerate()
+        .filter(|(_, bucket)| bucket.weight > 0.0)
+        .map(|(key, bucket)| (key as u16, bucket))
+        .collect();
+    ranked.sort_unstable_by(|(left_key, left), (right_key, right)| {
         right
             .weight
             .partial_cmp(&left.weight)
