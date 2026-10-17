@@ -2,9 +2,10 @@
 use super::*;
 use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialBody, POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan,
-    celestial_assignments, celestial_longitude, earth_view_longitude, lunar_sun_direction,
-    material_load_frame, presentation_offset, resolve_cloud_texture, resolve_earth_texture,
-    resolve_moon_texture, resolve_sky_texture, sky_rotation, solar_direction, wall_clock_seconds,
+    astronomy_frame_interval, celestial_assignments, celestial_longitude, earth_view_longitude,
+    lunar_sun_direction, material_load_frame, presentation_offset, resolve_cloud_texture,
+    resolve_earth_texture, resolve_moon_texture, resolve_sky_texture, sky_rotation,
+    solar_direction, wall_clock_seconds,
 };
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -56,6 +57,7 @@ impl AstronomyProgram {
 
 #[derive(Default)]
 pub(super) struct AstronomyWallpaper {
+    cache: procedural_wallpaper_cache::ProceduralFrameCache,
     enabled: bool,
     path: String,
     configured_path: String,
@@ -240,6 +242,9 @@ impl AstronomyWallpaper {
 
     /// A terminal required-image failure must not strand GPU allocations once wakes stop.
     unsafe fn fail_material(&mut self, gl: &glow::Context) {
+        unsafe {
+            self.cache.cleanup(gl);
+        }
         for texture in self.take_failed_material().into_iter().flatten() {
             unsafe {
                 gl.delete_texture(texture);
@@ -248,6 +253,9 @@ impl AstronomyWallpaper {
     }
 
     pub(super) unsafe fn cleanup(&mut self, gl: &glow::Context) {
+        unsafe {
+            self.cache.cleanup(gl);
+        }
         self.pending = None;
         self.moon_pending = None;
         self.cloud_pending = None;
@@ -387,6 +395,7 @@ impl<C: CompositorConnection> Compositor<C> {
             || a.moon_configured_path != *moon_configured
             || a.dual_material != dual;
         if changed {
+            a.cache.invalidate();
             a.enabled = enabled;
             a.configured_path = configured.clone();
             a.moon_configured_path = moon_configured.clone();
@@ -471,6 +480,15 @@ impl<C: CompositorConnection> Compositor<C> {
             a.sample_offset = offset_seconds;
             a.clock = WallpaperClock::default();
         }
+        a.clock.set_interval(astronomy_frame_interval(
+            a.draw_plan
+                .iter()
+                .map(|canvas| canvas.radius)
+                .fold(0.0_f32, f32::max),
+            a.earth_rotating.then_some(a.earth_period),
+            a.dual_material.then_some(a.moon_period),
+            a.sky_period,
+        ));
         a.clock.set_paused(!a.powered || occluded);
         let tick = a.clock.tick(now);
         if tick {
@@ -484,11 +502,19 @@ impl<C: CompositorConnection> Compositor<C> {
             || power_changed
             || timezone_changed
             || tick;
+        if a.frame_changed {
+            a.cache.invalidate();
+        }
         a.frame_changed
     }
 
     /// Called with a current context, after the normal static wallpaper pass.
     pub(super) fn draw_astronomy_wallpaper(&mut self, repair: Option<(i32, i32, i32, i32)>) {
+        let cache_ten_bit = procedural_wallpaper_cache::uses_ten_bit(
+            self.hdr_enabled,
+            self.hdr_output_10bit,
+            self.needs_postprocess() && self.postprocess_fbo.is_some(),
+        );
         let a = &mut self.astronomy_wallpaper;
         unsafe {
             for tex in a.retired.drain(..) {
@@ -501,7 +527,13 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             return;
         }
-        if !a.enabled || !a.powered {
+        if !a.enabled {
+            unsafe {
+                a.cache.cleanup(&self.gl);
+            }
+            return;
+        }
+        if !a.powered {
             return;
         }
         // First adoption changes the entire material, so wait for a frame
@@ -522,6 +554,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(load) = a.pending.as_ref() {
             match load.try_recv() {
                 Ok(data) => {
+                    a.cache.invalidate();
                     a.pending = None;
                     if data.width != data.height.saturating_mul(2) {
                         log::warn!(
@@ -562,6 +595,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(load) = a.moon_pending.as_ref() {
             match load.try_recv() {
                 Ok(data) => {
+                    a.cache.invalidate();
                     a.moon_pending = None;
                     if data.width != data.height.saturating_mul(2) {
                         log::warn!(
@@ -602,6 +636,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(load) = a.cloud_pending.as_ref().filter(|_| poll_optional) {
             match load.try_recv() {
                 Ok(data) => {
+                    a.cache.invalidate();
                     a.cloud_pending = None;
                     if data.width == data.height.saturating_mul(2) {
                         a.cloud_texture =
@@ -628,6 +663,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(load) = a.sky_pending.as_ref().filter(|_| poll_optional) {
             match load.try_recv() {
                 Ok(data) => {
+                    a.cache.invalidate();
                     a.sky_pending = None;
                     if data.width == data.height.saturating_mul(2) {
                         a.sky_texture =
@@ -679,6 +715,19 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(program) = a.program.as_ref() else {
             return;
         };
+        let cached = unsafe {
+            a.cache
+                .ensure(&self.gl, self.screen_w, self.screen_h, cache_ten_bit)
+        };
+        if cached && a.cache.valid() {
+            unsafe {
+                a.cache
+                    .present(&self.gl, a.draw_plan.iter().map(|canvas| canvas.clip));
+            }
+            return;
+        }
+        let cache_state = cached.then(|| unsafe { a.cache.begin(&self.gl) });
+        let repair = if cached { None } else { repair };
         let sun = solar_direction(a.sample_unix);
         let longitude = earth_view_longitude(
             a.sample_unix,
@@ -768,6 +817,14 @@ impl<C: CompositorConnection> Compositor<C> {
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_vertex_array(None);
             gl.use_program(None);
+        }
+        drop(cache_state);
+        if cached {
+            a.cache.finish();
+            unsafe {
+                a.cache
+                    .present(&self.gl, a.draw_plan.iter().map(|canvas| canvas.clip));
+            }
         }
     }
 }

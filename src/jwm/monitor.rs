@@ -1575,6 +1575,15 @@ impl Jwm {
                 })
             })
             .collect();
+        use slotmap::Key as _;
+        let identities: Vec<u64> = self
+            .state
+            .monitor_order
+            .iter()
+            .filter(|&&key| self.state.monitors.contains_key(key))
+            .map(|key| key.data().as_ffi())
+            .collect();
+        backend.compositor_set_monitor_identities(&identities);
         backend.compositor_set_monitors(&mon_list);
     }
 

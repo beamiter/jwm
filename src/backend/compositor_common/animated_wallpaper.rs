@@ -128,9 +128,42 @@ fn resolve_earth_texture_from(
 
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_nanos(66_666_667);
 pub(crate) const POWER_QUERY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Keep the fastest visible decorative rotation below roughly half a pixel per
+/// update, bounded to 1–15 Hz. Physical sunlight still refreshes at least once a
+/// second. Match the shader's period clamping, including the static-sky sentinel.
+pub(crate) fn astronomy_frame_interval(
+    radius: f32,
+    earth_minutes: Option<u32>,
+    moon_minutes: Option<u32>,
+    sky_minutes: u32,
+) -> Duration {
+    let radius = if radius.is_finite() {
+        f64::from(radius.max(0.0))
+    } else {
+        0.0
+    };
+    let fastest = [
+        earth_minutes,
+        moon_minutes,
+        (sky_minutes != 0).then_some(sky_minutes),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|m| m.clamp(1, 525_600))
+    .min();
+    let hz = fastest.map_or(1.0, |minutes| {
+        (radius * std::f64::consts::TAU / (f64::from(minutes) * 60.0) / 0.5)
+            .ceil()
+            .clamp(1.0, 15.0)
+    });
+    Duration::from_secs_f64(1.0 / hz).max(FRAME_INTERVAL)
+}
+
 #[derive(Debug)]
 pub(crate) struct WallpaperClock {
     last_frame: Option<Instant>,
+    interval: Duration,
     paused: bool,
 }
 
@@ -138,12 +171,16 @@ impl Default for WallpaperClock {
     fn default() -> Self {
         Self {
             last_frame: None,
+            interval: FRAME_INTERVAL,
             paused: true,
         }
     }
 }
 
 impl WallpaperClock {
+    pub(crate) fn set_interval(&mut self, interval: Duration) {
+        self.interval = interval.clamp(FRAME_INTERVAL, Duration::from_secs(1));
+    }
     pub(crate) fn set_paused(&mut self, paused: bool) {
         if self.paused != paused {
             self.paused = paused;
@@ -155,7 +192,8 @@ impl WallpaperClock {
             return None;
         }
         Some(self.last_frame.map_or(Duration::ZERO, |last| {
-            FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+            self.interval
+                .saturating_sub(now.saturating_duration_since(last))
         }))
     }
     /// Admit only a due frame; never schedule catch-up bursts after a pause.
@@ -171,6 +209,53 @@ impl WallpaperClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn astronomy_cadence_follows_visible_speed_and_bounds() {
+        assert_eq!(
+            astronomy_frame_interval(1000.0, None, None, 0),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            astronomy_frame_interval(1000.0, Some(1440), None, 0),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            astronomy_frame_interval(1000.0, Some(1), None, 0),
+            FRAME_INTERVAL
+        );
+        let slow = astronomy_frame_interval(1000.0, Some(60), None, 0);
+        let fast = astronomy_frame_interval(1000.0, Some(20), None, 0);
+        assert!(fast < slow && fast > FRAME_INTERVAL);
+        assert_eq!(
+            astronomy_frame_interval(1000.0, None, Some(1), 0),
+            FRAME_INTERVAL
+        );
+        assert_eq!(
+            astronomy_frame_interval(1000.0, None, None, 1),
+            FRAME_INTERVAL
+        );
+        assert_eq!(
+            astronomy_frame_interval(f32::NAN, None, None, 0),
+            Duration::from_secs(1)
+        );
+    }
+    #[test]
+    fn interval_changes_do_not_reset_or_burst_clock() {
+        let now = Instant::now();
+        let mut c = WallpaperClock::default();
+        c.set_paused(false);
+        c.set_interval(Duration::from_secs(1));
+        assert!(c.tick(now));
+        assert!(!c.tick(now + Duration::from_millis(900)));
+        c.set_interval(FRAME_INTERVAL);
+        assert!(c.tick(now + Duration::from_millis(900)));
+        assert!(!c.tick(now + Duration::from_millis(901)));
+        c.set_interval(Duration::ZERO);
+        assert_eq!(c.interval, FRAME_INTERVAL);
+        c.set_interval(Duration::from_secs(20));
+        assert_eq!(c.interval, Duration::from_secs(1));
+    }
+
     #[test]
     fn capped_frame_clock_does_not_follow_high_refresh_damage() {
         let t = Instant::now();

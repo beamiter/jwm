@@ -56,9 +56,89 @@ const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "bmp", "gif"]
 /// would stall the frame that opened it.
 ///
 /// Selection retains at most twice this many candidates while the worker
-/// reads the whole directory. Only entries whose type is unresolved need a
+/// reads a bounded prefix of the directory. Only entries whose type is unresolved need a
 /// stat, see [`select_wallpapers`].
 pub const MAX_ENTRIES: usize = 200;
+
+/// Stop pathological directories after a bounded number of raw entries,
+/// including sidecars and unreadable entries. Ordering applies to this prefix.
+pub const MAX_SCAN_ENTRIES: usize = 100_000;
+
+/// Dropping the owner cancels its worker without joining on filesystem I/O.
+#[derive(Debug, Default)]
+pub struct ScanCancellation(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl ScanCancellation {
+    pub fn observer(&self) -> impl Fn() -> bool + Send + 'static {
+        let cancelled = std::sync::Arc::clone(&self.0);
+        move || cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for ScanCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug)]
+pub struct WallpaperListing {
+    pub directory: PathBuf,
+    pub paths: Vec<PathBuf>,
+    /// Configuration identity at scan start and its original matching row key.
+    /// Applied only if the configuration still has that identity at completion.
+    pub selection: Option<(String, String)>,
+}
+
+impl From<(PathBuf, Vec<PathBuf>)> for WallpaperListing {
+    fn from((directory, paths): (PathBuf, Vec<PathBuf>)) -> Self {
+        Self {
+            directory,
+            paths,
+            selection: None,
+        }
+    }
+}
+
+/// Resolve aliases off the event loop, keeping the listing's original paths.
+/// Retain a valid current picture even if it falls outside the bounded listing.
+pub fn resolve_selection(
+    paths: &mut Vec<PathBuf>,
+    current: &str,
+    home: &Path,
+    cancelled: impl Fn() -> bool,
+) -> Option<(String, String)> {
+    if current.is_empty() || is_effect_choice(current) || cancelled() {
+        return None;
+    }
+    let expanded = expand_home(current, home);
+    // Prefer the literal row over another symlink to the same image.
+    let selected = paths
+        .iter()
+        .find(|path| **path == expanded)
+        .cloned()
+        .or_else(|| {
+            let canonical = std::fs::canonicalize(&expanded).ok()?;
+            paths
+                .iter()
+                .take_while(|_| !cancelled())
+                .find(|path| std::fs::canonicalize(path).ok().as_ref() == Some(&canonical))
+                .cloned()
+        });
+    let selected = match selected {
+        Some(path) => path,
+        None if !cancelled() && is_image(&expanded) && expanded.is_file() => {
+            if paths.len() >= MAX_ENTRIES {
+                paths.pop();
+            }
+            paths.push(expanded.clone());
+            paths.sort_unstable_by(|a, b| sort_key(a).cmp(&sort_key(b)).then_with(|| a.cmp(b)));
+            expanded
+        }
+        None => return None,
+    };
+    Some((current.to_owned(), selected.to_str()?.to_owned()))
+}
 
 /// What a directory entry's own type says about it, as the directory listing
 /// reports it (`d_type`) rather than as a stat would.
@@ -137,19 +217,38 @@ pub fn expand_home(path: &str, home: &Path) -> PathBuf {
 ///
 /// Sorting is case-insensitive so `Alps.jpg` and `alps.jpg` do not end up at
 /// opposite ends of the list.
+#[cfg(test)]
 #[must_use]
 pub fn list_wallpapers(dir: &Path) -> Vec<PathBuf> {
+    list_wallpapers_cancellable(dir, || false)
+}
+
+/// Cancellation is checked before every raw directory entry, not just images.
+/// A blocked filesystem syscall itself cannot be interrupted by this flag.
+#[must_use]
+pub fn list_wallpapers_cancellable(dir: &Path, cancelled: impl Fn() -> bool) -> Vec<PathBuf> {
+    if cancelled() {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    // The extension is checked before the entry type is asked for: on a file
-    // system without `d_type`, asking costs an lstat, and a pictures folder
-    // full of sidecar files should not pay one per sidecar.
-    let candidates = entries.flatten().filter_map(|entry| {
-        let path = entry.path();
-        is_image(&path).then(|| (path, EntryKind::of(entry.file_type())))
-    });
+    // Bound/check before filtering: millions of sidecars must remain cancellable.
+    let candidates = bounded_scan(entries, &cancelled)
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            is_image(&path).then(|| (path, EntryKind::of(entry.file_type())))
+        });
     select_wallpapers(candidates, Path::is_file)
+}
+
+fn bounded_scan<T>(
+    entries: impl IntoIterator<Item = T>,
+    cancelled: impl Fn() -> bool,
+) -> impl Iterator<Item = T> {
+    let mut entries = entries.into_iter();
+    (0..MAX_SCAN_ENTRIES).map_while(move |_| if cancelled() { None } else { entries.next() })
 }
 
 /// The wallpapers among `entries`, sorted by name, capped at [`MAX_ENTRIES`].
@@ -229,6 +328,83 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_scan_does_not_consume_even_one_raw_entry() {
+        let cancellation = ScanCancellation::default();
+        let cancelled = cancellation.observer();
+        drop(cancellation);
+        let entries =
+            std::iter::from_fn(|| -> Option<()> { panic!("cancelled scan read an entry") });
+        assert_eq!(bounded_scan(entries, cancelled).count(), 0);
+    }
+
+    #[test]
+    fn scan_budget_counts_non_images_and_checks_cancellation_between_entries() {
+        let visited = std::cell::Cell::new(0);
+        let entries = std::iter::repeat_with(|| {
+            visited.set(visited.get() + 1);
+            "sidecar.txt"
+        });
+        assert_eq!(bounded_scan(entries, || false).count(), MAX_SCAN_ENTRIES);
+        assert_eq!(visited.get(), MAX_SCAN_ENTRIES);
+        visited.set(0);
+        let entries = std::iter::repeat_with(|| {
+            visited.set(visited.get() + 1);
+            "sidecar.txt"
+        });
+        assert_eq!(bounded_scan(entries, || visited.get() >= 7).count(), 7);
+        assert_eq!(visited.get(), 7);
+    }
+
+    #[test]
+    fn selection_resolves_home_and_symlinks_without_rewriting_rows() {
+        let dir = temp_dir("selection-alias");
+        let real = dir.join("z-real.png");
+        let alias = dir.join("a-alias.png");
+        std::fs::write(&real, b"x").unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let mut paths = vec![alias.clone(), real.clone()];
+        let original = paths.clone();
+        let selected = resolve_selection(&mut paths, "~/z-real.png", &dir, || false).unwrap();
+        assert_eq!(selected.1, real.to_str().unwrap());
+        assert_eq!(paths, original);
+        paths.pop();
+        let selected =
+            resolve_selection(&mut paths, real.to_str().unwrap(), &dir, || false).unwrap();
+        assert_eq!(selected.1, alias.to_str().unwrap());
+        assert_eq!(paths, [alias]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_picture_survives_the_row_cap_without_growing_it() {
+        let dir = temp_dir("selection-cap");
+        let current = dir.join("z-current.png");
+        std::fs::write(&current, b"x").unwrap();
+        let mut paths: Vec<_> = (0..MAX_ENTRIES)
+            .map(|i| dir.join(format!("{i:04}.png")))
+            .collect();
+        let selected =
+            resolve_selection(&mut paths, current.to_str().unwrap(), &dir, || false).unwrap();
+        assert_eq!(paths.len(), MAX_ENTRIES);
+        assert_eq!(selected.1, current.to_str().unwrap());
+        assert!(paths.contains(&current));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn selection_does_not_add_missing_effect_or_cancelled_paths() {
+        let dir = temp_dir("selection-missing");
+        let current = dir.join("a.png");
+        let mut paths = Vec::new();
+        assert!(resolve_selection(&mut paths, current.to_str().unwrap(), &dir, || false).is_none());
+        std::fs::write(&current, b"x").unwrap();
+        assert!(resolve_selection(&mut paths, current.to_str().unwrap(), &dir, || true).is_none());
+        assert!(resolve_selection(&mut paths, ASTRONOMY_CHOICE, &dir, || false).is_none());
+        assert!(paths.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn solar_system_choice_is_selected_and_never_an_image() {

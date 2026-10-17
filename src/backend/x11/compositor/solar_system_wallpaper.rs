@@ -23,6 +23,7 @@ struct SolarProgram {
 }
 #[derive(Default)]
 pub(super) struct SolarSystemWallpaper {
+    cache: procedural_wallpaper_cache::ProceduralFrameCache,
     enabled: bool,
     powered: bool,
     failed: bool,
@@ -98,6 +99,9 @@ impl SolarSystemWallpaper {
         frame_changed.then(receive)
     }
     pub(super) unsafe fn cleanup(&mut self, gl: &glow::Context) {
+        unsafe {
+            self.cache.cleanup(gl);
+        }
         if let Some(p) = self.program.take() {
             unsafe {
                 gl.delete_program(p.program);
@@ -148,6 +152,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let a = &mut self.solar_system_wallpaper;
         let mut changed = a.enabled != enabled;
         if changed {
+            a.cache.invalidate();
             a.enabled = enabled;
             a.failed = false;
             a.rendered = false;
@@ -229,11 +234,25 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         a.frame_changed = changed | std::mem::take(&mut a.camera_dirty);
         a.sample_spin_for_frame();
+        if a.frame_changed {
+            a.cache.invalidate();
+        }
         a.frame_changed
     }
     pub(super) fn draw_solar_system_wallpaper(&mut self) {
+        let cache_ten_bit = procedural_wallpaper_cache::uses_ten_bit(
+            self.hdr_enabled,
+            self.hdr_output_10bit,
+            self.needs_postprocess() && self.postprocess_fbo.is_some(),
+        );
         let a = &mut self.solar_system_wallpaper;
-        if !a.enabled || !a.powered || a.failed {
+        if !a.enabled || a.failed {
+            unsafe {
+                a.cache.cleanup(&self.gl);
+            }
+            return;
+        }
+        if !a.powered {
             return;
         }
         // Adopt only on a full material frame, never on unrelated partial client damage.
@@ -241,6 +260,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Some(load) = a.earth_pending.as_ref() {
                 match SolarSystemWallpaper::poll_material(a.frame_changed, || load.try_recv()) {
                     Some(Ok(data)) => {
+                        a.cache.invalidate();
                         a.earth_pending = None;
                         if data.width == data.height.saturating_mul(2) {
                             unsafe {
@@ -270,6 +290,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Some(load) = a.cloud_pending.as_ref() {
                 match SolarSystemWallpaper::poll_material(a.frame_changed, || load.try_recv()) {
                     Some(Ok(data)) => {
+                        a.cache.invalidate();
                         a.cloud_pending = None;
                         if data.width == data.height.saturating_mul(2) {
                             unsafe {
@@ -299,6 +320,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Some(load) = a.sky_pending.as_ref() {
                 match SolarSystemWallpaper::poll_material(a.frame_changed, || load.try_recv()) {
                     Some(Ok(data)) => {
+                        a.cache.invalidate();
                         a.sky_pending = None;
                         if data.width == data.height.saturating_mul(2) {
                             unsafe {
@@ -359,6 +381,19 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+        let cached = unsafe {
+            a.cache
+                .ensure(&self.gl, self.screen_w, self.screen_h, cache_ten_bit)
+        };
+        let clip = (0, 0, self.screen_w as i32, self.screen_h as i32);
+        if cached && a.cache.valid() {
+            unsafe {
+                a.cache.present(&self.gl, [clip]);
+            }
+            a.rendered = true;
+            return;
+        }
+        let cache_state = cached.then(|| unsafe { a.cache.begin(&self.gl) });
         let p = a.program.as_ref().unwrap();
         let eye = a.camera.eye();
         unsafe {
@@ -401,6 +436,13 @@ impl<C: CompositorConnection> Compositor<C> {
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
+        }
+        drop(cache_state);
+        if cached {
+            a.cache.finish();
+            unsafe {
+                a.cache.present(&self.gl, [clip]);
+            }
         }
         a.rendered = true;
     }

@@ -6069,7 +6069,7 @@ impl<C: CompositorConnection> Compositor<C> {
             let global_transition_progress = self.wallpaper_transition_start.map(|start| {
                 let elapsed = start.elapsed().as_millis() as f32;
                 let duration = self.wallpaper_crossfade_duration_ms.max(1) as f32;
-                (elapsed / duration).clamp(0.0, 1.0)
+                crate::backend::compositor_common::wallpaper::wallpaper_fade(elapsed / duration)
             });
             let has_wallpaper = !wallpaper_occluded
                 && (!self.monitor_wallpapers.is_empty()
