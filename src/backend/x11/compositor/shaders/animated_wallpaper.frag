@@ -16,6 +16,15 @@ uniform bool sky_enabled;
 uniform vec2 sky_rotation;
 out vec4 frag_color;
 const float PI = 3.141592653589793;
+// Analytic gradients of an equirectangular lookup. Taking dFdx(atan(...))
+// mistakes the longitude wrap for a full-texture jump and blurs a visible seam.
+// Analytic ray/sphere differentials also remain defined in silhouette branches.
+vec2 equirect_gradient(vec3 n, vec3 dn) {
+    float longitude_scale = max(dot(n.xz,n.xz), 0.00000001);
+    float latitude_scale = max(length(n.xz), 0.0001);
+    return vec2((n.z*dn.x-n.x*dn.z)/(2.0*PI*longitude_scale),
+                -dn.y/(PI*latitude_scale));
+}
 // Original decorative fallback, not an observed star catalogue.
 // Coherent slow drift only: no twinkle, extra textures or sample loops.
 float sky_hash(vec2 p) {
@@ -74,14 +83,27 @@ vec3 galaxy_background(vec2 pixel) {
     vec2 uv = (pixel-resolution*0.5)/max(resolution.y,1.0);
     vec2 g = vec2(dot(uv,vec2(0.94,0.342)),dot(uv,vec2(-0.342,0.94))-0.08);
     vec2 sky_uv = vec2(0.57+g.x*0.22,0.5-g.y*0.44);
+    vec2 sky_dx = vec2(0.94*0.22,0.342*0.44)/max(resolution.y,1.0);
+    vec2 sky_dy = vec2(0.342*0.22,-0.94*0.44)/max(resolution.y,1.0);
     if (moving) {
         // Travel through the panorama, rather than spinning the canvas. The
         // aspect-correct ray stays within the texture poles on ultrawide views.
-        vec3 ray = normalize(vec3(g*(0.44*PI), 1.0));
-        ray.xz = mat2(sky_rotation.x, -sky_rotation.y,
-                      sky_rotation.y, sky_rotation.x) * ray.xz;
+        vec3 view = vec3(g*(0.44*PI), 1.0);
+        float inverse_length = inversesqrt(dot(view,view));
+        vec3 ray = view*inverse_length;
+        vec3 view_dx = vec3(0.94,-0.342,0.0)*(0.44*PI/max(resolution.y,1.0));
+        vec3 view_dy = vec3(0.342,0.94,0.0)*(0.44*PI/max(resolution.y,1.0));
+        vec3 ray_dx = (view_dx-ray*dot(ray,view_dx))*inverse_length;
+        vec3 ray_dy = (view_dy-ray*dot(ray,view_dy))*inverse_length;
+        mat2 roll = mat2(sky_rotation.x, -sky_rotation.y,
+                         sky_rotation.y, sky_rotation.x);
+        ray.xz = roll*ray.xz;
+        ray_dx.xz = roll*ray_dx.xz;
+        ray_dy.xz = roll*ray_dy.xz;
         sky_uv = vec2(0.57 + atan(ray.x,ray.z)/(2.0*PI),
                       0.5 - asin(clamp(ray.y,-1.0,1.0))/PI);
+        sky_dx = equirect_gradient(ray,ray_dx);
+        sky_dy = equirect_gradient(ray,ray_dy);
         if (!sky_enabled) {
             // A periodic spatial fallback: both sides meet at the same sample
             // and first derivative. Blend over the whole circumference so no
@@ -98,7 +120,7 @@ vec3 galaxy_background(vec2 pixel) {
     // NASA SVS/Gaia catalogue panorama, decorative rather than a live sky.
     // Horizontal REPEAT joins catalogue longitude; latitude stays in [0,1].
     // The bundled JPEG is sampled as UNORM and dimmed in display space.
-    return texture(sky_map,sky_uv).rgb*0.34;
+    return textureGrad(sky_map,sky_uv,sky_dx,sky_dy).rgb*0.34;
 }
 
 // One shared Earth-fixed transform keeps the camera, map and atmosphere aligned.
@@ -135,7 +157,14 @@ void main() {
     vec3 earth_n = earth_normal(n);
     vec2 uv = vec2(0.5 + atan(earth_n.x, earth_n.z)/(2.0*PI),
                    0.5 - asin(clamp(earth_n.y, -1.0, 1.0))/PI);
-    vec3 surface = texture(earth_map, uv).rgb;
+    float inverse_radius = 1.0/max(sphere_radius,1.0);
+    // Bound the tangent differential by one pixel's curved-surface footprint.
+    float normal_z = max(n.z,sqrt(inverse_radius));
+    vec3 normal_dx = earth_normal(vec3(inverse_radius,0.0,-p.x*inverse_radius/normal_z));
+    vec3 normal_dy = earth_normal(vec3(0.0,inverse_radius,-p.y*inverse_radius/normal_z));
+    vec2 uv_dx = equirect_gradient(earth_n,normal_dx);
+    vec2 uv_dy = equirect_gradient(earth_n,normal_dy);
+    vec3 surface = textureGrad(earth_map,uv,uv_dx,uv_dy).rgb;
     vec3 albedo = pow(surface, vec3(2.2));
     float light = dot(earth_n, normalize(sun_direction));
     float view_cos = sqrt(max(0.0, 1.0-radius2));
@@ -146,11 +175,13 @@ void main() {
         float lommel = mu / max(mu + view_cos, 0.08);
         float diffuse = 0.48 * mu + 0.52 * lommel;
         vec3 color = pow(albedo * (0.014 + 1.20*diffuse), vec3(1.0/2.2));
-        frag_color = vec4(mix(galaxy_background(pixel), color, coverage), 1.0);
+        // Opaque lunar pixels must not evaluate a panorama or procedural stars.
+        if (coverage < 1.0) color = mix(galaxy_background(pixel),color,coverage);
+        frag_color = vec4(color, 1.0);
         return;
     }
     // NASA's static Blue Marble cloud composite, not live weather.
-    float cloud = clouds_enabled ? texture(cloud_map, uv).r : 0.0;
+    float cloud = clouds_enabled ? textureGrad(cloud_map,uv,uv_dx,uv_dy).r : 0.0;
     // Retain the cloud map's soft optical-density gradations instead of
     // thresholding it into opaque white patches. Static composite, not weather.
     cloud = pow(clamp(cloud, 0.0, 1.0), 1.15) * 0.70;

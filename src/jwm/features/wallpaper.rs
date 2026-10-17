@@ -88,15 +88,71 @@ pub struct WallpaperListing {
     /// Configuration identity at scan start and its original matching row key.
     /// Applied only if the configuration still has that identity at completion.
     pub selection: Option<(String, String)>,
+    /// Keep partial and failed directory scans distinguishable from an empty
+    /// folder. The event loop formats this without touching the filesystem.
+    pub summary: ScanSummary,
 }
 
 impl From<(PathBuf, Vec<PathBuf>)> for WallpaperListing {
     fn from((directory, paths): (PathBuf, Vec<PathBuf>)) -> Self {
+        let images = paths.len();
         Self {
             directory,
             paths,
             selection: None,
+            summary: ScanSummary {
+                images,
+                ..Default::default()
+            },
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ScanSummary {
+    pub images: usize,
+    pub visited: usize,
+    pub unreadable: usize,
+    pub unsupported_names: usize,
+    pub error: Option<std::io::ErrorKind>,
+}
+
+impl ScanSummary {
+    /// A successful small listing needs no warning. Effects are always rows,
+    /// so an empty directory must be reported explicitly instead of relying
+    /// on the list panel's otherwise-unreachable empty state.
+    pub(crate) fn message(&self, directory: &Path, listed_images: usize) -> String {
+        let mut notes = Vec::new();
+        if let Some(error) = self.error {
+            let reason = match error {
+                std::io::ErrorKind::NotFound => "folder not found",
+                std::io::ErrorKind::PermissionDenied => "permission denied",
+                std::io::ErrorKind::NotADirectory => "not a folder",
+                _ => "directory unavailable",
+            };
+            notes.push(format!("Cannot read {}: {reason}", directory.display()));
+        } else if listed_images == 0 {
+            notes.push(format!("No images in {}", directory.display()));
+        }
+        if self.visited >= MAX_SCAN_ENTRIES {
+            notes.push(format!("Scan limit reached ({MAX_SCAN_ENTRIES} entries)"));
+        }
+        if self.images > MAX_ENTRIES {
+            notes.push(format!(
+                "{} images found; search covers {listed_images} listed images",
+                self.images
+            ));
+        }
+        if self.unreadable > 0 {
+            notes.push(format!("{} unreadable entries skipped", self.unreadable));
+        }
+        if self.unsupported_names > 0 {
+            notes.push(format!(
+                "{} unsupported filenames skipped",
+                self.unsupported_names
+            ));
+        }
+        notes.join(" · ")
     }
 }
 
@@ -227,20 +283,52 @@ pub fn list_wallpapers(dir: &Path) -> Vec<PathBuf> {
 /// A blocked filesystem syscall itself cannot be interrupted by this flag.
 #[must_use]
 pub fn list_wallpapers_cancellable(dir: &Path, cancelled: impl Fn() -> bool) -> Vec<PathBuf> {
+    scan_wallpapers_cancellable(dir, cancelled).0
+}
+
+/// Bounded scan with enough metadata to explain an incomplete picker.
+#[must_use]
+pub fn scan_wallpapers_cancellable(
+    dir: &Path,
+    cancelled: impl Fn() -> bool,
+) -> (Vec<PathBuf>, ScanSummary) {
+    let mut summary = ScanSummary::default();
     if cancelled() {
-        return Vec::new();
+        return (Vec::new(), summary);
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            summary.error = Some(error.kind());
+            return (Vec::new(), summary);
+        }
     };
     // Bound/check before filtering: millions of sidecars must remain cancellable.
     let candidates = bounded_scan(entries, &cancelled)
-        .flatten()
+        .inspect(|_| summary.visited += 1)
         .filter_map(|entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    summary.unreadable += 1;
+                    return None;
+                }
+            };
             let path = entry.path();
-            is_image(&path).then(|| (path, EntryKind::of(entry.file_type())))
+            if !is_image(&path) {
+                return None;
+            }
+            // Config and IPC paths are UTF-8 strings. A lossy replacement can
+            // name another image, so never put an unrepresentable key in a row.
+            if path.to_str().is_none() {
+                summary.unsupported_names += 1;
+                return None;
+            }
+            Some((path, EntryKind::of(entry.file_type())))
         });
-    select_wallpapers(candidates, Path::is_file)
+    let (paths, images) = select_wallpapers_counted(candidates, Path::is_file);
+    summary.images = images;
+    (paths, summary)
 }
 
 fn bounded_scan<T>(
@@ -267,12 +355,20 @@ fn bounded_scan<T>(
 #[must_use]
 pub fn select_wallpapers(
     entries: impl IntoIterator<Item = (PathBuf, EntryKind)>,
-    mut is_file: impl FnMut(&Path) -> bool,
+    is_file: impl FnMut(&Path) -> bool,
 ) -> Vec<PathBuf> {
+    select_wallpapers_counted(entries, is_file).0
+}
+
+fn select_wallpapers_counted(
+    entries: impl IntoIterator<Item = (PathBuf, EntryKind)>,
+    mut is_file: impl FnMut(&Path) -> bool,
+) -> (Vec<PathBuf>, usize) {
     let candidates = entries
         .into_iter()
         .filter(|(path, kind)| {
             is_image(path)
+                && path.to_str().is_some()
                 && match kind {
                     EntryKind::File => true,
                     EntryKind::Other => false,
@@ -281,7 +377,9 @@ pub fn select_wallpapers(
         })
         .map(|(path, _)| (sort_key(&path), path));
     let mut files = Vec::with_capacity(MAX_ENTRIES * 2);
+    let mut images = 0;
     for candidate in candidates {
+        images += 1;
         files.push(candidate);
         if files.len() == MAX_ENTRIES * 2 {
             // A discarded name already has MAX_ENTRIES better names, so
@@ -299,7 +397,20 @@ pub fn select_wallpapers(
         files.truncate(MAX_ENTRIES);
     }
     files.sort_unstable();
-    files.into_iter().map(|(_, path)| path).collect()
+    (files.into_iter().map(|(_, path)| path).collect(), images)
+}
+
+/// Search both the filename/path and the human-readable effect name. Tokens
+/// are normalized once per query; a multiword search can match in any order.
+pub(crate) fn matches_query(key: &str, label: &str, words: &[&str]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    let key = key.to_lowercase();
+    let label = label.to_lowercase();
+    words
+        .iter()
+        .all(|word| key.contains(word) || label.contains(word))
 }
 
 /// Case-insensitive name a wallpaper is ordered by.
@@ -328,6 +439,93 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_matches_unicode_paths_and_all_query_words() {
+        assert!(matches_query(
+            "/walls/Été Alps.png",
+            "Été Alps.png",
+            &["été", "alps"]
+        ));
+        assert!(matches_query(
+            SOLAR_SYSTEM_CHOICE,
+            "Solar System 3D · drag to orbit",
+            &["orbit", "solar"]
+        ));
+        assert!(!matches_query(
+            "/walls/Alps.png",
+            "Alps.png",
+            &["alps", "beach"]
+        ));
+        assert!(matches_query("/walls/a.png", "a.png", &[]));
+    }
+
+    #[test]
+    fn scan_summary_distinguishes_unavailable_empty_and_capped_folders() {
+        let dir = temp_dir("scan-summary");
+        let (empty, summary) = scan_wallpapers_cancellable(&dir, || false);
+        assert!(empty.is_empty());
+        assert!(summary.error.is_none());
+        assert!(
+            summary
+                .message(&dir, empty.len())
+                .starts_with("No images in ")
+        );
+        let (missing, summary) = scan_wallpapers_cancellable(&dir.join("absent"), || false);
+        assert!(missing.is_empty());
+        assert_eq!(summary.error, Some(std::io::ErrorKind::NotFound));
+        assert!(summary.message(&dir, 0).contains("folder not found"));
+
+        for index in 0..MAX_ENTRIES + 3 {
+            std::fs::write(dir.join(format!("{index:04}.png")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        std::fs::create_dir(dir.join("folder.png")).unwrap();
+        let (paths, summary) = scan_wallpapers_cancellable(&dir, || false);
+        assert_eq!(paths.len(), MAX_ENTRIES);
+        assert_eq!(summary.images, MAX_ENTRIES + 3);
+        assert_eq!(summary.visited, MAX_ENTRIES + 5);
+        let message = summary.message(&dir, paths.len());
+        assert!(message.contains("203 images found"));
+        assert!(message.contains("search covers 200 listed images"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scan_never_turns_non_utf8_filenames_into_the_wrong_image_path() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let dir = temp_dir("scan-invalid-name");
+        let invalid = dir.join(std::ffi::OsString::from_vec(b"bad\xff.png".to_vec()));
+        let valid = dir.join("bad\u{fffd}.png");
+        std::fs::write(&invalid, b"invalid name").unwrap();
+        std::fs::write(&valid, b"valid name").unwrap();
+        let (paths, summary) = scan_wallpapers_cancellable(&dir, || false);
+        assert_eq!(paths, [valid]);
+        assert_eq!(summary.images, 1);
+        assert_eq!(summary.unsupported_names, 1);
+        assert!(
+            summary
+                .message(&dir, 1)
+                .contains("unsupported filenames skipped")
+        );
+        assert!(select_wallpapers([(invalid, EntryKind::File)], |_| true).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn partial_scan_status_explains_both_limits_and_read_errors() {
+        let summary = ScanSummary {
+            images: MAX_ENTRIES + 1,
+            visited: MAX_SCAN_ENTRIES,
+            unreadable: 2,
+            ..Default::default()
+        };
+        let message = summary.message(Path::new("/walls"), MAX_ENTRIES);
+        assert!(message.contains("Scan limit reached (100000 entries)"));
+        assert!(message.contains("201 images found"));
+        assert!(message.contains("search covers 200 listed images"));
+        assert!(message.contains("2 unreadable entries skipped"));
+    }
 
     #[test]
     fn cancelled_scan_does_not_consume_even_one_raw_entry() {

@@ -263,7 +263,12 @@ impl<C: CompositorConnection> Compositor<C> {
             && self.focus_highlight_start.is_some_and(|(_, start)| {
                 start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128
             });
-        focus_active || self.wallpaper_transition_start.is_some()
+        focus_active
+            || self.wallpaper_transition_start.is_some()
+            || self
+                .monitor_wallpapers
+                .iter()
+                .any(|wallpaper| wallpaper.previous.is_some())
     }
 
     pub(crate) fn overlay_window(&self) -> u32 {
@@ -920,6 +925,13 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             self.old_wallpaper_img_w = 0;
             self.old_wallpaper_img_h = 0;
+            for wallpaper in &mut self.monitor_wallpapers {
+                if let Some(previous) = wallpaper.previous.take() {
+                    unsafe {
+                        self.gl.delete_texture(previous.texture);
+                    }
+                }
+            }
         }
         if disabling_edge_glow {
             self.edge_glow_active = false;

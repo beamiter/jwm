@@ -3537,12 +3537,18 @@ impl WaylandCompositor {
                     m.mode as u8,
                     m.img_w,
                     m.img_h,
+                    m.previous.as_ref().map(|previous| previous.texture),
                 )
                     .hash(&mut key);
             }
+            let wallpaper_dynamic = self.wallpaper_transition_start.is_some()
+                || self
+                    .monitor_wallpapers
+                    .iter()
+                    .any(|wallpaper| wallpaper.previous.is_some());
             let pack_safe = crate::backend::compositor_common::bar_wallpaper::sample_due(
                 key.finish(),
-                self.wallpaper_transition_start.is_some(),
+                wallpaper_dynamic,
             ) && unsafe {
                 [
                     ffi::PIXEL_PACK_BUFFER_BINDING,
@@ -3559,7 +3565,7 @@ impl WaylandCompositor {
             };
             crate::backend::compositor_common::bar_wallpaper::sample_frame(
                 key.finish(),
-                self.wallpaper_transition_start.is_some(),
+                wallpaper_dynamic,
                 (self.screen_w, self.screen_h),
                 damage_scissor.map(|s| (s[0], s[1], s[2], s[3])),
                 pack_safe,

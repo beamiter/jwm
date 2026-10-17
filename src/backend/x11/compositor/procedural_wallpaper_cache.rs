@@ -8,6 +8,47 @@ pub(super) fn uses_ten_bit(hdr: bool, output_ten_bit: bool, postprocess_active: 
     hdr || output_ten_bit || postprocess_active
 }
 
+/// Surface and panorama maps rotate and may become much smaller than their
+/// uploaded size. Build one mip pyramid when adopting a material, never during
+/// a repaint. Explicit gradients in the shaders avoid false longitude-seam LODs
+/// and undefined implicit derivatives inside ray/silhouette branches.
+///
+/// The base RGBA8 image remains usable if mip allocation fails. Only the bound
+/// texture is touched; the caller's active unit and prior binding are preserved.
+pub(super) unsafe fn prepare_equirectangular_texture(
+    gl: &glow::Context,
+    texture: glow::Texture,
+) -> bool {
+    unsafe {
+        let previous = gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.generate_mipmap(glow::TEXTURE_2D);
+        let mipmaps_ready = gl.get_error() == glow::NO_ERROR;
+        if !mipmaps_ready {
+            // An incomplete pyramid must never make an otherwise valid surface
+            // sample black. Retain the original base-level filtering fallback.
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAX_LEVEL, 0);
+        }
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            if mipmaps_ready {
+                glow::LINEAR_MIPMAP_LINEAR
+            } else {
+                glow::LINEAR
+            } as i32,
+        );
+        gl.bind_texture(glow::TEXTURE_2D, previous);
+        mipmaps_ready
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ProceduralFrameCache {
     target: Option<(glow::Framebuffer, glow::Texture)>,

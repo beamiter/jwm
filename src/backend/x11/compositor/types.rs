@@ -628,6 +628,8 @@ pub(super) struct MonitorWallpaper {
     pub(super) mon_w: u32,
     pub(super) mon_h: u32,
     pub(super) texture: Option<glow::Texture>,
+    pub(super) previous:
+        Option<crate::backend::compositor_common::wallpaper::WallpaperTransition<glow::Texture>>,
     pub(super) mode: WallpaperMode,
     pub(super) requested_mode: WallpaperMode,
     pub(super) img_w: u32,

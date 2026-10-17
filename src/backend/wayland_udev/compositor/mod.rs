@@ -622,6 +622,7 @@ pub(crate) struct MonitorWallpaper {
     pub mon_w: u32,
     pub mon_h: u32,
     pub texture: Option<u32>,
+    pub previous: Option<crate::backend::compositor_common::wallpaper::WallpaperTransition<u32>>,
     pub mode: WallpaperMode,
     pub requested_mode: WallpaperMode,
     pub img_w: u32,
@@ -3464,6 +3465,9 @@ impl WaylandCompositor {
                     && texture != 0
                 {
                     gl.DeleteTextures(1, &texture);
+                }
+                if let Some(previous) = wallpaper.previous.take() {
+                    gl.DeleteTextures(1, &previous.texture);
                 }
             }
             for texture in self.retired_wallpaper_textures.drain(..) {

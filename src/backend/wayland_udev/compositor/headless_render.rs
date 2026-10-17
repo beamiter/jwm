@@ -5325,7 +5325,7 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
             );
             texture
         };
-        let cached_textures = (0..12).map(|_| allocate_texture()).collect::<Vec<_>>();
+        let cached_textures = (0..13).map(|_| allocate_texture()).collect::<Vec<_>>();
         compositor.overview_title_textures = vec![(cached_textures[0], 1, 1)];
         compositor.tab_title_textures = vec![vec![Some((cached_textures[1], 1, 1))]];
         compositor.annotation_label_textures = vec![Some((cached_textures[2], 1, 1))];
@@ -5349,6 +5349,15 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
             mon_w: 1,
             mon_h: 1,
             texture: Some(cached_textures[10]),
+            previous: Some(
+                crate::backend::compositor_common::wallpaper::WallpaperTransition {
+                    texture: cached_textures[12],
+                    mode: crate::backend::compositor_common::wallpaper::WallpaperMode::Fit,
+                    width: 1,
+                    height: 1,
+                    started: std::time::Instant::now(),
+                },
+            ),
             mode: crate::backend::compositor_common::wallpaper::WallpaperMode::Fill,
             requested_mode: crate::backend::compositor_common::wallpaper::WallpaperMode::Fill,
             img_w: 1,
@@ -10272,6 +10281,331 @@ fn wayland_tilt_preserves_premultiplied_alpha_in_linear_frames() {
             gl.DeleteTextures(1, &texture);
         }
         assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}
+
+/// Exercise the real wallpaper draw pass: complementary weights must cover
+/// letterbox margins as well as the region where both images overlap.
+#[test]
+fn wayland_wallpaper_crossfade_fades_fit_margins_and_retires_the_old_texture() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use crate::backend::compositor_common::wallpaper::WallpaperMode;
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+        let red = create_element_texture(&gl, 4, 4, &[255u8, 0, 0, 255].repeat(16));
+        let blue = create_element_texture(&gl, 1, 2, &[0u8, 0, 255, 255].repeat(2));
+        compositor.wallpaper_texture = Some(blue);
+        compositor.wallpaper_img_w = 1;
+        compositor.wallpaper_img_h = 2;
+        compositor.wallpaper_mode = WallpaperMode::Fit;
+        compositor.old_wallpaper_texture = Some(red);
+        compositor.old_wallpaper_img_w = 4;
+        compositor.old_wallpaper_img_h = 4;
+        compositor.old_wallpaper_mode = WallpaperMode::Fill;
+        compositor.wallpaper_crossfade_duration_ms = 20_000;
+        compositor.wallpaper_transition_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, W, H);
+        gl.Enable(ffi::BLEND);
+        gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+        gl.Disable(ffi::SCISSOR_TEST);
+        gl.ClearColor(0.1, 0.15, 0.25, 1.0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        let projection = super::ortho(0.0, W as f32, H as f32, 0.0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 2, 24),
+            [128, 0, 0, 255],
+            3,
+            "Fit margin fades instead of retaining opaque old image",
+        );
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 32, 24),
+            [128, 0, 128, 255],
+            3,
+            "midpoint does not dim",
+        );
+        let mut dst = 0;
+        gl.GetIntegerv(ffi::BLEND_DST_RGB, &mut dst);
+        assert_eq!(dst, ffi::ONE_MINUS_SRC_ALPHA as i32);
+        // RGBA8 clamps an incorrect additive alpha sum to one and would hide
+        // the bug. Exercise the same production pass against a float target.
+        let (mut float_texture, mut float_fbo) = (0, 0);
+        gl.GenTextures(1, &mut float_texture);
+        gl.BindTexture(ffi::TEXTURE_2D, float_texture);
+        gl.TexImage2D(
+            ffi::TEXTURE_2D,
+            0,
+            ffi::RGBA16F as i32,
+            W,
+            H,
+            0,
+            ffi::RGBA,
+            ffi::FLOAT,
+            std::ptr::null(),
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_MIN_FILTER,
+            ffi::NEAREST as i32,
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_MAG_FILTER,
+            ffi::NEAREST as i32,
+        );
+        gl.GenFramebuffers(1, &mut float_fbo);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, float_fbo);
+        gl.FramebufferTexture2D(
+            ffi::FRAMEBUFFER,
+            ffi::COLOR_ATTACHMENT0,
+            ffi::TEXTURE_2D,
+            float_texture,
+            0,
+        );
+        assert_eq!(
+            gl.CheckFramebufferStatus(ffi::FRAMEBUFFER),
+            ffi::FRAMEBUFFER_COMPLETE
+        );
+        compositor.render_wallpaper(&gl, &projection, None);
+        let mut float_pixel = [0.0f32; 4];
+        gl.ReadPixels(
+            W / 2,
+            H / 2,
+            1,
+            1,
+            ffi::RGBA,
+            ffi::FLOAT,
+            float_pixel.as_mut_ptr().cast(),
+        );
+        assert!((float_pixel[0] - 0.5).abs() < 0.02, "{float_pixel:?}");
+        assert!((float_pixel[2] - 0.5).abs() < 0.02, "{float_pixel:?}");
+        assert_eq!(
+            float_pixel[3], 1.0,
+            "wallpaper alpha stays opaque on RGBA16F"
+        );
+        assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        gl.DeleteFramebuffers(1, &float_fbo);
+        gl.DeleteTextures(1, &float_texture);
+        compositor.wallpaper_transition_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(21));
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        assert!(compositor.wallpaper_transition_start.is_none());
+        assert_eq!(gl.IsTexture(red), ffi::FALSE as u8);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 2, 24),
+            [0, 0, 0, 255],
+            0,
+            "finished Fit margin",
+        );
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 32, 24),
+            [0, 0, 255, 255],
+            0,
+            "finished image",
+        );
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}
+
+#[test]
+fn wayland_wallpaper_output_fade_is_independent_and_respects_damage_scissors() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use crate::backend::compositor_common::wallpaper::{WallpaperMode, WallpaperTransition};
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+        let red = create_element_texture(&gl, 1, 1, &[255u8, 0, 0, 255]);
+        let blue = create_element_texture(&gl, 1, 1, &[0u8, 0, 255, 255]);
+        let green = create_element_texture(&gl, 1, 1, &[0u8, 255, 0, 255]);
+        compositor.wallpaper_crossfade_duration_ms = 20_000;
+        let started = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        let monitor = |identity, x, texture, previous| super::MonitorWallpaper {
+            identity: Some(identity),
+            mon_x: x,
+            mon_y: 0,
+            mon_w: 32,
+            mon_h: 48,
+            texture: Some(texture),
+            previous,
+            mode: WallpaperMode::Stretch,
+            requested_mode: WallpaperMode::Stretch,
+            img_w: 1,
+            img_h: 1,
+            current_path: String::new(),
+            load_failed: false,
+        };
+        compositor.monitor_wallpapers = vec![
+            monitor(
+                1,
+                0,
+                blue,
+                Some(WallpaperTransition {
+                    texture: red,
+                    mode: WallpaperMode::Stretch,
+                    width: 1,
+                    height: 1,
+                    started,
+                }),
+            ),
+            monitor(2, 32, green, None),
+        ];
+        assert!(compositor.has_active_animations());
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, W, H);
+        gl.Enable(ffi::BLEND);
+        gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+        gl.Disable(ffi::SCISSOR_TEST);
+        gl.ClearColor(0.0, 0.0, 0.0, 1.0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        let projection = super::ortho(0.0, W as f32, H as f32, 0.0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 16, 24),
+            [128, 0, 128, 255],
+            3,
+            "left output's independent midpoint",
+        );
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 48, 24),
+            [0, 255, 0, 255],
+            0,
+            "right output stays opaque",
+        );
+
+        compositor.monitor_wallpapers[1].mon_x = 16;
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 24, 24),
+            [0, 255, 0, 255],
+            0,
+            "overlapping outputs retain last-writer color without additive brightening",
+        );
+        compositor.monitor_wallpapers[1].mon_x = 32;
+
+        // Existing pixels outside a tiny repair box must survive both clears
+        // and wallpaper layers, including on the other monitor.
+        gl.ClearColor(1.0, 1.0, 0.0, 1.0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, Some([8, 8, 8, 8]));
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 12, 36),
+            [128, 0, 128, 255],
+            3,
+            "damaged pixels are repaired",
+        );
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 48, 24),
+            [255, 255, 0, 255],
+            0,
+            "other output outside damage is untouched",
+        );
+        let mut scissor = [0; 4];
+        gl.GetIntegerv(ffi::SCISSOR_BOX, scissor.as_mut_ptr());
+        assert_eq!(scissor, [8, 8, 8, 8]);
+        assert_ne!(gl.IsEnabled(ffi::SCISSOR_TEST), 0);
+
+        // The local fade can target a global wallpaper that is also fading.
+        // At p=g=0.5, red local old contributes 1/2, green global old 1/4,
+        // and blue global current 1/4. Each texture still has one owner.
+        compositor.wallpaper_texture = compositor.monitor_wallpapers[0].texture.take();
+        compositor.wallpaper_img_w = 1;
+        compositor.wallpaper_img_h = 1;
+        compositor.wallpaper_mode = WallpaperMode::Stretch;
+        let global_old = create_element_texture(&gl, 1, 1, &[0u8, 255, 0, 255]);
+        compositor.old_wallpaper_texture = Some(global_old);
+        compositor.old_wallpaper_img_w = 1;
+        compositor.old_wallpaper_img_h = 1;
+        compositor.old_wallpaper_mode = WallpaperMode::Stretch;
+        compositor.wallpaper_transition_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 16, 24),
+            [128, 64, 64, 255],
+            3,
+            "output transition targets the complete global transition",
+        );
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 48, 24),
+            [0, 255, 0, 255],
+            0,
+            "independent override ignores the global transition",
+        );
+
+        // A target without an image fades to the caller's plain background,
+        // including its color, then stops scheduling wallpaper frames.
+        assert_eq!(compositor.wallpaper_texture.take(), Some(blue));
+        gl.DeleteTextures(1, &blue);
+        assert_eq!(compositor.old_wallpaper_texture.take(), Some(global_old));
+        gl.DeleteTextures(1, &global_old);
+        compositor.wallpaper_transition_start = None;
+        gl.Disable(ffi::SCISSOR_TEST);
+        gl.ClearColor(0.1, 0.15, 0.25, 1.0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 16, 24),
+            [140, 19, 32, 255],
+            3,
+            "empty target blends its plain desktop color",
+        );
+        compositor.monitor_wallpapers[0]
+            .previous
+            .as_mut()
+            .unwrap()
+            .started = std::time::Instant::now() - std::time::Duration::from_secs(21);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        compositor.render_wallpaper(&gl, &projection, None);
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 16, 24),
+            [26, 38, 64, 255],
+            1,
+            "empty target has no final-frame color jump",
+        );
+        assert!(compositor.monitor_wallpapers[0].previous.is_none());
+        assert_eq!(gl.IsTexture(red), ffi::FALSE as u8);
+        assert!(!compositor.has_active_animations());
         assert!(
             compositor
                 .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)

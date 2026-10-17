@@ -40,7 +40,7 @@ fn main() {
 }
 """)
 RUSTC=os.environ.get('RUSTC') or shutil.which('rustc') or str(REPO.parent/'toolchain/bin/rustc')
-subprocess.run([RUSTC,str(helper),'-Awarnings','-o',str(ROOT/'astronomy_values')],check=True)
+subprocess.run([RUSTC,'--edition=2024',str(helper),'-Awarnings','-o',str(ROOT/'astronomy_values')],check=True)
 def astronomy_values(instant,mode='earth',minutes=1440,longitude=DEFAULT_LONGITUDE,rotating=False,offset_seconds=0):
  args=[mode,str(instant)]
  args.extend([str(minutes),str(longitude),str(rotating).lower()] if mode=='earth' else [str(offset_seconds),str(minutes)])
@@ -62,7 +62,7 @@ fn main() {
  println!("]");
 }
 """)
-subprocess.run([RUSTC,str(planner),'-Awarnings','-o',str(ROOT/'astronomy_plan')],check=True)
+subprocess.run([RUSTC,'--edition=2024',str(planner),'-Awarnings','-o',str(ROOT/'astronomy_plan')],check=True)
 def layout_plan(width,height,outputs,per_output=True,repair=None):
  args=[width,height,int(per_output),*(repair if repair is not None else (-1,0,0,0)),*(v for output in outputs for v in output)]
  return json.loads(subprocess.check_output([str(ROOT/'astronomy_plan'),*map(str,args)]))
@@ -128,6 +128,7 @@ for es in (False,True):
   for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
   texture=Image.open(asset).convert('RGBA');data=C.create_string_buffer(texture.tobytes())
   gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,texture.width,texture.height,0,0x1908,0x1401,data)
+  gl('glGenerateMipmap',None,[U])(0x0DE1);param(0x0DE1,0x2801,0x2703)
   textures[body]=tex.value
  # Match production texture units: surface=0, NASA clouds=1, optional sky=2.
  gl('glActiveTexture',None,[U])(0x84C1)
@@ -135,6 +136,7 @@ for es in (False,True):
  for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
  clouds=Image.open(Path(os.environ.get('ASTRONOMY_TEST_CLOUD_TEXTURE',str(REPO/'assets/astronomy/earth-nasa-clouds.jpg')))).convert('RGBA');cloud_data=C.create_string_buffer(clouds.tobytes())
  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,clouds.width,clouds.height,0,0x1908,0x1401,cloud_data)
+ gl('glGenerateMipmap',None,[U])(0x0DE1);param(0x0DE1,0x2801,0x2703)
  unif1i(loc(prog,b'cloud_map'),1);unif1i(loc(prog,b'clouds_enabled'),1)
  sky_path=Path(os.environ.get('ASTRONOMY_TEST_SKY_TEXTURE',str(REPO/'assets/astronomy/milkyway-nasa-gaia.jpg')))
  sky_available=sky_path.is_file()
@@ -147,6 +149,7 @@ for es in (False,True):
   for key,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
   sky_data=C.create_string_buffer(sky_texture.tobytes())
   gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,sky_texture.width,sky_texture.height,0,0x1908,0x1401,sky_data)
+  gl('glGenerateMipmap',None,[U])(0x0DE1);param(0x0DE1,0x2801,0x2703)
  else:
   gl('glBindTexture',None,[U,U])(0x0DE1,0)
  unif1i(loc(prog,b'sky_map'),2);unif1i(loc(prog,b'sky_enabled'),int(sky_available))
@@ -290,6 +293,85 @@ for es in (False,True):
   assert output.getchannel('A').getextrema()==(255,255)
   current(d,None,None,None);egl('eglDestroySurface',U,[P,P])(d,target)
   return output,plan
+ # High-frequency maps expose minification shimmer. Compare the actual surface
+ # shader against a uniform average, and retain an unfiltered negative control.
+ # Include the longitude seam and both geographic poles.
+ def upload_filter_fixture(image):
+  assert current(d,surf,surf,ctx)
+  gl('glActiveTexture',None,[U])(0x84C0)
+  tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex))
+  gl('glBindTexture',None,[U,U])(0x0DE1,tex)
+  for key,val in ((0x2801,0x2703),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
+  data=C.create_string_buffer(image.tobytes())
+  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x8058,image.width,image.height,0,0x1908,0x1401,data)
+  gl('glGenerateMipmap',None,[U])(0x0DE1)
+  assert gl('glGetError',U,[])()==0
+  return tex.value
+ checker=Image.frombytes('RGBA',(1024,512),b''.join((bytes((0,0,0,255,255,255,255,255))*512 if y%2==0 else bytes((255,255,255,255,0,0,0,255))*512) for y in range(512)))
+ checker_texture=upload_filter_fixture(checker)
+ average_texture=upload_filter_fixture(Image.new('RGBA',(1,1),(128,128,128,255)))
+ earth_texture=textures['earth'];filter_metrics=[]
+ for label,longitude,latitude in [('equator',0,0),('longitude-seam',180,0),('north-pole',0,90),('south-pole',0,-90)]:
+  lat,lon=math.radians(latitude),math.radians(longitude)
+  lighting=(math.sin(lon)*math.cos(lat),math.sin(lat),math.cos(lon)*math.cos(lat))
+  def filter_frame(texture):
+   textures['earth']=texture
+   return layout_image(256,192,[(0,0,256,192)],clouds_enabled=False,sky_enabled=False,earth_latitude=latitude,earth_longitude=longitude,frozen_sun=lighting)[0]
+  filtered=filter_frame(checker_texture)
+  expected=filter_frame(average_texture)
+  assert current(d,surf,surf,ctx)
+  gl('glBindTexture',None,[U,U])(0x0DE1,checker_texture);param(0x0DE1,0x2801,0x2601)
+  unfiltered=filter_frame(checker_texture)
+  assert current(d,surf,surf,ctx)
+  gl('glBindTexture',None,[U,U])(0x0DE1,checker_texture);param(0x0DE1,0x2801,0x2703)
+  box=(80,48,176,144)
+  def average_error(image):
+   return sum(ImageStat.Stat(ImageChops.difference(image.crop(box).convert('RGB'),expected.crop(box).convert('RGB'))).mean)/3
+  filtered_error=average_error(filtered);unfiltered_error=average_error(unfiltered)
+  assert filtered_error<0.5, (label,'minified map is not its area average',filtered_error)
+  assert unfiltered_error>5 and filtered_error<unfiltered_error/10, (label,'mipmap negative control did not alias',unfiltered_error)
+  name=f'{kind}-texture-minification-{label}.png';filtered.save(ROOT/name)
+  unfiltered.save(ROOT/f'{kind}-texture-minification-{label}-unfiltered.png')
+  filter_metrics.append({'file':name,'view_longitude':longitude,'view_latitude':latitude,'filtered_mean_error':filtered_error,'unfiltered_mean_error':unfiltered_error})
+ textures['earth']=earth_texture
+ assert current(d,surf,surf,ctx)
+ gl('glBindTexture',None,[U,U])(0x0DE1,earth_texture)
+ gl('glDeleteTextures',None,[I,C.POINTER(U)])(1,C.byref(U(checker_texture)))
+ gl('glDeleteTextures',None,[I,C.POINTER(U)])(1,C.byref(U(average_texture)))
+ # A smooth longitude pattern must remain sharp where atan wraps. This probe
+ # executes the production analytic function on both sides of the seam and at
+ # high north/south latitudes; an implicit derivative selects the wrong mip.
+ wrap_row=bytes(v for x in range(1024) for v in (round(128+100*math.cos(2*math.pi*(x+.5)/1024)),0,0,255))
+ wrap_texture=upload_filter_fixture(Image.frombytes('RGBA',(1024,512),wrap_row*512))
+ gradient_source=source.split('void main() {',1)[0]+r"""
+void main() {
+ float longitude=PI+(gl_FragCoord.x-3.3)*.001;
+ float latitude=gl_FragCoord.x<2.?-1.56:gl_FragCoord.x>6.?1.56:0.;
+ float sl=sin(longitude),cl=cos(longitude),sp=sin(latitude),cp=cos(latitude);
+ vec3 n=vec3(cp*sl,sp,cp*cl);
+ vec3 dx=vec3(cp*cl,0.,-cp*sl)*.001;
+ vec3 dy=vec3(-sp*sl,cp,-sp*cl)*.001;
+ vec2 gx=equirect_gradient(n,dx),gy=equirect_gradient(n,dy);
+ bool ok=length(gx-vec2(.001/(2.*PI),0.))<.000001;
+ ok=ok&&length(gy-vec2(0.,-.001/PI))<.000001;
+ vec2 uv=vec2(.5+atan(n.x,n.z)/(2.*PI),.5-asin(clamp(n.y,-1.,1.))/PI);
+ ok=ok&&textureGrad(earth_map,uv,gx,gy).r>.85;
+ frag_color=ok?vec4(0,1,0,1):vec4(1,0,0,1);
+}
+"""
+ gradient_fragment=compile(gradient_source,0x8B30)
+ gradient_program=gl('glCreateProgram',U,[])();attach(gradient_program,vs);attach(gradient_program,gradient_fragment)
+ gl('glLinkProgram',None,[U])(gradient_program)
+ linked=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(gradient_program,0x8B82,C.byref(linked));assert linked.value
+ gl('glUseProgram',None,[U])(gradient_program);unif1i(loc(gradient_program,b'earth_map'),0)
+ gl('glViewport',None,[I,I,I,I])(0,0,8,1);gl('glDrawArrays',None,[U,I,I])(4,0,3)
+ gradient_pixels=(C.c_ubyte*32)();read(0,0,8,1,0x1908,0x1401,gradient_pixels)
+ assert list(gradient_pixels)==[0,255,0,255]*8, ('seam/pole explicit texture gradients',list(gradient_pixels))
+ gl('glDeleteProgram',None,[U])(gradient_program);gl('glDeleteShader',None,[U])(gradient_fragment)
+ gl('glUseProgram',None,[U])(prog);gl('glViewport',None,[I,I,I,I])(0,0,W,H)
+ gl('glBindTexture',None,[U,U])(0x0DE1,earth_texture)
+ gl('glDeleteTextures',None,[I,C.POINTER(U)])(1,C.byref(U(wrap_texture)))
+ results[kind]['texture_filtering']={'frames':filter_metrics,'area_average':'PASS','longitude_seam_poles':'PASS','unfiltered_negative_controls':'PASS','gradient_wrap_probes':8}
  layout_cases={
   'per-output-dual-5120x1440':(5120,1440,[(0,0,2560,1440),(2560,0,2560,1440)]),
   'per-output-mixed-3000x1920':(3000,1920,[(0,0,1920,1080),(1920,0,1080,1920)]),
@@ -588,7 +670,7 @@ for a,b in zip(results['gl330']['dual_materials']['frames'],results['gles300']['
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
  api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
  assert api_max_error <= 1, (a['file'],delta.getextrema())
-for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion'):
+for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion','texture_filtering'):
  for a,b in zip(results['gl330'][group]['frames'],results['gles300'][group]['frames']):
   delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
   api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))

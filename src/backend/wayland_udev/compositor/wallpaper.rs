@@ -359,9 +359,21 @@ impl WaylandCompositor {
                     }
                     if let Some((tex, w, h)) = uploaded {
                         if let Some(mw) = self.monitor_wallpapers.get_mut(*mon_idx) {
-                            if let Some(old) = mw.texture.replace(tex) {
+                            if let Some(stale) = mw.previous.take() {
                                 unsafe {
-                                    gl.DeleteTextures(1, &old);
+                                    gl.DeleteTextures(1, &stale.texture);
+                                }
+                            }
+                            if let Some(old) = mw.texture.replace(tex) {
+                                if self.wallpaper_crossfade {
+                                    mw.previous = Some(crate::backend::compositor_common::wallpaper::WallpaperTransition {
+                                        texture: old, mode: mw.mode, width: mw.img_w, height: mw.img_h,
+                                        started: Instant::now(),
+                                    });
+                                } else {
+                                    unsafe {
+                                        gl.DeleteTextures(1, &old);
+                                    }
                                 }
                             }
                             mw.img_w = w;
@@ -398,32 +410,26 @@ impl WaylandCompositor {
     // 5. Render wallpaper
     // =========================================================================
 
-    /// Render the wallpaper for each monitor (or the global wallpaper) into the
-    /// currently bound framebuffer. Uses the window shader program with
-    /// opacity=1.0, no corner radius, no dim.
-    ///
-    /// If crossfade is active (transition_start is set), draws the old wallpaper
-    /// opaque first, then blends the new wallpaper over it at increasing alpha.
-    /// Fading both layers independently over the cleared framebuffer would
-    /// darken the midpoint rather than produce a linear crossfade.
+    /// Render weighted wallpaper layers over opaque black. Additive blending
+    /// interpolates the complete canvases, including Fit/Center margins, so an
+    /// old image cannot linger outside its replacement until the final frame.
     pub(crate) unsafe fn render_wallpaper(
         &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         outer_scissor: Option<GlScissor>,
     ) {
-        // Determine crossfade progress (0.0 = just started, 1.0 = complete)
-        let crossfade_alpha = if let Some(start) = self.wallpaper_transition_start {
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let duration = self.wallpaper_crossfade_duration_ms.max(1);
-            let t = (elapsed_ms as f32) / (duration as f32);
-            crate::backend::compositor_common::wallpaper::wallpaper_fade(t)
-        } else {
-            1.0
-        };
-
-        // Terminate crossfade when complete: free old texture and clear state
-        if crossfade_alpha >= 1.0 && self.wallpaper_transition_start.is_some() {
+        let now = Instant::now();
+        let duration = self.wallpaper_crossfade_duration_ms.max(1);
+        let global_progress = self.wallpaper_transition_start.map_or(1.0, |start| {
+            if !self.wallpaper_crossfade {
+                return 1.0;
+            }
+            crate::backend::compositor_common::wallpaper::wallpaper_fade(
+                now.saturating_duration_since(start).as_secs_f32() / (duration as f32 / 1000.0),
+            )
+        });
+        if global_progress >= 1.0 {
             self.wallpaper_transition_start = None;
             if let Some(old) = self.old_wallpaper_texture.take() {
                 unsafe {
@@ -431,178 +437,211 @@ impl WaylandCompositor {
                 }
             }
         }
-
+        for wallpaper in &mut self.monitor_wallpapers {
+            if wallpaper.previous.as_ref().is_some_and(|previous| {
+                !self.wallpaper_crossfade || previous.progress(now, duration) >= 1.0
+            }) {
+                if let Some(previous) = wallpaper.previous.take() {
+                    unsafe {
+                        gl.DeleteTextures(1, &previous.texture);
+                    }
+                }
+            }
+        }
+        let global = self.wallpaper_texture.map(|texture| {
+            (
+                texture,
+                self.wallpaper_mode,
+                self.wallpaper_img_w,
+                self.wallpaper_img_h,
+            )
+        });
+        let old_global = self.old_wallpaper_texture.map(|texture| {
+            (
+                texture,
+                self.old_wallpaper_mode,
+                self.old_wallpaper_img_w,
+                self.old_wallpaper_img_h,
+            )
+        });
         unsafe {
             gl.UseProgram(self.program);
             self.bind_quad_vao(gl);
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.Uniform1i(self.win_uniforms.texture, 0);
-
-            // The wallpaper always lands in the encoded output_fbo, ahead of
-            // the scene-linear decode pass. Uniforms persist on the program
-            // across frames, and the deferred routes end a frame with the
-            // window program still at u_scene_linear=1 (a client's color
-            // transform can leave u_color_managed=1 as well). Inheriting
-            // either would convert the wallpaper texel here and the decode
-            // pass would sRGB-decode it a second time.
+            // This pass always precedes scene-linear decoding; reset uniforms
+            // that client rendering may have left behind on the shared program.
             gl.Uniform1i(self.win_uniforms.scene_linear, 0);
             gl.Uniform1i(self.win_uniforms.color_managed, 0);
             gl.Uniform1f(self.win_uniforms.desat, 0.0);
-
-            // Set projection
             gl.UniformMatrix4fv(
                 self.win_uniforms.projection,
                 1,
                 ffi::FALSE as u8,
                 projection.as_ptr(),
             );
-
-            // No corner radius, no dim, no ripple for wallpaper
             gl.Uniform1f(self.win_uniforms.radius, 0.0);
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
             gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
-            // Full UV rect (use entire texture)
             gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+            // Preserve opaque backdrop alpha on float targets as well as on
+            // normalized targets; only the weighted RGB layers are additive.
+            gl.BlendFuncSeparate(ffi::ONE, ffi::ONE, ffi::ZERO, ffi::ONE);
+            let mut clear_color = [0.0f32; 4];
+            gl.GetFloatv(ffi::COLOR_CLEAR_VALUE, clear_color.as_mut_ptr());
+            gl.ClearColor(0.0, 0.0, 0.0, 1.0);
 
             // Iterate over monitors
-            for mw in &self.monitor_wallpapers {
-                let area = (
-                    mw.mon_x as f32,
-                    mw.mon_y as f32,
-                    mw.mon_w as f32,
-                    mw.mon_h as f32,
-                );
-
-                // Determine which texture and dimensions to use for this monitor
-                let has_monitor_override = mw.texture.is_some();
-                let (tex, img_w, img_h, mode) = if let Some(t) = mw.texture {
-                    (t, mw.img_w, mw.img_h, mw.mode)
-                } else if let Some(t) = self.wallpaper_texture {
-                    (
-                        t,
-                        self.wallpaper_img_w,
-                        self.wallpaper_img_h,
-                        self.wallpaper_mode,
-                    )
-                } else {
-                    // No wallpaper available for this monitor
-                    continue;
-                };
-
-                if img_w == 0 || img_h == 0 {
+            for wallpaper in &self.monitor_wallpapers {
+                let current = wallpaper
+                    .texture
+                    .map(|texture| (texture, wallpaper.mode, wallpaper.img_w, wallpaper.img_h))
+                    .or(global);
+                if current.is_none() && wallpaper.previous.is_none() && old_global.is_none() {
                     continue;
                 }
-
-                // Fill/center modes can extend beyond their target output.
-                // Constrain every monitor wallpaper to that monitor and retain
-                // the caller's partial-damage restriction.
                 let Some(scissor) = monitor_gl_scissor(
                     self.screen_w,
                     self.screen_h,
-                    mw.mon_x,
-                    mw.mon_y,
-                    mw.mon_w,
-                    mw.mon_h,
+                    wallpaper.mon_x,
+                    wallpaper.mon_y,
+                    wallpaper.mon_w,
+                    wallpaper.mon_h,
                     outer_scissor,
                 ) else {
                     continue;
                 };
                 gl.Enable(ffi::SCISSOR_TEST);
                 gl.Scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
-
-                let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, img_w, img_h);
-                let (draw_old_global, current_opacity) = monitor_crossfade_layers(
-                    has_monitor_override,
-                    self.old_wallpaper_texture.is_some(),
-                    crossfade_alpha,
+                let output_progress = wallpaper
+                    .previous
+                    .as_ref()
+                    .map(|previous| previous.progress(now, duration));
+                let (draw_old_global, global_opacity) = monitor_crossfade_layers(
+                    wallpaper.texture.is_some(),
+                    old_global.is_some(),
+                    global_progress,
                 );
-
-                // Set size uniform for the shader
-                gl.Uniform2f(self.win_uniforms.size, rw, rh);
-
-                // --- Draw old wallpaper (crossfade out) ---
+                let target_weight = output_progress.unwrap_or(1.0);
+                let opacity = target_weight * global_opacity;
+                // When clearing an override with no global image, its target
+                // is the caller's plain desktop. Fade that color in as well,
+                // rather than jump from black to the plain desktop at the end.
+                if current.is_none() {
+                    gl.ClearColor(
+                        clear_color[0] * opacity,
+                        clear_color[1] * opacity,
+                        clear_color[2] * opacity,
+                        1.0,
+                    );
+                } else {
+                    gl.ClearColor(0.0, 0.0, 0.0, 1.0);
+                }
+                // Clear only this output's damaged area. Other outputs retain
+                // their own old/new layers and independent transition clocks.
+                gl.Clear(ffi::COLOR_BUFFER_BIT);
+                let area = (
+                    wallpaper.mon_x as f32,
+                    wallpaper.mon_y as f32,
+                    wallpaper.mon_w as f32,
+                    wallpaper.mon_h as f32,
+                );
+                if let Some(previous) = &wallpaper.previous {
+                    self.draw_wallpaper_layer_gles(
+                        gl,
+                        (
+                            previous.texture,
+                            previous.mode,
+                            previous.width,
+                            previous.height,
+                        ),
+                        area,
+                        1.0 - target_weight,
+                    );
+                }
+                // The fallback's own transition is part of the target canvas.
+                // This prevents a jump when two overlapping fades finish in
+                // different orders.
                 if draw_old_global {
-                    if let Some(old_tex) = self.old_wallpaper_texture {
-                        let (orx, ory, orw, orh) = compute_wallpaper_rect(
-                            self.old_wallpaper_mode,
+                    if let Some(old) = old_global {
+                        self.draw_wallpaper_layer_gles(
+                            gl,
+                            old,
                             area,
-                            self.old_wallpaper_img_w,
-                            self.old_wallpaper_img_h,
+                            target_weight * (1.0 - global_progress),
                         );
-                        gl.Uniform4f(self.win_uniforms.rect, orx, ory, orw, orh);
-                        gl.Uniform2f(self.win_uniforms.size, orw, orh);
-                        gl.Uniform1f(self.win_uniforms.opacity, 1.0);
-                        gl.BindTexture(ffi::TEXTURE_2D, old_tex);
-                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     }
                 }
-
-                // --- Draw current wallpaper ---
-                gl.Uniform4f(self.win_uniforms.rect, rx, ry, rw, rh);
-                gl.Uniform2f(self.win_uniforms.size, rw, rh);
-                gl.Uniform1f(self.win_uniforms.opacity, current_opacity);
-                gl.BindTexture(ffi::TEXTURE_2D, tex);
-                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
-            }
-
-            // If no per-monitor wallpapers were drawn, draw the global wallpaper
-            // across the entire screen as a fallback.
-            if self.monitor_wallpapers.is_empty() {
-                if let Some(tex) = self.wallpaper_texture {
-                    if self.wallpaper_img_w > 0 && self.wallpaper_img_h > 0 {
-                        let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-                        let (rx, ry, rw, rh) = compute_wallpaper_rect(
-                            self.wallpaper_mode,
-                            area,
-                            self.wallpaper_img_w,
-                            self.wallpaper_img_h,
-                        );
-
-                        gl.Uniform2f(self.win_uniforms.size, rw, rh);
-                        let (draw_old_global, current_opacity) = monitor_crossfade_layers(
-                            false,
-                            self.old_wallpaper_texture.is_some(),
-                            crossfade_alpha,
-                        );
-
-                        // Old wallpaper crossfade
-                        if draw_old_global {
-                            if let Some(old_tex) = self.old_wallpaper_texture {
-                                let (orx, ory, orw, orh) = compute_wallpaper_rect(
-                                    self.old_wallpaper_mode,
-                                    area,
-                                    self.old_wallpaper_img_w,
-                                    self.old_wallpaper_img_h,
-                                );
-                                gl.Uniform4f(self.win_uniforms.rect, orx, ory, orw, orh);
-                                gl.Uniform2f(self.win_uniforms.size, orw, orh);
-                                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
-                                gl.BindTexture(ffi::TEXTURE_2D, old_tex);
-                                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
-                            }
-                        }
-
-                        gl.Uniform4f(self.win_uniforms.rect, rx, ry, rw, rh);
-                        gl.Uniform2f(self.win_uniforms.size, rw, rh);
-                        gl.Uniform1f(self.win_uniforms.opacity, current_opacity);
-                        gl.BindTexture(ffi::TEXTURE_2D, tex);
-                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
-                    }
+                if let Some(current) = current {
+                    self.draw_wallpaper_layer_gles(gl, current, area, opacity);
                 }
             }
-
-            // Per-monitor drawing temporarily narrows the GL scissor. Restore
-            // the exact outer damage state expected by the remaining passes.
+            // Restore the caller's damage scissor before the global fallback
+            // and before any later client/overlay pass.
             if let Some(scissor) = outer_scissor {
                 gl.Enable(ffi::SCISSOR_TEST);
                 gl.Scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
             } else {
                 gl.Disable(ffi::SCISSOR_TEST);
             }
-
+            if self.monitor_wallpapers.is_empty() && (global.is_some() || old_global.is_some()) {
+                let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                let (draw_old, opacity) =
+                    monitor_crossfade_layers(false, old_global.is_some(), global_progress);
+                if global.is_none() {
+                    gl.ClearColor(
+                        clear_color[0] * opacity,
+                        clear_color[1] * opacity,
+                        clear_color[2] * opacity,
+                        1.0,
+                    );
+                } else {
+                    gl.ClearColor(0.0, 0.0, 0.0, 1.0);
+                }
+                gl.Clear(ffi::COLOR_BUFFER_BIT);
+                if draw_old {
+                    if let Some(old) = old_global {
+                        self.draw_wallpaper_layer_gles(gl, old, area, 1.0 - global_progress);
+                    }
+                }
+                if let Some(current) = global {
+                    self.draw_wallpaper_layer_gles(gl, current, area, opacity);
+                }
+            }
+            gl.ClearColor(
+                clear_color[0],
+                clear_color[1],
+                clear_color[2],
+                clear_color[3],
+            );
+            // The frame renderer established premultiplied blending before
+            // this pass; restore it without invalidating its state cache.
+            gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+            gl.Uniform1f(self.win_uniforms.opacity, 1.0);
             gl.BindTexture(ffi::TEXTURE_2D, 0);
             gl.BindVertexArray(0);
+        }
+    }
+
+    unsafe fn draw_wallpaper_layer_gles(
+        &self,
+        gl: &ffi::Gles2,
+        layer: (u32, WallpaperMode, u32, u32),
+        area: (f32, f32, f32, f32),
+        opacity: f32,
+    ) {
+        let (texture, mode, width, height) = layer;
+        if opacity <= 0.0 || width == 0 || height == 0 {
+            return;
+        }
+        let (x, y, w, h) = compute_wallpaper_rect(mode, area, width, height);
+        unsafe {
+            gl.Uniform4f(self.win_uniforms.rect, x, y, w, h);
+            gl.Uniform2f(self.win_uniforms.size, w, h);
+            gl.Uniform1f(self.win_uniforms.opacity, opacity);
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 

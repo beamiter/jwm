@@ -296,6 +296,10 @@ pub enum SystemUiState {
     ListPanel {
         kind: ListKind,
         rows: Vec<ListRow>,
+        /// Immutable wallpaper catalog; `rows` is its current filtered view.
+        /// Other lists source their rows from live feature state and leave it
+        /// empty. Sharing the catalog keeps render snapshots inexpensive.
+        source_rows: Option<Arc<[ListRow]>>,
         /// Raster icon paths aligned with `rows`, resolved when the list was
         /// built; empty for every kind but the window switcher and the
         /// notification center, the two lists whose rows stand for
@@ -308,9 +312,9 @@ pub enum SystemUiState {
         message: String,
         /// What the panel is currently asking for, if anything.
         prompt: Option<PromptKind>,
-        /// Type-to-filter query. Only the clipboard picker collects one; its
-        /// rows are the filtered view, so a refresh of the history reapplies
-        /// it. Every other kind leaves this empty and renders no query bar.
+        /// Clipboard and wallpaper type-to-filter query. Their rows are the
+        /// filtered view, so refreshes reapply it. Other list kinds leave this
+        /// empty and render no query bar.
         query: String,
         /// Shown when the list is empty and there is no message.
         empty: String,
@@ -476,9 +480,10 @@ impl ListKind {
             Self::Bluetooth => {
                 "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    d / middle-click  forget    Esc"
             }
-            Self::Wallpaper | Self::Theme => {
-                "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close"
+            Self::Wallpaper => {
+                "type  filter    Click/Enter  apply    PgUp/PgDn  page    Esc  close"
             }
+            Self::Theme => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
             Self::AudioOutput | Self::AudioInput | Self::MediaPlayers => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
@@ -1182,6 +1187,7 @@ impl Clone for SystemUiState {
             Self::ListPanel {
                 kind,
                 rows,
+                source_rows,
                 row_icons,
                 selected,
                 message,
@@ -1191,6 +1197,7 @@ impl Clone for SystemUiState {
             } => Self::ListPanel {
                 kind: *kind,
                 rows: rows.clone(),
+                source_rows: source_rows.clone(),
                 row_icons: row_icons.clone(),
                 selected: *selected,
                 message: message.clone(),
@@ -1872,6 +1879,7 @@ impl SystemUiState {
             kind,
             rows: Vec::new(),
             row_icons: Vec::new(),
+            source_rows: None,
             selected: 0,
             message: message.into(),
             prompt: None,
@@ -1913,6 +1921,7 @@ impl SystemUiState {
             kind: ListKind::Notifications,
             rows,
             row_icons,
+            source_rows: None,
             selected: 0,
             message: String::new(),
             prompt: None,
@@ -2174,6 +2183,7 @@ impl SystemUiState {
             kind: ListKind::Clipboard,
             rows,
             row_icons,
+            source_rows: None,
             selected: 0,
             message: String::new(),
             prompt: None,
@@ -2248,7 +2258,7 @@ impl SystemUiState {
         match self {
             Self::Launcher { query, .. } | Self::Info { query, .. } => !query.is_empty(),
             Self::ListPanel {
-                kind: ListKind::Clipboard,
+                kind: ListKind::Clipboard | ListKind::Wallpaper,
                 query,
                 prompt: None,
                 ..
@@ -2257,11 +2267,17 @@ impl SystemUiState {
         }
     }
 
-    /// Empty the launcher / keybindings search and rebuild matches.
+    /// Empty the launcher, keybindings, or wallpaper search and rebuild matches.
     /// Passphrases and the lock password are left alone.
     pub fn clear_search_query(&mut self) {
         match self {
-            Self::Launcher { query, .. } | Self::Info { query, .. } => {
+            Self::Launcher { query, .. }
+            | Self::Info { query, .. }
+            | Self::ListPanel {
+                kind: ListKind::Wallpaper,
+                query,
+                ..
+            } => {
                 if query.is_empty() {
                     return;
                 }
@@ -2633,6 +2649,8 @@ impl SystemUiState {
     pub fn wallpaper_picker(paths: &[std::path::PathBuf], current: &str, directory: &str) -> Self {
         let mut rows: Vec<ListRow> = paths
             .iter()
+            // Config paths are UTF-8: never apply a lossy replacement name.
+            .filter(|path| path.to_str().is_some())
             .map(|path| ListRow {
                 key: path.to_string_lossy().into_owned(),
                 text: crate::jwm::features::wallpaper::picker_row(path, current),
@@ -2660,10 +2678,12 @@ impl SystemUiState {
         // Start on the wallpaper already in use, so Escape-ing out of the
         // panel and reopening does not lose the user's place.
         let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
+        let source_rows = Some(rows.clone().into());
         Self::ListPanel {
             kind: ListKind::Wallpaper,
             rows,
             row_icons: Vec::new(),
+            source_rows,
             selected,
             message: String::new(),
             prompt: None,
@@ -2674,6 +2694,50 @@ impl SystemUiState {
 
     pub fn is_wallpaper_picker(&self) -> bool {
         self.is_list(ListKind::Wallpaper)
+    }
+
+    /// Adopt an asynchronous scan without discarding a filter typed while the
+    /// folder was loading. Keep its highlighted result when that result still
+    /// matches; an untouched picker opens on the effective configuration.
+    pub(crate) fn refresh_wallpaper_picker(
+        &mut self,
+        paths: &[PathBuf],
+        current: &str,
+        directory: &str,
+        status: String,
+    ) {
+        let Self::ListPanel {
+            kind: ListKind::Wallpaper,
+            query,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let highlighted = (!query.is_empty())
+            .then(|| rows.get(*selected).map(|row| row.key.clone()))
+            .flatten();
+        let query = std::mem::take(query);
+        let mut next = Self::wallpaper_picker(paths, current, directory);
+        if let Self::ListPanel {
+            query: next_query,
+            message,
+            ..
+        } = &mut next
+        {
+            *next_query = query;
+            *message = status;
+        }
+        next.refresh_matches();
+        if let Self::ListPanel { rows, selected, .. } = &mut next
+            && let Some(key) = highlighted
+            && let Some(index) = rows.iter().position(|row| row.key == key)
+        {
+            *selected = index;
+        }
+        *self = next;
     }
 
     /// Image path for the side preview. Effect identities never reach the
@@ -2705,6 +2769,7 @@ impl SystemUiState {
             kind: ListKind::Theme,
             rows,
             row_icons: Vec::new(),
+            source_rows: None,
             selected,
             message: String::new(),
             prompt: None,
@@ -2747,6 +2812,7 @@ impl SystemUiState {
             kind: Self::audio_kind(direction),
             rows,
             row_icons: Vec::new(),
+            source_rows: None,
             selected,
             message: String::new(),
             prompt: None,
@@ -2841,6 +2907,7 @@ impl SystemUiState {
             kind: ListKind::MediaPlayers,
             rows,
             row_icons: Vec::new(),
+            source_rows: None,
             selected,
             message: String::new(),
             prompt: None,
@@ -2904,6 +2971,7 @@ impl SystemUiState {
             kind: ListKind::WindowSwitcher,
             rows,
             row_icons,
+            source_rows: None,
             selected,
             message: String::new(),
             prompt: None,
@@ -3421,8 +3489,18 @@ impl SystemUiState {
     }
 
     pub fn push_char(&mut self, ch: char) {
+        if self.is_wallpaper_picker() && ch.is_control() {
+            return;
+        }
         match self {
-            Self::Launcher { query, .. } | Self::Info { query, .. } => {
+            Self::Launcher { query, .. }
+            | Self::Info { query, .. }
+            | Self::ListPanel {
+                kind: ListKind::Wallpaper,
+                query,
+                prompt: None,
+                ..
+            } => {
                 if !push_shell_query(query, ch) {
                     return;
                 }
@@ -3460,6 +3538,16 @@ impl SystemUiState {
         match self {
             Self::Launcher { query, .. } | Self::Info { query, .. } => {
                 query.pop();
+            }
+            Self::ListPanel {
+                kind: ListKind::Wallpaper,
+                query,
+                prompt: None,
+                ..
+            } => {
+                if query.pop().is_none() {
+                    return;
+                }
             }
             Self::ListPanel {
                 prompt: Some(prompt),
@@ -4513,6 +4601,7 @@ impl SystemUiState {
                 prompt,
                 query,
                 empty,
+                ..
             } => {
                 // One renderer for the notification center and the three
                 // pickers: a scrolling window over the rows, then the status
@@ -4529,11 +4618,13 @@ impl SystemUiState {
                     total: rows.len(),
                 });
                 let mut items: Vec<String> = if rows.is_empty() {
-                    // A clipboard filter that matches nothing is not an empty
-                    // history — say which; a status line still outranks both.
-                    let fallback: &str = if !message.is_empty() {
+                    // A filter matching nothing differs from an empty source.
+                    // Wallpaper scan status remains visible below that result.
+                    let fallback: &str = if !query.is_empty() && *kind == ListKind::Wallpaper {
+                        "No matching wallpapers"
+                    } else if !message.is_empty() {
                         message.as_str()
-                    } else if *kind == ListKind::Clipboard && !query.is_empty() {
+                    } else if !query.is_empty() && *kind == ListKind::Clipboard {
                         "No matching entries"
                     } else {
                         empty.as_str()
@@ -4623,7 +4714,9 @@ impl SystemUiState {
                     if let Some(icons) = &mut icons {
                         icons.push(None);
                     }
-                } else if !message.is_empty() && !rows.is_empty() {
+                } else if !message.is_empty()
+                    && (!rows.is_empty() || (*kind == ListKind::Wallpaper && !query.is_empty()))
+                {
                     items.push(String::new());
                     items.push(format!("  {message}"));
                     if let Some(icons) = &mut icons {
@@ -4652,11 +4745,16 @@ impl SystemUiState {
                 let forget_armed =
                     prompt.is_none() && rows.iter().any(|row| row.data.forget_armed());
                 OverlayParts {
-                    title: kind.title().to_string(),
-                    // The clipboard picker's filter gets the launcher's query
-                    // bar, caret included. Other kinds never collect one and
-                    // draw no bar.
-                    query: (*kind == ListKind::Clipboard).then(|| query.clone()),
+                    title: if *kind == ListKind::Wallpaper {
+                        let position = if rows.is_empty() { 0 } else { selected + 1 };
+                        format!("{}  ·  {position}/{}", kind.title(), rows.len())
+                    } else {
+                        kind.title().to_string()
+                    },
+                    // Searchable pickers share the launcher's query bar and
+                    // caret. Other kinds never collect a query.
+                    query: matches!(kind, ListKind::Clipboard | ListKind::Wallpaper)
+                        .then(|| query.clone()),
                     selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
                     icons,
@@ -4842,6 +4940,28 @@ impl SystemUiState {
                 scored.sort_by_key(|&(i, score)| (Reverse(score), i));
                 *matches = scored.into_iter().map(|(i, _)| i).collect();
                 *offset = 0;
+            }
+            Self::ListPanel {
+                kind: ListKind::Wallpaper,
+                rows,
+                source_rows: Some(source),
+                selected,
+                query,
+                ..
+            } => {
+                let previous = rows.get(*selected).map(|row| row.key.clone());
+                let normalized = query.to_lowercase();
+                let words: Vec<_> = normalized.split_whitespace().collect();
+                *rows = source
+                    .iter()
+                    .filter(|row| {
+                        crate::jwm::features::wallpaper::matches_query(&row.key, &row.text, &words)
+                    })
+                    .cloned()
+                    .collect();
+                *selected = previous
+                    .and_then(|key| rows.iter().position(|row| row.key == key))
+                    .unwrap_or(0);
             }
             Self::Inactive
             | Self::Locked { .. }
@@ -6497,6 +6617,7 @@ mod tests {
                 row(3, Vec::new()),
             ],
             row_icons: Vec::new(),
+            source_rows: None,
             selected: 0,
             message: String::new(),
             prompt: None,
@@ -6552,6 +6673,7 @@ mod tests {
             kind: ListKind::Notifications,
             rows,
             row_icons: Vec::new(),
+            source_rows: None,
             selected: 15,
             message: String::new(),
             prompt: None,
@@ -6814,6 +6936,139 @@ mod tests {
         panel.move_selection(-1);
         panel.move_selection(-1);
         assert_eq!(panel.selected_wallpaper(), Some("/walls/alps.jpg"));
+    }
+
+    #[test]
+    fn wallpaper_search_keeps_current_selection_and_filters_unicode_words() {
+        let paths: Vec<PathBuf> = [
+            "/walls/Été Alps.png",
+            "/walls/Été Beach.png",
+            "/walls/Winter Alps.png",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        let mut panel = SystemUiState::wallpaper_picker(&paths, "/walls/Été Beach.png", "/walls");
+        for ch in "ÉTÉ".chars() {
+            panel.push_char(ch);
+        }
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/Été Beach.png"));
+        let parts = panel.overlay_parts();
+        assert_eq!(parts.query.as_deref(), Some("ÉTÉ"));
+        assert!(parts.title.ends_with("2/2"));
+        assert!(parts.items[1].contains('\u{f00c}'));
+        for ch in " alps".chars() {
+            panel.push_char(ch);
+        }
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/Été Alps.png"));
+        assert_eq!(panel.overlay_parts().scroll.unwrap().total, 1);
+        assert!(panel.has_search_query());
+        panel.clear_search_query();
+        assert!(!panel.has_search_query());
+        assert_eq!(panel.overlay_parts().scroll.unwrap().total, paths.len() + 2);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/Été Alps.png"));
+    }
+
+    #[test]
+    fn wallpaper_filter_preserves_mouse_page_and_preview_row_identity() {
+        let paths: Vec<PathBuf> = (0..50)
+            .map(|index| {
+                let group = if index % 2 == 0 { "alps" } else { "beach" };
+                PathBuf::from(format!("/walls/{index:02}-{group}.png"))
+            })
+            .collect();
+        let mut panel = SystemUiState::wallpaper_picker(&paths, "", "/walls");
+        for ch in "alps".chars() {
+            panel.push_char(ch);
+        }
+        assert_eq!(panel.overlay_parts().scroll.unwrap().total, 25);
+        assert!(panel.page_selection(1));
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/24-alps.png"));
+        assert_eq!(panel.select_visible_row(0), Some(true));
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/02-alps.png"));
+        panel.jump_selection(true);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/48-alps.png"));
+        panel.page_selection(1);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/48-alps.png"));
+        panel.move_selection(1);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/00-alps.png"));
+        assert!(panel.seek_scroll(0.5));
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/24-alps.png"));
+    }
+
+    #[test]
+    fn wallpaper_search_has_honest_no_match_and_effect_states() {
+        use crate::jwm::features::wallpaper::SOLAR_SYSTEM_CHOICE;
+        let mut panel = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        for ch in "solar system".chars() {
+            panel.push_char(ch);
+        }
+        assert_eq!(panel.selected_wallpaper_choice(), Some(SOLAR_SYSTEM_CHOICE));
+        assert!(panel.selected_wallpaper().is_none());
+        panel.push_char('x');
+        assert!(panel.selected_wallpaper_choice().is_none());
+        let parts = panel.overlay_parts();
+        assert!(parts.items[0].contains("No matching wallpapers"));
+        assert_eq!(parts.selected, None);
+        assert_eq!(parts.scroll, None);
+        assert_eq!(panel.select_visible_row(0), None);
+        panel.move_selection(1);
+        panel.jump_selection(true);
+        panel.page_selection(-1);
+        assert!(!panel.seek_scroll(0.5));
+        assert!(panel.selected_wallpaper_choice().is_none());
+        panel.backspace();
+        assert_eq!(panel.selected_wallpaper_choice(), Some(SOLAR_SYSTEM_CHOICE));
+        panel.clear_search_query();
+        panel.backspace();
+        assert_eq!(panel.selected_wallpaper_choice(), Some(SOLAR_SYSTEM_CHOICE));
+    }
+
+    #[test]
+    fn wallpaper_scan_adoption_keeps_typed_query_and_matching_highlight() {
+        use crate::jwm::features::wallpaper::SOLAR_SYSTEM_CHOICE;
+        let mut panel = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        for ch in "solar".chars() {
+            panel.push_char(ch);
+        }
+        let paths = [PathBuf::from("/walls/solar.png")];
+        panel.refresh_wallpaper_picker(&paths, "/walls/solar.png", "/walls", "partial scan".into());
+        assert_eq!(panel.overlay_parts().query.as_deref(), Some("solar"));
+        assert_eq!(panel.selected_wallpaper_choice(), Some(SOLAR_SYSTEM_CHOICE));
+        assert_eq!(panel.overlay_parts().scroll.unwrap().total, 2);
+        assert!(
+            panel
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|line| line.contains("partial scan"))
+        );
+
+        let mut untouched = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        untouched.refresh_wallpaper_picker(&paths, "/walls/solar.png", "/walls", String::new());
+        assert_eq!(untouched.selected_wallpaper(), Some("/walls/solar.png"));
+    }
+
+    #[test]
+    fn wallpaper_query_is_bounded_and_snapshot_searches_stay_independent() {
+        let paths = [PathBuf::from("/walls/été.png")];
+        let mut panel = SystemUiState::wallpaper_picker(&paths, "", "/walls");
+        panel.push_char('\n');
+        assert_eq!(panel.overlay_parts().query.as_deref(), Some(""));
+        let mut snapshot = panel.clone();
+        for _ in 0..MAX_SHELL_QUERY_CHARS + 10 {
+            panel.push_char('é');
+        }
+        assert_eq!(
+            panel.overlay_parts().query.unwrap().chars().count(),
+            MAX_SHELL_QUERY_CHARS
+        );
+        assert!(panel.selected_wallpaper_choice().is_none());
+        snapshot.push_char('é');
+        assert_eq!(snapshot.selected_wallpaper(), Some("/walls/été.png"));
+        assert_eq!(snapshot.overlay_parts().query.as_deref(), Some("é"));
+        panel.clear_search_query();
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/été.png"));
     }
 
     #[test]
@@ -8594,6 +8849,7 @@ mod tests {
             kind: ListKind::Notifications,
             rows,
             row_icons: icons,
+            source_rows: None,
             selected: 15,
             message: String::new(),
             prompt: None,
@@ -8685,6 +8941,7 @@ mod tests {
             kind: ListKind::Notifications,
             rows: vec![row(3), row(2), row(1)],
             row_icons: vec![None, None, None],
+            source_rows: None,
             selected: 1,
             message: String::new(),
             prompt: None,

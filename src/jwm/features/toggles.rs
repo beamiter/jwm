@@ -1034,13 +1034,15 @@ impl Jwm {
                 return (std::path::PathBuf::new(), Vec::new()).into();
             }
             let directory = wallpaper::resolve_directory(&configured_dir, &worker_current, &home);
-            let mut paths = wallpaper::list_wallpapers_cancellable(&directory, &cancelled);
+            let (mut paths, summary) =
+                wallpaper::scan_wallpapers_cancellable(&directory, &cancelled);
             let selection =
                 wallpaper::resolve_selection(&mut paths, &requested_current, &home, &cancelled);
             wallpaper::WallpaperListing {
                 directory,
                 paths,
                 selection,
+                summary,
             }
         });
         let mut state = crate::jwm::features::SystemUiState::wallpaper_picker(&[], &current, "");
@@ -1089,10 +1091,14 @@ impl Jwm {
             .as_ref()
             .filter(|(requested, _)| *requested == current)
             .map_or(current.as_str(), |(_, matched)| matched.as_str());
-        self.features.system_ui = crate::jwm::features::SystemUiState::wallpaper_picker(
+        let status = listing
+            .summary
+            .message(&listing.directory, listing.paths.len());
+        self.features.system_ui.refresh_wallpaper_picker(
             &listing.paths,
             selected,
             &listing.directory.to_string_lossy(),
+            status,
         );
         self.mark_system_ui_dirty();
     }
@@ -5826,7 +5832,7 @@ mod shell_entry_tests {
             .find("BackgroundJob::spawn(move ||")
             .expect("the wallpaper listing no longer runs on a worker");
         for call in [
-            "list_wallpapers_cancellable(",
+            "scan_wallpapers_cancellable(",
             "resolve_directory(",
             "resolve_selection(",
         ] {
@@ -6828,6 +6834,7 @@ mod modal_grab_tests {
                     directory: PathBuf::from("/walls"),
                     paths: vec![PathBuf::from("/walls/a.png"), PathBuf::from("/walls/b.png")],
                     selection: Some((requested, "/walls/b.png".into())),
+                    summary: Default::default(),
                 },
             ));
             jwm.poll_wallpaper_listing_job();
@@ -6840,6 +6847,41 @@ mod modal_grab_tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn wallpaper_listing_reapplies_the_filter_typed_while_scanning() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui = scanning_wallpaper_picker();
+        for ch in "beach".chars() {
+            jwm.features.system_ui.push_char(ch);
+        }
+        jwm.features.wallpaper_listing = Some(BackgroundJob::completed_for_test(
+            (
+                PathBuf::from("/walls"),
+                vec![
+                    PathBuf::from("/walls/alps.png"),
+                    PathBuf::from("/walls/beach.png"),
+                ],
+            )
+                .into(),
+        ));
+        jwm.poll_wallpaper_listing_job();
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("beach")
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_wallpaper(),
+            Some("/walls/beach.png")
+        );
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().scroll.unwrap().total,
+            1
+        );
+        assert!(jwm.features.wallpaper_listing.is_none());
+        assert!(jwm.system_ui_dirty);
     }
 
     #[test]

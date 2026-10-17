@@ -1676,12 +1676,12 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Returns true if wallpaper crossfade is currently animating.
     pub(super) fn tick_wallpaper_crossfade(&mut self) -> bool {
-        if !self.wallpaper_crossfade {
-            return false;
-        }
+        // Report the finishing tick as well: tickless compositors need one
+        // final repair after retiring the old image, even with no window damage.
+        let mut active = self.wallpaper_transition_start.is_some();
         if let Some(start) = self.wallpaper_transition_start {
             let elapsed = start.elapsed().as_millis() as u64;
-            if elapsed >= self.wallpaper_crossfade_duration_ms {
+            if !self.wallpaper_crossfade || elapsed >= self.wallpaper_crossfade_duration_ms {
                 // Transition finished — clean up old texture
                 if let Some(tex) = self.old_wallpaper_texture.take() {
                     unsafe {
@@ -1691,13 +1691,24 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.old_wallpaper_img_w = 0;
                 self.old_wallpaper_img_h = 0;
                 self.wallpaper_transition_start = None;
-                false
-            } else {
-                true
             }
-        } else {
-            false
         }
+        let now = std::time::Instant::now();
+        for wallpaper in &mut self.monitor_wallpapers {
+            if let Some(previous) = &wallpaper.previous {
+                active = true;
+                if !self.wallpaper_crossfade
+                    || previous.progress(now, self.wallpaper_crossfade_duration_ms) >= 1.0
+                {
+                    if let Some(previous) = wallpaper.previous.take() {
+                        unsafe {
+                            self.gl.delete_texture(previous.texture);
+                        }
+                    }
+                }
+            }
+        }
+        active
     }
 }
 

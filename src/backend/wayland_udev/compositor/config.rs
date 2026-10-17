@@ -791,6 +791,17 @@ impl WaylandCompositor {
         // --- Wallpaper ---
         self.wallpaper_crossfade = b.wallpaper_crossfade;
         self.wallpaper_crossfade_duration_ms = b.wallpaper_crossfade_duration_ms.clamp(1, 30_000);
+        if !self.wallpaper_crossfade {
+            self.wallpaper_transition_start = None;
+            if let Some(texture) = self.old_wallpaper_texture.take() {
+                self.retired_wallpaper_textures.push(texture);
+            }
+            for wallpaper in &mut self.monitor_wallpapers {
+                if let Some(previous) = wallpaper.previous.take() {
+                    self.retired_wallpaper_textures.push(previous.texture);
+                }
+            }
+        }
         if wallpaper_config_requests_change(
             &self.wallpaper_path,
             self.wallpaper_requested_mode,
@@ -1889,6 +1900,7 @@ impl WaylandCompositor {
                         mon_w: w,
                         mon_h: h,
                         texture: None,
+                        previous: None,
                         mode,
                         requested_mode: mode,
                         img_w: 0,
@@ -1912,7 +1924,22 @@ impl WaylandCompositor {
                 wallpaper.load_failed = false;
                 if path.is_empty() {
                     if let Some(texture) = wallpaper.texture.take() {
-                        self.retired_wallpaper_textures.push(texture);
+                        if let Some(previous) = wallpaper.previous.take() {
+                            self.retired_wallpaper_textures.push(previous.texture);
+                        }
+                        if self.wallpaper_crossfade {
+                            wallpaper.previous = Some(
+                                crate::backend::compositor_common::wallpaper::WallpaperTransition {
+                                    texture,
+                                    mode: wallpaper.mode,
+                                    width: wallpaper.img_w,
+                                    height: wallpaper.img_h,
+                                    started: std::time::Instant::now(),
+                                },
+                            );
+                        } else {
+                            self.retired_wallpaper_textures.push(texture);
+                        }
                     }
                     wallpaper.mode = mode;
                     wallpaper.img_w = 0;
@@ -1929,6 +1956,9 @@ impl WaylandCompositor {
         for mut wallpaper in previous.into_iter().flatten() {
             if let Some(texture) = wallpaper.texture.take() {
                 self.retired_wallpaper_textures.push(texture);
+            }
+            if let Some(previous) = wallpaper.previous.take() {
+                self.retired_wallpaper_textures.push(previous.texture);
             }
         }
         // Any unmatched request is cancelled by dropping its lazy queue slot.

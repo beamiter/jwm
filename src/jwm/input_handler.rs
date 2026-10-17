@@ -2866,13 +2866,21 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_wallpaper_picker() {
-                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                // Space belongs to the search, so filenames with several
+                // words are searchable. Only Enter or a click commits.
+                if keysym == keys::KEY_Return {
                     self.apply_selected_wallpaper(backend);
                 } else {
-                    if keysym == keys::KEY_Up {
+                    if keysym == keys::KEY_BackSpace {
+                        self.consume_system_ui_query_replace();
+                        self.features.system_ui.backspace();
+                    } else if keysym == keys::KEY_Up {
                         self.features.system_ui.move_selection(-1);
                     } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
                         self.features.system_ui.move_selection(1);
+                    } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+                        self.consume_system_ui_query_replace();
+                        self.features.system_ui.push_char(ch);
                     }
                     self.sync_system_ui(backend);
                 }
@@ -5372,6 +5380,56 @@ mod tests {
         backend.key_ops = Box::new(input.clone());
         backend.toast_log.lock().unwrap().clear();
         (jwm, backend, input)
+    }
+
+    #[test]
+    fn wallpaper_keyboard_search_includes_spaces_and_query_replace() {
+        use crate::backend::common_define::keys;
+        use crate::jwm::features::SystemUiState;
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        let paths = [
+            std::path::PathBuf::from("/walls/blue night.png"),
+            std::path::PathBuf::from("/walls/red day.png"),
+        ];
+        jwm.features.system_ui = SystemUiState::wallpaper_picker(&paths, "", "/walls");
+        for ch in "blue night".chars() {
+            input.select(ch as u32);
+            jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        }
+        assert!(jwm.features.system_ui.is_wallpaper_picker());
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("blue night")
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_wallpaper(),
+            Some("/walls/blue night.png")
+        );
+        jwm.arm_system_ui_query_replace();
+        for ch in "red".chars() {
+            input.select(ch as u32);
+            jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        }
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_wallpaper(),
+            Some("/walls/red day.png")
+        );
+        input.select(keys::KEY_BackSpace);
+        jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("re")
+        );
+        input.select(keys::KEY_x);
+        jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        assert!(jwm.features.system_ui.selected_wallpaper_choice().is_none());
+        input.select(keys::KEY_Return);
+        jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        assert!(jwm.features.system_ui.is_wallpaper_picker());
     }
 
     fn count_repeat_dispatch(

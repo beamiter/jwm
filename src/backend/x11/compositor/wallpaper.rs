@@ -281,6 +281,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         mon_w: w,
                         mon_h: h,
                         texture: None,
+                        previous: None,
                         mode,
                         requested_mode: mode,
                         img_w: 0,
@@ -304,8 +305,25 @@ impl<C: CompositorConnection> Compositor<C> {
                 wallpaper.load_failed = false;
                 if path.is_empty() {
                     if let Some(texture) = wallpaper.texture.take() {
-                        unsafe {
-                            self.gl.delete_texture(texture);
+                        if let Some(previous) = wallpaper.previous.take() {
+                            unsafe {
+                                self.gl.delete_texture(previous.texture);
+                            }
+                        }
+                        if self.wallpaper_crossfade {
+                            wallpaper.previous = Some(
+                                crate::backend::compositor_common::wallpaper::WallpaperTransition {
+                                    texture,
+                                    mode: wallpaper.mode,
+                                    width: wallpaper.img_w,
+                                    height: wallpaper.img_h,
+                                    started: std::time::Instant::now(),
+                                },
+                            );
+                        } else {
+                            unsafe {
+                                self.gl.delete_texture(texture);
+                            }
                         }
                     }
                     wallpaper.mode = mode;
@@ -324,6 +342,11 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Some(texture) = wallpaper.texture.take() {
                 unsafe {
                     self.gl.delete_texture(texture);
+                }
+            }
+            if let Some(previous) = wallpaper.previous.take() {
+                unsafe {
+                    self.gl.delete_texture(previous.texture);
                 }
             }
         }
