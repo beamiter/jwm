@@ -539,6 +539,32 @@ mod tests {
     }
 
     #[test]
+    fn fixed_histogram_handles_all_4096_color_bins() {
+        let mut rgba = Vec::with_capacity(4096 * 4);
+        for red in 0..16u8 {
+            for green in 0..16u8 {
+                for blue in 0..16u8 {
+                    rgba.extend_from_slice(&[
+                        red * 16 + 8,
+                        green * 16 + 8,
+                        blue * 16 + 8,
+                        255,
+                    ]);
+                }
+            }
+        }
+        let palette = palette_from_rgba(&rgba).expect("colorful sample");
+        assert!(palette.accent.iter().all(|value| value.is_finite()));
+        assert!(palette.secondary.iter().all(|value| value.is_finite()));
+        assert_eq!(palette_from_rgba(&rgba), Some(palette));
+    }
+
+    #[test]
+    fn fixed_histogram_rejects_transparent_pixels() {
+        assert!(palette_from_rgba(&[255, 0, 0, 0]).is_none());
+    }
+
+    #[test]
     fn daily_theme_tracks_primary_slot_and_off_restores_static_path() {
         let mut behavior = crate::config::Config::default().behavior().clone();
         behavior.wallpaper = "static.png".to_string();
