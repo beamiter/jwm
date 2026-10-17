@@ -17,18 +17,39 @@ wallpaper_astronomy_layout = "earth-moon"
 wallpaper_earth_texture = ""
 wallpaper_moon_texture = ""
 
-# Integer minutes per turn, inclusive range 1..525600.
-# Earth applies in every Astronomy layout when its view is "rotating".
-# Moon applies in the earth-moon layout. Earth defaults to a fixed view.
-# Defaults: Earth 1440 (24 hours); Moon 39343 (about 27.3 days).
-# For a faster decorative view, use "rotating", Earth = 20 and Moon = 30.
+# Earth applies in every Astronomy layout. Default "fixed" keeps this center
+# and orientation while real sunlight moves; "rotating" enables the axis tour.
 wallpaper_earth_view = "fixed"
+wallpaper_earth_latitude = 23.13 # finite degrees, -90..90; north positive
+wallpaper_earth_longitude = 113.28 # finite degrees, -180..180; east positive
+wallpaper_earth_roll = 0.0 # finite degrees, -180..180; initial image orientation
+wallpaper_earth_rotation_axis = [0.0, 1.0, 0.0]
+# Integer minutes per turn, 1..525600; used only by the "rotating" view.
 wallpaper_earth_rotation_minutes = 1440
+
+# Moon applies only in earth-moon layout. Default "rotating" preserves its
+# original texture tour; "fixed" stops texture motion while real lunar phase updates.
+wallpaper_moon_view = "rotating"
+wallpaper_moon_latitude = 10.313240312354818 # original 0.18-radian tilt; -90..90
+wallpaper_moon_longitude = 0.0 # -180..180
+wallpaper_moon_roll = 0.0 # -180..180
+wallpaper_moon_rotation_axis = [0.0, 1.0, 0.0]
+# About 27.3 days. Use Earth = 20 and Moon = 30 for faster decorative tours.
 wallpaper_moon_rotation_minutes = 39343
+
+# Both axes are [x, y, z] in body coordinates, each component finite in -1..1,
+# and at least one nonzero. JWM normalizes them; negate all components to reverse.
+# +X = equator at 90 degrees east; +Y = north pole; +Z = equator at zero longitude.
+# With latitude = longitude = roll = 0:
+#   [0, 1, 0] = horizontal, [1, 0, 0] = vertical, [1, 1, 0] = diagonal,
+#   [-1, -1, 0] = reversed diagonal, [0, 0, 1] = around the viewing direction.
+# Other centers use the same body axes, which do not always align with the screen.
+# For examples and immediate hot updates, see docs/astronomy-wallpaper.md.
 
 # Compatibility settings; they do not change the viewing longitude or sunlight.
 # Earth uses wallpaper_earth_longitude and the fixed/rotating view above.
-# Celestial illumination follows the actual UTC instant.
+# Both bodies use the actual current system instant, converted to UTC once.
+# Timezone/DST changes never add another offset to sunlight or lunar phase.
 wallpaper_astronomy_timezone = "system"
 # Integer hours, -12..14; default 8. No operating-system timezone changes.
 wallpaper_timezone_offset_hours = 8

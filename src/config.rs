@@ -1331,7 +1331,7 @@ pub struct BehaviorConfig {
     /// Decorative galaxy travel: minutes per revolution, 0 disables, 1..=525600.
     #[serde(default = "default_wallpaper_sky_rotation_minutes")]
     pub wallpaper_sky_rotation_minutes: u32,
-    /// Earth camera: "fixed" (default) or "rotating" for the legacy spin.
+    /// Earth camera: "fixed" (default) or "rotating" for an arbitrary-axis tour.
     #[serde(default = "default_wallpaper_earth_view")]
     pub wallpaper_earth_view: String,
     /// Earth camera latitude in degrees, -90..=90; positive is north.
@@ -1342,11 +1342,41 @@ pub struct BehaviorConfig {
     /// This is the fixed view's center or the rotating view's starting meridian.
     #[serde(default = "default_wallpaper_earth_longitude")]
     pub wallpaper_earth_longitude: f64,
+    /// Initial Earth camera roll in degrees, -180..=180; positive is clockwise on screen.
+    #[serde(default)]
+    pub wallpaper_earth_roll: f64,
+    /// Earth tour axis [x, y, z] in body coordinates; normalized when used.
+    /// Finite components in -1..=1, at least one nonzero; negate to reverse.
+    #[serde(
+        default = "default_wallpaper_rotation_axis",
+        deserialize_with = "deserialize_wallpaper_rotation_axis"
+    )]
+    pub wallpaper_earth_rotation_axis: [f64; 3],
     /// Earth spin period in minutes, 1..=525600 (default: one day).
     /// Active only with wallpaper_earth_view = "rotating".
     #[serde(default = "default_wallpaper_earth_rotation_minutes")]
     pub wallpaper_earth_rotation_minutes: u32,
+    /// Moon texture view: "fixed" or "rotating" (default, preserving legacy spin).
+    #[serde(default = "default_wallpaper_moon_view")]
+    pub wallpaper_moon_view: String,
+    /// Moon texture latitude in degrees, -90..=90; positive is north.
+    #[serde(default = "default_wallpaper_moon_latitude")]
+    pub wallpaper_moon_latitude: f64,
+    /// Moon texture longitude in degrees, -180..=180; positive is east.
+    #[serde(default)]
+    pub wallpaper_moon_longitude: f64,
+    /// Initial Moon texture roll in degrees, -180..=180; positive is clockwise on screen.
+    #[serde(default)]
+    pub wallpaper_moon_roll: f64,
+    /// Moon presentation axis [x, y, z] in body coordinates; normalized when used.
+    /// Finite components in -1..=1, at least one nonzero; negate to reverse.
+    #[serde(
+        default = "default_wallpaper_rotation_axis",
+        deserialize_with = "deserialize_wallpaper_rotation_axis"
+    )]
+    pub wallpaper_moon_rotation_axis: [f64; 3],
     /// Moon spin period in minutes, 1..=525600 (default: approximately 27.32 days).
+    /// Active only with wallpaper_moon_view = "rotating"; lunar phase stays real time.
     #[serde(default = "default_wallpaper_moon_rotation_minutes")]
     pub wallpaper_moon_rotation_minutes: u32,
     /// Legacy astronomy presentation timezone source: system or configured.
@@ -1807,8 +1837,57 @@ fn default_wallpaper_earth_longitude() -> f64 {
     113.28
 }
 
+fn default_wallpaper_rotation_axis() -> [f64; 3] {
+    [0.0, 1.0, 0.0]
+}
+
+fn deserialize_wallpaper_rotation_axis<'de, D>(deserializer: D) -> Result<[f64; 3], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+
+    struct AxisVisitor;
+    impl<'de> Visitor<'de> for AxisVisitor {
+        type Value = [f64; 3];
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an array of exactly 3 numbers")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut axis = [0.0; 3];
+            for (index, component) in axis.iter_mut().enumerate() {
+                *component = sequence
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(index, &self))?;
+            }
+            // TOML's tuple deserializer can discard trailing array elements.
+            // Explicitly reject the fourth element before semantic validation.
+            if sequence.next_element::<de::IgnoredAny>()?.is_some() {
+                return Err(de::Error::invalid_length(4, &self));
+            }
+            Ok(axis)
+        }
+    }
+
+    deserializer.deserialize_seq(AxisVisitor)
+}
+
 fn default_wallpaper_earth_rotation_minutes() -> u32 {
     1440
+}
+
+fn default_wallpaper_moon_view() -> String {
+    "rotating".into()
+}
+
+fn default_wallpaper_moon_latitude() -> f64 {
+    // Preserve the original 0.18-radian presentation tilt.
+    0.18_f64.to_degrees()
 }
 
 fn default_wallpaper_moon_rotation_minutes() -> u32 {
@@ -2373,7 +2452,14 @@ impl Default for Config {
                     wallpaper_earth_view: default_wallpaper_earth_view(),
                     wallpaper_earth_latitude: default_wallpaper_earth_latitude(),
                     wallpaper_earth_longitude: default_wallpaper_earth_longitude(),
+                    wallpaper_earth_roll: 0.0,
+                    wallpaper_earth_rotation_axis: default_wallpaper_rotation_axis(),
                     wallpaper_earth_rotation_minutes: default_wallpaper_earth_rotation_minutes(),
+                    wallpaper_moon_view: default_wallpaper_moon_view(),
+                    wallpaper_moon_latitude: default_wallpaper_moon_latitude(),
+                    wallpaper_moon_longitude: 0.0,
+                    wallpaper_moon_roll: 0.0,
+                    wallpaper_moon_rotation_axis: default_wallpaper_rotation_axis(),
                     wallpaper_moon_rotation_minutes: default_wallpaper_moon_rotation_minutes(),
                     wallpaper_astronomy_timezone: default_wallpaper_astronomy_timezone(),
                     wallpaper_timezone_offset_hours: default_wallpaper_timezone_offset_hours(),
@@ -4565,8 +4651,8 @@ impl Config {
             )),
             ("behavior", "wallpaper_earth_view") => Some(concat!(
                 "# Earth camera: \"fixed\" (default) anchors the map while real UTC sunlight changes.\n",
-                "# \"rotating\" restores the legacy spin, using wallpaper_earth_rotation_minutes.\n",
-                "# Earth framing uses the latitude/longitude below, independent of timezone.\n",
+                "# \"rotating\" tours around wallpaper_earth_rotation_axis at the configured period.\n",
+                "# Latitude, longitude and roll set initial framing, independent of timezone.\n",
             )),
             ("behavior", "wallpaper_earth_latitude") => Some(concat!(
                 "# Earth camera: finite latitude in -90..90 degrees; north is positive.\n",
@@ -4577,13 +4663,47 @@ impl Config {
                 "# Fixed center or rotating starting meridian.\n",
                 "# Default 113.28; no device location lookup or permission is used.\n",
             )),
+            ("behavior", "wallpaper_earth_roll") => Some(concat!(
+                "# Initial Earth camera roll: finite degrees in -180..180; default 0.\n",
+                "# Sets image orientation around the viewing direction without changing the center.\n",
+                "# Positive turns clockwise on screen; negative turns counterclockwise.\n",
+            )),
+            ("behavior", "wallpaper_earth_rotation_axis") => Some(concat!(
+                "# Earth tour axis [x, y, z]: three finite numbers in -1..1, not all zero.\n",
+                "# Body axes: +X = 90 degrees east, +Y = north, +Z = zero longitude.\n",
+                "# Normalized automatically; [0, 1, 0] (default), [1, 0, 0] or [1, 1, 0].\n",
+                "# Negate all components to reverse. Only active with Earth view = \"rotating\".\n",
+            )),
             ("behavior", "wallpaper_earth_rotation_minutes") => Some(concat!(
                 "# Active only with wallpaper_earth_view = \"rotating\": integer minutes per Earth turn, 1..525600.\n",
                 "# Default 1440 = 24 hours; example: wallpaper_earth_rotation_minutes = 20\n",
             )),
+            ("behavior", "wallpaper_moon_view") => Some(concat!(
+                "# Earth-moon layout: \"rotating\" (default) tours the Moon texture around its axis.\n",
+                "# \"fixed\" freezes the texture framing; both modes keep the current real lunar phase.\n",
+            )),
+            ("behavior", "wallpaper_moon_latitude") => Some(concat!(
+                "# Moon texture latitude: finite degrees in -90..90; north is positive.\n",
+                "# Default about 10.31324 preserves the original 0.18-radian tilt.\n",
+            )),
+            ("behavior", "wallpaper_moon_longitude") => Some(concat!(
+                "# Moon texture longitude: finite degrees in -180..180; east is positive.\n",
+                "# Default 0; fixed center or rotating initial longitude.\n",
+            )),
+            ("behavior", "wallpaper_moon_roll") => Some(concat!(
+                "# Initial Moon texture roll: finite degrees in -180..180; default 0.\n",
+                "# Positive turns clockwise on screen; negative turns counterclockwise.\n",
+                "# Artistic texture framing; the current phase remains in its stable presentation.\n",
+            )),
+            ("behavior", "wallpaper_moon_rotation_axis") => Some(concat!(
+                "# Moon texture axis [x, y, z]: three finite numbers in -1..1, not all zero.\n",
+                "# Same body coordinates as Earth; normalized automatically, default [0, 1, 0].\n",
+                "# Negate all components to reverse. Only active with Moon view = \"rotating\".\n",
+            )),
             ("behavior", "wallpaper_moon_rotation_minutes") => Some(concat!(
-                "# Earth-moon layout only: integer minutes per Moon turn, 1..525600.\n",
+                "# Moon view = \"rotating\" only: integer minutes per Moon texture turn, 1..525600.\n",
                 "# Default 39343 is about 27.3 days; example: wallpaper_moon_rotation_minutes = 30\n",
+                "# Decorative speed never accelerates the physical lunar phase.\n",
             )),
             ("behavior", "wallpaper_astronomy_timezone") => Some(concat!(
                 "# Legacy astronomy presentation: \"system\" (default) follows local timezone/DST;\n",
@@ -5026,15 +5146,27 @@ impl Config {
                 }
                 self.inner.behavior.wallpaper_astronomy_bodies = bodies;
             }
-            "behavior.wallpaper_earth_view" => {
+            "behavior.wallpaper_earth_view" | "behavior.wallpaper_moon_view" => {
                 let view = as_string()?;
                 if !["fixed", "rotating"].contains(&view.as_str()) {
-                    return Err("behavior.wallpaper_earth_view must be fixed or rotating".into());
+                    return Err(format!("{key} must be fixed or rotating"));
                 }
-                self.inner.behavior.wallpaper_earth_view = view;
+                if key == "behavior.wallpaper_earth_view" {
+                    self.inner.behavior.wallpaper_earth_view = view;
+                } else {
+                    self.inner.behavior.wallpaper_moon_view = view;
+                }
             }
-            "behavior.wallpaper_earth_latitude" | "behavior.wallpaper_earth_longitude" => {
-                let limit = if key == "behavior.wallpaper_earth_latitude" {
+            "behavior.wallpaper_earth_latitude"
+            | "behavior.wallpaper_earth_longitude"
+            | "behavior.wallpaper_earth_roll"
+            | "behavior.wallpaper_moon_latitude"
+            | "behavior.wallpaper_moon_longitude"
+            | "behavior.wallpaper_moon_roll" => {
+                let limit = if matches!(
+                    key,
+                    "behavior.wallpaper_earth_latitude" | "behavior.wallpaper_moon_latitude"
+                ) {
                     90.0
                 } else {
                     180.0
@@ -5045,10 +5177,35 @@ impl Config {
                     .ok_or_else(|| {
                         format!("{key} must be a finite number in [{}, {limit}]", -limit)
                     })?;
-                if key == "behavior.wallpaper_earth_latitude" {
-                    self.inner.behavior.wallpaper_earth_latitude = degrees;
+                match key {
+                    "behavior.wallpaper_earth_latitude" => {
+                        self.inner.behavior.wallpaper_earth_latitude = degrees;
+                    }
+                    "behavior.wallpaper_earth_longitude" => {
+                        self.inner.behavior.wallpaper_earth_longitude = degrees;
+                    }
+                    "behavior.wallpaper_earth_roll" => {
+                        self.inner.behavior.wallpaper_earth_roll = degrees;
+                    }
+                    "behavior.wallpaper_moon_latitude" => {
+                        self.inner.behavior.wallpaper_moon_latitude = degrees;
+                    }
+                    "behavior.wallpaper_moon_longitude" => {
+                        self.inner.behavior.wallpaper_moon_longitude = degrees;
+                    }
+                    _ => self.inner.behavior.wallpaper_moon_roll = degrees,
+                }
+            }
+            "behavior.wallpaper_earth_rotation_axis" | "behavior.wallpaper_moon_rotation_axis" => {
+                let axis: [f64; 3] = serde_json::from_value(value.clone())
+                    .map_err(|_| format!("{key} must be a three-number [x, y, z] array"))?;
+                if let Some(error) = validation::wallpaper_rotation_axis_error(&axis) {
+                    return Err(format!("{key}: {error}"));
+                }
+                if key == "behavior.wallpaper_earth_rotation_axis" {
+                    self.inner.behavior.wallpaper_earth_rotation_axis = axis;
                 } else {
-                    self.inner.behavior.wallpaper_earth_longitude = degrees;
+                    self.inner.behavior.wallpaper_moon_rotation_axis = axis;
                 }
             }
             "behavior.wallpaper_solar_spin_speed" => {
@@ -5785,7 +5942,122 @@ mod tests {
     }
 
     #[test]
-    fn earth_view_invalid_updates_are_atomic() {
+    fn celestial_orientation_legacy_defaults_and_hot_updates_roundtrip() {
+        let mut table: toml::Table =
+            toml::from_str(&toml::to_string(&Config::default().inner).unwrap()).unwrap();
+        let behavior = table.get_mut("behavior").unwrap().as_table_mut().unwrap();
+        for key in [
+            "wallpaper_earth_roll",
+            "wallpaper_earth_rotation_axis",
+            "wallpaper_moon_view",
+            "wallpaper_moon_latitude",
+            "wallpaper_moon_longitude",
+            "wallpaper_moon_roll",
+            "wallpaper_moon_rotation_axis",
+        ] {
+            behavior.remove(key);
+        }
+        let legacy: TomlConfig = toml::from_str(&toml::to_string(&table).unwrap()).unwrap();
+        assert_eq!(legacy.behavior.wallpaper_earth_view, "fixed");
+        assert_eq!(legacy.behavior.wallpaper_earth_roll, 0.0);
+        assert_eq!(
+            legacy.behavior.wallpaper_earth_rotation_axis,
+            [0.0, 1.0, 0.0]
+        );
+        assert_eq!(legacy.behavior.wallpaper_moon_view, "rotating");
+        assert_eq!(
+            legacy.behavior.wallpaper_moon_latitude,
+            0.18_f64.to_degrees()
+        );
+        assert_eq!(legacy.behavior.wallpaper_moon_longitude, 0.0);
+        assert_eq!(legacy.behavior.wallpaper_moon_roll, 0.0);
+        assert_eq!(
+            legacy.behavior.wallpaper_moon_rotation_axis,
+            [0.0, 1.0, 0.0]
+        );
+        let mut config = Config {
+            inner: legacy,
+            gesture_policy_generation: super::next_gesture_policy_generation(),
+        };
+        for view in ["fixed", "rotating"] {
+            for (latitude, longitude, roll) in [
+                (-90.0, -180.0, -180.0),
+                (90.0, 180.0, 180.0),
+                (0.0, 0.0, 0.0),
+                (43.123456789, -72.987654321, 25.125),
+            ] {
+                config
+                    .set_values(&[
+                        (
+                            "behavior.wallpaper_moon_view".into(),
+                            serde_json::json!(view),
+                        ),
+                        (
+                            "behavior.wallpaper_moon_latitude".into(),
+                            serde_json::json!(latitude),
+                        ),
+                        (
+                            "behavior.wallpaper_moon_longitude".into(),
+                            serde_json::json!(longitude),
+                        ),
+                        (
+                            "behavior.wallpaper_moon_roll".into(),
+                            serde_json::json!(roll),
+                        ),
+                        (
+                            "behavior.wallpaper_earth_roll".into(),
+                            serde_json::json!(roll),
+                        ),
+                    ])
+                    .unwrap();
+                let loaded: TomlConfig =
+                    toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+                assert_eq!(loaded.behavior.wallpaper_moon_view, view);
+                assert_eq!(loaded.behavior.wallpaper_moon_latitude, latitude);
+                assert_eq!(loaded.behavior.wallpaper_moon_longitude, longitude);
+                assert_eq!(loaded.behavior.wallpaper_moon_roll, roll);
+                assert_eq!(loaded.behavior.wallpaper_earth_roll, roll);
+                assert_eq!(loaded.behavior.wallpaper_earth_view, "fixed");
+                assert_eq!(loaded.behavior.wallpaper_moon_rotation_minutes, 39343);
+                assert!(config.diagnostics().is_empty());
+            }
+        }
+        for axis in [
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [0.25, 0.5, 0.75],
+            [f64::from_bits(1), 0.0, 0.0],
+        ] {
+            for key in [
+                "behavior.wallpaper_earth_rotation_axis",
+                "behavior.wallpaper_moon_rotation_axis",
+            ] {
+                config.set_value(key, &serde_json::json!(axis)).unwrap();
+            }
+            let loaded: TomlConfig =
+                toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
+            // Keep the user's vector exactly; rendering normalizes it safely.
+            assert_eq!(loaded.behavior.wallpaper_earth_rotation_axis, axis);
+            assert_eq!(loaded.behavior.wallpaper_moon_rotation_axis, axis);
+            assert!(config.diagnostics().is_empty());
+        }
+        // Integer JSON arrays are valid numeric vectors too.
+        config
+            .set_value(
+                "behavior.wallpaper_moon_rotation_axis",
+                &serde_json::json!([1, -1, 0]),
+            )
+            .unwrap();
+        assert_eq!(
+            config.behavior().wallpaper_moon_rotation_axis,
+            [1.0, -1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn celestial_view_invalid_updates_are_atomic() {
         let mut config = Config::default();
         let before = toml::to_string(&config.inner).unwrap();
         let mut invalid = Vec::new();
@@ -5797,11 +6069,16 @@ mod tests {
             serde_json::json!(false),
             serde_json::json!(0),
         ] {
-            invalid.push(("wallpaper_earth_view", bad));
+            invalid.push(("wallpaper_earth_view", bad.clone()));
+            invalid.push(("wallpaper_moon_view", bad));
         }
         for (key, limit) in [
             ("wallpaper_earth_latitude", 90.0),
             ("wallpaper_earth_longitude", 180.0),
+            ("wallpaper_earth_roll", 180.0),
+            ("wallpaper_moon_latitude", 90.0),
+            ("wallpaper_moon_longitude", 180.0),
+            ("wallpaper_moon_roll", 180.0),
         ] {
             for bad in [
                 serde_json::json!(-limit - 0.000001),
@@ -5816,8 +6093,38 @@ mod tests {
                 invalid.push((key, bad));
             }
         }
+        for key in [
+            "wallpaper_earth_rotation_axis",
+            "wallpaper_moon_rotation_axis",
+        ] {
+            for bad in [
+                serde_json::json!([0, 0, 0]),
+                serde_json::json!([-0.0, 0.0, -0.0]),
+                serde_json::json!([1.000001, 0, 0]),
+                serde_json::json!([0, -1.000001, 0]),
+                serde_json::json!([0, 0, 1e100]),
+                serde_json::json!([]),
+                serde_json::json!([1]),
+                serde_json::json!([1, 0]),
+                serde_json::json!([1, 0, 0, 0]),
+                serde_json::json!([1, "0", 0]),
+                serde_json::json!([1, false, 0]),
+                serde_json::json!([1, 0, null]),
+                serde_json::json!("[0, 1, 0]"),
+                serde_json::json!({"x":0, "y":1, "z":0}),
+                serde_json::json!(1),
+                serde_json::json!(null),
+            ] {
+                invalid.push((key, bad));
+            }
+        }
         for (key, bad) in invalid {
             let key = format!("behavior.{key}");
+            assert!(
+                config.set_value(&key, &bad).is_err(),
+                "accepted {key}={bad}"
+            );
+            assert_eq!(toml::to_string(&config.inner).unwrap(), before);
             assert!(
                 config
                     .set_values(&[
@@ -5835,17 +6142,23 @@ mod tests {
     }
 
     #[test]
-    fn earth_view_toml_rejects_invalid_and_nonfinite_coordinates() {
-        let path = temporary_config_path("earth-view-invalid");
+    fn celestial_view_toml_rejects_invalid_and_nonfinite_coordinates() {
+        let path = temporary_config_path("celestial-view-invalid");
         let original: toml::Table =
             toml::from_str(&toml::to_string(&Config::default().inner).unwrap()).unwrap();
         let mut invalid = vec![
             ("wallpaper_earth_view", toml::Value::String("spin".into())),
             ("wallpaper_earth_view", toml::Value::Integer(1)),
+            ("wallpaper_moon_view", toml::Value::String("spin".into())),
+            ("wallpaper_moon_view", toml::Value::Integer(1)),
         ];
         for (key, limit) in [
             ("wallpaper_earth_latitude", 90.0),
             ("wallpaper_earth_longitude", 180.0),
+            ("wallpaper_earth_roll", 180.0),
+            ("wallpaper_moon_latitude", 90.0),
+            ("wallpaper_moon_longitude", 180.0),
+            ("wallpaper_moon_roll", 180.0),
         ] {
             for bad in [
                 -limit - 0.000001,
@@ -5859,6 +6172,48 @@ mod tests {
             invalid.push((key, toml::Value::String("25.0".into())));
             invalid.push((key, toml::Value::Boolean(true)));
         }
+        for key in [
+            "wallpaper_earth_rotation_axis",
+            "wallpaper_moon_rotation_axis",
+        ] {
+            for axis in [
+                vec![],
+                vec![1.0, 0.0],
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![1.0, 0.0, 0.0, f64::NAN],
+                vec![0.0, 0.0, 0.0],
+                vec![-0.0, 0.0, -0.0],
+                vec![1.000001, 0.0, 0.0],
+                vec![0.0, -1.000001, 0.0],
+                vec![0.0, 0.0, f64::NAN],
+                vec![f64::INFINITY, 0.0, 1.0],
+                vec![0.0, f64::NEG_INFINITY, 1.0],
+            ] {
+                invalid.push((
+                    key,
+                    toml::Value::Array(axis.into_iter().map(toml::Value::Float).collect()),
+                ));
+            }
+            invalid.push((key, toml::Value::String("[0, 1, 0]".into())));
+            invalid.push((key, toml::Value::Integer(1)));
+            invalid.push((
+                key,
+                toml::Value::Array(vec![
+                    toml::Value::Integer(1),
+                    toml::Value::Integer(0),
+                    toml::Value::Integer(0),
+                    toml::Value::String("must not be discarded".into()),
+                ]),
+            ));
+            invalid.push((
+                key,
+                toml::Value::Array(vec![
+                    toml::Value::Integer(1),
+                    toml::Value::String("0".into()),
+                    toml::Value::Integer(0),
+                ]),
+            ));
+        }
         for (key, bad) in invalid {
             let mut table = original.clone();
             table
@@ -5866,9 +6221,12 @@ mod tests {
                 .unwrap()
                 .as_table_mut()
                 .unwrap()
-                .insert(key.into(), bad);
+                .insert(key.into(), bad.clone());
             std::fs::write(&path, toml::to_string(&table).unwrap()).unwrap();
-            assert!(Config::load_from_file(&path).is_err(), "accepted {key}");
+            assert!(
+                Config::load_from_file(&path).is_err(),
+                "accepted {key}={bad}"
+            );
             if let Ok(diagnostics) = Config::validate_config_file(&path) {
                 assert!(
                     diagnostics.issues().iter().any(|issue| {
@@ -8230,7 +8588,14 @@ border_px = 3
             "wallpaper_earth_view",
             "wallpaper_earth_latitude",
             "wallpaper_earth_longitude",
+            "wallpaper_earth_roll",
+            "wallpaper_earth_rotation_axis",
             "wallpaper_earth_rotation_minutes",
+            "wallpaper_moon_view",
+            "wallpaper_moon_latitude",
+            "wallpaper_moon_longitude",
+            "wallpaper_moon_roll",
+            "wallpaper_moon_rotation_axis",
             "wallpaper_moon_rotation_minutes",
             "wallpaper_astronomy_timezone",
             "wallpaper_timezone_offset_hours",
@@ -8256,6 +8621,9 @@ border_px = 3
         assert!(first.contains("wallpaper_earth_view = \"fixed\""));
         assert!(first.contains("wallpaper_earth_latitude = 23.13"));
         assert!(first.contains("wallpaper_earth_longitude = 113.28"));
+        assert!(first.contains("wallpaper_earth_roll = 0.0"));
+        assert!(first.contains("wallpaper_moon_view = \"rotating\""));
+        assert!(first.contains("wallpaper_moon_roll = 0.0"));
         assert_eq!(Config::add_option_comments(&first), first);
         let loaded = Config::load_from_file(&path).unwrap();
         assert_eq!(
