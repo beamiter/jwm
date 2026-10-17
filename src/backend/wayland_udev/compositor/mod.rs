@@ -616,12 +616,14 @@ pub(crate) fn glass_domain_index(scene_linear: bool) -> usize {
 }
 
 pub(crate) struct MonitorWallpaper {
+    pub(crate) identity: Option<u64>,
     pub mon_x: i32,
     pub mon_y: i32,
     pub mon_w: u32,
     pub mon_h: u32,
     pub texture: Option<u32>,
     pub mode: WallpaperMode,
+    pub requested_mode: WallpaperMode,
     pub img_w: u32,
     pub img_h: u32,
     /// Currently-loaded wallpaper path (used to skip reloads when active tags
@@ -1547,8 +1549,9 @@ pub(crate) struct WaylandCompositor {
     wallpaper_img_w: u32,
     wallpaper_img_h: u32,
     monitor_wallpapers: Vec<MonitorWallpaper>,
-    pending_wallpaper: Option<std::sync::mpsc::Receiver<WallpaperImageData>>,
-    pending_monitor_wallpapers: Vec<(usize, std::sync::mpsc::Receiver<WallpaperImageData>)>,
+    monitor_identities: Vec<u64>,
+    pending_wallpaper: Option<wallpaper::DeferredWallpaperLoad>,
+    pending_monitor_wallpapers: Vec<(usize, wallpaper::DeferredWallpaperLoad)>,
     /// Raw wallpaper textures detached while no GL context is available.
     /// They are deleted at the beginning of the next rendered frame.
     retired_wallpaper_textures: Vec<u32>,
@@ -1749,7 +1752,7 @@ pub(crate) struct WaylandCompositor {
     /// In-flight decode for the side preview. Replaced on every new request;
     /// the dropped receiver makes the superseded worker's send a no-op, so
     /// held-down arrow keys never queue a backlog.
-    pending_system_ui_preview: Option<std::sync::mpsc::Receiver<WallpaperImageData>>,
+    pending_system_ui_preview: Option<wallpaper::DeferredWallpaperLoad>,
     /// The open panel's row-icon band: resolved raster paths aligned with the
     /// overlay's items, picked up from `compositor_common::row_icons` on every
     /// sync. `Some` reserves the list's icon column; `None` (any other panel,
@@ -3059,6 +3062,7 @@ impl WaylandCompositor {
                 wallpaper_img_w: 0,
                 wallpaper_img_h: 0,
                 monitor_wallpapers: Vec::new(),
+                monitor_identities: Vec::new(),
                 pending_wallpaper: None,
                 pending_monitor_wallpapers: Vec::new(),
                 retired_wallpaper_textures: Vec::new(),
@@ -5194,6 +5198,20 @@ impl WaylandCompositor {
                 ),
             };
 
+            if crate::backend::compositor_common::wallpaper::wallpaper_resize_needs_reload(
+                &self.wallpaper_path,
+                self.wallpaper_requested_mode,
+                (self.screen_w, self.screen_h),
+                (w, h),
+            ) {
+                self.wallpaper_load_failed = false;
+                self.pending_wallpaper = Some(Self::load_wallpaper_async(
+                    &self.wallpaper_path,
+                    w,
+                    h,
+                    self.wallpaper_requested_mode,
+                ));
+            }
             self.screen_w = w;
             self.screen_h = h;
             self.sysui_text_dirty = true;

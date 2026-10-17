@@ -3644,6 +3644,9 @@ pub trait CompositorWorkspaceEffects: Send {
     }
 
     fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _width: u32, _height: u32) {}
+    /// Stable policy monitor keys, separate from dense configuration slots.
+    fn compositor_set_monitor_identities(&mut self, _identities: &[u64]) {}
+
     fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {}
 
     /// Replace the set of outputs covered by a per-monitor lock shade. An

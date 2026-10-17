@@ -229,8 +229,9 @@ pub struct FeatureStates {
     /// directory and the images in it. A large folder or a network mount
     /// can take seconds to read, so the picker opens scanning and the frame
     /// tick fills it in; a picker closed meanwhile drops the answer.
-    pub wallpaper_listing:
-        Option<connectivity::BackgroundJob<(std::path::PathBuf, Vec<std::path::PathBuf>)>>,
+    pub wallpaper_listing: Option<connectivity::BackgroundJob<wallpaper::WallpaperListing>>,
+    /// Cancels obsolete scans when the picker closes or is replaced.
+    pub wallpaper_scan_cancellation: Option<wallpaper::ScanCancellation>,
     /// Compositor-off root wallpaper decode, if one is in flight.
     pub native_root_job: Option<connectivity::BackgroundJob<Option<native_root::NativeRootPixels>>>,
     /// Fingerprint of the native root picture last requested, so a still

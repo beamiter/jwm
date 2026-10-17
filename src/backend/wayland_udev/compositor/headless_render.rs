@@ -5343,12 +5343,14 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
         compositor.wallpaper_texture = Some(cached_textures[8]);
         compositor.old_wallpaper_texture = Some(cached_textures[9]);
         compositor.monitor_wallpapers.push(super::MonitorWallpaper {
+            identity: None,
             mon_x: 0,
             mon_y: 0,
             mon_w: 1,
             mon_h: 1,
             texture: Some(cached_textures[10]),
             mode: crate::backend::compositor_common::wallpaper::WallpaperMode::Fill,
+            requested_mode: crate::backend::compositor_common::wallpaper::WallpaperMode::Fill,
             img_w: 1,
             img_h: 1,
             current_path: String::new(),

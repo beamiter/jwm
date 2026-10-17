@@ -1298,6 +1298,7 @@ impl<C: CompositorConnection> Compositor<C> {
             wallpaper_img_w: 0,
             wallpaper_img_h: 0,
             monitor_wallpapers: Vec::new(),
+            monitor_identities: Vec::new(),
             // Phase 6.1: Colorblind correction
             colorblind_mode: match behavior.colorblind_mode.as_str() {
                 "deuteranopia" => 1,

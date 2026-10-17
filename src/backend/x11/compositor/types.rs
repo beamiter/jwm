@@ -622,12 +622,14 @@ pub(super) struct PortalUniforms {
 }
 
 pub(super) struct MonitorWallpaper {
+    pub(crate) identity: Option<u64>,
     pub(super) mon_x: i32,
     pub(super) mon_y: i32,
     pub(super) mon_w: u32,
     pub(super) mon_h: u32,
     pub(super) texture: Option<glow::Texture>,
     pub(super) mode: WallpaperMode,
+    pub(super) requested_mode: WallpaperMode,
     pub(super) img_w: u32,
     pub(super) img_h: u32,
     pub(super) current_path: String,

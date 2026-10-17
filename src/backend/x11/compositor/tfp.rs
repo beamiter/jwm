@@ -452,6 +452,20 @@ impl<C: CompositorConnection> Compositor<C> {
             new_w,
             new_h
         );
+        if crate::backend::compositor_common::wallpaper::wallpaper_resize_needs_reload(
+            &self.wallpaper_path,
+            self.wallpaper_requested_mode,
+            (self.screen_w, self.screen_h),
+            (new_w, new_h),
+        ) {
+            self.wallpaper_load_failed = false;
+            self.pending_wallpaper = Some(Self::load_wallpaper_async(
+                &self.wallpaper_path,
+                new_w,
+                new_h,
+                self.wallpaper_requested_mode,
+            ));
+        }
         self.screen_w = new_w;
         self.screen_h = new_h;
         self.sysui_text_dirty = true;

@@ -8880,7 +8880,7 @@ mod tests {
 
         jwm.features.wallpaper_listing =
             Some(crate::jwm::features::connectivity::BackgroundJob::spawn(
-                || (std::path::PathBuf::new(), Vec::new()),
+                || (std::path::PathBuf::new(), Vec::new()).into(),
             ));
         assert!(
             !jwm.background_job_readiness_is_complete(),
@@ -8890,7 +8890,7 @@ mod tests {
         jwm.async_update_notifier =
             Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
         let job = crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
-            (std::path::PathBuf::new(), Vec::new())
+            (std::path::PathBuf::new(), Vec::new()).into()
         });
         jwm.features.wallpaper_listing = Some(jwm.track_background_job(job));
         assert!(

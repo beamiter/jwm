@@ -23,6 +23,74 @@ pub(crate) fn wallpaper_request_needs_reload(
     load_failed || current_path != new_path || current_mode != new_mode
 }
 
+/// A moved/reordered output may keep an existing decode/texture only when its
+/// content and sampling target are unchanged. Failed loads retry on refresh.
+pub(crate) fn wallpaper_texture_reusable(
+    previous: (&str, WallpaperMode, u32, u32),
+    requested: (&str, WallpaperMode, u32, u32),
+    load_failed: bool,
+) -> bool {
+    !load_failed && previous == requested
+}
+
+/// Stable identity is independent of the dense slot used for user configuration.
+/// Before the policy publishes keys (startup only), geometry is the fallback.
+#[derive(Clone, Copy)]
+pub(crate) struct WallpaperOutputKey<'a> {
+    pub identity: Option<u64>,
+    pub position: (i32, i32),
+    pub image: (&'a str, WallpaperMode, u32, u32),
+    pub failed: bool,
+}
+
+/// Each old owner is consumed at most once. A changed request still keeps its
+/// own visible texture; only an unchanged request carries its pending job along.
+pub(crate) fn wallpaper_output_plan(
+    previous: &[WallpaperOutputKey<'_>],
+    requested: &[WallpaperOutputKey<'_>],
+) -> Vec<(Option<usize>, bool)> {
+    let mut used = vec![false; previous.len()];
+    requested
+        .iter()
+        .map(|new| {
+            let index = previous.iter().enumerate().position(|(i, old)| {
+                !used[i]
+                    && match (old.identity, new.identity) {
+                        (Some(a), Some(b)) => a == b,
+                        (None, None) => old.position == new.position,
+                        _ => false,
+                    }
+            });
+            let reuse = index.is_some_and(|i| {
+                wallpaper_texture_reusable(previous[i].image, new.image, previous[i].failed)
+            });
+            if let Some(i) = index {
+                used[i] = true;
+            }
+            (index, reuse)
+        })
+        .collect()
+}
+
+pub(crate) fn wallpaper_resize_needs_reload(
+    path: &str,
+    mode: WallpaperMode,
+    old: (u32, u32),
+    new: (u32, u32),
+) -> bool {
+    !path.is_empty() && mode != WallpaperMode::Center && (new.0 > old.0 || new.1 > old.1)
+}
+
+pub(crate) fn uses_global_wallpaper_fallback(
+    resolved_path: &str,
+    resolved_mode: WallpaperMode,
+    global_path: &str,
+    global_mode: WallpaperMode,
+    daily_rotation: bool,
+) -> bool {
+    !daily_rotation && resolved_path == global_path && resolved_mode == global_mode
+}
+
 pub(crate) struct WallpaperImageData {
     pub(crate) rgba: Vec<u8>,
     pub(crate) width: u32,
@@ -103,6 +171,160 @@ pub(crate) fn compute_wallpaper_rect(
             (ax + (aw - dw) * 0.5, ay + (ah - dh) * 0.5, dw, dh)
         }
         WallpaperMode::Center => (ax + (aw - iw) * 0.5, ay + (ah - ih) * 0.5, iw, ih),
+    }
+}
+
+/// Resize only when it removes source pixels that cannot improve the displayed image.
+/// Fill must preserve enough detail on *both* axes, whereas Fit uses the smaller
+/// ratio. Center is deliberately never rescaled: it is a native-pixel crop.
+pub(crate) fn prepare_wallpaper_image(
+    image: image::DynamicImage,
+    target_w: u32,
+    target_h: u32,
+    mode: WallpaperMode,
+) -> image::DynamicImage {
+    use image::imageops::FilterType;
+    let (w, h) = (image.width(), image.height());
+    if target_w == 0 || target_h == 0 || w == 0 || h == 0 {
+        return image;
+    }
+    match mode {
+        WallpaperMode::Center => image,
+        WallpaperMode::Stretch => {
+            let (dw, dh) = (w.min(target_w), h.min(target_h));
+            if (dw, dh) == (w, h) {
+                image
+            } else {
+                image.resize_exact(dw, dh, FilterType::Lanczos3)
+            }
+        }
+        WallpaperMode::Fill | WallpaperMode::Fit => {
+            let sx = target_w as f64 / w as f64;
+            let sy = target_h as f64 / h as f64;
+            let scale = if mode == WallpaperMode::Fill {
+                sx.max(sy)
+            } else {
+                sx.min(sy)
+            }
+            .min(1.0);
+            if scale >= 1.0 {
+                return image;
+            }
+            // Ceil prevents Fill losing its last covering pixel through rounding.
+            let dw = (w as f64 * scale).ceil().max(1.0) as u32;
+            let dh = (h as f64 * scale).ceil().max(1.0) as u32;
+            image.resize_exact(dw, dh, FilterType::Lanczos3)
+        }
+    }
+}
+
+pub(crate) fn wallpaper_fade(progress: f32) -> f32 {
+    let t = progress.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    #[test]
+    fn reordered_changed_output_retains_its_owner_and_drops_only_its_pending_job() {
+        let key = |id, path| WallpaperOutputKey {
+            identity: Some(id),
+            position: (0, 0),
+            image: (path, WallpaperMode::Fill, 100, 100),
+            failed: false,
+        };
+        let old = [key(11, "a"), key(22, "b")];
+        assert_eq!(
+            wallpaper_output_plan(&old, &[key(22, "b2"), key(11, "a")]),
+            vec![(Some(1), false), (Some(0), true)]
+        );
+        assert_eq!(
+            wallpaper_output_plan(&old, &[key(22, "b2")]),
+            vec![(Some(1), false)]
+        );
+        let mut changed = key(22, "b");
+        changed.image.1 = WallpaperMode::Center;
+        changed.image.2 = 200;
+        assert_eq!(
+            wallpaper_output_plan(&old, &[changed]),
+            vec![(Some(1), false)]
+        );
+        let mut failed = key(22, "b");
+        failed.failed = true;
+        assert_eq!(
+            wallpaper_output_plan(&[key(11, "a"), failed], &[key(22, "b")]),
+            vec![(Some(1), false)]
+        );
+        assert_eq!(
+            wallpaper_output_plan(&old, &[key(33, "b")]),
+            vec![(None, false)]
+        );
+        assert_eq!(
+            wallpaper_output_plan(&old, &[key(11, "a"), key(11, "a")]),
+            vec![(Some(0), true), (None, false)]
+        );
+    }
+    #[test]
+    fn global_resampling_only_requires_growth_and_never_changes_center_pixels() {
+        assert!(wallpaper_resize_needs_reload(
+            "a",
+            WallpaperMode::Fit,
+            (100, 100),
+            (200, 100)
+        ));
+        assert!(!wallpaper_resize_needs_reload(
+            "a",
+            WallpaperMode::Center,
+            (100, 100),
+            (200, 200)
+        ));
+        assert!(!wallpaper_resize_needs_reload(
+            "a",
+            WallpaperMode::Fill,
+            (200, 200),
+            (100, 100)
+        ));
+        assert!(!wallpaper_resize_needs_reload(
+            "",
+            WallpaperMode::Fit,
+            (100, 100),
+            (200, 100)
+        ));
+    }
+    #[test]
+    fn texture_reuse_ignores_position_but_checks_content_size_and_failure() {
+        let old = ("a.png", WallpaperMode::Fill, 1920, 1080);
+        assert!(wallpaper_texture_reusable(old, old, false));
+        assert!(!wallpaper_texture_reusable(old, old, true));
+        for new in [
+            ("b.png", WallpaperMode::Fill, 1920, 1080),
+            ("a.png", WallpaperMode::Fit, 1920, 1080),
+            ("a.png", WallpaperMode::Fill, 2560, 1440),
+        ] {
+            assert!(!wallpaper_texture_reusable(old, new, false));
+        }
+    }
+    #[test]
+    fn modes_preserve_native_center_and_fill_detail() {
+        for (mode, size) in [
+            (WallpaperMode::Fill, (400, 100)),
+            (WallpaperMode::Fit, (100, 25)),
+            (WallpaperMode::Stretch, (100, 100)),
+            (WallpaperMode::Center, (800, 200)),
+        ] {
+            let image =
+                prepare_wallpaper_image(image::DynamicImage::new_rgba8(800, 200), 100, 100, mode);
+            assert_eq!((image.width(), image.height()), size);
+        }
+    }
+    #[test]
+    fn smoothstep_has_exact_endpoints_and_symmetric_midpoint() {
+        assert_eq!(wallpaper_fade(-1.0), 0.0);
+        assert_eq!(wallpaper_fade(2.0), 1.0);
+        assert_eq!(wallpaper_fade(0.5), 0.5);
+        assert!(wallpaper_fade(0.1) < 0.1);
+        assert!((wallpaper_fade(0.25) + wallpaper_fade(0.75) - 1.0).abs() < 1e-6);
     }
 }
 

@@ -1798,94 +1798,141 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
-    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
-        // Detect topology change: if monitor count or geometry differs we have to
-        // tear down existing per-monitor wallpaper textures. If only `active_tags`
-        // changed (typical view/toggleview path), keep existing textures and just
-        // re-resolve paths so unchanged monitors don't trigger a reload.
-        let geometry_changed = self.monitors.len() != monitors.len()
-            || self
-                .monitors
-                .iter()
-                .zip(monitors.iter())
-                .any(|(a, b)| (a.0, a.1, a.2, a.3, a.4) != (b.0, b.1, b.2, b.3, b.4));
+    pub(crate) fn set_monitor_identities(&mut self, identities: &[u64]) {
+        self.monitor_identities = identities.to_vec();
+    }
 
+    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
         self.monitors = monitors.to_vec();
         self.per_monitor_renderer.set_monitors(monitors);
-
-        let cfg = CONFIG.load();
+        let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
         let day = chrono::Datelike::num_days_from_ce(&chrono::Local::now().date_naive());
-
-        if geometry_changed {
-            self.retired_wallpaper_textures.extend(
-                self.monitor_wallpapers
-                    .drain(..)
-                    .filter_map(|wallpaper| wallpaper.texture),
-            );
-            self.pending_monitor_wallpapers.clear();
-        }
-
-        for (slot, &(idx, x, y, w, h, active_tags)) in monitors.iter().enumerate() {
-            let (path, mode_str) = resolve_wallpaper_for_tag_at(
-                behavior,
-                if behavior.wallpaper_rotation == "daily" {
-                    slot as u32
-                } else {
-                    idx
-                },
-                active_tags,
-                day,
-            );
-            let path = path.to_string();
-            let mode = parse_wallpaper_mode(mode_str);
-
-            if geometry_changed {
-                if !path.is_empty() {
-                    let rx = Self::load_wallpaper_async(&path, w, h, mode);
-                    self.pending_monitor_wallpapers.push((slot, rx));
-                }
-                self.monitor_wallpapers.push(MonitorWallpaper {
-                    mon_x: x,
-                    mon_y: y,
-                    mon_w: w,
-                    mon_h: h,
-                    texture: None,
-                    mode,
-                    img_w: 0,
-                    img_h: 0,
-                    current_path: path,
-                    load_failed: false,
-                });
-            } else if let Some(mw) = self.monitor_wallpapers.get_mut(slot) {
-                if crate::backend::compositor_common::wallpaper::wallpaper_request_needs_reload(
-                    &mw.current_path,
-                    mw.mode,
-                    &path,
-                    mode,
-                    mw.load_failed,
-                ) {
-                    mw.load_failed = false;
-                    // A newer request supersedes any decode still in flight for
-                    // this monitor; otherwise the older result can win the race.
-                    self.pending_monitor_wallpapers
-                        .retain(|(mon_idx, _)| *mon_idx != slot);
-                    mw.mode = mode;
-                    mw.current_path = path.clone();
-                    if !path.is_empty() {
-                        let rx = Self::load_wallpaper_async(&path, w, h, mode);
-                        self.pending_monitor_wallpapers.push((slot, rx));
+        let mut previous: Vec<_> = std::mem::take(&mut self.monitor_wallpapers)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut pending = std::mem::take(&mut self.pending_monitor_wallpapers);
+        let wanted: Vec<_> = monitors
+            .iter()
+            .enumerate()
+            .map(|(slot, &(idx, x, y, w, h, tags))| {
+                let (path, mode) = resolve_wallpaper_for_tag_at(
+                    behavior,
+                    if behavior.wallpaper_rotation == "daily" {
+                        slot as u32
                     } else {
-                        if let Some(texture) = mw.texture.take() {
-                            self.retired_wallpaper_textures.push(texture);
-                        }
-                        mw.img_w = 0;
-                        mw.img_h = 0;
+                        idx
+                    },
+                    tags,
+                    day,
+                );
+                let mode = parse_wallpaper_mode(mode);
+                let global =
+                    crate::backend::compositor_common::wallpaper::uses_global_wallpaper_fallback(
+                        path,
+                        mode,
+                        &behavior.wallpaper,
+                        parse_wallpaper_mode(&behavior.wallpaper_mode),
+                        behavior.wallpaper_rotation == "daily",
+                    );
+                (
+                    self.monitor_identities.get(slot).copied(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    if global {
+                        String::new()
+                    } else {
+                        path.to_owned()
+                    },
+                    mode,
+                )
+            })
+            .collect();
+        use crate::backend::compositor_common::wallpaper::{
+            WallpaperOutputKey, wallpaper_output_plan,
+        };
+        let previous_keys: Vec<_> = previous
+            .iter()
+            .map(|old| {
+                let old = old.as_ref().unwrap();
+                WallpaperOutputKey {
+                    identity: old.identity,
+                    position: (old.mon_x, old.mon_y),
+                    image: (&old.current_path, old.requested_mode, old.mon_w, old.mon_h),
+                    failed: old.load_failed,
+                }
+            })
+            .collect();
+        let requested_keys: Vec<_> = wanted
+            .iter()
+            .map(|(identity, x, y, w, h, path, mode)| WallpaperOutputKey {
+                identity: *identity,
+                position: (*x, *y),
+                image: (path, *mode, *w, *h),
+                failed: false,
+            })
+            .collect();
+        let plan = wallpaper_output_plan(&previous_keys, &requested_keys);
+        for (slot, (identity, x, y, w, h, path, mode)) in wanted.into_iter().enumerate() {
+            let (previous_index, reuse) = plan[slot];
+            let old_index = previous_index.filter(|_| reuse);
+            let mut wallpaper =
+                previous_index
+                    .and_then(|i| previous[i].take())
+                    .unwrap_or(MonitorWallpaper {
+                        identity,
+                        mon_x: x,
+                        mon_y: y,
+                        mon_w: w,
+                        mon_h: h,
+                        texture: None,
+                        mode,
+                        requested_mode: mode,
+                        img_w: 0,
+                        img_h: 0,
+                        current_path: String::new(),
+                        load_failed: false,
+                    });
+            wallpaper.identity = identity;
+            wallpaper.mon_x = x;
+            wallpaper.mon_y = y;
+            wallpaper.mon_w = w;
+            wallpaper.mon_h = h;
+            if let Some(old_index) = old_index {
+                if let Some(index) = pending.iter().position(|(index, _)| *index == old_index) {
+                    let (_, load) = pending.swap_remove(index);
+                    self.pending_monitor_wallpapers.push((slot, load));
+                }
+            } else {
+                wallpaper.current_path = path.clone();
+                wallpaper.requested_mode = mode;
+                wallpaper.load_failed = false;
+                if path.is_empty() {
+                    if let Some(texture) = wallpaper.texture.take() {
+                        self.retired_wallpaper_textures.push(texture);
                     }
+                    wallpaper.mode = mode;
+                    wallpaper.img_w = 0;
+                    wallpaper.img_h = 0;
+                } else {
+                    // Keep the visible image and its mode until the replacement
+                    // decode AND GPU upload have succeeded.
+                    self.pending_monitor_wallpapers
+                        .push((slot, Self::load_wallpaper_async(&path, w, h, mode)));
                 }
             }
+            self.monitor_wallpapers.push(wallpaper);
         }
-
+        for mut wallpaper in previous.into_iter().flatten() {
+            if let Some(texture) = wallpaper.texture.take() {
+                self.retired_wallpaper_textures.push(texture);
+            }
+        }
+        // Any unmatched request is cancelled by dropping its lazy queue slot.
+        drop(pending);
         self.needs_render = true;
     }
 

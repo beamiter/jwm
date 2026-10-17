@@ -7,9 +7,7 @@ use crate::backend::compositor_common::wallpaper::{
     PREVIEW_THUMB_EDGE, compute_wallpaper_rect, parse_wallpaper_mode,
 };
 use smithay::backend::renderer::gles::ffi;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
 type GlScissor = [i32; 4];
@@ -91,190 +89,22 @@ fn monitor_crossfade_layers(
 /// its own layout). Re-laying out the old image early would show it in the
 /// wrong mode for the whole decode, and forever if the decode fails.
 ///
-/// The mode applies at once only when no new image is coming: the wallpaper
-/// is being cleared, or the request keeps the current path with no decode in
-/// flight and the last request succeeded, so the visible texture is already
-/// that path's image. A failed request may still be showing an older image.
+/// Only clearing applies a mode immediately. Every nonempty request decodes
+/// again, including a same-path mode change: mode-aware downsampling means
+/// the currently visible texture may not have the new mode's required pixels.
 fn wallpaper_mode_on_request(
-    current_path: &str,
-    decode_in_flight: bool,
-    load_failed: bool,
     current_mode: WallpaperMode,
     requested_path: &str,
     requested_mode: WallpaperMode,
 ) -> WallpaperMode {
-    let same_image = requested_path == current_path && !decode_in_flight && !load_failed;
-    if requested_path.is_empty() || same_image {
+    if requested_path.is_empty() {
         requested_mode
     } else {
         current_mode
     }
 }
 
-/// Counting gate bounding how many wallpaper images decode concurrently.
-/// Each decode does `image::open` + a Lanczos3 downscale, which is heavy on CPU
-/// and transiently holds a full decoded image in memory. Rapid wallpaper changes
-/// or output hotplug (one decode per monitor in `set_monitors`) would otherwise
-/// run an unbounded number of such decodes at once.
-struct DecodeGate {
-    /// The number of currently-available decode permits.
-    available: Mutex<usize>,
-    freed: Condvar,
-}
-
-impl DecodeGate {
-    const fn new(permits: usize) -> Self {
-        Self {
-            available: Mutex::new(permits),
-            freed: Condvar::new(),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, usize> {
-        self.available.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Block until a permit is free.
-    fn acquire(&self) -> DecodePermit<'_> {
-        let mut available = self.lock();
-        while *available == 0 {
-            available = self
-                .freed
-                .wait(available)
-                .unwrap_or_else(|e| e.into_inner());
-        }
-        *available -= 1;
-        DecodePermit { gate: self }
-    }
-
-    /// Block until a permit is free, or give up once `cancelled` reports
-    /// true. The token is re-read on every wake-up; [`Self::wake_all`] is how
-    /// a canceller makes blocked waiters look at it.
-    fn acquire_unless(&self, cancelled: impl Fn() -> bool) -> Option<DecodePermit<'_>> {
-        let mut available = self.lock();
-        loop {
-            if cancelled() {
-                // `notify_one` may have picked this waiter for a freed permit
-                // it no longer wants; hand the wake-up on, or a waiter that
-                // still wants the permit sleeps beside a free one.
-                if *available > 0 {
-                    self.freed.notify_one();
-                }
-                return None;
-            }
-            if *available > 0 {
-                *available -= 1;
-                return Some(DecodePermit { gate: self });
-            }
-            available = self
-                .freed
-                .wait(available)
-                .unwrap_or_else(|e| e.into_inner());
-        }
-    }
-
-    /// Wake every blocked waiter so cancellable ones re-check their token;
-    /// the others find no permit and wait again. Taking the lock orders the
-    /// wake-up after a waiter's check, so none can miss it.
-    fn wake_all(&self) {
-        let _available = self.lock();
-        self.freed.notify_all();
-    }
-}
-
-/// The process-wide decode gate shared by wallpaper loads and side previews.
-fn decode_gate() -> &'static DecodeGate {
-    static GATE: OnceLock<DecodeGate> = OnceLock::new();
-    GATE.get_or_init(|| {
-        let max = std::thread::available_parallelism()
-            .map(|n| n.get().min(4))
-            .unwrap_or(2);
-        DecodeGate::new(max)
-    })
-}
-
-/// RAII permit for a [`DecodeGate`]; returns the permit on drop (covering
-/// early returns and panics).
-struct DecodePermit<'a> {
-    gate: &'a DecodeGate,
-}
-
-impl Drop for DecodePermit<'_> {
-    fn drop(&mut self) {
-        let mut available = self.gate.lock();
-        *available += 1;
-        self.gate.freed.notify_one();
-    }
-}
-
-/// Latest-wins tickets for the wallpaper picker's side preview.
-///
-/// A held arrow key moves the highlight faster than a full-size image
-/// decodes. Dropping a superseded request's receiver only discards its
-/// result; without a ticket every superseded worker still queued on the
-/// shared gate, decoded its whole image and delayed both the preview the user
-/// is looking at and any real wallpaper change behind it.
-struct PreviewRequests {
-    latest: AtomicU64,
-}
-
-impl PreviewRequests {
-    const fn new() -> Self {
-        Self {
-            latest: AtomicU64::new(0),
-        }
-    }
-
-    /// Issue the ticket for a new request, superseding every earlier one, and
-    /// wake the decodes blocked on `gate` so the superseded ones leave now.
-    fn supersede(&self, gate: &DecodeGate) -> u64 {
-        let ticket = self.latest.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        gate.wake_all();
-        ticket
-    }
-
-    fn is_current(&self, ticket: u64) -> bool {
-        self.latest.load(Ordering::Acquire) == ticket
-    }
-}
-
-static SIDE_PREVIEW_REQUESTS: PreviewRequests = PreviewRequests::new();
-
-/// Decode one side-preview thumbnail unless a newer request supersedes it
-/// first. The check runs while waiting for a permit and again after `open`,
-/// the long part: a highlight that moved on meanwhile does not need the
-/// resize either.
-fn decode_side_preview(
-    gate: &DecodeGate,
-    requests: &PreviewRequests,
-    ticket: u64,
-    open: impl FnOnce() -> Option<image::DynamicImage>,
-) -> Option<WallpaperImageData> {
-    let stale = || !requests.is_current(ticket);
-    // Bound concurrent decodes; released when this returns.
-    let _permit = gate.acquire_unless(stale)?;
-    let img = open()?;
-    if stale() {
-        return None;
-    }
-    let img = if img.width() > PREVIEW_THUMB_EDGE || img.height() > PREVIEW_THUMB_EDGE {
-        img.resize(
-            PREVIEW_THUMB_EDGE,
-            PREVIEW_THUMB_EDGE,
-            image::imageops::FilterType::Lanczos3,
-        )
-    } else {
-        img
-    };
-    let rgba = img.to_rgba8();
-    let (width, height) = (rgba.width(), rgba.height());
-    Some(WallpaperImageData {
-        rgba: rgba.into_raw(),
-        width,
-        height,
-        mode: WallpaperMode::Fit,
-    })
-}
+pub(super) use crate::backend::compositor_common::wallpaper_decode::DeferredWallpaperLoad;
 
 impl WaylandCompositor {
     // =========================================================================
@@ -291,47 +121,10 @@ impl WaylandCompositor {
         max_w: u32,
         max_h: u32,
         mode: WallpaperMode,
-    ) -> mpsc::Receiver<WallpaperImageData> {
-        let (tx, rx) = mpsc::channel();
-        let path = path.to_string();
-        std::thread::spawn(move || {
-            // Bound concurrent decodes; released when this thread exits.
-            let _permit = decode_gate().acquire();
-            let img =
-                match crate::backend::compositor_common::image_source::open_regular_image(&path) {
-                    Ok(img) => img,
-                    Err(e) => {
-                        log::warn!("[wallpaper] failed to load '{}': {}", path, e);
-                        return;
-                    }
-                };
-
-            let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
-                log::info!(
-                    "[wallpaper] downscaling '{}' from {}x{} to fit {}x{}",
-                    path,
-                    img.width(),
-                    img.height(),
-                    max_w,
-                    max_h,
-                );
-                img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
-            } else {
-                img
-            };
-
-            let rgba = img.to_rgba8();
-            let (w, h) = (rgba.width(), rgba.height());
-            log::info!("[wallpaper] decoded '{}' ({}x{})", path, w, h);
-
-            let _ = tx.send(WallpaperImageData {
-                rgba: rgba.into_raw(),
-                width: w,
-                height: h,
-                mode,
-            });
-        });
-        rx
+    ) -> DeferredWallpaperLoad {
+        crate::backend::compositor_common::wallpaper_decode::load_wallpaper(
+            path, max_w, max_h, mode,
+        )
     }
 
     /// Decode a wallpaper picker's side-preview thumbnail on a background
@@ -339,35 +132,13 @@ impl WaylandCompositor {
     /// gate, Lanczos3 downscale, channel back — but bounded to a thumbnail,
     /// latest-wins, and quiet about it: an unreadable candidate is a
     /// no-preview, not a warning the user cannot act on.
-    pub(crate) fn load_system_ui_preview_async(path: &str) -> mpsc::Receiver<WallpaperImageData> {
-        let (tx, rx) = mpsc::channel();
-        let path = path.to_string();
-        let gate = decode_gate();
-        // Issuing this ticket supersedes every earlier preview: a worker still
-        // waiting for a permit leaves at once, and one mid-decode skips its
-        // resize, so a held arrow key costs at most the decodes in flight.
-        let ticket = SIDE_PREVIEW_REQUESTS.supersede(gate);
-        let spawned = std::thread::Builder::new()
-            .name("jwm-preview".to_string())
-            .spawn(move || {
-                let preview = decode_side_preview(gate, &SIDE_PREVIEW_REQUESTS, ticket, || {
-                    crate::backend::compositor_common::image_source::open_regular_image(&path)
-                        .map_err(|e| {
-                            log::debug!("[wallpaper] no side preview for '{}': {}", path, e)
-                        })
-                        .ok()
-                });
-                if let Some(data) = preview {
-                    let _ = tx.send(data);
-                }
-            });
-        if let Err(error) = spawned {
-            // The sender went down with the closure, so the poll sees a
-            // disconnected channel: no preview until the highlight moves,
-            // rather than a panic on the compositor thread.
-            log::warn!("[wallpaper] could not start a side-preview decode: {error}");
-        }
-        rx
+    pub(crate) fn load_system_ui_preview_async(path: &str) -> DeferredWallpaperLoad {
+        Self::load_wallpaper_async(
+            path,
+            PREVIEW_THUMB_EDGE,
+            PREVIEW_THUMB_EDGE,
+            WallpaperMode::Fit,
+        )
     }
 
     // =========================================================================
@@ -381,7 +152,11 @@ impl WaylandCompositor {
         gl: &ffi::Gles2,
         data: &WallpaperImageData,
     ) -> Option<(u32, u32, u32)> {
-        if data.rgba.is_empty() || data.width == 0 || data.height == 0 {
+        let expected = usize::try_from(data.width)
+            .ok()?
+            .checked_mul(usize::try_from(data.height).ok()?)?
+            .checked_mul(4)?;
+        if data.rgba.len() != expected || data.width == 0 || data.height == 0 {
             log::warn!("[wallpaper] upload skipped: empty image data");
             return None;
         }
@@ -394,6 +169,33 @@ impl WaylandCompositor {
                 return None;
             }
 
+            let mut max_size = 0;
+            gl.GetIntegerv(ffi::MAX_TEXTURE_SIZE, &mut max_size);
+            if data.width > max_size.max(0) as u32 || data.height > max_size.max(0) as u32 {
+                gl.DeleteTextures(1, &tex);
+                return None;
+            }
+            let mut previous_texture = 0;
+            let mut previous_unpack = 0;
+            gl.GetIntegerv(ffi::TEXTURE_BINDING_2D, &mut previous_texture);
+            gl.GetIntegerv(ffi::PIXEL_UNPACK_BUFFER_BINDING, &mut previous_unpack);
+            let unpack_names = [
+                ffi::UNPACK_ALIGNMENT,
+                ffi::UNPACK_ROW_LENGTH,
+                ffi::UNPACK_SKIP_ROWS,
+                ffi::UNPACK_SKIP_PIXELS,
+            ];
+            let mut unpack_values = [0; 4];
+            for (name, value) in unpack_names.into_iter().zip(&mut unpack_values) {
+                gl.GetIntegerv(name, value);
+                gl.PixelStorei(name, if name == ffi::UNPACK_ALIGNMENT { 1 } else { 0 });
+            }
+            gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
+            for _ in 0..8 {
+                if gl.GetError() == ffi::NO_ERROR {
+                    break;
+                }
+            }
             gl.BindTexture(ffi::TEXTURE_2D, tex);
 
             gl.TexImage2D(
@@ -421,7 +223,17 @@ impl WaylandCompositor {
                 ffi::CLAMP_TO_EDGE as i32,
             );
 
-            gl.BindTexture(ffi::TEXTURE_2D, 0);
+            let upload_error = gl.GetError();
+            gl.BindTexture(ffi::TEXTURE_2D, previous_texture as u32);
+            gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, previous_unpack as u32);
+            for (name, value) in unpack_names.into_iter().zip(unpack_values) {
+                gl.PixelStorei(name, value);
+            }
+            if upload_error != ffi::NO_ERROR {
+                gl.DeleteTextures(1, &tex);
+                log::warn!("wallpaper: upload failed with GL error 0x{upload_error:x}");
+                return None;
+            }
 
             log::info!(
                 "[wallpaper] uploaded texture id={} ({}x{})",
@@ -605,7 +417,7 @@ impl WaylandCompositor {
             let elapsed_ms = start.elapsed().as_millis() as u64;
             let duration = self.wallpaper_crossfade_duration_ms.max(1);
             let t = (elapsed_ms as f32) / (duration as f32);
-            t.clamp(0.0, 1.0)
+            crate::backend::compositor_common::wallpaper::wallpaper_fade(t)
         } else {
             1.0
         };
@@ -804,14 +616,7 @@ impl WaylandCompositor {
     /// the requested mode together with it.
     pub(crate) fn set_wallpaper(&mut self, path: &str, mode: &str) {
         let wp_mode = parse_wallpaper_mode(mode);
-        self.wallpaper_mode = wallpaper_mode_on_request(
-            &self.wallpaper_path,
-            self.pending_wallpaper.is_some(),
-            self.wallpaper_load_failed,
-            self.wallpaper_mode,
-            path,
-            wp_mode,
-        );
+        self.wallpaper_mode = wallpaper_mode_on_request(self.wallpaper_mode, path, wp_mode);
         self.wallpaper_load_failed = false;
         self.wallpaper_requested_mode = wp_mode;
         self.wallpaper_path = path.to_string();
@@ -852,108 +657,6 @@ impl WaylandCompositor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-
-    fn available(gate: &DecodeGate) -> usize {
-        *gate.lock()
-    }
-
-    #[test]
-    fn a_superseded_side_preview_never_decodes() {
-        let gate = DecodeGate::new(1);
-        let requests = PreviewRequests::new();
-        let opened = AtomicUsize::new(0);
-        let open = || {
-            opened.fetch_add(1, Ordering::Relaxed);
-            Some(image::DynamicImage::new_rgba8(960, 10))
-        };
-
-        let first = requests.supersede(&gate);
-        let second = requests.supersede(&gate);
-        assert!(decode_side_preview(&gate, &requests, first, open).is_none());
-        assert_eq!(
-            opened.load(Ordering::Relaxed),
-            0,
-            "a highlight the user already left must not cost a decode"
-        );
-
-        let preview = decode_side_preview(&gate, &requests, second, open)
-            .expect("the latest highlight decodes");
-        assert_eq!(opened.load(Ordering::Relaxed), 1);
-        assert_eq!((preview.width, preview.height), (PREVIEW_THUMB_EDGE, 5));
-        assert_eq!(preview.mode, WallpaperMode::Fit);
-        assert_eq!(available(&gate), 1, "both requests returned the gate");
-    }
-
-    #[test]
-    fn a_side_preview_superseded_mid_decode_skips_the_resize() {
-        let gate = DecodeGate::new(1);
-        let requests = PreviewRequests::new();
-        let ticket = requests.supersede(&gate);
-        let preview = decode_side_preview(&gate, &requests, ticket, || {
-            // The highlight moves while the image is being read.
-            requests.supersede(&gate);
-            Some(image::DynamicImage::new_rgba8(960, 10))
-        });
-        assert!(preview.is_none());
-        assert_eq!(available(&gate), 1);
-    }
-
-    #[test]
-    fn superseding_releases_a_side_preview_blocked_on_the_gate() {
-        let gate = DecodeGate::new(1);
-        let requests = PreviewRequests::new();
-        let opened = AtomicUsize::new(0);
-        // A wallpaper decode holds the only permit.
-        let held = gate.acquire();
-        let ticket = requests.supersede(&gate);
-        std::thread::scope(|scope| {
-            let waiter = scope.spawn(|| {
-                decode_side_preview(&gate, &requests, ticket, || {
-                    opened.fetch_add(1, Ordering::Relaxed);
-                    None
-                })
-                .is_none()
-            });
-            // Whether the waiter already sleeps on the gate or has yet to
-            // reach it, the new ticket sends it away without the permit.
-            requests.supersede(&gate);
-            assert!(matches!(waiter.join(), Ok(true)));
-        });
-        assert_eq!(opened.load(Ordering::Relaxed), 0);
-        drop(held);
-        assert_eq!(available(&gate), 1);
-    }
-
-    #[test]
-    fn a_cancelled_waiter_leaves_a_free_permit_for_the_next_one() {
-        let gate = DecodeGate::new(1);
-        assert!(gate.acquire_unless(|| true).is_none());
-        assert_eq!(available(&gate), 1);
-        let permit = gate.acquire_unless(|| false).expect("the permit is free");
-        assert_eq!(available(&gate), 0);
-        drop(permit);
-        assert_eq!(available(&gate), 1);
-    }
-
-    /// The compositor entry point is what hands out the tickets; the helpers
-    /// above only matter if every side-preview request goes through them.
-    #[test]
-    fn the_side_preview_loader_takes_a_ticket_per_request() {
-        let source = include_str!("wallpaper.rs");
-        let loader = source
-            .split_once(&format!("fn {}(", "load_system_ui_preview_async"))
-            .expect("load_system_ui_preview_async")
-            .1
-            .split_once("\n    }\n")
-            .expect("load_system_ui_preview_async body")
-            .0;
-        assert!(loader.contains(&format!("{}.supersede(gate)", "SIDE_PREVIEW_REQUESTS")));
-        assert!(loader.contains(&format!(
-            "{}(gate, &SIDE_PREVIEW_REQUESTS, ticket,",
-            "decode_side_preview"
-        )));
-    }
 
     #[test]
     fn test_parse_wallpaper_mode_variants() {
@@ -1090,27 +793,13 @@ mod tests {
         // A new path: the old image stays laid out as it was until the new
         // texture (which carries the requested mode) is uploaded.
         assert_eq!(
-            wallpaper_mode_on_request(
-                "/wall/old.jpg",
-                false,
-                false,
-                WallpaperMode::Fill,
-                "/wall/new.jpg",
-                WallpaperMode::Center,
-            ),
+            wallpaper_mode_on_request(WallpaperMode::Fill, "/wall/new.jpg", WallpaperMode::Center,),
             WallpaperMode::Fill
         );
         // The same path while its own decode is still in flight: the visible
         // texture is an older image, so it keeps its mode too.
         assert_eq!(
-            wallpaper_mode_on_request(
-                "/wall/new.jpg",
-                true,
-                false,
-                WallpaperMode::Fill,
-                "/wall/new.jpg",
-                WallpaperMode::Center,
-            ),
+            wallpaper_mode_on_request(WallpaperMode::Fill, "/wall/new.jpg", WallpaperMode::Center,),
             WallpaperMode::Fill
         );
     }
@@ -1120,41 +809,27 @@ mod tests {
         // A/Fill is visible; B/Fit failed and its receiver was removed.
         // Explicitly retrying B must not relayout A while B decodes again.
         assert_eq!(
-            wallpaper_mode_on_request(
-                "/wall/B.png",
-                false,
-                true,
-                WallpaperMode::Fill,
-                "/wall/B.png",
-                WallpaperMode::Fit
-            ),
+            wallpaper_mode_on_request(WallpaperMode::Fill, "/wall/B.png", WallpaperMode::Fit),
             WallpaperMode::Fill
         );
     }
 
     #[test]
-    fn a_mode_change_for_the_visible_image_applies_immediately() {
+    fn same_path_mode_change_waits_for_mode_appropriate_pixels() {
+        // Fill can downsample the source. Center needs native-size pixels, so
+        // keep both the old texture and its layout until the new upload lands.
+        // A failed same-path decode must likewise leave the old layout intact.
         assert_eq!(
             wallpaper_mode_on_request(
-                "/wall/current.jpg",
-                false,
-                false,
                 WallpaperMode::Fill,
                 "/wall/current.jpg",
-                WallpaperMode::Fit,
+                WallpaperMode::Center,
             ),
-            WallpaperMode::Fit
+            WallpaperMode::Fill
         );
         // Clearing the wallpaper has no image to wait for.
         assert_eq!(
-            wallpaper_mode_on_request(
-                "/wall/current.jpg",
-                true,
-                false,
-                WallpaperMode::Fill,
-                "",
-                WallpaperMode::Stretch,
-            ),
+            wallpaper_mode_on_request(WallpaperMode::Fill, "", WallpaperMode::Stretch),
             WallpaperMode::Stretch
         );
     }

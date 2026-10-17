@@ -42,6 +42,8 @@ pub(crate) mod toast;
 pub mod transitions;
 pub(crate) mod ui_theme;
 pub mod wallpaper;
+#[cfg(any(feature = "x11-backends", feature = "wayland-backends"))]
+pub(crate) mod wallpaper_decode;
 pub mod waterlily;
 pub mod window_animation;
 pub(crate) mod window_glow;

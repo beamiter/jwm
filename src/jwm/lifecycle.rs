@@ -2376,6 +2376,7 @@ mod normal_exit_transaction_tests {
         operations: Arc<Mutex<Vec<ExitOperation>>>,
         /// Every monitor list pushed to the compositor, oldest first.
         monitor_pushes: Vec<Vec<(u32, i32, i32, u32, u32, u32)>>,
+        monitor_identity_pushes: Vec<Vec<u64>>,
         /// Every EWMH desktop publish as `(current, total)`, oldest first.
         desktop_pushes: Vec<(u32, u32)>,
         private_capture_gate:
@@ -2395,6 +2396,7 @@ mod normal_exit_transaction_tests {
                 color_allocator: DummyColorAllocator,
                 operations,
                 monitor_pushes: Vec::new(),
+                monitor_identity_pushes: Vec::new(),
                 desktop_pushes: Vec::new(),
                 private_capture_gate: None,
             }
@@ -2406,6 +2408,10 @@ mod normal_exit_transaction_tests {
     impl CompositorControl for ExitBackend {}
     impl CompositorMedia for ExitBackend {}
     impl CompositorWorkspaceEffects for ExitBackend {
+        fn compositor_set_monitor_identities(&mut self, identities: &[u64]) {
+            self.monitor_identity_pushes.push(identities.to_vec());
+        }
+
         fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
             self.monitor_pushes.push(monitors.to_vec());
         }
@@ -3047,6 +3053,83 @@ mod normal_exit_transaction_tests {
         assert_ne!(tags & tagmask, 0, "tags {tags:#b} are still unreachable");
         assert_eq!(tags, active & tagmask);
         assert_eq!(jwm.state.clients[scratchpad].state.tags, 0);
+    }
+
+    #[test]
+    fn compositor_monitor_identities_follow_owners_across_reorder_removal_and_replacement() {
+        use crate::core::models::WMMonitor;
+        use slotmap::Key as _;
+
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let first = jwm.state.monitor_order[0];
+        jwm.state.monitors[first].geometry.m_x = 10;
+        let mut second_monitor = WMMonitor::new();
+        second_monitor.geometry.m_x = 20;
+        let second = jwm.state.monitors.insert(second_monitor);
+        jwm.state.monitor_order = vec![first, second];
+        backend.monitor_pushes.clear();
+        backend.monitor_identity_pushes.clear();
+
+        jwm.refresh_compositor_monitors(&mut backend);
+        assert_eq!(
+            backend.monitor_identity_pushes[0],
+            vec![first.data().as_ffi(), second.data().as_ffi()]
+        );
+        assert_eq!(
+            backend.monitor_pushes[0]
+                .iter()
+                .map(|m| (m.0, m.1))
+                .collect::<Vec<_>>(),
+            vec![(0, 10), (1, 20)]
+        );
+
+        jwm.state.monitor_order.swap(0, 1);
+        jwm.refresh_compositor_monitors(&mut backend);
+        assert_eq!(
+            backend.monitor_identity_pushes[1],
+            vec![second.data().as_ffi(), first.data().as_ffi()]
+        );
+        assert_eq!(
+            backend.monitor_pushes[1]
+                .iter()
+                .map(|m| (m.0, m.1))
+                .collect::<Vec<_>>(),
+            vec![(0, 20), (1, 10)]
+        );
+
+        // A stale order entry must be filtered identically from both streams.
+        jwm.state.monitors.remove(first).unwrap();
+        jwm.refresh_compositor_monitors(&mut backend);
+        assert_eq!(
+            backend.monitor_identity_pushes[2],
+            vec![second.data().as_ffi()]
+        );
+        assert_eq!(backend.monitor_pushes[2].len(), 1);
+        assert_eq!(backend.monitor_pushes[2][0].1, 20);
+
+        // Reusing a slot after removal must not inherit the old GPU owner.
+        let mut replacement_monitor = WMMonitor::new();
+        replacement_monitor.geometry.m_x = 30;
+        let replacement = jwm.state.monitors.insert(replacement_monitor);
+        assert_ne!(replacement.data().as_ffi(), first.data().as_ffi());
+        jwm.state.monitor_order = vec![replacement, second];
+        jwm.refresh_compositor_monitors(&mut backend);
+        assert_eq!(
+            backend.monitor_identity_pushes[3],
+            vec![replacement.data().as_ffi(), second.data().as_ffi()]
+        );
+        assert_eq!(
+            backend.monitor_pushes[3]
+                .iter()
+                .map(|m| (m.0, m.1))
+                .collect::<Vec<_>>(),
+            vec![(0, 30), (1, 20)]
+        );
+        assert_eq!(
+            backend.monitor_pushes.len(),
+            backend.monitor_identity_pushes.len()
+        );
     }
 
     /// Regression: a reload that moved `layout.tags_length` masked the

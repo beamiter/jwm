@@ -1400,6 +1400,7 @@ impl PropertyOps for WaylandPropertyOps {
 #[derive(Debug, Default)]
 struct CompositorDesiredState {
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
+    monitor_identities: Vec<u64>,
     minimized_windows: HashSet<u64>,
     dock_targets: HashMap<u64, CompositorRect>,
     // Policy snapshots outlive GPU owners, including failed reconstruction.
@@ -1912,6 +1913,7 @@ impl UdevBackend {
         };
         // Restore the opaque session UI before the first render is scheduled.
         compositor.set_system_ui(self.compositor_desired.system_ui.clone());
+        compositor.set_monitor_identities(&self.compositor_desired.monitor_identities);
         compositor.set_monitors(&monitors);
         compositor.apply_per_monitor_refresh_rates(&refresh_rates);
         // Recreated compositors have no trustworthy live source geometry.
@@ -5117,6 +5119,13 @@ impl CompositorWorkspaceEffects for UdevBackend {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_overview_monitor(x, y, width, height);
             self.request_render();
+        }
+    }
+
+    fn compositor_set_monitor_identities(&mut self, identities: &[u64]) {
+        self.compositor_desired.monitor_identities = identities.to_vec();
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_monitor_identities(identities);
         }
     }
 

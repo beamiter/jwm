@@ -144,6 +144,11 @@ jobs:
           EGL_PLATFORM: surfaceless
           JWM_REQUIRE_HEADLESS_GL: 1
 
+      - name: Procedural wallpaper cache GL/GLES regression
+        run: bash scripts/test-procedural-wallpaper-cache.sh
+        env:
+          JWM_REQUIRE_HEADLESS_GL: 1
+
   feature-profiles:
     name: Feature profile (${{ matrix.profile.name }})
     runs-on: ubuntu-latest

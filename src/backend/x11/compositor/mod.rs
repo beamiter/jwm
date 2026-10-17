@@ -140,6 +140,7 @@ mod config;
 mod event_apply;
 mod features;
 pub(crate) mod init;
+mod procedural_wallpaper_cache;
 mod recording_gpu;
 mod render;
 mod rules;
@@ -196,7 +197,6 @@ use glow::HasContext;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::mpsc;
 
 use math::ortho;
 use transitions_common::TransitionMode;
@@ -587,7 +587,7 @@ where
     /// In-flight decode for the side preview. Replaced on every new request;
     /// the dropped receiver makes the superseded worker's send a no-op, so
     /// held-down arrow keys never queue a backlog.
-    pending_system_ui_preview: Option<mpsc::Receiver<WallpaperImageData>>,
+    pending_system_ui_preview: Option<wallpaper::DeferredWallpaperLoad>,
     /// The open panel's row-icon band: resolved raster paths aligned with the
     /// overlay's items, picked up from `compositor_common::row_icons` on every
     /// sync. `Some` reserves the list's icon column; `None` (any other panel,
@@ -898,6 +898,7 @@ where
     wallpaper_img_h: u32,
     /// Per-monitor wallpaper overrides. Populated by set_monitors().
     monitor_wallpapers: Vec<MonitorWallpaper>,
+    monitor_identities: Vec<u64>,
 
     // --- Phase 6.1: Colorblind correction ---
     colorblind_mode: i32, // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
