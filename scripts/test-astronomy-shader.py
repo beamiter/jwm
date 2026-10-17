@@ -14,10 +14,17 @@ SOURCE=REPO/'src/backend/x11/compositor/shaders/animated_wallpaper.frag'
 W,H=int(os.environ.get("PREVIEW_WIDTH",960)),int(os.environ.get("PREVIEW_HEIGHT",540))
 DEFAULT_LATITUDE,DEFAULT_LONGITUDE=23.13,113.28  # Guangzhou, explicit city-level choice.
 helper=ROOT/'astronomy_values.rs'
-helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\n'+r"""
+helper.write_text('#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod astronomy;\nuse astronomy as animated_wallpaper;\n#[path = '+json.dumps(str(REPO/'src/backend/compositor_common/panorama.rs'))+'] mod panorama;\n'+r"""
 fn main() {
  let a:Vec<String>=std::env::args().skip(1).collect();
  let mode=&a[0]; let t:f64=a[1].parse().unwrap();
+ if mode=="panorama" {
+  let mut view=panorama::PanoramaView::default();view.zoom(t);
+  let w:f64=a[4].parse().unwrap();let h:f64=a[5].parse().unwrap();
+  let drag=view.begin_drag([w*0.5,h*0.5],[w,h]).unwrap();
+  view.set_orientation(drag.orientation_at([w*0.5+a[2].parse::<f64>().unwrap(),h*0.5+a[3].parse::<f64>().unwrap()]).unwrap());
+  print!("{} ",view.fov_degrees());for value in view.matrix(){print!("{} ",value);}println!();return;
+ }
  if matches!(mode.as_str(),"earth-frame"|"moon-frame"|"earth-drag-frame"|"moon-drag-frame") {
   let view=astronomy::CelestialView {
    rotating:a[3]=="true", latitude:a[4].parse().unwrap(),
@@ -61,6 +68,10 @@ fn main() {
 """)
 RUSTC=os.environ.get('RUSTC') or shutil.which('rustc') or str(REPO.parent/'toolchain/bin/rustc')
 subprocess.run([RUSTC,'--edition=2024',str(helper),'-Awarnings','-o',str(ROOT/'astronomy_values')],check=True)
+def panorama_frame(steps=0,dx=0,dy=0,width=640,height=480):
+ values=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),'panorama',*map(str,[steps,dx,dy,width,height])]).split()))
+ assert len(values)==10 and all(math.isfinite(v) for v in values)
+ return values[0],values[1:]
 def astronomy_values(instant,mode='earth',minutes=1440,longitude=DEFAULT_LONGITUDE,rotating=False,offset_seconds=0):
  args=[mode,str(instant)]
  args.extend([str(minutes),str(longitude),str(rotating).lower()] if mode=='earth' else [str(offset_seconds),str(minutes)])
@@ -120,7 +131,7 @@ surface=egl('eglCreatePbufferSurface',P,[P,P,C.POINTER(I)])
 current=egl('eglMakeCurrent',U,[P,P,P,P])
 results={}
 PREVIEW_INSTANT=datetime.datetime.now(datetime.timezone.utc).timestamp()
-source=SOURCE.read_text()
+source=SOURCE.read_text().replace('// JWM_COSMIC_SKY_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl').read_text())
 vert='#version 330 core\nvoid main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0,1); }'
 def prepare(s,es):
  return '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler3D;\n'+s.lstrip().split('\n',1)[1] if es else s
@@ -291,11 +302,17 @@ for es in (False,True):
  enable=gl('glEnable',None,[U]); disable=gl('glDisable',None,[U])
  scissor=gl('glScissor',None,[I,I,I,I]); clear=gl('glClear',None,[U])
  clear_color=gl('glClearColor',None,[F,F,F,F]); read=gl('glReadPixels',None,[I,I,I,I,U,U,P])
- def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=1440,moon_minutes=39343,offset_seconds=0,sky_enabled=None,earth_rotating=False,earth_latitude=DEFAULT_LATITUDE,earth_longitude=DEFAULT_LONGITUDE,frozen_sun=None,legacy_earth=False,sky_minutes=0,sky_seconds=None,earth_roll=0,earth_axis=(0,1,0),moon_latitude=math.degrees(0.18),moon_longitude=0,moon_roll=0,moon_axis=(0,1,0),moon_rotating=True,body_frames=None):
+ def layout_image(width,height,outputs,repair=None,materials=None,instant=BASE+120,clouds_enabled=True,earth_minutes=1440,moon_minutes=39343,offset_seconds=0,sky_enabled=None,earth_rotating=False,earth_latitude=DEFAULT_LATITUDE,earth_longitude=DEFAULT_LONGITUDE,frozen_sun=None,legacy_earth=False,sky_minutes=0,sky_seconds=None,earth_roll=0,earth_axis=(0,1,0),moon_latitude=math.degrees(0.18),moon_longitude=0,moon_roll=0,moon_axis=(0,1,0),moon_rotating=True,body_frames=None,panorama=None,body_zoom=1.0,detail=None):
   target=surface(d,cfg,attrs(0x3057,width,0x3056,height,0x3038));assert target
   assert current(d,target,target,ctx)
   gl('glViewport',None,[I,I,I,I])(0,0,width,height)
   unif1i(loc(prog,b'clouds_enabled'),int(clouds_enabled))
+  unif1i(loc(prog,b'panorama_enabled'),int(panorama is not None))
+  if panorama is not None:
+   fov,matrix=panorama
+   unif1f(loc(prog,b'panorama_fov'),fov)
+   gl('glUniformMatrix3fv',None,[I,I,C.c_ubyte,C.POINTER(F)])(loc(prog,b'panorama_view'),1,0,(F*9)(*matrix))
+  unif1f(loc(prog,b'surface_detail'),body_zoom if detail is None else detail)
   roll=list(map(float,subprocess.check_output([str(ROOT/'astronomy_values'),'sky',str(instant if sky_seconds is None else sky_seconds),str(sky_minutes)]).split()))
   gl('glUniform2f',None,[I,F,F])(loc(prog,b'sky_rotation'),*roll)
   use_sky=sky_available if sky_enabled is None else sky_enabled and sky_available
@@ -325,7 +342,7 @@ for es in (False,True):
    enable(0x0C11);scissor(*draw_plan['clip'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'canvas_origin'),*draw_plan['origin'])
    gl('glUniform2f',None,[I,F,F])(loc(prog,b'resolution'),*draw_plan['size'])
-   unif1f(loc(prog,b'sphere_radius'),draw_plan['radius'])
+   unif1f(loc(prog,b'sphere_radius'),draw_plan['radius']*body_zoom)
    gl('glDrawArrays',None,[U,I,I])(4,0,3)
   if repair is None: disable(0x0C11)
   else: enable(0x0C11);scissor(*repair)
@@ -893,6 +910,159 @@ void main() {
    filename=f'{kind}-sky-ultrawide-{textured}-{seconds}.png';wide_image.save(ROOT/filename)
    motion_frames.append({'file':filename,'sky_seconds':seconds,'textured':textured,'aspect':'32:9'})
  results[kind]['sky_motion']={'frames':motion_frames,'period_wrap_restart':'PASS','body_interiors':'PASS','static_disable':'PASS','one_minute_motion':'PASS'}
+ # The exploration path runs the real panorama projection and shared sky,
+ # independently from the retained legacy-framing regression controls above.
+ cosmos_frames=[]
+ catalog_path=REPO/'assets/astronomy/galaxy-nasa-4k.png'
+ catalog=Image.open(catalog_path).convert('RGBA')
+ assert catalog.size==(4096,2048) and catalog.getchannel('A').getextrema()==(0,255)
+ legacy_sky_tex,legacy_sky_available=sky_tex,sky_available
+ sky_tex=U(upload_filter_fixture(catalog));sky_available=True
+ def cosmos_image(label,pose,body='earth',zoom=0.35,mapped=True,detail=None,instant=BASE+43200,repair=None):
+  im,_=layout_image(640,480,[(0,0,640,480)],materials={(0,0):body},
+                    panorama=pose,body_zoom=zoom,sky_enabled=mapped,detail=detail,
+                    moon_rotating=False,instant=instant,repair=repair)
+  filename=f'{kind}-cosmos-{label}.png';im.save(ROOT/filename)
+  cosmos_frames.append({'file':filename,'body':body,'body_zoom':zoom,'fov_degrees':pose[0],'mapped':mapped})
+  return im.convert('RGB')
+ scale=2*math.tan(math.radians(60)/2)/480
+ pose_cases=[('centre',0,0),('left',math.pi/2,0),('back',math.pi,0),
+             ('right',-math.pi/2,0),('up',0,-math.pi/2),('down',0,math.pi/2),
+             ('past-pole',0,math.pi*.8),('oblique',1.7,-2.2),('full-turn',2*math.pi,0)]
+ poses={name:panorama_frame(dx=yaw/scale,dy=pitch/scale) for name,yaw,pitch in pose_cases}
+ panorama_images={name:cosmos_image(name,pose) for name,pose in poses.items()}
+ assert max(v[1] for v in ImageChops.difference(panorama_images['centre'],panorama_images['full-turn']).getextrema())<=1,'360-degree sky failed to close'
+ sky_box=(0,0,640,140)
+ assert len({hashlib.sha256(im.crop(sky_box).tobytes()).hexdigest() for name,im in panorama_images.items() if name!='full-turn'})==8,'full-sphere views repeat a flat crop'
+ for name,im in panorama_images.items():
+  assert ImageChops.difference(im.crop((285,205,355,275)),panorama_images['centre'].crop((285,205,355,275))).getbbox() is None,'sky camera changed body geography or true-time light'
+ for mapped in (True,False):
+  a=cosmos_image(f'seam-{mapped}-before',panorama_frame(dx=(math.pi-1e-7)/scale),mapped=mapped)
+  b=cosmos_image(f'seam-{mapped}-after',panorama_frame(dx=(math.pi+1e-7)/scale),mapped=mapped)
+  assert max(v[1] for v in ImageChops.difference(a,b).getextrema())<=1,'celestial longitude seam flickers'
+  x=cosmos_image(f'fallback-{mapped}-opposite',poses['back'],mapped=mapped)
+  y=cosmos_image(f'fallback-{mapped}-origin',poses['centre'],mapped=mapped)
+  assert ImageChops.difference(x.crop(sky_box),y.crop(sky_box)).getbbox() is not None
+ for steps in (-64,6,64):
+  pose=panorama_frame(steps=steps)
+  im=cosmos_image(f'lens-{steps}',pose)
+  assert ImageChops.difference(im.crop(sky_box),panorama_images['centre'].crop(sky_box)).getbbox() is not None,'sky wheel did not change actual perspective'
+ # Sample the actual production ray function on GPU and compare against an
+ # independent scalar perspective reference. This catches transposed matrices,
+ # wrong vertical FOV, Y inversion and rays that stop short of the poles.
+ assert current(d,surf,surf,ctx)
+ diagnostic=source[:source.index('void main() {')]+'''void main(){
+ vec3 dx,dy;vec3 ray=panorama_ray(gl_FragCoord.xy-canvas_origin,dx,dy);
+ frag_color=vec4(ray*0.5+0.5,1.0);
+}'''
+ probe_shader=compile(diagnostic,0x8B30);probe=gl('glCreateProgram',U,[])()
+ attach(probe,vs);attach(probe,probe_shader);gl('glLinkProgram',None,[U])(probe)
+ linked=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(probe,0x8B82,C.byref(linked));assert linked.value
+ gl('glUseProgram',None,[U])(probe)
+ probe_count=0
+ for pose in [*poses.values(),panorama_frame(steps=64),panorama_frame(steps=-64)]:
+  fov,matrix=pose
+  gl('glViewport',None,[I,I,I,I])(0,0,W,H);disable(0x0C11)
+  gl('glUniform2f',None,[I,F,F])(loc(probe,b'resolution'),W,H)
+  gl('glUniform2f',None,[I,F,F])(loc(probe,b'canvas_origin'),0,0)
+  unif1f(loc(probe,b'panorama_fov'),fov)
+  gl('glUniformMatrix3fv',None,[I,I,C.c_ubyte,C.POINTER(F)])(loc(probe,b'panorama_view'),1,0,(F*9)(*matrix))
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  for px,py in [(0,0),(W-1,0),(0,H-1),(W-1,H-1),(W//2,H//2),(W//3,H*2//3)]:
+   pixel=(C.c_ubyte*4)();read(px,py,1,1,0x1908,0x1401,pixel)
+   k=2*math.tan(math.radians(fov)/2)/H
+   camera=[(px+.5-W*.5)*k,(py+.5-H*.5)*k,1.0]
+   length=math.sqrt(sum(v*v for v in camera));camera=[v/length for v in camera]
+   ray=[sum(matrix[column*3+row]*camera[column] for column in range(3)) for row in range(3)]
+   expected=[round((v*.5+.5)*255) for v in ray]
+   assert max(abs(pixel[i]-expected[i]) for i in range(3))<=1,(pose,px,py,list(pixel),expected)
+   probe_count+=1
+ gl('glUseProgram',None,[U])(prog);gl('glDeleteProgram',None,[U])(probe);gl('glDeleteShader',None,[U])(probe_shader)
+ # Point the production camera at each real catalogue direction. Camera axes
+ # are built independently; all landmark colours remain in a bounded sky cap.
+ def direction_pose(galactic):
+  gx,gy,gz=galactic
+  def unit(v):
+   length=math.sqrt(sum(x*x for x in v));return [x/length for x in v]
+  forward=unit([-.3746065934*gy-.9271838546*gz,.9271838546*gy-.3746065934*gz,gx])
+  right=unit([forward[2],0.,-forward[0]])
+  up=[forward[1]*right[2]-forward[2]*right[1],forward[2]*right[0]-forward[0]*right[2],forward[0]*right[1]-forward[1]*right[0]]
+  return 8.,right+up+forward
+ landmarks=[('orion',[-.824943831,-.331876518,-.457521204]),
+            ('lagoon',[.994392948,-.020361,.103769428]),
+            ('carina',[.299894690,-.010897463,-.953910069]),
+            ('eagle',[.956448362,.013831226,.291573709])]
+ # Exact poles cannot be hidden behind the globe in this diagnostic. Cardinal
+ # longitude values are an independent catalogue-orientation oracle, including
+ # NASA's left-increasing longitude convention and the atan(0,0) guard.
+ assert current(d,surf,surf,ctx)
+ coordinate_source=source[:source.index('void main() {')]+'''uniform vec3 catalog_probe;
+ uniform int catalog_probe_mode;
+ void main(){
+  if(catalog_probe_mode==1){
+   frag_color=vec4(cosmic_nebulae(catalog_probe,0.0003)*4.0,1.0);return;
+  }
+  vec2 uv=cosmic_uv(catalog_probe);
+  vec2 dx=cosmic_gradient(catalog_probe,vec3(1,0,0));
+  vec2 dy=cosmic_gradient(catalog_probe,vec3(0,1,0));
+  bool finite=!(any(isnan(uv))||any(isinf(uv))||any(isnan(dx))||any(isinf(dx))||any(isnan(dy))||any(isinf(dy)));
+  frag_color=vec4(uv,finite?1.0:0.0,1.0);
+ }'''
+ coordinate_shader=compile(coordinate_source,0x8B30);coordinate_program=gl('glCreateProgram',U,[])()
+ attach(coordinate_program,vs);attach(coordinate_program,coordinate_shader);gl('glLinkProgram',None,[U])(coordinate_program)
+ linked=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(coordinate_program,0x8B82,C.byref(linked));assert linked.value
+ gl('glUseProgram',None,[U])(coordinate_program);gl('glViewport',None,[I,I,I,I])(0,0,1,1);disable(0x0C11)
+ def catalog_probe_pixel(direction,mode=0):
+  gl('glUniform3f',None,[I,F,F,F])(loc(coordinate_program,b'catalog_probe'),*direction)
+  unif1i(loc(coordinate_program,b'catalog_probe_mode'),mode)
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  value=(C.c_ubyte*4)();read(0,0,1,1,0x1908,0x1401,value)
+  assert gl('glGetError',U,[])()==0
+  return list(value)
+ coordinate_probes=[([1,0,0],[.5,.5]),([0,0,1],[.25,.5]),
+                    ([-1,0,0],[0,.5]),([0,0,-1],[.75,.5]),
+                    ([0,1,0],[.5,0]),([0,-1,0],[.5,1])]
+ for direction,expected in coordinate_probes:
+  value=catalog_probe_pixel(direction)
+  longitude_error=abs(value[0]-round(expected[0]*255))
+  if expected[0]==0:longitude_error=min(longitude_error,abs(value[0]-255))
+  assert longitude_error<=1 and abs(value[1]-round(expected[1]*255))<=1,(direction,value,expected)
+  assert value[2:]==[255,255],('nonfinite pole/gradient',direction,value)
+ for name,direction in landmarks:
+  value=catalog_probe_pixel(direction,1)
+  assert max(value[:3])>5,('missing nebula at catalogue direction',name,value)
+  assert catalog_probe_pixel([-v for v in direction],1)[:3]==[0,0,0],('nebula leaks outside spherical cap',name)
+ gl('glUseProgram',None,[U])(prog);gl('glDeleteProgram',None,[U])(coordinate_program);gl('glDeleteShader',None,[U])(coordinate_shader)
+ # Keep the inspecting globe small so each nebula can be seen around it.
+ for name,direction in landmarks:
+  cosmos_image('nebula-'+name,direction_pose(direction),zoom=0.035)
+ for name,direction in [('north',[1e-7,1,0]),('south',[1e-7,-1,0])]:
+  cosmos_image('galactic-pole-'+name,direction_pose(direction))
+ # Real high-resolution maps must supply additional spatial information at a
+ # fixed camera/zoom, not just enlarge a pre-rendered low-resolution frame.
+ detail_metrics=[]
+ for body,path in [('earth',REPO/'assets/astronomy/earth-nasa-october.jpg'),('moon',REPO/'assets/astronomy/moon-nasa-lroc-8k.jpg')]:
+  original=textures[body]
+  actual=Image.open(path).convert('RGBA')
+  base_size=(4096,2048) if body=='earth' else (2048,1024)
+  low=actual.resize(base_size,Image.Resampling.LANCZOS)
+  low_texture=upload_filter_fixture(low);high_texture=upload_filter_fixture(actual)
+  textures[body]=low_texture
+  lit_instant=BASE+4*3600 if body=='earth' else BASE+11*86400+16*3600
+  low_image=cosmos_image(body+'-zoom-base',poses['centre'],body=body,zoom=8,detail=0,instant=lit_instant)
+  textures[body]=high_texture
+  high_image=cosmos_image(body+'-zoom-detail',poses['centre'],body=body,zoom=8,detail=0,instant=lit_instant)
+  grain_image=cosmos_image(body+'-zoom-material',poses['centre'],body=body,zoom=8,instant=lit_instant)
+  delta=ImageChops.difference(low_image,high_image)
+  assert delta.getbbox() is not None,'high-resolution map was not actually sampled'
+  assert max(v[1] for v in delta.getextrema())>=2,'near LOD contains no additional texture information'
+  assert ImageChops.difference(high_image,grain_image).getbbox() is not None,'filtered material LOD was not reached'
+  detail_metrics.append({'body':body,'native_size':actual.size,'base_size':low.size,'mean_difference':sum(ImageStat.Stat(delta).mean)/3,'max_difference':max(v[1] for v in delta.getextrema()),'file_sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+  textures[body]=original
+  assert current(d,surf,surf,ctx)
+  for texture in [low_texture,high_texture]:gl('glDeleteTextures',None,[I,C.POINTER(U)])(1,C.byref(U(texture)))
+ results[kind]['cosmic_exploration']={'frames':cosmos_frames,'production_ray_gpu_probes':probe_count,'catalog_coordinate_gpu_probes':len(coordinate_probes),'nebula_cap_gpu_probes':len(landmarks)*2,'panorama_full_sphere':'PASS','360_wrap':'PASS','longitude_seam_textured_and_fallback':'PASS','body_light_and_geography_unchanged':'PASS','zoom_detail':detail_metrics,'catalog_sha256':hashlib.sha256(catalog_path.read_bytes()).hexdigest()}
+ sky_tex,sky_available=legacy_sky_tex,legacy_sky_available
  results[kind]['layouts']=layout_metrics
  results[kind]['layout_pixel_assertions']='PASS: dual centers, portrait radius, gaps, negative clipping, repairs, mirror dedup, stable overlaps, outside-root'
  current(d,None,None,None)
@@ -901,6 +1071,8 @@ void main() {
  egl('eglDestroySurface',U,[P,P])(d,surf);egl('eglDestroyContext',U,[P,P])(d,ctx)
 results['source_sha256']=hashlib.sha256(source.encode()).hexdigest()
 results['production_astronomy_source_sha256']=hashlib.sha256((REPO/'src/backend/compositor_common/animated_wallpaper.rs').read_bytes()).hexdigest()
+results['production_panorama_source_sha256']=hashlib.sha256((REPO/'src/backend/compositor_common/panorama.rs').read_bytes()).hexdigest()
+results['shared_sky_sha256']=hashlib.sha256((REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl').read_bytes()).hexdigest()
 
 # Both real APIs must agree within one byte of raster/float rounding.
 api_max_error=0
@@ -916,7 +1088,7 @@ for a,b in zip(results['gl330']['dual_materials']['frames'],results['gles300']['
  delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
  api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))
  assert api_max_error <= 1, (a['file'],delta.getextrema())
-for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion','texture_filtering','all_direction_rotation','mouse_drag_rotation'):
+for group in ('fixed_earth','seasonal_earth','rotating_earth','lunar_phases','sky_motion','texture_filtering','all_direction_rotation','mouse_drag_rotation','cosmic_exploration'):
  for a,b in zip(results['gl330'][group]['frames'],results['gles300'][group]['frames']):
   delta=ImageChops.difference(Image.open(ROOT/a['file']).convert('RGB'),Image.open(ROOT/b['file']).convert('RGB'))
   api_max_error=max(api_max_error,max(v[1] for v in delta.getextrema()))

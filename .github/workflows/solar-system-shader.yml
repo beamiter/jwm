@@ -4,32 +4,65 @@ on:
     paths:
       - 'src/backend/x11/compositor/shaders/solar_system.frag'
       - 'src/backend/compositor_common/solar_system.rs'
-      - 'assets/astronomy/earth-nasa-october.jpg'
+      - 'src/backend/compositor_common/animated_wallpaper.rs'
+      - 'src/backend/compositor_common/panorama.rs'
+      - 'src/backend/x11/compositor/solar_system_wallpaper.rs'
+      - 'src/backend/x11/compositor/shaders/cosmic_sky.glsl'
+      - 'src/backend/x11/compositor/procedural_wallpaper_cache.rs'
+      - 'assets/astronomy/**'
+      - 'scripts/prepare-astronomy-*.py'
+      - 'rust-toolchain.toml'
       - 'scripts/test-solar-system-shader.py'
       - '.github/workflows/solar-system-shader.yml'
   pull_request:
     paths:
       - 'src/backend/x11/compositor/shaders/solar_system.frag'
       - 'src/backend/compositor_common/solar_system.rs'
-      - 'assets/astronomy/earth-nasa-october.jpg'
+      - 'src/backend/compositor_common/animated_wallpaper.rs'
+      - 'src/backend/compositor_common/panorama.rs'
+      - 'src/backend/x11/compositor/solar_system_wallpaper.rs'
+      - 'src/backend/x11/compositor/shaders/cosmic_sky.glsl'
+      - 'src/backend/x11/compositor/procedural_wallpaper_cache.rs'
+      - 'assets/astronomy/**'
+      - 'scripts/prepare-astronomy-*.py'
+      - 'rust-toolchain.toml'
       - 'scripts/test-solar-system-shader.py'
       - '.github/workflows/solar-system-shader.yml'
   workflow_dispatch:
 jobs:
   mesa:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
+      EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: '1'
       MESA_SHADER_CACHE_DISABLE: 'true'
+      SOLAR_TEST_OUTPUT: /tmp/jwm-solar-preview
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1-mesa-dri python3-pil
-      - name: Camera and bounded orbital math
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
+      - name: Camera, planet picking and full panorama navigation
+        shell: bash
         run: |
-          rustc --edition 2024 --test src/backend/compositor_common/solar_system.rs -o /tmp/solar-camera-tests
-          /tmp/solar-camera-tests
-      - name: Desktop GL and GLES rendered landscape regression
+          set -euo pipefail
+          mkdir -p "$SOLAR_TEST_OUTPUT"
+          python3 - "$SOLAR_TEST_OUTPUT/navigation-tests.rs" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          root = Path.cwd() / "src/backend/compositor_common"
+          modules = ("animated_wallpaper", "panorama", "solar_system")
+          Path(sys.argv[1]).write_text("".join(
+              f"#[path={json.dumps(str(root / (name + '.rs')))}] mod {name};\n"
+              for name in modules
+          ))
+          PY
+          rustc --edition=2024 --test "$SOLAR_TEST_OUTPUT/navigation-tests.rs" \
+            -Awarnings -o "$SOLAR_TEST_OUTPUT/navigation-tests"
+          "$SOLAR_TEST_OUTPUT/navigation-tests"
+      - name: Desktop GL and GLES planet close-up and panorama regressions
         run: /usr/bin/python3 scripts/test-solar-system-shader.py
       - name: Portrait, pole, zoom and scissor regression
         env:
@@ -51,3 +84,5 @@ jobs:
             /tmp/jwm-solar-preview/metrics.json
             /tmp/jwm-solar-portrait/*.png
             /tmp/jwm-solar-portrait/metrics.json
+            /tmp/jwm-solar-fallback/*.png
+            /tmp/jwm-solar-fallback/metrics.json

@@ -1,4 +1,167 @@
-//! Bounded, deterministic camera for the decorative (not ephemeris) solar scene.
+//! Deterministic camera, navigation and picking for the illustrative solar scene.
+
+/// The readable illustration uses compressed orbital distances and enlarged
+/// bodies. Keep these values aligned with the analytic spheres in the shader.
+pub(crate) const ORBIT_RADII: [f32; 8] = [2.5, 3.6, 4.8, 6.0, 7.5, 9.3, 11.0, 12.7];
+pub(crate) const BODY_RADII: [f32; 9] = [1.12, 0.23, 0.40, 0.46, 0.33, 0.90, 0.76, 0.58, 0.55];
+
+pub(crate) fn body_center(body: u8, phases: &[f32; 8]) -> Option<[f32; 3]> {
+    if body == 0 {
+        return Some([0.0; 3]);
+    }
+    let index = usize::from(body - 1);
+    let orbit = *ORBIT_RADII.get(index)?;
+    let phase = phases[index];
+    if !phase.is_finite() {
+        return None;
+    }
+    let (sin, cos) = phase.sin_cos();
+    Some([cos * orbit, sin * 0.025 * f32::from(body), sin * orbit])
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a.into_iter().zip(b).map(|(a, b)| a * b).sum()
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|i| a[i] - b[i])
+}
+
+fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
+    let length = dot(v, v).sqrt();
+    (length.is_finite() && length > f32::EPSILON).then(|| v.map(|v| v / length))
+}
+
+fn sphere_distance(eye: [f32; 3], ray: [f32; 3], center: [f32; 3], radius: f32) -> Option<f32> {
+    let q = sub(eye, center);
+    let b = dot(q, ray);
+    let discriminant = b * b - dot(q, q) + radius * radius;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    [-b - root, -b + root]
+        .into_iter()
+        .find(|distance| *distance > 0.0 && distance.is_finite())
+}
+
+/// All values are frozen together after a displayed frame. Picking a moving
+/// planet must use the geometry the user saw, not a later decorative orbit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SolarProjection {
+    pub eye: [f32; 3],
+    /// Columns are camera right, up and forward (positive camera Z looks ahead).
+    pub basis: [f32; 9],
+    pub viewport: [u32; 2],
+    pub phases: [f32; 8],
+    pub focal: f32,
+}
+
+impl SolarProjection {
+    pub(crate) fn default_focal(viewport: [u32; 2]) -> f32 {
+        let width = viewport[0] as f32;
+        let height = (viewport[1] as f32).max(1.0);
+        if width >= height * 1.25 {
+            1.5
+        } else {
+            1.2 * (width / height).max(1.0)
+        }
+    }
+
+    /// Match gl_FragCoord's pixel centre while accepting X11's top-left origin.
+    pub(crate) fn ray_at(&self, x: f64, y: f64) -> Option<[f32; 3]> {
+        if !x.is_finite()
+            || !y.is_finite()
+            || self.viewport.contains(&0)
+            || x < 0.0
+            || y < 0.0
+            || x >= f64::from(self.viewport[0])
+            || y >= f64::from(self.viewport[1])
+            || !self
+                .eye
+                .iter()
+                .chain(self.basis.iter())
+                .all(|v| v.is_finite())
+            || !self.focal.is_finite()
+            || self.focal <= 0.0
+        {
+            return None;
+        }
+        let pixels = f64::from(self.viewport[0].min(self.viewport[1]));
+        let u = ((x + 0.5 - f64::from(self.viewport[0]) * 0.5) / pixels) as f32;
+        let v = ((f64::from(self.viewport[1]) * 0.5 - y - 0.5) / pixels) as f32;
+        normalize(std::array::from_fn(|i| {
+            self.basis[i] * u + self.basis[3 + i] * v + self.basis[6 + i] * self.focal
+        }))
+    }
+
+    pub(crate) fn project(&self, point: [f32; 3]) -> Option<[f64; 2]> {
+        let offset = sub(point, self.eye);
+        let forward = [self.basis[6], self.basis[7], self.basis[8]];
+        let depth = dot(offset, forward);
+        if self.viewport.contains(&0) || !depth.is_finite() || depth <= 0.0 {
+            return None;
+        }
+        let right = [self.basis[0], self.basis[1], self.basis[2]];
+        let up = [self.basis[3], self.basis[4], self.basis[5]];
+        let pixels = f64::from(self.viewport[0].min(self.viewport[1]));
+        let scale = f64::from(self.focal / depth) * pixels;
+        let point = [
+            f64::from(self.viewport[0]) * 0.5 + f64::from(dot(offset, right)) * scale - 0.5,
+            f64::from(self.viewport[1]) * 0.5 - f64::from(dot(offset, up)) * scale - 0.5,
+        ];
+        point.iter().all(|v| v.is_finite()).then_some(point)
+    }
+
+    /// Pick the nearest visible sphere or Saturn's translucent ring. A ring
+    /// pixel opens Saturn as well; the empty annulus never steals a sky drag.
+    pub(crate) fn pick(&self, x: f64, y: f64) -> Option<u8> {
+        let ray = self.ray_at(x, y)?;
+        let mut nearest = f32::INFINITY;
+        let mut selected = None;
+        for (index, radius) in BODY_RADII.into_iter().enumerate() {
+            let body = index as u8;
+            let center = body_center(body, &self.phases)?;
+            if let Some(distance) = sphere_distance(self.eye, ray, center, radius)
+                && distance < nearest
+            {
+                nearest = distance;
+                selected = Some(body);
+            }
+        }
+        let saturn = body_center(6, &self.phases)?;
+        let orbit_normal = normalize([0.0, ORBIT_RADII[5], -0.15])?;
+        let (sin, cos) = 26.7_f32.to_radians().sin_cos();
+        let normal = [sin, cos * orbit_normal[1], cos * orbit_normal[2]];
+        let denominator = dot(ray, normal);
+        if denominator.abs() > 0.0001 {
+            let distance = dot(sub(saturn, self.eye), normal) / denominator;
+            if distance > 0.0 && distance < nearest {
+                let point = std::array::from_fn(|i| self.eye[i] + ray[i] * distance - saturn[i]);
+                let radius = dot(point, point).sqrt();
+                if ring_opacity(radius) > 0.001 {
+                    selected = Some(6);
+                }
+            }
+        }
+        selected
+    }
+}
+
+fn ring_opacity(radius: f32) -> f32 {
+    if radius <= 0.96 || radius >= 1.68 {
+        return 0.0;
+    }
+    let smooth = |lo: f32, hi: f32| {
+        let x = ((radius - lo) / (hi - lo)).clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    let edge = smooth(0.96, 1.01) * (1.0 - smooth(1.61, 1.68));
+    let cassini = 1.0 - 0.8 * (-((radius - 1.43) / 0.022).powi(2)).exp();
+    let structure = 0.59 + 0.10 * (radius * 129.0).sin() + 0.045 * (radius * 337.0).sin();
+    (edge * cassini * structure).clamp(0.0, 0.85)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SolarCamera {
     pub azimuth: f32,
@@ -36,10 +199,268 @@ impl SolarCamera {
             self.distance * h * c,
         ]
     }
+
+    /// Proper rotation with +Z pointing out from the orbit target to the eye.
+    /// The rendered camera's forward column is its negation, so this matrix can
+    /// be passed directly to the same quaternion arcball used by Earth/Moon.
+    pub(crate) fn orbit_matrix(self) -> [f32; 9] {
+        let (sin, cos) = self.azimuth.sin_cos();
+        let (elevation, horizontal) = self.elevation.sin_cos();
+        [
+            cos,
+            0.0,
+            -sin,
+            -sin * elevation,
+            horizontal,
+            -cos * elevation,
+            horizontal * sin,
+            elevation,
+            horizontal * cos,
+        ]
+    }
+
+    pub(crate) fn focus(&mut self, body: u8, phases: &[f32; 8]) -> bool {
+        let Some(radius) = BODY_RADII.get(usize::from(body)).copied() else {
+            return false;
+        };
+        let Some(center) = body_center(body, phases) else {
+            return false;
+        };
+        // Approach the illuminated hemisphere. This is a navigation choice;
+        // illumination and the orbit itself remain unchanged in world space.
+        if body != 0 {
+            let toward_sun = normalize(center.map(|v| -v)).unwrap_or([0.0, 0.0, 1.0]);
+            let view = normalize([toward_sun[0], toward_sun[1] + 0.25, toward_sun[2]])
+                .unwrap_or([0.0, 0.0, 1.0]);
+            self.azimuth = view[0].atan2(view[2]);
+            self.elevation = view[1].asin();
+        }
+        self.distance = radius * if body == 6 { 10.0 } else { 5.0 };
+        true
+    }
+
+    pub(crate) fn zoom_body(&mut self, body: u8, steps: f64) -> bool {
+        let Some(radius) = BODY_RADII.get(usize::from(body)).copied() else {
+            return false;
+        };
+        if !steps.is_finite() {
+            return false;
+        }
+        let old = self.distance;
+        self.distance = (self.distance * (-steps.clamp(-20.0, 20.0) * 0.12).exp() as f32)
+            .clamp(radius * 1.12, radius * 40.0);
+        self.distance != old
+    }
+
+    pub(crate) fn projection(
+        self,
+        target: [f32; 3],
+        orbit: [f32; 9],
+        look: [f32; 9],
+        viewport: [u32; 2],
+        phases: [f32; 8],
+        lens_scale: f32,
+    ) -> SolarProjection {
+        let mut basis = orbit;
+        for component in &mut basis[6..9] {
+            *component = -*component;
+        }
+        let mut viewed = [0.0; 9];
+        for column in 0..3 {
+            for row in 0..3 {
+                viewed[column * 3 + row] = (0..3)
+                    .map(|i| basis[i * 3 + row] * look[column * 3 + i])
+                    .sum();
+            }
+        }
+        let offset = if orbit == self.orbit_matrix() {
+            self.eye()
+        } else {
+            std::array::from_fn(|i| orbit[6 + i] * self.distance)
+        };
+        SolarProjection {
+            eye: std::array::from_fn(|i| target[i] + offset[i]),
+            basis: viewed,
+            viewport,
+            phases,
+            focal: SolarProjection::default_focal(viewport) * lens_scale,
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+    #[test]
+    fn focused_planet_picking_matches_the_displayed_pixel_and_scales() {
+        for viewport in [[1920, 1080], [600, 900], [512, 512]] {
+            let phases = scene_phases(0.0).0;
+            for body in 0..=8 {
+                let mut camera = SolarCamera::default();
+                assert!(camera.focus(body, &phases));
+                let center = body_center(body, &phases).unwrap();
+                let projection = camera.projection(
+                    center,
+                    camera.orbit_matrix(),
+                    IDENTITY,
+                    viewport,
+                    phases,
+                    1.0,
+                );
+                let pixel = projection.project(center).unwrap();
+                assert_eq!(
+                    projection.pick(pixel[0], pixel[1]),
+                    Some(body),
+                    "body {body}, viewport {viewport:?}"
+                );
+                assert!((pixel[0] - (f64::from(viewport[0]) * 0.5 - 0.5)).abs() < 0.002);
+                assert!((pixel[1] - (f64::from(viewport[1]) * 0.5 - 0.5)).abs() < 0.002);
+                let ray = projection.ray_at(pixel[0], pixel[1]).unwrap();
+                let expected = normalize(sub(center, projection.eye)).unwrap();
+                assert!(
+                    ray.into_iter()
+                        .zip(expected)
+                        .all(|(a, b)| (a - b).abs() < 0.00001)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn free_look_turns_the_whole_scene_and_has_no_pole_singularity() {
+        let phases = scene_phases(0.0).0;
+        for elevation in [
+            -std::f32::consts::FRAC_PI_2,
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+        ] {
+            let camera = SolarCamera {
+                elevation,
+                ..SolarCamera::default()
+            };
+            let facing = camera.projection(
+                [0.0; 3],
+                camera.orbit_matrix(),
+                IDENTITY,
+                [800, 600],
+                phases,
+                1.0,
+            );
+            assert_eq!(facing.pick(399.5, 299.5), Some(0));
+            let away = camera.projection(
+                [0.0; 3],
+                camera.orbit_matrix(),
+                [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0],
+                [800, 600],
+                phases,
+                1.0,
+            );
+            assert_eq!(away.pick(399.5, 299.5), None);
+            assert!(away.project([0.0; 3]).is_none());
+            assert!(
+                away.ray_at(399.5, 299.5)
+                    .unwrap()
+                    .iter()
+                    .all(|v| v.is_finite())
+            );
+        }
+    }
+
+    #[test]
+    fn pending_orbit_time_cannot_change_a_displayed_hit() {
+        let camera = SolarCamera::default();
+        let phases = scene_phases(0.0).0;
+        let frozen = camera.projection(
+            [0.0; 3],
+            camera.orbit_matrix(),
+            IDENTITY,
+            [1920, 1080],
+            phases,
+            1.0,
+        );
+        let earth_pixel = frozen.project(body_center(3, &phases).unwrap()).unwrap();
+        assert_eq!(frozen.pick(earth_pixel[0], earth_pixel[1]), Some(3));
+        let future = SolarProjection {
+            phases: scene_phases(300.0).0,
+            ..frozen
+        };
+        assert_ne!(future.pick(earth_pixel[0], earth_pixel[1]), Some(3));
+        assert_eq!(frozen.pick(earth_pixel[0], earth_pixel[1]), Some(3));
+    }
+
+    #[test]
+    fn body_zoom_never_enters_the_sphere_or_changes_the_orbit_phase() {
+        let phases = scene_phases(321.0).0;
+        for body in 0..=8 {
+            let mut camera = SolarCamera::default();
+            camera.focus(body, &phases);
+            let initial = camera;
+            assert!(camera.zoom_body(body, 4.0));
+            assert!(camera.distance < initial.distance);
+            assert!(camera.zoom_body(body, -4.0));
+            assert!((camera.distance - initial.distance).abs() < 0.00001);
+            for _ in 0..8 {
+                camera.zoom_body(body, 1e100);
+            }
+            assert_eq!(camera.distance, BODY_RADII[usize::from(body)] * 1.12);
+            for _ in 0..8 {
+                camera.zoom_body(body, -1e100);
+            }
+            assert_eq!(camera.distance, BODY_RADII[usize::from(body)] * 40.0);
+            assert_eq!(camera.azimuth, initial.azimuth);
+            assert_eq!(camera.elevation, initial.elevation);
+            let valid = camera;
+            assert!(!camera.zoom_body(body, f64::NAN));
+            assert!(!camera.focus(9, &phases));
+            assert!(!camera.zoom_body(255, 3.0));
+            assert_eq!(camera, valid);
+        }
+    }
+
+    #[test]
+    fn picking_rejects_invalid_coordinates_and_invisible_ring_gaps() {
+        let camera = SolarCamera::default();
+        let projection = camera.projection(
+            [0.0; 3],
+            camera.orbit_matrix(),
+            IDENTITY,
+            [800, 600],
+            scene_phases(0.0).0,
+            1.0,
+        );
+        for point in [
+            [f64::NAN, 0.0],
+            [0.0, f64::INFINITY],
+            [-1.0, 10.0],
+            [800.0, 0.0],
+            [0.0, 600.0],
+        ] {
+            assert!(projection.pick(point[0], point[1]).is_none());
+        }
+        assert_eq!(ring_opacity(0.96), 0.0);
+        assert_eq!(ring_opacity(1.68), 0.0);
+        assert!(ring_opacity(1.2) > 0.1);
+        assert!(ring_opacity(1.43) < ring_opacity(1.4));
+        assert!(
+            SolarProjection {
+                viewport: [0, 600],
+                ..projection
+            }
+            .ray_at(0.0, 0.0)
+            .is_none()
+        );
+        assert!(
+            SolarProjection {
+                focal: f32::NAN,
+                ..projection
+            }
+            .ray_at(0.0, 0.0)
+            .is_none()
+        );
+    }
+
     #[test]
     fn phases_stay_bounded_and_smooth_after_years() {
         let (a, _) = scene_phases(1e9);

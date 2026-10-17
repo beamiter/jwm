@@ -6,13 +6,18 @@ focus target or input region. Both xcb and x11rb use the same implementation.
 Native Wayland does not implement this material yet; the picker explains that
 limitation and leaves the existing static wallpaper selected.
 
+Earth and Moon support full-axis dragging and independent wheel zoom. Dragging
+the empty background turns a perspective camera through the entire celestial
+sphere, including both poles. See the [celestial explorer guide](celestial-explorer.md)
+for the shared controls, sky catalogue and Solar System close-ups.
+
 ## Configuration
 
 ```toml
 [behavior]
 wallpaper_effect = "astronomy" # "off" is the backwards-compatible default
 wallpaper_earth_texture = "" # bundled NASA Earth texture
-wallpaper_sky_rotation_minutes = 1440 # slow 24-hour galaxy travel; 0 = static
+wallpaper_sky_rotation_minutes = 1440 # 24-hour sky tour; 0 stops the automatic tour
 wallpaper_earth_view = "fixed" # default; "rotating" enables the period below
 wallpaper_earth_latitude = 23.13 # Guangzhou city-level framing, not device location
 wallpaper_earth_longitude = 113.28 # degrees east; stays fixed as time passes
@@ -195,7 +200,7 @@ the config file for restart persistence. Invalid axes, angles or modes reject
 the whole batch without partially changing the scene. Orientation changes
 reuse loaded textures and request a frame using the current system instant.
 
-## Drag Earth or Moon with the mouse
+## Drag Earth, Moon or the sky with the mouse
 
 Direct manipulation is enabled automatically for a rendered Astronomy globe
 on either X11 transport; no extra configuration or modifier key is needed.
@@ -208,9 +213,13 @@ on either X11 transport; no extra configuration or modifier key is needed.
    a rotating view resumes its configured tour smoothly from that pose.
 
 Only the body under the initial press is selected. Earth and Moon keep independent
-manual orientations; if the same body appears on several outputs, those copies
-share its orientation. A press on empty sky does not begin a gesture. Existing
-window, bar, tab, modal, lock-screen and configured mouse-binding handling takes
+manual orientations and zoom; if the same body appears on several outputs,
+those copies share that body's state. A press on empty sky starts a panorama
+gesture: drag horizontally, vertically or diagonally to look in any direction,
+passing through either pole without a latitude clamp. Release and grab again to
+continue looking around. The background keeps its own orientation and lens,
+separate from the body's pose. Existing window, bar, tab, modal, lock-screen
+and configured mouse-binding handling takes
 priority, so dragging a window or selecting text does not rotate the wallpaper.
 The feature does not create a focusable window. The initial desktop click keeps
 normal monitor-selection behavior; subsequent drag motion does not change focus
@@ -218,8 +227,9 @@ or select another body.
 
 An active gesture captures the pointer. It may continue outside the globe,
 across an existing window or onto another output, using the original globe's
-pixel radius throughout. A virtual sphere joins a smooth outer trackball surface
-near the limb, avoiding a sudden sensitivity clamp. Equivalent motion as a
+pixel radius throughout. Sky gestures likewise keep the canvas and perspective
+that were visible at the initial press. A virtual sphere joins a smooth outer
+trackball surface near the limb, avoiding a sudden sensitivity clamp. Equivalent motion as a
 fraction of the globe radius gives the same rotation on 1080p, 4K and portrait
 outputs. Motion is anchored to the initial press rather than accumulated from
 every input event, so coalescing a burst of mouse events does not change its
@@ -234,18 +244,56 @@ epoch orientation. Timezone changes do not add another offset to the light.
 
 The manual orientation lasts for this running session and does not rewrite
 latitude, longitude, roll or rotation-axis settings. Changing a body's configured
-orientation, fixed/rotating mode or period resets that body's manual offset;
-reloading identical values preserves it. Restart restores the configured pose
+orientation, fixed/rotating mode or period resets that body's manual offset and
+zoom; reloading identical values preserves them. Restart restores the configured pose
 and its current-time tour. Layout changes, output removal, unavailable rendering,
 screen locking and modal capture retire an active drag safely. Layout/material
 changes retain the current pose where possible rather than leaving a pointer
 grab attached to a disappearing canvas.
 
-Pointer updates have a separate, coalesced cadence capped at 60 Hz. Holding the
-pointer still does not keep that fast cadence running: real-light updates use
+Pointer-driven rendering has a separate, coalesced cadence capped at 60 Hz.
+Holding the pointer still does not keep that fast cadence running: real-light updates use
 the normal low-power schedule, and release retires the interaction wake after
 its final frame. Texture, cloud and shader resources are reused throughout a
 gesture; the background cache and sampled-bar identity follow accepted poses.
+The native input queue retains left-button motion samples so an out-and-back
+drag cannot become a Solar System click. Event processing has bounded batches;
+a high-polling-rate mouse can still produce more CPU input work than the rendering
+cadence. The pointer-grab watchdog remains active while a gesture is held.
+
+## Zoom and surface detail
+
+Scroll up over a visible globe to enlarge it; scroll down to pull back. Earth
+and Moon have independent scales from **0.35× to 8×** their normal canvas radius.
+Zoomed globes may extend beyond their canvas, so keep the pointer on the visible
+surface when scrolling out again. A grab uses the displayed radius throughout;
+wheel events during a held drag do not change its sensitivity. Zoom is session
+state and does not change `wallpaper_mode` or write new configuration values.
+
+Earth starts with a surface map bounded to 4096×2048, and Moon to 2048×1024.
+Once the body scale
+exceeds **1.3×**, a bounded worker can load additional
+detail: the bundled Earth map has **5400×2700** native pixels and the optional
+Moon detail map has **8192×4096**. The existing map remains visible while that
+one-time request completes. Decoding and upload obey the GPU's reported texture
+limit, never enlarge a smaller source image, and retain the base map if the
+detail image is missing, invalid or cannot be uploaded. This is progressive
+image resolution, not an unlimited streaming terrain system.
+
+An explicit Earth or Moon texture path remains authoritative at every zoom
+level. JWM reads additional detail from that same source when available; it does
+not replace a custom map with a bundled NASA close-up. Bundled detail is likewise
+not substituted for a user data override. High-resolution images use mipmaps
+and stable longitude/pole gradients. The surface shader reveals restrained
+artistic material grain as the body grows; it does not infer measured elevation
+or create a displaced terrain mesh.
+
+Scroll over empty sky to narrow or widen the panorama's perspective lens,
+independently of globe scale. Astronomy starts at a **60° vertical field of
+view**, bounded to **8°–110°**. A narrow lens reveals catalogue stars and finer
+nebula artwork; scrolling back out restores a wider view. Sky orientation and
+lens are shared across the Astronomy canvases for this session. Neither sky
+zoom nor body zoom changes the current UTC Sun direction or lunar phase.
 
 ## Fixed geographic view and real daylight
 
@@ -339,8 +387,8 @@ No Apple UI, assets, watermark or proprietary implementation is copied.
 The existing NASA surface and static Blue Marble cloud composite remain offline,
 historical imagery, not current weather. Custom Earth maps do not receive the
 extra cloud layer. There are no live cloud or city-light observations. The
-NASA/Gaia-derived galaxy backdrop retains decorative framing rather
-than representing the observer's live sky.
+catalogue-based galaxy backdrop uses decorative camera framing. It is a distant
+celestial sphere, independent of the observer's geographic location.
 
 Regular animation ticks adapt between 1 and 15 Hz. Only visible bodies whose
 views are rotating and are not currently held contribute their decorative speed
@@ -385,15 +433,30 @@ The Moon map is the unchanged NASA SVS [CGI Moon Kit](https://svs.gsfc.nasa.gov/
 2048×1024 LROC color map (`moon-nasa-lroc.jpg`, 457,942 bytes).
 Credit: NASA’s Scientific Visualization Studio; LROC/LOLA.
 SHA256: `f7130a1822681fa7512d7dcfd40db8c10b9ba4f06777910348698260ed7a2170`.
+The optional `moon-nasa-lroc-8k.jpg` supplies 8192×4096 close-up detail from
+the same NASA SVS 2025 LROC/LOLA map family. Its derivation, checksum and source
+are recorded in the [asset attribution](../assets/astronomy/README.md#moon-close-up-detail).
 The optional cloud mask is NASA Goddard / Reto Stöckli’s 2002 Blue Marble
 composite, bundled unchanged at 2048×1024 as `earth-nasa-clouds.jpg`. It uses
 one extra texture sample on Earth (none on Moon), with a maximum 8 MiB RGBA
 upload. If it is missing or fails to load, both surface materials still work.
 
+The shared sky now prefers `galaxy-nasa-4k.png`, a 4096×2048 atlas derived from
+[NASA SVS's full star maps](https://svs.gsfc.nasa.gov/4851/), including
+Gaia, Hipparcos and Tycho stars. The fourth channel carries faint constellation
+figures as data, so catalogue and figure overlay use one RGBA texture lookup.
+These figures are conventional patterns, not official constellation boundaries.
+The prior `milkyway-nasa-gaia.jpg` remains installed as a compatibility fallback.
+The new atlas is GPU-size bounded and optional; a procedural sky keeps navigation
+available if no sky map can be loaded. Four fixed-direction procedural nebula
+landmarks add artistic structure around sourced celestial directions; see the
+[coordinate and rendering notes](celestial-explorer.md#sky-catalogue-and-nebulae).
+
 The renderer uses linear-light surface shading, a restrained ocean glint and
-thin Earth limb, an airless lunar regolith lighting approximation, and an
-irregular decorative Milky Way band with dust lanes. These are visual models,
-not a physically calibrated atmosphere or terrain-displacement simulation.
+thin Earth limb, and an airless lunar regolith lighting approximation. Surface
+grain, atmosphere and nebula appearance are visual models. They do not supply
+measured terrain displacement, a calibrated atmosphere or a volume of gas that
+the camera can fly through.
 
 Full source and media-use attribution accompany all bundled images in
 `assets/astronomy/README.md`. Moon loading is also offline; if either required
@@ -401,10 +464,10 @@ texture fails in Earth/Moon mode, the static wallpaper remains visible.
 
 ## Validation and limits
 
-The actual fragment shader compiles, links and renders in Mesa surfaceless EGL
-on desktop GLSL 330 and GLES 300. Corresponding RGBA frames match
-exactly and remain opaque. Coverage includes dated Guangzhou UTC+8
-00/06/12/18 views, fixed-camera controls with a frozen Sun, seasonal northern/
+The shader regression script compiles, links and renders the actual fragment
+shader in Mesa surfaceless EGL on desktop GLSL 330 and GLES 300. It compares
+the corresponding RGBA frames and checks their opacity. Coverage includes
+dated Guangzhou UTC+8 00/06/12/18 views, fixed-camera controls with a frozen Sun, seasonal northern/
 southern/polar views, explicit rotating Earth, legacy controls, and
 5120×1440 single-globe previews. Landmarks/hemisphere orientation
 were visually inspected. These are real shader tests, not compositor runtime
@@ -419,10 +482,15 @@ rolled and polar starting poses, off-globe motion, same-endpoint event coalescin
 long holds, release rebasing after clock corrections, and 20,000 successive
 gestures without scale/shear drift. Renderer tests cover visible-circle hit
 testing, clipped/overlapping outputs, radius-normalized coordinates, independent
-body offsets, final-motion consumption and retirement of interaction wakeups.
+body offsets, wheel limits and displayed-radius picking, lazy detail loading,
+panorama capture through both poles, final-motion consumption and retirement
+of interaction wakeups.
 The GL/GLES script feeds the production trackball into the actual shader and
 checks geographic landmarks, current sunlight, lunar phase contours and texture
-gradients. WM tests cover desktop admission and pointer-grab ownership separately.
+gradients. WM tests cover desktop admission, body versus sky routing, wheel
+ownership, cross-output capture and pointer-grab ownership separately. Native
+XCB/x11rb tests retain out-and-back motion through bounded event batches so a
+Solar System drag cannot be mistaken for a planet click.
 
 Config/picker regressions and X11 integration run through the Cargo workspace
 with its locked dependencies. Software rendering exercises shader and framebuffer
@@ -460,30 +528,36 @@ The wrapper already supplies `--locked`; append `--offline` only if all locked
 dependencies are cached. The suite includes real shell and IPC tests, so it
 requires a test environment that allows their local sockets and child processes.
 
-## Slow galaxy motion
+## Automatic sky tour and 360° navigation
 
 `wallpaper_sky_rotation_minutes = 1440` is the default: one calm panoramic circuit
-per 24 hours. Set it to `0` to restore the exact original stationary framing,
-`720` for a 12-hour circuit, or `60` for a visibly faster one-hour preview. The range
-is integer `0..=525600`; normal config reload applies it without texture reload.
-This controls only the background, not Guangzhou's fixed Earth camera, solar
-lighting, lunar phase or either body's rotation period.
+per 24 hours. Set it to `0` to stop the automatic tour, `720` for a 12-hour circuit,
+or `60` for a faster one-hour preview. Manual sky dragging and wheel zoom work
+with every value, including zero. The range is integer `0..=525600`; normal config
+reload applies it without texture reload. Changing the period resets the manual
+sky orientation and lens. This setting controls the Astronomy background only;
+it does not change Earth framing, solar lighting, lunar phase, either body's
+rotation period or the Solar System camera.
 
-The angle uses absolute Unix UTC time, with a full turn reduced in double
-precision before computing the two rotation components. Restarting at the same
-time reproduces the same sky; display timezone and DST have no effect. Sleep
-and occlusion pause rendering, then resume at the current UTC orientation.
-Changing the system clock or period can reposition the sky intentionally.
+The automatic angle uses absolute Unix UTC time, reduced to one turn in double
+precision. With no manual offset, restarting at the same instant reproduces the
+same orientation; display timezone and DST have no effect. Sleep and occlusion
+pause rendering, then resume at the current UTC orientation with the retained
+session offset. Holding the sky pauses its decorative tour at the displayed
+orientation; release resumes smoothly from the chosen direction. Earth and Moon
+continue their separate illumination updates throughout.
 
-Motion pans through the full panorama: old sky leaves the edge as new sectors
-enter. The aspect-correct rectilinear ray yaws through the equirectangular
-catalogue, keeping latitude inside the poles even on ultrawide screens. This
-slightly changes edge framing relative to the old static crop. The procedural
-fallback uses a smoothly blended periodic spatial field so its stars and dust
-travel together without a hard reset. Neither is
-an observational planetarium or a simulation of the sky above Guangzhou.
-There is no twinkle, new texture, extra texture fetch, file I/O or new timer:
-the procedural fallback evaluates its field twice to blend its wrap seam;
-frames reuse the existing capped 15 FPS wallpaper schedule and power/occlusion
-gates. The phase wrap is continuous. Static mode retains the existing schedule
-because UTC sunlight and lunar lighting still update.
+A perspective ray samples the distant celestial sphere. Full-axis camera
+orientation can pass through both poles and wrap around longitude without
+clamping latitude, stretching a screen-sized image or leaving a flat backdrop
+behind the globe. Catalogue stars, constellation figures and nebula landmarks
+use that same direction. If the catalogue is unavailable, fallback stars and dust
+come from a seamless spatial field; the nebula artwork is fixed in space rather
+than animated noise. The catalogue and its constellation channel share one
+lookup per visible background pixel. Nebula detail uses a bounded number of
+noise layers and fades unresolved frequencies at wide views.
+
+Automatic frames retain the existing maximum 15 Hz schedule and power/occlusion
+gates; interactive sky changes use the separate 60 Hz cap. There is no runtime
+asset download or decoding on each pointer event. Setting the tour to zero keeps
+real-time Earth sunlight and lunar phase updates active.

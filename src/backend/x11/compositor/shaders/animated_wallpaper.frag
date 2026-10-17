@@ -9,14 +9,23 @@ uniform vec3 sun_direction;
 uniform mat3 view_to_body;
 uniform sampler2D earth_map;
 uniform bool moon_material;
+// Session zoom controls only a restrained, filtered material grain. Actual
+// continents, maria and craters always come from the selected NASA colour map.
+uniform float surface_detail;
 uniform sampler2D cloud_map;
 uniform bool clouds_enabled;
 uniform sampler2D sky_map;
 uniform bool sky_enabled;
 // (cos, sin), or (0, 0) for the exact original stationary framing.
 uniform vec2 sky_rotation;
+// Full camera-to-panorama frame and vertical field of view (degrees).
+// A zero flag retains the historical shader controls for regression probes.
+uniform int panorama_enabled;
+uniform mat3 panorama_view;
+uniform float panorama_fov;
 out vec4 frag_color;
 const float PI = 3.141592653589793;
+// JWM_COSMIC_SKY_INCLUDE
 // Analytic gradients of an equirectangular lookup. Taking dFdx(atan(...))
 // mistakes the longitude wrap for a full-texture jump and blurs a visible seam.
 // Analytic ray/sphere differentials also remain defined in silhouette branches.
@@ -77,7 +86,24 @@ vec3 procedural_background(vec2 pixel) {
     return sky;
 }
 
+vec3 panorama_ray(vec2 pixel, out vec3 world_dx, out vec3 world_dy) {
+    float scale = 2.0*tan(clamp(panorama_fov,8.0,110.0)*PI/360.0)
+                / max(resolution.y,1.0);
+    vec3 camera = vec3((pixel-resolution*0.5)*scale,1.0);
+    float inverse_length = inversesqrt(dot(camera,camera));
+    vec3 ray = camera*inverse_length;
+    world_dx = panorama_view*(vec3(scale,0,0)-ray*(ray.x*scale))*inverse_length;
+    world_dy = panorama_view*(vec3(0,scale,0)-ray*(ray.y*scale))*inverse_length;
+    return panorama_view*ray;
+}
+
 vec3 galaxy_background(vec2 pixel) {
+    if (panorama_enabled != 0) {
+        vec3 dx,dy;
+        vec3 ray = panorama_ray(pixel,dx,dy);
+        vec3 color = cosmic_sky(ray,dx,dy,sky_enabled);
+        return pow(max(color,vec3(0.0)),vec3(1.0/2.2));
+    }
     bool moving = dot(sky_rotation, sky_rotation) > 0.5;
     // Preserve the original static framing exactly when motion is disabled.
     if (!moving && !sky_enabled) return procedural_background(pixel);
@@ -128,6 +154,28 @@ vec3 galaxy_background(vec2 pixel) {
 vec3 earth_normal(vec3 n) {
     return view_to_body * n;
 }
+
+// This is artistic microscopic material grain, not invented geographic relief.
+// Three incommensurate body-space waves have no longitude seam or polar pinch.
+// Explicit normal differentials remove unresolved frequencies before they can
+// sparkle during pointer motion. The ordinary unzoomed renderer is unchanged.
+float detail_wave(vec3 n, vec3 dx, vec3 dy, vec3 frequency) {
+    float footprint = max(abs(dot(dx, frequency)), abs(dot(dy, frequency)));
+    float filtered = 1.0 - smoothstep(0.7, 2.2, footprint);
+    return sin(dot(n, frequency)) * filtered;
+}
+
+float surface_grain(vec3 n, vec3 dx, vec3 dy) {
+    if (surface_detail <= 1.2) return 0.0;
+    float coarse = detail_wave(n, dx, dy, vec3(241.0, 313.0, 179.0))
+                 * detail_wave(n, dx, dy, vec3(-193.0, 127.0, 269.0));
+    float middle = detail_wave(n, dx, dy, vec3(617.0, -433.0, 839.0))
+                 * detail_wave(n, dx, dy, vec3(709.0, 983.0, -547.0));
+    float fine = detail_wave(n, dx, dy, vec3(1873.0, 1297.0, -1553.0))
+               * detail_wave(n, dx, dy, vec3(-1637.0, 2141.0, 1181.0));
+    return smoothstep(1.2, 4.0, surface_detail)
+         * (coarse * 0.50 + middle * 0.32 + fine * 0.18);
+}
 vec3 atmosphere(vec2 p, float radius2) {
     if (moon_material) return vec3(0.0);
     vec3 limb = earth_normal(vec3(normalize(p), 0.0));
@@ -162,12 +210,16 @@ void main() {
     vec2 uv_dy = equirect_gradient(earth_n,normal_dy);
     vec3 surface = textureGrad(earth_map,uv,uv_dx,uv_dy).rgb;
     vec3 albedo = pow(surface, vec3(2.2));
+    float grain = surface_grain(earth_n, normal_dx, normal_dy);
     float light = dot(earth_n, normalize(sun_direction));
     float view_cos = sqrt(max(0.0, 1.0-radius2));
     float mu = max(light, 0.0);
     // Airless regolith has strong backscatter and a softly modelled limb.
     // The LROC mosaic supplies real maria/craters; no invented bump geography.
     if (moon_material) {
+        // Fine regolith contrast is subtle and cannot move the physical
+        // terminator; the new optional 8K LROC image supplies actual detail.
+        albedo *= 1.0 + 0.065 * grain;
         float lommel = mu / max(mu + view_cos, 0.08);
         float diffuse = 0.48 * mu + 0.52 * lommel;
         vec3 color = pow(albedo * (0.014 + 1.20*diffuse), vec3(1.0/2.2));
@@ -182,6 +234,7 @@ void main() {
     // thresholding it into opaque white patches. Static composite, not weather.
     cloud = pow(clamp(cloud, 0.0, 1.0), 1.15) * 0.70;
     float water = smoothstep(0.015, 0.09, surface.b - max(surface.r, surface.g));
+    albedo *= 1.0 + mix(0.050, 0.012, water) * grain;
     // Restrained blue water reflectance keeps the supplied near-black ocean
     // map readable under daylight without lifting the whole night hemisphere.
     albedo = mix(albedo, max(albedo, vec3(0.018,0.055,0.095)), water*0.85);

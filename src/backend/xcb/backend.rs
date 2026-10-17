@@ -35,6 +35,7 @@ use crate::backend::x11::wm::managed_unmap::{
     ManagedUnmapDisposition, ManagedUnmapTracker, SharedManagedUnmaps,
 };
 use crate::backend::x11::wm::pointer_event_drain::PointerEventDrain;
+use crate::backend::x11::wm::pointer_motion::coalesce_pointer_motion;
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, ProtocolErrorClass,
@@ -1016,23 +1017,20 @@ impl XcbLoopData<'_> {
     fn dispatch_backend_event(
         &mut self,
         event: BackendEvent,
+        left_button_held: bool,
         pending_motion: &mut Option<BackendEvent>,
         pending_configure: &mut Option<BackendEvent>,
         context: &str,
     ) {
         match &event {
-            BackendEvent::MotionNotify { target, .. } => {
+            BackendEvent::MotionNotify { .. } => {
                 self.flush_pending_configure(pending_configure, context);
-                if let Some(BackendEvent::MotionNotify {
-                    target: prev_target,
-                    ..
-                }) = pending_motion
+                for motion in coalesce_pointer_motion(pending_motion, event, left_button_held)
+                    .into_iter()
+                    .flatten()
                 {
-                    if prev_target != target {
-                        self.flush_pending_motion(pending_motion, context);
-                    }
+                    self.deliver_backend_event(motion, context);
                 }
-                *pending_motion = Some(event);
             }
             BackendEvent::WindowConfigured { .. } => {
                 self.flush_pending_motion(pending_motion, context);
@@ -2794,9 +2792,15 @@ impl Backend for XcbBackend {
                     let mut pending_motion = None;
                     let mut pending_configure = None;
                     for (event, repeat) in events {
+                        let left_button_held = matches!(
+                            &event,
+                            xcb::Event::X(x::Event::MotionNotify(motion))
+                                if motion.state().bits() & (1 << 8) != 0
+                        );
                         if let Some(mapped) = data.backend.map_event(event, repeat) {
                             data.dispatch_backend_event(
                                 mapped,
+                                left_button_held,
                                 &mut pending_motion,
                                 &mut pending_configure,
                                 "XCB event",
@@ -2805,6 +2809,7 @@ impl Backend for XcbBackend {
                         while let Some(mapped) = data.backend.pending.pop_front() {
                             data.dispatch_backend_event(
                                 mapped,
+                                false,
                                 &mut pending_motion,
                                 &mut pending_configure,
                                 "queued XCB event",
@@ -6492,6 +6497,131 @@ mod parity_tests {
                 root_y: 213.0,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn native_left_drag_motion_keeps_out_and_back_evidence_through_xcb_batching() {
+        use super::{PointerEventDrain, XcbEventSource, XcbSourceEvent, coalesce_pointer_motion};
+        use crate::backend::api::HitTarget;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use x11rb::protocol::xproto::{self, ConnectionExt, EventMask};
+        use xcb::Xid;
+
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let (conn, screen) = xcb::Connection::connect(Some(x11.name())).unwrap();
+        let conn = Arc::new(conn);
+        let root = conn
+            .get_setup()
+            .roots()
+            .nth(screen as usize)
+            .unwrap()
+            .root();
+        conn.check_request(conn.send_request_checked(&x::ChangeWindowAttributes {
+            window: root,
+            value_list: &[x::Cw::EventMask(x::EventMask::POINTER_MOTION)],
+        }))
+        .unwrap();
+        let (driver, _) = x11rb::connect(Some(x11.name())).unwrap();
+        let mut source = XcbEventSource::new(conn.clone(), Arc::new(PointerEventDrain::default()));
+        for index in 0..65_u32 {
+            driver
+                .send_event(
+                    false,
+                    root.resource_id(),
+                    EventMask::POINTER_MOTION,
+                    xproto::MotionNotifyEvent {
+                        response_type: xproto::MOTION_NOTIFY_EVENT,
+                        root: root.resource_id(),
+                        event: root.resource_id(),
+                        root_x: if index == 32 { 300 } else { 100 },
+                        root_y: 100,
+                        state: xproto::KeyButMask::BUTTON1,
+                        time: 1000 + index,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        driver.get_input_focus().unwrap().reply().unwrap();
+        conn.wait_for_reply(conn.send_request(&x::GetInputFocus {}))
+            .unwrap();
+        assert!(source.prefetch_queued_before_sleep().unwrap());
+        let mut event_loop = calloop::EventLoop::<Vec<BackendEvent>>::try_new().unwrap();
+        event_loop
+            .handle()
+            .insert_source(source, |event, _, observed| {
+                let XcbSourceEvent::Events(events) = event else {
+                    return;
+                };
+                let mut pending_motion = None;
+                for (event, _) in events {
+                    if let xcb::Event::X(x::Event::MotionNotify(motion)) = event {
+                        let held = motion.state().bits() & (1 << 8) != 0;
+                        observed.extend(
+                            coalesce_pointer_motion(
+                                &mut pending_motion,
+                                BackendEvent::MotionNotify {
+                                    target: HitTarget::Background { output: None },
+                                    root_x: f64::from(motion.root_x()),
+                                    root_y: f64::from(motion.root_y()),
+                                    time: motion.time(),
+                                },
+                                held,
+                            )
+                            .into_iter()
+                            .flatten(),
+                        );
+                    }
+                }
+                observed.extend(pending_motion);
+            })
+            .map_err(|error| error.error)
+            .unwrap();
+        let mut observed = Vec::new();
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert_eq!(
+            observed.len(),
+            64,
+            "preserved left drag retains the raw fairness bound"
+        );
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert_eq!(observed.len(), 65);
+        for (index, event) in observed.iter().enumerate() {
+            assert!(
+                matches!(event, BackendEvent::MotionNotify { root_x, root_y: 100.0, time, .. }
+                if *root_x == if index == 32 { 300.0 } else { 100.0 } && *time == 1000 + index as u32)
+            );
+        }
+        observed.clear();
+        for root_x in [100, 300, 100] {
+            driver
+                .send_event(
+                    false,
+                    root.resource_id(),
+                    EventMask::POINTER_MOTION,
+                    xproto::MotionNotifyEvent {
+                        response_type: xproto::MOTION_NOTIFY_EVENT,
+                        root: root.resource_id(),
+                        event: root.resource_id(),
+                        root_x,
+                        root_y: 100,
+                        same_screen: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        driver.get_input_focus().unwrap().reply().unwrap();
+        conn.wait_for_reply(conn.send_request(&x::GetInputFocus {}))
+            .unwrap();
+        event_loop.dispatch(Duration::ZERO, &mut observed).unwrap();
+        assert_eq!(observed.len(), 1);
+        assert!(matches!(
+            observed[0],
+            BackendEvent::MotionNotify { root_x: 100.0, .. }
         ));
     }
 

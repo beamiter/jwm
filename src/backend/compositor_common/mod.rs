@@ -28,6 +28,8 @@ pub(crate) mod solar_system;
 pub(crate) mod minimized_thumbnail;
 pub(crate) mod osd;
 pub mod page_curl;
+#[cfg(feature = "x11-backends")]
+pub(crate) mod panorama;
 pub(crate) mod prism;
 pub(crate) mod recording_indicator;
 pub mod recording_nv12;

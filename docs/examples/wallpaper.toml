@@ -1,10 +1,11 @@
 # Wallpaper example (TOML, not YAML).
 # Merge these keys into the existing [behavior] section of config_x11.toml;
 # do not add a second [behavior] or duplicate keys. Replace example paths/connectors.
-# Astronomy requires the X11 compositor. Native Wayland uses static wallpaper.
+# Celestial effects require the X11 compositor. Native Wayland uses static wallpaper.
 [behavior]
 
-# Live effect: "off" (default) = static; "astronomy" = animated Earth/Moon.
+# Live effect: "off" (default) = static; "astronomy" = animated Earth/Moon;
+# "solar-system" = the interactive Sun and eight planets.
 wallpaper_effect = "astronomy"
 # "span" (default): one Earth across the framebuffer.
 # "per-output": complete Earth on every screen.
@@ -13,13 +14,25 @@ wallpaper_astronomy_layout = "earth-moon"
 
 # Mouse: hold left button on the visible Earth/Moon and drag in any direction.
 # Edge drags also roll; release keeps the pose and resumes any automatic tour.
-# Starts only on uncovered globe surface; window/bar bindings keep priority.
-# Manual poses are session-only and independent per body; no extra enable key.
-# Changing a body's orientation/mode/period resets its manual pose.
+# Wheel over a body scales it from 0.35x to 8x; Earth/Moon keep independent zoom.
+# Left-drag empty sky to look through the entire celestial sphere, including poles.
+# Wheel over sky changes the perspective lens (Astronomy vertical FOV 8..110 degrees).
+# The sky tour defaults to 1440 minutes; wallpaper_sky_rotation_minutes = 0 stops
+# automatic sky movement while leaving manual panorama navigation available.
+# Gestures start on uncovered wallpaper; window/bar/modal bindings keep priority.
+# A captured gesture can continue across windows and other outputs.
+# Manual poses, zoom and lens are session-only; no extra enable key.
+# Changing a body's orientation/mode/period resets its manual pose and zoom.
+# Solar System: click Sun/planet for a close-up; drag bodies to orbit, sky to look.
+# Wheel on a focused body approaches/recedes; right-click uncovered wallpaper
+# restores the saved overview. A drag never becomes a click by returning to its start.
+# Shared controls, detail and sky sources: docs/celestial-explorer.md.
 
 # Empty strings (defaults) load the installed bundled NASA textures.
 # Custom example: wallpaper_earth_texture = "/home/alice/Pictures/earth.jpg"
 # Custom maps must be decodable 2:1 equirectangular images.
+# Above 1.3x, Astronomy lazily requests Earth native 5400 / Moon 8192 detail where
+# available and GPU-supported. Explicit custom maps remain authoritative.
 wallpaper_earth_texture = ""
 wallpaper_moon_texture = ""
 
@@ -68,13 +81,13 @@ wallpaper_timezone_offset_hours = 8
 # Use either the inline map below or the subtable, never both.
 wallpaper_astronomy_bodies = { "DP-1" = "earth", "HDMI-1" = "moon" }
 
-# Static fallback, restored when Astronomy is off/unavailable.
+# Static fallback, restored when the celestial effect is off/unavailable.
 # Generated default is jwm/wallpaper.jpg in your config directory.
 # With no override/daily rotation, "" loads no static image and shows the
 # backend's default desktop background (theme-dependent without the compositor).
 # Example: wallpaper = "/home/alice/Pictures/Wallpapers/forest.jpg"
 wallpaper = ""
-# Static images only; this does not resize Astronomy bodies. Default "fill".
+# Static images only; Astronomy body scale uses the mouse wheel. Default "fill".
 # fill = preserve aspect and crop; fit = show whole image with margins;
 # stretch = distort to fill; center = unscaled and centered (may crop).
 wallpaper_mode = "fill"
@@ -87,11 +100,11 @@ wallpaper_crossfade_duration_ms = 500
 
 # "off" (default) or "daily" (local calendar date, different images per output slot).
 # Automatic daily selection from a nonempty collection overrides static monitor/tag choices.
-# Astronomy stays on top; the daily fallback continues underneath.
+# The celestial effect stays on top; the daily fallback continues underneath.
 wallpaper_rotation = "off"
 # Example: ["/home/alice/Pictures/a.jpg", "/home/alice/Pictures/b.jpg"]
 wallpaper_rotation_paths = []
-# Picking a static image disables Astronomy. With a nonempty daily collection,
+# Picking a static image disables the celestial effect. With a nonempty daily collection,
 # the manual pick replaces only the global fallback; monitor/tag overrides still apply.
 # It lasts for today in this session; reload discards it. The collection is retained.
 

@@ -2897,13 +2897,28 @@ mod tests {
         End,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum SolarGestureEvent {
+        Begin(f64, f64),
+        Motion(f64, f64),
+        Abort,
+        End(bool),
+    }
+
     struct RenderSpyBackend {
         astronomy_ready: bool,
         astronomy_hit: bool,
         astronomy_active: bool,
         astronomy_motion_fails: bool,
         astronomy_gestures: Vec<AstronomyGestureEvent>,
+        astronomy_zooms: Vec<(f64, f64, f64)>,
         solar_ready: bool,
+        solar_hit: bool,
+        solar_active: bool,
+        solar_motion_fails: bool,
+        solar_gestures: Vec<SolarGestureEvent>,
+        solar_zooms: Vec<(f64, f64, f64)>,
+        solar_returns: Vec<(f64, f64)>,
         solar_deltas: Vec<(f32, f32, f32)>,
         recording_region_updates: Vec<(i32, i32, u32, u32)>,
         recording_overlay_updates: Vec<Option<(i32, i32, u32, u32)>>,
@@ -2967,7 +2982,14 @@ mod tests {
                 astronomy_active: false,
                 astronomy_motion_fails: false,
                 astronomy_gestures: Vec::new(),
+                astronomy_zooms: Vec::new(),
                 solar_ready: false,
+                solar_hit: true,
+                solar_active: false,
+                solar_motion_fails: false,
+                solar_gestures: Vec::new(),
+                solar_zooms: Vec::new(),
+                solar_returns: Vec::new(),
                 solar_deltas: Vec::new(),
                 recording_region_updates: Vec::new(),
                 recording_overlay_updates: Vec::new(),
@@ -3044,8 +3066,68 @@ mod tests {
             }
         }
 
+        fn compositor_astronomy_zoom(&mut self, x: f64, y: f64, steps: f64) -> bool {
+            if !self.astronomy_ready || !self.astronomy_hit || self.astronomy_active {
+                return false;
+            }
+            self.astronomy_zooms.push((x, y, steps));
+            true
+        }
+
         fn compositor_solar_system_interactive(&self) -> bool {
             self.solar_ready
+        }
+
+        fn compositor_solar_system_begin_drag(&mut self, x: f64, y: f64) -> bool {
+            if !self.solar_ready || !self.solar_hit || self.solar_active {
+                return false;
+            }
+            self.solar_active = true;
+            self.solar_gestures.push(SolarGestureEvent::Begin(x, y));
+            true
+        }
+
+        fn compositor_solar_system_abort_drag(&mut self) {
+            if self.solar_active {
+                self.solar_active = false;
+                self.solar_gestures.push(SolarGestureEvent::Abort);
+            }
+        }
+
+        fn compositor_solar_system_drag_motion(&mut self, x: f64, y: f64) -> bool {
+            if !self.solar_ready || !self.solar_active || self.solar_motion_fails {
+                return false;
+            }
+            self.solar_gestures.push(SolarGestureEvent::Motion(x, y));
+            true
+        }
+
+        fn compositor_solar_system_drag_active(&self) -> bool {
+            self.solar_ready && self.solar_active
+        }
+
+        fn compositor_solar_system_end_drag(&mut self, activate_click: bool) {
+            if self.solar_active {
+                self.solar_active = false;
+                self.solar_gestures
+                    .push(SolarGestureEvent::End(activate_click));
+            }
+        }
+
+        fn compositor_solar_system_zoom(&mut self, x: f64, y: f64, steps: f64) -> bool {
+            if !self.solar_ready || !self.solar_hit || self.solar_active {
+                return false;
+            }
+            self.solar_zooms.push((x, y, steps));
+            true
+        }
+
+        fn compositor_solar_system_leave_closeup(&mut self, x: f64, y: f64) -> bool {
+            if !self.solar_ready || !self.solar_hit || self.solar_active {
+                return false;
+            }
+            self.solar_returns.push((x, y));
+            true
         }
         fn compositor_solar_system_camera_delta(&mut self, a: f32, e: f32, z: f32) -> bool {
             if !self.solar_ready {
@@ -8014,6 +8096,7 @@ mod tests {
             .input_ops
             .solar_button_mask
             .store(1 << 8, AtomicOrdering::Relaxed);
+        jwm.last_mouse_root = (800.0, 500.0);
         (jwm, backend)
     }
 
@@ -8508,19 +8591,39 @@ mod tests {
     }
 
     #[test]
-    fn solar_desktop_drag_orbits_and_release_retires_exactly_its_grab() {
+    fn solar_desktop_drag_uses_ordered_motion_and_final_release_endpoint() {
+        use SolarGestureEvent::*;
         let (mut jwm, mut backend) = solar_input_fixture();
-        jwm.try_wallpaper_press(&mut backend, 1);
-        assert_eq!(
-            jwm.wallpaper_drag.map(|drag| drag.last),
-            Some((800.0, 500.0))
-        );
-        *backend.input_ops.pointer.lock().unwrap() = (820.0, 510.0);
+        // The server is already over a different window with the button up.
+        // Neither initial picking nor the watchdog may use that future point.
+        *backend.input_ops.pointer.lock().unwrap() = (1600.0, 700.0);
+        *backend.input_ops.solar_pointer_child.lock().unwrap() = Some(WindowId::from_raw(123));
+        backend
+            .input_ops
+            .solar_button_mask
+            .store(0, AtomicOrdering::Relaxed);
+        capture_press(&mut jwm, &mut backend, 800.25, 500.5);
         jwm.tick_wallpaper_drag(&mut backend);
-        assert_eq!(backend.solar_deltas.len(), 1);
-        assert!((backend.solar_deltas[0].0 - 0.1).abs() < 0.0001);
-        jwm.on_button_release(&mut backend, HitTarget::Background { output: None }, 1, 0);
+        assert!(jwm.wallpaper_drag.is_some());
+        let token = backend
+            .input_ops
+            .pointer_drain_requests
+            .load(AtomicOrdering::Relaxed);
+        assert_ne!(token, 0);
+        astronomy_motion(&mut jwm, &mut backend, 820.5, 540.25);
+        capture_release(&mut jwm, &mut backend, 900.75, 480.5);
+        jwm.handle_event(&mut backend, BackendEvent::PointerEventsDrained { token })
+            .unwrap();
         jwm.cancel_wallpaper_drag(&mut backend);
+        assert_eq!(
+            backend.solar_gestures,
+            [
+                Begin(800.25, 500.5),
+                Motion(820.5, 540.25),
+                Motion(900.75, 480.5),
+                End(false),
+            ]
+        );
         assert!(jwm.wallpaper_drag.is_none());
         assert_eq!(
             backend
@@ -8530,48 +8633,211 @@ mod tests {
             1
         );
         assert_eq!(backend.track_releases, 0);
+        assert!(backend.solar_deltas.is_empty());
     }
 
     #[test]
-    fn solar_scroll_zooms_without_grabbing() {
+    fn solar_click_activation_requires_a_natural_release_within_the_whole_gesture_slop() {
+        use SolarGestureEvent::*;
+        for (motions, release, activate) in [
+            (vec![], (800.0, 500.0), true),
+            (vec![(802.0, 501.0)], (803.0, 502.0), true),
+            (vec![], (804.0, 500.0), true),
+            (vec![], (804.01, 500.0), false),
+            (vec![(850.0, 510.0)], (800.0, 500.0), false),
+            (vec![(803.0, 503.0)], (800.0, 500.0), false),
+        ] {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+            for (x, y) in motions {
+                astronomy_motion(&mut jwm, &mut backend, x, y);
+            }
+            capture_release(&mut jwm, &mut backend, release.0, release.1);
+            assert_eq!(
+                backend.solar_gestures.last(),
+                Some(&End(activate)),
+                "release {release:?}"
+            );
+            assert!(!backend.solar_active);
+            assert!(jwm.wallpaper_drag.is_none());
+        }
+    }
+
+    #[test]
+    fn solar_secondary_releases_and_wheel_cannot_activate_or_reproject_a_capture() {
+        use SolarGestureEvent::*;
         let (mut jwm, mut backend) = solar_input_fixture();
-        jwm.try_wallpaper_press(&mut backend, 4);
-        jwm.try_wallpaper_press(&mut backend, 5);
-        assert_eq!(
-            backend.solar_deltas,
-            vec![(0.0, 0.0, 1.0), (0.0, 0.0, -1.0)]
-        );
+        capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+        for detail in [2, 3, 4, 5, 6, 7] {
+            jwm.try_wallpaper_press(&mut backend, detail);
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::ButtonRelease {
+                    target: HitTarget::Background { output: None },
+                    detail,
+                    time: 1001,
+                    root_x: 850.0,
+                    root_y: 550.0,
+                },
+            )
+            .unwrap();
+            assert!(jwm.wallpaper_drag.is_some());
+            assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0)]);
+        }
+        assert!(backend.solar_zooms.is_empty());
+        assert!(backend.solar_returns.is_empty());
+        capture_release(&mut jwm, &mut backend, 800.0, 500.0);
+        assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0), End(true)]);
         assert_eq!(
             backend
                 .input_ops
-                .pointer_grabs
+                .pointer_ungrabs
                 .load(AtomicOrdering::Relaxed),
-            0
+            1
         );
     }
 
     #[test]
-    fn solar_drag_cancels_on_readiness_loss_button_loss_child_or_query_error() {
-        for condition in 0..4 {
-            let (mut jwm, mut backend) = solar_input_fixture();
-            jwm.try_wallpaper_press(&mut backend, 1);
-            match condition {
-                0 => backend.solar_ready = false,
-                1 => backend
-                    .input_ops
-                    .solar_button_mask
-                    .store(0, AtomicOrdering::Relaxed),
-                2 => {
-                    *backend.input_ops.solar_pointer_child.lock().unwrap() =
-                        Some(WindowId::from_raw(123))
-                }
-                _ => backend
-                    .input_ops
-                    .solar_query_fails
-                    .store(true, AtomicOrdering::Relaxed),
+    fn celestial_wheel_zooms_at_the_event_point_without_grabbing_or_using_future_pointer() {
+        for solar in [false, true] {
+            let (mut jwm, mut backend) = if solar {
+                solar_input_fixture()
+            } else {
+                astronomy_input_fixture()
+            };
+            *backend.input_ops.pointer.lock().unwrap() = (1400.0, 200.0);
+            *backend.input_ops.solar_pointer_child.lock().unwrap() = Some(WindowId::from_raw(321));
+            for (detail, x, y) in [(4, 800.25, 500.5), (5, 850.5, 520.25)] {
+                jwm.handle_event(
+                    &mut backend,
+                    BackendEvent::ButtonPress {
+                        target: HitTarget::Background { output: None },
+                        state: 0,
+                        detail,
+                        time: 1000,
+                        root_x: x,
+                        root_y: y,
+                    },
+                )
+                .unwrap();
             }
-            jwm.tick_wallpaper_drag(&mut backend);
+            let expected = [(800.25, 500.5, 1.0), (850.5, 520.25, -1.0)];
+            if solar {
+                assert_eq!(backend.solar_zooms, expected);
+                assert!(backend.astronomy_zooms.is_empty());
+            } else {
+                assert_eq!(backend.astronomy_zooms, expected);
+                assert!(backend.solar_zooms.is_empty());
+            }
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_grabs
+                    .load(AtomicOrdering::Relaxed),
+                0
+            );
             assert!(jwm.wallpaper_drag.is_none());
+        }
+    }
+
+    #[test]
+    fn celestial_zoom_and_solar_return_respect_surface_modifier_modal_and_lock_priority() {
+        for solar in [false, true] {
+            for detail in [3, 4, 5] {
+                for condition in 0..6 {
+                    let (mut jwm, mut backend) = if solar {
+                        solar_input_fixture()
+                    } else {
+                        astronomy_input_fixture()
+                    };
+                    let target = if condition == 1 {
+                        HitTarget::Surface(WindowId::from_raw(456))
+                    } else {
+                        HitTarget::Background { output: None }
+                    };
+                    match condition {
+                        2 => backend
+                            .key_ops
+                            .solar_modifiers
+                            .store(Mods::SHIFT.bits() as u32, AtomicOrdering::Relaxed),
+                        3 => jwm.features.screenshot.active = true,
+                        4 => {
+                            jwm.features.monitor_lock.lock(0, (0, 0, 1920, 1080));
+                        }
+                        5 => {
+                            backend.solar_hit = false;
+                            backend.astronomy_hit = false;
+                        }
+                        _ => {}
+                    }
+                    jwm.handle_event(
+                        &mut backend,
+                        BackendEvent::ButtonPress {
+                            target,
+                            state: 0,
+                            detail,
+                            time: 1000,
+                            root_x: 800.25,
+                            root_y: 500.5,
+                        },
+                    )
+                    .unwrap();
+                    let accepted = condition == 0;
+                    assert_eq!(
+                        backend.solar_returns.len(),
+                        usize::from(accepted && solar && detail == 3)
+                    );
+                    assert_eq!(
+                        backend.solar_zooms.len(),
+                        usize::from(accepted && solar && detail != 3)
+                    );
+                    assert_eq!(
+                        backend.astronomy_zooms.len(),
+                        usize::from(accepted && !solar && detail != 3)
+                    );
+                    assert_eq!(
+                        backend
+                            .input_ops
+                            .pointer_grabs
+                            .load(AtomicOrdering::Relaxed),
+                        0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn solar_missing_release_and_query_failure_wait_for_native_fence_without_activating_planet() {
+        use SolarGestureEvent::*;
+        for query_fails in [false, true] {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+            backend
+                .input_ops
+                .solar_query_fails
+                .store(query_fails, AtomicOrdering::Relaxed);
+            backend
+                .input_ops
+                .solar_button_mask
+                .store(0, AtomicOrdering::Relaxed);
+            jwm.tick_wallpaper_drag(&mut backend);
+            jwm.tick_wallpaper_drag(&mut backend);
+            assert!(jwm.wallpaper_drag.is_some());
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_drain_requests
+                    .load(AtomicOrdering::Relaxed),
+                1
+            );
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::PointerEventsDrained { token: 1 },
+            )
+            .unwrap();
+            assert!(jwm.wallpaper_drag.is_none());
+            assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0), End(false)]);
             assert_eq!(
                 backend
                     .input_ops
@@ -8579,12 +8845,49 @@ mod tests {
                     .load(AtomicOrdering::Relaxed),
                 1
             );
-            assert!(backend.solar_deltas.is_empty());
         }
     }
 
     #[test]
-    fn solar_press_fails_closed_without_releasing_someone_elses_grab() {
+    fn solar_stale_native_fence_cannot_cancel_a_new_planet_click() {
+        use SolarGestureEvent::*;
+        let (mut jwm, mut backend) = solar_input_fixture();
+        capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+        backend
+            .input_ops
+            .solar_button_mask
+            .store(0, AtomicOrdering::Relaxed);
+        jwm.tick_wallpaper_drag(&mut backend);
+        capture_release(&mut jwm, &mut backend, 800.0, 500.0);
+        capture_press(&mut jwm, &mut backend, 900.0, 550.0);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::PointerEventsDrained { token: 1 },
+        )
+        .unwrap();
+        assert!(jwm.wallpaper_drag.is_some());
+        capture_release(&mut jwm, &mut backend, 900.0, 550.0);
+        assert_eq!(
+            backend.solar_gestures,
+            [
+                Begin(800.0, 500.0),
+                End(true),
+                Begin(900.0, 550.0),
+                End(true)
+            ]
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
+    fn solar_press_refuses_stale_geometry_or_failed_grab_without_releasing_another_owner() {
+        use SolarGestureEvent::*;
         for condition in 0..4 {
             let (mut jwm, mut backend) = solar_input_fixture();
             match condition {
@@ -8593,14 +8896,8 @@ mod tests {
                     .input_ops
                     .solar_grab_fails
                     .store(true, AtomicOrdering::Relaxed),
-                2 => {
-                    *backend.input_ops.solar_pointer_child.lock().unwrap() =
-                        Some(WindowId::from_raw(123))
-                }
-                _ => backend
-                    .input_ops
-                    .solar_query_fails
-                    .store(true, AtomicOrdering::Relaxed),
+                2 => backend.solar_hit = false,
+                _ => jwm.last_mouse_root = (f64::NAN, 500.0),
             }
             jwm.try_wallpaper_press(&mut backend, 1);
             jwm.cancel_wallpaper_drag(&mut backend);
@@ -8612,11 +8909,17 @@ mod tests {
                     .load(AtomicOrdering::Relaxed),
                 0
             );
+            if condition == 1 {
+                assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0), Abort]);
+            } else {
+                assert!(backend.solar_gestures.is_empty());
+            }
         }
     }
 
     #[test]
-    fn solar_drag_normalizes_resolution_portrait_and_negative_origins() {
+    fn solar_drag_preserves_event_coordinates_on_portrait_and_negative_origin_outputs() {
+        use SolarGestureEvent::*;
         for (width, height, origin) in [
             (1920, 1080, (0, 0)),
             (2560, 1440, (0, 0)),
@@ -8627,24 +8930,29 @@ mod tests {
             let (mut jwm, mut backend) = solar_input_fixture();
             let g = &mut jwm.state.monitors.values_mut().next().unwrap().geometry;
             (g.m_x, g.m_y, g.m_w, g.m_h) = (origin.0, origin.1, width, height);
-            let start = (origin.0 + width / 2, origin.1 + height / 2);
-            *backend.input_ops.pointer.lock().unwrap() = (start.0 as f64, start.1 as f64);
+            let start = (
+                (origin.0 + width / 2) as f64,
+                (origin.1 + height / 2) as f64,
+            );
+            let step = (width.min(height) / 10) as f64;
+            jwm.last_mouse_root = start;
             jwm.try_wallpaper_press(&mut backend, 1);
-            let step = width.min(height) / 10;
-            *backend.input_ops.pointer.lock().unwrap() =
-                ((start.0 + step) as f64, (start.1 - step) as f64);
-            jwm.tick_wallpaper_drag(&mut backend);
-            assert_eq!(backend.solar_deltas.len(), 1);
-            let (a, e, z) = backend.solar_deltas[0];
-            assert!((a - 0.54).abs() < 0.00001);
-            assert!((e + 0.54).abs() < 0.00001);
-            assert_eq!(z, 0.0);
+            astronomy_motion(&mut jwm, &mut backend, start.0 + step, start.1 - step);
+            assert_eq!(
+                backend.solar_gestures,
+                [
+                    Begin(start.0, start.1),
+                    Motion(start.0 + step, start.1 - step)
+                ]
+            );
             jwm.cancel_wallpaper_drag(&mut backend);
+            assert_eq!(backend.solar_gestures.last(), Some(&End(false)));
         }
     }
 
     #[test]
-    fn solar_drag_stops_at_output_boundary_without_camera_jump() {
+    fn solar_panorama_drag_keeps_its_capture_across_output_and_existing_window_boundaries() {
+        use SolarGestureEvent::*;
         let (mut jwm, mut backend) = solar_input_fixture();
         let mut other = crate::core::models::WMMonitor::new();
         (
@@ -8654,15 +8962,30 @@ mod tests {
             other.geometry.m_h,
         ) = (1920, 0, 3840, 2160);
         jwm.state.monitors.insert(other);
-        *backend.input_ops.pointer.lock().unwrap() = (1919.0, 500.0);
-        jwm.try_wallpaper_press(&mut backend, 1);
+        capture_press(&mut jwm, &mut backend, 1919.0, 500.0);
+        let selected = jwm.state.sel_mon;
+        *backend.input_ops.pointer.lock().unwrap() = (2300.0, 1100.0);
+        *backend.input_ops.solar_pointer_child.lock().unwrap() = Some(WindowId::from_raw(456));
         jwm.tick_wallpaper_drag(&mut backend);
         assert!(jwm.wallpaper_drag.is_some());
-        assert!(backend.solar_deltas.is_empty());
-        *backend.input_ops.pointer.lock().unwrap() = (1920.0, 500.0);
-        jwm.tick_wallpaper_drag(&mut backend);
-        assert!(jwm.wallpaper_drag.is_none());
-        assert!(backend.solar_deltas.is_empty());
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::MotionNotify {
+                target: HitTarget::Surface(WindowId::from_raw(456)),
+                root_x: 2300.0,
+                root_y: 1100.0,
+                time: 1001,
+            },
+        )
+        .unwrap();
+        assert!(jwm.wallpaper_drag.is_some());
+        assert_eq!(jwm.state.sel_mon, selected);
+        assert_eq!(
+            backend.solar_gestures,
+            [Begin(1919.0, 500.0), Motion(2300.0, 1100.0)]
+        );
+        capture_release(&mut jwm, &mut backend, 2301.0, 1100.0);
+        assert_eq!(backend.solar_gestures.last(), Some(&End(false)));
         assert_eq!(
             backend
                 .input_ops
@@ -8670,27 +8993,45 @@ mod tests {
                 .load(AtomicOrdering::Relaxed),
             1
         );
-        // A fresh gesture on the second output can start normally.
-        jwm.try_wallpaper_press(&mut backend, 1);
-        assert!(jwm.wallpaper_drag.is_some());
-        jwm.cancel_wallpaper_drag(&mut backend);
     }
 
     #[test]
-    fn solar_drag_cancels_changed_output_even_without_motion() {
-        let (mut jwm, mut backend) = solar_input_fixture();
-        jwm.try_wallpaper_press(&mut backend, 1);
-        jwm.state.monitors.values_mut().next().unwrap().geometry.m_w += 1;
-        jwm.tick_wallpaper_drag(&mut backend);
-        assert!(jwm.wallpaper_drag.is_none());
-        assert!(backend.solar_deltas.is_empty());
-        assert_eq!(
-            backend
-                .input_ops
-                .pointer_ungrabs
-                .load(AtomicOrdering::Relaxed),
-            1
-        );
+    fn solar_capture_invalidations_cancel_without_clicking_a_planet() {
+        use SolarGestureEvent::*;
+        for condition in 0..5 {
+            let (mut jwm, mut backend) = solar_input_fixture();
+            capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+            match condition {
+                0 => {
+                    jwm.state.monitors.values_mut().next().unwrap().geometry.m_w += 1;
+                    jwm.tick_wallpaper_drag(&mut backend);
+                }
+                1 => {
+                    backend.solar_ready = false;
+                    jwm.tick_wallpaper_drag(&mut backend);
+                }
+                2 => {
+                    backend.solar_motion_fails = true;
+                    astronomy_motion(&mut jwm, &mut backend, 801.0, 500.0);
+                }
+                3 => {
+                    astronomy_motion(&mut jwm, &mut backend, f64::NAN, 500.0);
+                }
+                _ => {
+                    jwm.features.monitor_lock.lock(0, (0, 0, 1920, 1080));
+                    jwm.tick_wallpaper_drag(&mut backend);
+                }
+            }
+            assert!(jwm.wallpaper_drag.is_none());
+            assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0), End(false)]);
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_ungrabs
+                    .load(AtomicOrdering::Relaxed),
+                1
+            );
+        }
     }
 
     #[test]
@@ -8726,7 +9067,8 @@ mod tests {
     }
 
     #[test]
-    fn solar_actual_lifecycle_events_retire_owned_grab() {
+    fn solar_actual_lifecycle_events_retire_owned_grab_without_activating_a_planet() {
+        use SolarGestureEvent::*;
         for event in [
             BackendEvent::WindowMapped(WindowId::from_raw(456)),
             BackendEvent::OutputPowerSet {
@@ -8744,6 +9086,7 @@ mod tests {
             jwm.try_wallpaper_press(&mut backend, 1);
             jwm.handle_event(&mut backend, event).unwrap();
             assert!(jwm.wallpaper_drag.is_none());
+            assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0), End(false)]);
             assert_eq!(
                 backend
                     .input_ops
@@ -8755,7 +9098,8 @@ mod tests {
     }
 
     #[test]
-    fn solar_drag_schedules_poll_and_modal_transfer_does_not_release_new_owner() {
+    fn solar_drag_schedules_watchdog_and_modal_transfer_never_releases_the_new_owner() {
+        use SolarGestureEvent::*;
         let (mut jwm, mut backend) = solar_input_fixture();
         jwm.try_wallpaper_press(&mut backend, 1);
         assert!(jwm.maintenance_next_wakeup_at(std::time::Instant::now()) <= FRAME_INTERVAL);
@@ -8764,6 +9108,7 @@ mod tests {
         assert!(backend.input_ops().grab_pointer(0, None).unwrap());
         jwm.tick_wallpaper_drag(&mut backend);
         jwm.cancel_wallpaper_drag(&mut backend);
+        assert_eq!(backend.solar_gestures, [Begin(800.0, 500.0), End(false)]);
         assert_eq!(
             backend
                 .input_ops

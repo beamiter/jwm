@@ -24,12 +24,19 @@ pub(crate) fn resolve_moon_texture(configured: &str) -> Option<String> {
     resolve_body_texture(configured, "moon-nasa-lroc.jpg")
 }
 
+/// Optional near-view source. A custom map stays authoritative at every LOD;
+/// absence of the bundled detail map leaves the already loaded base in use.
+pub(crate) fn resolve_moon_detail_texture(configured: &str) -> Option<String> {
+    resolve_body_texture(configured, "moon-nasa-lroc-8k.jpg")
+}
+
 pub(crate) fn resolve_cloud_texture() -> Option<String> {
     resolve_body_texture("", "earth-nasa-clouds.jpg")
 }
 
 pub(crate) fn resolve_sky_texture() -> Option<String> {
-    resolve_body_texture("", "milkyway-nasa-gaia.jpg")
+    resolve_body_texture("", "galaxy-nasa-4k.png")
+        .or_else(|| resolve_body_texture("", "milkyway-nasa-gaia.jpg"))
 }
 
 fn resolve_body_texture(configured: &str, asset: &str) -> Option<String> {
@@ -95,10 +102,17 @@ fn body_texture_candidates(
     let mut paths = Vec::new();
     if let Some(home) = data_home {
         paths.push(home.join(&asset_path));
-        if asset == "earth-nasa-october.jpg" {
-            // Preserve an existing user-owned legacy default override. Version
-            // assets still prefer October; explicit paths remain authoritative.
-            paths.push(home.join("jwm/astronomy/earth-nasa-january.jpg"));
+        let legacy = match asset {
+            "earth-nasa-october.jpg" => Some("earth-nasa-january.jpg"),
+            "galaxy-nasa-4k.png" => Some("milkyway-nasa-gaia.jpg"),
+            "moon-nasa-lroc-8k.jpg" => Some("moon-nasa-lroc.jpg"),
+            _ => None,
+        };
+        if let Some(legacy) = legacy {
+            // User-owned older defaults remain authoritative over newer
+            // bundled assets. In particular, zooming must never replace a
+            // user's lunar geography with the NASA close-up texture.
+            paths.push(home.join("jwm/astronomy").join(legacy));
         }
     }
     if let Some(prefix) = executable
@@ -497,6 +511,26 @@ impl Default for CelestialRotation {
 }
 
 impl CelestialRotation {
+    /// A finite right-hand rotation, without an intermediate f32 matrix.
+    pub(crate) fn axis_angle(axis: [f64; 3], radians: f64) -> Option<Self> {
+        if !radians.is_finite() || !axis.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let scale = axis.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        if scale == 0.0 {
+            return None;
+        }
+        let axis = axis.map(|v| v / scale);
+        let norm = axis.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let (sine, cosine) = (radians.rem_euclid(std::f64::consts::TAU) * 0.5).sin_cos();
+        Some(Self::normalized([
+            cosine,
+            axis[0] / norm * sine,
+            axis[1] / norm * sine,
+            axis[2] / norm * sine,
+        ]))
+    }
+
     fn normalized(quaternion: [f64; 4]) -> Self {
         let scale = quaternion.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
         if scale == 0.0 || !quaternion.iter().all(|v| v.is_finite()) {
@@ -2247,6 +2281,51 @@ mod asset_tests {
             Some(paths[2].clone())
         );
         assert_eq!(resolve_earth_texture_from("", &paths, |_| false), None);
+    }
+
+    #[test]
+    fn new_sky_and_lunar_detail_assets_preserve_legacy_user_owned_overrides() {
+        for (asset, legacy) in [
+            ("galaxy-nasa-4k.png", "milkyway-nasa-gaia.jpg"),
+            ("moon-nasa-lroc-8k.jpg", "moon-nasa-lroc.jpg"),
+        ] {
+            let paths = body_texture_candidates(
+                asset,
+                Some(Path::new("/home/u/.local/share")),
+                Some(Path::new("/versions/2/bin/jwm")),
+                &[PathBuf::from("/usr/share")],
+                Some(Path::new("/source")),
+            );
+            assert_eq!(
+                paths,
+                [
+                    format!("/home/u/.local/share/jwm/astronomy/{asset}"),
+                    format!("/home/u/.local/share/jwm/astronomy/{legacy}"),
+                    format!("/versions/2/share/jwm/astronomy/{asset}"),
+                    format!("/usr/share/jwm/astronomy/{asset}"),
+                    format!("/source/assets/astronomy/{asset}"),
+                ]
+                .map(PathBuf::from)
+            );
+            assert_eq!(
+                resolve_earth_texture_from("", &paths, |_| true),
+                Some(paths[0].clone()),
+            );
+            // An older user override wins even with the new version, system
+            // and source-tree assets all installed and readable.
+            assert_eq!(
+                resolve_earth_texture_from("", &paths, |path| path != paths[0]),
+                Some(paths[1].clone()),
+            );
+            assert_eq!(
+                resolve_earth_texture_from("", &paths, |path| path != paths[0] && path != paths[1]),
+                Some(paths[2].clone()),
+            );
+            assert_eq!(
+                resolve_earth_texture_from("/custom/map.png", &paths, |_| true),
+                Some(PathBuf::from("/custom/map.png")),
+            );
+        }
     }
     #[test]
     fn explicit_earth_override_never_falls_back_even_when_missing() {

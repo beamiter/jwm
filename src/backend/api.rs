@@ -3135,8 +3135,9 @@ pub trait BackendDiagnostics: Send {
 
 /// Runtime controls for compositor-wide visual state.
 pub trait CompositorControl: Send {
-    /// Begin a direct globe gesture only when the event point hits a rendered,
-    /// powered Earth or Moon. The WM owns the pointer grab and event routing.
+    /// Begin a gesture on a rendered, powered Earth/Moon or its sky panorama.
+    /// The compositor captures the displayed target; the WM owns the grab and
+    /// routes ordered pointer events without re-targeting during the gesture.
     fn compositor_astronomy_begin_drag(&mut self, _root_x: f64, _root_y: f64) -> bool {
         false
     }
@@ -3145,7 +3146,7 @@ pub trait CompositorControl: Send {
     /// this must preserve the prior pose/clock instead of committing a drag.
     fn compositor_astronomy_abort_drag(&mut self) {}
 
-    /// Rotate the captured globe from an ordered pointer event. False means
+    /// Rotate the captured globe or sky from an ordered pointer event. False means
     /// the compositor invalidated the gesture and the WM should retire its grab.
     fn compositor_astronomy_drag_motion(&mut self, _root_x: f64, _root_y: f64) -> bool {
         false
@@ -3160,8 +3161,47 @@ pub trait CompositorControl: Send {
     /// Retain the current globe pose, retire the gesture, and resume its clock.
     fn compositor_astronomy_end_drag(&mut self) {}
 
+    /// Zoom the Earth/Moon under the event point, or change the sky field of
+    /// view when the event hits empty panorama. Positive wheel steps zoom in.
+    fn compositor_astronomy_zoom(&mut self, _root_x: f64, _root_y: f64, _steps: f64) -> bool {
+        false
+    }
+
     /// True only while the selected solar wallpaper is rendered and powered.
     fn compositor_solar_system_interactive(&self) -> bool {
+        false
+    }
+
+    /// Capture the displayed solar body or panorama at this press point.
+    fn compositor_solar_system_begin_drag(&mut self, _root_x: f64, _root_y: f64) -> bool {
+        false
+    }
+
+    /// Undo only the just-started solar capture after a refused native grab.
+    fn compositor_solar_system_abort_drag(&mut self) {}
+
+    /// Advance a solar body/panorama capture from ordered pointer coordinates.
+    fn compositor_solar_system_drag_motion(&mut self, _root_x: f64, _root_y: f64) -> bool {
+        false
+    }
+
+    /// Read-only validity check for the solar capture's native queue watchdog.
+    fn compositor_solar_system_drag_active(&self) -> bool {
+        false
+    }
+
+    /// End the solar capture. Only an actual left release within the click
+    /// slop may activate the originally pressed planet; cancellation is false.
+    fn compositor_solar_system_end_drag(&mut self, _activate_click: bool) {}
+
+    /// Zoom the selected solar view or empty sky at an ordered wheel event.
+    fn compositor_solar_system_zoom(&mut self, _root_x: f64, _root_y: f64, _steps: f64) -> bool {
+        false
+    }
+
+    /// Return from a planet close-up after an unbound background right click.
+    /// The event point must still belong to a rendered solar canvas.
+    fn compositor_solar_system_leave_closeup(&mut self, _root_x: f64, _root_y: f64) -> bool {
         false
     }
 
