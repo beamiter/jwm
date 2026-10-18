@@ -13,6 +13,8 @@ on:
       - 'src/backend/compositor_common/panorama.rs'
       - 'src/backend/x11/compositor/solar_system_wallpaper.rs'
       - 'src/backend/x11/compositor/shaders/cosmic_sky.glsl'
+      - 'src/backend/x11/compositor/shaders/planet_surface.glsl'
+      - 'src/backend/x11/compositor/shaders/solar_optics.glsl'
       - 'src/backend/x11/compositor/procedural_wallpaper_cache.rs'
       - 'assets/astronomy/**'
       - 'scripts/prepare-astronomy-*.py'
@@ -32,6 +34,8 @@ on:
       - 'src/backend/compositor_common/panorama.rs'
       - 'src/backend/x11/compositor/solar_system_wallpaper.rs'
       - 'src/backend/x11/compositor/shaders/cosmic_sky.glsl'
+      - 'src/backend/x11/compositor/shaders/planet_surface.glsl'
+      - 'src/backend/x11/compositor/shaders/solar_optics.glsl'
       - 'src/backend/x11/compositor/procedural_wallpaper_cache.rs'
       - 'assets/astronomy/**'
       - 'scripts/prepare-astronomy-*.py'
@@ -72,7 +76,7 @@ jobs:
           rustc --edition=2024 --test "$SOLAR_TEST_OUTPUT/navigation-tests.rs" \
             -Awarnings -o "$SOLAR_TEST_OUTPUT/navigation-tests"
           "$SOLAR_TEST_OUTPUT/navigation-tests"
-      - name: Desktop GL and GLES planet close-up and panorama regressions
+      - name: Desktop GL and GLES dated scenes, HDR, rings and occultation
         run: /usr/bin/python3 scripts/test-solar-system-shader.py
       - name: Portrait, pole, zoom and scissor regression
         env:

@@ -24,6 +24,10 @@ pub(crate) fn cosmic_shader_source(source: &str) -> String {
             "// JWM_PLANET_SURFACE_INCLUDE",
             include_str!("../x11/compositor/shaders/planet_surface.glsl"),
         )
+        .replace(
+            "// JWM_SOLAR_OPTICS_INCLUDE",
+            include_str!("../x11/compositor/shaders/solar_optics.glsl"),
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

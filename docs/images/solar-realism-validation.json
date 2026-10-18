@@ -1,0 +1,84 @@
+{
+  "description": "Unmodified production Solar System shader renders from the smoke regression profile.",
+  "scope": "Mesa llvmpipe software rendering; not photographs or target-hardware performance measurements.",
+  "command": "python3 scripts/test-solar-system-shader.py --profile smoke --width 960 --height 540 --output /tmp/jwm-solar-final",
+  "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+  "profile": "smoke",
+  "resolution": [
+    960,
+    540
+  ],
+  "expanded_shader_sha256": "2829766007ecedfeb1d5c7d1b4603c6c242266bc730ac142a97ec54a735b607c",
+  "source_sha256": {
+    "src/backend/x11/compositor/shaders/solar_system.frag": "a7db14fc4d487260e30ef730017c0eb08f4ade35bd743f044647d7fba5bbe331",
+    "src/backend/x11/compositor/shaders/cosmic_sky.glsl": "786039c9af4e9bafceb14e2d4aebd3935bd78b72fad50e876e05dd54a4bcf19d",
+    "src/backend/x11/compositor/shaders/solar_optics.glsl": "a5e045df12ab4cb3f48cddf908b7309323b0de77b0d823261ccef223ac49e616",
+    "src/backend/compositor_common/solar_system.rs": "742bb2017e69fe2b36d042e677239b8632fc3eb3ddeefe6cca59b8fc7ed7097f",
+    "src/backend/compositor_common/panorama.rs": "87f357bb2bd65f932d3c618275921d4b890e20da08e6dbfabad23d8367ebf4cb",
+    "src/backend/compositor_common/animated_wallpaper.rs": "4aaf389a66aeed89a3fe09693d82cdf9cf289b88e59d667e5ab6a45bacb8f3d1",
+    "src/backend/compositor_common/celestial_catalog.rs": "f81c3231200bfefc923537fb410b04726f20246dd9745e1ef3f4033ddd5fc9ee",
+    "src/backend/compositor_common/kepler_ephemeris.rs": "025b2cc62fd1102e4041df4ae2eabcd85f1e388b8532cae1e2ddec28b2f15573",
+    "src/backend/compositor_common/solar_ephemeris.rs": "32cd01bae74ad53ee82fef4119d0ecb3f1f348c43fe692d1b89841f80bd41557"
+  },
+  "texture_sha256": {
+    "earth-nasa-october.jpg": "ccfd9b7a5e5ee601e1466556716bba50ea418f3a8e068ab0194ae0425815b1b0",
+    "earth-nasa-clouds.jpg": "daddaad84d7a33bbbc86cdda3f591099f57cee8607b7bcf3b67eb7e4f7a1c793",
+    "galaxy-nasa-4k.png": "f92ee3d1eff038c93200a79f0a0496edb4bb37cf397de676d7d57c1e85cc8d94",
+    "mercury-nasa-messenger.jpg": "6a99105fd4bcf9649977b5f163db0303bfe07c48354bcc3f1bc69ccd9566a438",
+    "mars-nasa-viking.jpg": "12ec6bf02ebd42a246edc778cb2ce8c595b4d9f0892badf0bfff8abb2303c780",
+    "jupiter-nasa-cassini.jpg": "147a68a29590299a052d402cda76c29877ba5ebd4a6cab752aeb5e5166f507ec"
+  },
+  "apis": {
+    "gl330": {
+      "result": "pass",
+      "version": "4.5 (Core Profile) Mesa 25.2.8-0ubuntu0.24.04.2",
+      "samples": 1,
+      "exploration_frames": 9,
+      "scissor_preserved": true,
+      "independent_canvas_translation_preserved": true,
+      "exploration_pick_probes": 405,
+      "finite_hdr_probes": 46656,
+      "solar_optics_probes": 512,
+      "foreground_solar_occultation": true,
+      "spin_independent_world_lighting": true,
+      "gl_gles_max_channel_difference": 0
+    },
+    "gles300": {
+      "result": "pass",
+      "version": "OpenGL ES 3.2 Mesa 25.2.8-0ubuntu0.24.04.2",
+      "samples": 1,
+      "exploration_frames": 9,
+      "scissor_preserved": true,
+      "independent_canvas_translation_preserved": true,
+      "exploration_pick_probes": 405,
+      "finite_hdr_probes": 46656,
+      "solar_optics_probes": 512,
+      "foreground_solar_occultation": true,
+      "spin_independent_world_lighting": true,
+      "gl_gles_max_channel_difference": 0
+    }
+  },
+  "images": [
+    {
+      "file": "solar-realism-overview.png",
+      "source_frame": "gl330-dated-2026.png",
+      "api": "gl330",
+      "bytes": 401077,
+      "sha256": "9d9aaeb0a66e68e0cfd176d11719bee7df8f0ae0acccbdbc351bc564fe0e6208"
+    },
+    {
+      "file": "solar-realism-sun.png",
+      "source_frame": "gl330-dated-sun.png",
+      "api": "gl330",
+      "bytes": 252549,
+      "sha256": "a914ba11f151d21dd9703689783c01b9a83f2c4844f82cd647286a084ea5791a"
+    },
+    {
+      "file": "solar-realism-saturn.png",
+      "source_frame": "gl330-saturn-ring-closeup.png",
+      "api": "gl330",
+      "bytes": 457537,
+      "sha256": "2adb90f9bf0d8bded8b46b82899887802e87f8c1220a79c77381a8d31a748b50"
+    }
+  ]
+}

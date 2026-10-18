@@ -10,6 +10,7 @@ on:
       - src/backend/x11/compositor/astronomy_wallpaper.rs
       - src/backend/x11/compositor/shaders/animated_wallpaper.frag
       - src/backend/x11/compositor/shaders/planet_surface.glsl
+      - src/backend/x11/compositor/shaders/solar_optics.glsl
       - src/backend/x11/compositor/shaders/cosmic_sky.glsl
       - src/backend/x11/compositor/procedural_wallpaper_cache.rs
       - src/config.rs
@@ -31,6 +32,7 @@ on:
       - src/backend/x11/compositor/astronomy_wallpaper.rs
       - src/backend/x11/compositor/shaders/animated_wallpaper.frag
       - src/backend/x11/compositor/shaders/planet_surface.glsl
+      - src/backend/x11/compositor/shaders/solar_optics.glsl
       - src/backend/x11/compositor/shaders/cosmic_sky.glsl
       - src/backend/x11/compositor/procedural_wallpaper_cache.rs
       - src/config.rs

@@ -255,9 +255,38 @@ Don Davis map as fictional, including the storms. It is not bundled as an
 observed Saturn map. Saturn's default cloud material and analytic rings are
 explicit visual approximations. Venus radar surface data are likewise not a
 visible-light view through its opaque clouds; no such map is silently used as
-visible cloud colour. The Sun, Venus, Saturn, Uranus and Neptune have restrained
+visible cloud colour. Venus, Saturn, Uranus and Neptune have restrained
 scientific fallback materials unless a user supplies an appropriate image.
-Optional illustration mode may use clearly described procedural detail.
+The Sun uses an analytic photosphere. Optional illustration mode may use
+clearly described procedural detail.
+
+## Analytic Solar System rendering
+
+The visible-light rendering layers add no image assets or runtime downloads.
+Observed maps above remain the preferred material inputs. Scientific
+presentation also includes analytic optical effects; these are not additional
+NASA/ESA imagery, measured terrain, current sunspots or a new storm catalogue.
+
+The Sun's near-white photosphere, limb darkening and filtered generic granules
+follow [NASA's description of the photosphere](https://solarscience.msfc.nasa.gov/surface.shtml).
+Its pale limb glow has a separate enhanced display exposure, not measured
+coronal brightness. Saturn's filtered radial ring bands use optical-depth
+ranges and dimensions from the
+[NASA ring fact sheet](https://nssdc.gsfc.nasa.gov/planetary/factsheet/satringfact.html);
+angle-dependent reflection/transmission and mutual shadows remain analytic
+approximations. Giant-planet oblateness uses the NASA polar/equatorial radii
+listed in the [science notes](../../docs/astronomy-science.md#visible-light-geometry-and-lighting),
+with matching rendering and CPU picking geometry.
+
+The existing Earth cloud image supplies opacity on an independent shell.
+Ocean reflection is constrained by a blue-colour heuristic from the existing
+surface map, not a new water or roughness dataset. Nearby atmospheric colour
+and density use at most six integration samples and are display approximations,
+not spectral multiple scattering or weather observations. All layers are
+composited in linear light before one display tone map. Separate Sun, planet
+and sky exposure factors, together with compressed distances and enlarged
+bodies, do not represent one calibrated camera exposure or a common physical
+scale. Source image bytes and their derivations are documented above.
 
 The Mercury, Mars and Jupiter maps above are installed, offline data. A missing
 or rejected map uses the selected mode's fallback. User-supplied maps keep

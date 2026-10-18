@@ -16,6 +16,26 @@ galaxy and Solar System controls. All gestures start on uncovered wallpaper with
 no modifier key. Windows, bars, tabs, modal panels, the lock screen and configured
 mouse bindings keep their normal priority.
 
+## 实际渲染预览
+
+以下为生产着色器在 **Mesa llvmpipe（LLVM 20.1.2）** 下输出的
+**960×540 原始 PNG**，未经修图。图中展示 GL330 路径的结果；同一份源码的
+GL330 与 GLES300 路径均通过 `smoke` 验证。这些是软件渲染预览，不是摄影图，
+也不是目标显卡的性能实测。源码、贴图和图片哈希及验证结果见
+[精简验证记录](images/solar-realism-validation.json)。
+
+**太阳系总览**：相机呈现前后层次，显示距离与天体大小仍经过压缩。
+
+![太阳系总览的实际渲染结果](images/solar-realism-overview.png)
+
+**太阳近景**：近白光球、临边明暗与独立增强曝光的日缘辉光。
+
+![太阳光球与日缘辉光的实际渲染结果](images/solar-realism-sun.png)
+
+**土星近景**：扁球轮廓、薄环分层、透射与星球和环之间的阴影。
+
+![土星扁球体与薄环的实际渲染结果](images/solar-realism-saturn.png)
+
 ## Explore the system and individual bodies
 
 | Gesture | Result |
@@ -28,9 +48,10 @@ mouse bindings keep their normal priority.
 | Wheel over the focused body's visible surface | Move the camera closer to or farther from that body |
 | Right-click any uncovered wallpaper in a close-up | Restore the saved overview camera, orientation and lens |
 
-Saturn's visible rings select Saturn. Picking uses the nearest displayed sphere
-or visible ring, including occlusion by foreground objects. A click opens the
-body only when the left button is naturally released and the pointer never
+Saturn's visible rings select Saturn. Picking uses the nearest displayed body
+or visible ring, including occlusion by foreground objects. The four giant
+planets use the same tilted oblate shape in rendering and CPU picking. A click
+opens the body only when the left button is naturally released and the pointer never
 travels more than four pixels from its initial position. A drag that moves out
 and back remains a drag. Clicking empty sky does not select a body. There is no
 global Escape binding; application key handling stays intact.
@@ -53,9 +74,9 @@ The shared panorama lens control defaults to 60° and is bounded to 8°–110°.
 Solar applies its tangent ratio to the existing aspect-aware focal length, so
 these control values are not the exact vertical field of view for every screen
 shape. Close-up surface scrolling instead changes distance, bounded between
-1.12 and 40 times the focused body's radius, keeping the camera outside its
-sphere. A fresh selection approaches the illuminated hemisphere and gives
-Saturn extra room for its rings. Close-up navigation tracks orbital position;
+1.12 and 40 times the focused body's displayed radius, keeping the camera
+outside its bounding sphere. A fresh selection frames the illuminated
+hemisphere obliquely and gives Saturn extra room for its rings. Close-up navigation tracks orbital position;
 it does not freeze the body's rotation or move the Sun.
 
 Camera poses, lens, current selection and the saved overview last only in the
@@ -75,8 +96,8 @@ apparent alignments are not predictions of real transits. The optional
 [scientific model notes](astronomy-science.md) describe the fitted date range,
 UTC conversion, independent reference checks and accuracy limits.
 
-Perspective, sphere occlusion, sun-facing lighting and Saturn's ring depth are
-computed in 3D. The close-up retains the focused sphere, material, illumination
+Perspective, body occlusion, sun-facing lighting and Saturn's ring depth are
+computed in 3D. The close-up retains the focused body, material, illumination
 and rings while hiding the other bodies and orbit guides. Earth uses the
 bundled NASA October surface and historical MODIS cloud composite. Mercury,
 Mars and Jupiter load the installed historical MESSENGER, Viking/USGS and
@@ -105,9 +126,10 @@ The sky's RGB catalogue and constellation data share one RGBA lookup per visible
 background pixel, with sRGB decoding before the Solar tone mapper. Figures are
 subtle in wide views and fade further at close magnification. Nebula colours,
 shapes and apparent sizes are original artwork around sourced directions; they
-are not telescope images or measured volumes of gas. The Earth cloud luminance is a
-visual opacity mask in the same body-fixed coordinates as its surface. Bodies
-without installed observation-based maps use labelled approximations. Venus
+are not telescope images or measured volumes of gas. Earth cloud luminance is a
+visual opacity mask on a separate shell, using the same body-fixed coordinates
+as its surface. Bodies without installed observation-based maps use labelled
+approximations. Venus
 has an opaque pale cloud deck; Saturn, Uranus and Neptune use approximate
 visible appearances, not measured dynamic atmospheres. In Scientific
 presentation, unavailable mapped terrain is not replaced with invented crater
@@ -123,6 +145,38 @@ moiré and flickering when detailed maps shrink onto a distant planet. Mipmaps
 are generated once when the material is adopted and add approximately one-third
 to its texture storage. A failed mipmap generation keeps the base image and
 falls back to linear sampling. The full-resolution scene cache is unchanged.
+
+### Visible-light rendering
+
+Jupiter, Saturn, Uranus and Neptune use NASA reference polar/equatorial radius
+ratios for their tilted oblate silhouettes, illumination normals and picking.
+The flattening is not exaggerated; the display sizes and orbital distances
+remain compressed. The [science notes](astronomy-science.md#visible-light-geometry-and-lighting)
+list the reference dimensions and the limits of this model.
+
+The Sun has a near-white photosphere, limb darkening and analytic granulation
+filtered to the pixel footprint. Its separately enhanced, pale limb glow is a
+display layer, not measured coronal brightness or a reconstruction of current
+solar activity. Saturn's thin rings have radial optical-depth bands, filtered
+ringlets, viewing-angle-dependent transmission and mutual shadows with the
+oblate planet. Reflected and transmitted light differ between the illuminated
+and opposite faces of the rings.
+
+Earth's independent cloud shell adds parallax and approximate cloud shadows.
+A blue-colour heuristic from the existing surface image limits rough ocean
+specular reflection (GGX); it is not a measured water, wave or roughness map.
+The nearest visible atmosphere uses at most six integration samples with
+altitude falloff and sunlight occlusion. Its colour and density are display
+approximations, not a spectral or multiple-scattering atmospheric solution.
+
+These analytic optical layers are also present in Scientific presentation.
+Observed maps still take priority, and missing observations do not acquire
+invented geographic features, sunspots or named storms. Image colours are
+decoded once; lighting, clouds, rings and atmospheres are combined in linear
+light before one final filmic tone map and display transfer. The Sun, planets
+and surrounding sky use separate display exposure factors. Their simultaneous
+visibility is not a prediction of one camera exposure. This update requires
+no additional images or runtime downloads.
 
 ## Rotation and time
 
@@ -167,12 +221,12 @@ their cameras adds a timezone offset.
 
 ## Rendering cost and validation
 
-The wallpaper uses a fixed number of analytic intersections, never unbounded ray
-marching. Planet and ring material pixels and silhouette edges receive four
-subpixel rays, while smooth sky and corona use one ray; soft orbit guides have
-analytic coverage. Scientific presentation uses restrained solar white light
-and reduced night-side fill; Illustrative presentation adds the warm corona.
-Translucent, shadowed Saturn rings follow the body's equatorial plane.
+The wallpaper uses analytic body/ring intersections and at most six integration
+samples through the nearest visible atmosphere, never unbounded ray marching.
+Body silhouettes and visible rings receive four subpixel rays; filtered
+interiors and smooth sky use one shading ray, and soft orbit guides have
+analytic coverage. Both presentations include the optical layers described
+above; Scientific presentation retains restrained materials and night-side fill.
 Idle animation is capped at 15 frames
 per second and pauses when fully covered or displays are asleep. Pointer-driven
 camera and lens updates have a separate coalesced 60 Hz rendering cap and
@@ -184,12 +238,25 @@ Power state is checked at the existing two-second interval.
 Failure to compile the material retains the static fallback and stops animation
 wakes until the effect is changed.
 
-Run `python3 scripts/test-solar-system-shader.py` to compile and render the actual
-shader on surfaceless Mesa GL330 and GLES300. It uses production Rust camera and
-phase helpers, verifies actual close-up cameras for the Sun and every planet,
+Run `python3 scripts/test-solar-system-shader.py --profile smoke --width 640 --height 360`
+for a bounded regression gate on surfaceless Mesa GL330 and GLES300. It checks
+the production camera and CPU/GPU picking, finite HDR output, solar and ring
+optical behaviour, foreground solar occlusion, world-space illumination,
+independent outputs and scissored repair. Close-up, grazing-ring and backlit
+views are included. For image iteration without that diagnostic matrix, use
+`python3 scripts/test-solar-system-shader.py --profile preview --api gl330`.
+Preview still checks basic rendering, camera and canvas invariants; it is not
+a substitute for the regression gate. Neither short profile records benchmark
+timings.
+
+The default `--profile full` retains the complete regression matrix. It uses
+production Rust camera and phase helpers, verifies actual close-up cameras for the Sun and every planet,
 CPU/GPU picking agreement, full-axis views, panorama lens limits, filtered
 surface detail, orbital/surface wrap continuity, ring/Sun alignment and
 scissored repair. PNGs and metrics are saved under `/tmp/jwm-solar-preview`.
+`--output` selects another destination, `--asset-dir` selects an existing local
+texture directory, and `--width`/`--height` set the image dimensions. Assets are
+read locally; the harness does not fetch textures.
 Set `SOLAR_SPIN_VIDEO=1` for a fixed-camera, fixed-orbit self-rotation preview
 (three displayed seconds per saved frame), or `PREVIEW_WIDTH=540 PREVIEW_HEIGHT=960` for portrait coverage, or `SOLAR_VIDEO=1`
 to write ninety orbit/zoom preview frames. `SOLAR_NO_EARTH=1`, `SOLAR_NO_CLOUD=1`, and `SOLAR_NO_SKY=1` independently verify

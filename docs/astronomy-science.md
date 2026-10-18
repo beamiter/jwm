@@ -25,7 +25,7 @@ The material setting and the orbital model are independent:
 
 | Setting | Scientific/date-derived option | Illustration option |
 | --- | --- | --- |
-| `wallpaper_astronomy_presentation` | `"scientific"`: observed maps, subdued unmeasured materials, no generated geographic microdetail or procedural nebula artwork | `"illustrative"`: optional artistic material detail, nebulae and enhanced lighting |
+| `wallpaper_astronomy_presentation` | `"scientific"`: observed maps with analytic optical display layers and subdued fallback materials; no generated terrain, named storms or procedural nebula artwork | `"illustrative"`: optional artistic material detail, nebulae and enhanced lighting |
 | `wallpaper_solar_orbit_mode` | `"ephemeris"`: offline JPL fitted Keplerian positions for the selected date | `"illustrative"`: the legacy animated orbital tour |
 
 Both presentations retain finite map resolution and enlarged display bodies.
@@ -47,8 +47,10 @@ is a sky scene and does not acquire an invented planetary radius or period.
 Planetary radii are **volumetric mean radii** from
 [JPL's planetary physical parameters](https://ssd.jpl.nasa.gov/planets/phys_par.html).
 They are distinct from equatorial radii, particularly for the giant planets.
-The displayed spheres are navigation geometry; their screen size is not a
-physical radius measurement. Rotation, orbit and obliquity values link to the
+Solar System uses oblate navigation geometry for the four giant planets, with
+separate NASA polar/equatorial radius ratios; other displayed bodies remain
+spherical. Screen size is not a physical radius measurement. Rotation, orbit
+and obliquity values link to the
 individual [NASA planetary fact sheets](https://nssdc.gsfc.nasa.gov/planetary/factsheet/).
 These are conventional reference quantities, not constantly refreshed
 measurements.
@@ -239,7 +241,7 @@ clamping. They do not claim a terrain, weather or photometric validation.
 | Mars | [NASA Viking/USGS texture](https://science.nasa.gov/3d-resources/mars/) | Historical processed global surface mosaic, retained at native resolution; colours and added lighting are not calibrated radiance |
 | Jupiter | [Cassini PIA07782](https://www.jpl.nasa.gov/images/pia07782-cassinis-best-maps-of-jupiter-cylindrical-map/) | Clouds observed in December 2000; a near-visible reconstruction from two filters; historical storm positions |
 | Sky | [NASA SVS 2020 star maps](https://svs.gsfc.nasa.gov/4851/) | Gaia DR2 faint stars plus Hipparcos/Tycho foreground; a distant catalogue panorama, not a navigable stellar volume |
-| Sun, Venus, Saturn, Uranus, Neptune | Explicitly simplified material | No globally measured default cloud/surface map is supplied; procedural detail belongs to illustration mode |
+| Sun, Venus, Saturn, Uranus, Neptune | Explicitly simplified material | No globally measured default cloud/surface map is supplied; analytic optical layers and broad cloud reflectance are display approximations, not observed activity or terrain |
 
 The new Mercury and Mars assets retain their original JPEG bytes. Jupiter's
 original 3601 × 1801 latitude/longitude grid is resampled once over its full
@@ -256,15 +258,75 @@ still needs its own provenance check. Likewise, Venus radar surface imagery
 would require a labelled radar mode; it cannot serve as visible-light cloud
 colour through an opaque atmosphere.
 
+## Visible-light geometry and lighting
+
+The Solar System's giant planets are oblate spheroids using the following
+[NASA NSSDCA reference dimensions](https://nssdc.gsfc.nasa.gov/planetary/factsheet/).
+Their equatorial radii are defined at the 1 bar atmospheric level; these are
+reference atmospheric shapes, not solid surfaces. The polar/equatorial ratio
+is calculated from the listed radii, rather than exaggerating the flattening.
+
+| Body | Equatorial radius (km) | Polar radius (km) | Polar/equatorial ratio |
+| --- | ---: | ---: | ---: |
+| [Jupiter](https://nssdc.gsfc.nasa.gov/planetary/factsheet/jupiterfact.html) | 71,492 | 66,854 | 0.9351256 |
+| [Saturn](https://nssdc.gsfc.nasa.gov/planetary/factsheet/saturnfact.html) | 60,268 | 54,364 | 0.9020376 |
+| [Uranus](https://nssdc.gsfc.nasa.gov/planetary/factsheet/uranusfact.html) | 25,559 | 24,973 | 0.9770727 |
+| [Neptune](https://nssdc.gsfc.nasa.gov/planetary/factsheet/neptunefact.html) | 24,764 | 24,341 | 0.9829188 |
+
+GPU intersections, illumination normals and CPU picking share the tilted
+spheroid dimensions. Mapped planetocentric latitude is derived from the
+position relative to the centre, independently of the geometric normal, so
+flattening does not shift the Cassini cloud map's latitude bands. Saturn also
+casts its oblate shadow onto its rings. Display radii and orbital distances
+still have separate scale factors; this shape refinement does not make the
+whole scene a common-scale physical model.
+
+The near-white solar photosphere uses limb darkening and pixel-filtered
+analytic granulation, following the qualitative features described by
+[NASA's solar-physics reference](https://solarscience.msfc.nasa.gov/surface.shtml).
+Granules are generic display structure, not observed solar pixels; no current
+sunspots or activity regions are generated. The pale outer glow has a separate
+enhanced exposure. In visible light the real corona is normally overwhelmed by
+the photosphere, as described in [NASA's Sun facts](https://science.nasa.gov/sun/facts/).
+The glow therefore does not represent calibrated coronal radiance or a plasma
+and magnetic-field simulation.
+
+Saturn's flat rings use C/B/A regions based on
+[NASA's ring dimensions and optical-depth ranges](https://nssdc.gsfc.nasa.gov/planetary/factsheet/satringfact.html).
+The radial density profile and fine ringlets are analytic approximations with
+pixel-footprint filtering. Beer-Lambert transmission depends on viewing angle;
+sun-facing reflection and opposite-side transmission use distinct phase
+responses. Planet-on-ring and ring-on-planet shadows share this geometry and
+optical depth. These reproduce the kinds of translucent rings and shadows in
+[Cassini imagery](https://science.nasa.gov/photojournal/rings-and-shadows/),
+without reconstructing individual particles or measured ring photometry.
+
+Earth's historical cloud image is placed on a separate shell with approximate
+shadows. A blue-colour mask inferred from the surface image limits GGX ocean
+reflection; neither the mask nor its roughness is a measured surface product.
+The nearest visible atmosphere uses at most six integration samples with
+altitude-dependent density and solar occlusion. Its colours, density and
+scattering weights are chosen for display, not fitted spectral radiance,
+multiple scattering or current weather. These layers run in Scientific
+presentation as well; installed observed maps continue to take priority over
+fallback materials and generated geographic detail remains excluded.
+
+Image inputs are decoded once and the layers are combined in linear light,
+followed by one filmic tone map and display transfer. Solar, planetary and sky
+exposure factors are adjusted separately for legibility. This is not the
+dynamic range of a single camera exposure: NASA's
+[Cassini exposure example](https://science.nasa.gov/photojournal/not-really-starless-at-saturn/)
+explains why most stars disappear when bright rings are correctly exposed.
+No new textures or runtime downloads are needed for these optical layers.
+Their reference sources were checked on 2026-10-18.
+
 ## Rendering fidelity that remains a presentation choice
 
-Spherical body geometry, surface BRDFs, tone mapping, atmospheric rims, the
-solar luminous surface and Saturn's ring optical depth are approximations.
-Ring divisions and shadows improve spatial interpretation without claiming
-particle-by-particle structure or measured photometry. Planetary oblateness,
-resolved relief, multiple scattering, thermal emission and changing clouds
-are not reconstructed. A finite mosaic cannot reveal unlimited real detail
-as the camera approaches.
+Reference spheroids, surface reflection, tone mapping, atmospheric layers, the
+solar luminous surface and Saturn's ring optical depth remain approximations.
+Resolved relief, spectral multiple scattering, thermal emission and changing
+weather are not reconstructed. A finite mosaic cannot reveal unlimited real
+detail as the camera approaches.
 
 In date-derived Solar mode, each planetary spin axis preserves the catalogue's
 obliquity relative to its actual fitted orbit plane. The direction of the tilt

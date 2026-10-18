@@ -4,6 +4,13 @@
 /// bodies. Keep these values aligned with the analytic spheres in the shader.
 pub(crate) const ORBIT_RADII: [f32; 8] = [2.5, 3.6, 4.8, 6.0, 7.5, 9.3, 11.0, 12.7];
 pub(crate) const BODY_RADII: [f32; 9] = [1.12, 0.23, 0.40, 0.46, 0.33, 0.90, 0.76, 0.58, 0.55];
+/// Polar/equatorial radii of the giant planets' 1-bar reference surfaces.
+/// NASA GSFC fact sheets: 66854/71492, 54364/60268, 24973/25559, 24341/24764.
+/// Keep aligned with `polar_ratio` in solar_system.frag. The smaller rocky
+/// bodies retain spheres; these ratios do not imply resolved terrain.
+pub(crate) const BODY_POLAR_RATIOS: [f32; 9] = [
+    1.0, 1.0, 1.0, 1.0, 1.0, 0.9351256, 0.90203756, 0.97707266, 0.98291874,
+];
 
 pub(crate) fn body_center(body: u8, phases: &[f32; 8]) -> Option<[f32; 3]> {
     if body == 0 {
@@ -32,15 +39,29 @@ fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
     (length.is_finite() && length > f32::EPSILON).then(|| v.map(|v| v / length))
 }
 
-fn sphere_distance(eye: [f32; 3], ray: [f32; 3], center: [f32; 3], radius: f32) -> Option<f32> {
+fn spheroid_distance(
+    eye: [f32; 3],
+    ray: [f32; 3],
+    center: [f32; 3],
+    radius: f32,
+    axis: [f32; 3],
+    polar_ratio: f32,
+) -> Option<f32> {
     let q = sub(eye, center);
-    let b = dot(q, ray);
-    let discriminant = b * b - dot(q, q) + radius * radius;
+    let flattening = polar_ratio.recip().powi(2) - 1.0;
+    let metric = |v: [f32; 3]| {
+        let axial = dot(v, axis) * flattening;
+        std::array::from_fn(|i| v[i] + axis[i] * axial)
+    };
+    let a = dot(ray, metric(ray));
+    let b = dot(q, metric(ray));
+    let c = dot(q, metric(q)) - radius * radius;
+    let discriminant = b * b - a * c;
     if discriminant < 0.0 {
         return None;
     }
     let root = discriminant.sqrt();
-    [-b - root, -b + root]
+    [(-b - root) / a, (-b + root) / a]
         .into_iter()
         .find(|distance| *distance > 0.0 && distance.is_finite())
 }
@@ -74,6 +95,20 @@ impl SolarProjection {
         } else {
             body_center(body, &self.phases)
         }
+    }
+
+    fn axis(&self, body: u8) -> Option<[f32; 3]> {
+        if let Some(axes) = &self.body_axes {
+            return normalize(*axes.get(usize::from(body))?);
+        }
+        if body == 0 {
+            return Some([0.0, 1.0, 0.0]);
+        }
+        let index = usize::from(body - 1);
+        let obliquities = [0.034_f32, 177.4, 23.44, 25.19, 3.1, 26.7, 97.8, 28.3];
+        let orbit_normal = normalize([0.0, *ORBIT_RADII.get(index)?, -0.025 * f32::from(body)])?;
+        let (sin, cos) = obliquities[index].to_radians().sin_cos();
+        normalize([sin, cos * orbit_normal[1], cos * orbit_normal[2]])
     }
 
     pub(crate) fn default_focal(viewport: [u32; 2]) -> f32 {
@@ -131,7 +166,7 @@ impl SolarProjection {
         point.iter().all(|v| v.is_finite()).then_some(point)
     }
 
-    /// Pick the nearest visible sphere or Saturn's translucent ring. A ring
+    /// Pick the nearest visible spheroid or Saturn's translucent ring. A ring
     /// pixel opens Saturn as well; the empty annulus never steals a sky drag.
     pub(crate) fn pick(&self, x: f64, y: f64) -> Option<u8> {
         let ray = self.ray_at(x, y)?;
@@ -143,8 +178,14 @@ impl SolarProjection {
                 continue;
             }
             let center = self.center(body)?;
-            if let Some(distance) = sphere_distance(self.eye, ray, center, radius)
-                && distance < nearest
+            if let Some(distance) = spheroid_distance(
+                self.eye,
+                ray,
+                center,
+                radius,
+                self.axis(body)?,
+                BODY_POLAR_RATIOS[index],
+            ) && distance < nearest
             {
                 nearest = distance;
                 selected = Some(body);
@@ -154,13 +195,7 @@ impl SolarProjection {
             return selected;
         }
         let saturn = self.center(6)?;
-        let normal = if let Some(axes) = &self.body_axes {
-            normalize(axes[6])?
-        } else {
-            let orbit_normal = normalize([0.0, ORBIT_RADII[5], -0.15])?;
-            let (sin, cos) = 26.7_f32.to_radians().sin_cos();
-            [sin, cos * orbit_normal[1], cos * orbit_normal[2]]
-        };
+        let normal = self.axis(6)?;
         let denominator = dot(ray, normal);
         if denominator.abs() > 0.0001 {
             let distance = dot(sub(saturn, self.eye), normal) / denominator;
@@ -201,8 +236,8 @@ impl Default for SolarCamera {
     fn default() -> Self {
         Self {
             azimuth: 0.4,
-            elevation: 0.65,
-            distance: 35.0,
+            elevation: 0.38,
+            distance: 27.5,
         }
     }
 }
@@ -267,12 +302,21 @@ impl SolarCamera {
         // illumination and the orbit itself remain unchanged in world space.
         if body != 0 {
             let toward_sun = normalize(center.map(|v| -v)).unwrap_or([0.0, 0.0, 1.0]);
-            let view = normalize([toward_sun[0], toward_sun[1] + 0.25, toward_sun[2]])
-                .unwrap_or([0.0, 0.0, 1.0]);
+            let tangent =
+                normalize([toward_sun[2], 0.0, -toward_sun[0]]).unwrap_or([1.0, 0.0, 0.0]);
+            // A sunlit three-quarter portrait exposes the terminator and cloud
+            // curvature. Looking straight down the light vector made the old
+            // close-ups appear flat even with detailed observed textures.
+            let view = normalize([
+                toward_sun[0] * 0.86 + tangent[0] * 0.48,
+                toward_sun[1] * 0.86 + 0.24,
+                toward_sun[2] * 0.86 + tangent[2] * 0.48,
+            ])
+            .unwrap_or([0.0, 0.0, 1.0]);
             self.azimuth = view[0].atan2(view[2]);
             self.elevation = view[1].asin();
         }
-        self.distance = radius * if body == 6 { 10.0 } else { 5.0 };
+        self.distance = radius * if body == 6 { 8.8 } else { 4.0 };
         true
     }
 
@@ -332,6 +376,38 @@ mod tests {
     use super::*;
 
     const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+    #[test]
+    fn tilted_oblate_silhouette_does_not_pick_the_old_spherical_polar_cap() {
+        let ratio = BODY_POLAR_RATIOS[6];
+        let hit = |eye, axis| spheroid_distance(eye, [0.0, 0.0, -1.0], [0.0; 3], 1.0, axis, ratio);
+        assert!(hit([0.0, 0.95, 3.0], [0.0, 1.0, 0.0]).is_none());
+        assert!(hit([0.0, 0.88, 3.0], [0.0, 1.0, 0.0]).is_some());
+        assert!(hit([0.0, 0.95, 3.0], [1.0, 0.0, 0.0]).is_some());
+        let pole = hit([0.0, 0.0, 3.0], [0.0, 0.0, 1.0]).unwrap();
+        assert!((pole - (3.0 - ratio)).abs() < 0.00001);
+
+        let projection = SolarProjection {
+            eye: [0.0, 0.0, 3.0],
+            basis: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0],
+            viewport: [800, 600],
+            phases: [0.0; 8],
+            centers: Some([[0.0; 3]; 9]),
+            focus: Some(6),
+            body_axes: Some([[0.0, 1.0, 0.0]; 9]),
+            focal: 1.5,
+        };
+        // The old circumscribed sphere covers this pixel. Neither the actual
+        // polar silhouette nor a ray through the equatorial ring does.
+        let sky = projection
+            .project([0.0, BODY_RADII[6] * 0.98, 0.0])
+            .unwrap();
+        assert_eq!(projection.pick(sky[0], sky[1]), None);
+        let surface = projection
+            .project([0.0, BODY_RADII[6] * 0.82, 0.0])
+            .unwrap();
+        assert_eq!(projection.pick(surface[0], surface[1]), Some(6));
+    }
 
     #[test]
     fn focused_planet_picking_matches_the_displayed_pixel_and_scales() {
