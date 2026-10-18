@@ -392,3 +392,24 @@ the production scene with Pango measurement and Cairo, without a running WM,
 display server or provider processes. The fixtures use portable labels so
 missing Nerd Fonts do not obscure layout inspection. Install the configured
 icon font when evaluating native screenshots that use private-use glyphs.
+
+## Fixed-physical sidebar regression
+
+Managed sidebars retain readable workspace labels and clock digits at 32,
+42 and 48 physical pixels across 1x, 1.25x, 1.5x and 2x output scales.
+Decorative outer and inner padding yield to the available logical width;
+text stays upright and the pointer target still spans the full bar width.
+This is different from a 42-logical-pixel standalone fixture, which grows
+to 84 physical pixels at 2x and did not expose the blank-sidebar regression.
+
+The production Cairo/Pango test checks both edges, both themes, normal and
+oversized padding, complete clock/workspace labels, actual glyph pixels,
+containment and full-width hit targets (96 configurations):
+
+```sh
+XBAR_SIDEBAR_PREVIEWS=/tmp/jwm-managed-sidebars \
+  cargo test --locked -p xbar_core --all-features --test managed_sidebars
+```
+
+PNG and Scene JSON outputs are optional; the regression always runs under
+the existing all-feature/all-target core test job without a display server.

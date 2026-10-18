@@ -1420,8 +1420,17 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
 
         let main_padding =
             finite_non_negative(self.config.horizontal_padding).min(axis.main_len() * 0.5);
+        // Managed thickness is physical: 42 px at 2x leaves only 21 logical
+        // pixels. Fixed outer padding plus pill padding used to consume the
+        // entire sidebar label. Preserve room for an icon/two clock digits
+        // before allocating decorative cross-axis spacing.
+        let cross_padding_limit = if axis.vertical {
+            (axis.cross_len() - self.font_size() * 2.0).max(0.0) * 0.5
+        } else {
+            axis.cross_len() * 0.5
+        };
         let cross_padding =
-            finite_non_negative(self.config.vertical_padding).min(axis.cross_len() * 0.5);
+            finite_non_negative(self.config.vertical_padding).min(cross_padding_limit);
         let cross_size = (axis.cross_len() - cross_padding * 2.0).max(0.0);
         if cross_size <= 0.0 {
             return scene;
@@ -2287,6 +2296,14 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             self.horizontal_text_padding().min(4.0)
         } else {
             self.horizontal_text_padding()
+        };
+        // On a narrow sidebar the inner and outer padding share one width
+        // budget. Reducing only the outer inset still loses two-digit clock
+        // components once DPI leaves less than a normal pill's logical width.
+        let padding = if self.config.edge.is_vertical() {
+            padding.min((bounds.width - self.font_size() * 2.0).max(0.0) * 0.5)
+        } else {
+            padding
         };
         let text_bounds = bounds.inset(padding, 0.0);
         let text = self.fit_text(&spec.text, text_bounds.width, 0.0);
