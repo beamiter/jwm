@@ -1,0 +1,151 @@
+name: Verify sidebar repair and native windows
+on:
+  push:
+    branches: [automation/sidebar-repair-20261018]
+    paths: [.github/workflows/sidebar-repair-resume.yml]
+permissions:
+  contents: write
+concurrency:
+  group: sidebar-repair-20261018
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.repository == 'beamiter/jwm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-bars
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 296c601d8b92869fd0a54de756ff15b279b05021
+          persist-credentials: true
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libasound2-dev libdbus-1-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libudev-dev fonts-dejavu-core libgtk-3-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev python3-yaml xvfb xauth xdotool imagemagick
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: native-bars-protocol-core
+          cache-on-failure: true
+      - name: Load pinned regression recipe without changing the baseline
+        shell: bash
+        run: |
+          git fetch --depth=1 origin 77c814ae900d5f21a399e5366fdb224cf977a652
+          git show 77c814ae900d5f21a399e5366fdb224cf977a652:.github/workflows/sidebar-repair-once.yml > /tmp/sidebar-recipe.yml
+          /usr/bin/python3 - <<'PY'
+          import yaml
+          from pathlib import Path
+          recipe = yaml.safe_load(Path('/tmp/sidebar-recipe.yml').read_text())
+          steps = {step.get('name'): step for step in recipe['jobs']['verify']['steps']}
+          test = steps['Install production Cairo regression tests']['run']
+          test = test.replace('painted.chunks_exact(4)', 'painted.as_chunks::<4>().0.iter()')
+          test = test.replace('u32::from_ne_bytes(pixel.try_into().unwrap())', 'u32::from_ne_bytes(*pixel)')
+          test = test.replace('if alpha == 0 { 0 } else { ((component * 255 + alpha / 2) / alpha).min(255) as u8 }', '(component * 255 + alpha / 2).checked_div(alpha).unwrap_or(0).min(255) as u8')
+          assert 'chunks_exact' not in test and 'checked_div' in test
+          Path('/tmp/install-sidebar-test.sh').write_text(test)
+          Path('/tmp/apply-sidebar-fix.py').write_text(steps['Apply bounded sidebar padding fix']['run'])
+          PY
+          bash -e /tmp/install-sidebar-test.sh
+      - name: Reproduce baseline and apply the fix
+        shell: bash
+        run: |
+          set +e
+          CARGO_TERM_COLOR=never cargo test --locked -p xbar_core --all-features --test managed_sidebars -- --nocapture > /tmp/sidebar-before.log 2>&1
+          result=$?
+          set -e
+          tail -90 /tmp/sidebar-before.log
+          test "$result" -ne 0
+          grep -q 'managed sidebar lost' /tmp/sidebar-before.log
+          python3 /tmp/apply-sidebar-fix.py
+          rustfmt --edition 2024 crates/xbar_core/src/presentation.rs crates/xbar_core/tests/managed_sidebars.rs
+      - name: Core tests, pixel regressions, lint and four-edge fixtures
+        shell: bash
+        run: |
+          XBAR_SIDEBAR_PREVIEWS=/tmp/jwm-managed-sidebars cargo test --locked -p xbar_core --all-features
+          cargo clippy --locked -p xbar_core --all-features --all-targets --no-deps -- -D warnings
+          cargo run --locked -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-standalone-bars
+      - name: Compile and test both Tao frontends
+        shell: bash
+        run: |
+          for bar in tao_glow_bar tao_pixels_bar; do
+            cargo check --manifest-path "bars/$bar/Cargo.toml" --all-targets --locked
+            cargo test --manifest-path "bars/$bar/Cargo.toml" --all-targets --locked
+            cargo build --manifest-path "bars/$bar/Cargo.toml" --locked
+          done
+      - name: Left and right native windows at 1x and 2x
+        shell: bash
+        run: |
+          cat > /tmp/sidebar-native.py <<'PY'
+          import os, pathlib, subprocess, tempfile, time
+          output = pathlib.Path('/tmp/jwm-native-sidebars')
+          output.mkdir(exist_ok=True)
+          for bar in ['tao_glow_bar', 'tao_pixels_bar']:
+              for scale in [1, 2]:
+                  for edge in ['left', 'right']:
+                      with tempfile.TemporaryDirectory(prefix='jwm-sidebar-') as home:
+                          cfg = pathlib.Path(home) / 'xbar.toml'
+                          cfg.write_text('font = "DejaVu Sans 11"\n[presentation]\ntag_labels = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]\n')
+                          env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=home, XDG_RUNTIME_DIR=home, XBAR_CONFIG=str(cfg), GDK_BACKEND='x11', GDK_SCALE=str(scale), JWM_BAR_POSITION=edge, JWM_BAR_THICKNESS='42', LIBGL_ALWAYS_SOFTWARE='1', DBUS_SESSION_BUS_ADDRESS='', GTK_A11Y='none', NO_AT_BRIDGE='1')
+                          env.pop('WAYLAND_DISPLAY', None)
+                          name = f'{bar}-{edge}-{scale}x'
+                          with (output / f'{name}.log').open('w') as log:
+                              process = subprocess.Popen([str(pathlib.Path(os.environ['CARGO_TARGET_DIR']) / 'debug' / bar)], env=env, stdout=log, stderr=log)
+                              try:
+                                  window = None
+                                  for _ in range(100):
+                                      found = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^' + bar + '$'], env=env, capture_output=True, text=True)
+                                      if found.returncode == 0 and found.stdout.strip():
+                                          window = found.stdout.strip().splitlines()[-1]
+                                          break
+                                      if process.poll() is not None:
+                                          raise RuntimeError(f'{name} exited with {process.returncode}: ' + (output / f'{name}.log').read_text())
+                                      time.sleep(0.1)
+                                  assert window is not None, f'{name} never mapped'
+                                  time.sleep(1.0)
+                                  geometry = subprocess.check_output(['xdotool', 'getwindowgeometry', '--shell', window], env=env, text=True)
+                                  values = dict(line.split('=', 1) for line in geometry.splitlines() if '=' in line)
+                                  print(name, values, flush=True)
+                                  assert int(values['WIDTH']) == 42, (name, values)
+                                  assert int(values['HEIGHT']) == 1440, (name, values)
+                                  assert int(values['X']) == (0 if edge == 'left' else 1238), (name, values)
+                                  assert int(values['Y']) == 0, (name, values)
+                                  assert process.poll() is None, f'{name} stopped after mapping'
+                                  subprocess.run(['import', '-window', window, str(output / f'{name}.png')], env=env, check=True, timeout=10)
+                              finally:
+                                  if process.poll() is None:
+                                      process.terminate()
+                                      try:
+                                          process.wait(timeout=3)
+                                      except subprocess.TimeoutExpired:
+                                          process.kill()
+                                          process.wait()
+          PY
+          xvfb-run -a -s '-screen 0 1280x1440x24' python3 /tmp/sidebar-native.py
+      - name: Publish the verified fix, not this workflow
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 296c601d8b92869fd0a54de756ff15b279b05021
+          git diff --check
+          git add crates/xbar_core/src/presentation.rs crates/xbar_core/tests/managed_sidebars.rs docs/bars-four-edges.md
+          test "$(git diff --cached --name-only | wc -l)" -eq 3
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(bars): keep managed sidebars readable at physical-pixel DPI scales' -m 'Bound outer and inner sidebar padding before it consumes the text area. Add 96 Cairo/Pango configurations asserting actual glyph pixels and full-width hits. Regression fails on baseline; core tests and strict Clippy pass after the fix. Both Tao frontends compile and pass tests; native left/right windows verified at 1x and 2x.'
+          git push origin HEAD:refs/heads/fix/managed-sidebar-readable-20261018
+          git show --stat --oneline HEAD
+          git diff HEAD^ HEAD -- crates/xbar_core/src/presentation.rs
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: managed-sidebar-render-validation
+          path: |
+            /tmp/sidebar-before.log
+            /tmp/jwm-managed-sidebars
+            /tmp/jwm-standalone-bars
+            /tmp/jwm-native-sidebars
+          retention-days: 7
