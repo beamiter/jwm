@@ -3285,6 +3285,11 @@ mod tests {
             monitor_id,
             SecondaryBarInstance {
                 monitor_id,
+                launch_config: crate::jwm::types::BarLaunchConfig::for_monitor(
+                    &crate::config::CONFIG.load(),
+                    monitor_id,
+                ),
+                last_strut: None,
                 shmem: ring,
                 command_notifier: None,
                 pid: child.id(),

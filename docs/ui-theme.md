@@ -115,10 +115,11 @@ different numbers, because it is ~28–40px tall and never dismissed rather than
 a card the user summoned: `GlassParams::for_status_bar` shortens the bevel and
 its refraction so two of them cannot meet in the middle and turn the strip into
 one long lens, and raises the rim and specular, which on something this thin
-are nearly all the material there is to see. JWM reserves 42 logical pixels
-for the bar (`appearance.status_bar_height`); `xbar_core`'s default
-`bar_height` is the same 42 so the first frame is not a 38px strip inside a
-42px strut. Its corners come from the theme
+are nearly all the material there is to see. JWM uses a 42 physical pixel
+cross-axis thickness for its managed bars (`appearance.status_bar_height`),
+plus the configured outside and inside margins. The frontend receives that
+physical thickness and converts it to logical units at the output scale; a
+standalone `xbar_core` bar defaults to a 42 logical pixel thickness. Its corners come from the theme
 too, not from `behavior.corner_radius` — on a bar that thin that is a stadium,
 and the squircle needs a flat edge to ease its curvature out into. The tint is
 lighter for a different reason: the bar is the one frosted surface whose

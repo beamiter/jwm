@@ -18,17 +18,20 @@ complete webview bridge). Releases are tagged; consumers pin `tag = "vX.Y.Z"`.
 
 ## Architecture
 
-```text
-native/provider input -> BarRuntime -> RuntimeFrame -> FrontendEnvelope
-                              |              |               |
-                              v              v               v
-                           BarModel ----> BarView       toolkit / web
-                                             |
-                              PresentationProjector
-                                    |             |
-                              LayoutEngine    native widgets
-                                    |
-                              Scene + HitRegion -> Cairo / wgpu
+```mermaid
+flowchart TD
+    Input["Provider and window events"] --> Runtime["BarRuntime"]
+    Runtime --> Model["BarModel"]
+    Model --> Frame["RuntimeFrame / BarSnapshot"]
+    Frame --> Projector["PresentationProjector"]
+    Frame --> Web["FrontendEnvelope / HTML"]
+    Projector --> Scene["LayoutEngine / Scene / HitRegion"]
+    Projector --> Widgets["Native controls / DockBridge"]
+    Scene --> Paint["Cairo / egui / native presenter"]
+    Paint --> Actions["UserAction"]
+    Widgets --> Actions
+    Web --> Actions
+    Actions --> Runtime
 ```
 
 - `BarModel` is the only semantic state owner. It reduces typed `BarEvent`
@@ -56,16 +59,114 @@ native/provider input -> BarRuntime -> RuntimeFrame -> FrontendEnvelope
   call: transport is polled every turn while providers tick at a bounded
   monotonic cadence.
 - `LayoutEngine` produces a renderer-neutral retained `Scene` and semantic hit
-  map. `Scene::damage_from` invalidates both old and new component bounds.
+  map. Its four-edge axis model allocates workspace, layout, status and Dock
+  groups while keeping text and thumbnails upright. Responsive priorities and
+  overflow preserve access on short outputs. `Scene::damage_from` invalidates
+  both old and new component bounds.
 - `DockReporter` owns acknowledged shelf/item geometry, hover leases,
   50 ms-bounded moving-anchor refreshes, and bounded retries.
   `toolkit_dock::DockBridge` adds the shared retained-toolkit
   layout without coupling one bar package to another. Each rendered item
   captures its `DockItemBinding`; callbacks never reconstruct an action from
   the bridge's newer session/generation state.
+- `BarEdge`, `BarPlacement`, `EwmhStrut` and `LayerShellPlacement` centralize
+  edge-specific native geometry. Managed snapshots already carry the bar's
+  actual physical origin; `from_bar_geometry` consumes it without applying
+  bottom/right offsets twice.
+- `web_layout` provides shared HTML axis CSS, visible keyboard focus and
+  scrolling-aware DOM geometry. It is installed by the Tauri and Dioxus hosts
+  without duplicating orientation logic in each frontend framework.
 - `CairoBar` is the high-level native facade combining runtime, layout,
   interaction, and Cairo rendering. Its `handle_pointer` API owns hover and
-  matching press/release semantics.
+  matching press/release semantics, including the captured action identity
+  across model updates.
+
+## Four-edge presentation
+
+`BarEdge::{Top, Bottom, Left, Right}` selects the physical output edge; `Top`
+is the backward-compatible default. `PresentationConfig.edge` carries it to
+renderers. Horizontal bars allocate along x; vertical bars allocate along y.
+Only coordinates and allocation axes change: text and images are never rotated.
+
+The shared TOML file, normally `~/.config/xbar/config.toml`, uses:
+
+```toml
+[presentation]
+position = "left"
+thickness = 42.0
+```
+
+`thickness` aliases the existing `bar_height` key. Use one of them; both mean
+logical cross-axis thickness. JWM-managed bars instead receive their effective
+`JWM_BAR_POSITION` and `JWM_BAR_THICKNESS`, with thickness in physical pixels.
+`BarConfig::load_default` validates those overrides. The physical value is
+stored as `PresentationConfig.physical_thickness`; call
+`logical_thickness(scale_factor)` when preparing a native logical allocation.
+Thus 48 managed physical pixels become 24 logical pixels at 2×. Standalone
+`thickness = 48.0` remains 48 logical pixels at that scale. `XBAR_POSITION` is
+a standalone edge override when `JWM_BAR_POSITION` is absent.
+
+For managed transport snapshots, `MonitorGeometry.x/y` already include the
+bar's padding and bottom/right placement. `width` is the bar's actual physical
+width. A vertical snapshot carries its available length in `height`; horizontal
+snapshots preserve the legacy output-height field. Use
+`BarPlacement::from_bar_geometry` with the effective logical thickness and
+scale. `BarPlacement::at_edge` takes a raw output rectangle instead. Global Dock
+targets add the authoritative physical origin once to scaled local bounds.
+
+The Scene protects the active workspace, clock and important controls when
+space is constrained. `WorkspaceOverflow` and wheel navigation preserve access
+to the complete tag list; `StatusOverflow` opens the Shell Hub. On sidebars,
+`ControlSpec::sidebar_lines` supplies upright clock components and compact
+readings. `accessible_label` and `tooltip_text` retain full semantic labels for
+native adapters. Controls reserve at least 32 logical pixels along the main
+axis when space permits, with fixed hit regions spanning the bar thickness.
+Native host keyboard handling remains separate from the Scene pointer facade.
+
+### Exact retained Dock allocations
+
+`DockMetrics` computes upright card dimensions, bounded magnification and
+fixed acquisition slots for both orientations. Drawing and reporting use the
+same calculations. Persistent compositor targets use resting card bounds;
+preview and restore use the current visual bounds.
+
+Call `DockBridge::set_edge(edge)` before synchronizing a retained frontend.
+`synchronize` budgets width on horizontal bars and available height on sidebars.
+Its public allocation accessors all use logical, bar-local coordinates:
+
+| API | Meaning |
+|---|---|
+| `shelf_bounds()` | Exact fixed shelf allocation in the bar root |
+| `slot_bounds(token)` | Stable whole-thickness pointer/focus target |
+| `resting_item_bounds(token)` | Resting card used for persistent geometry |
+| `item_bounds(token)` | Current visual card, with magnification already applied |
+| `overflow_bounds()` | Exact overflow affordance allocation |
+| `item_size()` / `slot_extent()` | Resting size / fixed main-axis slot extent |
+
+The legacy `shelf_width()` method returns the main-axis extent, which is height
+on a sidebar. Place a retained shelf outside scrolling control groups and
+reserve this extent from their layout. Subtract the shelf origin when using
+child-relative coordinates. Native implicit button padding or a second scale
+must not alter the allocation after it has been reported.
+
+Capture `item_binding(token)` in ordinary controls and `overflow_binding()` in
+the actionable `+N` control. `overflow_count()` counts known locally omitted
+windows. `request_restore(binding)` accepts the current overflow binding and
+uses the visible affordance as its animation origin. A protocol overflow flag
+alone supplies no token, so it cannot produce a restore binding. Stale
+session/generation bindings are rejected and queued intent survives validated
+transport recovery.
+
+HTML docks that use their own flow layout report actual DOM geometry through
+`web_layout`'s `restingDockRect` and `visibleDockRect` helpers. These account for
+transforms, the viewport and nested clipping/scroll ancestors. Scroll and resize
+changes republish targets; hidden or detached cards withdraw them. Dioxus uses
+the fixed `DockBridge` allocation path. Its Dock remains outside the status
+scroller and preserves the same coordinates as the Rust reporter.
+
+See the JWM [four-edge guide](../../docs/bars-four-edges.md) for per-monitor
+configuration, saved native Shell Hub controls, work areas, struts, frontend
+coverage and the validation matrix.
 
 ## Pure model
 
@@ -317,14 +418,59 @@ Each application keeps its own generated context and optional plugins.
 
 ## Validation
 
+From the JWM repository root, the shared kernel and actual render fixture are:
+
 ```bash
-cargo fmt --all -- --check
-cargo test --no-default-features
-cargo test --no-default-features --features render-cairo
-cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo doc --no-default-features --no-deps
+cargo test -p xbar_core --no-default-features
+cargo test -p xbar_core --no-default-features --features render-cairo
+cargo test -p xbar_core --all-features
+cargo clippy -p xbar_core --all-targets --all-features -- -D warnings
+cargo doc -p xbar_core --no-default-features --no-deps
+cargo run -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-bar-previews
 ```
+
+The fixture uses the production Cairo/Pango scene with populated workspaces,
+status and minimized-window cards. It writes a PNG and matching scene JSON for
+each of four edges, two themes and two DPI scales without a display server.
+Portable labels make the geometry inspectable without an installed Nerd Font.
+
+The four-edge change has passed 365 all-feature unit tests and 2 doctests.
+Tests cover all four orientations, short/thin viewports, negative desktop
+origins, 1×/1.25×/2× geometry, upright text/cards, complete workspace traversal,
+fixed Dock hits, visual versus persistent anchors, stale bindings and recovery.
+
+GUI companions and bars are intentionally outside the root Cargo workspace;
+check them through their own manifests. `xbar_tauri` has an explicit
+`[workspace]` boundary for standalone checks:
+
+```bash
+cargo check --manifest-path crates/xbar_core/crates/xbar_tauri/Cargo.toml
+cargo test --manifest-path crates/xbar_core/crates/xbar_tauri/Cargo.toml --lib
+cargo test --manifest-path crates/xbar_core/crates/xbar_gtk/Cargo.toml
+cargo check --manifest-path bars/tao_glow_bar/Cargo.toml
+node scripts/test_bar_layout.mjs
+```
+
+The Tauri bridge passes 13 library tests, including four-edge standalone
+placement; the GTK adapter passes 11 tests. The 22 non-Tauri frontend packages
+pass package checks, and Leptos/Yew pass `wasm32-unknown-unknown` target checks.
+The browser script requires Playwright/Chromium and exercises the seven HTML
+frontends' real stylesheets with controlled DOM fixtures: 84 edge/size/focus
+cases, scrolling/transformed geometry and four exact pinned Dock allocations.
+After building React/Solid/Svelte/Vue with `npm run build` in each frontend,
+`node scripts/test_bar_web_frontends.mjs` exercises 16 cases using the actual
+production bundles at all four edges. Its Chromium host mocks Tauri IPC and
+verifies readiness, exactly-once keyboard actions, clipped/scrolling Dock
+reports and restore geometry. This does not exercise the native Tauri/WebKit
+runtime.
+
+Package compilation and fixture tests remain distinct from native visual
+validation. `tao_glow_bar` and GTK have four-edge X11 smoke coverage; the change
+does not claim complete physical Wayland or all-toolkit visual validation.
+The experimental Iced adapter lacks explicit bar keyboard traversal, and
+Xilem's in-window tooltips can clip on narrow sidebars. JWM's native minimized
+previews use the correct inward-facing placement independently of those local
+tooltip limitations.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership,
 [docs/CONSUMER-MATRIX.md](docs/CONSUMER-MATRIX.md) for every JWM bar family,

@@ -41,6 +41,9 @@ pub struct EguiBarApp {
     /// from `presentation.bar_height`, which follows the window the manager
     /// actually gave us so the scene always fills it.
     configured_height: f32,
+    managed: bool,
+    default_monitor_geometry: MonitorGeometry,
+    last_strut_placement: Option<BarPlacement>,
     interaction: InteractionState,
     pressed_pointer_button: Option<egui::PointerButton>,
     scene: Scene,
@@ -82,6 +85,7 @@ impl EguiBarApp {
         presentation.apply_nerd_font_icons_if_stock();
         let configured_height = presentation.bar_height;
 
+        let managed = !shared_path.is_empty();
         let runtime = if shared_path.is_empty() {
             BarRuntime::new(model_config(&config))?
         } else {
@@ -94,10 +98,31 @@ impl EguiBarApp {
         let window = crate::platform::window_id(cc)
             .inspect_err(|error| debug!("no X11 window to mark as a dock: {error}"))
             .ok();
+        let default_monitor_geometry = x11
+            .as_ref()
+            .and_then(|x11| x11.screen_geometry().ok())
+            .unwrap_or(MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            });
+        let scale = f64::from(cc.egui_ctx.pixels_per_point());
+        let initial_placement = BarPlacement::at_edge(
+            default_monitor_geometry,
+            presentation.logical_thickness(scale),
+            scale,
+            presentation.edge,
+        )?;
+        send_placement(&cc.egui_ctx, initial_placement);
         if let (Some(x11), Some(window)) = (x11.as_ref(), window) {
-            let (screen_width, _) = x11.screen_size();
-            let spec = dock_spec(0, 0, screen_width, configured_height);
-            if let Err(error) = x11.apply_dock_spec(window, &spec) {
+            let spec = DockWindowSpec::for_edge(
+                BAR_NAME,
+                initial_placement,
+                default_monitor_geometry,
+                presentation.edge,
+            );
+            if let Err(error) = x11.apply_dock_spec(window, &spec, managed) {
                 warn!("could not announce the bar as a dock: {error}");
             }
         }
@@ -107,6 +132,9 @@ impl EguiBarApp {
             schedule: RuntimeSchedule::default(),
             presentation,
             configured_height,
+            managed,
+            default_monitor_geometry,
+            last_strut_placement: Some(initial_placement),
             interaction: InteractionState::default(),
             pressed_pointer_button: None,
             scene: Scene {
@@ -320,6 +348,7 @@ impl EguiBarApp {
                 }
                 BarEffect::ClearMonitorGeometry => {
                     self.active_monitor_geometry = None;
+                    self.apply_output_geometry(ctx);
                 }
                 effect @ (BarEffect::Screenshot
                 | BarEffect::OpenAudioControl
@@ -336,39 +365,84 @@ impl EguiBarApp {
         }
     }
 
-    fn apply_monitor_geometry(&self, ctx: &egui::Context, geometry: MonitorGeometry) {
-        // Viewport commands are in egui points; the core's geometry is
-        // physical pixels.
-        let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-            geometry.x as f32 / pixels_per_point,
-            geometry.y as f32 / pixels_per_point,
-        )));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-            geometry.width as f32 / pixels_per_point,
-            self.configured_height,
-        )));
+    fn requested_thickness(&self, scale: f64) -> f64 {
+        // Rendering follows the actual short axis; future geometry keeps the
+        // configured logical size or JWM's explicit physical size.
+        let mut config = self.presentation.clone();
+        config.bar_height = self.configured_height;
+        config.logical_thickness(scale)
+    }
 
+    fn apply_monitor_geometry(&self, ctx: &egui::Context, geometry: MonitorGeometry) {
+        let scale = f64::from(ctx.pixels_per_point());
+        match BarPlacement::from_bar_geometry(
+            geometry,
+            self.requested_thickness(scale),
+            scale,
+            self.presentation.edge,
+        ) {
+            Ok(placement) => send_placement(ctx, placement),
+            Err(error) => warn!("ignoring invalid monitor placement: {error}"),
+        }
+    }
+
+    fn apply_output_geometry(&mut self, ctx: &egui::Context) {
+        if let Some(geometry) = self.x11.as_ref().and_then(|x11| x11.screen_geometry().ok()) {
+            self.default_monitor_geometry = geometry;
+        }
+        let scale = f64::from(ctx.pixels_per_point());
+        match BarPlacement::at_edge(
+            self.default_monitor_geometry,
+            self.requested_thickness(scale),
+            scale,
+            self.presentation.edge,
+        ) {
+            Ok(placement) => send_placement(ctx, placement),
+            Err(error) => warn!("ignoring invalid output placement: {error}"),
+        }
+    }
+
+    fn synchronize_struts(&mut self, ctx: &egui::Context, size: Size) {
+        if self.managed {
+            return;
+        }
+        let Some(outer) = ctx.input(|input| input.viewport().outer_rect) else {
+            return;
+        };
+        let scale = ctx.pixels_per_point();
+        let placement = BarPlacement {
+            x: (outer.min.x * scale).round() as i32,
+            y: (outer.min.y * scale).round() as i32,
+            width: (size.width * scale).round().max(1.0) as u32,
+            height: (size.height * scale).round().max(1.0) as u32,
+        };
+        if self.last_strut_placement == Some(placement) {
+            return;
+        }
         if let (Some(x11), Some(window)) = (self.x11.as_ref(), self.window) {
-            let height = (self.configured_height * pixels_per_point).round().max(1.0) as u32;
-            let spec = dock_spec(geometry.x, geometry.y, geometry.width, height as f32);
-            if let Err(error) = x11.apply_struts(window, &spec) {
-                warn!("could not update the bar's struts: {error}");
+            match x11.screen_geometry().and_then(|root| {
+                x11.apply_struts(
+                    window,
+                    &DockWindowSpec::for_edge(BAR_NAME, placement, root, self.presentation.edge),
+                )
+            }) {
+                Ok(()) => self.last_strut_placement = Some(placement),
+                Err(error) => warn!("could not update the bar's struts: {error}"),
             }
         }
     }
 }
 
-fn dock_spec(x: i32, y: i32, width: u32, height: f32) -> DockWindowSpec {
-    DockWindowSpec::top(
-        BAR_NAME,
-        BarPlacement {
-            x,
-            y,
-            width,
-            height: height.round().clamp(1.0, f32::from(u16::MAX)) as u32,
-        },
-    )
+fn send_placement(ctx: &egui::Context, placement: BarPlacement) {
+    let scale = ctx.pixels_per_point().max(f32::EPSILON);
+    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+        placement.x as f32 / scale,
+        placement.y as f32 / scale,
+    )));
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+        placement.width as f32 / scale,
+        placement.height as f32 / scale,
+    )));
 }
 
 impl eframe::App for EguiBarApp {
@@ -380,7 +454,11 @@ impl eframe::App for EguiBarApp {
             self.last_pixels_per_point = pixels_per_point;
             if let Some(geometry) = self.active_monitor_geometry {
                 self.apply_monitor_geometry(&ctx, geometry);
+            } else {
+                self.apply_output_geometry(&ctx);
             }
+            self.interaction.clear_hover();
+            self.pressed_pointer_button = None;
         }
 
         let update = self.schedule.service(&mut self.runtime);
@@ -392,7 +470,12 @@ impl eframe::App for EguiBarApp {
         // A window manager may hand the bar a different height than it asked
         // for. Laying the scene out against the window it actually has is what
         // keeps the background filling it edge to edge.
-        self.presentation.bar_height = size.height;
+        self.presentation.bar_height = if self.presentation.edge.is_vertical() {
+            size.width
+        } else {
+            size.height
+        };
+        self.synchronize_struts(&ctx, size);
 
         self.scene = self.build_scene(&ctx, size);
         self.synchronize_dock();

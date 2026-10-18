@@ -703,7 +703,8 @@ fn preview_min_h(vh: f32) -> f32 {
 ///
 /// The card is content-sized and docked under the bar, so the open desktop
 /// beside it — never below it, where the footer's height depends on the list
-/// — is where the preview goes: right of the card by [`PREVIEW_GAP`],
+/// — is where the preview goes: right of the card by [`PREVIEW_GAP`], or left
+/// when a right-edge bar leaves more usable space there,
 /// vertically centered on the card, capped at [`PREVIEW_MAX_W`] ×
 /// [`PREVIEW_MAX_H`] and clamped inside the viewport. The frame does not
 /// depend on the highlighted image's aspect, so browsing a mixed directory
@@ -717,11 +718,21 @@ fn preview_min_h(vh: f32) -> f32 {
 #[must_use]
 pub(crate) fn side_preview_frame(panel: Rect, viewport: [f32; 4]) -> Option<Rect> {
     let [vx, vy, vw, vh] = viewport;
-    let remain = (vx + vw - (panel[0] + panel[2])).max(0.0);
-    let gap = preview_gap(remain);
     let edge = preview_edge(vw, vh);
-    let x = panel[0] + panel[2] + gap;
-    let w = (vx + vw - edge - x).min(PREVIEW_MAX_W);
+    let right_space = (vx + vw - (panel[0] + panel[2])).max(0.0);
+    let right_gap = preview_gap(right_space);
+    let right_width = (right_space - edge - right_gap).min(PREVIEW_MAX_W);
+    let (x, w) = if right_width >= preview_min_w(vw) {
+        (panel[0] + panel[2] + right_gap, right_width)
+    } else {
+        // A right-edge bar opens its picker toward the left. Put the image
+        // preview on the roomy side too, without covering either the bar or
+        // the list's click targets.
+        let left_space = (panel[0] - vx).max(0.0);
+        let left_gap = preview_gap(left_space);
+        let width = (left_space - edge - left_gap).min(PREVIEW_MAX_W);
+        (panel[0] - left_gap - width, width)
+    };
     let h = (vh - 2.0 * edge).min(PREVIEW_MAX_H);
     if w < preview_min_w(vw) || h < preview_min_h(vh) {
         return None;
@@ -1306,6 +1317,18 @@ mod tests {
         let frame = side_preview_frame(panel, viewport).unwrap();
         assert_eq!(frame[0], -1260.0 + 600.0 + PREVIEW_GAP);
         assert!(frame[0] + frame[2] <= viewport[0] + viewport[2] - PREVIEW_EDGE + 0.001);
+    }
+
+    #[test]
+    fn a_right_bar_picker_places_its_wallpaper_preview_on_the_left() {
+        let viewport = [-1920.0, 100.0, 1920.0, 1080.0];
+        let panel = [-642.0, 105.0, 600.0, 520.0];
+        let frame = side_preview_frame(panel, viewport).expect("space inside a right-edge picker");
+        assert_eq!(frame[0] + frame[2] + PREVIEW_GAP, panel[0]);
+        assert_eq!(frame[2], PREVIEW_MAX_W);
+        assert!(frame[0] >= viewport[0]);
+        assert!(frame[1] >= viewport[1]);
+        assert!(frame[1] + frame[3] <= viewport[1] + viewport[3]);
     }
 
     #[test]

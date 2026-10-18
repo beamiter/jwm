@@ -11,7 +11,7 @@
         :key="i"
         :class="buttonClass(i)"
         @mousedown="pressedButton = i"
-        @mouseup="onTagRelease(i)"
+        @click="onTagRelease(i)"
         @mouseleave="pressedButton = null"
         :title="`Tag ${i + 1}`"
       >
@@ -401,6 +401,14 @@ function minimizedInitial(item: MinimizedWindow): string {
 }
 
 type WindowMetrics = { x: number; y: number; scale: number };
+type LogicalDockRect = Pick<DOMRect, "left" | "top" | "width" | "height">;
+type DockLayoutAdapter = {
+  visibleDockRect: (element: HTMLElement) => LogicalDockRect | null;
+  restingDockRect: (item: HTMLElement, dock: HTMLElement) => LogicalDockRect | null;
+};
+const dockLayout = (): DockLayoutAdapter | undefined =>
+  (window as Window & { __xbarLayout?: DockLayoutAdapter }).__xbarLayout;
+const withdrawnDockRect: LogicalDockRect = { left: 0, top: 0, width: 0, height: 0 };
 
 async function windowMetrics(): Promise<WindowMetrics | null> {
   try {
@@ -430,7 +438,12 @@ function projectDockGeometry(
 }
 
 function physicalGeometry(element: HTMLElement, metrics: WindowMetrics): DockGeometry {
-  return projectDockGeometry(element.getBoundingClientRect(), metrics);
+  const layout = dockLayout();
+  const rect = layout?.visibleDockRect
+    ? layout.visibleDockRect(element)
+    : element.getBoundingClientRect();
+  // A fully clipped anchor must withdraw its previous compositor geometry.
+  return projectDockGeometry(rect ?? withdrawnDockRect, metrics);
 }
 
 function restingItemGeometry(
@@ -438,6 +451,10 @@ function restingItemGeometry(
   dock: HTMLElement,
   metrics: WindowMetrics,
 ): DockGeometry {
+  const layout = dockLayout();
+  if (layout?.restingDockRect) {
+    return projectDockGeometry(layout.restingDockRect(item, dock) ?? withdrawnDockRect, metrics);
+  }
   const dockRect = dock.getBoundingClientRect();
   return projectDockGeometry(
     {
@@ -619,6 +636,7 @@ function handleDockResize() {
 // --- 事件监听（Tauri） ---
 onMounted(() => {
   window.addEventListener('resize', handleDockResize);
+  window.addEventListener('scroll', handleDockResize, true);
   (async () => {
     const stopListening = await listen<FrontendEnvelope>('xbar-state', (event) => {
       if (cancelled) return;
@@ -665,6 +683,7 @@ onBeforeUnmount(() => {
   cancelled = true;
   unlisten?.();
   window.removeEventListener('resize', handleDockResize);
+  window.removeEventListener('scroll', handleDockResize, true);
   dockResizeObserver?.disconnect();
   cancelDockGeometryRetry();
   stopAllPreviewDeliveries();

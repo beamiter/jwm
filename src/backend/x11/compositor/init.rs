@@ -1389,6 +1389,7 @@ impl<C: CompositorConnection> Compositor<C> {
             minimized_gpu_use_clock: 0,
             minimized_window_metadata: HashMap::new(),
             dock_preview: None,
+            dock_preview_edge: xbar_core::placement::BarEdge::Top,
             dock_position: (0.5 * screen_w as f32, screen_h as f32),
             // Phase 3.3: Ripple on open
             ripple_on_open: behavior.ripple_on_open,

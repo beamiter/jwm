@@ -401,6 +401,7 @@ impl Jwm {
         self.secondary_bar_retry_after
             .retain(|mon_id, _| existing_monitors.contains(mon_id));
 
+        let config = CONFIG.load();
         // Sequential creation: only create the next bar if all previous bars are managed
         for &mon_id in &all_mon_ids {
             if let Some(&retry_after) = self.secondary_bar_retry_after.get(&mon_id) {
@@ -408,6 +409,19 @@ impl Jwm {
                     continue;
                 }
                 self.secondary_bar_retry_after.remove(&mon_id);
+            }
+
+            // A resolution change can clamp the physical thickness even when
+            // the config did not change. Restart only when that effective
+            // process setting differs; ordinary output moves stay in-place.
+            let wanted = self.secondary_bar_launch_config(&config, mon_id);
+            if self
+                .secondary_bars
+                .get(&mon_id)
+                .is_some_and(|bar| bar.launch_config != wanted)
+            {
+                self.retire_secondary_bar(backend, mon_id);
+                self.pending_bar_updates.insert(mon_id);
             }
 
             // Check if this bar already exists
@@ -600,6 +614,9 @@ impl Jwm {
 
         let cfg = CONFIG.load();
         let mut command = secondary_bar_command(cfg.status_bar_name(), &shared_path, monitor_id);
+        let launch_config = self.secondary_bar_launch_config(&cfg, monitor_id);
+        command.env("JWM_BAR_POSITION", launch_config.edge.as_str());
+        command.env("JWM_BAR_THICKNESS", launch_config.thickness.to_string());
 
         // Spawn the process
         match command.spawn() {
@@ -619,6 +636,8 @@ impl Jwm {
 
                 let bar_instance = super::SecondaryBarInstance {
                     monitor_id,
+                    launch_config,
+                    last_strut: None,
                     shmem: ring_buffer,
                     command_notifier,
                     pid,
@@ -641,6 +660,59 @@ impl Jwm {
                 );
                 self.note_secondary_bar_failure(monitor_id, now, &reason);
             }
+        }
+    }
+
+    fn secondary_bar_launch_config(
+        &self,
+        config: &crate::config::Config,
+        monitor_id: i32,
+    ) -> super::types::BarLaunchConfig {
+        self.get_monitor_by_id(monitor_id)
+            .and_then(|key| self.state.monitors.get(key))
+            .filter(|monitor| monitor.geometry.m_w > 0 && monitor.geometry.m_h > 0)
+            .map_or_else(
+                || super::types::BarLaunchConfig::for_monitor(config, monitor_id),
+                |monitor| {
+                    let geometry = &monitor.geometry;
+                    super::types::BarLaunchConfig::for_output(
+                        config,
+                        monitor_id,
+                        crate::core::types::Rect::new(
+                            geometry.m_x,
+                            geometry.m_y,
+                            geometry.m_w,
+                            geometry.m_h,
+                        ),
+                    )
+                },
+            )
+    }
+
+    /// A config reload changes every affected output atomically from the
+    /// compositor's point of view. Retire the old process and its Dock anchors
+    /// before the supervisor remaps the new orientation. Per-tag visibility
+    /// remains monitor state and therefore survives the frontend restart.
+    pub(crate) fn reconcile_secondary_bar_configuration(&mut self, backend: &mut dyn Backend) {
+        let cfg = CONFIG.load();
+        let changed: Vec<_> = self
+            .secondary_bars
+            .iter()
+            .filter_map(|(&monitor, bar)| {
+                let wanted = self.secondary_bar_launch_config(&cfg, monitor);
+                (bar.launch_config != wanted).then_some(monitor)
+            })
+            .collect();
+        for monitor in changed {
+            info!("Restarting status bar on monitor {monitor} for updated placement");
+            self.retire_secondary_bar(backend, monitor);
+            self.pending_bar_updates.insert(monitor);
+        }
+        // Padding and root extents may change with an otherwise identical
+        // native surface. Force one strut refresh; steady-state arrange stays
+        // free of property updates.
+        for bar in self.secondary_bars.values_mut() {
+            bar.last_strut = None;
         }
     }
 

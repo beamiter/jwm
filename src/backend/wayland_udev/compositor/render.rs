@@ -15,7 +15,7 @@ use crate::backend::compositor_common::dynamic_island::{
 };
 use crate::backend::compositor_common::effects::MotionTrailParams;
 use crate::backend::compositor_common::genie::{
-    dock_item_preview_target, genie_progress, output_bounds_for_anchor, preview_rect,
+    dock_item_preview_target, genie_progress, output_bounds_for_anchor, preview_rect_at_edge,
 };
 use crate::backend::compositor_common::minimized_thumbnail::ThumbnailPurpose;
 use crate::backend::compositor_common::system_ui_panel as panel;
@@ -2224,12 +2224,13 @@ impl WaylandCompositor {
                 self.screen_h as f32,
             ),
         );
-        let Some(rect) = preview_rect(
+        let Some(rect) = preview_rect_at_edge(
             preview.anchor,
             source.width,
             source.height,
             output_bounds,
             preview.scale,
+            self.dock_preview_edge,
         ) else {
             return;
         };
@@ -4130,7 +4131,8 @@ impl WaylandCompositor {
                         // Not the window radius: on a strip this thin that is a
                         // stadium, and the squircle needs a flat edge to ease
                         // its corners out into.
-                        let sheet_radius = ui_palette.status_bar_sheet_radius(radius, draw_h);
+                        let sheet_radius =
+                            ui_palette.status_bar_sheet_radius(radius, draw_w.min(draw_h));
                         self.glass_fill_rounded(
                             gl,
                             &projection,
@@ -9120,7 +9122,7 @@ mod glass_backdrop_contract_tests {
             "the bar tint must come from the shared constant"
         );
         assert!(
-            body.contains("ui_palette.status_bar_sheet_radius(radius,draw_h)"),
+            body.contains("ui_palette.status_bar_sheet_radius(radius,draw_w.min(draw_h))"),
             "the sheet must round through the shared bar radius, not the window's"
         );
     }

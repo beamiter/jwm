@@ -7,6 +7,7 @@ use crate::jwm::Jwm;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use xbar_core::placement::BarEdge;
 
 /// `JWM_DEBUG_WORKAREA=1` traces every work-area decision. Read once: the
 /// work area is computed per monitor on every frame and per client on every
@@ -93,6 +94,7 @@ fn dock_reaches_output_edge(dock: Rect, physical: Rect, edge: &str, pad: i32) ->
 
 /// The configured bar starts at the physical top plus padding. Work-area
 /// struts may already reserve that strip; only its uncovered remainder counts.
+#[cfg(test)]
 fn unreserved_top_fallback(offset: i32, m_y: i32, w_y: i32) -> i32 {
     let reserved = (i64::from(w_y) - i64::from(m_y)).max(0);
     (i64::from(offset.max(0)) - reserved).max(0) as i32
@@ -289,7 +291,7 @@ impl Jwm {
             .copied()
             .unwrap_or(true);
 
-        if show_bar {
+        if show_bar && CONFIG.load().status_bar_position_for_monitor(monitor.num) == BarEdge::Top {
             // Config-only fallback; observed dock geometry is handled by the
             // work-area calculation before this offset is used.
             let cfg = CONFIG.load();
@@ -324,15 +326,13 @@ impl Jwm {
         let ww = monitor.geometry.w_w;
         let wh = monitor.geometry.w_h;
 
-        let show_bar = monitor
-            .pertag
-            .as_ref()
-            .and_then(|p| p.show_bars.get(p.cur_tag))
-            .copied()
-            .unwrap_or(true);
-        if !show_bar {
-            return Some(Rect::new(wx, wy, ww, wh));
-        }
+        let show_bar = self.monitor_shows_status_bar(mon_key);
+        let configured = CONFIG.load();
+        let bar = crate::jwm::bar_geometry::BarGeometry::for_monitor(monitor, &configured);
+        let managed_bar = self
+            .secondary_bars
+            .get(&monitor.num)
+            .and_then(|bar| bar.client_key);
 
         // Subtract all visible dock-like clients (includes Wayland layer-shell panels).
         let mut top = 0i32;
@@ -345,6 +345,11 @@ impl Jwm {
 
         if let Some(client_keys) = self.state.monitor_clients.get(mon_key) {
             for &client_key in client_keys {
+                // The configured bar is reserved explicitly below, including
+                // before it maps and while orientation is being reloaded.
+                if Some(client_key) == managed_bar {
+                    continue;
+                }
                 let client = match self.state.clients.get(client_key) {
                     Some(c) => c,
                     None => continue,
@@ -532,12 +537,20 @@ impl Jwm {
 
         // Only the config fallback discounts a strip already covered by struts.
         // Observed docks can be stacked and keep their full reservation above.
-        if top == 0 && bottom == 0 && left == 0 && right == 0 {
-            top = unreserved_top_fallback(
-                self.get_client_y_offset(monitor),
+        if show_bar {
+            let physical = Rect::new(
+                monitor.geometry.m_x,
                 monitor.geometry.m_y,
-                wy,
+                monitor.geometry.m_w,
+                monitor.geometry.m_h,
             );
+            let depth = bar.unreserved_depth(physical, Rect::new(wx, wy, ww, wh));
+            match bar.edge {
+                BarEdge::Top => top = top.max(depth),
+                BarEdge::Bottom => bottom = bottom.max(depth),
+                BarEdge::Left => left = left.max(depth),
+                BarEdge::Right => right = right.max(depth),
+            }
         }
 
         // Every reservation above came from a client. As with X11 struts,

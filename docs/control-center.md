@@ -209,8 +209,83 @@ seconds. The media pill play/pauses; right-click opens the Hub. The
 monitor index and window title stay display-only. `~/.config/xbar/config.toml`
 can hide pills (`[presentation.visibility]`) and add extra shell entries
 (`presentation.shell_routes = ["hub", "notifications"]`). The monitor pill
-is off by default. Bar height defaults to 42 logical pixels, matching
-`appearance.status_bar_height`.
+is off by default. Managed bars default to 42 physical pixels of thickness,
+controlled by `appearance.status_bar_height`. Top and bottom bars use that
+as height; left and right bars use it as width. Each frontend converts the
+physical thickness to its output's logical coordinates, so output scaling does
+not reserve a different strip from the one the bar paints.
+
+### Bar placement and size
+
+The Hub's **Sound & Display** section has three saved controls:
+
+- **Bar edge · screen N** cycles that monitor through top, right, bottom and
+  left. Use Left/Right, the mouse wheel, or Enter/click to advance. Other
+  monitors retain their placements.
+- **Bar size · all screens** adjusts physical thickness in 2 px steps,
+  between 32 and 128 px in the UI.
+- **Bar margin · all screens** adjusts the outside/inside spacing in 2 px
+  steps, from 0 to 32 px. A zero margin puts targets against the screen edge.
+
+Edits are saved to the active JWM configuration while preserving unrelated
+comments and settings. An orientation or thickness change briefly restarts the
+affected bar processes; the Hub, workspaces, fullscreen state and per-tag bar
+visibility stay in place. Changing only margins repositions the existing bars.
+A failed save shows a notification and keeps the previous setting.
+
+The global default and monitor overrides can also be configured directly:
+
+```toml
+[appearance]
+status_bar_height = 48 # Physical cross-axis thickness
+status_bar_padding = 4
+
+[status_bar]
+name = "tao_glow_bar"
+show_bar = true
+position = "top" # top, bottom, left, right
+
+[[status_bar.monitors]]
+monitor = 0
+position = "left"
+
+[[status_bar.monitors]]
+monitor = 1
+position = "bottom"
+```
+
+Monitor numbers are the IDs returned by `jwm-tool msg get_monitors`; an
+unplug/replug may reuse an available ID. A monitor without an override uses
+`status_bar.position`. Existing configurations with no position stay at the top.
+Global `position` changes leave explicit per-monitor overrides intact; setting
+`status_bar.monitors` to an empty array returns every monitor to the default.
+
+For a temporary script-driven change:
+
+```sh
+jwm-tool msg set_config --args '{"key":"status_bar.position","value":"bottom"}'
+jwm-tool msg set_config --args '{"key":"status_bar.monitors","value":[]}'
+```
+
+`set_config` changes live state until the next file reload; the Hub controls save
+their changes. `get_config` reports `status_bar_position` and
+`status_bar_monitors`; `get_show_bar` also reports the focused output's effective
+`bar_position`, `bar_thickness` and `bar_padding`.
+
+JWM passes each managed process its effective `JWM_BAR_POSITION` and
+`JWM_BAR_THICKNESS` (physical pixels). These values take precedence over the
+bar's standalone `[presentation] position` and logical thickness settings in
+`~/.config/xbar/config.toml`. The shared monitor snapshot carries the actual
+padded bar origin, including bottom/right placement; frontends consume that
+origin directly. Width is the actual bar width, and vertical bars receive their
+full available length as height. JWM owns both the native window rectangle and
+the per-output workspace reservation, including the padding on both sides of
+the strip. Managed frontends must not replace that reservation with a global
+desktop strut. Bars on an interior monitor edge reserve only that monitor's
+workspace, leaving adjacent outputs usable.
+On very small outputs, thickness and padding are clamped to the space available;
+the spawned process receives the effective thickness so it paints the same
+rectangle the window manager reserves.
 
 ## Network and Bluetooth
 

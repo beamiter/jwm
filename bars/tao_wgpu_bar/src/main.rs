@@ -1,3 +1,6 @@
+#[path = "../../native_x11.rs"]
+mod native_x11;
+
 use anyhow::{Context as _, Result};
 use log::warn;
 use pango::FontDescription;
@@ -7,15 +10,15 @@ use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopBuilder;
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::{
-    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowBuilder, WindowId},
 };
 use x11rb::rust_connection::RustConnection;
 use xbar_core::{
-    AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
-    TransportWakeSlot, WakeAck,
+    AlignedWakeThread, BarPlacement, BarRuntime, MonitorGeometry, RuntimeUpdate,
+    TransportRecoveryConfig, TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
     presentation::{Point, logical_bar_height},
     render::cairo::{CairoBar, CpuCanvas, PointerButton, PointerInput},
@@ -96,7 +99,8 @@ struct App {
     bar: CairoBar,
     scale_factor: f64,
     logical_size: LogicalSize<f64>,
-    default_logical_size: LogicalSize<f64>,
+    default_monitor: MonitorGeometry,
+    dock_hints: native_x11::DockHints,
     last_physical_size: PhysicalSize<u32>,
     last_cursor_pos: Option<Point>,
     gpu: Option<WgpuPresenter>,
@@ -134,7 +138,13 @@ impl App {
             bar,
             scale_factor,
             logical_size,
-            default_logical_size: logical_size,
+            default_monitor: MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            dock_hints: native_x11::DockHints::default(),
             last_physical_size: PhysicalSize::new(
                 logical_size.width.round() as u32,
                 logical_size.height.round() as u32,
@@ -164,16 +174,34 @@ impl App {
             .map(|monitor| monitor.size())
             .and_then(usable_screen_size)
             .unwrap_or(PhysicalSize::new(1920, 1080));
-        self.logical_size = LogicalSize::new(
-            f64::from(screen_size.width) / self.scale_factor,
-            f64::from(self.bar.config().bar_height),
-        );
-        self.default_logical_size = self.logical_size;
+        let origin = primary
+            .as_ref()
+            .map(|monitor| monitor.position())
+            .unwrap_or(PhysicalPosition::new(0, 0));
+        self.default_monitor = MonitorGeometry {
+            x: origin.x,
+            y: origin.y,
+            width: screen_size.width,
+            height: screen_size.height,
+        };
+        let initial_placement = BarPlacement::at_edge(
+            self.default_monitor,
+            self.bar.config().logical_thickness(self.scale_factor),
+            self.scale_factor,
+            self.bar.config().edge,
+        )
+        .expect("validated bar thickness and output scale");
+        self.logical_size = PhysicalSize::new(initial_placement.width, initial_placement.height)
+            .to_logical(self.scale_factor);
 
         let window = Arc::new(
             WindowBuilder::new()
                 .with_title("tao_wgpu_bar")
                 .with_inner_size(self.logical_size)
+                .with_position(PhysicalPosition::new(
+                    initial_placement.x,
+                    initial_placement.y,
+                ))
                 .with_decorations(false)
                 .with_resizable(true)
                 .with_visible(true)
@@ -181,6 +209,14 @@ impl App {
                 .build(event_loop)
                 .context("failed to create tao window")?,
         );
+        if let Err(error) = self.dock_hints.sync(
+            window.as_ref(),
+            initial_placement,
+            self.bar.config().edge,
+            "tao_wgpu_bar",
+        ) {
+            warn!("could not announce dock: {error:#}");
+        }
         let size = window.inner_size();
         let safe_width = size.width.max(1);
         let safe_height = size.height.max(1);
@@ -299,12 +335,7 @@ impl App {
             .route::<_, std::convert::Infallible>(update, |request| {
                 match request {
                     GeometryRequest::Apply(geometry) => self.apply_monitor_geometry(geometry),
-                    GeometryRequest::Clear => {
-                        if let Some(window) = &self.window {
-                            window.set_outer_position(LogicalPosition::new(0.0, 0.0));
-                            window.set_inner_size(self.default_logical_size);
-                        }
-                    }
+                    GeometryRequest::Clear => self.place_on_output(),
                 }
                 Ok(())
             })
@@ -331,21 +362,111 @@ impl App {
         }
     }
 
-    fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
-        if let Some(window) = &self.window {
-            let placement = match BarPlacement::top(
+    fn apply_monitor_geometry(&mut self, geometry: MonitorGeometry) {
+        let config = self.bar.config();
+        match BarPlacement::from_bar_geometry(
+            geometry,
+            config.logical_thickness(self.scale_factor),
+            self.scale_factor,
+            config.edge,
+        ) {
+            Ok(placement) => self.apply_native_placement(placement),
+            Err(error) => warn!("ignoring invalid monitor placement: {error}"),
+        }
+    }
+
+    fn place_on_output(&mut self) {
+        if let Some(window) = self.window.as_ref() {
+            if let Some(monitor) = window.current_monitor() {
+                let origin = monitor.position();
+                let size = monitor.size();
+                self.default_monitor = MonitorGeometry {
+                    x: origin.x,
+                    y: origin.y,
+                    width: size.width,
+                    height: size.height,
+                };
+            }
+        }
+        let config = self.bar.config();
+        match BarPlacement::at_edge(
+            self.default_monitor,
+            config.logical_thickness(self.scale_factor),
+            self.scale_factor,
+            config.edge,
+        ) {
+            Ok(placement) => self.apply_native_placement(placement),
+            Err(error) => warn!("ignoring invalid output placement: {error}"),
+        }
+    }
+
+    fn desired_placement(&self) -> Result<BarPlacement, xbar_core::placement::PlacementError> {
+        let config = self.bar.config();
+        match self.bar.runtime().view().geometry {
+            Some(geometry) => BarPlacement::from_bar_geometry(
                 geometry,
-                f64::from(self.bar.config().bar_height),
+                config.logical_thickness(self.scale_factor),
                 self.scale_factor,
-            ) {
-                Ok(placement) => placement,
-                Err(error) => {
-                    warn!("ignoring invalid monitor placement: {error}");
-                    return;
-                }
-            };
-            window.set_outer_position(PhysicalPosition::new(placement.x, placement.y));
-            window.set_inner_size(PhysicalSize::new(placement.width, placement.height));
+                config.edge,
+            ),
+            None => BarPlacement::at_edge(
+                self.default_monitor,
+                config.logical_thickness(self.scale_factor),
+                self.scale_factor,
+                config.edge,
+            ),
+        }
+    }
+
+    fn reapply_geometry(&mut self) {
+        if let Some(geometry) = self.bar.runtime().view().geometry {
+            self.apply_monitor_geometry(geometry);
+        } else {
+            self.place_on_output();
+        }
+    }
+
+    fn apply_native_placement(&mut self, placement: BarPlacement) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        window.set_outer_position(PhysicalPosition::new(placement.x, placement.y));
+        window.set_inner_size(PhysicalSize::new(placement.width, placement.height));
+        if let Err(error) = self.dock_hints.sync(
+            window.as_ref(),
+            placement,
+            self.bar.config().edge,
+            "tao_wgpu_bar",
+        ) {
+            warn!("could not update dock hints: {error:#}");
+        }
+        self.request_redraw();
+    }
+
+    fn sync_dock_hints(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let Ok(position) = window.outer_position() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let placement = BarPlacement {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        };
+        if let Err(error) = self.dock_hints.sync(
+            window.as_ref(),
+            placement,
+            self.bar.config().edge,
+            "tao_wgpu_bar",
+        ) {
+            warn!("could not update dock hints: {error:#}");
         }
     }
 
@@ -369,7 +490,13 @@ impl App {
             event if is_terminal_window_event(&event) => return Some(ControlFlow::Exit),
             WindowEvent::Resized(size) => {
                 self.last_physical_size = size;
-                if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
+                if let Some(height) = logical_bar_height(
+                    self.bar
+                        .config()
+                        .edge
+                        .physical_thickness(size.width, size.height),
+                    self.scale_factor,
+                ) {
                     self.bar.config_mut().bar_height = height;
                 }
                 if size.width > 0 && size.height > 0 {
@@ -379,32 +506,30 @@ impl App {
                     }
                 }
                 self.request_redraw();
+                self.sync_dock_hints();
             }
+            WindowEvent::Moved(_) => self.sync_dock_hints(),
             WindowEvent::ScaleFactorChanged {
                 scale_factor,
                 new_inner_size,
             } => {
                 self.scale_factor = scale_factor;
-                self.last_physical_size = *new_inner_size;
-                if let Some(height) =
-                    logical_bar_height(self.last_physical_size.height, self.scale_factor)
-                {
-                    self.bar.config_mut().bar_height = height;
+                // Keep the configured thickness while the scale event still
+                // carries a size from the previous output. GTK commits this size.
+                if let Ok(placement) = self.desired_placement() {
+                    *new_inner_size = PhysicalSize::new(placement.width, placement.height);
                 }
-                self.logical_size = self.last_physical_size.to_logical::<f64>(self.scale_factor);
-                if self.last_physical_size.width > 0
-                    && self.last_physical_size.height > 0
-                    && let Some(gpu) = self.gpu.as_mut()
-                {
+                self.last_physical_size = *new_inner_size;
+                self.logical_size = self.last_physical_size.to_logical(self.scale_factor);
+                if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(
-                        self.last_physical_size.width,
-                        self.last_physical_size.height,
+                        self.last_physical_size.width.max(1),
+                        self.last_physical_size.height.max(1),
                     );
                 }
-                if let Some(geometry) = self.bar.runtime().view().geometry {
-                    self.apply_monitor_geometry(geometry);
-                }
-                self.request_redraw();
+                self.last_cursor_pos = None;
+                self.handle_pointer_input(PointerInput::Leave);
+                self.reapply_geometry();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let position = position.to_logical::<f64>(self.scale_factor);

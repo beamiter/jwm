@@ -1536,6 +1536,23 @@ impl Config {
             );
         }
 
+        if self.inner.status_bar.monitors.len() > 128 {
+            diagnostics.error(
+                "status_bar.monitors",
+                "at most 128 output placements are allowed",
+                None,
+            );
+        }
+        let mut bar_monitors = std::collections::HashSet::new();
+        for (index, placement) in self.inner.status_bar.monitors.iter().enumerate() {
+            let path = format!("status_bar.monitors[{index}].monitor");
+            if placement.monitor < 0 {
+                diagnostics.error(path, "monitor IDs must be nonnegative", None);
+            } else if !bar_monitors.insert(placement.monitor) {
+                diagnostics.error(path, "duplicate status bar monitor placement", None);
+            }
+        }
+
         validate_modifiers(
             &mut diagnostics,
             "keybindings.modkey",

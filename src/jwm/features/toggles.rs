@@ -879,6 +879,16 @@ impl Jwm {
                 wallpaper: (!behavior.wallpaper.trim().is_empty())
                     .then_some(behavior.wallpaper.as_str()),
                 ui_theme: Some(cfg.ui_theme()),
+                status_bar: self
+                    .state
+                    .sel_mon
+                    .and_then(|key| self.state.monitors.get(key))
+                    .map(|monitor| crate::jwm::features::system_ui::BarControls {
+                        monitor: monitor.num,
+                        position: cfg.status_bar_position_for_monitor(monitor.num),
+                        thickness: cfg.status_bar_height(),
+                        padding: cfg.status_bar_padding(),
+                    }),
                 media: self.features.media.get(),
                 volume,
                 brightness,
@@ -901,6 +911,110 @@ impl Jwm {
                 locked_monitor: self.features.monitor_lock.latest(),
             },
         )
+    }
+
+    /// Save the selected bar setting and update only bar/layout state. A
+    /// wheel notch must not rebuild key grabs, reload cursors, or rescan the
+    /// wallpaper collection as a complete configuration reload would.
+    pub(crate) fn adjust_bar_control(
+        &mut self,
+        backend: &mut dyn Backend,
+        kind: crate::jwm::features::ControlKind,
+        direction: i32,
+    ) {
+        use crate::jwm::features::ControlKind;
+        use xbar_core::placement::BarEdge;
+        if direction == 0 {
+            return;
+        }
+        let cfg = CONFIG.load();
+        let (key, value, changed_monitor) = match kind {
+            ControlKind::BarPosition => {
+                let Some(monitor) = self
+                    .state
+                    .sel_mon
+                    .and_then(|key| self.state.monitors.get(key))
+                    .map(|monitor| monitor.num)
+                else {
+                    return;
+                };
+                let edges = [BarEdge::Top, BarEdge::Right, BarEdge::Bottom, BarEdge::Left];
+                let current = edges
+                    .iter()
+                    .position(|&edge| edge == cfg.status_bar_position_for_monitor(monitor))
+                    .unwrap_or(0);
+                let position = edges[(current as i32 + direction.signum()).rem_euclid(4) as usize];
+                let mut placements = cfg.status_bar_config().monitors.clone();
+                if let Some(entry) = placements.iter_mut().find(|entry| entry.monitor == monitor) {
+                    entry.position = position;
+                } else {
+                    placements.push(crate::config::StatusBarMonitorConfig { monitor, position });
+                }
+                placements.sort_by_key(|entry| entry.monitor);
+                (
+                    "status_bar.monitors",
+                    serde_json::json!(placements),
+                    Some(monitor),
+                )
+            }
+            ControlKind::BarThickness => {
+                let next = cfg
+                    .status_bar_height()
+                    .saturating_add(direction.signum() * 2)
+                    .clamp(32, 128);
+                if next == cfg.status_bar_height() {
+                    return;
+                }
+                (
+                    "appearance.status_bar_height",
+                    serde_json::json!(next),
+                    None,
+                )
+            }
+            ControlKind::BarPadding => {
+                let next = cfg
+                    .status_bar_padding()
+                    .saturating_add(direction.signum() * 2)
+                    .clamp(0, 32);
+                if next == cfg.status_bar_padding() {
+                    return;
+                }
+                (
+                    "appearance.status_bar_padding",
+                    serde_json::json!(next),
+                    None,
+                )
+            }
+            _ => return,
+        };
+        let updated = match cfg.with_validated_value(key, &value) {
+            Ok(config) => config,
+            Err(error) => {
+                self.report_theme_failure(backend, "Bar setting not applied", error);
+                return;
+            }
+        };
+        self.observe_config_reload(std::time::Instant::now(), "bar pre-save check");
+        match updated.persist_bar_setting(key, &value, changed_monitor) {
+            Ok(revision) => self.note_config_written_by_us(revision),
+            Err(error) => {
+                self.report_theme_failure(backend, "Bar setting not saved", error.to_string());
+                return;
+            }
+        }
+        CONFIG.store(std::sync::Arc::new(updated));
+        self.reconcile_secondary_bar_configuration(backend);
+        self.arrange(backend, None);
+        self.broadcast_monitor_bar_all_monitors(backend);
+        self.refresh_compositor_monitors(backend);
+        if let Err(error) = self.update_ewmh_desktop(backend) {
+            warn!("could not publish bar work areas: {error}");
+        }
+        self.refresh_open_control_center();
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": key, "value": value }),
+        );
     }
 
     /// Adopt one completed slow-control snapshot without ever waiting for it.

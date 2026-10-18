@@ -1,3 +1,4 @@
+pub(crate) mod bar_geometry;
 pub mod client;
 pub mod client_stack;
 pub(crate) mod closed_placement;
@@ -2373,6 +2374,11 @@ impl Jwm {
                         // positions the floating preview only; the resting
                         // Genie/static-thumbnail target remains the stable
                         // geometry last published by SetMinimizedGeometry.
+                        backend.compositor_set_minimized_preview_edge(
+                            CONFIG
+                                .load()
+                                .status_bar_position_for_monitor(source_monitor),
+                        );
                         backend.compositor_set_minimized_window_preview(Some(window), Some(anchor));
                         self.active_minimized_preview = Some((source_monitor, window));
                         self.active_minimized_preview_generation = Some(cmd.minimized_generation);
@@ -2623,13 +2629,15 @@ impl Jwm {
         // `position_secondary_bar_on_monitor`. Never publish the client work
         // area (`w_y`): that includes the bar's own strut and feeds a +height
         // offset back into both placement and Dock anchor conversion.
-        let configured_pad = CONFIG.load().status_bar_padding();
+        let config = CONFIG.load();
+        let placement = crate::jwm::bar_geometry::BarGeometry::for_monitor(monitor, &config);
+        let bar_visible = self.monitor_shows_status_bar(mon_key);
         let bar_geometry = self
             .secondary_bars
             .get(&monitor.num)
             .and_then(|bar| bar.client_key)
             .and_then(|key| self.state.clients.get(key))
-            .filter(|client| client.geometry.w > 0)
+            .filter(|client| bar_visible && client.geometry.w > 0 && client.geometry.h > 0)
             .map(|client| {
                 (
                     client.geometry.x,
@@ -2639,10 +2647,10 @@ impl Jwm {
                 )
             });
         let (bar_x, bar_y, bar_width, bar_height) = bar_geometry.unwrap_or((
-            monitor.geometry.m_x + configured_pad,
-            monitor.geometry.m_y + configured_pad,
-            (monitor.geometry.m_w - 2 * configured_pad).max(1),
-            CONFIG.load().status_bar_height(),
+            placement.rect.x,
+            placement.rect.y,
+            placement.rect.w,
+            placement.rect.h,
         ));
         self.message.wallpaper_luminance =
             crate::backend::compositor_common::bar_wallpaper::register_and_read(
@@ -2656,7 +2664,13 @@ impl Jwm {
         monitor_info_for_message.monitor_x = bar_x;
         monitor_info_for_message.monitor_y = bar_y;
         monitor_info_for_message.monitor_width = bar_width;
-        monitor_info_for_message.monitor_height = monitor.geometry.m_h;
+        // Keep the historical monitor-height field for horizontal clients;
+        // vertical frontends need the exact padded longitudinal extent.
+        monitor_info_for_message.monitor_height = if placement.edge.is_vertical() {
+            bar_height
+        } else {
+            monitor.geometry.m_h
+        };
         monitor_info_for_message.monitor_num = monitor.num;
         monitor_info_for_message.set_ltsymbol(&monitor.lt_symbol);
 

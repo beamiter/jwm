@@ -5,6 +5,10 @@ edition = "2024"
 description = "Tauri 2 host bridge for xbar_core"
 repository = "https://github.com/beamiter/xbar_core"
 
+# This GUI adapter is intentionally outside JWM's core workspace. An explicit
+# boundary also makes its own checks work when Cargo walks through xbar_core.
+[workspace]
+
 [features]
 default = []
 clock-chrono = ["xbar_core/clock-chrono"]

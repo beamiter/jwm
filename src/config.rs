@@ -7,6 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
+use xbar_core::placement::BarEdge;
 
 use std::fmt;
 use std::rc::Rc;
@@ -22,6 +23,7 @@ use crate::backend::common_define::keys as k;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 
 pub(crate) mod astronomy;
+mod bar;
 mod validation;
 
 pub use astronomy::AstronomyOutputConfig;
@@ -493,7 +495,10 @@ pub struct AppearanceConfig {
     /// screen, application launcher and keybinding viewer.
     #[serde(alias = "dmenu_font")]
     pub system_ui_font: String,
+    /// Physical pixels between the bar and output/workspace edges.
     pub status_bar_padding: i32,
+    /// Physical cross-axis thickness: height at top/bottom, width at left/right.
+    /// The spawned frontend divides this by its scale factor for logical layout.
     pub status_bar_height: i32,
     /// Xcursor theme name that decides the pointer's *shape/look*, e.g.
     /// "Adwaita", "Bibata-Modern-Ice", "capitaine-cursors".
@@ -2025,6 +2030,18 @@ fn default_tab_bar_height() -> f32 {
 pub struct StatusBarConfig {
     pub name: String,
     pub show_bar: bool,
+    /// Physical output edge. Existing configurations retain the top bar.
+    #[serde(default)]
+    pub position: BarEdge,
+    /// Optional per-output placements, using the IDs reported by get_monitors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitors: Vec<StatusBarMonitorConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusBarMonitorConfig {
+    pub monitor: i32,
+    pub position: BarEdge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2555,6 +2572,8 @@ impl Default for Config {
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
                     show_bar: true,
+                    position: BarEdge::Top,
+                    monitors: Vec::new(),
                 },
                 colors: ColorsConfig {
                     dark_sea_green1: "#afffd7".to_string(),
@@ -3429,6 +3448,19 @@ impl Config {
 
     pub fn status_bar_config(&self) -> &StatusBarConfig {
         &self.inner.status_bar
+    }
+
+    pub fn status_bar_position(&self) -> BarEdge {
+        self.inner.status_bar.position
+    }
+
+    pub fn status_bar_position_for_monitor(&self, monitor: i32) -> BarEdge {
+        self.inner
+            .status_bar
+            .monitors
+            .iter()
+            .find(|entry| entry.monitor == monitor)
+            .map_or(self.inner.status_bar.position, |entry| entry.position)
     }
 
     pub fn colors(&self) -> &ColorsConfig {
@@ -5213,6 +5245,35 @@ impl Config {
                 self.inner.layout.n_master = v;
             }
             "status_bar.show_bar" => self.inner.status_bar.show_bar = as_bool()?,
+            "status_bar.position" => {
+                let position = as_string()?.trim().to_ascii_lowercase();
+                self.inner.status_bar.position =
+                    serde_json::from_value(serde_json::json!(position)).map_err(|_| {
+                        "status_bar.position must be top, bottom, left, or right".to_string()
+                    })?;
+            }
+            "status_bar.monitors" => {
+                self.inner.status_bar.monitors = serde_json::from_value(value.clone())
+                    .map_err(|error| format!("invalid status_bar.monitors: {error}"))?;
+            }
+            "appearance.status_bar_height" => {
+                let thickness = as_u32()?;
+                if !(1..=512).contains(&thickness) {
+                    return Err(
+                        "appearance.status_bar_height must be in 1..=512 physical pixels".into(),
+                    );
+                }
+                self.inner.appearance.status_bar_height = thickness as i32;
+            }
+            "appearance.status_bar_padding" => {
+                let padding = as_u32()?;
+                if padding > 256 {
+                    return Err(
+                        "appearance.status_bar_padding must be in 0..=256 physical pixels".into(),
+                    );
+                }
+                self.inner.appearance.status_bar_padding = padding as i32;
+            }
             "behavior.active_opacity" => {
                 let v = as_f32()?;
                 if !(0.0..=1.0).contains(&v) {
@@ -9724,6 +9785,70 @@ border_px = 3
                 .with_validated_value("status_bar.show_bar", &serde_json::json!(false))
                 .unwrap();
             assert_eq!(serde_json::to_value(&disabled.inner).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn bar_positions_are_backwards_compatible_and_monitor_overrides_are_explicit() {
+        use xbar_core::placement::BarEdge;
+        let mut config = validated_value_fixture(42);
+        assert_eq!(config.status_bar_position(), BarEdge::Top);
+        assert!(config.status_bar_config().monitors.is_empty());
+        for (name, edge) in [
+            ("top", BarEdge::Top),
+            ("bottom", BarEdge::Bottom),
+            ("left", BarEdge::Left),
+            ("right", BarEdge::Right),
+        ] {
+            config
+                .set_values(&[("status_bar.position".into(), serde_json::json!(name))])
+                .unwrap();
+            assert_eq!(config.status_bar_position_for_monitor(8), edge);
+        }
+        config
+            .set_values(&[(
+                "status_bar.monitors".into(),
+                serde_json::json!([
+                    {"monitor": 0, "position": "bottom"}, {"monitor": 2, "position": "left"}
+                ]),
+            )])
+            .unwrap();
+        assert_eq!(config.status_bar_position_for_monitor(0), BarEdge::Bottom);
+        assert_eq!(config.status_bar_position_for_monitor(2), BarEdge::Left);
+        assert_eq!(config.status_bar_position_for_monitor(1), BarEdge::Right);
+        let serialized = toml::to_string(&config.inner).unwrap();
+        let loaded: TomlConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(loaded.status_bar.monitors, config.inner.status_bar.monitors);
+    }
+
+    #[test]
+    fn invalid_bar_orientation_and_monitor_batches_leave_configuration_unchanged() {
+        let mut config = validated_value_fixture(42);
+        let before = serde_json::to_value(&config.inner).unwrap();
+        for (key, value) in [
+            ("status_bar.position", serde_json::json!("center")),
+            ("status_bar.position", serde_json::json!(2)),
+            (
+                "status_bar.monitors",
+                serde_json::json!([{"monitor":-1,"position":"left"}]),
+            ),
+            (
+                "status_bar.monitors",
+                serde_json::json!([{"monitor":0,"position":"left"},{"monitor":0,"position":"right"}]),
+            ),
+            ("appearance.status_bar_height", serde_json::json!(0)),
+            ("appearance.status_bar_height", serde_json::json!(513)),
+            ("appearance.status_bar_padding", serde_json::json!(-1)),
+        ] {
+            assert!(
+                config
+                    .set_values(&[
+                        ("status_bar.position".into(), serde_json::json!("left")),
+                        (key.into(), value)
+                    ])
+                    .is_err()
+            );
+            assert_eq!(serde_json::to_value(&config.inner).unwrap(), before);
         }
     }
 

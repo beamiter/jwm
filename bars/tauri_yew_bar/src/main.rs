@@ -23,6 +23,11 @@ thread_local! {
     static WM_SESSION_ID: Cell<u64> = const { Cell::new(0) };
     static MINIMIZED_GENERATION: Cell<u64> = const { Cell::new(0) };
     static DOCK_GEOMETRY_RETRY: RefCell<Option<Timeout>> = const { RefCell::new(None) };
+    static DOCK_GEOMETRY_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static DOCK_GEOMETRY_LIFETIME: Cell<u64> = const { Cell::new(0) };
+    static DOCK_GEOMETRY_PUBLISHING: Cell<bool> = const { Cell::new(false) };
+    static DOCK_GEOMETRY_REPUBLISH: Cell<bool> = const { Cell::new(false) };
+    static DOCK_GEOMETRY_LISTENERS: RefCell<Option<GeometryListeners>> = const { RefCell::new(None) };
 }
 
 #[wasm_bindgen]
@@ -46,6 +51,15 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = innerPosition, catch)]
     async fn inner_position(this: &TauriWindow) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["window", "__xbarLayout"], js_name = visibleDockRect, catch)]
+    fn shared_visible_dock_rect(element: &web_sys::Element) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["window", "__xbarLayout"], js_name = restingDockRect, catch)]
+    fn shared_resting_dock_rect(
+        item: &web_sys::Element,
+        dock: &web_sys::Element,
+    ) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -368,11 +382,38 @@ fn project_dock_geometry(
     }
 }
 
+#[derive(Deserialize)]
+struct LogicalDockRect {
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+}
+
+fn project_shared_dock_rect(value: JsValue, origin: &PhysicalPosition, scale: f64) -> DockGeometry {
+    match serde_wasm_bindgen::from_value::<Option<LogicalDockRect>>(value) {
+        Ok(Some(rect)) => {
+            project_dock_geometry(rect.left, rect.top, rect.width, rect.height, origin, scale)
+        }
+        // An installed adapter returns null when an anchor is fully clipped.
+        // Zero dimensions explicitly withdraw the previous compositor anchor.
+        _ => DockGeometry {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        },
+    }
+}
+
 fn physical_geometry(
     element: &web_sys::Element,
     origin: &PhysicalPosition,
     scale: f64,
 ) -> DockGeometry {
+    if let Ok(rect) = shared_visible_dock_rect(element) {
+        return project_shared_dock_rect(rect, origin, scale);
+    }
     let rect = element.get_bounding_client_rect();
     project_dock_geometry(
         rect.left(),
@@ -390,6 +431,9 @@ fn resting_item_geometry(
     origin: &PhysicalPosition,
     scale: f64,
 ) -> DockGeometry {
+    if let Ok(rect) = shared_resting_dock_rect(item, dock) {
+        return project_shared_dock_rect(rect, origin, scale);
+    }
     let dock_rect = dock.get_bounding_client_rect();
     project_dock_geometry(
         dock_rect.left() + f64::from(item.offset_left()),
@@ -747,6 +791,63 @@ fn end_preview(window_id: u64, wm_session_id: u64, minimized_generation: u64, ev
     }
 }
 
+struct GeometryListeners {
+    window: web_sys::Window,
+    callback: Closure<dyn FnMut()>,
+}
+
+impl Drop for GeometryListeners {
+    fn drop(&mut self) {
+        let callback = self.callback.as_ref().unchecked_ref();
+        let _ = self
+            .window
+            .remove_event_listener_with_callback("resize", callback);
+        let _ = self
+            .window
+            .remove_event_listener_with_callback_and_bool("scroll", callback, true);
+    }
+}
+
+fn geometry_tracking_current(lifetime: u64) -> bool {
+    DOCK_GEOMETRY_ACTIVE.with(Cell::get) && DOCK_GEOMETRY_LIFETIME.with(Cell::get) == lifetime
+}
+
+fn stop_dock_geometry_tracking() {
+    DOCK_GEOMETRY_ACTIVE.with(|active| active.set(false));
+    DOCK_GEOMETRY_LIFETIME.with(|lifetime| lifetime.set(lifetime.get().wrapping_add(1)));
+    DOCK_GEOMETRY_LISTENERS.with(|listeners| listeners.borrow_mut().take());
+    cancel_dock_geometry_retry();
+    DOCK_GEOMETRY_PUBLISHING.with(|publishing| publishing.set(false));
+    DOCK_GEOMETRY_REPUBLISH.with(|pending| pending.set(false));
+}
+
+fn start_dock_geometry_tracking() {
+    stop_dock_geometry_tracking();
+    DOCK_GEOMETRY_ACTIVE.with(|active| active.set(true));
+}
+
+fn dock_publish_current(lifetime: u64, session: u64, generation: u64, connected: bool) -> bool {
+    geometry_tracking_current(lifetime)
+        && generation == MINIMIZED_GENERATION.with(Cell::get)
+        && dock_retry_allowed(session, WM_SESSION_ID.with(Cell::get), connected)
+}
+
+// Scroll bursts share one transaction. When a transaction is superseded or
+// finishes, publish the latest DOM geometry once, rather than allowing old
+// asynchronous item reports to overwrite newer scroll positions.
+struct DockPublishGuard(u64);
+
+impl Drop for DockPublishGuard {
+    fn drop(&mut self) {
+        if geometry_tracking_current(self.0) {
+            DOCK_GEOMETRY_PUBLISHING.with(|publishing| publishing.set(false));
+            if DOCK_GEOMETRY_REPUBLISH.with(|pending| pending.replace(false)) {
+                publish_dock_geometry_later();
+            }
+        }
+    }
+}
+
 fn dock_retry_allowed(expected_session: u64, current_session: u64, dock_connected: bool) -> bool {
     expected_session != 0 && expected_session == current_session && dock_connected
 }
@@ -758,6 +859,9 @@ fn cancel_dock_geometry_retry() {
 }
 
 fn schedule_dock_geometry_retry(wm_session_id: u64) {
+    if !DOCK_GEOMETRY_ACTIVE.with(Cell::get) {
+        return;
+    }
     let connected = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.query_selector(".minimized-dock").ok().flatten())
@@ -784,10 +888,22 @@ fn schedule_dock_geometry_retry(wm_session_id: u64) {
 }
 
 fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
+    if !DOCK_GEOMETRY_ACTIVE.with(Cell::get) || wm_session_id == 0 {
+        return;
+    }
+    if DOCK_GEOMETRY_PUBLISHING.with(|publishing| publishing.replace(true)) {
+        DOCK_GEOMETRY_REPUBLISH.with(|pending| pending.set(true));
+        return;
+    }
+    let lifetime = DOCK_GEOMETRY_LIFETIME.with(Cell::get);
     let minimized_generation = MINIMIZED_GENERATION.with(Cell::get);
     wasm_bindgen_futures::spawn_local(async move {
+        let _publish = DockPublishGuard(lifetime);
         if defer_one_turn {
             gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        if !geometry_tracking_current(lifetime) {
+            return;
         }
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return;
@@ -799,9 +915,10 @@ fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
             schedule_dock_geometry_retry(wm_session_id);
             return;
         };
-        if !dock_retry_allowed(
+        if !dock_publish_current(
+            lifetime,
             wm_session_id,
-            WM_SESSION_ID.with(Cell::get),
+            minimized_generation,
             dock.is_connected(),
         ) {
             return;
@@ -824,6 +941,14 @@ fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
             return;
         };
         for index in 0..items.length() {
+            if !dock_publish_current(
+                lifetime,
+                wm_session_id,
+                minimized_generation,
+                dock.is_connected(),
+            ) {
+                return;
+            }
             let item = items
                 .item(index)
                 .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok());
@@ -859,13 +984,21 @@ fn publish_dock_geometry_later() {
     start_dock_geometry_publish(WM_SESSION_ID.with(Cell::get), true);
 }
 
-fn install_geometry_resize_listener() {
-    let callback = Closure::<dyn FnMut()>::new(publish_dock_geometry_later);
-    if let Some(window) = web_sys::window() {
-        let _ =
-            window.add_event_listener_with_callback("resize", callback.as_ref().unchecked_ref());
-        callback.forget();
+fn install_geometry_listeners() {
+    if !DOCK_GEOMETRY_ACTIVE.with(Cell::get) {
+        return;
     }
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let callback = Closure::<dyn FnMut()>::new(publish_dock_geometry_later);
+    let function = callback.as_ref().unchecked_ref();
+    let _ = window.add_event_listener_with_callback("resize", function);
+    // Element scroll events do not bubble; capture observes either bar axis.
+    let _ = window.add_event_listener_with_callback_and_bool("scroll", function, true);
+    DOCK_GEOMETRY_LISTENERS.with(|listeners| {
+        *listeners.borrow_mut() = Some(GeometryListeners { window, callback });
+    });
 }
 
 fn dispatch_args(request: ActionRequest) -> JsValue {
@@ -897,11 +1030,16 @@ fn app() -> Html {
         let snapshot = snapshot.clone();
         let scale_factor = scale_factor.clone();
         use_effect_with((), move |_| {
+            start_dock_geometry_tracking();
+            let lifetime = DOCK_GEOMETRY_LIFETIME.with(Cell::get);
             let latest_revision = Rc::new(Cell::new(None::<u64>));
             let callback_revision = Rc::clone(&latest_revision);
             let dock_signature = Rc::new(RefCell::new(String::new()));
             let callback_dock_signature = Rc::clone(&dock_signature);
             let state_callback = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+                if !geometry_tracking_current(lifetime) {
+                    return;
+                }
                 match serde_wasm_bindgen::from_value::<EventPayload<FrontendEnvelope>>(event) {
                     Ok(event) => {
                         let envelope = event.payload;
@@ -967,14 +1105,23 @@ fn app() -> Html {
 
             wasm_bindgen_futures::spawn_local(async move {
                 let registration = async {
+                    if !geometry_tracking_current(lifetime) {
+                        return Ok::<(), JsValue>(());
+                    }
                     tauri_listen("xbar-state", &state_callback).await?;
-                    install_geometry_resize_listener();
+                    if !geometry_tracking_current(lifetime) {
+                        return Ok(());
+                    }
+                    install_geometry_listeners();
 
                     tauri_invoke("frontend_ready", JsValue::NULL).await?;
 
                     let window = get_current_window();
                     match window.scale_factor().await {
-                        Ok(value) => scale_factor.set(value.as_f64()),
+                        Ok(value) if geometry_tracking_current(lifetime) => {
+                            scale_factor.set(value.as_f64())
+                        }
+                        Ok(_) => {}
                         Err(error) => error!(format!("failed to query scale factor: {error:?}")),
                     }
 
@@ -986,7 +1133,7 @@ fn app() -> Html {
                 }
                 state_callback.forget();
             });
-            || ()
+            stop_dock_geometry_tracking
         });
     }
 
@@ -1181,7 +1328,7 @@ fn app() -> Html {
                                 key={index}
                                 class={class}
                                 onmousedown={on_press(index)}
-                                onmouseup={on_release(index)}
+                                onclick={on_release(index)}
                                 onmouseleave={on_leave.clone()}
                                 title={format!("Tag {}", index + 1)}
                             >

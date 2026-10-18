@@ -1,3 +1,6 @@
+#[path = "../../native_x11.rs"]
+mod native_x11;
+
 use anyhow::{Context as _, Result};
 use log::warn;
 use pango::FontDescription;
@@ -6,7 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::{
-    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy},
     monitor::MonitorHandle,
@@ -15,8 +18,8 @@ use tao::{
 
 use x11rb::rust_connection::RustConnection;
 use xbar_core::{
-    AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
-    TransportWakeSlot, WakeAck,
+    AlignedWakeThread, BarEdge, BarPlacement, BarRuntime, MonitorGeometry, RuntimeUpdate,
+    TransportRecoveryConfig, TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
     presentation::{Point, logical_bar_height},
     render::cairo::{CairoBar, CpuCanvas, PointerButton, PointerInput},
@@ -37,7 +40,8 @@ struct App {
     bar: CairoBar,
     scale_factor: f64,
     logical_size: LogicalSize<f64>,
-    default_logical_size: LogicalSize<f64>,
+    default_monitor: MonitorGeometry,
+    dock_hints: native_x11::DockHints,
     last_physical_size: PhysicalSize<u32>,
     last_cursor_pos: Option<Point>,
     proxy: EventLoopProxy<UserEvent>,
@@ -76,7 +80,13 @@ impl App {
             bar,
             scale_factor,
             logical_size,
-            default_logical_size: logical_size,
+            default_monitor: MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            dock_hints: native_x11::DockHints::default(),
             last_physical_size: physical_size,
             last_cursor_pos: None,
             proxy,
@@ -177,7 +187,13 @@ impl App {
 
     fn resize(&mut self, physical_size: PhysicalSize<u32>) {
         self.last_physical_size = physical_size;
-        if let Some(height) = logical_bar_height(physical_size.height, self.scale_factor) {
+        if let Some(height) = logical_bar_height(
+            self.bar
+                .config()
+                .edge
+                .physical_thickness(physical_size.width, physical_size.height),
+            self.scale_factor,
+        ) {
             self.bar.config_mut().bar_height = height;
         }
         self.logical_size = physical_size.to_logical(self.scale_factor);
@@ -208,11 +224,7 @@ impl App {
             .route::<_, std::convert::Infallible>(update, |request| {
                 match request {
                     GeometryRequest::Apply(geometry) => self.apply_monitor_geometry(geometry),
-                    GeometryRequest::Clear => {
-                        self.window
-                            .set_outer_position(LogicalPosition::new(0.0, 0.0));
-                        self.window.set_inner_size(self.default_logical_size);
-                    }
+                    GeometryRequest::Clear => self.place_on_output(),
                 }
                 Ok(())
             })
@@ -262,22 +274,106 @@ impl App {
         }
     }
 
-    fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
-        let placement = match BarPlacement::top(
+    fn apply_monitor_geometry(&mut self, geometry: MonitorGeometry) {
+        let config = self.bar.config();
+        match BarPlacement::from_bar_geometry(
             geometry,
-            f64::from(self.bar.config().bar_height),
+            config.logical_thickness(self.scale_factor),
             self.scale_factor,
+            config.edge,
         ) {
-            Ok(placement) => placement,
-            Err(error) => {
-                warn!("ignoring invalid monitor placement: {error}");
-                return;
-            }
+            Ok(placement) => self.apply_native_placement(placement),
+            Err(error) => warn!("ignoring invalid monitor placement: {error}"),
+        }
+    }
+
+    fn place_on_output(&mut self) {
+        if let Some(monitor) = self.window.current_monitor() {
+            let origin = monitor.position();
+            let size = monitor.size();
+            self.default_monitor = MonitorGeometry {
+                x: origin.x,
+                y: origin.y,
+                width: size.width,
+                height: size.height,
+            };
+        }
+        let config = self.bar.config();
+        match BarPlacement::at_edge(
+            self.default_monitor,
+            config.logical_thickness(self.scale_factor),
+            self.scale_factor,
+            config.edge,
+        ) {
+            Ok(placement) => self.apply_native_placement(placement),
+            Err(error) => warn!("ignoring invalid output placement: {error}"),
+        }
+    }
+
+    fn desired_placement(&self) -> Result<BarPlacement, xbar_core::placement::PlacementError> {
+        let config = self.bar.config();
+        match self.bar.runtime().view().geometry {
+            Some(geometry) => BarPlacement::from_bar_geometry(
+                geometry,
+                config.logical_thickness(self.scale_factor),
+                self.scale_factor,
+                config.edge,
+            ),
+            None => BarPlacement::at_edge(
+                self.default_monitor,
+                config.logical_thickness(self.scale_factor),
+                self.scale_factor,
+                config.edge,
+            ),
+        }
+    }
+
+    fn reapply_geometry(&mut self) {
+        if let Some(geometry) = self.bar.runtime().view().geometry {
+            self.apply_monitor_geometry(geometry);
+        } else {
+            self.place_on_output();
+        }
+    }
+
+    fn apply_native_placement(&mut self, placement: BarPlacement) {
+        let window = &self.window;
+        window.set_outer_position(PhysicalPosition::new(placement.x, placement.y));
+        window.set_inner_size(PhysicalSize::new(placement.width, placement.height));
+        if let Err(error) = self.dock_hints.sync(
+            window.as_ref(),
+            placement,
+            self.bar.config().edge,
+            "tao_softbuffer_bar",
+        ) {
+            warn!("could not update dock hints: {error:#}");
+        }
+        self.request_redraw();
+    }
+
+    fn sync_dock_hints(&mut self) {
+        let window = &self.window;
+        let Ok(position) = window.outer_position() else {
+            return;
         };
-        self.window
-            .set_outer_position(PhysicalPosition::new(placement.x, placement.y));
-        self.window
-            .set_inner_size(PhysicalSize::new(placement.width, placement.height));
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let placement = BarPlacement {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        };
+        if let Err(error) = self.dock_hints.sync(
+            window.as_ref(),
+            placement,
+            self.bar.config().edge,
+            "tao_softbuffer_bar",
+        ) {
+            warn!("could not update dock hints: {error:#}");
+        }
     }
 }
 
@@ -301,12 +397,22 @@ fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
 fn initial_logical_size(
     screen_size: PhysicalSize<u32>,
     scale_factor: f64,
-    bar_height: f32,
+    logical_thickness: f64,
+    edge: BarEdge,
 ) -> LogicalSize<f64> {
-    LogicalSize::new(
-        f64::from(screen_size.width) / scale_factor,
-        f64::from(bar_height),
+    let placement = BarPlacement::at_edge(
+        MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: screen_size.width,
+            height: screen_size.height,
+        },
+        logical_thickness,
+        scale_factor,
+        edge,
     )
+    .expect("validated bar thickness and output scale");
+    PhysicalSize::new(placement.width, placement.height).to_logical(scale_factor)
 }
 
 /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
@@ -398,16 +504,37 @@ fn main() -> Result<()> {
         .map(MonitorHandle::size)
         .and_then(usable_screen_size)
         .unwrap_or(PhysicalSize::new(1920, 1080));
+    let origin = primary_monitor
+        .as_ref()
+        .map(|monitor| monitor.position())
+        .unwrap_or(PhysicalPosition::new(0, 0));
+    let initial_monitor = MonitorGeometry {
+        x: origin.x,
+        y: origin.y,
+        width: screen_size.width,
+        height: screen_size.height,
+    };
+    let initial_placement = BarPlacement::at_edge(
+        initial_monitor,
+        bar.config().logical_thickness(scale_factor),
+        scale_factor,
+        bar.config().edge,
+    )?;
     let logical_size = initial_logical_size(
         screen_size,
         scale_factor,
-        app_config.presentation.bar_height,
+        bar.config().logical_thickness(scale_factor),
+        bar.config().edge,
     );
 
     let window = Rc::new(
         WindowBuilder::new()
             .with_title("tao_softbuffer_bar")
             .with_inner_size(logical_size)
+            .with_position(PhysicalPosition::new(
+                initial_placement.x,
+                initial_placement.y,
+            ))
             .with_decorations(false)
             .with_resizable(true)
             .with_visible(true)
@@ -424,6 +551,8 @@ fn main() -> Result<()> {
         x11,
         compositor_active,
     )?;
+    app.default_monitor = initial_monitor;
+    app.apply_native_placement(initial_placement);
 
     let update = app.bar.tick();
     app.handle_runtime_update(update);
@@ -443,16 +572,25 @@ fn main() -> Result<()> {
                 WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                     *control_flow = ControlFlow::Exit;
                 }
-                WindowEvent::Resized(size) => app.resize(size),
+                WindowEvent::Resized(size) => {
+                    app.resize(size);
+                    app.sync_dock_hints();
+                }
+                WindowEvent::Moved(_) => app.sync_dock_hints(),
                 WindowEvent::ScaleFactorChanged {
                     scale_factor,
                     new_inner_size,
                 } => {
                     app.scale_factor = scale_factor;
-                    app.resize(*new_inner_size);
-                    if let Some(geometry) = app.bar.runtime().view().geometry {
-                        app.apply_monitor_geometry(geometry);
+                    // Keep the configured thickness while the scale event still
+                    // carries a size from the previous output. GTK commits this size.
+                    if let Ok(placement) = app.desired_placement() {
+                        *new_inner_size = PhysicalSize::new(placement.width, placement.height);
                     }
+                    app.resize(*new_inner_size);
+                    app.last_cursor_pos = None;
+                    app.handle_pointer_input(PointerInput::Leave);
+                    app.reapply_geometry();
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     let logical = position.to_logical::<f64>(app.scale_factor);
@@ -533,7 +671,7 @@ mod tests {
 
     #[test]
     fn initial_size_uses_configured_height_and_monitor_scale() {
-        let size = initial_logical_size(PhysicalSize::new(3840, 2160), 2.0, 52.5);
+        let size = initial_logical_size(PhysicalSize::new(3840, 2160), 2.0, 52.5, BarEdge::Top);
 
         assert_eq!(size.width, 1920.0);
         assert_eq!(size.height, 52.5);

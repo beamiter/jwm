@@ -9,7 +9,9 @@
 use std::time::{Duration, Instant};
 
 use crate::model::{DockItemGeometry, MinimizedWindow, MonitorGeometry, UserAction, WindowToken};
-use crate::presentation::{NodeId, PresentationConfig, Rect, Scene};
+use crate::presentation::{
+    BarAxis, DockMetrics, NodeId, PresentationConfig, Rect, Scene, SceneNode,
+};
 
 /// A visible preview is renewed before the compositor's lease can expire.
 pub const DOCK_PREVIEW_LEASE_INTERVAL: Duration = Duration::from_secs(2);
@@ -550,27 +552,10 @@ pub fn dock_geometry_reports(
         geometry: global_physical_geometry(shelf, monitor, scale),
     }];
 
-    let padding = finite_non_negative(config.dock_shelf_padding);
-    let usable_height = (shelf.height - padding * 2.0).max(0.0);
-    let base_height = finite_non_negative(config.dock_item_size).min(usable_height);
-    if base_height < 1.0 {
+    let axis = BarAxis::from_rect(config.edge, shelf);
+    let Some(metrics) = DockMetrics::new(config, axis.cross_len()) else {
         return reports;
-    }
-    let aspect = if config.dock_item_aspect_ratio.is_finite() {
-        config.dock_item_aspect_ratio.max(1.0)
-    } else {
-        1.0
     };
-    let base_width = base_height * aspect;
-    let hover_scale = if config.dock_hover_scale.is_finite() {
-        config.dock_hover_scale.max(1.0)
-    } else {
-        1.0
-    }
-    .min((usable_height / base_height).max(1.0));
-    let slot_width = base_width * hover_scale;
-    let slot_pitch = slot_width + finite_non_negative(config.dock_item_gap);
-    let slot_start = shelf.x + padding * 2.0 + finite_non_negative(config.dock_separator_width);
     for (slot, token) in scene
         .hits
         .iter()
@@ -580,12 +565,7 @@ pub fn dock_geometry_reports(
         })
         .enumerate()
     {
-        let stable = Rect::new(
-            slot_start + slot as f32 * slot_pitch + (slot_width - base_width) * 0.5,
-            shelf.y + (shelf.height - base_height) * 0.5,
-            base_width,
-            base_height,
-        );
+        let stable = metrics.card_rect(axis, slot, 1.0);
         reports.push(DockGeometryReport {
             window: Some(token),
             geometry: global_physical_geometry(stable, monitor, scale),
@@ -608,16 +588,41 @@ pub fn interactive_dock_geometry_reports(
         .hits
         .iter()
         .filter_map(|hit| match hit.id {
-            NodeId::MinimizedWindow(token) => Some(DockGeometryReport {
-                window: Some(token),
-                geometry: global_physical_geometry(hit.bounds, monitor, scale_factor),
-            }),
+            NodeId::MinimizedWindow(token) => {
+                // The fixed hit slot intentionally differs from the magnified
+                // thumbnail. Anchor previews to the first card primitive, never
+                // the later hover-caption union or the screen-edge hit padding.
+                let visual = scene
+                    .nodes
+                    .iter()
+                    .find_map(|node| match node {
+                        SceneNode::RoundedRect { id, bounds, .. } if *id == hit.id => Some(*bounds),
+                        _ => None,
+                    })
+                    .unwrap_or(hit.bounds);
+                Some(DockGeometryReport {
+                    window: Some(token),
+                    geometry: global_physical_geometry(visual, monitor, scale_factor),
+                })
+            }
+            NodeId::DockShelf => match hit.primary {
+                Some(UserAction::RestoreWindow { window, .. }) => Some(DockGeometryReport {
+                    window: Some(window),
+                    geometry: global_physical_geometry(hit.bounds, monitor, scale_factor),
+                }),
+                _ => None,
+            },
             _ => None,
         })
         .collect()
 }
 
 /// Convert one logical bar rectangle to global physical pixels.
+///
+/// Despite the historical `MonitorGeometry` name, the WM snapshot's x/y is
+/// already the bar window's authoritative origin, including bottom/right
+/// placement and output padding. Adding an edge offset here would apply that
+/// translation twice. Desktop-scaled x/y remain physical at every DPI.
 #[must_use]
 pub fn global_physical_geometry(
     bounds: Rect,
@@ -642,14 +647,6 @@ pub fn global_physical_geometry(
         .round()
         .clamp(0.0, f64::from(u32::MAX)) as u32;
     DockItemGeometry::new(x, y, width, height)
-}
-
-fn finite_non_negative(value: f32) -> f32 {
-    if value.is_finite() {
-        value.max(0.0)
-    } else {
-        0.0
-    }
 }
 
 fn preview_token(
@@ -1105,5 +1102,43 @@ mod tests {
         assert!(reporter.desired_preview().is_none());
         assert!(reporter.acknowledged_preview().is_none());
         assert!(reporter.next_retry_deadline(start).is_none());
+    }
+
+    #[test]
+    fn overflow_restore_uses_its_visible_anchor_without_publishing_a_fake_slot() {
+        let mut scene = dock_scene(None);
+        scene.hits.push(HitRegion {
+            id: NodeId::DockShelf,
+            bounds: Rect::new(155.0, 0.0, 40.0, 38.0),
+            primary: Some(UserAction::RestoreWindow {
+                window: WindowToken(99),
+                wm_session_id: 4,
+                minimized_generation: 8,
+                geometry: DockItemGeometry::default(),
+            }),
+            secondary: None,
+            scroll_up: None,
+            scroll_down: None,
+        });
+        let origin = MonitorGeometry {
+            x: -1920,
+            y: 1042,
+            width: 1920,
+            height: 1080,
+        };
+        let stable = dock_geometry_reports(&scene, &PresentationConfig::default(), origin, 1.25);
+        assert_eq!(
+            stable.len(),
+            1,
+            "overflow is not an extra persistent item slot"
+        );
+        let interactive = interactive_dock_geometry_reports(&scene, origin, 1.25);
+        assert_eq!(
+            interactive,
+            [DockGeometryReport {
+                window: Some(WindowToken(99)),
+                geometry: DockItemGeometry::new(-1726, 1042, 50, 48)
+            }]
+        );
     }
 }

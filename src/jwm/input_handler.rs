@@ -1224,6 +1224,11 @@ impl Jwm {
                         self.show_power_profile_osd(backend, next);
                     }
                 }
+                ControlKind::BarPosition | ControlKind::BarThickness | ControlKind::BarPadding => {
+                    if let Some(delta) = slider_delta.or(activate.then_some(SLIDER_STEP)) {
+                        self.adjust_bar_control(backend, control, delta.signum());
+                    }
+                }
                 ControlKind::NightLight => {
                     if activate {
                         // Through the toggle so the Night Light OSD and the
@@ -2157,7 +2162,13 @@ impl Jwm {
         {
             use crate::jwm::features::ControlKind;
             let _ = self.features.system_ui.select_visible_row(row);
-            if kind == ControlKind::PowerProfile {
+            if matches!(
+                kind,
+                ControlKind::PowerProfile
+                    | ControlKind::BarPosition
+                    | ControlKind::BarThickness
+                    | ControlKind::BarPadding
+            ) {
                 // Same arm as keyboard Left/Right — keeps the OSD and
                 // cache write in one place.
                 let keysym = if delta > 0 {

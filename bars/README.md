@@ -2,6 +2,9 @@
 
 JWM can spawn a status bar named in `config_*.toml` (`status_bar.name`). All bar
 crates live under this directory and share protocol helpers from `xbar_core`.
+Bars support the top, bottom, left and right output edges. The complete
+configuration, interaction and geometry contract is in
+[Four-edge bars](../docs/bars-four-edges.md).
 
 ## Official bar
 
@@ -28,11 +31,100 @@ Use `-b <name>` only when you intentionally want an example bar.
 Whatever bar you run, the Shell Hub entry should open the same built-in control
 center documented in [docs/control-center.md](../docs/control-center.md).
 
-`tao_glow_bar` defaults to 42 logical pixels of height so it matches
-`appearance.status_bar_height`. Hide or restore pills from
+The Hub's **Sound & Display** section includes saved controls for the current
+screen's bar edge, all-screen thickness and margins. Edge and thickness changes
+restart the affected bar processes; margin changes reposition them. These
+controls preserve unrelated configuration settings and comments.
+
+## Placement and thickness
+
+Edit the active JWM configuration, normally
+`~/.config/jwm/config_x11.toml` or `~/.config/jwm/config_wayland.toml`:
+
+```toml
+[appearance]
+status_bar_height = 48 # Physical thickness: height at top/bottom, width at left/right
+status_bar_padding = 4
+
+[status_bar]
+name = "tao_glow_bar"
+show_bar = true
+position = "top" # top, bottom, left, right
+
+[[status_bar.monitors]]
+monitor = 0
+position = "left"
+
+[[status_bar.monitors]]
+monitor = 1
+position = "bottom"
+```
+
+Monitor IDs come from `jwm-tool msg get_monitors`. A monitor without an override
+uses `status_bar.position`; old configurations with no position keep the top
+edge. Thickness defaults to **42 physical pixels** for JWM-managed bars. The
+historical `status_bar_height` key also controls sidebar width. The WM reserves
+the matching strip on each output and supplies the effective edge/thickness to
+its bar process, including on scaled or very small outputs.
+
+For a bar launched independently, `~/.config/xbar/config.toml` uses logical
+units instead:
+
+```toml
+[presentation]
+position = "right"
+thickness = 42.0 # Alias for the existing bar_height key; logical pixels
+```
+
+Use either `thickness` or `bar_height`, not both. Managed launch values
+`JWM_BAR_POSITION` and `JWM_BAR_THICKNESS` override these standalone settings.
+`XBAR_POSITION=left` is a one-process standalone edge override.
+See the [unit and precedence table](../docs/bars-four-edges.md#units-and-precedence)
+before changing size on a scaled output.
+
+Hide or restore pills from
 `~/.config/xbar/config.toml` (`[presentation.visibility]`,
 `presentation.shell_routes`). The monitor index pill is off unless you turn
 it on.
+
+## Sidebar interaction
+
+Sidebars keep glyphs and window thumbnails upright. The shared Scene stacks
+clock components and short readings, protects the active workspace and key
+status controls, and condenses long content. Workspace `+N` controls and mouse
+wheel navigation keep omitted workspaces reachable. Dock magnification follows
+the bar's main axis while click targets remain fixed; actionable Dock `+N`
+restores the most recent locally omitted window.
+
+GTK/Relm and HTML bars retain overflowing control groups in native or DOM
+scrollers. GTK controls support native focus and tooltips. The common HTML
+adapter adds visible keyboard focus, Enter/Space activation, arrow navigation
+along the displayed axis, and Home/End. Focused controls scroll into view.
+The [interaction guide](../docs/bars-four-edges.md#interaction-and-overflow)
+distinguishes these adapters from the shared Scene's pointer controls.
+
+## Package boundaries and checks
+
+The 22 non-Tauri bar packages are independent of the root Cargo workspace so
+their GUI dependency graphs stay separate. Fifteen consume the shared Scene;
+the other seven use GTK/Relm, GPUI/GPUI-component, Iced, Xilem or Dioxus. The six
+Tauri frontend applications share `xbar_tauri`, whose explicit `[workspace]`
+boundary allows it to be checked independently too.
+
+Run these commands from the repository root:
+
+```bash
+cargo check --manifest-path bars/tao_glow_bar/Cargo.toml
+cargo check --manifest-path crates/xbar_core/crates/xbar_tauri/Cargo.toml
+cargo test -p xbar_core --all-features
+cargo run -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-bar-previews
+```
+
+The final command renders the actual Cairo/Pango scene at all four edges in
+dark/light themes and at 1×/2×, with a PNG and matching scene JSON for each case.
+It needs no live WM or display server. The full
+[validation matrix](../docs/bars-four-edges.md#validation) separates package
+checks, automated geometry/interaction tests and native visual smoke tests.
 
 ## Wallpaper-aware workspace tags
 
@@ -53,8 +145,9 @@ measured glyph height. Oversized fonts or very short pills keep their original
 text placement and rely on the stronger occupied surface instead.
 Selected/filled tags retain the
 shared selected accent; urgent tags take precedence and retain the urgent
-accent. Text and borders come from that same policy. The bar's background,
-compositor mode, non-tag pills, hit targets and actions are unchanged.
+accent. Text and borders come from that same policy. Wallpaper adaptation
+controls tag paint; normal shared layout and input policy still determine
+geometry, hit targets and actions.
 
 JWM measures the wallpaper layer after wallpaper/astronomy drawing and before
 any client or overlay. It reads one center scanline per monitor (at most 16,384
@@ -105,13 +198,22 @@ also use this fallback; their producer sampling path is not adaptive.
 ### Validation limits
 
 Shared palette tests cover the numerical contrast policy independently of any
-GUI. Frontend adoption is not a claim that every experimental toolkit has been
-built or visually exercised: offline checks can be blocked by uncached Git
-checkouts/packages (GPUI, Iced, Xilem, Dioxus), and the standalone Tauri bridge
-currently has a workspace-membership build blocker. Runtime screenshots on the
-supported compositor and toolkit versions are still needed, especially for
-native widget hover/press styling and WebKit stylesheet installation. The
-extracted frontend-policy harness passes five Rust tests (including urgent plus
-selected precedence and CSS palette serialization); extracted class selectors
-pass twenty Node assertions across the four JavaScript frontends. These are
-source-level tests, not full toolkit or browser integration tests.
+GUI. All 22 non-Tauri bar packages and the standalone Tauri bridge have passed
+package checks during the four-edge refactor. The bridge also passes 13 library
+tests; Leptos and Yew pass Rust checks for `wasm32-unknown-unknown`. React, Solid,
+Svelte and Vue production builds pass. The layout browser regression uses each
+of the seven HTML frontends' real stylesheet and exercises four edges, three
+viewport sizes, keyboard interaction, transformed/scrolling Dock geometry and
+fixed Dioxus allocations. A separate 16-case suite loads the actual built
+React/Solid/Svelte/Vue applications on all four edges in Chromium, with a mock
+Tauri host, and verifies readiness, keyboard actions and scrolling Dock
+geometry. Native X11 smoke tests cover `tao_glow_bar` on all four edges and GTK
+on all four edges at 1×/2×.
+
+This coverage does not establish visual parity for every experimental toolkit
+or behavior on physical Wayland outputs. Actual font availability, compositor
+materials, native hover/press styling and WebKit rendering still depend on the
+desktop environment. The experimental Iced adapter has no explicit bar keyboard
+traversal, and Xilem's in-window tooltips can clip within a narrow sidebar.
+JWM's native minimized-window previews follow the inward-facing edge placement.
+The supported daily-drive target remains `tao_glow_bar`.

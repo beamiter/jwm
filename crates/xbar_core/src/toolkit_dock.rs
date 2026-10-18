@@ -32,8 +32,8 @@ pub const DOCK_ITEM_GAP: f32 = 4.0;
 pub const DOCK_SHELF_PADDING: f32 = 2.0;
 /// Width of the separator before the minimized-window shelf.
 pub const DOCK_SEPARATOR_WIDTH: f32 = 1.0;
-/// Width reserved for the overflow indicator.
-pub const DOCK_OVERFLOW_WIDTH: f32 = 12.0;
+/// Minimum acquisition extent for the actionable overflow indicator.
+pub const DOCK_OVERFLOW_WIDTH: f32 = 32.0;
 const MAX_VIEWPORT_FRACTION: f32 = 0.45;
 const MIN_DOCK_WAKE_DELAY: Duration = Duration::from_millis(1);
 
@@ -56,6 +56,7 @@ pub fn dock_wake_delay(now: Instant, fallback: Duration, deadline: Option<Instan
 
 #[derive(Debug, Clone, Copy)]
 struct DockLayout {
+    edge: crate::placement::BarEdge,
     monitor: crate::MonitorGeometry,
     scale_factor: f64,
     shelf: Rect,
@@ -80,6 +81,7 @@ pub struct DockItemBinding {
 /// Protocol/reporting state used by custom retained toolkits.
 #[derive(Debug, Default)]
 pub struct DockBridge {
+    edge: crate::placement::BarEdge,
     reporter: DockReporter,
     state_key: Option<(u64, u64, u64)>,
     windows: Vec<MinimizedWindow>,
@@ -99,8 +101,26 @@ impl DockBridge {
         Self::default()
     }
 
+    /// Set the screen edge before synchronizing a new frame. Window identity
+    /// and queued restore intent survive a placement change; hover ownership
+    /// is cleared until a pointer enters the new surface.
+    pub fn set_edge(&mut self, edge: crate::placement::BarEdge) {
+        if self.edge != edge {
+            self.edge = edge;
+            self.hovered = None;
+            self.reporter.clear_preview();
+            self.layout = None;
+        }
+    }
+
+    #[must_use]
+    pub const fn edge(&self) -> crate::placement::BarEdge {
+        self.edge
+    }
+
     /// Reconcile one owned model snapshot with a toolkit's fixed right-edge
-    /// allocation. `right_padding` is logical; the origin always comes from
+    /// allocation (bottom allocation on sidebars). `right_padding` is logical
+    /// padding along the main axis; the origin always comes from
     /// the WM snapshot and never from a toolkit window-position query.
     pub fn synchronize(
         &mut self,
@@ -145,17 +165,38 @@ impl DockBridge {
         let scale = sane_scale(scale_factor);
         let logical_width = snapshot
             .geometry
-            .map(|geometry| geometry.width as f32 / scale as f32)
+            .map(|geometry| {
+                (if self.edge.is_vertical() {
+                    geometry.height
+                } else {
+                    geometry.width
+                }) as f32
+                    / scale as f32
+            })
             .unwrap_or(0.0);
+        let right_padding = if right_padding.is_finite() {
+            right_padding.clamp(0.0, logical_width)
+        } else {
+            0.0
+        };
         let available_width = if snapshot.wm_available && snapshot.geometry.is_some() {
             (logical_width * MAX_VIEWPORT_FRACTION - right_padding).max(0.0)
         } else {
             0.0
         };
         let total = self.windows.len();
-        let mut visible_count = total;
+        let mut visible_count =
+            if crate::presentation::DockMetrics::new(&dock_presentation(self.edge), bar_height)
+                .is_some()
+            {
+                total
+            } else {
+                0
+            };
         while visible_count > 0
-            && shelf_width(
+            && shelf_extent(
+                self.edge,
+                bar_height,
                 visible_count,
                 snapshot.minimized_overflow || visible_count < total,
             ) > available_width
@@ -177,21 +218,45 @@ impl DockBridge {
             self.hovered = None;
         }
 
-        let shelf_width = shelf_width(self.visible_tokens.len(), self.overflow || self.collapsed);
-        let shelf = Rect::new(
-            (logical_width - right_padding - shelf_width).max(0.0),
-            0.0,
-            shelf_width,
-            bar_height.max(DOCK_ITEM_HEIGHT + DOCK_SHELF_PADDING * 2.0),
-        );
-        self.layout = snapshot.geometry.map(|monitor| DockLayout {
-            monitor,
-            scale_factor: scale,
-            shelf,
-        });
+        let extent = shelf_extent(
+            self.edge,
+            bar_height,
+            self.visible_tokens.len(),
+            self.overflow || self.collapsed,
+        )
+        .min((logical_width - right_padding).max(0.0));
+        let thickness = if bar_height.is_finite() {
+            bar_height.max(0.0)
+        } else {
+            0.0
+        };
+        let shelf = if self.edge.is_vertical() {
+            Rect::new(
+                0.0,
+                (logical_width - right_padding - extent).max(0.0),
+                thickness,
+                extent,
+            )
+        } else {
+            Rect::new(
+                (logical_width - right_padding - extent).max(0.0),
+                0.0,
+                extent,
+                thickness,
+            )
+        };
+        self.layout = snapshot
+            .geometry
+            .filter(|_| snapshot.wm_available && !shelf.is_empty())
+            .map(|monitor| DockLayout {
+                edge: self.edge,
+                monitor,
+                scale_factor: scale,
+                shelf,
+            });
 
-        let scene = dock_scene(shelf, &self.visible_tokens, self.hovered);
-        let presentation = dock_presentation();
+        let scene = dock_scene(shelf, self.edge, &self.visible_tokens, self.hovered);
+        let presentation = dock_presentation(self.edge);
         self.reporter.synchronize(DockReporterInput {
             wm_available: snapshot.wm_available,
             wm_session_id: snapshot.wm_session_id,
@@ -230,6 +295,38 @@ impl DockBridge {
             })
     }
 
+    /// Identity for the newest locally omitted window, restored by overflow.
+    ///
+    /// Capture this value in the overflow control just like an ordinary item
+    /// binding. It remains projection-scoped and cannot silently acquire a
+    /// different window after resize, restore/re-minimize, or WM restart.
+    /// Protocol-level overflow alone has no token to restore and returns None.
+    #[must_use]
+    pub fn overflow_binding(&self) -> Option<DockItemBinding> {
+        let (wm_session_id, minimized_generation, _) = self.state_key?;
+        self.overflow_bounds()?;
+        let token = self
+            .windows
+            .iter()
+            .rev()
+            .find(|window| !self.visible_tokens.contains(&window.token))?
+            .token;
+        Some(DockItemBinding {
+            wm_session_id,
+            minimized_generation,
+            token,
+        })
+    }
+
+    /// Known local omission count for a `+N` overflow label.
+    ///
+    /// A zero count with [`Self::overflow`] still true means the WM's bounded
+    /// projection omits additional windows whose tokens/count are unknown.
+    #[must_use]
+    pub fn overflow_count(&self) -> usize {
+        self.windows.len().saturating_sub(self.visible_tokens.len())
+    }
+
     /// Returns the minimized window currently hovered by the pointer.
     #[must_use]
     pub const fn hovered(&self) -> Option<WindowToken> {
@@ -248,10 +345,159 @@ impl DockBridge {
         self.collapsed
     }
 
-    /// Returns the logical width required by the current shelf.
+    /// Returns the required main-axis extent: width for a horizontal shelf,
+    /// height for a vertical shelf. Kept under the original method name for
+    /// toolkit API compatibility.
     #[must_use]
     pub fn shelf_width(&self) -> f32 {
-        shelf_width(self.visible_tokens.len(), self.overflow || self.collapsed)
+        self.layout.map_or_else(
+            || {
+                shelf_extent(
+                    self.edge,
+                    40.0,
+                    self.visible_tokens.len(),
+                    self.overflow || self.collapsed,
+                )
+            },
+            |layout| {
+                if self.edge.is_vertical() {
+                    layout.shelf.height
+                } else {
+                    layout.shelf.width
+                }
+            },
+        )
+    }
+
+    /// Exact shelf allocation in logical, bar-local coordinates.
+    ///
+    /// A retained toolkit must position this allocation in the bar's fixed
+    /// root, outside scrolling controls. All item/slot accessors below use
+    /// the same coordinate space, so subtract this rectangle's x/y when
+    /// positioning children relative to the shelf. The WM's physical desktop
+    /// origin is applied only when geometry is sent to the compositor.
+    #[must_use]
+    pub fn shelf_bounds(&self) -> Option<Rect> {
+        self.layout.map(|layout| layout.shelf)
+    }
+
+    /// Current visual card rectangle in logical, bar-local coordinates.
+    ///
+    /// Includes hover/neighbor magnification. Render this exact rectangle;
+    /// applying another scale or centering it in a different allocation would
+    /// detach preview and restore animations from the visible thumbnail.
+    #[must_use]
+    pub fn item_bounds(&self, token: WindowToken) -> Option<Rect> {
+        let layout = self.layout?;
+        let index = self.visible_tokens.iter().position(|item| *item == token)?;
+        Some(dock_item_visual_rect(
+            layout.shelf,
+            layout.edge,
+            &self.visible_tokens,
+            self.hovered,
+            index,
+        ))
+    }
+
+    /// Resting card rectangle in logical, bar-local coordinates.
+    ///
+    /// This is the stable compositor animation target, independent of hover.
+    #[must_use]
+    pub fn resting_item_bounds(&self, token: WindowToken) -> Option<Rect> {
+        let layout = self.layout?;
+        let index = self.visible_tokens.iter().position(|item| *item == token)?;
+        Some(dock_item_visual_rect(
+            layout.shelf,
+            layout.edge,
+            &self.visible_tokens,
+            None,
+            index,
+        ))
+    }
+
+    /// Fixed acquisition target in logical, bar-local coordinates.
+    ///
+    /// Spans the full bar thickness and reserves peak magnification along
+    /// the shelf's main axis. Attach pointer and focus interactions to this
+    /// stable target while drawing the card at [`Self::item_bounds`].
+    #[must_use]
+    pub fn slot_bounds(&self, token: WindowToken) -> Option<Rect> {
+        let layout = self.layout?;
+        let index = self.visible_tokens.iter().position(|item| *item == token)?;
+        dock_item_slot_rect(layout.shelf, layout.edge, index)
+    }
+
+    /// Overflow affordance rectangle in logical, bar-local coordinates.
+    ///
+    /// Both orientations reserve at least 32 logical pixels along the main
+    /// axis. Returns `None` when every window fits or no current layout has
+    /// been synchronized; exceptionally tiny viewports clip the affordance.
+    #[must_use]
+    pub fn overflow_bounds(&self) -> Option<Rect> {
+        if !self.overflow && !self.collapsed {
+            return None;
+        }
+        let layout = self.layout?;
+        let axis = crate::presentation::BarAxis::from_rect(layout.edge, layout.shelf);
+        let metrics = crate::presentation::DockMetrics::new(
+            &dock_presentation(layout.edge),
+            axis.cross_len(),
+        )?;
+        let bounds = if layout.edge.is_vertical() {
+            metrics.slot_rect(axis, self.visible_tokens.len())
+        } else {
+            let offset = if self.visible_tokens.is_empty() {
+                metrics.gap
+            } else {
+                self.visible_tokens.len() as f32 * metrics.slot_pitch
+            };
+            axis.rect(
+                metrics.slot_start(axis) + offset,
+                axis.cross_start(),
+                DOCK_OVERFLOW_WIDTH,
+                axis.cross_len(),
+            )
+        };
+        bounds.intersection(layout.shelf)
+    }
+
+    /// Upright resting thumbnail dimensions after clipping to this bar's
+    /// actual logical thickness. Native widgets should use this instead of
+    /// constants when the bar is scaled or lies on a side edge.
+    #[must_use]
+    pub fn item_size(&self) -> Size {
+        self.layout
+            .and_then(|layout| {
+                let axis = crate::presentation::BarAxis::from_rect(self.edge, layout.shelf);
+                crate::presentation::DockMetrics::new(
+                    &dock_presentation(self.edge),
+                    axis.cross_len(),
+                )
+            })
+            .map_or(Size::new(DOCK_ITEM_WIDTH, DOCK_ITEM_HEIGHT), |metrics| {
+                Size::new(metrics.item_width, metrics.item_height)
+            })
+    }
+
+    /// Fixed main-axis slot extent, including the peak hover allowance.
+    #[must_use]
+    pub fn slot_extent(&self) -> f32 {
+        self.layout
+            .and_then(|layout| {
+                let axis = crate::presentation::BarAxis::from_rect(self.edge, layout.shelf);
+                crate::presentation::DockMetrics::new(
+                    &dock_presentation(self.edge),
+                    axis.cross_len(),
+                )
+            })
+            .map_or(
+                if self.edge.is_vertical() {
+                    32.0
+                } else {
+                    DOCK_SLOT_WIDTH
+                },
+                |metrics| metrics.slot_extent,
+            )
     }
 
     /// Returns the macOS-style neighbour magnification for `token`.
@@ -260,7 +506,18 @@ impl DockBridge {
         let Some(index) = self.visible_tokens.iter().position(|item| *item == token) else {
             return 1.0;
         };
-        dock_item_scale(&self.visible_tokens, self.hovered, index)
+        let peak = self
+            .layout
+            .and_then(|layout| {
+                let axis = crate::presentation::BarAxis::from_rect(self.edge, layout.shelf);
+                crate::presentation::DockMetrics::new(
+                    &dock_presentation(self.edge),
+                    axis.cross_len(),
+                )
+                .map(|metrics| metrics.peak_scale)
+            })
+            .unwrap_or(1.0);
+        dock_item_scale(&self.visible_tokens, self.hovered, index, peak)
     }
 
     /// The full projection identity is captured by the rendered event
@@ -306,18 +563,27 @@ impl DockBridge {
         true
     }
 
-    /// Restore carries the magnified visual rectangle seen by the user, while
-    /// normal geometry reports remain the untransformed 30x20 resting slots.
+    /// Restore carries the exact visual rectangle seen by the user, while
+    /// normal geometry reports retain the untransformed resting cards.
+    /// Overflow restores use the overflow affordance as the animation origin.
     #[must_use]
     pub fn restore_action(&self, binding: DockItemBinding) -> Option<UserAction> {
-        if !self.matches(binding) || !self.visible_tokens.contains(&binding.token) {
+        if !self.matches(binding) {
             return None;
         }
+        let geometry = if self.visible_tokens.contains(&binding.token) {
+            self.visual_geometry(binding.token)
+        } else if self.overflow_binding() == Some(binding) {
+            let layout = self.layout?;
+            global_physical_geometry(self.overflow_bounds()?, layout.monitor, layout.scale_factor)
+        } else {
+            return None;
+        };
         Some(UserAction::RestoreWindow {
             window: binding.token,
             wm_session_id: binding.wm_session_id,
             minimized_generation: binding.minimized_generation,
-            geometry: self.visual_geometry(binding.token),
+            geometry,
         })
     }
 
@@ -453,10 +719,9 @@ impl DockBridge {
         let Some(layout) = self.layout else {
             return DockItemGeometry::default();
         };
-        let Some(index) = self.visible_tokens.iter().position(|item| *item == token) else {
+        let Some(visual) = self.item_bounds(token) else {
             return DockItemGeometry::default();
         };
-        let visual = dock_item_visual_rect(layout.shelf, &self.visible_tokens, self.hovered, index);
         global_physical_geometry(visual, layout.monitor, layout.scale_factor)
     }
 }
@@ -497,8 +762,38 @@ pub fn shelf_width(item_count: usize, show_overflow: bool) -> f32 {
         }
 }
 
-fn dock_presentation() -> PresentationConfig {
+fn shelf_extent(
+    edge: crate::placement::BarEdge,
+    thickness: f32,
+    item_count: usize,
+    show_overflow: bool,
+) -> f32 {
+    let Some(metrics) = crate::presentation::DockMetrics::new(&dock_presentation(edge), thickness)
+    else {
+        return 0.0;
+    };
+    if edge.is_vertical() {
+        return metrics.width_for_slots((item_count + usize::from(show_overflow)).max(1));
+    }
+    let item_extent = if item_count == 0 {
+        0.0
+    } else {
+        item_count as f32 * metrics.slot_extent
+            + item_count.saturating_sub(1) as f32 * DOCK_ITEM_GAP
+    };
+    DOCK_SHELF_PADDING * 3.0
+        + DOCK_SEPARATOR_WIDTH
+        + item_extent
+        + if show_overflow {
+            DOCK_ITEM_GAP + DOCK_OVERFLOW_WIDTH
+        } else {
+            0.0
+        }
+}
+
+fn dock_presentation(edge: crate::placement::BarEdge) -> PresentationConfig {
     PresentationConfig {
+        edge,
         dock_item_size: DOCK_ITEM_HEIGHT,
         dock_item_aspect_ratio: DOCK_ITEM_WIDTH / DOCK_ITEM_HEIGHT,
         dock_item_gap: DOCK_ITEM_GAP,
@@ -509,51 +804,58 @@ fn dock_presentation() -> PresentationConfig {
     }
 }
 
-fn dock_item_scale(tokens: &[WindowToken], hovered: Option<WindowToken>, index: usize) -> f32 {
+fn dock_item_scale(
+    tokens: &[WindowToken],
+    hovered: Option<WindowToken>,
+    index: usize,
+    peak: f32,
+) -> f32 {
     let Some(hover_index) = hovered.and_then(|token| tokens.iter().position(|item| *item == token))
     else {
         return 1.0;
     };
-    match index.abs_diff(hover_index) {
-        0 => DOCK_HOVER_SCALE,
-        1 => DOCK_NEIGHBOUR_SCALE,
-        2 => DOCK_SECOND_NEIGHBOUR_SCALE,
-        _ => 1.0,
-    }
+    let influence = match index.abs_diff(hover_index) {
+        0 => 1.0,
+        1 => (DOCK_NEIGHBOUR_SCALE - 1.0) / (DOCK_HOVER_SCALE - 1.0),
+        2 => (DOCK_SECOND_NEIGHBOUR_SCALE - 1.0) / (DOCK_HOVER_SCALE - 1.0),
+        _ => 0.0,
+    };
+    1.0 + (peak - 1.0).max(0.0) * influence
 }
 
 fn dock_item_visual_rect(
     shelf: Rect,
+    edge: crate::placement::BarEdge,
     tokens: &[WindowToken],
     hovered: Option<WindowToken>,
     index: usize,
 ) -> Rect {
-    let scale = dock_item_scale(tokens, hovered, index);
-    let base_x = shelf.x
-        + DOCK_SHELF_PADDING * 2.0
-        + DOCK_SEPARATOR_WIDTH
-        + index as f32 * (DOCK_SLOT_WIDTH + DOCK_ITEM_GAP)
-        + (DOCK_SLOT_WIDTH - DOCK_ITEM_WIDTH) * 0.5;
-    let base_y = shelf.y + (shelf.height - DOCK_ITEM_HEIGHT) * 0.5;
-    let width = DOCK_ITEM_WIDTH * scale;
-    let height = DOCK_ITEM_HEIGHT * scale;
-    Rect::new(
-        base_x + (DOCK_ITEM_WIDTH - width) * 0.5,
-        base_y + (DOCK_ITEM_HEIGHT - height) * 0.5,
-        width,
-        height,
-    )
+    let axis = crate::presentation::BarAxis::from_rect(edge, shelf);
+    let Some(metrics) =
+        crate::presentation::DockMetrics::new(&dock_presentation(edge), axis.cross_len())
+    else {
+        return Rect::default();
+    };
+    let scale = dock_item_scale(tokens, hovered, index, metrics.peak_scale);
+    metrics.card_rect(axis, index, scale)
 }
 
-fn dock_scene(shelf: Rect, tokens: &[WindowToken], hovered: Option<WindowToken>) -> Scene {
+fn dock_item_slot_rect(shelf: Rect, edge: crate::placement::BarEdge, index: usize) -> Option<Rect> {
+    let axis = crate::presentation::BarAxis::from_rect(edge, shelf);
+    let metrics =
+        crate::presentation::DockMetrics::new(&dock_presentation(edge), axis.cross_len())?;
+    metrics.slot_rect(axis, index).intersection(shelf)
+}
+
+fn dock_scene(
+    shelf: Rect,
+    edge: crate::placement::BarEdge,
+    tokens: &[WindowToken],
+    hovered: Option<WindowToken>,
+) -> Scene {
     let mut scene = Scene {
-        viewport: Size::new((shelf.x + shelf.width).max(1.0), shelf.height.max(1.0)),
-        clip: Rect::new(
-            0.0,
-            0.0,
-            (shelf.x + shelf.width).max(1.0),
-            shelf.height.max(1.0),
-        ),
+        viewport: Size::new(shelf.right().max(1.0), shelf.bottom().max(1.0)),
+        clip: Rect::new(0.0, 0.0, shelf.right().max(1.0), shelf.bottom().max(1.0)),
         nodes: vec![SceneNode::RoundedRect {
             id: NodeId::DockShelf,
             bounds: shelf,
@@ -565,9 +867,20 @@ fn dock_scene(shelf: Rect, tokens: &[WindowToken], hovered: Option<WindowToken>)
         hits: Vec::with_capacity(tokens.len()),
     };
     for (index, token) in tokens.iter().copied().enumerate() {
+        let Some(slot) = dock_item_slot_rect(shelf, edge, index) else {
+            continue;
+        };
+        scene.nodes.push(SceneNode::RoundedRect {
+            id: NodeId::MinimizedWindow(token),
+            bounds: dock_item_visual_rect(shelf, edge, tokens, hovered, index),
+            radius: 0.0,
+            fill: Rgba::new(0.0, 0.0, 0.0, 0.0),
+            stroke: None,
+            state: VisualState::default(),
+        });
         scene.hits.push(HitRegion {
             id: NodeId::MinimizedWindow(token),
-            bounds: dock_item_visual_rect(shelf, tokens, hovered, index),
+            bounds: slot,
             primary: None,
             secondary: None,
             scroll_up: None,
@@ -625,6 +938,20 @@ mod tests {
             })
             .collect();
         snapshot
+    }
+
+    fn assert_contains(outer: Rect, inner: Rect) {
+        // Intersections at far output coordinates can round width/height by
+        // a few float ULPs; containment concerns edges, not bitwise subtraction.
+        const EPSILON: f32 = 0.001;
+        assert!(
+            !inner.is_empty()
+                && inner.x + EPSILON >= outer.x
+                && inner.y + EPSILON >= outer.y
+                && inner.right() <= outer.right() + EPSILON
+                && inner.bottom() <= outer.bottom() + EPSILON,
+            "{outer:?} must contain {inner:?}"
+        );
     }
 
     #[test]
@@ -767,7 +1094,7 @@ mod tests {
                 .visible_windows()
                 .map(|window| window.token)
                 .collect::<Vec<_>>(),
-            vec![WindowToken(2), WindowToken(3), WindowToken(4)]
+            vec![WindowToken(3), WindowToken(4)]
         );
         assert!(bridge.overflow());
         assert!(!bridge.collapsed());
@@ -780,7 +1107,7 @@ mod tests {
             } if geometry.is_empty()
         )));
 
-        let one_slot = snapshot_with_windows(41, 4, 200);
+        let one_slot = snapshot_with_windows(41, 4, 220);
         bridge.synchronize(&one_slot, 1, 1.0, 40.0, 6.0);
         assert_eq!(
             bridge
@@ -1042,5 +1369,285 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn sidebar_bridge_budgets_output_height_and_preserves_authoritative_origin_at_every_scale() {
+        use crate::placement::BarEdge;
+        for edge in [BarEdge::Left, BarEdge::Right] {
+            for scale in [1.0, 1.25, 2.0] {
+                let mut model = snapshot_with_windows(81, 6, 42);
+                model.geometry = Some(MonitorGeometry {
+                    x: -42,
+                    y: 80,
+                    width: 42,
+                    height: 1080,
+                });
+                let mut bridge = DockBridge::new();
+                bridge.set_edge(edge);
+                bridge.synchronize(&model, 1, scale, (42.0 / scale) as f32, 6.0);
+                assert!(
+                    bridge.visible_windows().count() > 0,
+                    "must budget output height, not 42px width"
+                );
+                assert!(bridge.slot_extent() >= 32.0);
+                let visible: Vec<_> = bridge
+                    .visible_windows()
+                    .map(|window| window.token)
+                    .collect();
+                let now = Instant::now();
+                let targets: Vec<_> = bridge
+                    .pending_actions(now)
+                    .into_iter()
+                    .filter_map(|action| match action {
+                        UserAction::SetDockGeometry {
+                            window: Some(_),
+                            geometry,
+                            ..
+                        } => Some(geometry),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(targets.len(), visible.len());
+                for target in targets {
+                    assert!(target.x >= -42 && i64::from(target.x) + i64::from(target.width) <= 0);
+                    assert!(
+                        target.y >= 80 && i64::from(target.y) + i64::from(target.height) <= 1160
+                    );
+                    assert!(target.width >= target.height, "thumbnails remain landscape");
+                }
+                let binding = bridge.item_binding(visible[0]).unwrap();
+                bridge.enter(binding);
+                let size = bridge.item_size();
+                assert!(f64::from(size.width * bridge.scale_for(visible[0])) * scale <= 42.001);
+                let UserAction::RestoreWindow { geometry, .. } =
+                    bridge.restore_action(binding).unwrap()
+                else {
+                    panic!("restore")
+                };
+                assert!(
+                    geometry.x >= -42 && i64::from(geometry.x) + i64::from(geometry.width) <= 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retained_allocations_match_reported_and_interactive_geometry_on_every_edge() {
+        use crate::placement::BarEdge;
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            for scale in [1.0, 1.25, 2.0] {
+                let mut model = snapshot_with_windows(91, 4, 1600);
+                let monitor = MonitorGeometry {
+                    x: -1200,
+                    y: 45,
+                    width: if edge.is_vertical() { 42 } else { 1600 },
+                    height: if edge.is_vertical() { 1600 } else { 42 },
+                };
+                model.geometry = Some(monitor);
+                let mut bridge = DockBridge::new();
+                bridge.set_edge(edge);
+                bridge.synchronize(&model, 1, scale, (42.0 / scale) as f32, 6.0);
+                let shelf = bridge.shelf_bounds().expect("fixed shelf allocation");
+                let tokens: Vec<_> = bridge
+                    .visible_windows()
+                    .map(|window| window.token)
+                    .collect();
+                assert_eq!(tokens.len(), 4);
+                let slots: Vec<_> = tokens
+                    .iter()
+                    .map(|token| bridge.slot_bounds(*token).unwrap())
+                    .collect();
+                let stable: Vec<_> = tokens
+                    .iter()
+                    .map(|token| bridge.resting_item_bounds(*token).unwrap())
+                    .collect();
+                let reports = bridge.pending_actions(Instant::now());
+                assert!(reports.iter().any(|action| matches!(action,
+                    UserAction::SetDockGeometry { window: None, geometry, .. }
+                        if *geometry == global_physical_geometry(shelf, monitor, scale)
+                )));
+                for (index, token) in tokens.iter().enumerate() {
+                    assert_eq!(bridge.item_bounds(*token), Some(stable[index]));
+                    assert_contains(slots[index], stable[index]);
+                    assert!(reports.iter().any(|action| matches!(action,
+                        UserAction::SetDockGeometry { window: Some(window), geometry, .. }
+                            if window == token && *geometry == global_physical_geometry(stable[index], monitor, scale)
+                    )));
+                }
+                let binding = bridge.item_binding(tokens[1]).unwrap();
+                assert!(bridge.enter(binding));
+                bridge.synchronize(&model, 1, scale, (42.0 / scale) as f32, 6.0);
+                for (index, token) in tokens.iter().enumerate() {
+                    assert_eq!(bridge.slot_bounds(*token), Some(slots[index]));
+                    assert_eq!(bridge.resting_item_bounds(*token), Some(stable[index]));
+                    let visual = bridge.item_bounds(*token).unwrap();
+                    assert_contains(slots[index], visual);
+                    assert!(
+                        visual.width >= visual.height,
+                        "upright landscape cards on {edge:?}"
+                    );
+                    let action = bridge
+                        .restore_action(bridge.item_binding(*token).unwrap())
+                        .unwrap();
+                    assert!(matches!(action, UserAction::RestoreWindow { geometry, .. }
+                        if geometry == global_physical_geometry(visual, monitor, scale)));
+                }
+                let synthetic = dock_scene(shelf, edge, &tokens, Some(tokens[1]));
+                for (index, hit) in synthetic.hits.iter().enumerate() {
+                    assert_eq!(hit.bounds, slots[index]);
+                    assert_eq!(
+                        synthetic.bounds_for(hit.id),
+                        bridge.item_bounds(tokens[index])
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_restores_newest_omitted_window_from_visible_affordance_on_every_edge() {
+        use crate::placement::BarEdge;
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let mut model = snapshot_with_windows(92, 8, 400);
+            model.wm_sequence = Some(8);
+            let monitor = MonitorGeometry {
+                x: -42,
+                y: 90,
+                width: if edge.is_vertical() { 42 } else { 400 },
+                height: if edge.is_vertical() { 400 } else { 42 },
+            };
+            model.geometry = Some(monitor);
+            let mut bridge = DockBridge::new();
+            bridge.set_edge(edge);
+            bridge.synchronize(&model, 1, 1.25, 42.0 / 1.25, 6.0);
+            let overflow = bridge.overflow_bounds().unwrap();
+            assert!(
+                if edge.is_vertical() {
+                    overflow.height
+                } else {
+                    overflow.width
+                } >= 32.0
+            );
+            let binding = bridge.overflow_binding().expect("known omitted window");
+            assert_eq!(binding.token.0 as usize, bridge.overflow_count());
+            assert!(bridge.item_binding(binding.token).is_none());
+            assert!(
+                !bridge.enter(binding),
+                "overflow is not a false thumbnail preview"
+            );
+            let action = bridge.restore_action(binding).unwrap();
+            assert!(
+                matches!(action, UserAction::RestoreWindow { window, geometry, .. }
+                if window == binding.token && geometry == global_physical_geometry(overflow, monitor, 1.25))
+            );
+            assert!(
+                !bridge
+                    .pending_actions(Instant::now())
+                    .iter()
+                    .any(|action| matches!(action,
+                        UserAction::SetDockGeometry { window: Some(token), geometry, .. }
+                            if *token == binding.token && !geometry.is_empty()
+                    )),
+                "omitted windows must not acquire fictional persistent card slots"
+            );
+
+            // A queued overflow click is preserved through transport recovery,
+            // then retired by a changed minimized projection.
+            let now = Instant::now();
+            assert!(bridge.request_restore(binding));
+            bridge.record_failure(now);
+            let mut offline = model.clone();
+            offline.wm_available = false;
+            bridge.synchronize(&offline, 2, 1.25, 42.0 / 1.25, 6.0);
+            assert!(bridge.overflow_binding().is_none());
+            assert!(
+                !bridge
+                    .pending_actions(now)
+                    .iter()
+                    .any(|action| matches!(action, UserAction::RestoreWindow { .. }))
+            );
+            bridge.synchronize(&model, 3, 1.25, 42.0 / 1.25, 6.0);
+            assert!(bridge.pending_actions(now).contains(&action));
+            model.wm_sequence = Some(9);
+            bridge.synchronize(&model, 3, 1.25, 42.0 / 1.25, 6.0);
+            assert!(bridge.restore_action(binding).is_none());
+            assert!(!bridge.request_restore(binding));
+            assert!(
+                !bridge
+                    .pending_actions(now)
+                    .iter()
+                    .any(|action| matches!(action, UserAction::RestoreWindow { .. }))
+            );
+            model.minimized_windows.clear();
+            model.minimized_overflow = true;
+            bridge.synchronize(&model, 3, 1.25, 42.0 / 1.25, 6.0);
+            assert!(bridge.overflow());
+            assert_eq!(bridge.overflow_count(), 0);
+            assert!(
+                bridge.overflow_binding().is_none(),
+                "unknown protocol overflow cannot invent a token"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_geometry_stays_inside_short_viewports_and_rejects_obsolete_overflow_binding() {
+        use crate::placement::BarEdge;
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            for main in [1, 24, 80, 100, 220, 400] {
+                let mut model = snapshot_with_windows(93, 12, main);
+                model.geometry = Some(MonitorGeometry {
+                    x: -1920,
+                    y: 100,
+                    width: if edge.is_vertical() { 42 } else { main },
+                    height: if edge.is_vertical() { main } else { 42 },
+                });
+                let mut bridge = DockBridge::new();
+                bridge.set_edge(edge);
+                bridge.synchronize(&model, 1, 1.0, 42.0, 6.0);
+                let viewport = if edge.is_vertical() {
+                    Rect::new(0.0, 0.0, 42.0, main as f32)
+                } else {
+                    Rect::new(0.0, 0.0, main as f32, 42.0)
+                };
+                if let Some(shelf) = bridge.shelf_bounds() {
+                    assert_eq!(shelf.intersection(viewport), Some(shelf));
+                }
+                if let Some(overflow) = bridge.overflow_bounds() {
+                    assert_eq!(overflow.intersection(viewport), Some(overflow));
+                }
+                let items: Vec<_> = bridge
+                    .visible_windows()
+                    .map(|window| window.token)
+                    .collect();
+                for token in items {
+                    let slot = bridge.slot_bounds(token).unwrap();
+                    assert_eq!(slot.intersection(viewport), Some(slot));
+                    assert!(
+                        bridge
+                            .overflow_bounds()
+                            .is_none_or(|overflow| slot.intersection(overflow).is_none())
+                    );
+                }
+            }
+            let mut model = snapshot_with_windows(94, 12, 600);
+            if edge.is_vertical() {
+                model.geometry.as_mut().unwrap().width = 42;
+                model.geometry.as_mut().unwrap().height = 600;
+            }
+            let mut bridge = DockBridge::new();
+            bridge.set_edge(edge);
+            bridge.synchronize(&model, 1, 1.0, 42.0, 6.0);
+            let old_overflow = bridge.overflow_binding().unwrap();
+            if edge.is_vertical() {
+                model.geometry.as_mut().unwrap().height = 100;
+            } else {
+                model.geometry.as_mut().unwrap().width = 100;
+            }
+            bridge.synchronize(&model, 1, 1.0, 42.0, 6.0);
+            assert_ne!(bridge.overflow_binding(), Some(old_overflow));
+            assert!(bridge.restore_action(old_overflow).is_none());
+        }
     }
 }

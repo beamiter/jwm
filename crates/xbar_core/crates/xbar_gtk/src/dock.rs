@@ -484,7 +484,7 @@ impl DockInner {
         label.set_single_line_mode(true);
         let button = Button::new();
         button.add_css_class("minimized-card");
-        button.set_can_focus(false);
+        button.set_can_focus(true);
         button.set_focus_on_click(false);
         button.set_halign(gtk4::Align::Center);
         button.set_valign(gtk4::Align::Center);
@@ -863,16 +863,34 @@ pub struct MinimizedDock {
 
 impl MinimizedDock {
     pub(crate) fn new(bar_root: &gtk4::Box, theme: &crate::BarTheme, dispatch: Dispatch) -> Self {
-        let root = gtk4::Box::new(Orientation::Horizontal, theme.metrics.dock_item_gap);
+        let vertical = theme.presentation.edge.is_vertical();
+        let orientation = if vertical {
+            Orientation::Vertical
+        } else {
+            Orientation::Horizontal
+        };
+        let root = gtk4::Box::new(orientation, theme.metrics.dock_item_gap);
         root.add_css_class("dock-shelf");
         root.set_valign(gtk4::Align::Center);
+        root.set_halign(gtk4::Align::Center);
 
-        let separator = Separator::new(Orientation::Vertical);
+        let separator = Separator::new(if vertical {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        });
         separator.add_css_class("dock-separator");
-        separator.set_size_request(
-            theme.metrics.dock_separator_width,
-            theme.metrics.dock_item_height,
-        );
+        if vertical {
+            separator.set_size_request(
+                theme.metrics.dock_slot_width,
+                theme.metrics.dock_separator_width,
+            );
+        } else {
+            separator.set_size_request(
+                theme.metrics.dock_separator_width,
+                theme.metrics.dock_item_height,
+            );
+        }
         separator.set_valign(gtk4::Align::Center);
         root.append(&separator);
 
@@ -884,7 +902,7 @@ impl MinimizedDock {
         );
         root.append(&empty_slot);
 
-        let items = gtk4::Box::new(Orientation::Horizontal, theme.metrics.dock_item_gap);
+        let items = gtk4::Box::new(orientation, theme.metrics.dock_item_gap);
         items.add_css_class("dock-items");
         items.set_valign(gtk4::Align::Center);
         root.append(&items);
@@ -934,6 +952,54 @@ impl MinimizedDock {
     /// rate-limited to two seconds.
     pub(crate) fn maintain(&self) {
         self.inner.maintain(Instant::now());
+    }
+
+    pub(crate) fn retire(&self) {
+        let actions = {
+            let mut state = self.inner.state.borrow_mut();
+            let mut actions = Vec::new();
+            if let Some(hovered) = state.hovered.take() {
+                actions.push(DockInner::preview_action(&state, hovered, false, false));
+            }
+            state.cancel_preview_delivery();
+            state.preview_withdrawal = None;
+            if state.frame.wm_available {
+                actions.extend(state.ledger.reported.iter().map(|report| {
+                    UserAction::SetDockGeometry {
+                        window: report.window,
+                        wm_session_id: state.frame.wm_session_id,
+                        minimized_generation: state.frame.minimized_generation,
+                        geometry: DockItemGeometry::default(),
+                    }
+                }));
+            }
+            state.ledger.clear();
+            state.frame.wm_available = false;
+            state.frame.has_geometry = false;
+            actions
+        };
+        self.inner.dispatch_all(actions);
+    }
+
+    pub(crate) fn focused_window(&self) -> Option<WindowToken> {
+        self.inner
+            .cards
+            .borrow()
+            .iter()
+            .find(|card| card.button.is_focus())
+            .map(|card| card.token)
+    }
+
+    pub(crate) fn focus_window(&self, window: WindowToken) {
+        if let Some(card) = self
+            .inner
+            .cards
+            .borrow()
+            .iter()
+            .find(|card| card.token == window)
+        {
+            card.button.grab_focus();
+        }
     }
 }
 

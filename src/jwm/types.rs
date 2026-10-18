@@ -200,6 +200,8 @@ pub struct InteractionState {
 #[allow(dead_code)]
 pub struct SecondaryBarInstance {
     pub monitor_id: i32,
+    pub(crate) launch_config: BarLaunchConfig,
+    pub(crate) last_strut: Option<[u32; 12]>,
     pub shmem: Arc<SharedRingBuffer>,
     pub(crate) command_notifier: Option<SharedEventNotifier>,
     pub child: Child,
@@ -209,6 +211,48 @@ pub struct SecondaryBarInstance {
     pub has_focus: bool,
     pub last_spawn: Instant,
     pub next_health_check: Instant,
+}
+
+/// Process-scoped settings; changing them requires a fresh frontend so its
+/// presentation and native surface agree on orientation and physical size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BarLaunchConfig {
+    pub executable: String,
+    pub edge: xbar_core::placement::BarEdge,
+    pub thickness: i32,
+}
+
+impl BarLaunchConfig {
+    pub(crate) fn for_monitor(config: &crate::config::Config, monitor: i32) -> Self {
+        Self {
+            executable: config.status_bar_name().to_owned(),
+            edge: config.status_bar_position_for_monitor(monitor),
+            thickness: config.status_bar_height().max(1),
+        }
+    }
+
+    pub(crate) fn for_output(
+        config: &crate::config::Config,
+        monitor: i32,
+        output: crate::core::types::Rect,
+    ) -> Self {
+        let mut launch = Self::for_monitor(config, monitor);
+        let placement = super::bar_geometry::BarGeometry::new(
+            output,
+            launch.edge,
+            launch.thickness,
+            config.status_bar_padding(),
+        );
+        // The frontend must receive the exact strip we can paint. Sending an
+        // oversized requested value would make horizontal adapters grow past
+        // the padding on tiny/nested outputs and fight the WM's configure.
+        launch.thickness = if launch.edge.is_vertical() {
+            placement.rect.w
+        } else {
+            placement.rect.h
+        };
+        launch
+    }
 }
 
 impl SecondaryBarInstance {

@@ -13,7 +13,7 @@ use crate::backend::compositor_common::dynamic_island::{
     IslandDock, clip_bar_to_viewport, open_envelope,
 };
 use crate::backend::compositor_common::genie::{
-    GenieDirection, dock_item_preview_target, output_bounds_for_anchor, preview_rect,
+    GenieDirection, dock_item_preview_target, output_bounds_for_anchor, preview_rect_at_edge,
 };
 use crate::backend::compositor_common::minimized_thumbnail::{ThumbnailPurpose, ThumbnailSource};
 use crate::backend::compositor_common::system_ui_panel as panel;
@@ -4802,12 +4802,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.screen_h as f32,
             ),
         );
-        let Some(rect) = preview_rect(
+        let Some(rect) = preview_rect_at_edge(
             preview.anchor,
             source.width,
             source.height,
             output_bounds,
             preview.scale,
+            self.dock_preview_edge,
         ) else {
             return;
         };
@@ -7055,7 +7056,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                     // needs a flat edge to ease its corners
                                     // out into.
                                     let sheet_radius =
-                                        ui_palette.status_bar_sheet_radius(radius, bh);
+                                        ui_palette.status_bar_sheet_radius(radius, bw.min(bh));
                                     self.glass_fill_rounded(
                                         &proj,
                                         bx,
@@ -9603,7 +9604,7 @@ mod glass_backdrop_contract_tests {
             "the bar tint must come from the shared constant"
         );
         assert!(
-            body.contains("ui_palette.status_bar_sheet_radius(radius,bh)"),
+            body.contains("ui_palette.status_bar_sheet_radius(radius,bw.min(bh))"),
             "the sheet must round through the shared bar radius, not the window's"
         );
         assert!(
@@ -9619,7 +9620,7 @@ mod glass_backdrop_contract_tests {
         // of the window program must go through a reset first, or the
         // tracker's dedupe leaves the glass program bound for the bar pixmap.
         let sheet_at = body
-            .find("ui_palette.status_bar_sheet_radius(radius,bh)")
+            .find("ui_palette.status_bar_sheet_radius(radius,bw.min(bh))")
             .expect("sheet");
         let pixmap_at = body[sheet_at..]
             .find("bind_texture(glow::TEXTURE_2D,Some(wt.gl_texture))")

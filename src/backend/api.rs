@@ -2606,6 +2606,16 @@ pub trait PropertyOps: Send {
         start_x: u32,
         end_x: u32,
     ) -> Result<(), BackendError>;
+    /// Set both EWMH strut properties using all four edges. Native Wayland
+    /// backends reserve managed bars through compositor policy; their legacy
+    /// no-op top setter remains a valid fallback.
+    fn set_window_strut(&self, win: WindowId, partial: &[u32; 12]) -> Result<(), BackendError> {
+        if partial[0] == 0 && partial[1] == 0 && partial[3] == 0 {
+            self.set_window_strut_top(win, partial[2], partial[8], partial[9])
+        } else {
+            self.clear_window_strut(win)
+        }
+    }
     fn set_window_type_dock(&self, win: WindowId) -> Result<(), BackendError>;
     fn clear_window_strut(&self, win: WindowId) -> Result<(), BackendError>;
 
@@ -3828,6 +3838,10 @@ pub trait CompositorWindowEffects: Send {
         _anchor: Option<CompositorRect>,
     ) {
     }
+    /// The WM owns the monitor ID to bar-edge mapping, including hotplug
+    /// renumbering. Supply that placement directly rather than infer it from
+    /// compositor output enumeration indices or a corner anchor.
+    fn compositor_set_minimized_preview_edge(&mut self, _edge: xbar_core::placement::BarEdge) {}
     fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
     fn compositor_set_peek_mode(&mut self, _active: bool) {}
     /// Hand the compositor the tab bars to paint. Each group carries the strip

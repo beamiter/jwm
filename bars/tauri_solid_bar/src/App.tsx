@@ -206,6 +206,14 @@ const minimizedInitial = (window: MinimizedWindow): string => {
 };
 
 type WindowMetrics = { x: number; y: number; scale: number };
+type LogicalDockRect = Pick<DOMRect, "left" | "top" | "width" | "height">;
+type DockLayoutAdapter = {
+  visibleDockRect: (element: HTMLElement) => LogicalDockRect | null;
+  restingDockRect: (item: HTMLElement, dock: HTMLElement) => LogicalDockRect | null;
+};
+const dockLayout = (): DockLayoutAdapter | undefined =>
+  (window as Window & { __xbarLayout?: DockLayoutAdapter }).__xbarLayout;
+const withdrawnDockRect: LogicalDockRect = { left: 0, top: 0, width: 0, height: 0 };
 
 const windowMetrics = async (): Promise<WindowMetrics | null> => {
   try {
@@ -234,14 +242,24 @@ export const projectDockGeometry = (
   };
 };
 
-const physicalGeometry = (element: HTMLElement, metrics: WindowMetrics): DockGeometry =>
-  projectDockGeometry(element.getBoundingClientRect(), metrics);
+const physicalGeometry = (element: HTMLElement, metrics: WindowMetrics): DockGeometry => {
+  const layout = dockLayout();
+  const rect = layout?.visibleDockRect
+    ? layout.visibleDockRect(element)
+    : element.getBoundingClientRect();
+  // A fully clipped anchor must withdraw its previous compositor geometry.
+  return projectDockGeometry(rect ?? withdrawnDockRect, metrics);
+};
 
 const restingItemGeometry = (
   item: HTMLElement,
   dock: HTMLElement,
   metrics: WindowMetrics,
 ): DockGeometry => {
+  const layout = dockLayout();
+  if (layout?.restingDockRect) {
+    return projectDockGeometry(layout.restingDockRect(item, dock) ?? withdrawnDockRect, metrics);
+  }
   const dockRect = dock.getBoundingClientRect();
   return projectDockGeometry(
     {
@@ -552,12 +570,14 @@ function MinimizedDock(props: {
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(publish);
     if (dock) observer?.observe(dock);
     window.addEventListener("resize", publish);
+    window.addEventListener("scroll", publish, true);
     onCleanup(() => {
       disposed = true;
       window.cancelAnimationFrame(frame);
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       observer?.disconnect();
       window.removeEventListener("resize", publish);
+      window.removeEventListener("scroll", publish, true);
       for (const [bindingKey, delivery] of Array.from(previewDeliveries)) {
         sendAutomaticPreviewLeave(bindingKey, delivery);
       }
@@ -730,7 +750,7 @@ function App() {
                     <button
                       class={`${getButtonClass(tag())}${pressed() === index() ? " pressed" : ""}`}
                       onMouseDown={() => setPressed(index())}
-                      onMouseUp={() => {
+                      onClick={() => {
                         setPressed(null);
                         dispatchAction({
                           action: "view_tag_on",

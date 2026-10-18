@@ -10,7 +10,7 @@ use gtk4::gio;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, glib};
 use log::{info, warn};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::env;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -22,7 +22,7 @@ use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, PlatformEffectHandler, RuntimeUpdate,
     TransportRecoveryConfig, UserAction,
 };
-use xbar_gtk::{BarSurface, BarTheme, Dispatch};
+use xbar_gtk::{BarSurface, BarTheme, BarWindowPlacement, Dispatch};
 use xbar_linux_actions::ProcessActionHandler;
 
 const BAR_NAME: &str = "gtk_bar";
@@ -33,11 +33,12 @@ const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 struct BarApp {
     window: ApplicationWindow,
-    surface: BarSurface,
-    theme: BarTheme,
-    /// Width the bar falls back to before, and after, the window manager
-    /// describes a monitor: the whole screen.
-    default_width: i32,
+    surface: RefCell<BarSurface>,
+    theme: RefCell<BarTheme>,
+    config: BarConfig,
+    surface_scale: Cell<i32>,
+    dispatch: Dispatch,
+    placement: BarWindowPlacement,
     /// The startup mode decision. The window was created for this mode, so it
     /// cannot change until the bar restarts.
     translucent: bool,
@@ -65,8 +66,8 @@ impl BarApp {
         let theme = BarTheme::from_config(&config, translucent);
         theme.install();
 
-        let (screen_width, _) = xbar_gtk::primary_screen_size();
-        let default_width = xbar_gtk::logical_width(screen_width);
+        let (default_width, default_height) =
+            xbar_gtk::output_logical_size(&theme.presentation, xbar_gtk::primary_scale_factor());
         let window = ApplicationWindow::builder()
             .application(app)
             .title(BAR_NAME)
@@ -76,7 +77,7 @@ impl BarApp {
             // window manager's own geometry replaces this as soon as it
             // arrives, but a bar must never flash at some arbitrary width.
             .default_width(default_width)
-            .default_height(theme.metrics.bar_height)
+            .default_height(default_height)
             .build();
         if translucent {
             window.add_css_class("transparent-window");
@@ -92,6 +93,12 @@ impl BarApp {
             });
         }
 
+        let placement = BarWindowPlacement::new(
+            &window,
+            &theme.presentation,
+            BAR_NAME,
+            !shared_path.is_empty(),
+        );
         let mut runtime = if shared_path.is_empty() {
             BarRuntime::new(config.model_config())
         } else {
@@ -119,18 +126,38 @@ impl BarApp {
                     }
                 })
             };
-            let surface = BarSurface::new(&theme, dispatch);
+            let surface = BarSurface::new(&theme, dispatch.clone());
             window.set_child(Some(surface.widget()));
 
             Self {
                 window,
-                surface,
-                theme,
-                default_width,
+                surface: RefCell::new(surface),
+                theme: RefCell::new(theme),
+                config,
+                surface_scale: Cell::new(xbar_gtk::primary_scale_factor()),
+                dispatch,
+                placement,
                 translucent,
                 runtime: RefCell::new(runtime),
                 snapshot: RefCell::new(snapshot),
                 process_actions: RefCell::new(ProcessActionHandler::default()),
+            }
+        });
+
+        instance.window.connect_scale_factor_notify({
+            let weak = Rc::downgrade(&instance);
+            move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.refresh_surface_scale();
+                }
+            }
+        });
+        instance.window.connect_realize({
+            let weak = Rc::downgrade(&instance);
+            move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.refresh_surface_scale();
+                }
             }
         });
 
@@ -150,7 +177,7 @@ impl BarApp {
                 };
                 let update = app.runtime.borrow_mut().tick();
                 app.handle_runtime_update(update);
-                app.surface.maintain();
+                app.surface.borrow().maintain();
                 glib::ControlFlow::Continue
             }
         });
@@ -163,7 +190,7 @@ impl BarApp {
                 };
                 let update = app.runtime.borrow_mut().poll_transport();
                 app.handle_runtime_update(update);
-                app.surface.maintain();
+                app.surface.borrow().maintain();
                 glib::ControlFlow::Continue
             }
         });
@@ -194,12 +221,10 @@ impl BarApp {
     fn handle_platform_effect(&self, effect: BarEffect) {
         match effect {
             BarEffect::ApplyMonitorGeometry(geometry) => {
-                self.resize_window_to_monitor(geometry.width);
+                self.placement.apply_geometry(Some(geometry));
             }
             BarEffect::ClearMonitorGeometry => {
-                // Back to spanning the screen, which is where the bar started.
-                self.window
-                    .set_default_size(self.default_width, self.theme.metrics.bar_height);
+                self.placement.apply_geometry(None);
             }
             effect @ (BarEffect::Screenshot
             | BarEffect::OpenAudioControl
@@ -223,26 +248,37 @@ impl BarApp {
     fn sync_views(&self) {
         let snapshot = self.snapshot.borrow();
         let presentation =
-            PresentationProjector::project(snapshot.view(), &self.theme.presentation);
+            PresentationProjector::project(snapshot.view(), &self.theme.borrow().presentation);
         xbar_gtk::apply_theme_class(&self.window, presentation.theme);
-        self.surface.sync(&snapshot, presentation);
+        self.surface.borrow().sync(&snapshot, presentation);
     }
 
-    fn resize_window_to_monitor(&self, expected_width: u32) {
-        let scale_factor = self.window.scale_factor().max(1);
-        let logical_width = (f64::from(expected_width) / f64::from(scale_factor))
-            .round()
-            .clamp(1.0, f64::from(i32::MAX)) as i32;
-
-        // GTK4 deliberately exposes no general window-position API: on Wayland
-        // the compositor/JWM owns placement. Size is logical, while xbar_core
-        // monitor geometry is physical pixels.
-        self.window
-            .set_default_size(logical_width, self.theme.metrics.bar_height);
+    fn refresh_surface_scale(&self) {
+        let scale = self.window.scale_factor().max(1);
+        if self.surface_scale.replace(scale) == scale {
+            return;
+        }
+        let focused = self.surface.borrow().focused_control();
+        self.surface.borrow().retire();
+        let theme =
+            BarTheme::from_config_at_scale(&self.config, self.translucent, f64::from(scale));
+        theme.install();
+        let surface = BarSurface::new(&theme, self.dispatch.clone());
+        self.window.set_child(Some(surface.widget()));
+        *self.surface.borrow_mut() = surface;
+        *self.theme.borrow_mut() = theme;
+        self.sync_views();
+        self.surface.borrow().restore_focus(focused);
+        log::debug!(
+            "Applied native bar scale {scale}; focus {focused:?} -> {:?}",
+            self.surface.borrow().focused_control()
+        );
+        self.placement.refresh();
     }
 
     fn show(&self) {
         self.window.present();
+        self.placement.refresh();
         if self.translucent {
             if let Some(surface) = self.window.surface() {
                 surface.set_opaque_region(None);

@@ -9,7 +9,7 @@
 use gtk4::glib::translate::IntoGlib;
 use gtk4::pango::{FontDescription, Style};
 use xbar_core::ThemeMode;
-use xbar_core::presentation::{Palette, PresentationConfig, Rgba};
+use xbar_core::presentation::{DockMetrics, Palette, PresentationConfig, Rgba};
 
 /// CSS color literal for a renderer-neutral color.
 fn css(color: Rgba) -> String {
@@ -36,7 +36,7 @@ fn with_alpha(color: Rgba, alpha: f64) -> Rgba {
 /// Geometry shared by the stylesheet and the widget tree.
 #[derive(Debug, Clone, Copy)]
 pub struct Metrics {
-    /// Total bar height in logical pixels.
+    /// Total short-axis thickness in logical pixels.
     pub bar_height: i32,
     /// Height of a pill, matching `bar_height - 2 * vertical_padding`.
     pub pill_height: f32,
@@ -52,6 +52,7 @@ pub struct Metrics {
     pub dock_slot_height: i32,
     pub dock_item_gap: i32,
     pub dock_separator_width: i32,
+    pub dock_hover_scale: f32,
 }
 
 impl Metrics {
@@ -60,18 +61,20 @@ impl Metrics {
         let bar_height = config.bar_height.max(1.0);
         let vertical_padding = config.vertical_padding.max(0.0).min(bar_height * 0.5);
         let pill_height = (bar_height - 2.0 * vertical_padding).max(1.0);
-        let dock_item_height = config.dock_item_size.max(1.0).min(bar_height);
-        let dock_aspect = if config.dock_item_aspect_ratio.is_finite() {
-            config.dock_item_aspect_ratio.max(1.0)
-        } else {
-            1.5
-        };
-        let dock_hover_scale = if config.dock_hover_scale.is_finite() {
-            config.dock_hover_scale.max(1.0)
-        } else {
-            1.55
-        };
-        let dock_item_width = dock_item_height * dock_aspect;
+        // The widget content receives the bar after root padding. Reuse
+        // the renderer's short-axis cap so both horizontal HiDPI strips and
+        // vertical sidebars keep magnified cards inside that allocation.
+        let dock = DockMetrics::new(config, pill_height);
+        let dock_item_width = dock
+            .map_or(1.0, |metrics| metrics.item_width)
+            .floor()
+            .max(1.0);
+        let dock_item_height = dock
+            .map_or(1.0, |metrics| metrics.item_height)
+            .floor()
+            .max(1.0);
+        let dock_hover_scale = dock.map_or(1.0, |metrics| metrics.peak_scale);
+        let dock_slot_extent = dock.map_or(1.0, |metrics| metrics.slot_extent);
         Self {
             bar_height: bar_height.round() as i32,
             pill_height,
@@ -79,8 +82,19 @@ impl Metrics {
             item_gap: config.item_gap.max(0.0).round() as i32,
             dock_item_width: dock_item_width.round().max(1.0) as i32,
             dock_item_height: dock_item_height.round().max(1.0) as i32,
-            dock_slot_width: (dock_item_width * dock_hover_scale).ceil().max(1.0) as i32,
-            dock_slot_height: dock_item_height.round().max(1.0) as i32,
+            dock_slot_width: if config.edge.is_vertical() {
+                (dock_item_width * dock_hover_scale).ceil()
+            } else {
+                dock_slot_extent.ceil()
+            }
+            .max(1.0) as i32,
+            dock_slot_height: if config.edge.is_vertical() {
+                dock_slot_extent.ceil()
+            } else {
+                (dock_item_height * dock_hover_scale).ceil()
+            }
+            .max(1.0) as i32,
+            dock_hover_scale,
             dock_item_gap: config.dock_item_gap.max(0.0).round() as i32,
             dock_separator_width: config.dock_separator_width.max(1.0).round() as i32,
         }
@@ -234,11 +248,7 @@ pub fn stylesheet(
         .max(0.0)
         .min(config.dock_item_size.max(1.0) * 0.5);
     let dock_padding = config.dock_shelf_padding.max(0.0);
-    let dock_hover_scale = if config.dock_hover_scale.is_finite() {
-        config.dock_hover_scale.max(1.0)
-    } else {
-        1.55
-    };
+    let dock_hover_scale = metrics.dock_hover_scale;
 
     // Translucent windows must not carry GTK's default opaque background —
     // per-pixel alpha is what lets the compositor blend behind the bar. Solid
@@ -267,6 +277,9 @@ window.theme-dark {{
 .bar-root {{
   padding: {vertical_padding}px {horizontal_padding}px;
 }}
+.bar-root.vertical {{
+  padding: {horizontal_padding}px {vertical_padding}px;
+}}
 
 .pill {{
   min-width: 0;
@@ -289,6 +302,14 @@ window.theme-dark {{
   box-shadow: none;
   outline: none;
 }}
+.pill:focus-visible,
+.minimized-card:focus-visible {{
+  outline: 2px solid {focus_color};
+  outline-offset: -2px;
+}}
+.bar-root.vertical .pill {{
+  padding: 2px 1px;
+}}
 
 .client-name {{
 {font}}}
@@ -300,6 +321,9 @@ window.theme-dark {{
 .dock-shelf {{
   padding: 0 {dock_padding}px;
   background: transparent;
+}}
+.bar-root.vertical .dock-shelf {{
+  padding: {dock_padding}px 0;
 }}
 
 .dock-separator {{
@@ -344,9 +368,10 @@ window.theme-dark {{
 {dark_tags}
 {light_tags}",
         font = font_rules(font, config.font_size.max(1.0)),
+        focus_color = css(Palette::for_theme(ThemeMode::Dark).accent),
         corner_radius = metrics.corner_radius,
-        dock_item_width = metrics.dock_item_width,
-        dock_item_height = metrics.dock_item_height,
+        dock_item_width = (metrics.dock_item_width - 2).max(1),
+        dock_item_height = (metrics.dock_item_height - 2).max(1),
         dock_radius = dock_radius,
         dock_padding = dock_padding,
         dock_hover_scale = dock_hover_scale,
@@ -360,6 +385,38 @@ window.theme-dark {{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dock_slots_and_peak_cards_fit_small_logical_thickness_on_every_edge() {
+        for edge in [
+            xbar_core::BarEdge::Top,
+            xbar_core::BarEdge::Bottom,
+            xbar_core::BarEdge::Left,
+            xbar_core::BarEdge::Right,
+        ] {
+            for thickness in [12.0, 18.0, 21.0, 42.0, 64.0] {
+                let config = PresentationConfig {
+                    edge,
+                    bar_height: thickness,
+                    ..PresentationConfig::default()
+                };
+                let metrics = Metrics::from_config(&config);
+                let (card_cross, slot_cross) = if edge.is_vertical() {
+                    (metrics.dock_item_width, metrics.dock_slot_width)
+                } else {
+                    (metrics.dock_item_height, metrics.dock_slot_height)
+                };
+                assert!(
+                    card_cross as f32 * metrics.dock_hover_scale <= metrics.pill_height,
+                    "{edge} at {thickness}"
+                );
+                assert!(
+                    slot_cross as f32 <= metrics.pill_height.ceil(),
+                    "{edge} at {thickness}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn adaptive_tags_keep_fixed_geometry_and_urgent_precedence() {

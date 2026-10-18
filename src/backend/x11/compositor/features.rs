@@ -1041,6 +1041,13 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Animate the compositor-owned preview rather than asking every bar
     /// toolkit to transport and upload window pixels independently.
+    pub(crate) fn set_minimized_preview_edge(&mut self, edge: xbar_core::placement::BarEdge) {
+        if self.dock_preview_edge != edge {
+            self.dock_preview_edge = edge;
+            self.force_full_redraw();
+        }
+    }
+
     pub(crate) fn set_minimized_window_preview(
         &mut self,
         request: Option<(u32, crate::backend::api::CompositorRect)>,

@@ -622,6 +622,11 @@ pub enum ControlKind {
     Bluetooth,
     Volume,
     Brightness,
+    /// Saved placement for the monitor that opened the shell.
+    BarPosition,
+    /// Global physical bar dimensions. Keyboard/Enter adjust bounded values.
+    BarThickness,
+    BarPadding,
     /// Opens the output-device picker; the label carries the device in use.
     AudioOutput,
     /// Opens the input-device picker.
@@ -684,6 +689,7 @@ pub struct ControlCenterInputs<'a> {
     pub wallpaper: Option<&'a str>,
     /// Current `appearance.ui_theme` id for the Theme hub badge.
     pub ui_theme: Option<&'a str>,
+    pub status_bar: Option<BarControls>,
     pub media: Option<&'a crate::jwm::features::MediaState>,
     /// Percentage and mute state, when a working audio control exists.
     pub volume: Option<(u8, bool)>,
@@ -717,6 +723,14 @@ pub struct ControlCenterInputs<'a> {
     /// The most recently locked monitor, if any: the one the unlock row
     /// names and asks for.
     pub locked_monitor: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BarControls {
+    pub monitor: i32,
+    pub position: xbar_core::placement::BarEdge,
+    pub thickness: i32,
+    pub padding: i32,
 }
 
 const SHELL_HUB_VISIBLE_LINES: usize = 18;
@@ -766,6 +780,9 @@ fn control_section(kind: ControlKind) -> ControlSection {
         | ControlKind::Caffeine => ControlSection::QuickSettings,
         ControlKind::Volume
         | ControlKind::Brightness
+        | ControlKind::BarPosition
+        | ControlKind::BarThickness
+        | ControlKind::BarPadding
         | ControlKind::AudioOutput
         | ControlKind::AudioInput => ControlSection::SoundDisplay,
         ControlKind::Battery
@@ -1551,6 +1568,7 @@ impl SystemUiState {
             clipboard_count,
             wallpaper,
             ui_theme,
+            status_bar,
             media,
             volume,
             brightness,
@@ -1617,6 +1635,33 @@ impl SystemUiState {
                 enabled: media.status == crate::jwm::features::PlaybackStatus::Playing,
                 label: crate::jwm::features::media::control_row(media),
             });
+        }
+        if let Some(bar) = status_bar {
+            for (kind, label) in [
+                (
+                    ControlKind::BarPosition,
+                    format!(
+                        "\u{f108}  Bar edge · screen {}     [ {} ]",
+                        bar.monitor,
+                        bar.position.as_str()
+                    ),
+                ),
+                (
+                    ControlKind::BarThickness,
+                    format!("\u{f07d}  Bar size · all screens    {} px", bar.thickness),
+                ),
+                (
+                    ControlKind::BarPadding,
+                    format!("\u{f065}  Bar margin · all screens  {} px", bar.padding),
+                ),
+            ] {
+                entries.push(ControlEntry {
+                    kind,
+                    percent: 0,
+                    enabled: false,
+                    label,
+                });
+            }
         }
         if let Some((percent, muted)) = volume {
             entries.push(ControlEntry::simple(ControlKind::Volume, percent, muted));
@@ -3182,6 +3227,9 @@ impl SystemUiState {
             | ControlKind::Memory
             | ControlKind::NetworkThroughput
             | ControlKind::PowerProfile
+            | ControlKind::BarPosition
+            | ControlKind::BarThickness
+            | ControlKind::BarPadding
             | ControlKind::Network
             | ControlKind::Bluetooth
             | ControlKind::AudioOutput
@@ -3305,7 +3353,12 @@ impl SystemUiState {
         let kind = self.control_at_visible_row(visual_row)?;
         if !matches!(
             kind,
-            ControlKind::Volume | ControlKind::Brightness | ControlKind::PowerProfile
+            ControlKind::Volume
+                | ControlKind::Brightness
+                | ControlKind::PowerProfile
+                | ControlKind::BarPosition
+                | ControlKind::BarThickness
+                | ControlKind::BarPadding
         ) {
             return None;
         }
@@ -4725,6 +4778,9 @@ impl SystemUiState {
                     selected: visual_selection,
                     hint: if *armed {
                         "Click/Enter  confirm    Esc  back".into()
+                    } else if entries.get(*selected).is_some_and(|entry| matches!(entry.kind,
+                        ControlKind::BarPosition | ControlKind::BarThickness | ControlKind::BarPadding)) {
+                        "\u{f060}/\u{f061} / wheel  adjust    Click/Enter  next    Saved automatically    Esc".into()
                     } else if *shell_hub {
                         "A apps  N notices  C clipboard  D calendar  W wallpaper    \u{f062}/\u{f063} move  Click/Enter  Esc"
                             .into()
@@ -5885,6 +5941,39 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
 mod tests {
     use super::*;
     use crate::jwm::features::system_controls::{AudioDevice, AudioDirection};
+
+    #[test]
+    fn native_bar_controls_keep_scope_clear_and_support_keyboard_and_wheel() {
+        let mut state = SystemUiState::control_center(&ControlCenterInputs {
+            shell_hub: true,
+            status_bar: Some(BarControls {
+                monitor: 3,
+                position: xbar_core::placement::BarEdge::Left,
+                thickness: 48,
+                padding: 8,
+            }),
+            ..Default::default()
+        });
+        for kind in [
+            ControlKind::BarPosition,
+            ControlKind::BarThickness,
+            ControlKind::BarPadding,
+        ] {
+            state.restore_control_selection_kind(Some(kind), 0);
+            assert_eq!(state.activate_control(), Some(kind));
+            let parts = state.overlay_parts();
+            let row = parts.selected.unwrap();
+            assert_eq!(state.wheel_slider_step(row, -1), Some((kind, SLIDER_STEP)));
+            assert_eq!(state.wheel_slider_step(row, 1), Some((kind, -SLIDER_STEP)));
+            let text = &parts.items[row];
+            if kind == ControlKind::BarPosition {
+                assert!(text.contains("screen 3") && text.contains("left"));
+            } else {
+                assert!(text.contains("all screens") && text.contains("px"));
+            }
+            assert!(parts.hint.contains("Saved automatically"));
+        }
+    }
 
     #[test]
     fn control_center_builds_rows_for_available_controls() {
