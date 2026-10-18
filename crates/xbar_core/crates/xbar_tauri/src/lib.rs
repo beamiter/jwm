@@ -184,6 +184,7 @@ struct BridgeInner {
     glass: Mutex<GlassBackdrop>,
     tag_contrast: xbar_core::tag_contrast::TagContrastMode,
     tag_palette: Mutex<Option<xbar_core::tag_contrast::TagPalette>>,
+    presentation: xbar_core::presentation::PresentationConfig,
 }
 
 /// The frosted backdrop, which a webview can only receive as an image file.
@@ -275,15 +276,36 @@ fn setup<R: Runtime>(
     let window = app
         .get_webview_window(&config.window_label)
         .ok_or_else(|| format!("Tauri bar window {:?} is unavailable", config.window_label))?;
-    let baseline = WindowBaseline {
-        initial_position: window.outer_position().ok(),
-        logical_width: config.logical_width,
-        logical_height: config.logical_height,
-    };
+    let bar_config = xbar_core::config::BarConfig::load_default()?;
     let scale_factor = window.scale_factor()?;
+    let thickness = bar_config.presentation.logical_thickness(scale_factor);
+    let mut baseline = WindowBaseline {
+        initial_position: window.outer_position().ok(),
+        logical_width: if bar_config.presentation.edge.is_vertical() {
+            thickness
+        } else {
+            config.logical_width
+        },
+        logical_height: if bar_config.presentation.edge.is_vertical() {
+            config.logical_width
+        } else {
+            thickness
+        },
+    };
+    if let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) {
+        baseline = baseline_at_output(
+            MonitorGeometry {
+                x: monitor.position().x,
+                y: monitor.position().y,
+                width: monitor.size().width,
+                height: monitor.size().height,
+            },
+            &bar_config.presentation,
+            scale_factor,
+        )?;
+    }
     apply_window_baseline(&window, baseline, scale_factor)?;
 
-    let bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
     config.model.initial_theme = bar_config.theme;
     let runtime = if config.shared_path.is_empty() {
         xbar_core::BarRuntime::new(config.model.clone())?
@@ -301,6 +323,7 @@ fn setup<R: Runtime>(
         glass: Mutex::new(glass_backdrop()),
         tag_contrast: bar_config.presentation.tag_contrast,
         tag_palette: Mutex::new(None),
+        presentation: bar_config.presentation,
         config,
     });
     let guard = spawn_worker(app.clone(), Arc::clone(&inner))?;
@@ -417,6 +440,7 @@ fn frontend_ready<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, BridgeState>,
 ) -> Result<(), String> {
+    install_bar_layout(&app, &state.inner)?;
     // A page reload discards injected styles. Replay the current material on
     // the next worker turn even when wallpaper and WM state did not change.
     state
@@ -498,14 +522,19 @@ fn execute_effect<R: Runtime>(
             let scale_factor = window
                 .scale_factor()
                 .map_err(|error| format!("failed to query bar scale factor: {error}"))?;
-            apply_monitor_geometry(&window, geometry, inner.config.logical_height, scale_factor)
+            apply_monitor_geometry(&window, geometry, &inner.presentation, scale_factor)
         }
         BarEffect::ClearMonitorGeometry => {
             let window = main_window(app, &inner.config.window_label)?;
             let scale_factor = window
                 .scale_factor()
                 .map_err(|error| format!("failed to query bar scale factor: {error}"))?;
-            apply_window_baseline(&window, inner.baseline, scale_factor)
+            apply_current_output_baseline(
+                &window,
+                inner.baseline,
+                &inner.presentation,
+                scale_factor,
+            )
         }
         _ => Err(format!("Tauri bridge cannot execute {effect:?}")),
     }
@@ -533,19 +562,34 @@ fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
         }
     };
     let result = geometry.map_or_else(
-        || apply_window_baseline(window, state.inner.baseline, *scale_factor),
-        |geometry| {
-            apply_monitor_geometry(
+        || {
+            apply_current_output_baseline(
                 window,
-                geometry,
-                state.inner.config.logical_height,
+                state.inner.baseline,
+                &state.inner.presentation,
                 *scale_factor,
             )
+        },
+        |geometry| {
+            apply_monitor_geometry(window, geometry, &state.inner.presentation, *scale_factor)
         },
     );
     if let Err(error) = result {
         log::error!("failed to apply xbar scale-factor update: {error}");
     }
+    if let Err(error) = install_bar_layout(window.app_handle(), &state.inner) {
+        log::error!("failed to update bar layout after scale change: {error}");
+    }
+}
+
+fn install_bar_layout<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner) -> Result<(), String> {
+    let window = main_window(app, &inner.config.window_label)?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let css = json_string(xbar_core::web_layout::STYLESHEET);
+    let script = xbar_core::web_layout::install_script(&inner.presentation, scale);
+    window.eval(format!(
+        "(function(){{let style=document.getElementById('xbar-layout');if(!style){{style=document.createElement('style');style.id='xbar-layout';document.head.appendChild(style);}}style.textContent={css};}})();{script}"
+    )).map_err(|error| format!("failed to install bar layout: {error}"))
 }
 
 /// The wallpaper source this bar's configuration asks for, if any.
@@ -602,12 +646,29 @@ fn refresh_glass<R: Runtime>(
     let window = main_window(app, window_label)?;
     let (generation, css) = if let Some(strip) = glass.strip.as_mut() {
         strip.cache_mut().set_params(params);
-        if let Some(geometry) = geometry {
+        let monitor = window.current_monitor().ok().flatten();
+        if let Some(monitor) = monitor.as_ref() {
+            // The wire geometry is the bar, whose width is only its thickness
+            // on side edges. Fit wallpaper against the real output instead.
             strip
                 .source_mut()
-                .set_screen(geometry.width.max(1), geometry.height.max(1));
+                .set_screen(monitor.size().width.max(1), monitor.size().height.max(1));
         }
-        let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
+        let origin = geometry
+            .map(|geometry| (geometry.x, geometry.y))
+            .or_else(|| {
+                window
+                    .inner_position()
+                    .ok()
+                    .map(|position| (position.x, position.y))
+            })
+            .unwrap_or((0, 0));
+        let (x, y) = monitor.map_or(origin, |monitor| {
+            (
+                origin.0.saturating_sub(monitor.position().x),
+                origin.1.saturating_sub(monitor.position().y),
+            )
+        });
         let size = window
             .inner_size()
             .map_err(|error| format!("failed to query bar size: {error}"))?;
@@ -824,11 +885,25 @@ fn main_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> Result<WebviewWin
 }
 
 trait BarWindow {
+    fn bar_output(&self) -> tauri::Result<Option<MonitorGeometry>>;
     fn set_bar_position(&self, position: PhysicalPosition<i32>) -> tauri::Result<()>;
     fn set_bar_size(&self, size: PhysicalSize<u32>) -> tauri::Result<()>;
 }
 
 impl<R: Runtime> BarWindow for Window<R> {
+    fn bar_output(&self) -> tauri::Result<Option<MonitorGeometry>> {
+        let monitor = match self.current_monitor()? {
+            Some(monitor) => Some(monitor),
+            None => self.primary_monitor()?,
+        };
+        Ok(monitor.map(|monitor| MonitorGeometry {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        }))
+    }
+
     fn set_bar_position(&self, position: PhysicalPosition<i32>) -> tauri::Result<()> {
         self.set_position(position)
     }
@@ -839,6 +914,19 @@ impl<R: Runtime> BarWindow for Window<R> {
 }
 
 impl<R: Runtime> BarWindow for WebviewWindow<R> {
+    fn bar_output(&self) -> tauri::Result<Option<MonitorGeometry>> {
+        let monitor = match self.current_monitor()? {
+            Some(monitor) => Some(monitor),
+            None => self.primary_monitor()?,
+        };
+        Ok(monitor.map(|monitor| MonitorGeometry {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        }))
+    }
+
     fn set_bar_position(&self, position: PhysicalPosition<i32>) -> tauri::Result<()> {
         self.set_position(position)
     }
@@ -851,17 +939,39 @@ impl<R: Runtime> BarWindow for WebviewWindow<R> {
 fn apply_monitor_geometry(
     window: &impl BarWindow,
     geometry: MonitorGeometry,
-    logical_height: f64,
+    presentation: &xbar_core::presentation::PresentationConfig,
     scale_factor: f64,
 ) -> Result<(), String> {
-    let placement = BarPlacement::top(geometry, logical_height, scale_factor)
-        .map_err(|error| format!("invalid bar placement: {error}"))?;
+    let placement = BarPlacement::from_bar_geometry(
+        geometry,
+        presentation.logical_thickness(scale_factor),
+        scale_factor,
+        presentation.edge,
+    )
+    .map_err(|error| format!("invalid bar placement: {error}"))?;
     window
         .set_bar_position(PhysicalPosition::new(placement.x, placement.y))
         .map_err(|error| format!("failed to position bar window: {error}"))?;
     window
         .set_bar_size(PhysicalSize::new(placement.width, placement.height))
         .map_err(|error| format!("failed to resize bar window: {error}"))
+}
+
+/// A disconnected bar follows the current output and current physical
+/// thickness. A saved logical baseline belongs to its original scale only.
+fn apply_current_output_baseline(
+    window: &impl BarWindow,
+    fallback: WindowBaseline,
+    presentation: &xbar_core::presentation::PresentationConfig,
+    scale_factor: f64,
+) -> Result<(), String> {
+    let baseline = window
+        .bar_output()
+        .ok()
+        .flatten()
+        .and_then(|output| baseline_at_output(output, presentation, scale_factor).ok())
+        .unwrap_or(fallback);
+    apply_window_baseline(window, baseline, scale_factor)
 }
 
 fn apply_window_baseline(
@@ -878,6 +988,25 @@ fn apply_window_baseline(
     window
         .set_bar_size(size)
         .map_err(|error| format!("failed to restore bar size: {error}"))
+}
+
+fn baseline_at_output(
+    output: MonitorGeometry,
+    presentation: &xbar_core::presentation::PresentationConfig,
+    scale_factor: f64,
+) -> Result<WindowBaseline, String> {
+    let placement = xbar_core::BarPlacement::at_edge(
+        output,
+        presentation.logical_thickness(scale_factor),
+        scale_factor,
+        presentation.edge,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(WindowBaseline {
+        initial_position: Some(PhysicalPosition::new(placement.x, placement.y)),
+        logical_width: f64::from(placement.width) / scale_factor,
+        logical_height: f64::from(placement.height) / scale_factor,
+    })
 }
 
 fn baseline_physical_size(
@@ -958,6 +1087,107 @@ mod tests {
             PhysicalSize::new(1000, 50)
         );
         assert!(baseline_physical_size(baseline, 0.0).is_err());
+    }
+
+    #[test]
+    fn standalone_baseline_uses_selected_edge_and_physical_thickness() {
+        use xbar_core::{BarEdge, presentation::PresentationConfig};
+        let output = MonitorGeometry {
+            x: -1280,
+            y: 80,
+            width: 1280,
+            height: 720,
+        };
+        for (edge, position, size) in [
+            (BarEdge::Top, (-1280, 80), (1280, 48)),
+            (BarEdge::Bottom, (-1280, 752), (1280, 48)),
+            (BarEdge::Left, (-1280, 80), (48, 720)),
+            (BarEdge::Right, (-48, 80), (48, 720)),
+        ] {
+            let presentation = PresentationConfig {
+                edge,
+                physical_thickness: Some(48),
+                ..PresentationConfig::default()
+            };
+            for scale in [1.0, 1.25, 2.0] {
+                let baseline = baseline_at_output(output, &presentation, scale).unwrap();
+                assert_eq!(
+                    baseline.initial_position,
+                    Some(PhysicalPosition::new(position.0, position.1))
+                );
+                assert_eq!(
+                    baseline_physical_size(baseline, scale).unwrap(),
+                    PhysicalSize::new(size.0, size.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disconnect_rebases_against_current_output_after_scale_or_output_change() {
+        use std::cell::Cell;
+        use xbar_core::{BarEdge, presentation::PresentationConfig};
+
+        struct RecordingWindow {
+            output: MonitorGeometry,
+            position: Cell<Option<PhysicalPosition<i32>>>,
+            size: Cell<Option<PhysicalSize<u32>>>,
+        }
+        impl BarWindow for RecordingWindow {
+            fn bar_output(&self) -> tauri::Result<Option<MonitorGeometry>> {
+                Ok(Some(self.output))
+            }
+
+            fn set_bar_position(&self, position: PhysicalPosition<i32>) -> tauri::Result<()> {
+                self.position.set(Some(position));
+                Ok(())
+            }
+
+            fn set_bar_size(&self, size: PhysicalSize<u32>) -> tauri::Result<()> {
+                self.size.set(Some(size));
+                Ok(())
+            }
+        }
+
+        let startup_output = MonitorGeometry {
+            x: -1280,
+            y: 80,
+            width: 1280,
+            height: 720,
+        };
+        let current_output = MonitorGeometry {
+            x: 1920,
+            y: -200,
+            width: 1600,
+            height: 900,
+        };
+        for (edge, position, size) in [
+            (BarEdge::Top, (1920, -200), (1600, 48)),
+            (BarEdge::Bottom, (1920, 652), (1600, 48)),
+            (BarEdge::Left, (1920, -200), (48, 900)),
+            (BarEdge::Right, (3472, -200), (48, 900)),
+        ] {
+            let presentation = PresentationConfig {
+                edge,
+                physical_thickness: Some(48),
+                ..PresentationConfig::default()
+            };
+            let startup = baseline_at_output(startup_output, &presentation, 1.0).unwrap();
+            for current_scale in [1.25, 2.0] {
+                let window = RecordingWindow {
+                    output: current_output,
+                    position: Cell::new(None),
+                    size: Cell::new(None),
+                };
+                apply_current_output_baseline(&window, startup, &presentation, current_scale)
+                    .unwrap();
+                assert_eq!(
+                    window.position.get(),
+                    Some(PhysicalPosition::new(position.0, position.1))
+                );
+                assert_eq!(window.size.get(), Some(PhysicalSize::new(size.0, size.1)));
+            }
+        }
     }
 
     #[test]

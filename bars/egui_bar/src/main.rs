@@ -9,6 +9,7 @@ use app::{BAR_NAME, EguiBarApp};
 use log::{info, warn};
 use std::env;
 use xbar_core::logging::init as initialize_logging;
+use xbar_core::{BarPlacement, MonitorGeometry};
 
 fn main() -> anyhow::Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
@@ -35,16 +36,26 @@ fn main() -> anyhow::Result<()> {
     info!("starting {BAR_NAME} (translucent: {translucent})");
 
     let config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
-    let height = config.presentation.bar_height.max(1.0);
-    let width = x11
+    let (width, height) = x11
         .as_ref()
-        .map_or(1920.0, |session| session.screen_size().0 as f32);
+        .map_or((1920, 1080), platform::X11Session::screen_size);
+    let placement = BarPlacement::at_edge(
+        MonitorGeometry {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        config.presentation.logical_thickness(1.0),
+        1.0,
+        config.presentation.edge,
+    )?;
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(BAR_NAME)
-            .with_position(egui::Pos2::new(0.0, 0.0))
-            .with_inner_size([width, height])
+            .with_position(egui::Pos2::new(placement.x as f32, placement.y as f32))
+            .with_inner_size([placement.width as f32, placement.height as f32])
             .with_decorations(false)
             .with_resizable(true)
             .with_taskbar(false)

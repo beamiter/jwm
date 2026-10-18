@@ -1,0 +1,280 @@
+/* Shared by Dioxus and all six Tauri frontends. Logical axes keep labels
+   upright; no transformed or rotated hit targets are used. */
+html[data-bar-edge], html[data-bar-edge] body,
+html[data-bar-edge] :is(#root, #main, #app) {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden;
+}
+html[data-bar-edge] .button-row {
+  width: 100vw !important;
+  height: 100vh !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  gap: 6px;
+  overflow: hidden;
+}
+html[data-bar-edge] .button-row :is(button, [role="button"]):focus-visible {
+  outline: 2px solid #66b3ff !important;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 1px #111 !important;
+}
+html[data-bar-edge] :is(.buttons-container, .right-info-container) {
+  min-width: 0;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+}
+html[data-bar-edge="top"] :is(.buttons-container, .right-info-container),
+html[data-bar-edge="bottom"] :is(.buttons-container, .right-info-container) {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+html[data-bar-edge="top"] .buttons-container,
+html[data-bar-edge="bottom"] .buttons-container { flex: 0 1 48%; }
+html[data-bar-edge="top"] .right-info-container,
+html[data-bar-edge="bottom"] .right-info-container { flex: 0 1 auto; }
+html[data-bar-edge] :is(.emoji-button, .layout-toggle, .layout-option,
+  .volume-pill, .brightness-pill, .shell-pill, .screenshot-pill, .time-pill) {
+  min-width: 32px;
+  min-height: min(32px, calc(100vh - 4px));
+  touch-action: manipulation;
+}
+html[data-bar-edge="top"] :is(.pill, .emoji-button),
+html[data-bar-edge="bottom"] :is(.pill, .emoji-button) {
+  max-height: calc(100vh - 4px);
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+html[data-bar-edge="bottom"] .minimized-dock-card { transform-origin: center top; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .minimized-dock {
+  height: min(34px, calc(100vh - 2px));
+  max-height: calc(100vh - 2px);
+  padding-top: 0;
+  padding-bottom: 0;
+  align-items: center;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .minimized-item {
+  width: min(30px, calc((100vh - 6px) * 1.5));
+  min-width: min(30px, calc((100vh - 6px) * 1.5));
+  height: min(20px, calc(100vh - 6px));
+}
+@media (max-height: 31px) {
+  html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .minimized-item {
+    transform: none !important;
+  }
+}
+
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .button-row {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  padding: 4px 3px calc(4px + var(--xbar-fixed-dock, 0px)) !important;
+  gap: 6px !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.buttons-container, .right-info-container, .system-info-container,
+      .system-info, .layout-controls, .layout-selector, .layout-options) {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  gap: 4px !important;
+  margin: 0 !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.buttons-container, .right-info-container) {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  flex: 0 1 auto !important;
+  scrollbar-width: none;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .buttons-container {
+  max-height: 52%;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .right-info-container {
+  max-height: 48%;
+}
+/* The clock and frequently used controls stay at the visible start of the
+   status scroller; secondary telemetry and the dock remain reachable below. */
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .time-pill { order: -5; }
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .volume-pill { order: -4; }
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .brightness-pill { order: -3; }
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .shell-menu { order: -2; width: 100%; }
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .screenshot-pill { order: -1; }
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .spacer {
+  flex: 1 1 0 !important;
+  width: 0 !important;
+  min-height: 0 !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.pill, .emoji-button, .layout-toggle, .layout-option) {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  flex: 0 0 auto !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  height: auto !important;
+  min-height: 36px !important;
+  max-height: none !important;
+  padding: 4px 1px !important;
+  margin: 0 !important;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: normal !important;
+  overflow: hidden;
+  text-align: center;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .emoji-button {
+  min-height: 34px !important;
+  font-size: 16px;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .pill .nf-icon {
+  margin: 0 !important;
+  font-size: 16px;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.monitor-pill, .scale-pill) { display: none !important; }
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .time-pill > * {
+  display: none !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .time-pill[data-sidebar-label] {
+  font-size: 0 !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  .time-pill[data-sidebar-label]::after {
+  content: attr(data-sidebar-label);
+  display: block;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: pre-line;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .minimized-dock {
+  flex-direction: column !important;
+  align-items: center !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: auto !important;
+  max-height: none !important;
+  padding: 4px 1px !important;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.minimized-dock-slot, .minimized-dock-empty-slot) {
+  width: 100% !important;
+  height: 36px !important;
+  min-height: 36px !important;
+  flex: 0 0 36px !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .minimized-dock-card {
+  max-width: calc(100vw - 12px) !important;
+  max-height: 32px !important;
+  transform: none !important;
+}
+/* Tauri uses a native button as the fixed slot; Dioxus has an explicit slot
+   wrapper above. Magnify the picture only, never the restore hit rectangle. */
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .minimized-item {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  height: 36px !important;
+  min-height: 36px !important;
+  flex: 0 0 36px !important;
+  transform: none !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .minimized-thumbnail {
+  inset: auto !important;
+  left: 50% !important;
+  top: 50% !important;
+  width: min(30px, calc(100% - 4px));
+  height: auto;
+  aspect-ratio: 3 / 2;
+  transform: translate(-50%, -50%);
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.minimized-dock-separator, .dock-separator, .minimized-divider) {
+  width: 70% !important;
+  height: 1px !important;
+  min-height: 1px !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-bar-edge] .button-row *,
+  html[data-bar-edge] .button-row *::before,
+  html[data-bar-edge] .button-row *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Dioxus renders the exact local rectangles supplied by DockBridge. The
+   pinned shelf is a sibling of the scroll groups, so animation anchors and
+   hit regions cannot drift as workspace/status content is scrolled. */
+html[data-bar-edge] .button-row:has(.core-dock) {
+  --xbar-fixed-dock-gap: 6px;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row:has(.core-dock) {
+  padding-right: calc(6px + var(--xbar-fixed-dock, 0px)) !important;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .button-row:has(.core-dock) {
+  padding-bottom: calc(6px + var(--xbar-fixed-dock, 0px)) !important;
+}
+html[data-bar-edge] .button-row .core-dock {
+  position: fixed !important;
+  left: var(--dock-left) !important;
+  top: var(--dock-top) !important;
+  width: var(--dock-width) !important;
+  height: var(--dock-height) !important;
+  max-width: none !important;
+  max-height: none !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  overflow: visible !important;
+  z-index: 2;
+}
+html[data-bar-edge] .button-row .core-dock .minimized-dock-slot {
+  position: absolute !important;
+  left: var(--slot-left) !important;
+  top: var(--slot-top) !important;
+  width: var(--slot-width) !important;
+  height: var(--slot-height) !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: transparent;
+  color: inherit;
+  overflow: visible !important;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+html[data-bar-edge] .button-row .core-dock .minimized-dock-card {
+  position: absolute !important;
+  left: var(--card-left) !important;
+  top: var(--card-top) !important;
+  width: var(--card-width) !important;
+  height: var(--card-height) !important;
+  max-width: none !important;
+  max-height: none !important;
+  transform: none !important;
+  transition: none !important;
+  box-sizing: border-box;
+  pointer-events: none;
+}

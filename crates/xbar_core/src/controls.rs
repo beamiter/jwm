@@ -129,6 +129,140 @@ impl ControlSpec {
         }
     }
 
+    /// Human-readable name independent of an icon font. Toolkits use this as
+    /// the accessible name and retain the complete value when space forces an
+    /// icon-only or ellipsized visual presentation.
+    #[must_use]
+    pub fn accessible_label(&self) -> String {
+        let name = match self.id {
+            NodeId::Tag(id) => {
+                return format!(
+                    "Workspace {}{}{}",
+                    usize::from(id) + 1,
+                    if self.state.selected { ", active" } else { "" },
+                    if self.state.urgent {
+                        ", needs attention"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            NodeId::WorkspaceOverflow => "More workspaces",
+            NodeId::StatusOverflow => "More controls",
+            NodeId::LayoutButton => "Window layout",
+            NodeId::LayoutOption(_) => "Choose layout",
+            NodeId::Client | NodeId::ClientIcon => "Focused application",
+            NodeId::Monitor => "Monitor",
+            NodeId::Cpu => "CPU usage",
+            NodeId::Memory => "Memory usage",
+            NodeId::Brightness => "Brightness",
+            NodeId::Battery => "Battery",
+            NodeId::Audio => "Volume",
+            NodeId::Network => "Network",
+            NodeId::Media => "Media playback",
+            NodeId::Theme => "Theme",
+            NodeId::Screenshot => "Take screenshot",
+            NodeId::Clock => "Date and time",
+            NodeId::DockShelf => "Minimized windows",
+            NodeId::MinimizedWindow(_) => "Restore minimized window",
+            NodeId::ShellHub(route) => match route {
+                ShellRoute::Hub => "Quick settings",
+                ShellRoute::Applications => "Applications",
+                ShellRoute::Notifications => "Notifications",
+                ShellRoute::Clipboard => "Clipboard",
+                ShellRoute::Calendar => "Calendar",
+                ShellRoute::Wallpaper => "Wallpaper",
+                ShellRoute::Theme => "Theme settings",
+            },
+            NodeId::Background => "Status bar",
+        };
+        if self.value.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name}: {}", self.value)
+        }
+    }
+
+    /// Full native tooltip with discoverable non-primary interactions.
+    #[must_use]
+    pub fn tooltip_text(&self) -> String {
+        let mut text = self.accessible_label();
+        let hint = match self.id {
+            NodeId::Tag(_) => "Scroll to switch workspace; right-click to toggle",
+            NodeId::WorkspaceOverflow => {
+                "Click or scroll to switch workspace; right-click for previous"
+            }
+            NodeId::LayoutButton => "Click to choose; scroll or right-click to cycle layouts",
+            NodeId::Audio => "Scroll to change volume; right-click for audio controls",
+            NodeId::Brightness => "Scroll to change brightness",
+            NodeId::Clock => "Click for calendar; right-click to toggle seconds",
+            NodeId::MinimizedWindow(_) => "Click to restore; hover to preview",
+            _ => "",
+        };
+        if !hint.is_empty() {
+            text.push('\n');
+            text.push_str(hint);
+        }
+        text
+    }
+
+    /// Compact, upright content for a side bar. The renderer gives each line
+    /// its own horizontal text box; it must never rotate a whole horizontal
+    /// control or let a long SSID/title determine a sidebar's thickness.
+    #[must_use]
+    pub fn sidebar_lines(&self) -> Vec<String> {
+        if self.id == NodeId::Clock {
+            let clock = self.compact_value();
+            let parts: Vec<_> = clock.split(':').collect();
+            if (2..=3).contains(&parts.len())
+                && parts.iter().all(|part| {
+                    !part.is_empty()
+                        && part.len() <= 2
+                        && part.chars().all(|ch| ch.is_ascii_digit())
+                })
+            {
+                return parts.into_iter().map(str::to_owned).collect();
+            }
+            return vec![clock];
+        }
+        match self.id {
+            NodeId::Cpu | NodeId::Memory | NodeId::Brightness | NodeId::Battery | NodeId::Audio => {
+                [self.icon.clone(), self.value.clone()]
+                    .into_iter()
+                    .filter(|line| !line.is_empty())
+                    .collect()
+            }
+            // Connectivity and media state are carried by the icon. Long
+            // application titles and SSIDs belong in the native tooltip.
+            NodeId::Network | NodeId::Media | NodeId::ShellHub(_) => {
+                vec![if self.icon.is_empty() {
+                    self.value.clone()
+                } else {
+                    self.icon.clone()
+                }]
+            }
+            _ => vec![self.text()],
+        }
+    }
+
+    /// A stable short value suitable for an overflow-constrained horizontal
+    /// bar. Clock dates and icon labels yield to HH:MM[:SS] before controls do.
+    #[must_use]
+    pub fn compact_value(&self) -> String {
+        if self.id == NodeId::Clock {
+            self.value
+                .split_whitespace()
+                .rev()
+                .find(|part| part.contains(':'))
+                .unwrap_or(self.value.as_str())
+                .to_owned()
+        } else if !self.icon.is_empty() {
+            self.icon.clone()
+        } else {
+            self.value.clone()
+        }
+    }
+
     #[must_use]
     fn with_availability(mut self, available: bool) -> Self {
         self.available = available;
@@ -172,6 +306,21 @@ pub struct PresentationProjector;
 impl PresentationProjector {
     #[must_use]
     pub fn project(view: BarView<'_>, config: &PresentationConfig) -> BarPresentation {
+        let tag_count = view.tags.len().min(crate::model::MAX_MODEL_TAGS);
+        let active_index = view
+            .active_tag
+            .map(usize::from)
+            .filter(|index| *index < tag_count)
+            .or_else(|| view.tags.iter().position(|tag| tag.selected))
+            .unwrap_or(0);
+        let previous_tag = (tag_count > 0)
+            .then(|| (active_index + tag_count - 1) % tag_count)
+            .and_then(TagId::new)
+            .map(UserAction::ViewTag);
+        let next_tag = (tag_count > 0)
+            .then(|| (active_index + 1) % tag_count)
+            .and_then(TagId::new)
+            .map(UserAction::ViewTag);
         let tags = view
             .tags
             .iter()
@@ -182,7 +331,8 @@ impl PresentationProjector {
                 let bindings = InputBindings {
                     primary: Some(UserAction::ViewTag(id)),
                     secondary: Some(UserAction::ToggleTag(id)),
-                    ..InputBindings::default()
+                    scroll_up: previous_tag,
+                    scroll_down: next_tag,
                 };
                 Some(
                     control(
@@ -211,6 +361,26 @@ impl PresentationProjector {
             })
             .collect();
 
+        let layout_catalog = layout_menu(view, config);
+        let current_layout = view
+            .layout
+            .and_then(|id| {
+                layout_catalog
+                    .iter()
+                    .position(|item| item.id == NodeId::LayoutOption(id))
+            })
+            .unwrap_or(0);
+        let layout_action = |offset: usize| {
+            (!layout_catalog.is_empty())
+                .then(|| {
+                    layout_catalog[(current_layout + offset) % layout_catalog.len()]
+                        .bindings
+                        .primary
+                })
+                .flatten()
+        };
+        let next_layout = layout_action(1);
+        let previous_layout = layout_action(layout_catalog.len().saturating_sub(1));
         let layout_button = control(
             NodeId::LayoutButton,
             String::new(),
@@ -228,14 +398,16 @@ impl PresentationProjector {
             },
             InputBindings {
                 primary: Some(UserAction::ToggleLayoutSelector),
-                ..InputBindings::default()
+                secondary: next_layout,
+                scroll_up: previous_layout,
+                scroll_down: next_layout,
             },
         )
         .with_availability(view.wm_available)
         .with_enabled(view.wm_available);
 
         let layout_choices = if view.layout_selector_open {
-            layout_menu(view, config)
+            layout_catalog
         } else {
             Vec::new()
         };
@@ -1708,5 +1880,63 @@ mod tests {
         assert_eq!(by_id(&projected, NodeId::Audio).icon, icons.volume_medium);
         assert_eq!(by_id(&projected, NodeId::Monitor).value, "M2");
         assert_eq!(projected.tags[0].icon, icons.tag_icon(0));
+    }
+
+    #[test]
+    fn sidebar_text_preserves_readings_without_rotating_long_labels() {
+        let mut snapshot = snapshot();
+        snapshot.time = "Sun 18 Oct 2026 08:40:23".to_owned();
+        let projected =
+            PresentationProjector::project(snapshot.view(), &PresentationConfig::default());
+        let clock = by_id(&projected, NodeId::Clock);
+        assert_eq!(clock.sidebar_lines(), ["08", "40", "23"]);
+        assert_eq!(clock.compact_value(), "08:40:23");
+        assert!(clock.accessible_label().contains("Sun 18 Oct 2026"));
+        let audio = by_id(&projected, NodeId::Audio);
+        assert_eq!(
+            audio.sidebar_lines(),
+            [audio.icon.clone(), audio.value.clone()]
+        );
+        assert!(audio.accessible_label().starts_with("Volume"));
+        assert!(audio.tooltip_text().contains("Scroll"));
+    }
+
+    #[test]
+    fn closed_layout_button_and_tags_keep_complete_wheel_navigation() {
+        let mut snapshot = snapshot();
+        snapshot.active_tag = TagId::new(snapshot.tags.len() - 1);
+        snapshot.layout = Some(LayoutId(0));
+        snapshot.layout_selector_open = false;
+        let config = PresentationConfig {
+            layouts: vec![
+                LayoutChoice {
+                    id: LayoutId(0),
+                    label: "first".to_owned(),
+                },
+                LayoutChoice {
+                    id: LayoutId(1),
+                    label: "second".to_owned(),
+                },
+            ],
+            ..PresentationConfig::default()
+        };
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+        assert!(projected.layout_choices.is_empty());
+        assert_eq!(
+            projected.layout_button.bindings.scroll_down,
+            Some(UserAction::SetLayout(LayoutId(1)))
+        );
+        assert_eq!(
+            projected.tags.last().unwrap().bindings.scroll_down,
+            Some(UserAction::ViewTag(TagId::new(0).unwrap()))
+        );
+        assert!(
+            projected
+                .tags
+                .last()
+                .unwrap()
+                .tooltip_text()
+                .contains("workspace")
+        );
     }
 }

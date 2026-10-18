@@ -19,8 +19,8 @@ use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::Point;
 use xbar_core::render::cairo::{CairoBar, CpuCanvas, PointerInput};
 use xbar_core::{
-    BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
-    NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
+    BarEdge, BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec,
+    MonitorGeometry, NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 use xbar_present_wgpu::{PresentRect, WgpuPresenter};
@@ -104,18 +104,6 @@ fn write_dock_properties(
     Ok(())
 }
 
-fn dock_spec(x: i32, y: i32, width: u32, bar_height: u16) -> DockWindowSpec {
-    DockWindowSpec::top(
-        BAR_NAME,
-        BarPlacement {
-            x,
-            y,
-            width,
-            height: u32::from(bar_height),
-        },
-    )
-}
-
 // ---------------- Compositor detection ----------------
 /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
 /// selection. With one the bar asks for a depth-32 window and paints real
@@ -188,48 +176,89 @@ struct WindowAdapter<'a> {
     screen: &'a x::Screen,
     win: x::Window,
     bar_height: Cell<u16>,
+    edge: BarEdge,
+    managed: bool,
     effects: RefCell<EffectRouter>,
 }
 
 impl WindowAdapter<'_> {
-    fn sync_bar_height(&self, bar: &mut CairoBar, height: u16) {
-        // A window manager may enforce its configured dock height instead of
-        // the size requested when the window was created. Keep both future
-        // geometry requests and the presentation viewport fill in sync with
-        // that final server-side height.
-        self.bar_height.set(height);
-        bar.config_mut().bar_height = f32::from(height);
+    fn sync_bar_size(
+        &self,
+        bar: &mut CairoBar,
+        width: u16,
+        height: u16,
+        x: i16,
+        y: i16,
+    ) -> Result<()> {
+        // Geometry is authoritative, but only the short axis controls cell
+        // thickness. A vertical resize must never turn output height into
+        // bar_height and consequently into enormous hit targets.
+        let thickness = if self.edge.is_vertical() {
+            width
+        } else {
+            height
+        }
+        .max(1);
+        self.bar_height.set(thickness);
+        bar.config_mut().bar_height = f32::from(thickness);
+        self.sync_struts(BarPlacement {
+            x: i32::from(x),
+            y: i32::from(y),
+            width: u32::from(width),
+            height: u32::from(height),
+        })
+    }
+
+    fn root_geometry(&self) -> Result<MonitorGeometry> {
+        let cookie = self.conn.send_request(&x::GetGeometry {
+            drawable: x::Drawable::Window(self.screen.root()),
+        });
+        let geometry = self.conn.wait_for_reply(cookie)?;
+        Ok(MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: u32::from(geometry.width()),
+            height: u32::from(geometry.height()),
+        })
+    }
+
+    fn sync_struts(&self, placement: BarPlacement) -> Result<()> {
+        if !self.managed {
+            let spec =
+                DockWindowSpec::for_edge(BAR_NAME, placement, self.root_geometry()?, self.edge);
+            write_dock_properties(self.conn, self.win, &spec.strut_properties())?;
+            self.conn.flush()?;
+        }
+        Ok(())
     }
 
     fn apply_runtime_update(&self, update: RuntimeUpdate) -> Result<bool> {
         self.effects.borrow_mut().route(update, |request| {
-            let geometry = match request {
-                GeometryRequest::Apply(geometry) => geometry,
-                GeometryRequest::Clear => MonitorGeometry {
-                    x: 0,
-                    y: 0,
-                    width: u32::from(self.screen.width_in_pixels()),
-                    height: u32::from(self.screen.height_in_pixels()),
-                },
+            let thickness = f64::from(self.bar_height.get());
+            let placement = match request {
+                // Shared snapshots already contain the final padded origin.
+                GeometryRequest::Apply(geometry) => {
+                    BarPlacement::from_bar_geometry(geometry, thickness, 1.0, self.edge)?
+                }
+                GeometryRequest::Clear => {
+                    BarPlacement::at_edge(self.root_geometry()?, thickness, 1.0, self.edge)?
+                }
             };
-            self.apply_geometry(geometry)
+            self.apply_geometry(placement)
         })
     }
 
-    fn apply_geometry(&self, geometry: MonitorGeometry) -> Result<()> {
-        let width = geometry.width.max(1);
-        let bar_height = self.bar_height.get();
+    fn apply_geometry(&self, placement: BarPlacement) -> Result<()> {
         self.conn.send_and_check_request(&x::ConfigureWindow {
             window: self.win,
             value_list: &[
-                x::ConfigWindow::X(geometry.x),
-                x::ConfigWindow::Y(geometry.y),
-                x::ConfigWindow::Width(width),
-                x::ConfigWindow::Height(u32::from(bar_height)),
+                x::ConfigWindow::X(placement.x),
+                x::ConfigWindow::Y(placement.y),
+                x::ConfigWindow::Width(placement.width),
+                x::ConfigWindow::Height(placement.height),
             ],
         })?;
-        let spec = dock_spec(geometry.x, geometry.y, width, bar_height);
-        write_dock_properties(self.conn, self.win, &spec.strut_properties())?;
+        self.sync_struts(placement)?;
         self.conn.flush()?;
         Ok(())
     }
@@ -321,10 +350,11 @@ fn main() -> Result<()> {
     let mut presentation = app_config.presentation.clone();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
+    let edge = presentation.edge;
     let bar_height = presentation
-        .bar_height
+        .logical_thickness(1.0)
         .round()
-        .clamp(1.0, f32::from(u16::MAX)) as u16;
+        .clamp(1.0, f64::from(u16::MAX)) as u16;
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
 
@@ -339,8 +369,17 @@ fn main() -> Result<()> {
     let want_alpha = argb_visual.is_some();
 
     let win = conn.generate_id();
-    let mut current_width = screen.width_in_pixels();
-    let mut current_height = bar_height;
+    let root_geometry = MonitorGeometry {
+        x: 0,
+        y: 0,
+        width: u32::from(screen.width_in_pixels()),
+        height: u32::from(screen.height_in_pixels()),
+    };
+    let initial_placement = BarPlacement::at_edge(root_geometry, f64::from(bar_height), 1.0, edge)?;
+    let mut current_width = u16::try_from(initial_placement.width)?;
+    let mut current_height = u16::try_from(initial_placement.height)?;
+    let initial_x = i16::try_from(initial_placement.x)?;
+    let initial_y = i16::try_from(initial_placement.y)?;
     let event_mask = x::EventMask::EXPOSURE
         | x::EventMask::STRUCTURE_NOTIFY
         | x::EventMask::BUTTON_PRESS
@@ -400,8 +439,13 @@ fn main() -> Result<()> {
         }
     };
 
-    let spec = dock_spec(0, 0, u32::from(current_width), current_height);
-    write_dock_properties(&conn, win, &spec.properties())?;
+    let spec = DockWindowSpec::for_edge(BAR_NAME, initial_placement, root_geometry, edge);
+    let properties: Vec<_> = spec
+        .properties()
+        .into_iter()
+        .filter(|property| shared_path.is_empty() || !property.name.starts_with("_NET_WM_STRUT"))
+        .collect();
+    write_dock_properties(&conn, win, &properties)?;
 
     // 绑定 WGPU
     let target = Arc::new(XcbTarget {
@@ -432,6 +476,8 @@ fn main() -> Result<()> {
         screen,
         win,
         bar_height: Cell::new(bar_height),
+        edge,
+        managed: !shared_path.is_empty(),
         effects: RefCell::new(EffectRouter::default()),
     };
 
@@ -513,7 +559,13 @@ fn main() -> Result<()> {
                             {
                                 current_width = event.width();
                                 current_height = event.height();
-                                window.sync_bar_height(&mut bar, event.height());
+                                window.sync_bar_size(
+                                    &mut bar,
+                                    event.width(),
+                                    event.height(),
+                                    event.x(),
+                                    event.y(),
+                                )?;
                                 gpu.resize(u32::from(current_width), u32::from(current_height));
                                 true
                             }

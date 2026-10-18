@@ -6228,6 +6228,25 @@ mod property_ops {
             Ok(())
         }
 
+        fn set_window_strut(&self, win: WindowId, partial: &[u32; 12]) -> Result<(), BackendError> {
+            let window = self.ids.x11(win)?;
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                window,
+                self.atoms._NET_WM_STRUT,
+                AtomEnum::CARDINAL,
+                &partial[..4],
+            )?;
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                window,
+                self.atoms._NET_WM_STRUT_PARTIAL,
+                AtomEnum::CARDINAL,
+                partial,
+            )?;
+            Ok(())
+        }
+
         fn clear_window_strut(&self, win: WindowId) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             let _ = self.conn.delete_property(w, self.atoms._NET_WM_STRUT);

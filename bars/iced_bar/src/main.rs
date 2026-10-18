@@ -40,9 +40,9 @@ use xbar_core::config::BarConfig;
 use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
-    DockItemBinding, LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate,
-    ShellRoute, TagId, TransportRecoveryConfig, UserAction,
+    BarEffect, BarRuntime, DockBridge, DockItemBinding, LayoutId, ModelConfig,
+    PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate, ShellRoute, TagId,
+    TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -268,13 +268,20 @@ fn main() -> iced::Result {
     info!("startup mode: translucent={translucent}");
     let _ = TRANSLUCENT.set(translucent);
 
+    let presentation = BarConfig::load_default().unwrap_or_default().presentation;
+    let thickness = presentation.logical_thickness(1.0) as f32;
+    let initial_size = if presentation.edge.is_vertical() {
+        Size::new(thickness, 800.0)
+    } else {
+        Size::new(800.0, thickness)
+    };
     iced::application(IcedBar::new, IcedBar::update, IcedBar::view)
         .window(window::Settings {
             platform_specific: window::settings::PlatformSpecific {
                 application_id,
                 ..Default::default()
             },
-            size: Size::from([800., 40.]),
+            size: initial_size,
             decorations: false,
             transparent: translucent,
             level: window::Level::AlwaysOnTop,
@@ -295,6 +302,7 @@ enum Input {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum Message {
+    Activate(Option<UserAction>),
     TabSelected(usize),
     LayoutClicked(u32),
     ToggleLayoutSelector,
@@ -337,6 +345,7 @@ enum Message {
 struct IcedBar {
     tabs: [&'static str; 9],
     runtime: BarRuntime,
+    presentation: xbar_core::presentation::PresentationConfig,
     tag_contrast: TagContrastMode,
     schedule: RuntimeSchedule,
     process_actions: ProcessActionHandler,
@@ -399,6 +408,8 @@ impl IcedBar {
             translucent,
         ) as f32;
 
+        let mut dock = DockBridge::new();
+        dock.set_edge(bar_config.presentation.edge);
         Self {
             tabs: TAG_ICONS,
             runtime,
@@ -415,7 +426,8 @@ impl IcedBar {
             background: Color::from_rgba8(r, g, b, alpha),
             background_opacity: bar_config.background_opacity,
             translucent,
-            dock: DockBridge::new(),
+            dock,
+            presentation: bar_config.presentation,
         }
     }
 
@@ -427,6 +439,9 @@ impl IcedBar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = match message {
+            Message::Activate(action) => {
+                action.map_or_else(Task::none, |action| self.dispatch(action))
+            }
             Message::TabSelected(tab_index) => {
                 info!("Tab selected: {}", tab_index);
                 TagId::new(tab_index)
@@ -558,7 +573,8 @@ impl IcedBar {
             &snapshot,
             self.runtime.transport_generation(),
             f64::from(self.scale_factor),
-            40.0,
+            self.presentation
+                .logical_thickness(f64::from(self.scale_factor)) as f32,
             4.0,
         );
         let now = Instant::now();
@@ -640,7 +656,18 @@ impl IcedBar {
             ),
             window::resize(
                 window_id,
-                Size::new(geometry.width as f32 / scale_factor, 40.0),
+                xbar_core::BarPlacement::from_bar_geometry(
+                    geometry,
+                    self.presentation.logical_thickness(f64::from(scale_factor)),
+                    f64::from(scale_factor),
+                    self.presentation.edge,
+                )
+                .map_or(self.initial_window_size, |placement| {
+                    Size::new(
+                        placement.width as f32 / scale_factor,
+                        placement.height as f32 / scale_factor,
+                    )
+                }),
             ),
         ])
     }
@@ -1126,16 +1153,37 @@ impl IcedBar {
         row.boxed()
     }
 
+    fn place_dock_element<'a>(
+        element: Element<'a, Message>,
+        x: f32,
+        y: f32,
+    ) -> Element<'a, Message> {
+        container(element)
+            .padding(Padding {
+                left: x.max(0.0),
+                top: y.max(0.0),
+                right: 0.0,
+                bottom: 0.0,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .boxed()
+    }
+
     fn minimized_dock(&self) -> Element<'_, Message> {
-        let mut items = Row::<Element<'_, Message>>::new()
-            .spacing(4)
-            .align_y(iced::Alignment::Center);
+        let shelf = self.dock.shelf_bounds().unwrap_or_default();
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
         for minimized in self.dock.visible_windows() {
             let token = minimized.token;
-            let Some(binding) = self.dock.item_binding(token) else {
+            let Some((binding, slot, visual)) = self
+                .dock
+                .item_binding(token)
+                .zip(self.dock.slot_bounds(token))
+                .zip(self.dock.item_bounds(token))
+                .map(|((binding, slot), visual)| (binding, slot, visual))
+            else {
                 continue;
             };
-            let magnification = self.dock.scale_for(token);
             let urgent = minimized.urgent();
             let title = if minimized.title.trim().is_empty() {
                 minimized.app_id.clone()
@@ -1152,73 +1200,102 @@ impl IcedBar {
                     .size(11)
                     .color(Color::WHITE),
             )
-            .width(DOCK_ITEM_WIDTH * magnification)
-            .height(DOCK_ITEM_HEIGHT * magnification)
+            .width(visual.width)
+            .height(visual.height)
             .align_x(iced::Alignment::Center)
             .align_y(iced::Alignment::Center)
-            .style(move |_theme: &Theme| container::Style {
+            .style(move |_: &Theme| container::Style {
                 background: Some(Background::Color(fill)),
                 border: Border {
-                    color: if urgent {
-                        Color::from_rgb(1.0, 0.82, 0.84)
-                    } else {
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.42)
-                    },
+                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.42),
                     width: 1.0,
                     radius: border::radius(5.0),
                 },
                 ..Default::default()
             });
-            let titled = tooltip(
-                card,
-                container(text(title).size(12)).padding([4, 8]),
-                tooltip::Position::Top,
-            );
-            let interactive = mouse_area(titled)
-                .on_enter(Message::DockHover {
-                    binding,
-                    hovered: true,
+            let picture = container(card)
+                .padding(Padding {
+                    left: (visual.x - slot.x).max(0.0),
+                    top: (visual.y - slot.y).max(0.0),
+                    right: 0.0,
+                    bottom: 0.0,
                 })
-                .on_exit(Message::DockHover {
-                    binding,
-                    hovered: false,
+                .width(slot.width)
+                .height(slot.height);
+            let target = button(picture)
+                .padding(0)
+                .width(slot.width)
+                .height(slot.height)
+                .style(|_: &Theme, _| iced::widget::button::Style {
+                    background: None,
+                    text_color: Color::WHITE,
+                    border: Border::default(),
+                    ..Default::default()
                 })
                 .on_press(Message::DockRestore { binding });
-            items = items.push(
-                container(interactive)
-                    .width(DOCK_SLOT_WIDTH)
-                    .height(32)
-                    .align_x(iced::Alignment::Center)
-                    .align_y(iced::Alignment::Center)
-                    .boxed(),
-            );
-        }
-        if self.dock.overflow() || self.dock.collapsed() {
-            items = items.push(
-                container(text("+").size(12).color(Color::WHITE.scale_alpha(0.72)))
-                    .width(12)
-                    .align_x(iced::Alignment::Center)
-                    .boxed(),
-            );
-        }
-        container(items)
-            .width(self.dock.shelf_width())
-            .height(32)
-            .padding(Padding {
-                top: 0.0,
-                right: 2.0,
-                bottom: 0.0,
-                left: 5.0,
+            let target = mouse_area(tooltip(
+                target,
+                container(text(title).size(12)).padding([4, 8]),
+                self.tooltip_position(),
+            ))
+            .on_enter(Message::DockHover {
+                binding,
+                hovered: true,
             })
-            .style(|_theme: &Theme| container::Style {
-                border: Border {
-                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.20),
-                    width: 0.0,
-                    radius: border::radius(0.0),
-                },
-                ..Default::default()
-            })
+            .on_exit(Message::DockHover {
+                binding,
+                hovered: false,
+            });
+            items.push(Self::place_dock_element(
+                target.boxed(),
+                slot.x - shelf.x,
+                slot.y - shelf.y,
+            ));
+        }
+        if let Some(bounds) = self.dock.overflow_bounds() {
+            let binding = self.dock.overflow_binding();
+            let mut overflow = button(
+                text(if self.dock.overflow_count() > 0 {
+                    format!("+{}", self.dock.overflow_count())
+                } else {
+                    "…".into()
+                })
+                .size(11),
+            )
+            .width(bounds.width)
+            .height(bounds.height)
+            .padding(0);
+            if let Some(binding) = binding {
+                overflow = overflow.on_press(Message::DockRestore { binding });
+            }
+            items.push(Self::place_dock_element(
+                tooltip(
+                    overflow,
+                    container(
+                        text(if binding.is_some() {
+                            "Restore another minimized window"
+                        } else {
+                            "Additional minimized windows"
+                        })
+                        .size(12),
+                    )
+                    .padding([4, 8]),
+                    self.tooltip_position(),
+                )
+                .boxed(),
+                bounds.x - shelf.x,
+                bounds.y - shelf.y,
+            ));
+        }
+        container(iced::widget::stack(items))
+            .width(shelf.width)
+            .height(shelf.height)
             .boxed()
+    }
+
+    fn pinned_dock(&self) -> Element<'_, Message> {
+        let shelf = self.dock.shelf_bounds().unwrap_or_default();
+        Self::place_dock_element(self.minimized_dock(), shelf.x, shelf.y)
     }
 
     fn view_work_space(&self) -> Element<'_, Message> {
@@ -1256,7 +1333,6 @@ impl IcedBar {
         let monitor_pill = self.monitor_pill(monitor_num);
 
         let scale_pill = self.scale_pill(Some(self.scale_factor));
-        let minimized_dock = self.minimized_dock();
 
         Row::<Element<'_, Message>>::new()
             .push(tags_row.boxed())
@@ -1290,18 +1366,173 @@ impl IcedBar {
             .push(Space::new().width(6).height(Length::Fill).boxed())
             .push(scale_pill)
             .push(Space::new().width(4).height(Length::Fill).boxed())
-            .push(minimized_dock)
             .align_y(iced::Alignment::Center)
             .boxed()
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let work_space_row = self.view_work_space();
+    fn tooltip_position(&self) -> tooltip::Position {
+        match self.presentation.edge {
+            xbar_core::BarEdge::Top => tooltip::Position::Bottom,
+            xbar_core::BarEdge::Bottom => tooltip::Position::Top,
+            xbar_core::BarEdge::Left => tooltip::Position::Right,
+            xbar_core::BarEdge::Right => tooltip::Position::Left,
+        }
+    }
 
+    fn sidebar_cell(&self, spec: xbar_core::ControlSpec) -> Element<'_, Message> {
+        let palette = xbar_core::presentation::Palette::for_theme(self.runtime.view().theme);
+        let tags = TagPalette::for_wallpaper(
+            self.runtime.view().theme,
+            self.runtime.view().wallpaper_luminance,
+            self.presentation.tag_contrast,
+        );
+        let is_tag = matches!(spec.id, xbar_core::presentation::NodeId::Tag(_));
+        let state = VisualState {
+            hovered: false,
+            selected: spec.state.selected || spec.state.filled,
+            urgent: spec.state.urgent,
+            occupied: spec.state.occupied,
+        };
+        let colors = tags.colors(state);
+        let convert =
+            |c: xbar_core::presentation::Rgba| Color::from_rgba(c.red, c.green, c.blue, c.alpha);
+        let bg = convert(if is_tag {
+            colors.fill
+        } else {
+            palette.occupied
+        });
+        let fg = convert(if is_tag {
+            colors.foreground
+        } else {
+            palette.text
+        });
+        let hover_bg = convert(if is_tag {
+            tags.hovered.fill
+        } else {
+            palette.hovered
+        });
+        let outline = convert(colors.stroke.map_or(colors.fill, |stroke| stroke.color));
+        let title = spec.tooltip_text();
+        let sidebar_lines = spec.sidebar_lines();
+        let cell_height = (sidebar_lines.len() as f32 * 15.0 + 10.0).max(36.0);
+        let lines = sidebar_lines.join("\n");
+        let mut button = button(text(lines).size(12).color(fg))
+            .width(Length::Fill)
+            .height(cell_height)
+            .padding([5, 2])
+            .style(move |_: &Theme, status| iced::widget::button::Style {
+                background: Some(Background::Color(
+                    if matches!(status, iced::widget::button::Status::Hovered) {
+                        hover_bg
+                    } else {
+                        bg
+                    },
+                )),
+                text_color: fg,
+                border: Border {
+                    color: outline,
+                    width: 1.0,
+                    radius: border::radius(6.0),
+                },
+                ..Default::default()
+            });
+        if spec.state.enabled && spec.bindings.primary.is_some() {
+            button = button.on_press(Message::Activate(spec.bindings.primary));
+        }
+        let mut area = mouse_area(button);
+        if spec.state.enabled {
+            if spec.bindings.secondary.is_some() {
+                area = area.on_right_press(Message::Activate(spec.bindings.secondary));
+            }
+            let bindings = spec.bindings;
+            if bindings.scroll_up.is_some() || bindings.scroll_down.is_some() {
+                area = area.on_scroll(move |delta| {
+                    let y = match delta {
+                        mouse::ScrollDelta::Lines { y, .. }
+                        | mouse::ScrollDelta::Pixels { y, .. } => y,
+                    };
+                    Message::Activate(if y > 0.0 {
+                        bindings.scroll_up
+                    } else if y < 0.0 {
+                        bindings.scroll_down
+                    } else {
+                        None
+                    })
+                });
+            }
+        }
+        tooltip(
+            area,
+            container(text(title).size(12)).padding([4, 8]),
+            self.tooltip_position(),
+        )
+        .boxed()
+    }
+
+    fn sidebar(&self) -> Element<'_, Message> {
+        let projection =
+            xbar_core::PresentationProjector::project(self.runtime.view(), &self.presentation);
+        let mut leading = Column::<Element<'_, Message>>::new()
+            .spacing(4)
+            .width(Length::Fill);
+        for spec in projection
+            .tags
+            .into_iter()
+            .chain([projection.layout_button])
+            .chain(projection.layout_choices)
+        {
+            leading = leading.push(self.sidebar_cell(spec));
+        }
+        let mut trailing = Column::<Element<'_, Message>>::new()
+            .spacing(4)
+            .width(Length::Fill);
+        for spec in projection.status.into_iter().rev() {
+            trailing = trailing.push(self.sidebar_cell(spec));
+        }
         Column::<Element<'_, Message>>::new()
-            .padding(4)
-            .spacing(Self::TAB_SPACING)
-            .push(work_space_row)
+            .padding(3)
+            .spacing(6)
+            .push(
+                iced::widget::scrollable(leading)
+                    .height(Length::FillPortion(1))
+                    .boxed(),
+            )
+            .push(
+                iced::widget::scrollable(trailing)
+                    .height(Length::FillPortion(1))
+                    .boxed(),
+            )
+            .width(Length::Fill)
+            .height(self.dock.shelf_bounds().map_or(Length::Fill, |bounds| {
+                Length::Fixed((bounds.y - 6.0).max(0.0))
+            }))
+            .boxed()
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let controls = if self.presentation.edge.is_vertical() {
+            self.sidebar()
+        } else {
+            let reserve = self
+                .dock
+                .shelf_bounds()
+                .map_or(4.0, |bounds| bounds.width + 10.0);
+            Column::<Element<'_, Message>>::new()
+                .padding(Padding {
+                    left: 4.0,
+                    top: 4.0,
+                    right: reserve,
+                    bottom: 4.0,
+                })
+                .spacing(Self::TAB_SPACING)
+                .push(self.view_work_space())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .boxed()
+        };
+        iced::widget::stack([controls, self.pinned_dock()])
+            .width(Length::Fill)
+            .height(Length::Fill)
             .boxed()
     }
 }

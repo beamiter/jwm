@@ -4081,6 +4081,24 @@ impl PropertyOps for XcbPropertyOps {
         )
     }
 
+    fn set_window_strut(&self, win: WindowId, partial: &[u32; 12]) -> XcbResult<()> {
+        let window = self.win(win)?;
+        change_u32s(
+            &self.conn,
+            window,
+            self.atoms.net_wm_strut,
+            self.atoms.cardinal,
+            &partial[..4],
+        )?;
+        change_u32s(
+            &self.conn,
+            window,
+            self.atoms.net_wm_strut_partial,
+            self.atoms.cardinal,
+            partial,
+        )
+    }
+
     fn clear_window_strut(&self, win: WindowId) -> XcbResult<()> {
         let w = self.win(win)?;
         self.conn

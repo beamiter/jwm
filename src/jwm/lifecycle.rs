@@ -1558,6 +1558,10 @@ impl Jwm {
         // sync so the fallback is a view that still exists.
         self.retag_clients_off_retired_tags(backend, tagmask);
 
+        // Orientation is a frontend process setting. Restart only affected
+        // outputs before publishing the new geometry and work areas.
+        self.reconcile_secondary_bar_configuration(backend);
+
         // 4. Re-arrange all monitors (border/gap changes take effect)
         for mk in &mon_keys {
             self.arrange(backend, Some(*mk));

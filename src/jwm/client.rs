@@ -1448,90 +1448,69 @@ impl Jwm {
         };
 
         let show_bar = self.monitor_shows_status_bar(mon_key);
-
         let cfg = CONFIG.load();
-        let actual_bar_height = cfg.status_bar_height();
-        let bar_height = if show_bar { actual_bar_height } else { 0 };
-        // Above this output may be another output. Keep the complete mapped
-        // bar outside the desktop, just like other parked native windows.
-        let hidden_x = self.state.clients.get(client_key).map(|client| {
-            hidden_x_left_of_desktop(self.desktop_left_edge(), client.total_width().max(1))
+        let placement = crate::jwm::bar_geometry::BarGeometry::for_monitor(&monitor, &cfg);
+        let desired_strut = if show_bar {
+            self.status_bar_strut(&monitor)
+        } else {
+            [0; 12]
+        };
+        let target = if show_bar {
+            placement.rect
+        } else {
+            // Park outside the complete desktop, even for left/right bars on
+            // vertically stacked outputs or outputs with negative origins.
+            Rect::new(
+                hidden_x_left_of_desktop(self.desktop_left_edge(), placement.rect.w),
+                monitor.geometry.m_y,
+                placement.rect.w,
+                placement.rect.h,
+            )
+        };
+        let geometry_changed = self.state.clients.get(client_key).is_some_and(|client| {
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h,
+            ) != (target.x, target.y, target.w, target.h)
         });
+        let strut_changed = self
+            .secondary_bars
+            .get(&monitor_id)
+            .is_none_or(|bar| bar.last_strut != Some(desired_strut));
 
-        // arrange() reconciles the bar on every pass, so a bar that is already
-        // where this call would put it must cost nothing — no configure, no
-        // strut churn, no forced compositor redraw.
-        let already_placed = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|c| {
-                if show_bar {
-                    let pad = cfg.status_bar_padding();
-                    c.geometry.x == monitor.geometry.m_x + pad
-                        && c.geometry.y == monitor.geometry.m_y + pad
-                        && c.geometry.w == monitor.geometry.m_w - 2 * pad - 2 * c.geometry.border_w
-                        && c.geometry.h == bar_height
-                } else {
-                    Some(c.geometry.x) == hidden_x && c.geometry.y == monitor.geometry.m_y
-                }
-            })
-            .unwrap_or(false);
-        if already_placed {
-            return Ok(());
-        }
-
-        if let Some(client) = self.state.clients.get_mut(client_key) {
+        // No native configure or compositor redraw for an unchanged layout.
+        if geometry_changed {
+            let changes = WindowChanges {
+                x: Some(target.x),
+                y: Some(target.y),
+                width: Some(target.w as u32),
+                height: Some(target.h as u32),
+                ..Default::default()
+            };
+            backend.window_ops().apply_window_changes(win, changes)?;
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.geometry.x = target.x;
+                client.geometry.y = target.y;
+                client.geometry.w = target.w;
+                client.geometry.h = target.h;
+            }
             if show_bar {
-                let pad = cfg.status_bar_padding();
-                let border_width = client.geometry.border_w;
-                client.geometry.x = monitor.geometry.m_x + pad;
-                client.geometry.y = monitor.geometry.m_y + pad;
-                client.geometry.w = monitor.geometry.m_w - 2 * pad - 2 * border_width;
-                client.geometry.h = bar_height;
-                info!(
-                    "[position_secondary_bar_on_monitor] win={:?} target={}x{}+{}+{} pad={} monitor_id={}",
-                    win,
-                    client.geometry.w,
-                    client.geometry.h,
-                    client.geometry.x,
-                    client.geometry.y,
-                    pad,
-                    monitor_id
-                );
-
-                let changes = WindowChanges {
-                    x: Some(client.geometry.x),
-                    y: Some(client.geometry.y),
-                    width: Some(client.geometry.w as u32),
-                    height: Some(client.geometry.h as u32),
-                    ..Default::default()
-                };
-                backend.window_ops().apply_window_changes(win, changes)?;
                 backend.compositor_force_full_redraw();
-            } else {
-                // Park to the left of every output, including vertically
-                // stacked outputs and outputs with negative origins.
-                let hidden_x = hidden_x.expect("client exists in this branch");
-                let hidden_y = monitor.geometry.m_y;
-                if let Some(client) = self.state.clients.get_mut(client_key) {
-                    client.geometry.x = hidden_x;
-                    client.geometry.y = hidden_y;
-                }
-                let changes = WindowChanges {
-                    x: Some(hidden_x),
-                    y: Some(hidden_y),
-                    ..Default::default()
-                };
-                backend.window_ops().apply_window_changes(win, changes)?;
             }
         }
-
-        // Set strut after releasing the mutable borrow
-        if show_bar {
-            self.set_bar_strut(backend, win, &monitor, bar_height)?;
-        } else {
-            self.remove_bar_strut(backend, win)?;
+        if strut_changed {
+            if show_bar && desired_strut[..4].iter().any(|&depth| depth > 0) {
+                backend
+                    .property_ops()
+                    .set_window_strut(win, &desired_strut)?;
+            } else {
+                self.remove_bar_strut(backend, win)?;
+            }
+            if let Some(bar) = self.secondary_bars.get_mut(&monitor_id) {
+                bar.last_strut = Some(desired_strut);
+            }
         }
 
         Ok(())
@@ -1562,22 +1541,30 @@ impl Jwm {
         let _ = self.position_secondary_bar_on_monitor(backend, client_key, win, mon_num);
     }
 
-    pub(crate) fn set_bar_strut(
-        &self,
-        backend: &mut dyn Backend,
-        bar_win: WindowId,
-        mon: &WMMonitor,
-        bar_height: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let top_amount = bar_height.max(0) as u32;
-        let top_start_x = mon.geometry.m_x.max(0) as u32;
-        let top_end_x = (mon.geometry.m_x + mon.geometry.m_w - 1).max(0) as u32;
-        Ok(backend.property_ops().set_window_strut_top(
-            bar_win,
-            top_amount,
-            top_start_x,
-            top_end_x,
-        )?)
+    fn status_bar_strut(&self, monitor: &WMMonitor) -> [u32; 12] {
+        let cfg = CONFIG.load();
+        let bar = crate::jwm::bar_geometry::BarGeometry::for_monitor(monitor, &cfg);
+        let geometry = &monitor.geometry;
+        let output = Rect::new(geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h);
+        let bounds = self.state.monitors.values().fold(
+            (i64::MAX, i64::MAX, i64::MIN, i64::MIN),
+            |(left, top, right, bottom), monitor| {
+                let g = &monitor.geometry;
+                (
+                    left.min(i64::from(g.m_x)),
+                    top.min(i64::from(g.m_y)),
+                    right.max(i64::from(g.m_x) + i64::from(g.m_w.max(1))),
+                    bottom.max(i64::from(g.m_y) + i64::from(g.m_h.max(1))),
+                )
+            },
+        );
+        let root = Rect::new(
+            bounds.0 as i32,
+            bounds.1 as i32,
+            (bounds.2 - bounds.0).clamp(1, i64::from(i32::MAX)) as i32,
+            (bounds.3 - bounds.1).clamp(1, i64::from(i32::MAX)) as i32,
+        );
+        crate::jwm::bar_geometry::bar_strut(bar, output, root)
     }
 
     pub(crate) fn remove_bar_strut(

@@ -254,6 +254,14 @@
   }
 
   type WindowMetrics = { x: number; y: number; scale: number };
+  type LogicalDockRect = Pick<DOMRect, "left" | "top" | "width" | "height">;
+  type DockLayoutAdapter = {
+    visibleDockRect: (element: HTMLElement) => LogicalDockRect | null;
+    restingDockRect: (item: HTMLElement, dock: HTMLElement) => LogicalDockRect | null;
+  };
+  const dockLayout = (): DockLayoutAdapter | undefined =>
+    (window as Window & { __xbarLayout?: DockLayoutAdapter }).__xbarLayout;
+  const withdrawnDockRect: LogicalDockRect = { left: 0, top: 0, width: 0, height: 0 };
 
   async function windowMetrics(): Promise<WindowMetrics | null> {
     try {
@@ -283,7 +291,12 @@
   }
 
   function physicalGeometry(element: HTMLElement, metrics: WindowMetrics): DockGeometry {
-    return projectDockGeometry(element.getBoundingClientRect(), metrics);
+    const layout = dockLayout();
+    const rect = layout?.visibleDockRect
+      ? layout.visibleDockRect(element)
+      : element.getBoundingClientRect();
+    // A fully clipped anchor must withdraw its previous compositor geometry.
+    return projectDockGeometry(rect ?? withdrawnDockRect, metrics);
   }
 
   function restingItemGeometry(
@@ -291,6 +304,10 @@
     dock: HTMLElement,
     metrics: WindowMetrics,
   ): DockGeometry {
+    const layout = dockLayout();
+    if (layout?.restingDockRect) {
+      return projectDockGeometry(layout.restingDockRect(item, dock) ?? withdrawnDockRect, metrics);
+    }
     const dockRect = dock.getBoundingClientRect();
     return projectDockGeometry(
       {
@@ -720,6 +737,7 @@
       }
     };
     window.addEventListener("resize", handleResize);
+    window.addEventListener("scroll", handleResize, true);
     const initialize = async () => {
       const stopListening = await listen<FrontendEnvelope>(
         "xbar-state",
@@ -766,7 +784,10 @@
       console.error("Failed to initialize xbar Tauri bridge:", error);
     });
 
-    return () => window.removeEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("scroll", handleResize, true);
+    };
   });
 
   onDestroy(() => {
@@ -796,7 +817,7 @@
         <button
           class={`${getButtonClass(tag)}${pressed === index ? " pressed" : ""}`}
           onmousedown={() => (pressed = index)}
-          onmouseup={() => handleRelease(index, monitorId)}
+          onclick={() => handleRelease(index, monitorId)}
           onmouseleave={() => (pressed = null)}
           title={`Tag ${index + 1}`}
         >
@@ -805,49 +826,37 @@
       {/each}
 
       <div class="layout-controls">
-        <div
+        <button
+          type="button"
           class={`pill layout-toggle ${snapshot.layout_selector_open ? "open" : "closed"}`}
           onclick={toggleLayoutSelector}
-          role="button"
-          tabindex="0"
-          onkeydown={(event) =>
-            event.key === "Enter" && toggleLayoutSelector()}
           title="切换布局"
         >
           {snapshot.layout_symbol || "[]="}
-        </div>
+        </button>
         {#if snapshot.layout_selector_open}
           <div class="layout-selector">
-            <div
+            <button
+              type="button"
               class={`pill layout-option ${snapshot.layout_symbol === "[]=" ? "current" : ""}`}
               onclick={() => selectLayout(0, monitorId)}
-              role="button"
-              tabindex="0"
-              onkeydown={(event) =>
-                event.key === "Enter" && selectLayout(0, monitorId)}
             >
               []=
-            </div>
-            <div
+            </button>
+            <button
+              type="button"
               class={`pill layout-option ${snapshot.layout_symbol === "><>" ? "current" : ""}`}
               onclick={() => selectLayout(1, monitorId)}
-              role="button"
-              tabindex="0"
-              onkeydown={(event) =>
-                event.key === "Enter" && selectLayout(1, monitorId)}
             >
               {"><>"}
-            </div>
-            <div
+            </button>
+            <button
+              type="button"
               class={`pill layout-option ${snapshot.layout_symbol === "[M]" ? "current" : ""}`}
               onclick={() => selectLayout(2, monitorId)}
-              role="button"
-              tabindex="0"
-              onkeydown={(event) =>
-                event.key === "Enter" && selectLayout(2, monitorId)}
             >
               [M]
-            </div>
+            </button>
           </div>
         {/if}
       </div>
@@ -928,7 +937,8 @@
         </div>
       </div>
 
-      <div
+      <button
+        type="button"
         class="pill brightness-pill"
         onclick={() => adjustBrightness(5)}
         onwheel={(event) => {
@@ -939,18 +949,16 @@
           event.preventDefault();
           adjustBrightness(-5);
         }}
-        role="button"
-        tabindex="0"
-        onkeydown={(event) => event.key === "Enter" && adjustBrightness(5)}
         title="左键加亮 / 右键减暗 / 滚轮调节"
       >
         <span class="nf-icon">{ICON_BRIGHT}</span>
         {snapshot.brightness.percent === null
           ? "--"
           : `${snapshot.brightness.percent.toFixed(0)}%`}
-      </div>
+      </button>
 
-      <div
+      <button
+        type="button"
         class={`pill volume-pill ${!snapshot.audio_device || snapshot.audio_device.is_muted ? "muted" : ""}`}
         onclick={toggleMute}
         onwheel={(event) => {
@@ -960,65 +968,54 @@
             delta: event.deltaY < 0 ? 5 : -5,
           }).catch(console.error);
         }}
-        role="button"
-        tabindex="0"
-        onkeydown={(event) => event.key === "Enter" && toggleMute()}
         title={snapshot.audio_device?.name ?? "左键静音 / 滚轮调节"}
       >
         <span class="nf-icon">{volumeIcon(snapshot.audio_device)}</span>
         {snapshot.audio_device ? `${snapshot.audio_device.volume}%` : "--"}
-      </div>
+      </button>
 
       <div class="shell-menu">
-        <div
+        <button
+          type="button"
           class={`pill shell-pill ${snapshot.wm_available ? "" : "shell-pill-offline"}`}
           onclick={() => openShell("hub")}
-          role="button"
-          tabindex="0"
-          onkeydown={(event) => event.key === "Enter" && openShell("hub")}
           title="JWM shell"
         >
           <span class="nf-icon">{SHELL_ROUTES[0].icon}</span>
-        </div>
+        </button>
         {#if snapshot.wm_available}
           <div class="shell-dropdown">
             {#each SHELL_ROUTES as entry (entry.route)}
-              <div
+              <button
+                type="button"
                 class="shell-route"
                 onclick={() => openShell(entry.route)}
-                role="button"
-                tabindex="0"
-                onkeydown={(event) => event.key === "Enter" && openShell(entry.route)}
               >
                 <span class="nf-icon">{entry.icon}</span>
                 <span>{entry.label}</span>
-              </div>
+              </button>
             {/each}
           </div>
         {/if}
       </div>
 
-      <div
+      <button
+        type="button"
         class={`pill screenshot-pill ${isTaking ? "taking" : ""}`}
         onclick={takeScreenshot}
-        role="button"
-        tabindex="0"
-        onkeydown={(event) => event.key === "Enter" && takeScreenshot()}
         title="截图 (jwm)"
       >
         <span class="nf-icon">{ICON_SHOT}</span>
-      </div>
+      </button>
 
-      <div
+      <button
+        type="button"
         class="pill time-pill"
         onclick={toggleSeconds}
-        role="button"
-        tabindex="0"
-        onkeydown={(event) => event.key === "Enter" && toggleSeconds()}
         title={snapshot.show_seconds ? "点击隐藏秒" : "点击显示秒"}
       >
         <span class="nf-icon">{ICON_TIME}</span> {snapshot.time || "--"}
-      </div>
+      </button>
 
       <div
         class="pill monitor-pill"

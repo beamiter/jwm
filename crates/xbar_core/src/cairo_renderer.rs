@@ -2125,6 +2125,74 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_clock_and_compact_labels_fit_real_hinted_pango_bounds_at_both_scales() {
+        use crate::presentation::{LayoutEngine, PresentationConfig};
+        use crate::{AudioState, BarEdge, BatteryState, LayoutId, Percent};
+
+        for edge in [BarEdge::Left, BarEdge::Right] {
+            for scale in [1.0, 2.0] {
+                let viewport = Size::new(42.0, 720.0);
+                let surface = ImageSurface::create(
+                    Format::ARgb32,
+                    (f64::from(viewport.width) * scale) as i32,
+                    (f64::from(viewport.height) * scale) as i32,
+                )
+                .unwrap();
+                let context = Context::new(&surface).unwrap();
+                context.scale(scale, scale);
+                let renderer = CairoRenderer::new(FontDescription::from_string("DejaVu Sans"));
+                let mut config = PresentationConfig {
+                    edge,
+                    ..PresentationConfig::default()
+                };
+                config.labels.audio = "VOL".to_owned();
+                config.labels.battery = "BAT".to_owned();
+                config.labels.clock.clear();
+                let mut snapshot = BarModel::default().snapshot();
+                snapshot.time = "Sun 18 Oct 21:14".to_owned();
+                snapshot.layout = Some(LayoutId(0));
+                snapshot.layout_symbol = "[]=".to_owned();
+                snapshot.audio = AudioState::new(Percent::from_whole(42).ok(), false);
+                snapshot.battery = BatteryState::present(Percent::from_whole(73).ok(), false);
+                let measurer = renderer.text_measurer(&context);
+                let engine = LayoutEngine::new(config, measurer.clone());
+                let scene = engine.build(snapshot.view(), viewport, &InteractionState::default());
+                for (id, expected) in [
+                    (NodeId::Clock, vec!["21", "14"]),
+                    (NodeId::Audio, vec!["VOL", "42%"]),
+                    (NodeId::Battery, vec!["BAT", "73%"]),
+                    (NodeId::LayoutButton, vec!["[]="]),
+                ] {
+                    let nodes: Vec<_> = scene
+                        .nodes_for(id)
+                        .filter_map(|node| match node {
+                            SceneNode::Text {
+                                text, bounds, size, ..
+                            } => Some((text, *bounds, *size)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        nodes.iter().map(|node| node.0.as_str()).collect::<Vec<_>>(),
+                        expected,
+                        "{id:?} must remain readable on {edge:?} at {scale}x"
+                    );
+                    for (text, bounds, size) in nodes {
+                        let measured = measurer.measure(text, size);
+                        assert!(measured.width <= bounds.width + 0.001);
+                        assert!(bounds.x >= 0.0 && bounds.y >= 0.0);
+                        assert!(
+                            bounds.right() <= viewport.width && bounds.bottom() <= viewport.height,
+                            "clock lines must stay inside the physical bar edge"
+                        );
+                    }
+                }
+                renderer.render(&context, &scene).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn text_alignment_origins_cover_start_center_and_end() {
         let bounds = Rect::new(10.0, 5.0, 100.0, 40.0);
         assert_eq!(text_origin(bounds, 20, 20, TextAlign::Start), (10.0, 15.0));
@@ -2467,6 +2535,9 @@ mod tests {
     fn cairo_bar_rehits_a_stationary_pointer_after_layout_moves() {
         let config = crate::presentation::PresentationConfig {
             tag_labels: vec!["1".to_owned(); 9],
+            // Keep sufficient room to test a true label-driven relayout;
+            // responsive overflow deliberately keeps fixed compact slots.
+            left_fraction: 0.8,
             visibility: PresentationVisibility {
                 client_name: false,
                 monitor: false,

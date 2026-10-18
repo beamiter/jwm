@@ -13,7 +13,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, PropMode, Window};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
-use xbar_core::{DockProperty, DockPropertyValue, DockWindowSpec};
+use xbar_core::{DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry};
 
 /// A second connection to the display eframe is already using.
 ///
@@ -39,6 +39,19 @@ impl X11Session {
             u32::from(screen.width_in_pixels),
             u32::from(screen.height_in_pixels),
         )
+    }
+
+    /// Root dimensions may change after hotplug; setup() is only a startup
+    /// snapshot and would make bottom/right reservations stale.
+    pub fn screen_geometry(&self) -> Result<MonitorGeometry> {
+        let root = self.conn.setup().roots[self.screen].root;
+        let geometry = self.conn.get_geometry(root)?.reply()?;
+        Ok(MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: u32::from(geometry.width),
+            height: u32::from(geometry.height),
+        })
     }
 
     /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
@@ -112,9 +125,20 @@ impl X11Session {
         Ok(())
     }
 
-    /// Announce the window as a top dock covering `placement`.
-    pub fn apply_dock_spec(&self, window: Window, spec: &DockWindowSpec) -> Result<()> {
-        self.write_dock_properties(window, &spec.properties())
+    /// JWM owns reservations for managed bars, including padding and the
+    /// policy for interior output edges; frontends must not overwrite them.
+    pub fn apply_dock_spec(
+        &self,
+        window: Window,
+        spec: &DockWindowSpec,
+        managed: bool,
+    ) -> Result<()> {
+        let properties: Vec<_> = spec
+            .properties()
+            .into_iter()
+            .filter(|property| !managed || !property.name.starts_with("_NET_WM_STRUT"))
+            .collect();
+        self.write_dock_properties(window, &properties)
     }
 
     /// Update only the struts, for when the bar has been moved or resized.

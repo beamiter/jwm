@@ -1039,6 +1039,7 @@ where
     /// when the client is restored or actually retired.
     minimized_window_metadata: HashMap<u32, WindowVisualMetadata>,
     dock_preview: Option<DockPreview>,
+    dock_preview_edge: xbar_core::placement::BarEdge,
     dock_position: (f32, f32),
 
     // --- Phase 3.3: Window open ripple ---

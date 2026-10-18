@@ -256,11 +256,16 @@ impl StatusBarBuilder {
         let mut monitor_info = MonitorInfo::default();
 
         // 设置监视器几何信息
-        let pad = CONFIG.load().status_bar_padding();
-        monitor_info.monitor_x = monitor.geometry.m_x + pad;
-        monitor_info.monitor_y = monitor.geometry.m_y + pad;
-        monitor_info.monitor_width = (monitor.geometry.m_w - 2 * pad).max(1);
-        monitor_info.monitor_height = monitor.geometry.m_h;
+        let config = CONFIG.load();
+        let placement = crate::jwm::bar_geometry::BarGeometry::for_monitor(monitor, &config);
+        monitor_info.monitor_x = placement.rect.x;
+        monitor_info.monitor_y = placement.rect.y;
+        monitor_info.monitor_width = placement.rect.w;
+        monitor_info.monitor_height = if placement.edge.is_vertical() {
+            placement.rect.h
+        } else {
+            monitor.geometry.m_h
+        };
         monitor_info.monitor_num = monitor.num;
         message.wallpaper_luminance =
             crate::backend::compositor_common::bar_wallpaper::register_and_read(
@@ -268,7 +273,7 @@ impl StatusBarBuilder {
                 monitor_info.monitor_x,
                 monitor_info.monitor_y,
                 monitor_info.monitor_width,
-                CONFIG.load().status_bar_height(),
+                placement.rect.h,
             );
         monitor_info.set_ltsymbol(&monitor.lt_symbol);
         // The bar builds its layout menu from what this compositor actually

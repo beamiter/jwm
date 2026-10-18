@@ -1,3 +1,6 @@
+#[path = "../../gpui_sidebar.rs"]
+mod gpui_sidebar;
+
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -14,15 +17,13 @@ use gpui_component::{
 use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     init as init_components,
-    tooltip::Tooltip,
 };
 use log::{debug, warn};
 use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
-    DockItemBinding, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate,
-    ShellRoute, TagId, TransportRecoveryConfig, UserAction,
+    BarEffect, BarRuntime, DockBridge, DockItemBinding, LayoutId, ModelConfig, MonitorGeometry,
+    PlatformEffectHandler, RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -81,6 +82,7 @@ impl ClickLatch {
 
 struct GpuiComponentBar {
     runtime: BarRuntime,
+    presentation: xbar_core::presentation::PresentationConfig,
     process_actions: ProcessActionHandler,
     active_geometry: Option<MonitorGeometry>,
     default_size: Option<gpui::Size<Pixels>>,
@@ -108,7 +110,9 @@ impl GpuiComponentBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let shared_path = env::args().skip(1).last().unwrap_or_default();
+        let bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
         let config = ModelConfig {
+            initial_theme: bar_config.theme,
             show_seconds: true,
             clock_minute_format: "%m-%d %H:%M".into(),
             clock_second_format: "%m-%d %H:%M:%S".into(),
@@ -123,6 +127,8 @@ impl GpuiComponentBar {
         }
         .expect("gpui component bar model configuration is valid");
 
+        let mut dock = DockBridge::new();
+        dock.set_edge(bar_config.presentation.edge);
         let mut this = Self {
             runtime,
             process_actions: ProcessActionHandler::default(),
@@ -134,7 +140,8 @@ impl GpuiComponentBar {
             last_scale_factor: None,
             geometry_dirty: false,
             brightness_secondary_click: ClickLatch::default(),
-            dock: DockBridge::new(),
+            dock,
+            presentation: bar_config.presentation,
             _timer_task: None,
             _transport_task: None,
         };
@@ -208,7 +215,7 @@ impl GpuiComponentBar {
             &snapshot,
             self.runtime.transport_generation(),
             scale_factor,
-            42.0,
+            self.presentation.logical_thickness(scale_factor) as f32,
             10.0,
         );
         let now = Instant::now();
@@ -637,87 +644,14 @@ impl GpuiComponentBar {
             .child(self.chip_tag("s: 1.00", slate_700(), slate_100(), slate_700()))
     }
 
-    fn render_minimized_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let windows: Vec<_> = self.dock.visible_windows().cloned().collect();
-        let mut shelf = div()
-            .id("minimized-dock")
-            .w(px(self.dock.shelf_width()))
-            .h_full()
-            .pl(px(5.0))
-            .pr(px(2.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .border_l_1()
-            .border_color(slate_700());
-        for minimized in windows {
-            let token = minimized.token;
-            let Some(binding) = self.dock.item_binding(token) else {
-                continue;
-            };
-            let scale = self.dock.scale_for(token);
-            let title = if minimized.title.trim().is_empty() {
-                minimized.app_id.clone()
-            } else {
-                minimized.title.clone()
-            };
-            let hover_title = title.clone();
-            let tooltip_title = SharedString::from(title);
-            let background = if minimized.urgent() {
-                red_500()
-            } else {
-                blue_500()
-            };
-            let card = div()
-                .id(SharedString::from(format!(
-                    "minimized-card-{}-{}-{}",
-                    binding.wm_session_id,
-                    binding.minimized_generation,
-                    token.get(),
-                )))
-                .w(px(DOCK_ITEM_WIDTH * scale))
-                .h(px(DOCK_ITEM_HEIGHT * scale))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.0))
-                .border_1()
-                .border_color(if minimized.urgent() {
-                    rose_500()
-                } else {
-                    slate_300()
-                })
-                .bg(background)
-                .text_color(white())
-                .text_size(px(11.0))
-                .child(minimized.initial().to_string())
-                .tooltip(move |window, cx| Tooltip::new(tooltip_title.clone()).build(window, cx))
-                .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                    this.dock_hover(binding, *hovered, cx);
-                    if *hovered {
-                        debug!("minimized Dock hover: {hover_title}");
-                    }
-                    cx.notify();
-                }))
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.dock_restore(binding, cx);
-                    cx.notify();
-                }));
-            shelf = shelf.child(
-                div()
-                    .w(px(DOCK_SLOT_WIDTH))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(card),
-            );
-        }
-        if self.dock.overflow() || self.dock.collapsed() {
-            shelf = shelf.child(div().w(px(12.0)).text_color(slate_300()).child("+"));
-        }
-        shelf
+    fn render_minimized_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        gpui_sidebar::render_dock(
+            &self.dock,
+            self.runtime.view().theme,
+            Self::dock_hover,
+            Self::dock_restore,
+            cx,
+        )
     }
 }
 
@@ -737,10 +671,18 @@ impl Render for GpuiComponentBar {
         if self.geometry_dirty || scale_changed {
             let default_size = self.default_size.expect("default size is initialized");
             let target_size = self.active_geometry.map_or(default_size, |geometry| {
-                size(
-                    px(geometry.width as f32 / scale_factor),
-                    default_size.height,
+                xbar_core::BarPlacement::from_bar_geometry(
+                    geometry,
+                    self.presentation.logical_thickness(f64::from(scale_factor)),
+                    f64::from(scale_factor),
+                    self.presentation.edge,
                 )
+                .map_or(default_size, |placement| {
+                    size(
+                        px(placement.width as f32 / scale_factor),
+                        px(placement.height as f32 / scale_factor),
+                    )
+                })
             });
             // GPUI has no public window-position API. JWM remains responsible
             // for applying geometry.x/y; this frontend applies the logical size.
@@ -750,6 +692,19 @@ impl Render for GpuiComponentBar {
         }
         let dock_update = self.service_dock();
         self.handle_runtime_update(dock_update);
+        if self.presentation.edge.is_vertical() {
+            let dock = self.render_minimized_dock(cx);
+            return gpui_sidebar::render(
+                &self.runtime.snapshot(),
+                &self.presentation,
+                self.panel_background,
+                dock,
+                self.dock.shelf_bounds(),
+                Self::dispatch,
+                cx,
+            )
+            .into_any_element();
+        }
         let left = div()
             .flex()
             .flex_row()
@@ -766,8 +721,7 @@ impl Render for GpuiComponentBar {
             .gap(px(8.))
             .child(self.render_usage_pills())
             .child(div().w(px(1.)).h(px(24.)).bg(slate_700()))
-            .child(self.render_interactive_pills(cx))
-            .child(self.render_minimized_dock(cx));
+            .child(self.render_interactive_pills(cx));
 
         let root = div()
             .relative()
@@ -779,6 +733,10 @@ impl Render for GpuiComponentBar {
             .relative()
             .size_full()
             .px(px(10.))
+            .pr(px(self
+                .dock
+                .shelf_bounds()
+                .map_or(10.0, |bounds| bounds.width + 8.0)))
             .py(px(6.))
             .flex()
             .flex_row()
@@ -790,6 +748,8 @@ impl Render for GpuiComponentBar {
             .child(left)
             .child(right);
         root.child(panel)
+            .child(self.render_minimized_dock(cx))
+            .into_any_element()
     }
 }
 
@@ -856,11 +816,18 @@ fn main() {
         } else {
             panel_background.into()
         };
-        let height: Pixels = px(42.);
-        let width: Pixels = cx
+        let mut height: Pixels = px(config.presentation.logical_thickness(1.0) as f32);
+        let mut width: Pixels = cx
             .primary_display()
             .map(|display| display.bounds().size.width)
             .unwrap_or(px(1920.));
+        if config.presentation.edge.is_vertical() {
+            height = cx
+                .primary_display()
+                .map(|display| display.bounds().size.height)
+                .unwrap_or(px(1080.));
+            width = px(config.presentation.logical_thickness(1.0) as f32);
+        }
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {

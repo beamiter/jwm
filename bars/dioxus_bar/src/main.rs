@@ -17,18 +17,37 @@ use std::{
 
 use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
-use xbar_core::presentation::{Palette, Rgba};
+use xbar_core::presentation::{Palette, Rect, Rgba};
 use xbar_core::{
-    AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH,
-    DOCK_SLOT_WIDTH, DockBridge, DockItemBinding, LayoutId, MinimizedWindow, ModelConfig,
-    MonitorGeometry, Percent, PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails,
-    TagId, TagState, TransportRecoveryConfig, UserAction,
+    AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, DockBridge, DockItemBinding, LayoutId,
+    MinimizedWindow, ModelConfig, MonitorGeometry, Percent, PlatformEffectHandler, RuntimeUpdate,
+    ShellRoute, SystemDetails, TagId, TagState, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 
-const BAR_LOGICAL_HEIGHT: f64 = 40.0;
+fn bar_presentation() -> &'static xbar_core::presentation::PresentationConfig {
+    static PRESENTATION: OnceLock<xbar_core::presentation::PresentationConfig> = OnceLock::new();
+    PRESENTATION.get_or_init(|| {
+        xbar_core::config::BarConfig::load_default()
+            .unwrap_or_else(|error| {
+                warn!("falling back to the default bar config: {error}");
+                xbar_core::config::BarConfig::default()
+            })
+            .presentation
+    })
+}
+
+fn initial_bar_size() -> LogicalSize<f64> {
+    let config = bar_presentation();
+    let thickness = config.logical_thickness(1.0);
+    if config.edge.is_vertical() {
+        LogicalSize::new(thickness, 800.0)
+    } else {
+        LogicalSize::new(800.0, thickness)
+    }
+}
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 /// Startup diagnostics must never delay creation of the actual bar for long.
@@ -84,6 +103,20 @@ struct RuntimeOwner {
     dock: DockBridge,
 }
 
+struct DockCardView {
+    window: MinimizedWindow,
+    binding: DockItemBinding,
+    slot: Rect,
+    visual: Rect,
+}
+
+#[derive(Default)]
+struct DockView {
+    cards: Vec<DockCardView>,
+    shelf: Option<Rect>,
+    overflow: Option<(Rect, Option<DockItemBinding>, usize)>,
+}
+
 impl RuntimeOwner {
     fn new(shared_path: String) -> Self {
         let config = ModelConfig {
@@ -102,10 +135,9 @@ impl RuntimeOwner {
         }
         .expect("dioxus bar model configuration is valid");
 
-        Self {
-            runtime,
-            dock: DockBridge::new(),
-        }
+        let mut dock = DockBridge::new();
+        dock.set_edge(bar_presentation().edge);
+        Self { runtime, dock }
     }
 
     fn snapshot(&self) -> BarSnapshot {
@@ -140,7 +172,7 @@ impl RuntimeOwner {
             &snapshot,
             self.runtime.transport_generation(),
             scale_factor,
-            BAR_LOGICAL_HEIGHT as f32,
+            bar_presentation().logical_thickness(scale_factor) as f32,
             6.0,
         );
         let now = Instant::now();
@@ -189,28 +221,34 @@ impl RuntimeOwner {
         (update, self.runtime.snapshot())
     }
 
-    fn dock_ui(
-        &self,
-    ) -> (
-        Vec<(MinimizedWindow, f32, DockItemBinding)>,
-        bool,
-        bool,
-        f32,
-    ) {
-        (
-            self.dock
+    fn dock_ui(&self) -> DockView {
+        DockView::from_bridge(&self.dock)
+    }
+}
+
+impl DockView {
+    fn from_bridge(dock: &DockBridge) -> Self {
+        Self {
+            cards: dock
                 .visible_windows()
                 .cloned()
                 .filter_map(|window| {
-                    let scale = self.dock.scale_for(window.token);
-                    let binding = self.dock.item_binding(window.token)?;
-                    Some((window, scale, binding))
+                    let binding = dock.item_binding(window.token)?;
+                    let slot = dock.slot_bounds(window.token)?;
+                    let visual = dock.item_bounds(window.token)?;
+                    Some(DockCardView {
+                        window,
+                        binding,
+                        slot,
+                        visual,
+                    })
                 })
                 .collect(),
-            self.dock.overflow(),
-            self.dock.collapsed(),
-            self.dock.shelf_width(),
-        )
+            shelf: dock.shelf_bounds(),
+            overflow: dock
+                .overflow_bounds()
+                .map(|bounds| (bounds, dock.overflow_binding(), dock.overflow_count())),
+        }
     }
 }
 
@@ -382,11 +420,19 @@ body {{ color: {text}; }}
 }
 
 fn apply_monitor_geometry(geometry: MonitorGeometry, window: &DesktopContext) {
-    let physical_height = (window.scale_factor() * BAR_LOGICAL_HEIGHT)
-        .round()
-        .clamp(1.0, f64::from(u32::MAX)) as u32;
-    window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
-    window.set_inner_size(PhysicalSize::new(geometry.width, physical_height));
+    let config = bar_presentation();
+    match xbar_core::BarPlacement::from_bar_geometry(
+        geometry,
+        config.logical_thickness(window.scale_factor()),
+        window.scale_factor(),
+        config.edge,
+    ) {
+        Ok(placement) => {
+            window.set_outer_position(PhysicalPosition::new(placement.x, placement.y));
+            window.set_inner_size(PhysicalSize::new(placement.width, placement.height));
+        }
+        Err(error) => warn!("ignoring invalid bar geometry: {error}"),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -395,13 +441,70 @@ struct WindowBaseline {
     logical_size: LogicalSize<f64>,
 }
 
-fn restore_window_baseline(baseline: WindowBaseline, window: &DesktopContext) {
+fn window_output_geometry(window: &DesktopContext) -> Option<MonitorGeometry> {
+    window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+        .map(|monitor| MonitorGeometry {
+            x: monitor.position().x,
+            y: monitor.position().y,
+            width: monitor.size().width,
+            height: monitor.size().height,
+        })
+}
+
+fn current_output_baseline(
+    fallback: WindowBaseline,
+    output: Option<MonitorGeometry>,
+    config: &xbar_core::presentation::PresentationConfig,
+    scale: f64,
+) -> WindowBaseline {
+    output
+        .and_then(|output| {
+            xbar_core::BarPlacement::at_edge(
+                output,
+                config.logical_thickness(scale),
+                scale,
+                config.edge,
+            )
+            .ok()
+        })
+        .map_or(fallback, |placement| WindowBaseline {
+            position: Some(PhysicalPosition::new(placement.x, placement.y)),
+            logical_size: LogicalSize::new(
+                f64::from(placement.width) / scale,
+                f64::from(placement.height) / scale,
+            ),
+        })
+}
+
+fn initial_window_baseline(window: &DesktopContext) -> WindowBaseline {
+    let scale = window.scale_factor();
+    current_output_baseline(
+        WindowBaseline {
+            position: window.outer_position().ok(),
+            logical_size: window.inner_size().to_logical::<f64>(scale),
+        },
+        window_output_geometry(window),
+        bar_presentation(),
+        scale,
+    )
+}
+
+fn restore_window_baseline(fallback: WindowBaseline, window: &DesktopContext) {
+    let scale = window.scale_factor();
+    // Scale changes and WM disconnects both need a fresh output placement;
+    // multiplying the startup logical extent would scale the whole monitor.
+    let baseline = current_output_baseline(
+        fallback,
+        window_output_geometry(window),
+        bar_presentation(),
+        scale,
+    );
     if let Some(position) = baseline.position {
         window.set_outer_position(position);
     }
-    let physical_size = baseline
-        .logical_size
-        .to_physical::<u32>(window.scale_factor());
+    let physical_size = baseline.logical_size.to_physical::<u32>(scale);
     window.set_inner_size(PhysicalSize::new(
         physical_size.width.max(1),
         physical_size.height.max(1),
@@ -819,7 +922,7 @@ fn main() {
                 WindowBuilder::new()
                     .with_title("dioxus_bar")
                     .with_position(LogicalPosition::new(0, 0))
-                    .with_inner_size(LogicalSize::new(800.0, BAR_LOGICAL_HEIGHT))
+                    .with_inner_size(initial_bar_size())
                     .with_maximizable(false)
                     .with_minimizable(false)
                     .with_resizable(true)
@@ -881,6 +984,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restored_baseline_uses_current_output_and_physical_thickness_after_scale_change() {
+        use xbar_core::{BarEdge, presentation::PresentationConfig};
+
+        let startup_output = MonitorGeometry {
+            x: -1280,
+            y: 80,
+            width: 1280,
+            height: 720,
+        };
+        let current_output = MonitorGeometry {
+            x: 1920,
+            y: -200,
+            width: 1600,
+            height: 900,
+        };
+        let fallback = WindowBaseline {
+            position: None,
+            logical_size: LogicalSize::new(800.0, 48.0),
+        };
+        for (edge, position, size) in [
+            (BarEdge::Top, (1920, -200), (1600, 48)),
+            (BarEdge::Bottom, (1920, 652), (1600, 48)),
+            (BarEdge::Left, (1920, -200), (48, 900)),
+            (BarEdge::Right, (3472, -200), (48, 900)),
+        ] {
+            let config = PresentationConfig {
+                edge,
+                physical_thickness: Some(48),
+                ..PresentationConfig::default()
+            };
+            let startup = current_output_baseline(fallback, Some(startup_output), &config, 1.0);
+            for current_scale in [1.25, 2.0] {
+                let restored = current_output_baseline(
+                    startup,
+                    Some(current_output),
+                    &config,
+                    current_scale,
+                );
+                assert_eq!(
+                    restored.position,
+                    Some(PhysicalPosition::new(position.0, position.1))
+                );
+                assert_eq!(
+                    restored.logical_size.to_physical::<u32>(current_scale),
+                    PhysicalSize::new(size.0, size.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_only_overflow_remains_visible_without_inventing_a_restore_binding() {
+        let mut snapshot = xbar_core::BarModel::new(ModelConfig::default())
+            .unwrap()
+            .snapshot();
+        snapshot.wm_available = true;
+        snapshot.wm_session_id = 7;
+        snapshot.wm_sequence = Some(11);
+        snapshot.geometry = Some(MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 42,
+        });
+        snapshot.minimized_overflow = true;
+        let mut bridge = DockBridge::new();
+        bridge.synchronize(&snapshot, 1, 1.0, 42.0, 6.0);
+
+        let view = DockView::from_bridge(&bridge);
+        let (bounds, binding, count) = view.overflow.expect("unknown overflow stays visible");
+        assert!(!bounds.is_empty());
+        assert!(view.cards.is_empty());
+        assert!(binding.is_none());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn startup_diagnostic_timeout_kills_and_reaps_the_child() {
         let mut command = Command::new("sleep");
         command.arg("30");
@@ -900,9 +1080,10 @@ fn App() -> Element {
     let window = use_window();
     let window_baseline = {
         let window = window.clone();
-        use_hook(move || WindowBaseline {
-            position: window.outer_position().ok(),
-            logical_size: window.inner_size().to_logical::<f64>(window.scale_factor()),
+        use_hook(move || {
+            let baseline = initial_window_baseline(&window);
+            restore_window_baseline(baseline, &window);
+            baseline
         })
     };
     let mut scale_factor = use_signal(|| window.scale_factor());
@@ -915,6 +1096,10 @@ fn App() -> Element {
             warn!("falling back to the default bar config: {error}");
             xbar_core::config::BarConfig::default()
         })
+    });
+    use_effect(move || {
+        let script = xbar_core::web_layout::install_script(bar_presentation(), scale_factor());
+        let _ = document::eval(&script);
     });
     let mut pressed_button = use_signal(|| None::<usize>);
     let runtime = use_signal(move || Arc::new(Mutex::new(RuntimeOwner::new(shared_path))));
@@ -1094,12 +1279,19 @@ fn App() -> Element {
     } else {
         "[]="
     };
-    let (dock_windows, dock_overflow, dock_collapsed, dock_width) = runtime
+    let dock = runtime
         .read()
         .lock()
         .ok()
         .map(|runtime| runtime.dock_ui())
         .unwrap_or_default();
+    let dock_extent = dock.shelf.map_or(0.0, |shelf| {
+        if bar_presentation().edge.is_vertical() {
+            shelf.height
+        } else {
+            shelf.width
+        }
+    });
 
     let mut handle_button_press = move |index: usize| {
         info!("Button {} pressed", index);
@@ -1138,8 +1330,9 @@ fn App() -> Element {
     rsx! {
         document::Style { "{STYLE_CSS}" }
         document::Style { "{mode_css}" }
+        document::Style { "{xbar_core::web_layout::STYLESHEET}" }
 
-        div { class: "button-row",
+        div { class: "button-row", style: "--xbar-fixed-dock: {dock_extent}px",
             div { class: "buttons-container",
                 for (i , icon) in TAG_ICONS.iter().enumerate() {
                     {
@@ -1156,13 +1349,8 @@ fn App() -> Element {
                                 class: "{button_class}",
                                 title: "Tag {i + 1}",
                                 onmousedown: move |_| handle_button_press(i),
-                                onmouseup: move |_| handle_button_release(i),
                                 onmouseleave: move |_| handle_button_leave(i),
-                                onclick: move |_| {
-                                    if pressed_button() == Some(i) {
-                                        handle_button_release(i);
-                                    }
-                                },
+                                onclick: move |_| handle_button_release(i),
                                 span { class: "nf-icon", "{icon}" }
                             }
                         }
@@ -1242,45 +1430,69 @@ fn App() -> Element {
 
                 div { class: "pill scale-pill", {format!("s: {:.2}", scale_factor())} }
 
+            }
+            if let Some(shelf) = dock.shelf {
                 div {
-                    class: "minimized-dock",
-                    style: "width: {dock_width}px",
-                    title: if dock_collapsed { "Minimized windows hidden on this narrow bar" } else { "Minimized windows" },
-                    for (window, magnification, binding) in dock_windows {
+                    class: "minimized-dock core-dock",
+                    "data-core-dock": "true",
+                    style: "--dock-left: {shelf.x}px; --dock-top: {shelf.y}px; --dock-width: {shelf.width}px; --dock-height: {shelf.height}px",
+                    title: "Minimized windows",
+                    for card in dock.cards {
                         {
-                            let token = window.token;
-                            let title = if window.title.trim().is_empty() {
-                                window.app_id.clone()
-                            } else {
-                                window.title.clone()
-                            };
-                            let class = if window.urgent() {
-                                "minimized-dock-card urgent"
-                            } else {
-                                "minimized-dock-card"
-                            };
-                            let width = DOCK_ITEM_WIDTH * magnification;
-                            let height = DOCK_ITEM_HEIGHT * magnification;
+                            let window = card.window;
+                            let binding = card.binding;
+                            let title = if window.title.trim().is_empty() { window.app_id.clone() } else { window.title.clone() };
+                            let class = if window.urgent() { "minimized-dock-card urgent" } else { "minimized-dock-card" };
+                            let slot_left = card.slot.x - shelf.x;
+                            let slot_top = card.slot.y - shelf.y;
+                            let visual_left = card.visual.x - card.slot.x;
+                            let visual_top = card.visual.y - card.slot.y;
                             rsx! {
-                                div {
-                                    key: "{binding.wm_session_id}-{binding.minimized_generation}-{token.get()}",
+                                button {
+                                    key: "{binding.wm_session_id}-{binding.minimized_generation}-{binding.token.get()}",
                                     class: "minimized-dock-slot",
-                                    style: "width: {DOCK_SLOT_WIDTH}px",
+                                    "data-window-id": "{binding.token.get()}",
+                                    "aria-label": "Restore {title}",
+                                    title: "{title}",
+                                    style: "--slot-left: {slot_left}px; --slot-top: {slot_top}px; --slot-width: {card.slot.width}px; --slot-height: {card.slot.height}px",
                                     onmouseenter: move |_| dispatch_dock_enter.call(binding),
                                     onmouseleave: move |_| dispatch_dock_leave.call(binding),
                                     onclick: move |_| dispatch_dock_restore.call(binding),
                                     div {
                                         class: "{class}",
-                                        title: "{title}",
-                                        style: "width: {width}px; height: {height}px",
+                                        style: "--card-left: {visual_left}px; --card-top: {visual_top}px; --card-width: {card.visual.width}px; --card-height: {card.visual.height}px",
                                         span { "{window.initial()}" }
                                     }
                                 }
                             }
                         }
                     }
-                    if dock_overflow || dock_collapsed {
-                        span { class: "minimized-dock-overflow", title: "More minimized windows", "+" }
+                    if let Some((bounds, binding, count)) = dock.overflow {
+                        {
+                            let left = bounds.x - shelf.x;
+                            let top = bounds.y - shelf.y;
+                            let title = if binding.is_some() {
+                                format!("{count} more minimized windows — restore the most recent")
+                            } else {
+                                "Additional minimized windows".into()
+                            };
+                            let label = if count > 0 { format!("+{count}") } else { "…".into() };
+                            rsx! {
+                                button {
+                                    class: "minimized-dock-slot minimized-dock-overflow",
+                                    style: "--slot-left: {left}px; --slot-top: {top}px; --slot-width: {bounds.width}px; --slot-height: {bounds.height}px",
+                                    title: "{title}",
+                                    "aria-label": "{title}",
+                                    disabled: binding.is_none(),
+                                    onclick: move |_| {
+                                        if let Some(binding) = binding {
+                                            dispatch_dock_restore.call(binding);
+                                        }
+                                    },
+                                    "{label}"
+                                }
+                            }
+                        }
                     }
                 }
             }

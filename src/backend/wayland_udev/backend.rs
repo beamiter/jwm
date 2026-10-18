@@ -5287,6 +5287,12 @@ impl CompositorWindowEffects for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_set_minimized_preview_edge(&mut self, edge: xbar_core::placement::BarEdge) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_minimized_preview_edge(edge);
+        }
+    }
+
     fn compositor_set_minimized_window_preview(
         &mut self,
         window: Option<WindowId>,

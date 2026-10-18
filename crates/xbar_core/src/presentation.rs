@@ -199,6 +199,10 @@ impl Rgba {
 pub enum NodeId {
     Background,
     Tag(TagId),
+    /// Compact workspace navigation when the full tag strip does not fit.
+    WorkspaceOverflow,
+    /// Entry to the shell quick settings when status controls are condensed.
+    StatusOverflow,
     LayoutButton,
     LayoutOption(LayoutId),
     Client,
@@ -553,6 +557,8 @@ pub struct InteractionState {
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     #[serde(default)]
+    pressed_bindings: Option<crate::controls::InputBindings>,
+    #[serde(default)]
     pointer: Option<Point>,
 }
 
@@ -623,24 +629,36 @@ impl InteractionState {
     pub fn clear_hover(&mut self) -> bool {
         let hover_changed = self.hovered.take().is_some();
         let press_changed = self.pressed.take().is_some();
+        self.pressed_bindings = None;
         let pointer_changed = self.pointer.take().is_some();
         hover_changed || press_changed || pointer_changed
     }
 
     /// Cancel a pending activation without changing hover state.
     pub fn cancel_press(&mut self) -> bool {
+        self.pressed_bindings = None;
         self.pressed.take().is_some()
     }
 
     pub fn press(&mut self, scene: &Scene, point: Point) -> bool {
         self.pointer = Some(point);
-        let next = scene.hit_test(point).map(|region| region.id);
-        let changed = self.pressed != next;
+        let hit = scene.hit_test(point);
+        let next = hit.map(|region| region.id);
+        let bindings = hit.map(|region| crate::controls::InputBindings {
+            primary: region.primary,
+            secondary: region.secondary,
+            scroll_up: region.scroll_up,
+            scroll_down: region.scroll_down,
+        });
+        let changed = self.pressed != next || self.pressed_bindings != bindings;
         self.pressed = next;
+        self.pressed_bindings = bindings;
         changed
     }
 
-    /// Activates only when press and release resolve to the same stable node.
+    /// Activates only when press and release resolve to the same stable node
+    /// and action. A model refresh may change an overflow binding or reuse a
+    /// numeric window token; the held gesture must not acquire that new intent.
     pub fn release(
         &mut self,
         scene: &Scene,
@@ -650,8 +668,20 @@ impl InteractionState {
         let released = scene.hit_test(point);
         let action = released
             .filter(|region| Some(region.id) == self.pressed)
-            .and_then(|region| region.action(input));
+            .and_then(|region| region.action(input))
+            .filter(|action| {
+                self.pressed_bindings.is_some_and(|bindings| {
+                    let pressed = match input {
+                        PointerAction::Primary => bindings.primary,
+                        PointerAction::Secondary => bindings.secondary,
+                        PointerAction::ScrollUp => bindings.scroll_up,
+                        PointerAction::ScrollDown => bindings.scroll_down,
+                    };
+                    pressed == Some(*action)
+                })
+            });
         self.pressed = None;
+        self.pressed_bindings = None;
         action
     }
 }
@@ -857,7 +887,13 @@ pub fn logical_bar_height(physical_height: u32, scale_factor: f64) -> Option<f32
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PresentationConfig {
+    /// Output edge. Sidebars use upright, compact cells along the vertical axis.
+    pub edge: crate::placement::BarEdge,
+    /// Logical thickness: height on top/bottom, width on left/right.
     pub bar_height: f32,
+    /// Optional authoritative physical thickness supplied by the WM. This is
+    /// converted exactly once by native frontends when the output scale changes.
+    pub physical_thickness: Option<u32>,
     pub horizontal_padding: f32,
     pub vertical_padding: f32,
     pub item_gap: f32,
@@ -876,10 +912,10 @@ pub struct PresentationConfig {
     pub dock_corner_radius: f32,
     /// Peak scale of the card directly under the pointer.
     pub dock_hover_scale: f32,
-    /// Logical horizontal distance over which neighbouring cards magnify.
+    /// Logical distance along the bar's main axis over which neighbouring cards magnify.
     pub dock_influence_radius: f32,
     pub dock_separator_width: f32,
-    /// Preferred fraction reserved for tags/layout before right-side items.
+    /// Preferred leading fraction reserved for workspaces/layout before status items.
     pub left_fraction: f32,
     /// Labels are looked up only for the model-bounded visible tag indices;
     /// unused entries and source-vector spare capacity are never projected.
@@ -917,7 +953,9 @@ pub struct PresentationConfig {
 impl Default for PresentationConfig {
     fn default() -> Self {
         Self {
+            edge: crate::placement::BarEdge::Top,
             bar_height: 42.0,
+            physical_thickness: None,
             horizontal_padding: 10.0,
             vertical_padding: 6.0,
             item_gap: 6.0,
@@ -962,6 +1000,22 @@ impl Default for PresentationConfig {
 }
 
 impl PresentationConfig {
+    /// The native surface's thickness in logical units. WM pixels are already
+    /// physical; scaling them twice would reserve and paint different strips.
+    #[must_use]
+    pub fn logical_thickness(&self, scale_factor: f64) -> f64 {
+        let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        self.physical_thickness
+            .filter(|pixels| *pixels > 0)
+            .map_or(f64::from(self.bar_height), |pixels| {
+                f64::from(pixels) / scale
+            })
+    }
+
     /// Replace semantic labels and dynamic tag labels from one shared icon
     /// preset while preserving geometry, visibility, and threshold policy.
     /// Derived visual strings are bounded before they fan out into these
@@ -1059,48 +1113,155 @@ struct LayoutPass<'a, M> {
     measurer: &'a M,
 }
 
-/// Geometry shared by Dock reservation and painting. Keeping the capacity
-/// calculation here guarantees that width withheld from status controls can
-/// actually produce at least one shelf slot in the Dock painting pass.
-#[derive(Debug, Clone, Copy)]
-struct DockMetrics {
-    padding: f32,
+/// One frame's geometry and paint context shared by the two control groups.
+/// Each group selects only its own main-axis interval and content priority.
+#[derive(Clone, Copy)]
+struct ControlGroupContext<'a> {
+    axis: BarAxis,
+    cross: f32,
+    cross_size: f32,
     gap: f32,
-    separator_width: f32,
-    item_height: f32,
-    item_width: f32,
-    peak_scale: f32,
-    slot_width: f32,
-    slot_pitch: f32,
-    fixed_width: f32,
+    interaction: &'a InteractionState,
+    palette: Palette,
+}
+
+/// Coordinate vocabulary shared by layout and Dock reporting. Only rectangles
+/// and pointer distances change axes: glyphs and image pixels stay upright.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BarAxis {
+    pub(crate) vertical: bool,
+    pub(crate) bounds: Rect,
+}
+
+impl BarAxis {
+    pub(crate) fn new(edge: crate::placement::BarEdge, viewport: Size, thickness: f32) -> Self {
+        use crate::placement::BarEdge;
+        let thickness = finite_non_negative(thickness);
+        let bounds = match edge {
+            BarEdge::Top => Rect::new(0.0, 0.0, viewport.width, thickness.min(viewport.height)),
+            BarEdge::Bottom => {
+                let height = thickness.min(viewport.height);
+                Rect::new(0.0, viewport.height - height, viewport.width, height)
+            }
+            BarEdge::Left => Rect::new(0.0, 0.0, thickness.min(viewport.width), viewport.height),
+            BarEdge::Right => {
+                let width = thickness.min(viewport.width);
+                Rect::new(viewport.width - width, 0.0, width, viewport.height)
+            }
+        };
+        Self {
+            vertical: edge.is_vertical(),
+            bounds,
+        }
+    }
+
+    pub(crate) const fn from_rect(edge: crate::placement::BarEdge, bounds: Rect) -> Self {
+        Self {
+            vertical: edge.is_vertical(),
+            bounds,
+        }
+    }
+
+    pub(crate) fn main_start(self) -> f32 {
+        if self.vertical {
+            self.bounds.y
+        } else {
+            self.bounds.x
+        }
+    }
+    pub(crate) fn cross_start(self) -> f32 {
+        if self.vertical {
+            self.bounds.x
+        } else {
+            self.bounds.y
+        }
+    }
+    pub(crate) fn main_len(self) -> f32 {
+        if self.vertical {
+            self.bounds.height
+        } else {
+            self.bounds.width
+        }
+    }
+    pub(crate) fn cross_len(self) -> f32 {
+        if self.vertical {
+            self.bounds.width
+        } else {
+            self.bounds.height
+        }
+    }
+    pub(crate) fn main_end(self) -> f32 {
+        self.main_start() + self.main_len()
+    }
+    pub(crate) fn main(self, point: Point) -> f32 {
+        if self.vertical { point.y } else { point.x }
+    }
+    pub(crate) fn rect(self, main: f32, cross: f32, extent: f32, thickness: f32) -> Rect {
+        if self.vertical {
+            Rect::new(cross, main, thickness, extent)
+        } else {
+            Rect::new(main, cross, extent, thickness)
+        }
+    }
+    pub(crate) fn point(self, main: f32, cross: f32) -> Point {
+        if self.vertical {
+            Point::new(cross, main)
+        } else {
+            Point::new(main, cross)
+        }
+    }
+}
+
+/// Shared resting-card/slot metrics. A vertical shelf keeps landscape cards;
+/// its capacity and magnification operate on their *height*, never a rotated
+/// horizontal strip. Reporting and drawing use this exact calculation.
+#[derive(Debug, Clone, Copy)]
+pub struct DockMetrics {
+    pub padding: f32,
+    pub gap: f32,
+    pub separator_width: f32,
+    pub item_height: f32,
+    pub item_width: f32,
+    pub peak_scale: f32,
+    pub slot_extent: f32,
+    pub slot_pitch: f32,
+    fixed_extent: f32,
+    vertical: bool,
 }
 
 impl DockMetrics {
-    fn new(config: &PresentationConfig, available_height: f32) -> Option<Self> {
+    pub fn new(config: &PresentationConfig, available_cross: f32) -> Option<Self> {
         let padding = finite_non_negative(config.dock_shelf_padding);
         let gap = finite_non_negative(config.dock_item_gap);
         let separator_width = finite_non_negative(config.dock_separator_width);
-        let usable_height = (available_height - padding * 2.0).max(0.0);
-        let item_height = finite_non_negative(config.dock_item_size).min(usable_height);
+        let usable_cross = (finite_non_negative(available_cross) - padding * 2.0).max(0.0);
+        let aspect_ratio = if config.dock_item_aspect_ratio.is_finite() {
+            config.dock_item_aspect_ratio.clamp(1.0, 4.0)
+        } else {
+            1.0
+        };
+        let vertical = config.edge.is_vertical();
+        let item_height = finite_non_negative(config.dock_item_size).min(if vertical {
+            usable_cross / aspect_ratio
+        } else {
+            usable_cross
+        });
         if item_height < 1.0 {
             return None;
         }
-
-        let aspect_ratio = if config.dock_item_aspect_ratio.is_finite() {
-            config.dock_item_aspect_ratio.max(1.0)
-        } else {
-            1.0
-        };
-        let configured_scale = if config.dock_hover_scale.is_finite() {
-            config.dock_hover_scale.max(1.0)
-        } else {
-            1.0
-        };
-        let peak_scale = configured_scale.min((usable_height / item_height).max(1.0));
         let item_width = item_height * aspect_ratio;
-        let slot_width = item_width * peak_scale;
-        let slot_pitch = slot_width + gap;
-        let fixed_width = padding * 3.0 + separator_width;
+        let configured_scale = if config.dock_hover_scale.is_finite() {
+            config.dock_hover_scale.clamp(1.0, 3.0)
+        } else {
+            1.0
+        };
+        let item_cross = if vertical { item_width } else { item_height };
+        let item_main = if vertical { item_height } else { item_width };
+        let peak_scale = configured_scale.min((usable_cross / item_cross).max(1.0));
+        // Magnification changes pixels, never the acquisition target. A full
+        // 32px slot also makes small resting thumbnails easy to restore.
+        let slot_extent = (item_main * peak_scale).max(32.0);
+        let slot_pitch = slot_extent + gap;
         Some(Self {
             padding,
             gap,
@@ -1108,32 +1269,75 @@ impl DockMetrics {
             item_height,
             item_width,
             peak_scale,
-            slot_width,
+            slot_extent,
             slot_pitch,
-            fixed_width,
+            fixed_extent: padding * 3.0 + separator_width,
+            vertical,
         })
     }
 
-    fn minimum_width(self) -> f32 {
-        self.fixed_width + self.slot_width
+    /// Main-axis extent for the separator and one fixed acquisition slot.
+    #[must_use]
+    pub fn minimum_extent(self) -> f32 {
+        self.minimum_width()
     }
 
-    fn slot_capacity(self, available_width: f32) -> usize {
-        let minimum_width = self.minimum_width();
-        if available_width < minimum_width {
+    /// Main-axis extent for exactly `count` fixed slots, including chrome.
+    #[must_use]
+    pub fn extent_for_slots(self, count: usize) -> f32 {
+        self.width_for_slots(count)
+    }
+
+    pub(crate) fn minimum_width(self) -> f32 {
+        self.fixed_extent + self.slot_extent
+    }
+    pub fn slot_capacity(self, available: f32) -> usize {
+        // Opposite-end subtraction can lose a few ULPs on long outputs;
+        // an exactly reserved shelf must not unexpectedly drop its last slot.
+        let tolerance = 0.001;
+        if available + tolerance < self.minimum_width() {
             return 0;
         }
-        1_usize
-            .saturating_add(((available_width - minimum_width) / self.slot_pitch).floor() as usize)
+        1_usize.saturating_add(
+            ((available - self.minimum_width() + tolerance) / self.slot_pitch)
+                .floor()
+                .max(0.0) as usize,
+        )
     }
-
-    fn width_for_slots(self, slot_count: usize) -> f32 {
-        if slot_count == 0 {
+    pub(crate) fn width_for_slots(self, count: usize) -> f32 {
+        if count == 0 {
             return 0.0;
         }
-        self.fixed_width
-            + slot_count as f32 * self.slot_width
-            + slot_count.saturating_sub(1) as f32 * self.gap
+        self.fixed_extent
+            + count as f32 * self.slot_extent
+            + count.saturating_sub(1) as f32 * self.gap
+    }
+    pub(crate) fn slot_start(self, axis: BarAxis) -> f32 {
+        axis.main_start() + self.padding * 2.0 + self.separator_width
+    }
+    pub(crate) fn card_rect(self, axis: BarAxis, slot: usize, scale: f32) -> Rect {
+        let center = self.slot_start(axis) + slot as f32 * self.slot_pitch + self.slot_extent * 0.5;
+        let width = self.item_width * scale;
+        let height = self.item_height * scale;
+        let (main, cross) = if self.vertical {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        axis.rect(
+            center - main * 0.5,
+            axis.cross_start() + (axis.cross_len() - cross) * 0.5,
+            main,
+            cross,
+        )
+    }
+    pub(crate) fn slot_rect(self, axis: BarAxis, slot: usize) -> Rect {
+        axis.rect(
+            self.slot_start(axis) + slot as f32 * self.slot_pitch,
+            axis.cross_start(),
+            self.slot_extent,
+            axis.cross_len(),
+        )
     }
 }
 
@@ -1194,172 +1398,497 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             status,
         } = PresentationProjector::project(view, self.config);
         let viewport = viewport.normalized();
-        let clip = Rect::from_size(viewport);
-        let bar_height = finite_non_negative(self.config.bar_height).min(viewport.height);
-        let bar = Rect::new(0.0, 0.0, viewport.width, bar_height);
+        let axis = BarAxis::new(self.config.edge, viewport, self.config.bar_height);
+        let bar = axis.bounds;
         let palette = Palette::for_theme(theme);
         let tag_palette =
             TagPalette::for_wallpaper(theme, view.wallpaper_luminance, self.config.tag_contrast);
         let mut scene = Scene {
             viewport,
-            clip,
+            clip: Rect::from_size(viewport),
             nodes: Vec::new(),
             hits: Vec::new(),
         };
-
         if bar.is_empty() {
             return scene;
         }
-
         scene.nodes.push(SceneNode::Background {
             id: NodeId::Background,
             bounds: bar,
             fill: palette.background,
         });
 
-        let horizontal_padding =
-            finite_non_negative(self.config.horizontal_padding).min(bar.width * 0.5);
-        let vertical_padding =
-            finite_non_negative(self.config.vertical_padding).min(bar.height * 0.5);
-        let gap = finite_non_negative(self.config.item_gap);
-        let pill_height = (bar.height - 2.0 * vertical_padding).max(0.0);
-        if pill_height <= 0.0 {
+        let main_padding =
+            finite_non_negative(self.config.horizontal_padding).min(axis.main_len() * 0.5);
+        let cross_padding =
+            finite_non_negative(self.config.vertical_padding).min(axis.cross_len() * 0.5);
+        let cross_size = (axis.cross_len() - cross_padding * 2.0).max(0.0);
+        if cross_size <= 0.0 {
             return scene;
         }
-
-        let y = bar.y + vertical_padding;
-        let content_left = bar.x + horizontal_padding;
-        let content_right = (bar.right() - horizontal_padding).max(content_left);
+        let cross = axis.cross_start() + cross_padding;
+        let gap = finite_non_negative(self.config.item_gap);
+        let start = axis.main_start() + main_padding;
+        let end = (axis.main_end() - main_padding).max(start);
+        let total = end - start;
+        let target = self.minimum_target_extent();
+        if total < target {
+            return scene;
+        }
         let left_fraction = if self.config.left_fraction.is_finite() {
             self.config.left_fraction.clamp(0.2, 0.8)
         } else {
             0.42
         };
-        let right_floor = content_left + (content_right - content_left) * left_fraction;
-        let mut right_cursor = content_right;
-        let mut dock_bounds = None;
-        let dock_enabled = self.config.visibility.minimized_windows && view.wm_available;
-        let dock_available_width = (content_right - right_floor).max(0.0);
-        let dock_reserve = if dock_enabled {
-            self.dock_reserve_width(
-                minimized_windows.len(),
-                minimized_overflow,
-                dock_available_width,
-                bar.height,
-            )
+        let layout_extent = self.control_extent(&layout_button, true);
+        let tag_ideal: f32 = tags
+            .iter()
+            .map(|control| self.control_extent(control, false) + gap)
+            .sum();
+        let menu_ideal: f32 = layout_choices
+            .iter()
+            .map(|control| self.control_extent(control, true) + gap)
+            .sum();
+        let leading_ideal = (tag_ideal + layout_extent + menu_ideal).max(target);
+        let leading_minimum = if tags.is_empty() {
+            layout_extent
         } else {
-            0.0
+            target * 2.0 + gap
         };
-        let dock_gap = if dock_reserve > 0.0 { gap } else { 0.0 };
-
-        for control in status {
-            let spec = PillSpec::from(control);
-            let available = (right_cursor - right_floor - dock_reserve - dock_gap).max(0.0);
-            if available < self.minimum_visible_width() {
-                break;
-            }
-            let natural = self.pill_width(&spec.text);
-            let width = natural.min(available);
-            let candidate = Rect::new(right_cursor - width, y, width, pill_height);
-            let Some(bounds) = candidate.intersection(bar) else {
-                break;
-            };
-            self.push_pill(&mut scene, bounds, spec, interaction, palette, Some(bar));
-            right_cursor = (bounds.x - gap).max(content_left);
+        let mut leading_budget = leading_ideal.min((total * left_fraction).max(leading_minimum));
+        // Keep the clock and a workspace usable on a very short output. A
+        // missing layout-menu entry remains available by wheel on its button.
+        if !status.is_empty() {
+            leading_budget = leading_budget.min((total - target - gap).max(target));
         }
+        leading_budget = leading_budget.min(total);
+        let trailing_budget = (total - leading_budget - gap).max(0.0);
+        let dock_enabled = self.config.visibility.minimized_windows && view.wm_available;
+        let metrics = dock_enabled
+            .then(|| DockMetrics::new(self.config, axis.cross_len()))
+            .flatten();
+        let critical_status = status.len().min(3) as f32 * (target + gap);
+        let dock_budget = metrics.map_or(0.0, |metrics| {
+            let allowance = if status.is_empty() {
+                trailing_budget
+            } else {
+                (trailing_budget - critical_status)
+                    .max(0.0)
+                    .min(trailing_budget * 0.38)
+            };
+            if metrics.slot_capacity(allowance) == 0 {
+                return 0.0;
+            }
+            let count = minimized_windows.len()
+                + usize::from(minimized_overflow || minimized_windows.is_empty());
+            metrics.width_for_slots(count).min(allowance)
+        });
+        let status_budget =
+            (trailing_budget - dock_budget - if dock_budget > 0.0 { gap } else { 0.0 }).max(0.0);
+        let group_context = ControlGroupContext {
+            axis,
+            cross,
+            cross_size,
+            gap,
+            interaction,
+            palette,
+        };
+        let mut trailing = self.push_status_group(
+            &mut scene,
+            status,
+            status_budget,
+            end,
+            group_context,
+            view.wm_available,
+        );
 
-        if dock_enabled {
-            let available = (right_cursor - right_floor).max(0.0);
-            if let Some(bounds) = self.push_dock(
+        let dock_bounds = if dock_budget > 0.0 {
+            let available = axis.rect(
+                (trailing - dock_budget).max(start + leading_budget),
+                axis.cross_start(),
+                dock_budget.min((trailing - start - leading_budget).max(0.0)),
+                axis.cross_len(),
+            );
+            let result = self.push_dock(
                 &mut scene,
-                Rect::new(right_floor, bar.y, available, bar.height),
+                available,
                 minimized_windows,
                 minimized_overflow,
                 interaction,
                 palette,
-            ) {
-                dock_bounds = Some(bounds);
-                right_cursor = (bounds.x - gap).max(content_left);
+            );
+            if let Some(bounds) = result {
+                trailing = BarAxis::from_rect(self.config.edge, bounds).main_start() - gap;
             }
-        }
+            result
+        } else {
+            None
+        };
 
-        let left_limit = (right_cursor - gap).max(content_left);
-        let mut left_cursor = content_left;
-
-        for control in tags {
-            let available = (left_limit - left_cursor).max(0.0);
-            if available < self.minimum_visible_width() {
-                break;
-            }
-            let label = control.text();
-            let width = self.pill_width(&label).min(available);
-            let bounds = Rect::new(left_cursor, y, width, pill_height);
+        let leading_limit = (start + leading_budget).min(trailing).max(start);
+        let room = leading_limit - start;
+        let layout_reserved = if tags.is_empty() || room >= target + gap + layout_extent {
+            layout_extent
+        } else {
+            0.0
+        };
+        let tag_budget = (room
+            - layout_reserved
+            - if layout_reserved > 0.0 && !tags.is_empty() {
+                gap
+            } else {
+                0.0
+            })
+        .max(0.0);
+        let mut leading = self.push_workspace_group(
+            &mut scene,
+            tags,
+            tag_budget,
+            start,
+            group_context,
+            tag_palette,
+        );
+        if layout_reserved > 0.0 {
+            let bounds = axis.rect(
+                leading,
+                cross,
+                layout_extent.min((leading_limit - leading).max(0.0)),
+                cross_size,
+            );
             self.push_pill(
                 &mut scene,
                 bounds,
-                PillSpec {
-                    tag_palette: Some(tag_palette),
-                    ..PillSpec::from(control)
-                },
+                self.pill_spec(layout_button, true),
                 interaction,
                 palette,
                 Some(bar),
             );
-            left_cursor = bounds.right() + gap;
+            leading += layout_extent + gap;
         }
 
-        let layout_text = layout_button.text();
-        if let Some(bounds) =
-            self.place_left_pill(left_cursor, left_limit, y, pill_height, &layout_text)
-        {
-            self.push_pill(
-                &mut scene,
-                bounds,
-                PillSpec::from(layout_button),
-                interaction,
-                palette,
-                Some(bar),
-            );
-            left_cursor = bounds.right() + gap;
-        }
-
+        // A wide output can expand the layout chooser into the spare centre.
+        // A sidebar keeps these labels upright; wheel navigation on the main
+        // button still reaches every offered layout if the centre is crowded.
         for control in layout_choices {
-            let text = control.text();
-            let Some(bounds) = self.place_left_pill(left_cursor, left_limit, y, pill_height, &text)
-            else {
+            let extent = self.control_extent(&control, true);
+            if trailing - leading < extent {
                 break;
-            };
+            }
             self.push_pill(
                 &mut scene,
-                bounds,
-                PillSpec::from(control),
+                axis.rect(leading, cross, extent, cross_size),
+                self.pill_spec(control, true),
                 interaction,
                 palette,
                 Some(bar),
             );
-            left_cursor = bounds.right() + gap;
+            leading += extent + gap;
         }
-
-        if let Some(client_name) = client_name {
-            let client_left = left_cursor.max(content_left);
-            let client_right = right_cursor.min(content_right);
-            let available = client_right - client_left;
-            if available >= self.minimum_visible_width() {
+        let dock_caption_visible = dock_bounds.is_some()
+            && matches!(interaction.hovered(), Some(NodeId::MinimizedWindow(_)));
+        // Hovering a minimized application temporarily owns the title slot.
+        // Painting both labels in that same centre made the two names run
+        // together and partially covered the focused application's title.
+        if let Some(client_name) = client_name.filter(|_| !dock_caption_visible) {
+            let available = trailing - leading;
+            if axis.vertical {
+                // The desktop icon is useful on a narrow sidebar; a vertical
+                // ribbon of truncated title characters is not. The complete
+                // title remains available to the frontend's native tooltip.
+                if let Some(icon) = client_icon.as_ref()
+                    && available >= target
+                {
+                    let size = cross_size.min(target);
+                    scene.nodes.push(SceneNode::Image {
+                        id: NodeId::ClientIcon,
+                        bounds: Rect::new(
+                            cross + (cross_size - size) * 0.5,
+                            leading + (available - size) * 0.5,
+                            size,
+                            size,
+                        ),
+                        source: ImageSource::from(icon),
+                        state: VisualState::default(),
+                    });
+                }
+            } else if available >= self.minimum_visible_width() {
                 self.push_client_title(
                     &mut scene,
-                    Rect::new(client_left, y, available, pill_height),
+                    axis.rect(leading, cross, available, cross_size),
                     &client_name.value,
                     client_icon.as_ref(),
                     palette,
                 );
             }
         }
-
         if let Some(bounds) = dock_bounds {
-            self.push_dock_hover_title(&mut scene, bounds, view, interaction, left_cursor, gap);
+            self.push_dock_hover_title(&mut scene, bounds, view, interaction, leading, gap);
         }
-
         scene
+    }
+
+    fn minimum_target_extent(&self) -> f32 {
+        32.0_f32.max(self.font_size() * 1.8)
+    }
+
+    fn control_extent(&self, control: &ControlSpec, compact: bool) -> f32 {
+        if self.config.edge.is_vertical() {
+            let lines = control.sidebar_lines().len().max(1) as f32;
+            (lines * (self.font_size() + 2.0) + 8.0).max(self.minimum_target_extent())
+        } else {
+            let text = if compact {
+                control.compact_value()
+            } else {
+                control.text()
+            };
+            let padding = if compact {
+                self.horizontal_text_padding().min(4.0)
+            } else {
+                self.horizontal_text_padding()
+            };
+            (self.measurer.measure(&text, self.font_size()).width + padding * 2.0)
+                .max(self.minimum_target_extent())
+                .min(240.0)
+        }
+    }
+
+    fn pill_spec(&self, control: ControlSpec, compact: bool) -> PillSpec {
+        let lines = if self.config.edge.is_vertical() {
+            control.sidebar_lines()
+        } else {
+            Vec::new()
+        };
+        let text = if compact && !self.config.edge.is_vertical() {
+            control.compact_value()
+        } else {
+            control.text()
+        };
+        PillSpec {
+            text,
+            lines,
+            compact,
+            ..PillSpec::from(control)
+        }
+    }
+
+    fn push_status_group(
+        &self,
+        scene: &mut Scene,
+        controls: Vec<ControlSpec>,
+        budget: f32,
+        end: f32,
+        context: ControlGroupContext<'_>,
+        wm_available: bool,
+    ) -> f32 {
+        let ControlGroupContext {
+            axis,
+            cross,
+            cross_size,
+            gap,
+            interaction,
+            palette,
+        } = context;
+        if controls.is_empty() || budget < self.minimum_target_extent() {
+            return end;
+        }
+        let target = self.minimum_target_extent();
+        let compact_total: f32 = controls
+            .iter()
+            .map(|control| self.control_extent(control, true) + gap)
+            .sum::<f32>()
+            - gap;
+        let overflow = compact_total > budget && wm_available && budget >= target * 2.0 + gap;
+        let mut remaining = budget - if overflow { target + gap } else { 0.0 };
+        let mut order: Vec<_> = (0..controls.len()).collect();
+        order.sort_by_key(|index| status_priority(&controls[*index]));
+        let mut extents = vec![0.0; controls.len()];
+        let mut compact = vec![true; controls.len()];
+        for &index in &order {
+            if overflow && matches!(controls[index].id, NodeId::ShellHub(_)) {
+                continue;
+            }
+            let preferred = self.control_extent(&controls[index], true);
+            if remaining < target {
+                continue;
+            }
+            let extent = preferred.min(remaining);
+            extents[index] = extent;
+            remaining = (remaining - extent - gap).max(0.0);
+        }
+        // Spend spare room on actual readings before expanding the clock's
+        // date. On wide screens this reproduces the full horizontal content.
+        order.sort_by_key(|index| {
+            (
+                controls[*index].id == NodeId::Clock,
+                status_priority(&controls[*index]),
+            )
+        });
+        if !axis.vertical {
+            for index in order {
+                if extents[index] == 0.0 {
+                    continue;
+                }
+                let natural = self.control_extent(&controls[index], false);
+                let extra = (natural - extents[index]).max(0.0);
+                if extra <= remaining {
+                    remaining -= extra;
+                    extents[index] = natural;
+                    compact[index] = false;
+                }
+            }
+        }
+        let hidden = extents.iter().filter(|extent| **extent == 0.0).count();
+        let mut cursor = end;
+        for (index, control) in controls.into_iter().enumerate() {
+            let extent = extents[index];
+            if extent == 0.0 {
+                continue;
+            }
+            let bounds = axis.rect(cursor - extent, cross, extent, cross_size);
+            self.push_pill(
+                scene,
+                bounds,
+                self.pill_spec(control, compact[index]),
+                interaction,
+                palette,
+                Some(axis.bounds),
+            );
+            cursor -= extent + gap;
+        }
+        if overflow && hidden > 0 {
+            self.push_pill(
+                scene,
+                axis.rect(cursor - target, cross, target, cross_size),
+                PillSpec {
+                    id: NodeId::StatusOverflow,
+                    text: "…".to_owned(),
+                    lines: Vec::new(),
+                    compact: true,
+                    primary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
+                    secondary: Some(UserAction::OpenAudioControl),
+                    scroll_up: None,
+                    scroll_down: None,
+                    state: VisualState::default(),
+                    progress: None,
+                    tag_palette: None,
+                },
+                interaction,
+                palette,
+                Some(axis.bounds),
+            );
+            cursor -= target + gap;
+        }
+        cursor
+    }
+
+    fn push_workspace_group(
+        &self,
+        scene: &mut Scene,
+        controls: Vec<ControlSpec>,
+        budget: f32,
+        start: f32,
+        context: ControlGroupContext<'_>,
+        tag_palette: TagPalette,
+    ) -> f32 {
+        let ControlGroupContext {
+            axis,
+            cross,
+            cross_size,
+            gap,
+            interaction,
+            palette,
+        } = context;
+        let target = self.minimum_target_extent();
+        if controls.is_empty() || budget < target {
+            return start;
+        }
+        let natural: Vec<_> = controls
+            .iter()
+            .map(|control| self.control_extent(control, false).min(96.0))
+            .collect();
+        let full_width =
+            natural.iter().sum::<f32>() + controls.len().saturating_sub(1) as f32 * gap;
+        let active = controls
+            .iter()
+            .position(|control| control.state.selected)
+            .unwrap_or(0);
+        let mut selected = vec![false; controls.len()];
+        let overflow = full_width > budget && budget >= target * 2.0 + gap;
+        let mut remaining = budget - if overflow { target + gap } else { 0.0 };
+        let mut order: Vec<_> = (0..controls.len()).collect();
+        order.sort_by_key(|index| {
+            let state = controls[*index].state;
+            (
+                !state.selected,
+                !state.urgent,
+                !state.occupied,
+                index.abs_diff(active),
+                *index,
+            )
+        });
+        for index in order {
+            let extent = if full_width <= budget {
+                natural[index]
+            } else {
+                target
+            };
+            if extent <= remaining {
+                selected[index] = true;
+                remaining = (remaining - extent - gap).max(0.0);
+            }
+        }
+        let missing = selected.iter().filter(|selected| !**selected).count();
+        let previous = controls[active].bindings.scroll_up;
+        let next = controls[active].bindings.scroll_down;
+        let enabled = controls[active].state.enabled;
+        let mut cursor = start;
+        for (index, control) in controls.into_iter().enumerate() {
+            if !selected[index] {
+                continue;
+            }
+            let extent = if full_width <= budget {
+                natural[index]
+            } else {
+                target
+            };
+            let spec = PillSpec {
+                tag_palette: Some(tag_palette),
+                ..self.pill_spec(control, full_width > budget)
+            };
+            self.push_pill(
+                scene,
+                axis.rect(cursor, cross, extent, cross_size),
+                spec,
+                interaction,
+                palette,
+                Some(axis.bounds),
+            );
+            cursor += extent + gap;
+        }
+        if overflow && missing > 0 {
+            self.push_pill(
+                scene,
+                axis.rect(cursor, cross, target, cross_size),
+                PillSpec {
+                    id: NodeId::WorkspaceOverflow,
+                    text: format!("+{missing}"),
+                    lines: Vec::new(),
+                    compact: true,
+                    primary: enabled.then_some(next).flatten(),
+                    secondary: enabled.then_some(previous).flatten(),
+                    scroll_up: enabled.then_some(previous).flatten(),
+                    scroll_down: enabled.then_some(next).flatten(),
+                    state: VisualState::default(),
+                    progress: None,
+                    tag_palette: None,
+                },
+                interaction,
+                palette,
+                Some(axis.bounds),
+            );
+            cursor += target + gap;
+        }
+        cursor
     }
 
     /// The focused window's title, optionally preceded by its desktop icon.
@@ -1382,7 +1911,9 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         let icon_size = icon
             .map(|_| self.client_icon_size(bounds.height))
             .filter(|size| {
-                *size > 0.0 && bounds.width - (*size + gap) >= self.minimum_visible_width()
+                *size > 0.0
+                    && bounds.width - (*size + gap)
+                        >= self.minimum_visible_width().max(self.font_size() * 3.0)
             })
             .unwrap_or(0.0);
         let icon_advance = if icon_size > 0.0 {
@@ -1441,7 +1972,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         dock: Rect,
         view: BarView<'_>,
         interaction: &InteractionState,
-        content_left: f32,
+        content_start: f32,
         gap: f32,
     ) {
         let Some(NodeId::MinimizedWindow(token)) = interaction.hovered() else {
@@ -1458,15 +1989,36 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         if title.is_empty() {
             return;
         }
-        let available = (dock.x - gap - content_left).max(0.0);
+        let axis = BarAxis::from_rect(self.config.edge, dock);
+        let available = (axis.main_start() - gap - content_start).max(0.0);
         if available < self.minimum_visible_width() {
             return;
         }
-        let padding = self.horizontal_text_padding().min(8.0);
-        let natural = self.measurer.measure(title, self.font_size()).width + padding * 2.0;
-        let width = natural.min(180.0).min(available);
-        let bounds = Rect::new(dock.x - gap - width, dock.y, width, dock.height);
-        let text = self.fit_text(title, width, padding);
+        let padding = self
+            .horizontal_text_padding()
+            .min(if axis.vertical { 3.0 } else { 8.0 });
+        let bounds = if axis.vertical {
+            // A short upright caption uses spare centre space. It never
+            // extends beyond the bar where a native surface would crop it;
+            // the compositor preview itself is placed inward by the WM.
+            let height = (self.font_size() * 2.0 + 8.0).min(available);
+            axis.rect(
+                axis.main_start() - gap - height,
+                axis.cross_start(),
+                height,
+                axis.cross_len(),
+            )
+        } else {
+            let natural = self.measurer.measure(title, self.font_size()).width + padding * 2.0;
+            let width = natural.min(180.0).min(available);
+            axis.rect(
+                axis.main_start() - gap - width,
+                axis.cross_start(),
+                width,
+                axis.cross_len(),
+            )
+        };
+        let text = self.fit_text(title, bounds.width, padding);
         if text.is_empty() {
             return;
         }
@@ -1478,7 +2030,8 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         scene.nodes.push(SceneNode::RoundedRect {
             id: NodeId::MinimizedWindow(token),
             bounds,
-            radius: finite_non_negative(self.config.dock_corner_radius).min(bounds.height * 0.5),
+            radius: finite_non_negative(self.config.dock_corner_radius)
+                .min(bounds.width.min(bounds.height) * 0.5),
             fill: palette.occupied,
             stroke: None,
             state,
@@ -1494,11 +2047,9 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         });
     }
 
-    /// Paint a right-aligned macOS-style minimized-window shelf.
-    ///
-    /// Every card owns a fixed slot large enough for peak magnification. The
-    /// pointer therefore grows the hovered card and its neighbours without
-    /// shifting client text or status controls between frames.
+    /// Paint a shelf ending at the inner boundary of the status group. Fixed
+    /// slots own their complete cross-axis strip, including the screen edge;
+    /// magnification changes only the card image inside that target.
     fn push_dock(
         &self,
         scene: &mut Scene,
@@ -1511,39 +2062,33 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         if available.is_empty() {
             return None;
         }
-        let metrics = DockMetrics::new(self.config, available.height)?;
-        let max_slots = metrics.slot_capacity(available.width);
+        let available_axis = BarAxis::from_rect(self.config.edge, available);
+        let metrics = DockMetrics::new(self.config, available_axis.cross_len())?;
+        let max_slots = metrics.slot_capacity(available_axis.main_len());
         if max_slots == 0 {
             return None;
         }
-
         let empty_fallback = controls.is_empty() && !upstream_overflow;
-        let local_overflow = controls.len() > max_slots;
-        let show_overflow = upstream_overflow || local_overflow;
+        let show_overflow = upstream_overflow || controls.len() > max_slots;
         let item_capacity = max_slots.saturating_sub(usize::from(show_overflow));
         let first = controls.len().saturating_sub(item_capacity);
         let visible = &controls[first..];
-        let slot_count = visible.len() + usize::from(show_overflow || empty_fallback);
-
-        let width = metrics.width_for_slots(slot_count);
-        let candidate = Rect::new(
-            available.right() - width,
-            available.y,
-            width,
-            available.height,
-        );
-        let bounds = candidate.intersection(available)?;
-        if bounds.is_empty() {
-            return None;
-        }
-
+        let count = visible.len() + usize::from(show_overflow || empty_fallback);
+        let extent = metrics.width_for_slots(count);
+        let bounds = available_axis
+            .rect(
+                available_axis.main_end() - extent,
+                available_axis.cross_start(),
+                extent,
+                available_axis.cross_len(),
+            )
+            .intersection(available)?;
+        let axis = BarAxis::from_rect(self.config.edge, bounds);
         scene.nodes.push(SceneNode::RoundedRect {
             id: NodeId::DockShelf,
             bounds,
-            radius: finite_non_negative(self.config.dock_corner_radius).min(bounds.height * 0.5),
-            // An empty shelf is still a full animation target for the first
-            // minimized window, but macOS only exposes its separator until a
-            // real thumbnail arrives.
+            radius: finite_non_negative(self.config.dock_corner_radius)
+                .min(bounds.width.min(bounds.height) * 0.5),
             fill: if empty_fallback {
                 Rgba::new(0.0, 0.0, 0.0, 0.0)
             } else {
@@ -1552,18 +2097,20 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             stroke: None,
             state: VisualState::default(),
         });
-
         if metrics.separator_width > 0.0 {
-            let x = bounds.x + metrics.padding + metrics.separator_width * 0.5;
-            let start = Point::new(x, bounds.y + metrics.padding);
-            let end = Point::new(x, bounds.bottom() - metrics.padding);
+            let main = axis.main_start() + metrics.padding + metrics.separator_width * 0.5;
+            let start = axis.point(main, axis.cross_start() + metrics.padding);
+            let end = axis.point(
+                main,
+                axis.cross_start() + axis.cross_len() - metrics.padding,
+            );
             scene.nodes.push(SceneNode::Polyline {
                 id: NodeId::DockShelf,
-                bounds: Rect::new(
-                    x - metrics.separator_width * 0.5,
-                    start.y,
+                bounds: axis.rect(
+                    main - metrics.separator_width * 0.5,
+                    axis.cross_start() + metrics.padding,
                     metrics.separator_width,
-                    (end.y - start.y).max(0.0),
+                    (axis.cross_len() - metrics.padding * 2.0).max(0.0),
                 ),
                 points: vec![start, end],
                 color: palette.muted_text,
@@ -1571,25 +2118,17 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 state: VisualState::default(),
             });
         }
-
-        let mut slot_x = bounds.x + metrics.padding * 2.0 + metrics.separator_width;
-        let dock_pointer = match interaction.hovered() {
+        let pointer = match interaction.hovered() {
             Some(NodeId::MinimizedWindow(_)) => interaction.pointer(),
             _ => None,
         };
-        for control in visible {
-            let id = control.id;
-            let center_x = slot_x + metrics.slot_width * 0.5;
-            let scale = self.dock_scale(center_x, metrics.peak_scale, dock_pointer);
-            let width = metrics.item_width * scale;
-            let height = metrics.item_height * scale;
-            let item_bounds = Rect::new(
-                center_x - width * 0.5,
-                bounds.y + (bounds.height - height) * 0.5,
-                width,
-                height,
-            );
-            let hovered = interaction.hovered() == Some(id);
+        for (slot, control) in visible.iter().enumerate() {
+            let center = metrics.slot_start(axis)
+                + slot as f32 * metrics.slot_pitch
+                + metrics.slot_extent * 0.5;
+            let scale = self.dock_scale(axis, center, metrics.peak_scale, pointer);
+            let item_bounds = metrics.card_rect(axis, slot, scale);
+            let hovered = interaction.hovered() == Some(control.id);
             let state = VisualState {
                 hovered,
                 urgent: control.state.urgent,
@@ -1603,10 +2142,10 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 palette.hovered
             };
             scene.nodes.push(SceneNode::RoundedRect {
-                id,
+                id: control.id,
                 bounds: item_bounds,
                 radius: finite_non_negative(self.config.dock_corner_radius)
-                    .min(item_bounds.height * 0.5),
+                    .min(item_bounds.height.min(item_bounds.width) * 0.5),
                 fill,
                 stroke: state.urgent.then_some(Stroke {
                     color: palette.urgent_stroke,
@@ -1615,10 +2154,10 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 state,
             });
             scene.nodes.push(SceneNode::Text {
-                id,
+                id: control.id,
                 bounds: item_bounds,
                 text: control.icon.clone(),
-                size: (height * 0.56).max(1.0),
+                size: (item_bounds.height * 0.56).max(1.0),
                 color: if hovered {
                     palette.selected_text
                 } else {
@@ -1627,72 +2166,62 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 align: TextAlign::Center,
                 state,
             });
-
             let bindings = if control.state.enabled {
                 control.bindings
             } else {
                 crate::controls::InputBindings::default()
             };
             scene.hits.push(HitRegion {
-                id,
-                bounds: item_bounds,
+                id: control.id,
+                bounds: metrics.slot_rect(axis, slot),
                 primary: bindings.primary,
                 secondary: bindings.secondary,
                 scroll_up: bindings.scroll_up,
                 scroll_down: bindings.scroll_down,
             });
-            slot_x += metrics.slot_pitch;
         }
-
         if show_overflow {
-            let overflow_bounds = Rect::new(
-                slot_x + (metrics.slot_width - metrics.item_width) * 0.5,
-                bounds.y + (bounds.height - metrics.item_height) * 0.5,
-                metrics.item_width,
-                metrics.item_height,
-            );
+            let overflow_bounds = metrics.slot_rect(axis, visible.len());
+            // Restore the most recently omitted window, then the next one on
+            // the following frame. The old decorative ellipsis left hidden
+            // windows completely unreachable by pointer.
+            let hidden = controls.get(first.saturating_sub(1)).filter(|_| first > 0);
+            let action = hidden
+                .filter(|control| control.state.enabled)
+                .and_then(|control| control.bindings.primary);
             scene.nodes.push(SceneNode::Text {
                 id: NodeId::DockShelf,
                 bounds: overflow_bounds,
-                text: "…".to_owned(),
-                size: (metrics.item_height * 0.65).max(1.0),
+                text: if first > 0 {
+                    format!("+{first}")
+                } else {
+                    "…".to_owned()
+                },
+                size: self.font_size(),
                 color: palette.muted_text,
                 align: TextAlign::Center,
                 state: VisualState::default(),
             });
+            scene.hits.push(HitRegion {
+                id: NodeId::DockShelf,
+                bounds: overflow_bounds,
+                primary: action,
+                secondary: None,
+                scroll_up: action,
+                scroll_down: action,
+            });
         }
-
         Some(bounds)
     }
 
-    fn dock_reserve_width(
-        &self,
-        item_count: usize,
-        upstream_overflow: bool,
-        available_width: f32,
-        available_height: f32,
-    ) -> f32 {
-        let Some(metrics) = DockMetrics::new(self.config, available_height) else {
-            return 0.0;
-        };
-        if metrics.slot_capacity(available_width) == 0 {
-            return 0.0;
-        }
-        let slot_count =
-            item_count.saturating_add(usize::from(upstream_overflow || item_count == 0));
-        metrics.width_for_slots(slot_count).min(available_width)
-    }
-
-    fn dock_scale(&self, center_x: f32, peak_scale: f32, pointer: Option<Point>) -> f32 {
+    fn dock_scale(&self, axis: BarAxis, center: f32, peak: f32, pointer: Option<Point>) -> f32 {
         let Some(pointer) = pointer else {
             return 1.0;
         };
         let radius = finite_non_negative(self.config.dock_influence_radius).max(1.0);
-        let normalized = (1.0 - (pointer.x - center_x).abs() / radius).clamp(0.0, 1.0);
-        // Smoothstep gives the centre a macOS-like soft plateau while keeping
-        // the edge derivative zero, so neighbours settle without a snap.
+        let normalized = (1.0 - (axis.main(pointer) - center).abs() / radius).clamp(0.0, 1.0);
         let influence = normalized * normalized * (3.0 - 2.0 * normalized);
-        1.0 + (peak_scale - 1.0) * influence
+        1.0 + (peak - 1.0) * influence
     }
 
     fn push_pill(
@@ -1704,9 +2233,14 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         palette: Palette,
         clip: Option<Rect>,
     ) {
-        let bounds = clip
-            .and_then(|clip| bounds.intersection(clip))
-            .unwrap_or(bounds);
+        let bounds = if let Some(clip) = clip {
+            let Some(bounds) = bounds.intersection(clip) else {
+                return;
+            };
+            bounds
+        } else {
+            bounds
+        };
         if bounds.is_empty() {
             return;
         }
@@ -1740,34 +2274,83 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         scene.nodes.push(SceneNode::RoundedRect {
             id: spec.id,
             bounds,
-            radius: finite_non_negative(self.config.corner_radius).min(bounds.height * 0.5),
+            radius: finite_non_negative(self.config.corner_radius)
+                .min(bounds.width.min(bounds.height) * 0.5),
             fill,
             stroke,
             state: spec.state,
         });
 
-        // Preserve the original label box and placement for every state. Use
-        // the renderer's actual ink/logical height, including a 1px outline
-        // allowance, to avoid painting the dash over tall custom-font glyphs.
-        let text_bounds = bounds.inset(self.horizontal_text_padding(), 0.0);
+        // Text always lives in physical x/y boxes. A sidebar may stack two
+        // short lines, but never rotates glyphs, titles or progress labels.
+        let padding = if self.config.edge.is_vertical() || spec.compact {
+            self.horizontal_text_padding().min(4.0)
+        } else {
+            self.horizontal_text_padding()
+        };
+        let text_bounds = bounds.inset(padding, 0.0);
         let text = self.fit_text(&spec.text, text_bounds.width, 0.0);
         let marker_fits = tag_colors.is_some() && spec.state.occupied && bounds.width >= 10.0 && {
             let text_height = self.measurer.measure(&text, self.font_size()).height;
             text_height.is_finite() && bounds.height >= text_height.max(0.0) + 12.0
         };
-        if !text.is_empty() && !text_bounds.is_empty() {
+        let color = if let Some(colors) = tag_colors {
+            colors.foreground
+        } else if spec.state.selected {
+            palette.selected_text
+        } else {
+            palette.text
+        };
+        let lines: Vec<&str> = if spec.lines.is_empty() {
+            vec![&spec.text]
+        } else {
+            spec.lines.iter().map(String::as_str).collect()
+        };
+        let line_height = self.font_size() + 2.0;
+        let block_height = (lines.len() as f32 * line_height).min(text_bounds.height);
+        let row_height = block_height / lines.len().max(1) as f32;
+        let top = text_bounds.y + (text_bounds.height - block_height) * 0.5;
+        for (index, line) in lines.iter().enumerate() {
+            let mut size = self.font_size().min(row_height.max(1.0));
+            if self.config.edge.is_vertical() || spec.compact {
+                let natural = self.measurer.measure(line, size).width;
+                if natural > text_bounds.width && natural.is_finite() {
+                    size = (size * text_bounds.width / natural).max(9.0).min(size);
+                    // Pango's hinted advance is not perfectly proportional to
+                    // point size, especially at fractional/retina scales. A
+                    // bounded remeasure avoids avoidable ellipses such as
+                    // VOL -> V… even though one smaller font step fits.
+                    let minimum = 9.0_f32.min(size);
+                    for _ in 0..6 {
+                        if size <= minimum
+                            || self.measurer.measure(line, size).width <= text_bounds.width
+                        {
+                            break;
+                        }
+                        size = (size - 0.5).max(minimum);
+                    }
+                }
+            }
+            let fitted = self.fit_text_sized(line, text_bounds.width, 0.0, size);
+            if fitted.is_empty() || text_bounds.is_empty() {
+                continue;
+            }
+            let line_bounds = if lines.len() == 1 {
+                text_bounds
+            } else {
+                Rect::new(
+                    text_bounds.x,
+                    top + index as f32 * row_height,
+                    text_bounds.width,
+                    row_height,
+                )
+            };
             scene.nodes.push(SceneNode::Text {
                 id: spec.id,
-                bounds: text_bounds,
-                text,
-                size: self.font_size(),
-                color: if let Some(colors) = tag_colors {
-                    colors.foreground
-                } else if spec.state.selected {
-                    palette.selected_text
-                } else {
-                    palette.text
-                },
+                bounds: line_bounds,
+                text: fitted,
+                size,
+                color,
                 align: TextAlign::Center,
                 state: spec.state,
             });
@@ -1812,9 +2395,21 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             }
         }
 
+        // Extend acquisition to the screen edge without enlarging the paint
+        // material. Adjacent controls retain separate main-axis intervals.
+        let hit_bounds = clip.map_or(bounds, |bar| {
+            let axis = BarAxis::from_rect(self.config.edge, bar);
+            let item = BarAxis::from_rect(self.config.edge, bounds);
+            axis.rect(
+                item.main_start(),
+                axis.cross_start(),
+                item.main_len(),
+                axis.cross_len(),
+            )
+        });
         scene.hits.push(HitRegion {
             id: spec.id,
-            bounds,
+            bounds: hit_bounds,
             primary: spec.primary,
             secondary: spec.secondary,
             scroll_up: spec.scroll_up,
@@ -1822,40 +2417,20 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         });
     }
 
-    fn place_left_pill(
-        &self,
-        cursor: f32,
-        limit: f32,
-        y: f32,
-        height: f32,
-        text: &str,
-    ) -> Option<Rect> {
-        let available = (limit - cursor).max(0.0);
-        if available < self.minimum_visible_width() {
-            return None;
-        }
-        Some(Rect::new(
-            cursor,
-            y,
-            self.pill_width(text).min(available),
-            height,
-        ))
-    }
-
-    fn pill_width(&self, text: &str) -> f32 {
-        self.measurer.measure(text, self.font_size()).width + 2.0 * self.horizontal_text_padding()
-    }
-
     fn fit_text(&self, text: &str, available: f32, outer_padding: f32) -> String {
+        self.fit_text_sized(text, available, outer_padding, self.font_size())
+    }
+
+    fn fit_text_sized(&self, text: &str, available: f32, outer_padding: f32, size: f32) -> String {
         let available = (available - 2.0 * finite_non_negative(outer_padding)).max(0.0);
         if available <= 0.0 {
             return String::new();
         }
-        if self.measurer.measure(text, self.font_size()).width <= available {
+        if self.measurer.measure(text, size).width <= available {
             return text.to_owned();
         }
         let ellipsis = "…";
-        if self.measurer.measure(ellipsis, self.font_size()).width > available {
+        if self.measurer.measure(ellipsis, size).width > available {
             return String::new();
         }
         let mut chars: Vec<char> = text.chars().collect();
@@ -1863,7 +2438,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             chars.pop();
             let mut candidate: String = chars.iter().collect();
             candidate.push('…');
-            if self.measurer.measure(&candidate, self.font_size()).width <= available {
+            if self.measurer.measure(&candidate, size).width <= available {
                 return candidate;
             }
         }
@@ -1887,6 +2462,8 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
 struct PillSpec {
     id: NodeId,
     text: String,
+    lines: Vec<String>,
+    compact: bool,
     primary: Option<UserAction>,
     secondary: Option<UserAction>,
     scroll_up: Option<UserAction>,
@@ -1907,6 +2484,8 @@ impl From<ControlSpec> for PillSpec {
         Self {
             id: control.id,
             text,
+            lines: Vec::new(),
+            compact: false,
             primary: bindings.primary,
             secondary: bindings.secondary,
             scroll_up: bindings.scroll_up,
@@ -1979,6 +2558,23 @@ impl Palette {
                 accent: Rgba::rgb8(0, 122, 255),
             },
         }
+    }
+}
+
+fn status_priority(control: &ControlSpec) -> u8 {
+    match control.id {
+        NodeId::Clock => 0,
+        NodeId::Battery if matches!(control.tone, Some(crate::display::MetricTone::Critical)) => 1,
+        NodeId::Audio => 2,
+        NodeId::Battery => 3,
+        NodeId::Network => 4,
+        NodeId::Brightness => 5,
+        NodeId::ShellHub(ShellRoute::Hub) => 6,
+        NodeId::Theme => 7,
+        NodeId::Screenshot => 8,
+        NodeId::Memory | NodeId::Cpu => 9,
+        NodeId::Media => 10,
+        _ => 11,
     }
 }
 
@@ -2345,26 +2941,29 @@ mod tests {
         let mut engine = dock_engine();
         engine.config_mut().visibility.clock = true;
 
-        // With the default 38 px geometry, the Dock needs 48.85 logical px
-        // for its fixed chrome and first peak-sized slot. A 100 px viewport
-        // leaves only 46.4 px in the right partition, so the unusable shelf
-        // must not reserve that partition away from the clock.
-        let narrow = engine.build(
+        // A shelf never wins the last usable target over the clock. Small
+        // widths once reserved the Dock first and left an 8px status fragment.
+        for width in [100.0, 106.0, 160.0] {
+            let narrow = engine.build(
+                view(&tags, ""),
+                Size::new(width, 38.0),
+                &InteractionState::default(),
+            );
+            let clock = narrow
+                .hits
+                .iter()
+                .find(|hit| hit.id == NodeId::Clock)
+                .expect("clock survives");
+            assert!(clock.bounds.width >= 32.0);
+            assert_eq!(narrow.bounds_for(NodeId::DockShelf), None);
+        }
+        let room = engine.build(
             view(&tags, ""),
-            Size::new(100.0, 38.0),
+            Size::new(640.0, 38.0),
             &InteractionState::default(),
         );
-        assert!(narrow.hits.iter().any(|hit| hit.id == NodeId::Clock));
-        assert_eq!(narrow.bounds_for(NodeId::DockShelf), None);
-
-        // Six more pixels put the right partition safely beyond the one-slot
-        // threshold. Reservation and painting now agree, so the shelf appears.
-        let one_slot = engine.build(
-            view(&tags, ""),
-            Size::new(106.0, 38.0),
-            &InteractionState::default(),
-        );
-        assert!(one_slot.bounds_for(NodeId::DockShelf).is_some());
+        assert!(room.hits.iter().any(|hit| hit.id == NodeId::Clock));
+        assert!(room.bounds_for(NodeId::DockShelf).is_some());
     }
 
     #[test]
@@ -2389,7 +2988,15 @@ mod tests {
             .iter()
             .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(11)))
             .expect("first minimized card");
-        assert!((hit.bounds.width / hit.bounds.height - 1.5).abs() < 0.01);
+        let card = scene
+            .nodes_for(hit.id)
+            .find_map(|node| match node {
+                SceneNode::RoundedRect { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .expect("landscape card");
+        assert!((card.width / card.height - 1.5).abs() < 0.01);
+        assert!(hit.bounds.width >= card.width && hit.bounds.height >= card.height);
         assert_eq!(
             hit.primary,
             Some(UserAction::RestoreWindow {
@@ -2474,8 +3081,22 @@ mod tests {
             .iter()
             .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(22)))
             .unwrap();
-        assert!(hovered_first.bounds.width > first.bounds.width * 1.45);
-        assert!(hovered_second.bounds.width > second.bounds.width);
+        assert_eq!(
+            hovered_first.bounds, first.bounds,
+            "hover cannot move acquisition slots"
+        );
+        assert_eq!(hovered_second.bounds, second.bounds);
+        let visual = |scene: &Scene, id| {
+            scene
+                .nodes_for(id)
+                .find_map(|node| match node {
+                    SceneNode::RoundedRect { bounds, .. } => Some(*bounds),
+                    _ => None,
+                })
+                .expect("card material")
+        };
+        assert!(visual(&hovered, first.id).width > visual(&initial, first.id).width * 1.45);
+        assert!(visual(&hovered, second.id).width > visual(&initial, second.id).width);
         assert!(
             hovered
                 .nodes
@@ -2633,6 +3254,7 @@ mod tests {
             assert_eq!(
                 label_bounds,
                 hit.bounds
+                    .inset(0.0, engine.config().vertical_padding)
                     .inset(engine.config().pill_horizontal_padding, 0.0)
             );
             assert_eq!(
@@ -3204,6 +3826,406 @@ mod tests {
         assert_eq!(
             current.damage_from(&previous).regions(),
             &[Rect::new(0.0, 0.0, 240.0, 50.0)]
+        );
+    }
+
+    fn first_card(scene: &Scene, id: NodeId) -> Rect {
+        scene
+            .nodes_for(id)
+            .find_map(|node| match node {
+                SceneNode::RoundedRect { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .expect("card material")
+    }
+
+    #[test]
+    fn four_edges_keep_targets_disjoint_clipped_and_acquirable_at_the_screen_edge() {
+        use crate::placement::BarEdge;
+        let mut tags = vec![TagState::default(); MAX_MODEL_TAGS];
+        tags[MAX_MODEL_TAGS - 1].selected = true;
+        tags[3].urgent = true;
+        let windows: Vec<_> = (1..=12)
+            .map(|id| minimized(id, "A long minimized application", "test"))
+            .collect();
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            for extent in [80.0, 100.0, 160.0, 220.0, 320.0, 640.0, 1080.0, 1920.0] {
+                for thickness in [12.0, 24.0, 38.0, 42.0, 64.0] {
+                    let viewport = if edge.is_vertical() {
+                        Size::new(thickness, extent)
+                    } else {
+                        Size::new(extent, thickness)
+                    };
+                    let engine = LayoutEngine::new(
+                        PresentationConfig {
+                            edge,
+                            bar_height: thickness,
+                            ..PresentationConfig::default()
+                        },
+                        ApproximateTextMeasurer::default(),
+                    );
+                    let scene = engine.build(
+                        BarView {
+                            minimized_windows: &windows,
+                            ..view(&tags, "An enormously long focused title")
+                        },
+                        viewport,
+                        &InteractionState::default(),
+                    );
+                    let clip = Rect::from_size(viewport);
+                    for node in &scene.nodes {
+                        let bounds = node.bounds();
+                        assert!(!bounds.is_empty(), "{edge:?} {viewport:?}: {node:?}");
+                        assert!(
+                            bounds.x >= -0.001
+                                && bounds.y >= -0.001
+                                && bounds.right() <= clip.right() + 0.001
+                                && bounds.bottom() <= clip.bottom() + 0.001,
+                            "{edge:?} {viewport:?}: node escapes {bounds:?}"
+                        );
+                    }
+                    for (index, hit) in scene.hits.iter().enumerate() {
+                        assert!(!hit.bounds.is_empty());
+                        let axis = BarAxis::from_rect(edge, hit.bounds);
+                        assert!(
+                            axis.main_len() >= 31.999,
+                            "unusable fragment {edge:?} {viewport:?} {hit:?}"
+                        );
+                        assert!(
+                            (axis.cross_len() - thickness).abs() < 0.001,
+                            "target must reach the edge"
+                        );
+                        let middle = Point::new(
+                            hit.bounds.x + hit.bounds.width * 0.5,
+                            hit.bounds.y + hit.bounds.height * 0.5,
+                        );
+                        assert_eq!(scene.hit_test(middle).map(|hit| hit.id), Some(hit.id));
+                        let edge_point = match edge {
+                            BarEdge::Top => Point::new(middle.x, 0.0),
+                            BarEdge::Bottom => Point::new(middle.x, thickness - 0.01),
+                            BarEdge::Left => Point::new(0.0, middle.y),
+                            BarEdge::Right => Point::new(thickness - 0.01, middle.y),
+                        };
+                        assert_eq!(scene.hit_test(edge_point).map(|hit| hit.id), Some(hit.id));
+                        for other in &scene.hits[index + 1..] {
+                            assert!(
+                                hit.bounds.intersection(other.bounds).is_none(),
+                                "{edge:?} {viewport:?}: overlapping {:?} and {:?}",
+                                hit.id,
+                                other.id
+                            );
+                        }
+                    }
+                    if thickness >= 38.0
+                        && scene.hits.iter().any(|hit| hit.id == NodeId::LayoutButton)
+                    {
+                        assert!(
+                            scene
+                                .nodes_for(NodeId::LayoutButton)
+                                .any(|node| matches!(node,
+                            SceneNode::Text { text, .. } if !text.is_empty())),
+                            "invisible layout button on {edge:?} {viewport:?}"
+                        );
+                    }
+                    if thickness > 12.0 && extent >= 100.0 {
+                        assert!(
+                            scene.hits.iter().any(|hit| hit.id
+                                == NodeId::Tag(TagId::new(MAX_MODEL_TAGS - 1).unwrap())),
+                            "active workspace lost on {edge:?} {viewport:?}"
+                        );
+                        assert!(
+                            scene.hits.iter().any(|hit| hit.id == NodeId::Clock),
+                            "clock lost on {edge:?} {viewport:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sidebars_stack_upright_clock_and_readings_and_keep_long_titles_out_of_the_strip() {
+        use crate::placement::BarEdge;
+        let tags = vec![TagState::default(); 3];
+        for edge in [BarEdge::Left, BarEdge::Right] {
+            let engine = LayoutEngine::new(
+                PresentationConfig {
+                    edge,
+                    ..PresentationConfig::default()
+                },
+                ApproximateTextMeasurer::default(),
+            );
+            let scene = engine.build(
+                view(&tags, "This title must not become a vertical tower"),
+                Size::new(42.0, 1080.0),
+                &InteractionState::default(),
+            );
+            let clock: Vec<_> = scene
+                .nodes_for(NodeId::Clock)
+                .filter_map(|node| match node {
+                    SceneNode::Text { bounds, text, .. } => Some((bounds, text.as_str())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                clock.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
+                ["12", "34"]
+            );
+            assert!(clock[0].0.bottom() <= clock[1].0.y);
+            assert_eq!(clock[0].0.x, clock[1].0.x);
+            assert!(!scene.nodes.iter().any(|node| node.id() == NodeId::Client));
+            let audio = scene
+                .hits
+                .iter()
+                .find(|hit| hit.id == NodeId::Audio)
+                .expect("usable volume target");
+            assert!(audio.bounds.height >= 38.0);
+            assert_eq!(
+                scene.action_at(
+                    Point::new(0.0, audio.bounds.y + 1.0),
+                    PointerAction::ScrollUp
+                ),
+                Some(UserAction::VolumeUp)
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_overflow_reaches_every_tag_and_keeps_the_active_one_visible() {
+        use crate::placement::BarEdge;
+        for edge in [BarEdge::Top, BarEdge::Left] {
+            let engine = LayoutEngine::new(
+                PresentationConfig {
+                    edge,
+                    ..PresentationConfig::default()
+                },
+                ApproximateTextMeasurer::default(),
+            );
+            for active in 0..MAX_MODEL_TAGS {
+                let mut tags = vec![TagState::default(); MAX_MODEL_TAGS];
+                tags[active].selected = true;
+                let viewport = if edge.is_vertical() {
+                    Size::new(42.0, 300.0)
+                } else {
+                    Size::new(300.0, 42.0)
+                };
+                let scene = engine.build(view(&tags, ""), viewport, &InteractionState::default());
+                let id = NodeId::Tag(TagId::new(active).unwrap());
+                assert!(scene.hits.iter().any(|hit| hit.id == id));
+                let overflow = scene
+                    .hits
+                    .iter()
+                    .find(|hit| hit.id == NodeId::WorkspaceOverflow)
+                    .expect("overflow affordance");
+                assert_eq!(
+                    overflow.primary,
+                    Some(UserAction::ViewTag(
+                        TagId::new((active + 1) % MAX_MODEL_TAGS).unwrap()
+                    ))
+                );
+                assert_eq!(
+                    overflow.scroll_up,
+                    Some(UserAction::ViewTag(
+                        TagId::new((active + MAX_MODEL_TAGS - 1) % MAX_MODEL_TAGS).unwrap()
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_dock_axes_magnify_landscape_cards_without_moving_hits_or_static_targets() {
+        use crate::placement::BarEdge;
+        let tags = Vec::new();
+        let windows = [
+            minimized(1, "First", "test"),
+            minimized(2, "Second", "test"),
+        ];
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let mut engine = dock_engine();
+            engine.config_mut().edge = edge;
+            let viewport = if edge.is_vertical() {
+                Size::new(42.0, 800.0)
+            } else {
+                Size::new(800.0, 42.0)
+            };
+            let input = BarView {
+                minimized_windows: &windows,
+                ..view(&tags, "")
+            };
+            let initial = engine.build(input, viewport, &InteractionState::default());
+            let hit = initial
+                .hits
+                .iter()
+                .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(1)))
+                .unwrap();
+            let point = Point::new(
+                hit.bounds.x + hit.bounds.width * 0.5,
+                hit.bounds.y + hit.bounds.height * 0.5,
+            );
+            let mut interaction = InteractionState::default();
+            interaction.update_hover(&initial, point);
+            let hovered = engine.build(input, viewport, &interaction);
+            assert_eq!(initial.hits, hovered.hits);
+            assert_eq!(
+                initial.bounds_for(NodeId::DockShelf),
+                hovered.bounds_for(NodeId::DockShelf)
+            );
+            for id in [
+                NodeId::MinimizedWindow(WindowToken(1)),
+                NodeId::MinimizedWindow(WindowToken(2)),
+            ] {
+                let resting = first_card(&initial, id);
+                let magnified = first_card(&hovered, id);
+                assert!((resting.width / resting.height - 1.5).abs() < 0.001);
+                assert!(magnified.width > resting.width && magnified.height > resting.height);
+            }
+            for scale in [1.0, 1.25, 2.0] {
+                let geometry = crate::MonitorGeometry {
+                    x: -1920,
+                    y: 1060,
+                    width: 1920,
+                    height: 1080,
+                };
+                let before =
+                    crate::dock::dock_geometry_reports(&initial, engine.config(), geometry, scale);
+                let after =
+                    crate::dock::dock_geometry_reports(&hovered, engine.config(), geometry, scale);
+                assert_eq!(
+                    before, after,
+                    "stable targets changed on {edge:?} at scale {scale}"
+                );
+                let interactive =
+                    crate::dock::interactive_dock_geometry_reports(&hovered, geometry, scale);
+                let card = first_card(&hovered, hit.id);
+                let expected = crate::dock::global_physical_geometry(card, geometry, scale);
+                assert_eq!(interactive[0].geometry, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn background_and_edge_hits_follow_bottom_and_right_in_oversized_viewports() {
+        use crate::placement::BarEdge;
+        for (edge, viewport, expected) in [
+            (
+                BarEdge::Bottom,
+                Size::new(640.0, 120.0),
+                Rect::new(0.0, 78.0, 640.0, 42.0),
+            ),
+            (
+                BarEdge::Right,
+                Size::new(120.0, 640.0),
+                Rect::new(78.0, 0.0, 42.0, 640.0),
+            ),
+        ] {
+            let engine = LayoutEngine::new(
+                PresentationConfig {
+                    edge,
+                    ..PresentationConfig::default()
+                },
+                ApproximateTextMeasurer::default(),
+            );
+            let scene = engine.build(
+                view(&[TagState::default()], ""),
+                viewport,
+                &InteractionState::default(),
+            );
+            assert_eq!(scene.bounds_for(NodeId::Background), Some(expected));
+            for hit in &scene.hits {
+                assert_eq!(hit.bounds.intersection(expected), Some(hit.bounds));
+            }
+        }
+    }
+
+    #[test]
+    fn authoritative_physical_thickness_is_converted_once_and_invalid_scale_is_bounded() {
+        let config = PresentationConfig {
+            physical_thickness: Some(42),
+            bar_height: 99.0,
+            ..PresentationConfig::default()
+        };
+        assert_eq!(config.logical_thickness(2.0), 21.0);
+        assert_eq!(config.logical_thickness(1.25), 33.6);
+        assert_eq!(config.logical_thickness(f64::NAN), 42.0);
+        let restored: PresentationConfig = serde_json::from_str("{\"bar_height\":36}").unwrap();
+        assert_eq!(restored.edge, crate::placement::BarEdge::Top);
+        assert_eq!(restored.logical_thickness(2.0), 36.0);
+    }
+
+    #[test]
+    fn press_release_cannot_rebind_an_overflow_or_a_new_window_incarnation() {
+        let make_scene = |action| Scene {
+            viewport: Size::new(42.0, 100.0),
+            clip: Rect::new(0.0, 0.0, 42.0, 100.0),
+            nodes: Vec::new(),
+            hits: vec![HitRegion {
+                id: NodeId::WorkspaceOverflow,
+                bounds: Rect::new(0.0, 0.0, 42.0, 32.0),
+                primary: Some(action),
+                secondary: None,
+                scroll_up: None,
+                scroll_down: None,
+            }],
+        };
+        let point = Point::new(0.0, 10.0);
+        let first = make_scene(UserAction::ViewTag(TagId::new(2).unwrap()));
+        let replaced = make_scene(UserAction::ViewTag(TagId::new(3).unwrap()));
+        let mut interaction = InteractionState::default();
+        interaction.press(&first, point);
+        assert_eq!(
+            interaction.release(&replaced, point, PointerAction::Primary),
+            None
+        );
+        interaction.press(&replaced, point);
+        assert_eq!(
+            interaction.release(&replaced, point, PointerAction::Primary),
+            Some(UserAction::ViewTag(TagId::new(3).unwrap()))
+        );
+
+        let restore = |generation| UserAction::RestoreWindow {
+            window: WindowToken(7),
+            wm_session_id: 4,
+            minimized_generation: generation,
+            geometry: crate::DockItemGeometry::default(),
+        };
+        let mut original = make_scene(restore(1));
+        original.hits[0].id = NodeId::MinimizedWindow(WindowToken(7));
+        let mut replacement = make_scene(restore(2));
+        replacement.hits[0].id = original.hits[0].id;
+        interaction.press(&original, point);
+        assert_eq!(
+            interaction.release(&replacement, point, PointerAction::Primary),
+            None
+        );
+        assert_eq!(interaction.pressed(), None);
+    }
+
+    #[test]
+    fn dock_hover_title_temporarily_replaces_the_focused_title_without_overpainting() {
+        let tags = vec![TagState::default(); 2];
+        let windows = [minimized(1, "Browser", "browser")];
+        let input = BarView {
+            minimized_windows: &windows,
+            ..view(&tags, "Focused editor")
+        };
+        let engine = engine();
+        let initial = engine.build(input, Size::new(1600.0, 42.0), &InteractionState::default());
+        assert!(initial.nodes_for(NodeId::Client).next().is_some());
+        let hit = initial
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(1)))
+            .unwrap();
+        let mut interaction = InteractionState::default();
+        interaction.update_hover(&initial, Point::new(hit.bounds.x + 1.0, hit.bounds.y + 1.0));
+        let hovered = engine.build(input, Size::new(1600.0, 42.0), &interaction);
+        assert!(hovered.nodes_for(NodeId::Client).next().is_none());
+        assert!(
+            hovered
+                .nodes
+                .iter()
+                .any(|node| matches!(node, SceneNode::Text { text, .. } if text == "Browser"))
         );
     }
 }

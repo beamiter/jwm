@@ -17,7 +17,7 @@ use gtk4::{
 };
 use xbar_core::controls::ControlSpec;
 use xbar_core::presentation::{NodeId, PointerAction, Rgba};
-use xbar_core::{ShellRoute, UserAction};
+use xbar_core::{BarEdge, ShellRoute, UserAction};
 
 use crate::theme::Metrics;
 
@@ -38,6 +38,7 @@ pub type Dispatch = Rc<dyn Fn(UserAction, Option<DispatchCompletion>)>;
 /// Everything a pill needs that does not come from its own control.
 #[derive(Clone)]
 pub struct PillStyle {
+    pub edge: BarEdge,
     pub metrics: Metrics,
     pub accent: Rgba,
     /// The font the Cairo bars measure and draw with, already carrying the
@@ -51,6 +52,8 @@ pub struct Pill {
     button: Button,
     label: Label,
     font: FontDescription,
+    vertical: bool,
+    minimum_height: i32,
     progress_area: DrawingArea,
     /// A non-measuring overlay retained for empty and occupied tags alike.
     occupancy_marker: Option<DrawingArea>,
@@ -96,6 +99,7 @@ impl Bindings {
 impl Pill {
     pub fn new(spec: &ControlSpec, style: &PillStyle, dispatch: Dispatch) -> Self {
         let PillStyle {
+            edge,
             metrics,
             accent,
             font,
@@ -106,7 +110,12 @@ impl Pill {
         // divides a bar — status cells keep their natural width and are
         // dropped whole rather than squeezed.
         let label = Label::new(None);
-        label.set_single_line_mode(true);
+        label.set_single_line_mode(!edge.is_vertical());
+        if edge.is_vertical() {
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            label.set_max_width_chars(6);
+            label.set_justify(gtk4::Justification::Center);
+        }
 
         let progress = Rc::new(Cell::new(None::<f32>));
         let progress_area = DrawingArea::new();
@@ -191,9 +200,9 @@ impl Pill {
         button.add_css_class("pill");
         button.add_css_class(node_class(spec.id));
         button.set_size_request(-1, metrics.pill_height.round() as i32);
-        // Focus would draw a ring the Cairo bars have no equivalent for, and a
-        // bar is not part of any keyboard navigation order.
-        button.set_can_focus(false);
+        // Mouse use preserves client focus; explicit keyboard navigation can
+        // still reach every control and reveals the theme's focus outline.
+        button.set_can_focus(true);
         button.set_focus_on_click(false);
 
         let bindings = Rc::new(RefCell::new(Bindings::from_spec(spec)));
@@ -251,6 +260,8 @@ impl Pill {
             button,
             label,
             font,
+            vertical: edge.is_vertical(),
+            minimum_height: metrics.pill_height.round().max(1.0) as i32,
             progress_area,
             occupancy_marker,
             progress,
@@ -274,14 +285,32 @@ impl Pill {
     pub fn update(&self, spec: &ControlSpec) {
         debug_assert_eq!(self.id, spec.id, "a pill only ever shows its own control");
 
-        let text = spec.text();
+        let text = if self.vertical {
+            spec.sidebar_lines().join("\n")
+        } else {
+            spec.text()
+        };
         if self.label.text() != text {
             self.label.set_text(&text);
             // GTK would size the label by its logical extents alone, which
             // under-reports Nerd Font icons whose ink overflows their advance
             // — the pill would then be narrower here than in the Cairo bars.
-            self.label.set_size_request(self.text_width(&text), -1);
+            if self.vertical {
+                self.label.set_size_request(0, -1);
+                let line_height =
+                    (f64::from(self.font.size()) / f64::from(gtk4::pango::SCALE)).ceil() as i32 + 3;
+                let height =
+                    (text.lines().count().max(1) as i32 * line_height + 6).max(self.minimum_height);
+                self.button.set_size_request(self.minimum_height, height);
+            } else {
+                self.label.set_size_request(self.text_width(&text), -1);
+            }
         }
+        let accessible = spec.accessible_label();
+        self.button.set_tooltip_text(Some(&spec.tooltip_text()));
+        self.button
+            .update_property(&[gtk4::accessible::Property::Label(&accessible)]);
+        self.button.set_can_focus(spec.state.enabled);
 
         set_class(
             &self.button,
@@ -376,6 +405,8 @@ fn node_class(id: NodeId) -> &'static str {
     match id {
         NodeId::Background => "background",
         NodeId::Tag(_) => "tag",
+        NodeId::WorkspaceOverflow => "workspace-overflow",
+        NodeId::StatusOverflow => "status-overflow",
         NodeId::LayoutButton => "layout-button",
         NodeId::LayoutOption(_) => "layout-option",
         NodeId::Client => "client",
@@ -409,7 +440,7 @@ const fn shell_class(route: ShellRoute) -> &'static str {
     }
 }
 
-/// A horizontal run of pills that reconciles itself against a projection.
+/// An axis-aware run of pills that reconciles itself against a projection.
 ///
 /// Rebuilding only when the control identities change keeps the common case —
 /// a clock tick, a changed percentage — down to a label and a class update,
@@ -423,7 +454,12 @@ pub struct PillRow {
 
 impl PillRow {
     pub fn new(style: PillStyle, dispatch: Dispatch) -> Self {
-        let container = gtk4::Box::new(gtk4::Orientation::Horizontal, style.metrics.item_gap);
+        let orientation = if style.edge.is_vertical() {
+            gtk4::Orientation::Vertical
+        } else {
+            gtk4::Orientation::Horizontal
+        };
+        let container = gtk4::Box::new(orientation, style.metrics.item_gap);
         Self {
             container,
             pills: RefCell::new(Vec::new()),
@@ -435,6 +471,22 @@ impl PillRow {
     #[must_use]
     pub const fn widget(&self) -> &gtk4::Box {
         &self.container
+    }
+
+    pub(crate) fn focused_control(&self) -> Option<NodeId> {
+        self.pills
+            .borrow()
+            .iter()
+            .find(|pill| pill.button.is_focus())
+            .map(Pill::id)
+    }
+
+    pub(crate) fn focus_control(&self, id: NodeId) -> bool {
+        self.pills
+            .borrow()
+            .iter()
+            .find(|pill| pill.id() == id)
+            .is_some_and(|pill| pill.button.grab_focus())
     }
 
     pub fn sync(&self, specs: &[ControlSpec]) {

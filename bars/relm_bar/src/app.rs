@@ -16,7 +16,7 @@ use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, ModelConfig, PlatformEffectHandler, RuntimeUpdate,
     TransportRecoveryConfig, UserAction,
 };
-use xbar_gtk::{BarSurface, BarTheme, Dispatch, DispatchCompletion};
+use xbar_gtk::{BarSurface, BarTheme, BarWindowPlacement, Dispatch, DispatchCompletion};
 use xbar_linux_actions::ProcessActionHandler;
 
 const BAR_NAME: &str = "relm_bar";
@@ -33,6 +33,7 @@ pub enum AppInput {
     Activate(UserAction, Option<DispatchCompletion>),
     PollTransport,
     Tick,
+    RefreshSurfaceScale,
 }
 
 pub struct AppModel {
@@ -41,11 +42,13 @@ pub struct AppModel {
     process_actions: ProcessActionHandler,
 
     root_window: gtk::ApplicationWindow,
+    config: BarConfig,
+    translucent: bool,
+    surface_scale: i32,
+    dispatch: Dispatch,
     theme: BarTheme,
     surface: BarSurface,
-    /// Width the bar falls back to before, and after, the window manager
-    /// describes a monitor: the whole screen.
-    default_width: i32,
+    placement: BarWindowPlacement,
 }
 
 impl SimpleComponent for AppModel {
@@ -94,15 +97,24 @@ impl SimpleComponent for AppModel {
                 sender.input(AppInput::Activate(action, completion));
             })
         };
-        let surface = BarSurface::new(&theme, dispatch);
+        let surface = BarSurface::new(&theme, dispatch.clone());
         root.set_child(Some(surface.widget()));
 
-        let (screen_width, _) = xbar_gtk::primary_screen_size();
-        let default_width = xbar_gtk::logical_width(screen_width);
-        // Span the screen from the first frame, as the Cairo bars do. The
-        // window manager's own geometry replaces this as soon as it arrives,
-        // but a bar must never flash at some arbitrary width.
-        root.set_default_size(default_width, theme.metrics.bar_height);
+        root.connect_scale_factor_notify({
+            let sender = sender.clone();
+            move |_| sender.input(AppInput::RefreshSurfaceScale)
+        });
+        root.connect_realize({
+            let sender = sender.clone();
+            move |_| sender.input(AppInput::RefreshSurfaceScale)
+        });
+
+        let placement = BarWindowPlacement::new(
+            &root,
+            &theme.presentation,
+            BAR_NAME,
+            !shared_path.is_empty(),
+        );
 
         if translucent {
             root.add_css_class("transparent-window");
@@ -138,15 +150,21 @@ impl SimpleComponent for AppModel {
             snapshot,
             process_actions: ProcessActionHandler::default(),
             root_window: root.clone(),
+            config,
+            translucent,
+            surface_scale: xbar_gtk::primary_scale_factor(),
+            dispatch,
             theme,
             surface,
-            default_width,
+            placement,
         };
 
         model.handle_runtime_update(initial_update);
         model.sync_views();
         spawn_runtime_timers(sender);
         root.present();
+        model.refresh_surface_scale();
+        model.placement.refresh();
 
         ComponentParts { model, widgets: () }
     }
@@ -167,6 +185,7 @@ impl SimpleComponent for AppModel {
                 let update = self.runtime.tick();
                 self.handle_runtime_update(update);
             }
+            AppInput::RefreshSurfaceScale => self.refresh_surface_scale(),
         }
         self.surface.maintain();
     }
@@ -198,19 +217,10 @@ impl AppModel {
     fn handle_platform_effect(&mut self, effect: BarEffect) {
         match effect {
             BarEffect::ApplyMonitorGeometry(geometry) => {
-                let scale_factor = self.root_window.scale_factor().max(1);
-                let logical_width = (f64::from(geometry.width) / f64::from(scale_factor))
-                    .round()
-                    .clamp(1.0, f64::from(i32::MAX)) as i32;
-                // GTK4/Wayland leaves placement to the compositor. Convert the
-                // core's physical width into GTK logical units.
-                self.root_window
-                    .set_default_size(logical_width, self.theme.metrics.bar_height);
+                self.placement.apply_geometry(Some(geometry));
             }
             BarEffect::ClearMonitorGeometry => {
-                // Back to spanning the screen, which is where the bar started.
-                self.root_window
-                    .set_default_size(self.default_width, self.theme.metrics.bar_height);
+                self.placement.apply_geometry(None);
             }
             effect @ (BarEffect::Screenshot
             | BarEffect::OpenAudioControl
@@ -236,6 +246,30 @@ impl AppModel {
             PresentationProjector::project(self.snapshot.view(), &self.theme.presentation);
         xbar_gtk::apply_theme_class(&self.root_window, presentation.theme);
         self.surface.sync(&self.snapshot, presentation);
+    }
+
+    fn refresh_surface_scale(&mut self) {
+        let scale = self.root_window.scale_factor().max(1);
+        if self.surface_scale == scale {
+            return;
+        }
+        self.surface_scale = scale;
+        let focused = self.surface.focused_control();
+        self.surface.retire();
+        let theme =
+            BarTheme::from_config_at_scale(&self.config, self.translucent, f64::from(scale));
+        theme.install();
+        let surface = BarSurface::new(&theme, self.dispatch.clone());
+        self.root_window.set_child(Some(surface.widget()));
+        self.surface = surface;
+        self.theme = theme;
+        self.sync_views();
+        self.surface.restore_focus(focused);
+        log::debug!(
+            "Applied native bar scale {scale}; focus {focused:?} -> {:?}",
+            self.surface.focused_control()
+        );
+        self.placement.refresh();
     }
 }
 

@@ -264,16 +264,17 @@ pub(crate) fn dock_item_preview_target(
     .or(Some(stable_target))
 }
 
-/// Place an aspect-preserving preview below its bar anchor, flipping above
-/// only when the lower side cannot hold it.  The result is clamped to the
-/// compositor framebuffer so multi-monitor edge slots remain fully visible.
+/// Place an aspect-preserving preview inward from its configured bar edge.
+/// Only flip when the preferred side cannot contain the preview. Clamp both
+/// axes to the anchor's output, including outputs with negative origins.
 #[must_use]
-pub(crate) fn preview_rect(
+pub(crate) fn preview_rect_at_edge(
     anchor: CompositorRect,
     source_width: f32,
     source_height: f32,
     output_bounds: CompositorRect,
     scale: f32,
+    edge: xbar_core::placement::BarEdge,
 ) -> Option<CompositorRect> {
     let anchor = anchor.normalized()?;
     let output_bounds = output_bounds.normalized()?;
@@ -319,24 +320,59 @@ pub(crate) fn preview_rect(
     } else {
         PREVIEW_GAP
     };
-    let center_x = anchor.x + anchor.width * 0.5;
-    let below_y = anchor.y + anchor.height + gap;
+    use xbar_core::placement::BarEdge;
+    let center_x = anchor.x + anchor.width * 0.5 - width * 0.5;
+    let center_y = anchor.y + anchor.height * 0.5 - height * 0.5;
+    let below = anchor.y + anchor.height + gap;
+    let above = anchor.y - gap - height;
+    let right = anchor.x + anchor.width + gap;
+    let left = anchor.x - gap - width;
     let output_right = output_bounds.x + output_bounds.width;
     let output_bottom = output_bounds.y + output_bounds.height;
-    let y = if below_y + height <= output_bottom {
-        below_y
+    let (preferred, alternate) = match edge {
+        BarEdge::Top => ((center_x, below), (center_x, above)),
+        BarEdge::Bottom => ((center_x, above), (center_x, below)),
+        BarEdge::Left => ((right, center_y), (left, center_y)),
+        BarEdge::Right => ((left, center_y), (right, center_y)),
+    };
+    let cross_axis_fits = |(x, y): (f32, f32)| {
+        if edge.is_vertical() {
+            x >= output_bounds.x && x + width <= output_right
+        } else {
+            y >= output_bounds.y && y + height <= output_bottom
+        }
+    };
+    let (x, y) = if cross_axis_fits(preferred) || !cross_axis_fits(alternate) {
+        preferred
     } else {
-        (anchor.y - gap - height).max(output_bounds.y)
+        alternate
     };
     let max_x = (output_right - width).max(output_bounds.x);
     let max_y = (output_bottom - height).max(output_bounds.y);
-    let x = (center_x - width * 0.5).clamp(output_bounds.x, max_x);
     Some(CompositorRect::new(
-        x,
+        x.clamp(output_bounds.x, max_x),
         y.clamp(output_bounds.y, max_y),
         width,
         height,
     ))
+}
+
+#[cfg(test)]
+fn preview_rect(
+    anchor: CompositorRect,
+    source_width: f32,
+    source_height: f32,
+    output_bounds: CompositorRect,
+    scale: f32,
+) -> Option<CompositorRect> {
+    preview_rect_at_edge(
+        anchor,
+        source_width,
+        source_height,
+        output_bounds,
+        scale,
+        xbar_core::placement::BarEdge::Top,
+    )
 }
 
 /// Resolve the output containing an anchor without assuming the compositor's
@@ -470,6 +506,42 @@ mod tests {
         .unwrap();
         assert!(nested.x >= 0.0 && nested.x + nested.width <= 80.0 + 1e-3);
         assert!(nested.y >= 0.0 && nested.y + nested.height <= 48.0 + 1e-3);
+    }
+
+    #[test]
+    fn previews_open_inward_from_each_bar_edge_without_rotating_content() {
+        use xbar_core::placement::BarEdge;
+        let output = CompositorRect::new(-1200.0, -200.0, 1200.0, 900.0);
+        for (edge, anchor) in [
+            (
+                BarEdge::Top,
+                CompositorRect::new(-600.0, -195.0, 40.0, 40.0),
+            ),
+            (
+                BarEdge::Bottom,
+                CompositorRect::new(-600.0, 655.0, 40.0, 40.0),
+            ),
+            (
+                BarEdge::Left,
+                CompositorRect::new(-1195.0, 250.0, 40.0, 40.0),
+            ),
+            (
+                BarEdge::Right,
+                CompositorRect::new(-45.0, 250.0, 40.0, 40.0),
+            ),
+        ] {
+            let rect = preview_rect_at_edge(anchor, 1600.0, 900.0, output, 1.0, edge).unwrap();
+            assert!((rect.width / rect.height - 16.0 / 9.0).abs() < 0.001);
+            assert!(rect.x >= output.x && rect.y >= output.y);
+            assert!(rect.x + rect.width <= output.x + output.width);
+            assert!(rect.y + rect.height <= output.y + output.height);
+            match edge {
+                BarEdge::Top => assert!(rect.y > anchor.y + anchor.height),
+                BarEdge::Bottom => assert!(rect.y + rect.height < anchor.y),
+                BarEdge::Left => assert!(rect.x > anchor.x + anchor.width),
+                BarEdge::Right => assert!(rect.x + rect.width < anchor.x),
+            }
+        }
     }
 
     #[test]

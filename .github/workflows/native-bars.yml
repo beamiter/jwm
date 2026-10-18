@@ -11,6 +11,8 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test_bar_layout.mjs
+      - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
       - Cargo.toml
       - Cargo.lock
@@ -26,6 +28,8 @@ on:
       - vendor/glib/**
       - tests/glib_backport/**
       - scripts/test-bar-startup.mjs
+      - scripts/test_bar_layout.mjs
+      - scripts/test_bar_web_frontends.mjs
       - crates/xbar_core/**
       - Cargo.toml
       - Cargo.lock
@@ -539,15 +543,17 @@ jobs:
               "svelte": Path("bars/tauri_svelte_bar/src/App.svelte"),
               "vue": Path("bars/tauri_vue_bar/src/App.vue"),
           }
-          required = ("wm_session_id", "minimized_generation")
           failed = []
           for name, path in sources.items():
               text = path.read_text(encoding="utf-8")
+              # The retained host now delegates session/generation checks to
+              # the tested DockBridge; HTML publishers carry them directly.
+              required = (
+                  ("DockBridge", "DockItemBinding", "request_restore", "synchronize")
+                  if name == "gpui"
+                  else ("wm_session_id", "minimized_generation", "wm_sequence")
+              )
               missing = [field for field in required if field not in text]
-              if name != "gpui" and "wm_sequence" not in text:
-                  missing.append("wm_sequence")
-              if name == "gpui" and "DockItemBinding" not in text:
-                  missing.append("DockItemBinding")
               if missing:
                   failed.append(f"{name} ({path}): {', '.join(missing)}")
           if failed:
@@ -560,7 +566,7 @@ jobs:
           {
             printf '%s\n' "### Intentional exclusions"
             printf '%s\n' "- \`gpui_bar\`: formatting + static binding assertion only; its git \`main\` dependencies are unpinned and it has no lockfile."
-            printf '%s\n' "- React/Vue/Solid/Svelte UI: frozen dependency install, typecheck/build, and audit in locked-web-frontends; isolated startup/state-machine tests supplement compilation, but no browser execution is claimed."
+            printf '%s\n' "- React/Vue/Solid/Svelte UI: frozen dependency install, typecheck/build, audit and four-edge Chromium interaction checks in locked-web-frontends. The browser tests use a mock Tauri IPC host; they do not launch native WebKit windows."
             printf '%s\n' "- The six Tauri Rust hosts are format-checked and statically wired by \`tauri-host-contracts\`; that job explicitly documents why it does not claim compilation."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -599,6 +605,23 @@ jobs:
         if: ${{ matrix.frontend == 'react' }}
         working-directory: bars/tauri_react_bar
         run: pnpm test
+
+      - name: Install the browser regression runner
+        run: |
+          npm install --prefix "$RUNNER_TEMP/xbar-browser" --ignore-scripts --no-package-lock playwright@1.62.1
+          "$RUNNER_TEMP/xbar-browser/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Test all shared four-edge layout and focus fixtures
+        if: ${{ matrix.frontend == 'react' }}
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/xbar-browser/node_modules/playwright
+        run: node scripts/test_bar_layout.mjs
+
+      - name: Test the built frontend at all four edges
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/xbar-browser/node_modules/playwright
+          BAR_FRONTENDS: ${{ matrix.frontend }}
+        run: node scripts/test_bar_web_frontends.mjs
 
       - name: Audit the locked JavaScript dependency graph
         working-directory: bars/tauri_${{ matrix.frontend }}_bar

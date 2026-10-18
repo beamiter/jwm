@@ -234,6 +234,8 @@ enum FileTheme {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FilePresentation {
+    position: Option<crate::placement::BarEdge>,
+    #[serde(alias = "thickness")]
     bar_height: Option<f32>,
     horizontal_padding: Option<f32>,
     vertical_padding: Option<f32>,
@@ -319,6 +321,10 @@ impl BarConfig {
     /// `XBAR_FONT` environment variable overrides the font, preserving the
     /// pre-config workflow of every native bar, and `XBAR_ICON_FONT` does the
     /// same for the family that backs private-use icon glyphs.
+    /// `JWM_BAR_POSITION` (or `XBAR_POSITION` for a standalone process)
+    /// overrides the configured edge. `JWM_BAR_THICKNESS` is a strictly positive
+    /// physical pixel count supplied by JWM, converted to logical units by
+    /// each frontend at its actual output scale.
     pub fn load_default() -> Result<Self, ConfigError> {
         let mut config = match Self::default_path() {
             Some((path, required)) if path.is_file() || required => Self::load(&path)?,
@@ -336,7 +342,41 @@ impl BarConfig {
             validate_text_bytes("XBAR_ICON_FONT", &icon_font, MAX_ICON_FONT_BYTES)?;
             config.presentation.icon_font = Some(icon_font);
         }
+        let position = std::env::var("JWM_BAR_POSITION")
+            .or_else(|_| std::env::var("XBAR_POSITION"))
+            .ok();
+        let thickness = std::env::var("JWM_BAR_THICKNESS").ok();
+        config.apply_placement_overrides(position.as_deref(), thickness.as_deref())?;
         Ok(config)
+    }
+
+    // Keep environment access at the boundary, so validation and precedence
+    // can be tested without mutating process-global state. JWM owns physical
+    // placement; standalone bars use their logical presentation thickness.
+    fn apply_placement_overrides(
+        &mut self,
+        position: Option<&str>,
+        physical_thickness: Option<&str>,
+    ) -> Result<(), ConfigError> {
+        if let Some(position) = position {
+            self.presentation.edge = position.parse().map_err(|_| ConfigError::InvalidValue {
+                field: "JWM_BAR_POSITION/XBAR_POSITION",
+                reason: "must be top, bottom, left, or right",
+            })?;
+        }
+        if let Some(thickness) = physical_thickness {
+            self.presentation.physical_thickness = Some(
+                thickness
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or(ConfigError::InvalidValue {
+                        field: "JWM_BAR_THICKNESS",
+                        reason: "must be a positive physical pixel count",
+                    })?,
+            );
+        }
+        Ok(())
     }
 
     /// Model configuration seeded with this file's theme.
@@ -390,6 +430,9 @@ impl BarConfig {
         }
 
         let presentation = &mut config.presentation;
+        if let Some(edge) = file.presentation.position {
+            presentation.edge = edge;
+        }
         if let Some(mode) = file.presentation.tag_contrast {
             presentation.tag_contrast = mode;
         }
@@ -780,6 +823,44 @@ mod tests {
     #[test]
     fn empty_document_is_exactly_the_default() {
         assert_eq!(BarConfig::from_toml("").unwrap(), BarConfig::default());
+    }
+
+    #[test]
+    fn four_edges_and_thickness_alias_preserve_legacy_defaults() {
+        use crate::placement::BarEdge;
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let config = BarConfig::from_toml(&format!(
+                "[presentation]\nposition = '{}'\nthickness = 48.0",
+                edge.as_str()
+            ))
+            .unwrap();
+            assert_eq!(config.presentation.edge, edge);
+            assert_eq!(config.presentation.bar_height, 48.0);
+            assert_eq!(config.presentation.physical_thickness, None);
+        }
+        assert!(BarConfig::from_toml("[presentation]\nposition = 'diagonal'").is_err());
+    }
+
+    #[test]
+    fn wm_placement_override_wins_without_double_scaling() {
+        let mut config = BarConfig::from_toml("[presentation]\nposition = 'left'").unwrap();
+        config
+            .apply_placement_overrides(Some("bottom"), Some("60"))
+            .unwrap();
+        assert_eq!(config.presentation.edge, crate::placement::BarEdge::Bottom);
+        assert_eq!(config.presentation.logical_thickness(1.5), 40.0);
+        for invalid in ["", "0", "-1", "nan", "1.5", "4294967296"] {
+            assert!(
+                config
+                    .apply_placement_overrides(None, Some(invalid))
+                    .is_err()
+            );
+        }
+        assert!(
+            config
+                .apply_placement_overrides(Some("diagonal"), None)
+                .is_err()
+        );
     }
 
     #[test]

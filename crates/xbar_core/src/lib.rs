@@ -52,6 +52,7 @@ pub mod toolkit_dock;
 pub mod transport;
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub mod wake;
+pub mod web_layout;
 
 /// Canonical entry point for the shared-memory wire protocol.
 ///
@@ -92,8 +93,8 @@ pub use model::{
     WindowToken, WmCommand, WmSnapshot,
 };
 pub use placement::{
-    BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, LayerShellAnchors,
-    LayerShellLayer, LayerShellPlacement, PlacementError,
+    BarEdge, BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut,
+    LayerShellAnchors, LayerShellLayer, LayerShellPlacement, PlacementError,
 };
 pub use runtime::{
     BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, PlatformEffectFailure, PlatformEffectHandler,

@@ -6,10 +6,10 @@
 //! Neither had any relationship to the status bar, so the desktop read as a
 //! screen with things scattered on it rather than one surface.
 //!
-//! Docking them to the bar's bottom edge is what makes them read as one piece:
-//! the panel's top edge is flush with the strip it drops out of, its top
-//! corners are square so the two shapes merge, and it springs open from a
-//! narrow seed rather than fading in at full size. The bar is the notch.
+//! Docking them to the bar's inward edge makes their origin predictable.
+//! Horizontal bars merge into a panel growing toward the desktop; vertical
+//! bars open upright cards beside the strip. All panels spring open from a
+//! narrow seed rather than fading in at full size.
 //!
 //! Everything here is geometry and motion only — no GL — so the X11 and
 //! Wayland compositors place their panels identically.
@@ -17,7 +17,7 @@
 use crate::backend::compositor_common::effects::{clamp_effect_dt, finite_clamp};
 use std::time::Instant;
 
-/// Gap between the bar's bottom edge and a docked panel.
+/// Gap between the bar's inward edge and a docked panel.
 ///
 /// Zero: the point of the effect is that the two shapes touch. It is named
 /// rather than inlined because "flush" is a deliberate choice, not an
@@ -65,7 +65,7 @@ const HOVER_EASE_IN: f32 = 0.12;
 /// Where docked panels attach: the strip they drop out of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct IslandDock {
-    /// Horizontal centre panels are centred on.
+    /// Horizontal centre for top/bottom panels; inward edge for side panels.
     pub(crate) centre_x: f32,
     /// The y a docked panel's top edge sits on.
     pub(crate) top_y: f32,
@@ -79,13 +79,22 @@ pub(crate) struct IslandDock {
     /// *up* from its top edge instead of hanging off the bottom into empty
     /// space (or off-screen).
     grows_up: bool,
+    /// Side bars open upright cards toward the desktop. Their stacks still
+    /// advance vertically, keeping notification reading order familiar.
+    side: Option<SideDock>,
     /// Output bounds used for the no-bar fallback and final containment.
     viewport: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SideDock {
+    inner_x: f32,
+    grows_left: bool,
+}
+
 impl IslandDock {
-    /// Dock under the status bar at `bar` (`[x, y, w, h]`), or under the top of
-    /// the screen when the bar is hidden or lives on another output.
+    /// Dock inside the status bar at `bar` (`[x, y, w, h]`), or under the top
+    /// of the screen when the bar is hidden or lives on another output.
     ///
     /// The bar's own centre is used rather than the screen's: JWM's bar can be
     /// inset from the edges, and a panel centred on the screen under a bar that
@@ -95,6 +104,28 @@ impl IslandDock {
         let viewport = normalized_viewport(viewport);
         let [viewport_x, viewport_y, viewport_w, viewport_h] = viewport;
         match bar.and_then(|bar| clip_bar_to_viewport(bar, viewport)) {
+            Some([x, y, w, h]) if h / viewport_h > w / viewport_w => {
+                let grows_left = x + w * 0.5 > viewport_x + viewport_w * 0.5;
+                let inner_x = if grows_left {
+                    x - DOCK_GAP
+                } else {
+                    x + w + DOCK_GAP
+                };
+                Self {
+                    centre_x: inner_x,
+                    top_y: y,
+                    // Renderers expose top/bottom radii. Upright side cards
+                    // keep four rounded corners instead of squaring the
+                    // wrong pair against a vertical bar.
+                    merges_with_bar: false,
+                    grows_up: false,
+                    side: Some(SideDock {
+                        inner_x,
+                        grows_left,
+                    }),
+                    viewport,
+                }
+            }
             Some([x, y, w, h]) if w > 0.0 && h > 0.0 => {
                 let bar_mid = y + h * 0.5;
                 let view_mid = viewport_y + viewport_h * 0.5;
@@ -118,6 +149,7 @@ impl IslandDock {
                     },
                     merges_with_bar: true,
                     grows_up,
+                    side: None,
                     viewport,
                 }
             }
@@ -126,19 +158,26 @@ impl IslandDock {
                 top_y: (viewport_y + no_bar_margin(viewport_h)).min(viewport_y + viewport_h),
                 merges_with_bar: false,
                 grows_up: false,
+                side: None,
                 viewport,
             },
         }
     }
 
-    /// The rect a panel of `width` x `height` occupies, centred on the dock.
+    /// The rect a panel of `width` x `height` occupies, attached to the dock.
     #[must_use]
     pub(crate) fn rect(&self, width: f32, height: f32, y_offset: f32) -> [f32; 4] {
         let width = finite_clamp(width, 0.0, f32::MAX, 0.0);
         let height = finite_clamp(height, 0.0, f32::MAX, 0.0);
         let y_offset = finite_clamp(y_offset, 0.0, f32::MAX, 0.0);
         [
-            self.centre_x - width * 0.5,
+            self.side.map_or(self.centre_x - width * 0.5, |side| {
+                if side.grows_left {
+                    side.inner_x - width
+                } else {
+                    side.inner_x
+                }
+            }),
             self.panel_y(height, y_offset),
             width,
             height,
@@ -159,7 +198,14 @@ impl IslandDock {
     #[must_use]
     pub(crate) fn contained_rect(&self, width: f32, height: f32, y_offset: f32) -> [f32; 4] {
         let [viewport_x, viewport_y, viewport_w, viewport_h] = self.viewport;
-        let width = finite_clamp(width, 0.0, viewport_w, 0.0);
+        let available_width = self.side.map_or(viewport_w, |side| {
+            if side.grows_left {
+                (side.inner_x - viewport_x).max(0.0)
+            } else {
+                (viewport_x + viewport_w - side.inner_x).max(0.0)
+            }
+        });
+        let width = finite_clamp(width, 0.0, available_width, 0.0);
         let height = finite_clamp(height, 0.0, viewport_h, 0.0);
         let [x, y, w, h] = self.rect(width, height, y_offset);
         let max_x = (viewport_x + viewport_w - w).max(viewport_x);
@@ -613,6 +659,36 @@ mod tests {
         assert_eq!(dock.stack_limit(), 864.0);
         let stacked = dock.rect(360.0, 64.0, 80.0);
         assert_eq!(stacked[1] + stacked[3] + 80.0, 864.0);
+    }
+
+    #[test]
+    fn side_bars_open_upright_cards_inward_and_stack_downward() {
+        let viewport = [-1600.0, 120.0, 1600.0, 900.0];
+        for (bar, expected_x) in [
+            ([-1595.0, 125.0, 42.0, 890.0], -1553.0),
+            ([-47.0, 125.0, 42.0, 890.0], -407.0),
+        ] {
+            let dock = IslandDock::for_bar(Some(bar), viewport);
+            assert_eq!(
+                dock.contained_rect(360.0, 64.0, 0.0),
+                [expected_x, 125.0, 360.0, 64.0]
+            );
+            assert_eq!(
+                dock.contained_rect(360.0, 64.0, 80.0),
+                [expected_x, 205.0, 360.0, 64.0]
+            );
+            assert_eq!(dock.stack_limit(), 895.0);
+            assert_eq!(dock.radii(64.0, 24.0, 0.0), (24.0, 24.0));
+            let contained = dock.contained_rect(4000.0, 4000.0, 4000.0);
+            assert!(contained[0] >= viewport[0]);
+            assert!(contained[1] >= viewport[1]);
+            assert!(contained[0] + contained[2] <= viewport[0] + viewport[2]);
+            assert!(contained[1] + contained[3] <= viewport[1] + viewport[3]);
+            assert!(
+                contained[0] >= bar[0] + bar[2] || contained[0] + contained[2] <= bar[0],
+                "cards do not cover the side bar"
+            );
+        }
     }
 
     #[test]

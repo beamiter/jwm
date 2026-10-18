@@ -40,18 +40,17 @@ use x11rb::xcb_ffi::XCBConnection;
 use xbar_core::glass::fallback_rgb;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH,
-    DockBridge, DockItemBinding, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeSchedule, RuntimeUpdate, ShellRoute, TagId, ThemeMode, TransportRecoveryConfig,
-    UserAction, dock_wake_delay,
+    BarEffect, BarRuntime, DockBridge, DockItemBinding, LayoutId, ModelConfig, MonitorGeometry,
+    PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate, ShellRoute, TagId, ThemeMode,
+    TransportRecoveryConfig, UserAction, dock_wake_delay,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
 use masonry::accesskit::{Node, Role};
 use masonry::core::{
-    AccessCtx, ChildrenIds, ErasedAction, LayerType, LayoutCtx, MeasureCtx, NewWidget, PaintCtx,
-    PropertiesMut, PropertiesRef, PropertySet, RegisterCtx, Update, UpdateCtx, Widget, WidgetId,
-    WidgetMut, WidgetPod,
+    AccessCtx, ChildrenIds, ErasedAction, EventCtx, LayerType, LayoutCtx, MeasureCtx, NewWidget,
+    PaintCtx, PointerEvent, PropertiesMut, PropertiesRef, PropertySet, RegisterCtx, Update,
+    UpdateCtx, Widget, WidgetId, WidgetMut, WidgetPod,
 };
 use masonry::imaging::Painter;
 use masonry::kurbo::{Axis, Point, Size};
@@ -71,8 +70,8 @@ use xilem::core::{
 };
 use xilem::style::Style;
 use xilem::view::{
-    CrossAxisAlignment, FlexSpacer, PointerButton, button, button_any_pointer, flex, label,
-    sized_box, task_raw, zstack, zstack_item,
+    CrossAxisAlignment, FlexExt as _, FlexSpacer, PointerButton, button, button_any_pointer, flex,
+    label, portal, sized_box, task_raw, zstack, zstack_item,
 };
 use xilem::{EventLoop, ViewCtx, WidgetView, WindowOptions, Xilem};
 
@@ -187,6 +186,7 @@ struct GeometryDriver<D> {
     inner: D,
     bridge: Arc<GeometryBridge>,
     windows: HashMap<WindowId, AppliedWindowState>,
+    presentation: xbar_core::presentation::PresentationConfig,
 }
 
 impl<D> GeometryDriver<D> {
@@ -195,6 +195,9 @@ impl<D> GeometryDriver<D> {
             inner,
             bridge,
             windows: HashMap::new(),
+            presentation: xbar_core::config::BarConfig::load_default()
+                .unwrap_or_default()
+                .presentation,
         }
     }
 
@@ -227,9 +230,16 @@ impl<D> GeometryDriver<D> {
             .clamp(1.0, f64::from(u32::MAX)) as u32;
         match bridge.geometry {
             Some(geometry) => {
-                window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
-                let _ = window
-                    .request_inner_size(PhysicalSize::new(geometry.width.max(1), physical_height));
+                if let Ok(placement) = xbar_core::BarPlacement::from_bar_geometry(
+                    geometry,
+                    self.presentation.logical_thickness(scale_factor),
+                    scale_factor,
+                    self.presentation.edge,
+                ) {
+                    window.set_outer_position(PhysicalPosition::new(placement.x, placement.y));
+                    let _ = window
+                        .request_inner_size(PhysicalSize::new(placement.width, placement.height));
+                }
             }
             None => {
                 if let Some(position) = applied.baseline.position {
@@ -489,6 +499,7 @@ enum WorkerEvent {
 
 struct XilemBar {
     runtime: BarRuntime,
+    presentation: xbar_core::presentation::PresentationConfig,
     tag_contrast: TagContrastMode,
     schedule: RuntimeSchedule,
     process_actions: ProcessActionHandler,
@@ -531,13 +542,16 @@ impl XilemBar {
             xbar_core::config::BarConfig::default()
         });
         let background_opacity = app_config.background_opacity;
+        let mut dock = DockBridge::new();
+        dock.set_edge(app_config.presentation.edge);
         Self {
             runtime,
             tag_contrast: app_config.presentation.tag_contrast,
             schedule: RuntimeSchedule::default(),
             process_actions: ProcessActionHandler::default(),
             geometry_bridge,
-            dock: DockBridge::new(),
+            dock,
+            presentation: app_config.presentation,
             worker_signal: Arc::new(WorkerSignal::default()),
             theme: Theme::from_mode(theme_mode),
             translucent,
@@ -571,7 +585,7 @@ impl XilemBar {
             &snapshot,
             self.runtime.transport_generation(),
             scale_factor,
-            40.0,
+            self.presentation.logical_thickness(scale_factor) as f32,
             6.0,
         );
         let now = Instant::now();
@@ -1183,13 +1197,15 @@ fn scale_pill_view(theme: &Theme, scale: f32) -> impl WidgetView<XilemBar> + use
 struct HoverSensorWidget {
     child: WidgetPod<dyn Widget>,
     title: String,
+    capture_wheel: bool,
 }
 
 impl HoverSensorWidget {
-    fn new(child: NewWidget<impl Widget + ?Sized>, title: String) -> Self {
+    fn new(child: NewWidget<impl Widget + ?Sized>, title: String, capture_wheel: bool) -> Self {
         Self {
             child: child.erased().to_pod(),
             title,
+            capture_wheel,
         }
     }
 
@@ -1203,10 +1219,41 @@ impl HoverSensorWidget {
 }
 
 #[derive(Debug)]
-struct HoverChanged(bool);
+enum HoverInteraction {
+    Hover(bool),
+    Scroll(i32),
+}
 
 impl Widget for HoverSensorWidget {
-    type Action = HoverChanged;
+    type Action = HoverInteraction;
+
+    fn on_pointer_event(
+        &mut self,
+        ctx: &mut EventCtx<'_>,
+        _: &mut PropertiesMut<'_>,
+        event: &PointerEvent,
+    ) {
+        if self.capture_wheel
+            && !ctx.is_disabled()
+            && let PointerEvent::Scroll(event) = event
+        {
+            let delta = event
+                .delta
+                .to_pixel_delta(
+                    PhysicalPosition::new(1.0, 1.0),
+                    PhysicalPosition::new(1.0, 1.0),
+                )
+                .y;
+            if delta != 0.0 && delta.is_finite() {
+                ctx.submit_action::<Self::Action>(HoverInteraction::Scroll(if delta > 0.0 {
+                    1
+                } else {
+                    -1
+                }));
+                ctx.set_handled();
+            }
+        }
+    }
 
     fn register_children(&mut self, ctx: &mut RegisterCtx<'_>) {
         ctx.register_child(&mut self.child);
@@ -1236,7 +1283,7 @@ impl Widget for HoverSensorWidget {
                     position,
                 );
             }
-            ctx.submit_action::<Self::Action>(HoverChanged(*hovered));
+            ctx.submit_action::<Self::Action>(HoverInteraction::Hover(*hovered));
         }
     }
 
@@ -1291,12 +1338,13 @@ where
     State: 'static,
     Action: 'static,
     V: WidgetView<State, Action>,
-    F: Fn(&mut State, bool) -> Action + Send + Sync + 'static,
+    F: Fn(&mut State, HoverInteraction) -> Action + Send + Sync + 'static,
 {
     HoverSensor {
         inner,
         title,
         on_hover,
+        capture_wheel: false,
         phantom: std::marker::PhantomData,
     }
 }
@@ -1305,7 +1353,15 @@ struct HoverSensor<V, F, State, Action> {
     inner: V,
     title: String,
     on_hover: F,
+    capture_wheel: bool,
     phantom: std::marker::PhantomData<fn() -> (State, Action)>,
+}
+
+impl<V, F, State, Action> HoverSensor<V, F, State, Action> {
+    fn capture_wheel(mut self, enabled: bool) -> Self {
+        self.capture_wheel = enabled;
+        self
+    }
 }
 
 const HOVER_SENSOR_CONTENT_VIEW_ID: ViewId = ViewId::new(0x791f9be3);
@@ -1317,7 +1373,7 @@ where
     State: 'static,
     Action: 'static,
     V: WidgetView<State, Action>,
-    F: Fn(&mut State, bool) -> Action + Send + Sync + 'static,
+    F: Fn(&mut State, HoverInteraction) -> Action + Send + Sync + 'static,
 {
     type Element = xilem::Pod<HoverSensorWidget>;
     type ViewState = V::ViewState;
@@ -1328,7 +1384,11 @@ where
         });
         (
             ctx.with_action_widget(|ctx| {
-                ctx.create_pod(HoverSensorWidget::new(child.new_widget, self.title.clone()))
+                ctx.create_pod(HoverSensorWidget::new(
+                    child.new_widget,
+                    self.title.clone(),
+                    self.capture_wheel,
+                ))
             }),
             child_state,
         )
@@ -1345,6 +1405,7 @@ where
         if self.title != prev.title {
             HoverSensorWidget::set_title(&mut element, self.title.clone());
         }
+        element.widget.capture_wheel = self.capture_wheel;
         ctx.with_id(HOVER_SENSOR_CONTENT_VIEW_ID, |ctx| {
             View::<State, Action, _>::rebuild(
                 &self.inner,
@@ -1388,8 +1449,8 @@ where
                 HoverSensorWidget::child_mut(&mut element).downcast(),
                 app_state,
             ),
-            None => match message.take_message::<HoverChanged>() {
-                Some(hovered) => MessageResult::Action((self.on_hover)(app_state, hovered.0)),
+            None => match message.take_message::<HoverInteraction>() {
+                Some(event) => MessageResult::Action((self.on_hover)(app_state, *event)),
                 None => MessageResult::Stale,
             },
             _ => MessageResult::Stale,
@@ -1397,101 +1458,259 @@ where
     }
 }
 
+/// UnitPoint is resolved against the free space after the child size is
+/// subtracted. This positions a child precisely without transparent padding
+/// swallowing pointer events intended for neighbouring controls.
+fn dock_alignment(
+    parent: xbar_core::presentation::Rect,
+    child: xbar_core::presentation::Rect,
+) -> UnitPoint {
+    let fraction = |origin: f32, extent: f32| {
+        if extent > f32::EPSILON {
+            f64::from(origin / extent).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    UnitPoint::new(
+        fraction(child.x - parent.x, parent.width - child.width),
+        fraction(child.y - parent.y, parent.height - child.height),
+    )
+}
+
 fn minimized_item(state: &XilemBar, index: usize) -> Option<impl WidgetView<XilemBar> + use<>> {
-    let minimized = state.dock.visible_windows().nth(index)?.clone();
+    let minimized = state.dock.visible_windows().nth(index)?;
     let token = minimized.token;
     let binding = state.dock.item_binding(token)?;
-    let scale = state.dock.scale_for(token);
-    let background = if minimized.urgent() {
-        state.theme.urgent_bg
-    } else {
-        with_alpha(state.theme.blue, 0.92)
-    };
-    let border = if minimized.urgent() {
-        state.theme.urgent_border
-    } else {
-        with_alpha(state.theme.fg, 0.55)
-    };
+    let slot = state.dock.slot_bounds(token)?;
+    let visual = state.dock.item_bounds(token)?;
     let title = if minimized.title.trim().is_empty() {
         minimized.app_id.clone()
     } else {
         minimized.title.clone()
     };
-    let tooltip_title = title.clone();
-    let card = sized_box(hover_sensor(
-        button(
-            label(minimized.initial().to_string())
-                .text_size(PILL_FONT_SIZE)
-                .color(Color::WHITE),
-            move |state: &mut XilemBar| {
-                info!("restore minimized window {title}");
-                state.restore_minimized(binding);
-            },
-        ),
-        tooltip_title,
-        move |state: &mut XilemBar, hovered| {
-            state.hover_minimized(binding, hovered);
-        },
-    ))
+    let fill = if minimized.urgent() {
+        state.theme.urgent_bg
+    } else {
+        with_alpha(state.theme.blue, 0.26)
+    };
+    let card = sized_box(
+        label(minimized.initial().to_string())
+            .text_size(11.0)
+            .color(state.theme.fg),
+    )
     .dims(Dimensions::new(
-        Dim::Fixed(Length::px(f64::from(DOCK_ITEM_WIDTH * scale))),
-        Dim::Fixed(Length::px(f64::from(DOCK_ITEM_HEIGHT * scale))),
+        Dim::Fixed(Length::px(f64::from(visual.width))),
+        Dim::Fixed(Length::px(f64::from(visual.height))),
     ))
-    .background(background)
-    .border(border, Length::px(1.0))
+    .background(fill)
+    .border(
+        if minimized.urgent() {
+            state.theme.urgent_border
+        } else {
+            state.theme.subtle
+        },
+        Length::px(1.0),
+    )
     .corner_radius(Length::px(5.0));
+    let picture = zstack((zstack_item(card, dock_alignment(slot, visual)),))
+        .dims(Dimensions::new(Dim::Stretch, Dim::Stretch));
+    let target = button(picture, move |state: &mut XilemBar| {
+        state.restore_minimized(binding);
+    })
+    .prop(Padding::ZERO)
+    .prop(Background::Color(Color::TRANSPARENT))
+    .prop(BorderWidth::all(Length::ZERO))
+    .dims(Dimensions::new(Dim::Stretch, Dim::Stretch));
     Some(
-        sized_box(card)
-            .dims(Dimensions::new(
-                Dim::Fixed(Length::px(f64::from(DOCK_SLOT_WIDTH))),
-                Dim::Stretch,
-            ))
-            .padding(Padding::from_vh(
-                Length::px(f64::from((40.0 - DOCK_ITEM_HEIGHT * scale) * 0.5)),
-                Length::px(f64::from((DOCK_SLOT_WIDTH - DOCK_ITEM_WIDTH * scale) * 0.5)),
-            )),
+        sized_box(hover_sensor(
+            target,
+            title,
+            move |state: &mut XilemBar, event| {
+                if let HoverInteraction::Hover(hovered) = event {
+                    state.hover_minimized(binding, hovered);
+                }
+            },
+        ))
+        .dims(Dimensions::new(
+            Dim::Fixed(Length::px(f64::from(slot.width))),
+            Dim::Fixed(Length::px(f64::from(slot.height))),
+        )),
     )
 }
 
 fn minimized_dock(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let subtle = with_alpha(state.theme.subtle, 0.45);
-    let overflow = state.dock.overflow() || state.dock.collapsed();
-    let cards: Vec<_> = (0..16)
-        .filter_map(|index| minimized_item(state, index))
+    let shelf = state.dock.shelf_bounds().unwrap_or_default();
+    let cards: Vec<_> = state
+        .dock
+        .visible_windows()
+        .enumerate()
+        .filter_map(|(index, window)| {
+            let slot = state.dock.slot_bounds(window.token)?;
+            Some(zstack_item(
+                minimized_item(state, index)?,
+                dock_alignment(shelf, slot),
+            ))
+        })
         .collect();
-    let overflow_label = overflow.then(|| {
-        sized_box(
-            label("+")
-                .text_size(PILL_FONT_SIZE)
-                .color(state.theme.subtle),
-        )
-        .width(Dim::Fixed(Length::px(12.0)))
-        .height(Dim::Stretch)
+    let overflow = state.dock.overflow_bounds().map(|bounds| {
+        let binding = state.dock.overflow_binding();
+        let count = state.dock.overflow_count();
+        let label = label(if count > 0 {
+            format!("+{count}")
+        } else {
+            "…".into()
+        })
+        .text_size(11.0)
+        .color(state.theme.fg);
+        let control = button(label, move |state: &mut XilemBar| {
+            if let Some(binding) = binding {
+                state.restore_minimized(binding);
+            }
+        })
+        .disabled(binding.is_none())
+        .prop(Padding::ZERO)
+        .dims(Dimensions::new(
+            Dim::Fixed(Length::px(f64::from(bounds.width))),
+            Dim::Fixed(Length::px(f64::from(bounds.height))),
+        ));
+        zstack_item(control, dock_alignment(shelf, bounds))
     });
-    sized_box(
-        flex(
-            Axis::Horizontal,
-            (
-                flex(Axis::Horizontal, cards)
-                    .cross_axis_alignment(CrossAxisAlignment::Center)
-                    .gap(Length::px(f64::from(DOCK_ITEM_GAP))),
-                overflow_label,
-            ),
-        )
-        .cross_axis_alignment(CrossAxisAlignment::Center)
-        .gap(Length::px(f64::from(DOCK_ITEM_GAP))),
-    )
-    .width(Dim::Fixed(Length::px(f64::from(state.dock.shelf_width()))))
-    .height(Dim::Stretch)
-    .padding(Padding::from_vh(Length::ZERO, Length::px(2.0)))
-    .border(subtle, Length::px(1.0))
-    .corner_radius(Length::px(5.0))
+    sized_box(zstack((cards, overflow))).dims(Dimensions::new(
+        Dim::Fixed(Length::px(f64::from(shelf.width))),
+        Dim::Fixed(Length::px(f64::from(shelf.height))),
+    ))
 }
 
 // -------- Top-level view -----------------------------------------------------
 
-fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
+fn sidebar_cell(
+    state: &XilemBar,
+    spec: xbar_core::ControlSpec,
+) -> impl WidgetView<XilemBar> + use<> {
+    let palette = xbar_core::presentation::Palette::for_theme(state.runtime.view().theme);
+    let tag_palette = TagPalette::for_wallpaper(
+        state.runtime.view().theme,
+        state.runtime.view().wallpaper_luminance,
+        state.presentation.tag_contrast,
+    );
+    let tags = tag_palette.colors(VisualState {
+        hovered: false,
+        selected: spec.state.selected || spec.state.filled,
+        urgent: spec.state.urgent,
+        occupied: spec.state.occupied,
+    });
+    let is_tag = matches!(spec.id, xbar_core::presentation::NodeId::Tag(_));
+    let convert = |color: xbar_core::presentation::Rgba| {
+        Color::from_rgba8(
+            (color.red * 255.0).round() as u8,
+            (color.green * 255.0).round() as u8,
+            (color.blue * 255.0).round() as u8,
+            (color.alpha * 255.0).round() as u8,
+        )
+    };
+    let fg = convert(if is_tag {
+        tags.foreground
+    } else {
+        palette.text
+    });
+    let bg = convert(if is_tag { tags.fill } else { palette.occupied });
+    let border = convert(tags.stroke.map_or(tags.fill, |stroke| stroke.color));
+    let title = spec.tooltip_text();
+    let lines = spec.sidebar_lines();
+    let height = (lines.len() as f64 * 15.0 + 10.0).max(36.0);
+    let labels: Vec<_> = lines
+        .into_iter()
+        .map(|line| label(line).text_size(12.0).color(fg))
+        .collect();
+    let bindings = spec.bindings;
+    let control = button_any_pointer(
+        flex(Axis::Vertical, labels).gap(Length::ZERO),
+        move |state: &mut XilemBar, pointer| {
+            let action = if matches!(pointer, Some(PointerButton::Secondary)) {
+                bindings.secondary
+            } else {
+                bindings.primary
+            };
+            if let Some(action) = action {
+                state.dispatch(action);
+            }
+        },
+    )
+    .disabled(!spec.state.enabled)
+    .prop(Background::Color(Color::TRANSPARENT))
+    .prop(BorderColor::new(Color::TRANSPARENT))
+    .dims(Dimensions::new(Dim::Stretch, Dim::Stretch));
+    sized_box(
+        hover_sensor(control, title, move |state: &mut XilemBar, event| {
+            if let HoverInteraction::Scroll(direction) = event {
+                let action = if direction > 0 {
+                    bindings.scroll_up
+                } else {
+                    bindings.scroll_down
+                };
+                if let Some(action) = action {
+                    state.dispatch(action);
+                }
+            }
+        })
+        .capture_wheel(
+            spec.state.enabled && (bindings.scroll_up.is_some() || bindings.scroll_down.is_some()),
+        ),
+    )
+    .dims(Dimensions::new(
+        Dim::Stretch,
+        Dim::Fixed(Length::px(height)),
+    ))
+    .background(bg)
+    .border(border, Length::px(1.0))
+    .corner_radius(Length::px(6.0))
+}
+
+fn sidebar(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
+    let projection =
+        xbar_core::PresentationProjector::project(state.runtime.view(), &state.presentation);
+    let leading: Vec<_> = projection
+        .tags
+        .into_iter()
+        .chain([projection.layout_button])
+        .chain(projection.layout_choices)
+        .map(|spec| sidebar_cell(state, spec))
+        .collect();
+    let trailing: Vec<_> = projection
+        .status
+        .into_iter()
+        .rev()
+        .map(|spec| sidebar_cell(state, spec))
+        .collect();
+    flex(
+        Axis::Vertical,
+        (
+            portal(
+                flex(Axis::Vertical, leading)
+                    .cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .gap(Length::px(4.0)),
+            )
+            .constrain_horizontal(true)
+            .flex(1.0),
+            portal(
+                flex(Axis::Vertical, trailing)
+                    .cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .gap(Length::px(4.0)),
+            )
+            .constrain_horizontal(true)
+            .flex(1.0),
+        ),
+    )
+    .cross_axis_alignment(CrossAxisAlignment::Stretch)
+    .gap(Length::px(6.0))
+}
+
+fn app_logic(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
     state.service_dock();
+    if state.presentation.edge.is_vertical() {
+        return sidebar(state).boxed();
+    }
     let view = state.runtime.view();
     let cpu = view.system.cpu_percent.map_or(0.0, |value| value.as_f32());
     let mem = view
@@ -1545,12 +1764,12 @@ fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
                 FlexSpacer::Fixed(Length::px(RIGHTMOST_SECTION_GAP)),
                 scale_pill_view(&theme, 1.0),
                 FlexSpacer::Fixed(Length::px(4.0)),
-                minimized_dock(state),
             ),
         ),
     )
     .cross_axis_alignment(CrossAxisAlignment::Stretch)
     .gap(Length::ZERO)
+    .boxed()
 }
 
 // -------- Background workers -------------------------------------------------
@@ -1604,9 +1823,56 @@ fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
         state.translucent,
     );
     let bar_bg = with_alpha(rgb(r, g, b), alpha as f32);
+    let controls = app_logic(state);
+    let shelf = state.dock.shelf_bounds();
+    let vertical = state.presentation.edge.is_vertical();
+    let controls_height = if vertical {
+        shelf.map_or(Dim::Stretch, |bounds| {
+            Dim::Fixed(Length::px(f64::from((bounds.y - 6.0).max(0.0))))
+        })
+    } else {
+        Dim::Stretch
+    };
+    let right_padding = if vertical {
+        3.0
+    } else {
+        shelf.map_or(6.0, |bounds| f64::from(bounds.width) + 12.0)
+    };
+    let controls = sized_box(controls)
+        .dims(Dimensions::new(Dim::Stretch, controls_height))
+        .padding(Padding {
+            left: Length::px(if vertical { 3.0 } else { 6.0 }),
+            right: Length::px(right_padding),
+            top: Length::ZERO,
+            bottom: Length::ZERO,
+        });
+    let dock = shelf.map(|bounds| {
+        let scale = state
+            .geometry_bridge
+            .snapshot()
+            .scale_factor
+            .max(f64::EPSILON);
+        let geometry = state.runtime.view().geometry.unwrap_or(MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+        let viewport = xbar_core::presentation::Rect::new(
+            0.0,
+            0.0,
+            geometry.width as f32 / scale as f32,
+            if vertical {
+                geometry.height as f32 / scale as f32
+            } else {
+                state.presentation.logical_thickness(scale) as f32
+            },
+        );
+        zstack_item(minimized_dock(state), dock_alignment(viewport, bounds))
+    });
     fork(
-        sized_box(app_logic(state))
-            .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
+        sized_box(zstack((zstack_item(controls, UnitPoint::TOP_LEFT), dock)))
+            .dims(Dimensions::new(Dim::Stretch, Dim::Stretch))
             .background(bar_bg),
         (driver_task(),),
     )
@@ -1635,8 +1901,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     info!("startup mode: translucent={translucent}");
 
+    let presentation = xbar_core::config::BarConfig::load_default()
+        .unwrap_or_default()
+        .presentation;
+    let thickness = presentation.logical_thickness(1.0);
+    let initial_size = if presentation.edge.is_vertical() {
+        LogicalSize::new(thickness, 800.0)
+    } else {
+        LogicalSize::new(800.0, thickness)
+    };
     let opts = WindowOptions::new("xilem_bar")
-        .with_initial_inner_size(LogicalSize::new(800.0, 26.0))
+        .with_initial_inner_size(initial_size)
         .with_decorations(false)
         .with_transparent(translucent)
         .with_window_level(WindowLevel::AlwaysOnTop)

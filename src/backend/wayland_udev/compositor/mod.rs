@@ -1428,6 +1428,7 @@ pub(crate) struct WaylandCompositor {
     pending_minimized_visuals: HashSet<u64>,
     pending_genie_restores: HashSet<u64>,
     dock_preview: Option<DockPreview>,
+    dock_preview_edge: xbar_core::placement::BarEdge,
 
     // Window groups (tabs): the bars the window manager reserved, strip
     // geometry included, plus one (texture, w, h) per cell rebuilt only when
@@ -2987,6 +2988,7 @@ impl WaylandCompositor {
                 pending_minimized_visuals: HashSet::new(),
                 pending_genie_restores: HashSet::new(),
                 dock_preview: None,
+                dock_preview_edge: xbar_core::placement::BarEdge::Top,
 
                 // Window groups
                 window_groups: Vec::new(),

@@ -1552,6 +1552,14 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    pub(crate) fn set_minimized_preview_edge(&mut self, edge: xbar_core::placement::BarEdge) {
+        if self.dock_preview_edge != edge {
+            self.dock_preview_edge = edge;
+            self.force_full_damage_next = true;
+            self.needs_render = true;
+        }
+    }
+
     pub(crate) fn set_minimized_window_preview(
         &mut self,
         request: Option<(u64, crate::backend::api::CompositorRect)>,
