@@ -131,7 +131,7 @@ surface=egl('eglCreatePbufferSurface',P,[P,P,C.POINTER(I)])
 current=egl('eglMakeCurrent',U,[P,P,P,P])
 results={}
 PREVIEW_INSTANT=datetime.datetime.now(datetime.timezone.utc).timestamp()
-source=SOURCE.read_text().replace('// JWM_COSMIC_SKY_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl').read_text())
+source=SOURCE.read_text().replace('// JWM_COSMIC_SKY_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl').read_text()).replace('// JWM_PLANET_SURFACE_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/planet_surface.glsl').read_text())
 vert='#version 330 core\nvoid main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0,1); }'
 def prepare(s,es):
  return '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler3D;\n'+s.lstrip().split('\n',1)[1] if es else s
@@ -204,6 +204,82 @@ for es in (False,True):
  gl('glActiveTexture',None,[U])(0x84C0)
  gl('glBindTexture',None,[U,U])(0x0DE1,textures['earth'])
  unif1i(loc(prog,b'earth_map'),0)
+
+ # Exercise every production scene before the legacy regression probes. The
+ # fast flag runs these GL + GLES checks without repeating the historic suite.
+ catalogue_textures={3:textures['earth'],9:textures['moon']}
+ for body_id,asset in [(1,'mercury-nasa-messenger.jpg'),(4,'mars-nasa-viking.jpg'),(5,'jupiter-nasa-cassini.jpg')]:
+  path=REPO/'assets/astronomy'/asset
+  assert path.is_file(),f'missing observed catalogue map: {path}'
+  value=Image.open(path).convert('RGBA')
+  width=min(value.width,2048)&~1
+  if value.size!=(width,width//2):value=value.resize((width,width//2),Image.Resampling.LANCZOS)
+  tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex));gl('glBindTexture',None,[U,U])(0x0DE1,tex)
+  for key,val in ((0x2801,0x2703),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,key,val)
+  data=C.create_string_buffer(value.tobytes())
+  gl('glTexImage2D',None,[U,I,I,I,I,I,U,U,P])(0x0DE1,0,0x1908,value.width,value.height,0,0x1908,0x1401,data)
+  gl('glGenerateMipmap',None,[U])(0x0DE1);catalogue_textures[body_id]=tex.value
+ def catalogue_image(body_id,scientific=True,mapped=True,latitude=23.13,longitude=0.0,sky=True):
+  matrix=celestial_frame(BASE,latitude=latitude,longitude=longitude)[1]
+  light=[sum(matrix[col*3+row]*[0.48,0.25,0.84148675][col] for col in range(3)) for row in range(3)]
+  upload_view(prog,matrix)
+  gl('glUniform3f',None,[I,F,F,F])(loc(prog,b'sun_direction'),*light)
+  unif1i(loc(prog,b'celestial_body'),body_id+1)
+  unif1i(loc(prog,b'moon_material'),int(body_id==9))
+  unif1i(loc(prog,b'cosmic_scientific'),int(scientific))
+  unif1i(loc(prog,b'panorama_enabled'),1)
+  unif1f(loc(prog,b'panorama_fov'),60)
+  gl('glUniformMatrix3fv',None,[I,I,C.c_ubyte,C.POINTER(F)])(loc(prog,b'panorama_view'),1,0,(F*9)(1,0,0,0,1,0,0,0,1))
+  unif1i(loc(prog,b'sky_enabled'),int(sky_available and sky))
+  unif1i(loc(prog,b'surface_mapped'),int(mapped and body_id in catalogue_textures))
+  unif1f(loc(prog,b'surface_detail'),1)
+  unif1f(loc(prog,b'sphere_radius'),H*0.42*(0.48 if body_id==6 else 1.0))
+  gl('glActiveTexture',None,[U])(0x84C0)
+  gl('glBindTexture',None,[U,U])(0x0DE1,catalogue_textures.get(body_id,0) if mapped else 0)
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
+  assert gl('glGetError',U,[])()==0,('catalogue GL error',body_id)
+  output=Image.frombytes('RGBA',(W,H),bytes(buf)).transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+  assert output.getchannel('A').getextrema()==(255,255),('transparent body',body_id)
+  return output.convert('RGB')
+ catalogue_frames=[];catalogue_images={}
+ for body_id,name in enumerate(('sun','mercury','venus','earth','mars','jupiter','saturn','uranus','neptune','moon','galaxy')):
+  output=catalogue_image(body_id)
+  filename=f'{kind}-encyclopedia-{name}.png';output.save(ROOT/filename)
+  if body_id!=10:assert max(output.getpixel((W//2,H//2)))>8,('black planet',name)
+  catalogue_images[body_id]=output
+  catalogue_frames.append({'scene':name,'body_id':body_id,'file':filename,'observed_surface':body_id in catalogue_textures,'center_rgb':output.getpixel((W//2,H//2))})
+ scientific_blank=catalogue_image(10,sky=False)
+ assert all(low==high for low,high in scientific_blank.getextrema()),'scientific mode fabricated a star catalogue'
+ illustrative_blank=catalogue_image(10,scientific=False,sky=False)
+ assert ImageChops.difference(scientific_blank,illustrative_blank).getbbox() is not None,'illustrative sky fallback disappeared'
+ neutral_a=catalogue_image(5,mapped=False,longitude=0)
+ neutral_b=catalogue_image(5,mapped=False,longitude=91)
+ assert max(high for _,high in ImageChops.difference(neutral_a,neutral_b).getextrema())<=1,'scientific fallback invented cloud geography'
+ art_a=catalogue_image(5,scientific=False,mapped=False,longitude=0)
+ art_b=catalogue_image(5,scientific=False,mapped=False,longitude=91)
+ assert max(high for _,high in ImageChops.difference(art_a,art_b).getextrema())>1,'illustrative cloud bands did not rotate'
+ ring_radius=H*0.42*0.48
+ ring_pixels=0
+ saturn=catalogue_images[6]
+ sky_image=catalogue_images[10]
+ for y in range(H):
+  for x in range(W):
+   if math.hypot(x+0.5-W/2,H-y-0.5-H/2)>ring_radius*1.30:
+    if max(saturn.getpixel((x,y)))>40 and max(abs(a-b) for a,b in zip(saturn.getpixel((x,y)),sky_image.getpixel((x,y))))>20:ring_pixels+=1
+ assert ring_pixels>W*H*0.002,('Saturn rings absent',ring_pixels)
+ catalogue_metrics={'frames':catalogue_frames,'all_scenes_opaque':'PASS','scientific_missing_sky_no_invented_stars':'PASS','scientific_missing_surface_no_generated_geography':'PASS','illustrative_material_rotation':'PASS','saturn_ring_pixels':ring_pixels}
+ if os.environ.get('ASTRONOMY_TEST_SURFACES_ONLY')=='1':
+  results[kind]={'version':version,'renderer':renderer,'compile_link':'PASS','celestial_surfaces':catalogue_metrics}
+  current(d,None,None,None)
+  egl('eglDestroySurface',U,[P,P])(d,surf);egl('eglDestroyContext',U,[P,P])(d,ctx)
+  continue
+ # Restore the original fixture inputs for existing physical-light/pixel tests.
+ unif1i(loc(prog,b'celestial_body'),0);unif1i(loc(prog,b'moon_material'),0)
+ unif1i(loc(prog,b'cosmic_scientific'),0);unif1i(loc(prog,b'panorama_enabled'),0)
+ unif1i(loc(prog,b'sky_enabled'),int(sky_available));unif1f(loc(prog,b'sphere_radius'),layout_plan(W,H,[],False)[0]['radius'])
+ unif1f(loc(prog,b'surface_detail'),0)
+ gl('glBindTexture',None,[U,U])(0x0DE1,textures['earth'])
  images=[];metrics=[]
  cases=[(h,z) for z in (0,8) for h in (0,6,12,18)]+[(12+1/60,0),(12+1,0),(6+1/54000,0),(6+1/3600,0)]
  for hour,zone in cases:
@@ -277,7 +353,7 @@ for es in (False,True):
  for baseline,index,seconds in ((2,8,60),(2,9,3600),(1,10,1/15),(1,11,1)):
   delta=ImageChops.difference(images[baseline].convert('RGB'),images[index].convert('RGB'))
   diffs.append({'seconds':seconds,'mean_abs_rgb':sum(ImageStat.Stat(delta).mean)/3,'max_abs_channel':max(x[1] for x in delta.getextrema())})
- results[kind]={'version':version,'renderer':renderer,'compile_link':'PASS','opaque_all_frames':True,'distinct_frames':len(cases),'motion':diffs,'metrics':metrics,'legacy_controls':'Historical timezone orbit, latitude 0.18 radians; not production default.'}
+ results[kind]={'celestial_surfaces':catalogue_metrics,'version':version,'renderer':renderer,'compile_link':'PASS','opaque_all_frames':True,'distinct_frames':len(cases),'motion':diffs,'metrics':metrics,'legacy_controls':'Historical timezone orbit, latitude 0.18 radians; not production default.'}
  # Full root framebuffer test, two 2560x1440 outputs joined at x=2560.
  wide=surface(d,cfg,attrs(0x3057,5120,0x3056,1440,0x3038));assert wide
  assert current(d,wide,wide,ctx)
@@ -1069,6 +1145,17 @@ void main() {
  egl('eglDestroySurface',U,[P,P])(d,wide)
  current(d,None,None,None)
  egl('eglDestroySurface',U,[P,P])(d,surf);egl('eglDestroyContext',U,[P,P])(d,ctx)
+if os.environ.get('ASTRONOMY_TEST_SURFACES_ONLY')=='1':
+ max_error=0
+ for a,b in zip(results['gl330']['celestial_surfaces']['frames'],results['gles300']['celestial_surfaces']['frames']):
+  error=max(high for _,high in ImageChops.difference(Image.open(ROOT/a['file']),Image.open(ROOT/b['file'])).getextrema())
+  assert error<=2,('GL/GLES catalogue mismatch',a['scene'],error)
+  max_error=max(max_error,error)
+ results['gl_gles_max_channel_difference']=max_error
+ results['scope']='Surfaceless Mesa GL330/GLES300: all eleven scenes, observed maps, scientific fallback fidelity, Saturn rings; no live compositor/hotplug claims.'
+ (ROOT/'celestial-surfaces-metrics.json').write_text(json.dumps(results,indent=2))
+ print(json.dumps({'result':'PASS','output':str(ROOT),'apis':list(results)[:2],'gl_gles_max_channel_difference':max_error}))
+ raise SystemExit(0)
 results['source_sha256']=hashlib.sha256(source.encode()).hexdigest()
 results['production_astronomy_source_sha256']=hashlib.sha256((REPO/'src/backend/compositor_common/animated_wallpaper.rs').read_bytes()).hexdigest()
 results['production_panorama_source_sha256']=hashlib.sha256((REPO/'src/backend/compositor_common/panorama.rs').read_bytes()).hexdigest()

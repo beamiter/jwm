@@ -5110,24 +5110,18 @@ impl<C: CompositorConnection> Compositor<C> {
                 .collect();
             // Use this frame's monitor geometry, not Astronomy's cached draw
             // plan: prepare updates that cache only after this decision.
-            let per_output = astronomy_cfg.behavior().wallpaper_effect == "astronomy"
-                && matches!(
-                    astronomy_cfg.behavior().wallpaper_astronomy_layout.as_str(),
-                    "per-output" | "earth-moon"
-                );
-            let outputs: Vec<_> = if per_output {
-                self.monitor_wallpapers
-                    .iter()
-                    .take(129)
-                    .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            // All celestial layouts paint only active output pixels. Desktop
+            // holes between staggered monitors cannot keep an invisible scene awake.
+            let outputs: Vec<_> = self
+                .monitor_wallpapers
+                .iter()
+                .take(129)
+                .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
+                .collect();
             crate::backend::compositor_common::animated_wallpaper::astronomy_fully_covered(
                 (self.screen_w, self.screen_h),
                 &outputs,
-                per_output,
+                true,
                 &opaque_rects,
             )
         } else {
@@ -6288,7 +6282,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         if !astronomy_occluded {
             self.draw_astronomy_wallpaper(use_scissor.then_some(damage_scissor));
-            self.draw_solar_system_wallpaper();
+            self.draw_solar_system_wallpaper(use_scissor.then_some(damage_scissor));
         }
 
         // Wallpaper-only readback MUST precede the first client/overlay draw.

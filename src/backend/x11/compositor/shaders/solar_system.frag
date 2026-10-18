@@ -1,7 +1,18 @@
 #version 330 core
-// Original, fixed-cost 3D illustration. Readable scales/speeds, not ephemerides.
+// Date-derived JPL approximation or legacy illustration. Display scales are
+// deliberately compressed; body positions and mouse picking share one CPU frame.
 out vec4 frag_color;
 uniform vec2 resolution;
+uniform vec2 canvas_origin;
+uniform int ephemeris_enabled;
+uniform vec3 body_centers[9];
+uniform vec3 body_axes[9];
+uniform vec3 ellipse_centers[8];
+uniform vec3 ellipse_u[8];
+uniform vec3 ellipse_v[8];
+uniform int scientific_mode;
+uniform int focus_enabled;
+uniform int focused_body;
 uniform vec3 camera_eye;
 uniform mat3 camera_basis;
 uniform int camera_basis_enabled;
@@ -15,6 +26,20 @@ uniform sampler2D cloud_map;
 uniform int cloud_enabled;
 uniform sampler2D sky_map;
 uniform int sky_enabled;
+uniform sampler2D mercury_map;
+uniform int mercury_enabled;
+uniform sampler2D venus_map;
+uniform int venus_enabled;
+uniform sampler2D mars_map;
+uniform int mars_enabled;
+uniform sampler2D jupiter_map;
+uniform int jupiter_enabled;
+uniform sampler2D saturn_map;
+uniform int saturn_enabled;
+uniform sampler2D uranus_map;
+uniform int uranus_enabled;
+uniform sampler2D neptune_map;
+uniform int neptune_enabled;
 const float PI=3.14159265359;
 const float TAU=6.28318530718;
 // Explicit spherical lookup derivatives preserve longitude wrap continuity and
@@ -29,6 +54,7 @@ const float radius[9]=float[9](1.12,.23,.40,.46,.33,.90,.76,.58,.55);
 // Full right-hand-rule obliquities: >90 degrees naturally rotates retrograde.
 const float obliquity[8]=float[8](.034,177.4,23.44,25.19,3.1,26.7,97.8,28.3);
 vec3 body_axis(int body){
+ if(ephemeris_enabled!=0)return normalize(body_axes[body]);
  float tilt=obliquity[body-1]*PI/180.;
  // Each illustrative orbit is inclined in the yz plane; tilt relative to it.
  vec3 orbital_normal=normalize(vec3(0.,orbit[body-1],-.025*float(body)));
@@ -72,7 +98,7 @@ float crater_detail(vec3 q,float footprint){
  }
  return height;
 }
-vec3 center(int i){if(i==0)return vec3(0);float a=orbit_phase[i-1];return vec3(cos(a)*orbit[i-1],sin(a)*.025*float(i),sin(a)*orbit[i-1]);}
+vec3 center(int i){if(ephemeris_enabled!=0)return body_centers[i];if(i==0)return vec3(0);float a=orbit_phase[i-1];return vec3(cos(a)*orbit[i-1],sin(a)*.025*float(i),sin(a)*orbit[i-1]);}
 float sphere(vec3 ro,vec3 rd,vec3 c,float r){vec3 q=ro-c;float b=dot(q,rd),d=b*b-dot(q,q)+r*r;if(d<0.)return 1e5;float t=-b-sqrt(d);if(t>0.)return t;t=-b+sqrt(d);return t>0.?t:1e5;}
 vec3 rotate_y(vec3 n,float a){float s=sin(a),c=cos(a);return vec3(c*n.x-s*n.z,n.y,s*n.x+c*n.z);}
 // World-to-body rigid transform. Only albedo enters this frame; normals,
@@ -84,17 +110,41 @@ vec3 surface_point(int body,vec3 n){
  return rotate_y(vec3(dot(n,x),dot(n,axis),dot(n,z)),spin_phase[body-1]);
 }
 float ring_opacity(float r){
- // Outside the feathered annulus opacity is exactly zero.
- if(r<=.96||r>=1.68)return 0.;
- float edge=smoothstep(.96,1.01,r)*(1.-smoothstep(1.61,1.68,r));
- float cassini=1.-.8*exp(-pow((r-1.43)/.022,2.));
- float structure=.59+.10*sin(r*129.)+.045*sin(r*337.);
- return clamp(edge*cassini*structure,0.,.85);
+ // Main C/B/A ring dimensions relative to Saturn's equatorial radius.
+ // Opacity is an analytic display model, not measured ring photometry.
+ r/=radius[6];
+ if(r<=1.24||r>=2.269)return 0.;
+ float c=smoothstep(1.24,1.25,r)*(1.-smoothstep(1.516,1.526,r));
+ float b=smoothstep(1.516,1.526,r)*(1.-smoothstep(1.941,1.951,r));
+ float a=smoothstep(2.027,2.037,r)*(1.-smoothstep(2.259,2.269,r));
+ return .12*c+.78*b+.44*a;
 }
 vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
  vec3 q=surface_point(body,n); // Body-fixed clouds and surface, no boiling noise.
  float footprint=max(length(normal_dx),length(normal_dy));
- float detail=surface_detail(q,footprint);
+ vec2 mapped_uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
+ vec2 mapped_dx=equirect_gradient(q,surface_point(body,normal_dx));
+ vec2 mapped_dy=equirect_gradient(q,surface_point(body,normal_dy));
+ // Observed maps take precedence over either optional display material.
+ if(body==1&&mercury_enabled!=0)return textureGrad(mercury_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ if(body==2&&venus_enabled!=0)return textureGrad(venus_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ if(body==4&&mars_enabled!=0)return textureGrad(mars_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ if(body==5&&jupiter_enabled!=0)return textureGrad(jupiter_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ if(body==6&&saturn_enabled!=0)return textureGrad(saturn_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ if(body==7&&uranus_enabled!=0)return textureGrad(uranus_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ if(body==8&&neptune_enabled!=0)return textureGrad(neptune_map,mapped_uv,mapped_dx,mapped_dy).rgb;
+ float detail=scientific_mode!=0?0.:surface_detail(q,footprint);
+ if(scientific_mode!=0 && body!=3){
+  // Until an observed map is available, expose an approximate mean appearance
+  // instead of inventing named terrain, storms or crater geometry.
+  if(body==1)return vec3(.44,.42,.40);
+  if(body==2)return vec3(.91,.87,.75);
+  if(body==4)return vec3(.57,.30,.16);
+  if(body==5)return vec3(.78,.68,.54);
+  if(body==6)return vec3(.82,.75,.59);
+  if(body==7)return vec3(.48,.70,.72);
+  return vec3(.40,.59,.67);
+ }
  float fine=body==1?fbm(q*12.):0.;
  if(body==1){float rocks=fbm(q*5.);float craters=crater_detail(q,footprint);return mix(vec3(.20,.18,.17),vec3(.55,.50,.43),rocks)*(.88+.18*fine+.27*detail+.45*craters);}
  if(body==2){
@@ -107,8 +157,8 @@ vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
   vec2 uv=vec2(atan(q.z,q.x)/TAU+.5,.5-asin(clamp(q.y,-1.,1.))/PI);
   vec2 uv_dx=equirect_gradient(q,surface_point(body,normal_dx));
   vec2 uv_dy=equirect_gradient(q,surface_point(body,normal_dy));
-  vec3 base=earth_enabled!=0?textureGrad(earth_map,uv,uv_dx,uv_dy).rgb:mix(vec3(.025,.13,.32),vec3(.13,.27,.10),smoothstep(.48,.57,fbm(q*5.)));
-  float clouds=cloud_enabled!=0?smoothstep(.12,.88,textureGrad(cloud_map,uv,uv_dx,uv_dy).r):smoothstep(.58,.74,fbm(q*vec3(8.,12.,8.)));
+  vec3 base=earth_enabled!=0?textureGrad(earth_map,uv,uv_dx,uv_dy).rgb:scientific_mode!=0?vec3(.04,.16,.28):mix(vec3(.025,.13,.32),vec3(.13,.27,.10),smoothstep(.48,.57,fbm(q*5.)));
+  float clouds=cloud_enabled!=0?smoothstep(.12,.88,textureGrad(cloud_map,uv,uv_dx,uv_dy).r):scientific_mode!=0?0.:smoothstep(.58,.74,fbm(q*vec3(8.,12.,8.)));
   return mix(base*(1.+.06*detail),vec3(.94,.96,.98),clouds*.88);
  }
  if(body==4){float rock=fbm(q*4.);float dust=fbm(q*13.);float craters=crater_detail(q,footprint);return mix(vec3(.27,.10,.05),vec3(.71,.38,.19),rock)*(.82+.25*dust+.22*detail+.34*craters)+vec3(.2)*smoothstep(.88,.96,abs(q.y));}
@@ -141,7 +191,18 @@ vec3 material(int body,vec3 n,vec3 normal_dx,vec3 normal_dy){
  return (body==7?mix(vec3(.32,.63,.66),vec3(.42,.70,.73),bands):mix(vec3(.035,.18,.52),vec3(.10,.32,.68),bands))*(1.+.08*detail);
 }
 // JWM_COSMIC_SKY_INCLUDE
+// J2000 ecliptic (renderer x, -z, y) -> ICRS -> Galactic catalogue.
+// Preserve the fixed catalogue framing API used by the independent sky viewer.
+vec3 solar_catalog_direction(vec3 world){
+ vec3 e=vec3(world.x,-world.z,world.y);
+ vec3 q=vec3(e.x,.9174820621*e.y-.3977771559*e.z,.3977771559*e.y+.9174820621*e.z);
+ vec3 g=vec3(dot(vec3(-.0548755604,-.8734370902,-.4838350155),q),
+             dot(vec3(-.8676661490,-.1980763734,.4559837762),q),
+             dot(vec3(.4941094279,-.4448296300,.7469822445),q));
+ return vec3(-.3746065934*g.y-.9271838546*g.z,.9271838546*g.y-.3746065934*g.z,g.x);
+}
 vec3 stars(vec3 ray,vec3 ray_dx,vec3 ray_dy){
+ if(ephemeris_enabled!=0)return cosmic_sky(solar_catalog_direction(ray),solar_catalog_direction(ray_dx),solar_catalog_direction(ray_dy),sky_enabled!=0);
  return cosmic_sky(ray,ray_dx,ray_dy,sky_enabled!=0);
 }
 vec3 solar_ray(vec2 pixel,out float inverse_length,out vec3 right,out vec3 up){
@@ -165,6 +226,7 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
 
  float nearest=1e5;int body=-1;
  for(int i=0;i<9;i++){
+  if(focus_enabled!=0&&focused_body!=i)continue;
   vec3 c=center(i);float t=sphere(camera_eye,ray,c,radius[i]);if(t<nearest){nearest=t;body=i;}
   vec3 offset=c-camera_eye;float along=dot(offset,ray);float impact2=dot(offset,offset)-along*along;float footprint=along/pixels*1.5;
   if(along>0.&&abs(impact2-radius[i]*radius[i])<2.*radius[i]*footprint+footprint*footprint)needs_aa=true;
@@ -174,14 +236,30 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  vec3 ray_dx=(right-ray*dot(ray,right))*(inverse_length/pixels);
  vec3 ray_dy=(up-ray*dot(ray,up))*(inverse_length/pixels);
  vec3 color=body<0?stars(ray,ray_dx,ray_dy):vec3(0);
- // Feathered guides on the real orbital plane: deliberately subordinate to planets.
- if(abs(ray.y)>.0001){float t=-camera_eye.y/ray.y;if(t>0.&&t<nearest){vec3 p=camera_eye+ray*t;float r=length(p.xz);float width=max(.004,t/pixels*.38);float guide=0.;for(int i=0;i<8;i++)guide=max(guide,exp(-pow((r-orbit[i])/width,2.)));color+=vec3(.007,.012,.019)*guide;}}
+ // Each ellipse uses the same date-derived plane, apsides and display scale
+ // as its planet. This avoids circular guides beneath inclined true positions.
+ if(focus_enabled!=0){}else if(ephemeris_enabled!=0){
+  float guide=0.;
+  for(int i=0;i<8;i++){
+   vec3 u=ellipse_u[i],v=ellipse_v[i],normal=normalize(cross(u,v));
+   float denominator=dot(ray,normal);
+   if(abs(denominator)<.00001)continue;
+   float t=dot(ellipse_centers[i]-camera_eye,normal)/denominator;
+   if(t<=0.||t>=nearest)continue;
+   vec3 q=camera_eye+ray*t-ellipse_centers[i];
+   vec2 elliptic=vec2(dot(q,u)/dot(u,u),dot(q,v)/dot(v,v));
+   float separation=abs(length(elliptic)-1.)*min(length(u),length(v));
+   float width=max(.004,t/pixels*.38);
+   guide=max(guide,exp(-pow(separation/width,2.)));
+  }
+  color+=vec3(.008,.014,.022)*guide;
+ }else if(abs(ray.y)>.0001){float t=-camera_eye.y/ray.y;if(t>0.&&t<nearest){vec3 p=camera_eye+ray*t;float r=length(p.xz);float width=max(.004,t/pixels*.38);float guide=0.;for(int i=0;i<8;i++)guide=max(guide,exp(-pow((r-orbit[i])/width,2.)));color+=vec3(.007,.012,.019)*guide;}}
  if(body>=0){
   vec3 c=center(body),p=camera_eye+ray*nearest,n=normalize(p-c);
   if(body==0){
    vec3 q=rotate_y(n,surface_phase);float cells=fbm(q*18.);float granules=noise(q*100.);
    vec3 hot=mix(vec3(3.8,1.24,.15),vec3(6.,3.4,.9),cells);
-   color=hot*(.93+.07*granules)*(.68+.32*pow(max(0.,dot(n,-ray)),.4));
+   color=scientific_mode!=0?vec3(1.10,1.075,1.03)*(.35+.65*max(0.,dot(n,-ray))):hot*(.93+.07*granules)*(.68+.32*pow(max(0.,dot(n,-ray)),.4));
   } else {
    vec3 light=normalize(-p);float cosine=dot(n,light);float diffuse=max(0.,cosine);
    if(body==6){float denom=dot(light,ring_normal);if(abs(denom)>.001){float t=dot(c-p,ring_normal)/denom;if(t>.001){float r=length(p+light*t-c);diffuse*=1.-ring_opacity(r)*.8;}}}
@@ -198,7 +276,9 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
    }
    vec3 albedo=material(body,n,normal_dx,normal_dy);float rim=pow(1.-max(0.,dot(n,-ray)),3.);
    // A restrained cool fill keeps the night hemisphere readable in an illustration.
-   color=pow(albedo,vec3(2.2))*(.13+2.3*diffuse)+pow(albedo,vec3(2.2))*vec3(.025,.04,.07)*max(0.,dot(n,-ray));
+   float ambient=scientific_mode!=0?.006:.13;
+   color=pow(albedo,vec3(2.2))*(ambient+2.3*diffuse);
+   if(scientific_mode==0)color+=pow(albedo,vec3(2.2))*vec3(.025,.04,.07)*max(0.,dot(n,-ray));
    if(body==3){float spec=pow(max(0.,dot(reflect(-light,n),-ray)),32.);color+=vec3(.32,.48,.65)*spec*diffuse;color+=vec3(.025,.12,.32)*rim*(.2+diffuse);}
    if(body==2)color+=vec3(.24,.13,.035)*rim*diffuse;
    if(body==7||body==8)color+=vec3(.015,.08,.18)*rim*(.3+diffuse);
@@ -206,13 +286,13 @@ vec3 shade(vec2 pixel, bool classify, out bool needs_aa){
  }
  // Corona is in scene depth, so foreground planets/rings mask the bloom.
  float along=dot(-camera_eye,ray),miss=length(camera_eye+ray*along);
- if(along>0.&&(body==0||along<nearest)){
+ if((focus_enabled==0||focused_body==0)&&along>0.&&(body==0||along<nearest)){
   float edge=max(0.,miss-radius[0]);
-  color+=vec3(1.0,.36,.065)*(.45*exp(-edge*5.)+.10*exp(-edge*1.35)+.018*exp(-edge*.35));
+  if(scientific_mode==0)color+=vec3(1.0,.36,.065)*(.45*exp(-edge*5.)+.10*exp(-edge*1.35)+.018*exp(-edge*.35));
  }
  // Saturn's front ring is translucent; its rear portion is hidden by the sphere.
  vec3 sat=center(6);float denom=dot(ray,ring_normal);
- if(abs(denom)>.0001){float t=dot(sat-camera_eye,ring_normal)/denom;
+ if((focus_enabled==0||focused_body==6)&&abs(denom)>.0001){float t=dot(sat-camera_eye,ring_normal)/denom;
   if(t>0.&&t<nearest){vec3 p=camera_eye+ray*t;float r=length(p-sat);float opacity=ring_opacity(r);
    if(opacity>.001){needs_aa=true;vec3 light=normalize(-p);float shadow=sphere(p+light*.002,light,sat,radius[6])<1e4?.08:1.;
     float facing=.30+.7*abs(dot(ring_normal,light));vec3 dust=mix(vec3(.43,.34,.23),vec3(.83,.75,.58),smoothstep(.98,1.4,r));
@@ -226,10 +306,11 @@ vec3 tone(vec3 x){return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.,1.);}
 void main(){
  // Filtered interior materials need one ray; silhouettes and thin rings pay for
  // four fixed subpixel rays. Enlarged planets do not multiply all material work.
- bool needs_aa;vec3 color=shade(gl_FragCoord.xy,true,needs_aa);
+ vec2 pixel=gl_FragCoord.xy-canvas_origin;
+ bool needs_aa;vec3 color=shade(pixel,true,needs_aa);
  if(needs_aa){color=vec3(0);for(int i=0;i<4;i++){
   vec2 offset=vec2(float(i&1),float(i>>1))*.5-.25;bool unused;
-  color+=shade(gl_FragCoord.xy+offset,false,unused)*.25;
+  color+=shade(pixel+offset,false,unused)*.25;
  }}
  frag_color=vec4(pow(tone(color),vec3(1./2.2)),1.);
 }

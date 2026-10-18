@@ -14,8 +14,542 @@ use std::path::{Path, PathBuf};
 /// Picker-only identity. Never pass it to an image decoder or store it as a path.
 pub(crate) const ASTRONOMY_CHOICE: &str = "jwm-effect:astronomy";
 pub(crate) const SOLAR_SYSTEM_CHOICE: &str = "jwm-effect:solar-system";
+pub(crate) const SCENE_CHOICES: [(&str, &str, &str); 12] = [
+    (ASTRONOMY_CHOICE, "earth", "Astronomy Earth"),
+    (
+        SOLAR_SYSTEM_CHOICE,
+        "solar-system",
+        "Solar System 3D · drag to orbit",
+    ),
+    ("jwm-effect:moon", "moon", "Moon · lunar surface"),
+    ("jwm-effect:sun", "sun", "Sun · stellar surface"),
+    ("jwm-effect:mercury", "mercury", "Mercury · cratered world"),
+    ("jwm-effect:venus", "venus", "Venus · cloud-covered world"),
+    ("jwm-effect:mars", "mars", "Mars · red planet"),
+    ("jwm-effect:jupiter", "jupiter", "Jupiter · gas giant"),
+    ("jwm-effect:saturn", "saturn", "Saturn · rings"),
+    ("jwm-effect:uranus", "uranus", "Uranus · ice giant"),
+    ("jwm-effect:neptune", "neptune", "Neptune · ice giant"),
+    (
+        "jwm-effect:galaxy",
+        "galaxy",
+        "Milky Way panorama · 360° sky",
+    ),
+];
+
+const CONTROL_PREFIX: &str = "jwm-wallpaper:";
+const TARGET_PREFIX: &str = "jwm-wallpaper:target:";
+
 pub(crate) fn is_effect_choice(choice: &str) -> bool {
-    matches!(choice, ASTRONOMY_CHOICE | SOLAR_SYSTEM_CHOICE)
+    choice_scene(choice).is_some()
+}
+
+pub(crate) fn is_control_choice(choice: &str) -> bool {
+    choice.starts_with(CONTROL_PREFIX)
+}
+
+pub(crate) fn choice_scene(choice: &str) -> Option<&'static str> {
+    SCENE_CHOICES
+        .iter()
+        .find_map(|(key, scene, _)| (*key == choice).then_some(*scene))
+}
+
+fn scene_choice(scene: &str) -> &'static str {
+    SCENE_CHOICES
+        .iter()
+        .find_map(|(key, name, _)| (*name == scene).then_some(*key))
+        .unwrap_or(ASTRONOMY_CHOICE)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WallpaperTarget {
+    #[default]
+    All,
+    Output(String),
+}
+
+impl WallpaperTarget {
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        let target = key.strip_prefix(TARGET_PREFIX)?;
+        if target == "all" {
+            Some(Self::All)
+        } else {
+            target
+                .strip_prefix("output:")
+                .map(|name| Self::Output(name.into()))
+        }
+    }
+
+    fn key(&self) -> String {
+        match self {
+            Self::All => format!("{TARGET_PREFIX}all"),
+            Self::Output(name) => format!("{TARGET_PREFIX}output:{name}"),
+        }
+    }
+
+    pub(crate) fn next(&self, connectors: &[String]) -> Self {
+        let next = match self {
+            Self::All => connectors.first(),
+            Self::Output(name) => connectors
+                .iter()
+                .position(|item| item == name)
+                .and_then(|index| connectors.get(index + 1)),
+        };
+        next.map_or(Self::All, |name| Self::Output(name.clone()))
+    }
+
+    pub(crate) fn is_connected(&self, connectors: &[String]) -> bool {
+        match self {
+            Self::All => true,
+            Self::Output(name) => connectors.contains(name),
+        }
+    }
+}
+
+pub(crate) fn global_scene(behavior: &crate::config::BehaviorConfig) -> &str {
+    if behavior.wallpaper_effect == "solar-system" {
+        "solar-system"
+    } else {
+        &behavior.wallpaper_astronomy_scene
+    }
+}
+
+fn output_scene<'a>(
+    behavior: &'a crate::config::BehaviorConfig,
+    connector: &str,
+    connectors: &[String],
+) -> &'a str {
+    match behavior.wallpaper_astronomy_layout.as_str() {
+        "independent" => behavior
+            .wallpaper_astronomy_outputs
+            .get(connector)
+            .map_or_else(|| global_scene(behavior), |output| output.scene.as_str()),
+        "earth-moon" if behavior.wallpaper_effect != "solar-system" => {
+            if let Some(body) = behavior.wallpaper_astronomy_bodies.get(connector) {
+                return body;
+            }
+            // The original renderer alternates sorted connector names. A
+            // one-output edit freezes this old assignment for every survivor.
+            let mut sorted: Vec<_> = connectors.iter().collect();
+            sorted.sort();
+            if sorted
+                .iter()
+                .position(|name| name.as_str() == connector)
+                .unwrap_or(0)
+                % 2
+                == 0
+            {
+                "earth"
+            } else {
+                "moon"
+            }
+        }
+        "per-output" if behavior.wallpaper_effect != "solar-system" => "earth",
+        _ => global_scene(behavior),
+    }
+}
+
+pub(crate) fn target_scene<'a>(
+    behavior: &'a crate::config::BehaviorConfig,
+    target: &WallpaperTarget,
+    connectors: &[String],
+) -> &'a str {
+    match target {
+        WallpaperTarget::All => global_scene(behavior),
+        WallpaperTarget::Output(name) => output_scene(behavior, name, connectors),
+    }
+}
+
+pub(crate) fn astronomy_controls(
+    behavior: &crate::config::BehaviorConfig,
+    target: &WallpaperTarget,
+    connectors: &[String],
+) -> Vec<(String, String)> {
+    let target_label = match target {
+        WallpaperTarget::All => "All screens".into(),
+        WallpaperTarget::Output(name) => {
+            let absent = if connectors.contains(name) {
+                ""
+            } else {
+                " · disconnected"
+            };
+            format!("{name}{absent}")
+        }
+    };
+    let mut controls = vec![(
+        target.key(),
+        format!("\u{f108} Apply to: {target_label} · change"),
+    )];
+    for (layout, label) in [
+        ("span", "Span · one scene across all screens"),
+        ("mirror", "Mirror · one shared view on every screen"),
+        ("independent", "Independent · a scene or group per screen"),
+    ] {
+        let marker = if behavior.wallpaper_astronomy_layout == layout {
+            "\u{f00c}"
+        } else {
+            " "
+        };
+        controls.push((
+            format!("{CONTROL_PREFIX}layout:{layout}"),
+            format!("\u{f108} {marker} {label}"),
+        ));
+    }
+    if let WallpaperTarget::Output(name) = target {
+        if let Some(output) = behavior.wallpaper_astronomy_outputs.get(name)
+            && !output.group.is_empty()
+            && behavior.wallpaper_astronomy_layout == "independent"
+        {
+            controls.push((
+                format!("{CONTROL_PREFIX}detach"),
+                format!(
+                    "\u{f127} Leave group {} · make {name} independent",
+                    output.group
+                ),
+            ));
+        }
+        for other in connectors.iter().filter(|other| *other != name) {
+            let scene = output_scene(behavior, other, connectors);
+            controls.push((
+                format!("{CONTROL_PREFIX}share:{other}"),
+                format!(
+                    "\u{f0c1} Share with {other} · {}",
+                    crate::config::astronomy::scene_label(scene)
+                ),
+            ));
+        }
+    }
+    let mode = if behavior.wallpaper_astronomy_presentation == "scientific" {
+        "Scientific"
+    } else {
+        "Illustrative"
+    };
+    controls.push((
+        format!("{CONTROL_PREFIX}presentation"),
+        format!("\u{f0eb} Global lighting: {mode} · change"),
+    ));
+    let orbit = if behavior.wallpaper_solar_orbit_mode == "ephemeris" {
+        "JPL approximation"
+    } else {
+        "Illustrative orbit tour"
+    };
+    controls.push((
+        format!("{CONTROL_PREFIX}orbit"),
+        format!("\u{f135} Global solar orbits: {orbit} · change"),
+    ));
+    controls.push((
+        format!("{CONTROL_PREFIX}detail:clock"),
+        format!(
+            "Global date-derived clock: {:.0}× · {:+.0} days",
+            behavior.wallpaper_solar_time_scale, behavior.wallpaper_solar_time_offset_days
+        ),
+    ));
+    for (action, label) in [
+        ("now", "Global date-derived clock: Now · UTC and 1×"),
+        ("pause", "Global date-derived clock: Pause orbits"),
+        ("realtime", "Global date-derived clock: 1× · UTC + offset"),
+        ("fast", "Global date-derived clock: 1 day per second"),
+        ("day-back", "Global date-derived clock: offset −1 day"),
+        ("day-forward", "Global date-derived clock: offset +1 day"),
+        ("month-back", "Global date-derived clock: offset −30 days"),
+        (
+            "month-forward",
+            "Global date-derived clock: offset +30 days",
+        ),
+    ] {
+        controls.push((
+            format!("{CONTROL_PREFIX}time:{action}"),
+            format!("\u{f017} {label}"),
+        ));
+    }
+    controls.push((
+        format!("{CONTROL_PREFIX}detail:spin"),
+        format!(
+            "Solar spin: {:.3}× · independent of orbital date",
+            behavior.wallpaper_solar_spin_speed
+        ),
+    ));
+    controls.push((
+        format!("{CONTROL_PREFIX}info"),
+        format!(
+            "\u{f05a} About {} · facts, materials and sources",
+            crate::config::astronomy::scene_label(target_scene(behavior, target, connectors)),
+        ),
+    ));
+    for (index, line) in scene_information(target_scene(behavior, target, connectors))
+        .into_iter()
+        .enumerate()
+    {
+        controls.push((format!("{CONTROL_PREFIX}detail:{index}"), line));
+    }
+    controls
+}
+
+pub(crate) fn scene_information(scene: &str) -> Vec<String> {
+    use crate::backend::compositor_common::celestial_catalog::body_by_id;
+    let mut lines = Vec::new();
+    let mut wrap = |text: String| {
+        const WIDTH: usize = 60;
+        let mut line = String::new();
+        for mut word in text.split_whitespace() {
+            // Long source URLs also occupy bounded rows; the entire URL
+            // remains readable across consecutive lines instead of clipping.
+            while let Some((boundary, _)) = word.char_indices().nth(WIDTH) {
+                if !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                }
+                lines.push(word[..boundary].into());
+                word = &word[boundary..];
+            }
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > WIDTH {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    };
+    if let Some(body) = body_by_id(scene) {
+        wrap(format!("{} · {}", body.name, body.name_zh));
+        wrap(format!(
+            "Mean radius: {:.1} km · axial obliquity: {:.3}°",
+            body.radius_km, body.obliquity_degrees
+        ));
+        wrap(format!(
+            "Sidereal rotation: {:.4} hours{}",
+            body.rotation_hours.abs(),
+            if body.rotation_hours < 0.0 {
+                " · retrograde"
+            } else {
+                ""
+            }
+        ));
+        if let Some(period) = body.orbital_period_days {
+            let parent = body
+                .orbit_parent
+                .and_then(body_by_id)
+                .map_or("its parent", |parent| parent.name);
+            wrap(format!("Sidereal orbit: {period:.4} days around {parent}"));
+        }
+        wrap(body.description.into());
+        wrap(format!("Material: {}", body.material_label));
+        wrap(body.material_note.into());
+        wrap(format!("NASA reference: {}", body.source_url));
+        if body.physical_source_url != body.source_url {
+            wrap(format!("Physical quantities: {}", body.physical_source_url));
+        }
+        if let Some(source) = body.texture_source_url {
+            wrap(format!("Texture provenance: {source}"));
+        }
+    } else if scene == "solar-system" {
+        wrap("Solar System · 太阳系 · Sun and eight planets".into());
+        wrap("Ephemeris mode: JPL approximate positions; valid only within its documented date range.".into());
+        wrap("Both presentation modes compress orbital distances and enlarge bodies. The view is not to scale.".into());
+        wrap(
+            "The solar orbital clock is separate from Earth/Moon's real UTC day/night cycle."
+                .into(),
+        );
+        wrap("Orbital date at 1× follows UTC; surface spin uses its own multiplier, default 718.035×. Set wallpaper_solar_spin_speed to 1 for real-time sidereal spin.".into());
+        wrap("Source: https://ssd.jpl.nasa.gov/planets/approx_pos.html".into());
+    } else {
+        wrap("Milky Way panorama · 银河全景".into());
+        wrap("A navigable 360° celestial environment. Decorative stars and nebulae are illustrative, not a complete astrometric catalogue.".into());
+    }
+    wrap("Controls: drag a body to rotate; drag the sky to look around; wheel to zoom. Solar-system bodies are selectable.".into());
+    lines
+}
+
+fn independent_output_snapshot(
+    behavior: &crate::config::BehaviorConfig,
+    connectors: &[String],
+    preserve_saved: bool,
+) -> std::collections::BTreeMap<String, crate::config::AstronomyOutputConfig> {
+    let mut outputs = behavior.wallpaper_astronomy_outputs.clone();
+    for name in connectors {
+        if behavior.wallpaper_astronomy_layout == "independent" || preserve_saved {
+            outputs.entry(name.clone()).or_insert_with(|| {
+                crate::config::AstronomyOutputConfig::independent(output_scene(
+                    behavior, name, connectors,
+                ))
+            });
+        } else {
+            outputs.insert(
+                name.clone(),
+                crate::config::AstronomyOutputConfig::independent(output_scene(
+                    behavior, name, connectors,
+                )),
+            );
+        }
+    }
+    outputs
+}
+
+/// Produce a bounded atomic config transaction from a picker action. The
+/// current visible scene is captured before entering independent mode, so a
+/// choice for one output cannot silently replace another output's backdrop.
+pub(crate) fn astronomy_changes(
+    behavior: &crate::config::BehaviorConfig,
+    target: &WallpaperTarget,
+    connectors: &[String],
+    choice: &str,
+) -> Result<Vec<(String, serde_json::Value)>, String> {
+    use crate::config::astronomy::{join_output_scene, set_output_scene};
+    if !target.is_connected(connectors) {
+        return Err("The selected display is disconnected. Choose another target; its saved scene is retained.".into());
+    }
+    let mut changes = Vec::new();
+    let mut set = |field: &str, value: serde_json::Value| {
+        changes.push((format!("behavior.{field}"), value));
+    };
+    if let Some(scene) = choice_scene(choice) {
+        match target {
+            WallpaperTarget::All => {
+                set("wallpaper_astronomy_scene", serde_json::json!(scene));
+                let mut outputs = behavior.wallpaper_astronomy_outputs.clone();
+                for output in outputs.values_mut() {
+                    output.scene = scene.into();
+                }
+                if !outputs.is_empty() {
+                    set("wallpaper_astronomy_outputs", serde_json::json!(outputs));
+                }
+                if matches!(
+                    behavior.wallpaper_astronomy_layout.as_str(),
+                    "earth-moon" | "per-output"
+                ) {
+                    set("wallpaper_astronomy_layout", serde_json::json!("mirror"));
+                }
+                // New selections use the unified scene route. The legacy
+                // solar-system effect deliberately spans the desktop and
+                // would otherwise override a requested Mirror layout.
+                set("wallpaper_effect", serde_json::json!("astronomy"));
+            }
+            WallpaperTarget::Output(name) => {
+                let mut outputs = independent_output_snapshot(behavior, connectors, false);
+                set_output_scene(&mut outputs, name, scene);
+                set(
+                    "wallpaper_astronomy_scene",
+                    serde_json::json!(global_scene(behavior)),
+                );
+                set("wallpaper_astronomy_outputs", serde_json::json!(outputs));
+                set(
+                    "wallpaper_astronomy_layout",
+                    serde_json::json!("independent"),
+                );
+                set("wallpaper_effect", serde_json::json!("astronomy"));
+            }
+        }
+    } else if let Some(layout) = choice.strip_prefix("jwm-wallpaper:layout:") {
+        if !["span", "mirror", "independent"].contains(&layout) {
+            return Err("Unknown celestial layout".into());
+        }
+        if layout == "independent" {
+            set(
+                "wallpaper_astronomy_outputs",
+                serde_json::json!(independent_output_snapshot(behavior, connectors, true)),
+            );
+        }
+        set(
+            "wallpaper_astronomy_scene",
+            serde_json::json!(global_scene(behavior)),
+        );
+        set("wallpaper_astronomy_layout", serde_json::json!(layout));
+        set("wallpaper_effect", serde_json::json!("astronomy"));
+    } else if let Some(reference) = choice.strip_prefix("jwm-wallpaper:share:") {
+        let WallpaperTarget::Output(name) = target else {
+            return Err("Choose a display before sharing its scene".into());
+        };
+        if !connectors.iter().any(|connector| connector == reference) {
+            return Err(
+                "The display to share with is disconnected; no assignments changed.".into(),
+            );
+        }
+        let mut outputs = independent_output_snapshot(behavior, connectors, false);
+        join_output_scene(&mut outputs, name, reference, global_scene(behavior));
+        set(
+            "wallpaper_astronomy_scene",
+            serde_json::json!(global_scene(behavior)),
+        );
+        set("wallpaper_astronomy_outputs", serde_json::json!(outputs));
+        set(
+            "wallpaper_astronomy_layout",
+            serde_json::json!("independent"),
+        );
+        set("wallpaper_effect", serde_json::json!("astronomy"));
+    } else {
+        match choice {
+            "jwm-wallpaper:detach" => {
+                let WallpaperTarget::Output(name) = target else {
+                    return Err("Choose a display to detach".into());
+                };
+                let mut outputs = independent_output_snapshot(behavior, connectors, false);
+                if let Some(output) = outputs.get_mut(name) {
+                    output.group.clear();
+                }
+                set("wallpaper_astronomy_outputs", serde_json::json!(outputs));
+                set(
+                    "wallpaper_astronomy_layout",
+                    serde_json::json!("independent"),
+                );
+            }
+            "jwm-wallpaper:presentation" => set(
+                "wallpaper_astronomy_presentation",
+                serde_json::json!(
+                    if behavior.wallpaper_astronomy_presentation == "scientific" {
+                        "illustrative"
+                    } else {
+                        "scientific"
+                    }
+                ),
+            ),
+            "jwm-wallpaper:orbit" => set(
+                "wallpaper_solar_orbit_mode",
+                serde_json::json!(if behavior.wallpaper_solar_orbit_mode == "ephemeris" {
+                    "illustrative"
+                } else {
+                    "ephemeris"
+                }),
+            ),
+            "jwm-wallpaper:time:now" => {
+                set("wallpaper_solar_time_scale", serde_json::json!(1.0));
+                set("wallpaper_solar_time_offset_days", serde_json::json!(0.0));
+            }
+            "jwm-wallpaper:time:pause" => set("wallpaper_solar_time_scale", serde_json::json!(0.0)),
+            "jwm-wallpaper:time:realtime" => {
+                set("wallpaper_solar_time_scale", serde_json::json!(1.0))
+            }
+            "jwm-wallpaper:time:fast" => {
+                set("wallpaper_solar_time_scale", serde_json::json!(86400.0))
+            }
+            "jwm-wallpaper:time:day-back"
+            | "jwm-wallpaper:time:day-forward"
+            | "jwm-wallpaper:time:month-back"
+            | "jwm-wallpaper:time:month-forward" => {
+                let magnitude = if choice.contains("month-") { 30.0 } else { 1.0 };
+                let delta = if choice.ends_with("back") {
+                    -magnitude
+                } else {
+                    magnitude
+                };
+                set(
+                    "wallpaper_solar_time_offset_days",
+                    serde_json::json!(
+                        (behavior.wallpaper_solar_time_offset_days + delta).clamp(-19000.0, 8500.0)
+                    ),
+                );
+            }
+            _ => return Err("Unknown celestial picker action".into()),
+        }
+    }
+    if choice.starts_with("jwm-wallpaper:time:") {
+        // Date controls act on the view the user can see: leaving the
+        // decorative tour active would make Pause appear ineffective.
+        set("wallpaper_solar_orbit_mode", serde_json::json!("ephemeris"));
+    }
+    Ok(changes)
 }
 
 /// A fresh effect selection needs a resolved local texture (configured or
@@ -42,7 +576,7 @@ pub(crate) fn picker_current_at(
         return SOLAR_SYSTEM_CHOICE;
     }
     if behavior.wallpaper_effect == "astronomy" {
-        return ASTRONOMY_CHOICE;
+        return scene_choice(&behavior.wallpaper_astronomy_scene);
     }
     daily_picker_wallpaper_at(behavior, day)
         .unwrap_or_else(|| resolve_wallpaper_for_tag_at(behavior, 0, active_tags, day).0)
@@ -439,6 +973,281 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn celestial_facts_fit_picker_rows_without_losing_source_urls() {
+        use crate::backend::compositor_common::celestial_catalog::body_by_id;
+        for (scene, _) in crate::config::astronomy::ASTRONOMY_SCENES {
+            let lines = scene_information(scene);
+            assert!(!lines.is_empty(), "missing facts for {scene}");
+            assert!(
+                lines.iter().all(|line| line.chars().count() <= 60),
+                "facts would clip in the native picker for {scene}"
+            );
+            if let Some(body) = body_by_id(scene) {
+                let content = lines.concat();
+                for source in [
+                    Some(body.source_url),
+                    Some(body.physical_source_url),
+                    body.texture_source_url,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    assert!(content.contains(source), "missing {scene} source {source}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn celestial_global_selection_migrates_legacy_layouts_to_mirror() {
+        for layout in ["per-output", "earth-moon"] {
+            let mut config = crate::config::Config::default();
+            config
+                .set_values(&[(
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!(layout),
+                )])
+                .unwrap();
+            let changes = astronomy_changes(
+                config.behavior(),
+                &WallpaperTarget::All,
+                &["DP-1".into(), "HDMI-1".into()],
+                "jwm-effect:mars",
+            )
+            .unwrap();
+            config.set_values(&changes).unwrap();
+            assert_eq!(config.behavior().wallpaper_astronomy_layout, "mirror");
+            assert_eq!(config.behavior().wallpaper_astronomy_scene, "mars");
+            assert_eq!(config.behavior().wallpaper_effect, "astronomy");
+        }
+    }
+
+    #[test]
+    fn celestial_solar_selection_keeps_the_selected_global_layout() {
+        for layout in ["span", "mirror", "independent"] {
+            let mut config = crate::config::Config::default();
+            config
+                .set_values(&[(
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!(layout),
+                )])
+                .unwrap();
+            let changes = astronomy_changes(
+                config.behavior(),
+                &WallpaperTarget::All,
+                &["DP-1".into(), "HDMI-1".into()],
+                SOLAR_SYSTEM_CHOICE,
+            )
+            .unwrap();
+            config.set_values(&changes).unwrap();
+            assert_eq!(config.behavior().wallpaper_astronomy_layout, layout);
+            assert_eq!(config.behavior().wallpaper_astronomy_scene, "solar-system");
+            assert_eq!(config.behavior().wallpaper_effect, "astronomy");
+        }
+    }
+
+    #[test]
+    fn celestial_pause_switches_visible_orbits_from_illustrative_to_ephemeris() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_solar_orbit_mode".into(),
+                    serde_json::json!("illustrative"),
+                ),
+                (
+                    "behavior.wallpaper_solar_time_scale".into(),
+                    serde_json::json!(86400.0),
+                ),
+            ])
+            .unwrap();
+        let changes = astronomy_changes(
+            config.behavior(),
+            &WallpaperTarget::All,
+            &[],
+            "jwm-wallpaper:time:pause",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert_eq!(config.behavior().wallpaper_solar_orbit_mode, "ephemeris");
+        assert_eq!(config.behavior().wallpaper_solar_time_scale, 0.0);
+    }
+
+    #[test]
+    fn celestial_one_display_edit_keeps_the_other_solar_scene() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[(
+                "behavior.wallpaper_effect".into(),
+                serde_json::json!("solar-system"),
+            )])
+            .unwrap();
+        let connectors = vec!["DP-1".into(), "HDMI-1".into()];
+        let changes = astronomy_changes(
+            config.behavior(),
+            &WallpaperTarget::Output("HDMI-1".into()),
+            &connectors,
+            "jwm-effect:saturn",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert_eq!(config.behavior().wallpaper_effect, "astronomy");
+        assert_eq!(config.behavior().wallpaper_astronomy_layout, "independent");
+        assert_eq!(config.behavior().wallpaper_astronomy_scene, "solar-system");
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["DP-1"].scene,
+            "solar-system"
+        );
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["HDMI-1"].scene,
+            "saturn"
+        );
+    }
+
+    #[test]
+    fn celestial_legacy_earth_moon_migration_keeps_every_other_display() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_effect".into(),
+                    serde_json::json!("astronomy"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!("earth-moon"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_bodies".into(),
+                    serde_json::json!({"DP-2":"earth"}),
+                ),
+            ])
+            .unwrap();
+        let connectors = vec!["HDMI-1".into(), "DP-2".into(), "DP-1".into()];
+        let changes = astronomy_changes(
+            config.behavior(),
+            &WallpaperTarget::Output("HDMI-1".into()),
+            &connectors,
+            "jwm-effect:galaxy",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["DP-1"].scene,
+            "earth"
+        );
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["DP-2"].scene,
+            "earth"
+        );
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["HDMI-1"].scene,
+            "galaxy"
+        );
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_bodies["DP-2"],
+            "earth"
+        );
+    }
+
+    #[test]
+    fn celestial_share_detach_and_hot_unplug_do_not_retarget_a_screen() {
+        let mut config = crate::config::Config::default();
+        let connectors = vec!["DP-1".into(), "DP-2".into(), "HDMI-1".into()];
+        let target = WallpaperTarget::Output("DP-2".into());
+        let changes = astronomy_changes(
+            config.behavior(),
+            &target,
+            &connectors,
+            "jwm-wallpaper:share:DP-1",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert!(
+            !config.behavior().wallpaper_astronomy_outputs["DP-1"]
+                .group
+                .is_empty()
+        );
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["DP-1"],
+            config.behavior().wallpaper_astronomy_outputs["DP-2"]
+        );
+        let changes = astronomy_changes(
+            config.behavior(),
+            &target,
+            &connectors,
+            "jwm-effect:jupiter",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["DP-1"].scene,
+            "jupiter"
+        );
+        assert_eq!(
+            config.behavior().wallpaper_astronomy_outputs["HDMI-1"].scene,
+            "earth"
+        );
+        let changes = astronomy_changes(
+            config.behavior(),
+            &target,
+            &connectors,
+            "jwm-wallpaper:detach",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert!(
+            config.behavior().wallpaper_astronomy_outputs["DP-2"]
+                .group
+                .is_empty()
+        );
+        assert!(
+            astronomy_changes(
+                config.behavior(),
+                &target,
+                &["HDMI-1".into()],
+                "jwm-effect:mars"
+            )
+            .is_err()
+        );
+        assert_eq!(target.next(&["HDMI-1".into()]), WallpaperTarget::All);
+    }
+
+    #[test]
+    fn celestial_solar_clock_controls_leave_physical_earth_moon_time_settings_alone() {
+        let mut config = crate::config::Config::default();
+        let original = config.behavior().clone();
+        for action in ["fast", "day-forward", "month-back", "pause", "now"] {
+            let changes = astronomy_changes(
+                config.behavior(),
+                &WallpaperTarget::All,
+                &[],
+                &format!("jwm-wallpaper:time:{action}"),
+            )
+            .unwrap();
+            config.set_values(&changes).unwrap();
+            assert_eq!(
+                config.behavior().wallpaper_earth_rotation_minutes,
+                original.wallpaper_earth_rotation_minutes
+            );
+            assert_eq!(
+                config.behavior().wallpaper_moon_rotation_minutes,
+                original.wallpaper_moon_rotation_minutes
+            );
+            assert_eq!(
+                config.behavior().wallpaper_timezone_offset_hours,
+                original.wallpaper_timezone_offset_hours
+            );
+            assert_eq!(
+                config.behavior().wallpaper_solar_spin_speed,
+                original.wallpaper_solar_spin_speed
+            );
+        }
+        assert_eq!(config.behavior().wallpaper_solar_time_scale, 1.0);
+        assert_eq!(config.behavior().wallpaper_solar_time_offset_days, 0.0);
+    }
 
     #[test]
     fn search_matches_unicode_paths_and_all_query_words() {

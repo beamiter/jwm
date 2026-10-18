@@ -54,10 +54,28 @@ pub(crate) struct SolarProjection {
     pub basis: [f32; 9],
     pub viewport: [u32; 2],
     pub phases: [f32; 8],
+    /// Optional date-derived positions, frozen with the displayed pixels.
+    /// The legacy illustrative phases remain available for old configurations.
+    pub centers: Option<[[f32; 3]; 9]>,
+    /// Isolate an inspected body so compressed neighbours cannot obscure it.
+    pub focus: Option<u8>,
+    /// Date-derived axial tilts, in the same frame as the rendered orbit planes.
+    pub body_axes: Option<[[f32; 3]; 9]>,
     pub focal: f32,
 }
 
 impl SolarProjection {
+    pub(crate) fn center(&self, body: u8) -> Option<[f32; 3]> {
+        if let Some(centers) = &self.centers {
+            centers
+                .get(usize::from(body))
+                .copied()
+                .filter(|center| center.iter().all(|v| v.is_finite()))
+        } else {
+            body_center(body, &self.phases)
+        }
+    }
+
     pub(crate) fn default_focal(viewport: [u32; 2]) -> f32 {
         let width = viewport[0] as f32;
         let height = (viewport[1] as f32).max(1.0);
@@ -121,7 +139,10 @@ impl SolarProjection {
         let mut selected = None;
         for (index, radius) in BODY_RADII.into_iter().enumerate() {
             let body = index as u8;
-            let center = body_center(body, &self.phases)?;
+            if self.focus.is_some_and(|focus| focus != body) {
+                continue;
+            }
+            let center = self.center(body)?;
             if let Some(distance) = sphere_distance(self.eye, ray, center, radius)
                 && distance < nearest
             {
@@ -129,10 +150,17 @@ impl SolarProjection {
                 selected = Some(body);
             }
         }
-        let saturn = body_center(6, &self.phases)?;
-        let orbit_normal = normalize([0.0, ORBIT_RADII[5], -0.15])?;
-        let (sin, cos) = 26.7_f32.to_radians().sin_cos();
-        let normal = [sin, cos * orbit_normal[1], cos * orbit_normal[2]];
+        if self.focus.is_some_and(|body| body != 6) {
+            return selected;
+        }
+        let saturn = self.center(6)?;
+        let normal = if let Some(axes) = &self.body_axes {
+            normalize(axes[6])?
+        } else {
+            let orbit_normal = normalize([0.0, ORBIT_RADII[5], -0.15])?;
+            let (sin, cos) = 26.7_f32.to_radians().sin_cos();
+            [sin, cos * orbit_normal[1], cos * orbit_normal[2]]
+        };
         let denominator = dot(ray, normal);
         if denominator.abs() > 0.0001 {
             let distance = dot(sub(saturn, self.eye), normal) / denominator;
@@ -149,17 +177,18 @@ impl SolarProjection {
 }
 
 fn ring_opacity(radius: f32) -> f32 {
-    if radius <= 0.96 || radius >= 1.68 {
+    let radius = radius / BODY_RADII[6];
+    if radius <= 1.24 || radius >= 2.269 {
         return 0.0;
     }
     let smooth = |lo: f32, hi: f32| {
         let x = ((radius - lo) / (hi - lo)).clamp(0.0, 1.0);
         x * x * (3.0 - 2.0 * x)
     };
-    let edge = smooth(0.96, 1.01) * (1.0 - smooth(1.61, 1.68));
-    let cassini = 1.0 - 0.8 * (-((radius - 1.43) / 0.022).powi(2)).exp();
-    let structure = 0.59 + 0.10 * (radius * 129.0).sin() + 0.045 * (radius * 337.0).sin();
-    (edge * cassini * structure).clamp(0.0, 0.85)
+    let c = smooth(1.24, 1.25) * (1.0 - smooth(1.516, 1.526));
+    let b = smooth(1.516, 1.526) * (1.0 - smooth(1.941, 1.951));
+    let a = smooth(2.027, 2.037) * (1.0 - smooth(2.259, 2.269));
+    0.12 * c + 0.78 * b + 0.44 * a
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -220,12 +249,20 @@ impl SolarCamera {
     }
 
     pub(crate) fn focus(&mut self, body: u8, phases: &[f32; 8]) -> bool {
-        let Some(radius) = BODY_RADII.get(usize::from(body)).copied() else {
-            return false;
-        };
         let Some(center) = body_center(body, phases) else {
             return false;
         };
+        self.focus_at(body, center)
+    }
+
+    /// Frame the illuminated hemisphere using the displayed body's position.
+    pub(crate) fn focus_at(&mut self, body: u8, center: [f32; 3]) -> bool {
+        let Some(radius) = BODY_RADII.get(usize::from(body)).copied() else {
+            return false;
+        };
+        if !center.iter().all(|v| v.is_finite()) {
+            return false;
+        }
         // Approach the illuminated hemisphere. This is a navigation choice;
         // illumination and the orbit itself remain unchanged in world space.
         if body != 0 {
@@ -283,6 +320,9 @@ impl SolarCamera {
             basis: viewed,
             viewport,
             phases,
+            centers: None,
+            focus: None,
+            body_axes: None,
             focal: SolarProjection::default_focal(viewport) * lens_scale,
         }
     }
@@ -439,10 +479,10 @@ mod tests {
         ] {
             assert!(projection.pick(point[0], point[1]).is_none());
         }
-        assert_eq!(ring_opacity(0.96), 0.0);
-        assert_eq!(ring_opacity(1.68), 0.0);
+        assert_eq!(ring_opacity(1.23 * BODY_RADII[6]), 0.0);
+        assert_eq!(ring_opacity(2.27 * BODY_RADII[6]), 0.0);
         assert!(ring_opacity(1.2) > 0.1);
-        assert!(ring_opacity(1.43) < ring_opacity(1.4));
+        assert_eq!(ring_opacity(2.0 * BODY_RADII[6]), 0.0); // Cassini division
         assert!(
             SolarProjection {
                 viewport: [0, 600],
@@ -532,7 +572,9 @@ pub(crate) fn scene_phases(seconds: f64) -> ([f32; 8], f32) {
 /// NASA GSFC sidereal periods (hours), magnitudes only: retrograde is encoded
 /// by the full obliquity (>90 degrees) in the shader, never by a second sign.
 /// https://nssdc.gsfc.nasa.gov/planetary/factsheet/
-pub(crate) const SPIN_HOURS: [f64; 8] = [1407.6, 5832.5, 23.9345, 24.6229, 9.9, 10.7, 17.2, 16.1];
+pub(crate) const SPIN_HOURS: [f64; 8] = [
+    1407.6, 5832.6, 23.9345, 24.6229, 9.9250, 10.656, 17.24, 16.11,
+];
 
 /// Physical elapsed seconds, independent from the decorative orbital clock.
 pub(crate) fn scene_spin_phases(seconds: f64) -> [f32; 8] {

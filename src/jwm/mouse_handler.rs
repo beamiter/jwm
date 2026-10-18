@@ -179,10 +179,7 @@ impl Jwm {
             }) else {
                 return;
             };
-            let kind = if solar {
-                if !backend.compositor_solar_system_begin_drag(x, y) {
-                    return;
-                }
+            let kind = if solar && backend.compositor_solar_system_begin_drag(x, y) {
                 WallpaperDragKind::SolarSystem
             } else if backend.compositor_astronomy_begin_drag(x, y) {
                 WallpaperDragKind::Astronomy
@@ -209,14 +206,12 @@ impl Jwm {
                 }
             }
         } else if button == 3 {
-            if solar {
-                backend.compositor_solar_system_leave_closeup(x, y);
+            if !solar || !backend.compositor_solar_system_leave_closeup(x, y) {
+                backend.compositor_astronomy_reset(x, y);
             }
         } else {
             let steps = if button == 4 { 1.0 } else { -1.0 };
-            if solar {
-                backend.compositor_solar_system_zoom(x, y, steps);
-            } else {
+            if !solar || !backend.compositor_solar_system_zoom(x, y, steps) {
                 backend.compositor_astronomy_zoom(x, y, steps);
             }
         }

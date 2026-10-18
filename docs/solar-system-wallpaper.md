@@ -1,12 +1,18 @@
 # Interactive Solar System wallpaper
 
-The optional `behavior.wallpaper_effect = "solar-system"` effect is available in
-Wallpaper → Solar System 3D on the X11 compositor (xcb and x11rb). It does not
-change the default or existing Astronomy Earth/Moon settings. Selecting a static
-image restores ordinary wallpaper behavior.
+**Wallpaper → Solar System 3D** is available on the X11 compositor (xcb and
+x11rb). Open the native picker with `Alt+Ctrl+W`; select all screens, a connector
+or a shared group and choose the Solar System scene. The common configuration
+is `wallpaper_effect = "astronomy"` with
+`wallpaper_astronomy_scene = "solar-system"`; the earlier
+`wallpaper_effect = "solar-system"` value remains supported. Span, Mirror and
+Independent layouts can combine a Solar System screen with other celestial
+themes. See the [multi-display guide](astronomy-wallpaper.md#display-layouts).
+Native Wayland retains the existing static fallback. Selecting a static image
+with **Apply to: All screens** restores ordinary wallpaper behavior.
 
-The [celestial explorer guide](celestial-explorer.md) covers the shared Earth,
-Moon and Solar System controls. All gestures start on uncovered wallpaper with
+The [celestial explorer guide](celestial-explorer.md) covers the shared body,
+galaxy and Solar System controls. All gestures start on uncovered wallpaper with
 no modifier key. Windows, bars, tabs, modal panels, the lock screen and configured
 mouse bindings keep their normal priority.
 
@@ -14,7 +20,7 @@ mouse bindings keep their normal priority.
 
 | Gesture | Result |
 | --- | --- |
-| Left-click the Sun or any of the eight planets | Open a close-up that follows that body along its orbit |
+| Left-click the Sun or any of the eight planets | Open an isolated close-up that follows that body along its orbit |
 | Left-drag a visible body in the overview | Orbit the whole system in any direction, including roll and passage through either pole |
 | Left-drag a visible body in a close-up | Orbit the focused body in any direction |
 | Left-drag empty sky | Turn the camera's viewing direction through the full celestial sphere |
@@ -53,17 +59,30 @@ Saturn extra room for its rings. Close-up navigation tracks orbital position;
 it does not freeze the body's rotation or move the Sun.
 
 Camera poses, lens, current selection and the saved overview last only in the
-running session. They are not written to configuration. No new setting is
-needed to enable these controls.
+running session. They are not written to configuration. Independent connectors
+have separate cameras; a named shared group or Mirror copies share one view.
+Scene selection, display layout, grouping and the clock configuration are saved
+by the native picker. No extra setting enables the mouse controls.
 
 ## Scene and surface detail
 
-This is a stylized 3D illustration: the Sun and eight planets have
-exaggerated sizes, orbital distances and speeds for readability, rather than
-scientific scale or real ephemerides. Perspective, sphere occlusion, sun-facing
-lighting and Saturn's ring depth are computed in 3D. The close-up uses those same
-world-space spheres and material functions, with a new camera position. Earth
-uses the bundled NASA October surface and historical MODIS cloud composite.
+The default `wallpaper_solar_orbit_mode = "ephemeris"` computes date-driven
+positions from JPL's approximate planetary elements, including elliptical
+motion and inclination. Each orbit is rescaled independently and the bodies
+are enlarged for readable navigation: the display is not to scale, and its
+apparent alignments are not predictions of real transits. The optional
+`"illustrative"` orbit mode retains the decorative tour. The
+[scientific model notes](astronomy-science.md) describe the fitted date range,
+UTC conversion, independent reference checks and accuracy limits.
+
+Perspective, sphere occlusion, sun-facing lighting and Saturn's ring depth are
+computed in 3D. The close-up retains the focused sphere, material, illumination
+and rings while hiding the other bodies and orbit guides. Earth uses the
+bundled NASA October surface and historical MODIS cloud composite. Mercury,
+Mars and Jupiter load the installed historical MESSENGER, Viking/USGS and
+Cassini map products; their limitations remain visible in the picker's About
+notes. The Mercury map is a shaded monochrome mosaic rather than an albedo map,
+and Jupiter's clouds describe a historical observation, not current weather.
 The sky uses the shared 4K NASA full-star atlas, with faint constellation figures
 and four procedural nebula landmarks. Its directions remain attached to a distant
 celestial sphere as the camera turns. This provides a foundation for spatial
@@ -87,15 +106,16 @@ background pixel, with sRGB decoding before the Solar tone mapper. Figures are
 subtle in wide views and fade further at close magnification. Nebula colours,
 shapes and apparent sizes are original artwork around sourced directions; they
 are not telescope images or measured volumes of gas. The Earth cloud luminance is a
-visual opacity mask in the same body-fixed coordinates as its surface. Venus has
-an opaque pale cloud deck; Jupiter has unequal, sheared cloud zones and a curled
-storm; Saturn has softer, low-contrast bands. These other clouds are original,
-fixed-cost procedural illustrations, not measured atmospheric data. Approaching
-a surface reveals filtered, body-attached grain, rock/crater patterns and finer
-cloud structure where appropriate. These spatial patterns stay attached while
-the body spins. The additional layers fade when their features become smaller
-than a pixel, reducing shimmer while zooming or orbiting. They do not turn a
-colour map into a measured height field or a terrain mesh.
+visual opacity mask in the same body-fixed coordinates as its surface. Bodies
+without installed observation-based maps use labelled approximations. Venus
+has an opaque pale cloud deck; Saturn, Uranus and Neptune use approximate
+visible appearances, not measured dynamic atmospheres. In Scientific
+presentation, unavailable mapped terrain is not replaced with invented crater
+geography or named storms. Illustrative presentation permits filtered,
+body-attached grain, crater-like patterns and cloud bands. Those extra layers
+fade when their features become smaller than a pixel, reducing shimmer while
+zooming or orbiting. They do not turn a colour map into a measured height field
+or a terrain mesh.
 
 Image materials use mipmaps and trilinear minification, with analytic texture
 gradients that remain stable at longitude seams and near the poles. This reduces
@@ -112,34 +132,48 @@ Sidereal spin periods and obliquities follow the
 Venus and Uranus rotate retrograde; their full obliquities encode that direction
 once. Saturn’s rings share its equatorial plane. Surface patterns, Earth’s map,
 clouds and storms stay attached to each body, while sunlight and shadows remain
-in the world frame. Axis azimuths, starting longitudes and positions are
-illustrative, not a date-specific ephemeris or IAU pole-orientation solution.
+in the world frame. Axis azimuths and starting surface longitudes remain
+presentation choices, not an IAU pole/prime-meridian solution for the orbital
+date. The date-derived orbital centres do not make those surface phases a
+geographic prediction.
 
 `behavior.wallpaper_solar_spin_speed` controls only these eight self-rotations:
 
 - `718.035` (default): Earth completes a sidereal turn in 120 displayed seconds.
 - `1.0`: real-time sidereal rotation; Earth takes 23.9345 hours, not the 24-hour solar day.
-- `0.0`: pause planetary self-rotation, while the illustrative orbits continue.
+- `0.0`: pause planetary self-rotation without changing the orbital clock.
 
 The finite range is 0 through 10000. Every planet uses the same time multiplier,
 so Mercury and Venus visibly turn much more slowly than the gas giants. Changing
 speed preserves the current surface longitude. Spin pauses while the effect is
 inactive, fully covered or unpowered and resumes from its held phase. Restarting
-the application resets illustrative phases. Orbital speeds remain separately
-compressed for visibility, so orbit-to-spin ratios are not astronomical. Orbits run prograde around the
-scene’s north axis, with the original starting positions preserved. These
-controls never alter the existing Astronomy Earth/Moon rotation settings. Solar
-orbits and phases are illustrative session animation. The separate Astronomy
-effect still derives Earth's daylight and the Moon's phase from the real UTC
-instant; zooming or turning either camera does not add a timezone offset.
+the application resets presentation phases. The independent
+`wallpaper_solar_time_scale` defaults to `1.0`, following current UTC plus
+`wallpaper_solar_time_offset_days`. The native picker offers Now, Pause,
+1×, one day per second and ±day/month date offsets. The global orbital clock
+updates all Solar System scenes together while their cameras remain independent.
+Activating a **Global date-derived clock** row also selects Ephemeris mode;
+the decorative tour does not consume calendar-date settings.
+Its implemented playback interval is 1972-01-01 through 2049-12-31 23:58 UTC,
+clamped at either endpoint. The [orbital-clock guide](astronomy-wallpaper.md#solar-orbital-clock)
+specifies offset bounds, pause/restart behavior and the exact meaning of 1×.
+
+The default spin multiplier is accelerated even when the orbital date runs at
+1×; set both multipliers to `1.0` for reference-period spin and real-time
+orbital playback. These controls never alter Astronomy Earth/Moon's own
+rotation settings. Those gallery scenes derive Earth's daylight and the
+Moon's phase from the actual UTC instant, and neither zooming nor turning
+their cameras adds a timezone offset.
 
 ## Rendering cost and validation
 
 The wallpaper uses a fixed number of analytic intersections, never unbounded ray
 marching. Planet and ring material pixels and silhouette edges receive four
 subpixel rays, while smooth sky and corona use one ray; soft orbit guides have
-analytic coverage. A tone-mapped warm corona and translucent, shadowed Saturn
-rings keep the planets visually distinct. Idle animation is capped at 15 frames
+analytic coverage. Scientific presentation uses restrained solar white light
+and reduced night-side fill; Illustrative presentation adds the warm corona.
+Translucent, shadowed Saturn rings follow the body's equatorial plane.
+Idle animation is capped at 15 frames
 per second and pauses when fully covered or displays are asleep. Pointer-driven
 camera and lens updates have a separate coalesced 60 Hz rendering cap and
 invalidate the matching backdrop. Holding still does not keep the fast rendering

@@ -3167,6 +3167,11 @@ pub trait CompositorControl: Send {
         false
     }
 
+    /// Restore the celestial view under the pointer without changing other outputs.
+    fn compositor_astronomy_reset(&mut self, _root_x: f64, _root_y: f64) -> bool {
+        false
+    }
+
     /// True only while the selected solar wallpaper is rendered and powered.
     fn compositor_solar_system_interactive(&self) -> bool {
         false

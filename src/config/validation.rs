@@ -1238,15 +1238,56 @@ impl Config {
                 None,
             );
         }
-        if !["span", "per-output", "earth-moon"]
+        if !super::astronomy::ASTRONOMY_LAYOUTS
             .contains(&behavior.wallpaper_astronomy_layout.as_str())
         {
             diagnostics.error(
                 "behavior.wallpaper_astronomy_layout",
-                "expected span, per-output, or earth-moon",
+                "expected span, mirror, independent, per-output, or earth-moon",
                 None,
             );
         }
+        if !super::astronomy::is_scene(&behavior.wallpaper_astronomy_scene) {
+            diagnostics.error(
+                "behavior.wallpaper_astronomy_scene",
+                "expected a supported celestial body, solar-system, or galaxy",
+                None,
+            );
+        }
+        if let Some(error) = super::astronomy::outputs_error(&behavior.wallpaper_astronomy_outputs)
+        {
+            diagnostics.error("behavior.wallpaper_astronomy_outputs", error, None);
+        }
+        if !["scientific", "illustrative"]
+            .contains(&behavior.wallpaper_astronomy_presentation.as_str())
+        {
+            diagnostics.error(
+                "behavior.wallpaper_astronomy_presentation",
+                "expected scientific or illustrative (solar distances remain compressed)",
+                None,
+            );
+        }
+        if !["ephemeris", "illustrative"].contains(&behavior.wallpaper_solar_orbit_mode.as_str()) {
+            diagnostics.error(
+                "behavior.wallpaper_solar_orbit_mode",
+                "expected ephemeris or illustrative",
+                None,
+            );
+        }
+        require_f64_range(
+            &mut diagnostics,
+            "behavior.wallpaper_solar_time_scale",
+            behavior.wallpaper_solar_time_scale,
+            0.0,
+            1_000_000.0,
+        );
+        require_f64_range(
+            &mut diagnostics,
+            "behavior.wallpaper_solar_time_offset_days",
+            behavior.wallpaper_solar_time_offset_days,
+            -19000.0,
+            8500.0,
+        );
         for (key, view) in [
             (
                 "behavior.wallpaper_earth_view",

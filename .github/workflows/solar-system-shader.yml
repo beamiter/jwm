@@ -4,6 +4,11 @@ on:
     paths:
       - 'src/backend/x11/compositor/shaders/solar_system.frag'
       - 'src/backend/compositor_common/solar_system.rs'
+      - 'src/backend/compositor_common/solar_ephemeris.rs'
+      - 'src/backend/compositor_common/celestial_catalog.rs'
+      - 'src/backend/compositor_common/kepler_ephemeris.rs'
+      - 'src/backend/compositor_common/celestial_layout.rs'
+      - 'src/config/astronomy.rs'
       - 'src/backend/compositor_common/animated_wallpaper.rs'
       - 'src/backend/compositor_common/panorama.rs'
       - 'src/backend/x11/compositor/solar_system_wallpaper.rs'
@@ -18,6 +23,11 @@ on:
     paths:
       - 'src/backend/x11/compositor/shaders/solar_system.frag'
       - 'src/backend/compositor_common/solar_system.rs'
+      - 'src/backend/compositor_common/solar_ephemeris.rs'
+      - 'src/backend/compositor_common/celestial_catalog.rs'
+      - 'src/backend/compositor_common/kepler_ephemeris.rs'
+      - 'src/backend/compositor_common/celestial_layout.rs'
+      - 'src/config/astronomy.rs'
       - 'src/backend/compositor_common/animated_wallpaper.rs'
       - 'src/backend/compositor_common/panorama.rs'
       - 'src/backend/x11/compositor/solar_system_wallpaper.rs'
@@ -53,7 +63,7 @@ jobs:
           import sys
           from pathlib import Path
           root = Path.cwd() / "src/backend/compositor_common"
-          modules = ("animated_wallpaper", "panorama", "solar_system")
+          modules = ("animated_wallpaper", "panorama", "solar_system", "celestial_catalog", "kepler_ephemeris", "solar_ephemeris")
           Path(sys.argv[1]).write_text("".join(
               f"#[path={json.dumps(str(root / (name + '.rs')))}] mod {name};\n"
               for name in modules

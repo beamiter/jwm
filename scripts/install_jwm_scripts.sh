@@ -727,6 +727,12 @@ build_and_install_jwm() {
         /usr/local/share/jwm/astronomy/milkyway-nasa-gaia.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/galaxy-nasa-4k.png" \
         /usr/local/share/jwm/astronomy/galaxy-nasa-4k.png
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/mercury-nasa-messenger.jpg" \
+        /usr/local/share/jwm/astronomy/mercury-nasa-messenger.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/mars-nasa-viking.jpg" \
+        /usr/local/share/jwm/astronomy/mars-nasa-viking.jpg
+    sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/jupiter-nasa-cassini.jpg" \
+        /usr/local/share/jwm/astronomy/jupiter-nasa-cassini.jpg
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/README.md" \
         /usr/local/share/jwm/astronomy/README.md
 

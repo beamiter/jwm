@@ -1,15 +1,252 @@
-# Astronomy Earth and Moon wallpaper (X11)
+# Celestial 3D wallpapers and multi-display scenes (X11)
 
 Astronomy is an optional material in JWM's existing wallpaper feature. It draws
 inside the compositor background pass, below all windows, with no new window,
 focus target or input region. Both xcb and x11rb use the same implementation.
 Native Wayland does not implement this material yet; the picker explains that
-limitation and leaves the existing static wallpaper selected.
+limitation and leaves the existing static wallpaper selected. Configuring a
+celestial effect in TOML does not add a native Wayland renderer: the static
+wallpaper remains the fallback on that backend.
 
 Earth and Moon support full-axis dragging and independent wheel zoom. Dragging
 the empty background turns a perspective camera through the entire celestial
 sphere, including both poles. See the [celestial explorer guide](celestial-explorer.md)
 for the shared controls, sky catalogue and Solar System close-ups.
+
+## Quick start in the native configurator
+
+Open the configurator directly with `Alt+Ctrl+W`, or use **Shell Hub → Shell →
+Wallpaper** from a status bar's shell entry (`Alt+F10` opens the Shell Hub).
+The wallpaper panel is searchable: type a
+planet name, `share`, `clock`, or `about`, and use the pointer or Enter to activate
+a row. Clear the query to return to the full list; Page Up/Page Down browse it.
+
+1. Use **Apply to: All screens** at the top to cycle between all screens and
+   each connected display. The target uses connector names such as `DP-1` and
+   `HDMI-1`; it is independent of which screen contains the panel.
+2. Choose **Span**, **Mirror**, or **Independent**, then select a scene.
+3. For different scenes per display, choose that display as the target and
+   select a planet, Solar System, or Milky Way panorama. Selecting a scene for
+   one display automatically enters Independent mode and preserves the other
+   connected displays' currently visible themes.
+4. To span one scene over a subset of the desk, target a display and choose
+   **Share with DP-1**, substituting the desired reference display. Repeat for
+   more members. **Leave group** makes only the selected display independent.
+5. Use **About …** for the selected scene's reference dimensions, sidereal
+   rotation and orbit, material provenance, and source URLs. Values use real
+   units even when the rendered view deliberately enlarges bodies.
+
+Celestial selections and controls are saved to the existing JWM configuration.
+The panel stays open so several displays can be configured in succession; close
+it to use the wallpaper's mouse gestures. A save failure remains visible as
+“Applied for this session; not saved”. Static image choices retain their existing
+session/daily semantics described in [Wallpaper](wallpaper.md). Select **All
+screens** before choosing a static image: that action changes the global image
+fallback and disables the celestial effect, rather than configuring an
+individual celestial output.
+
+Selecting a scene with **All screens** changes the global fallback and existing
+configured output scenes while preserving shared-group membership. Selecting a
+member of an existing group changes the whole shared scene. Leave the group
+first if only that display should change. Filtering and asynchronous image
+scans preserve the selected target. If that target is unplugged while the panel
+is open, a write is refused until another target is chosen; JWM never silently
+redirects it to a different display.
+
+Layout, lighting/presentation, solar orbit mode, orbital clock and surface-spin
+settings are global. **Apply to** scopes scene selection and group membership;
+the clock controls update every Solar System scene together. Their rows are
+labelled **Global** so selecting one output does not imply a separate date or
+lighting model for it.
+
+## Available scenes
+
+| Configuration token | Scene / 中文名 |
+| --- | --- |
+| `earth` | Earth / 地球 |
+| `moon` | Moon / 月球 |
+| `sun` | Sun / 太阳 |
+| `mercury` | Mercury / 水星 |
+| `venus` | Venus / 金星 |
+| `mars` | Mars / 火星 |
+| `jupiter` | Jupiter / 木星 |
+| `saturn` | Saturn / 土星 |
+| `uranus` | Uranus / 天王星 |
+| `neptune` | Neptune / 海王星 |
+| `solar-system` | Solar System 3D / 太阳系 |
+| `galaxy` | Milky Way panorama / 银河全景 |
+
+The body catalogue covers the Sun, eight planets, and Moon. The sky combines a
+limited reference catalogue with explicitly illustrative scenery; `galaxy`
+does not imply a complete measured 3D reconstruction of the Milky Way. See the
+[scientific model and source notes](astronomy-science.md) for the exact accuracy
+and material boundaries.
+
+## Display layouts
+
+| Layout | Canvas and interaction | Scene assignment |
+| --- | --- | --- |
+| `span` | One scene spans the desktop canvas; drag or zoom affects that shared view. | `wallpaper_astronomy_scene` |
+| `mirror` | Each screen frames a complete copy with shared interaction state. | `wallpaper_astronomy_scene` |
+| `independent` | A separate canvas/state for each output, or a shared spanning canvas for an explicitly named group. | Connector entries in `wallpaper_astronomy_outputs`; unassigned outputs inherit the global scene. |
+
+Identical planet names alone do not join two Independent scenes. A nonempty
+`group` joins only its named members. All members must specify the same scene;
+mixed scenes in a group reject the config transaction. Disconnected assignments
+remain saved and are matched by connector when the display returns. Bounds and
+visible clips are rebuilt for the connected members, including uneven sizes
+and signed output positions. This is a shared virtual canvas, not automatic
+physical bezel calibration.
+
+The legacy layouts `per-output` (Earth per screen) and `earth-moon` retain their
+earlier meaning. Their `wallpaper_astronomy_bodies` map remains supported. The
+new picker records explicit connector scenes when converting them to Independent
+mode, so another screen's old Earth/Moon assignment is preserved.
+
+### One Saturn spanning the desk
+
+Merge into the existing `[behavior]` table; do not add a duplicate table header:
+
+```toml
+[behavior]
+wallpaper_effect = "astronomy"
+wallpaper_astronomy_scene = "saturn"
+wallpaper_astronomy_layout = "span"
+wallpaper_astronomy_presentation = "scientific"
+```
+
+Set the layout to `"mirror"` to show a complete Saturn on every display. The
+native picker can switch between these two arrangements directly.
+
+### One theme per screen
+
+```toml
+[behavior]
+wallpaper_effect = "astronomy"
+wallpaper_astronomy_scene = "earth" # default for a newly connected screen
+wallpaper_astronomy_layout = "independent"
+wallpaper_astronomy_outputs = { "DP-1" = { scene = "earth" }, "DP-2" = { scene = "moon" }, "HDMI-1" = { scene = "solar-system" } }
+```
+
+Replace those names with the connectors shown by **Apply to**. The Solar System
+on `HDMI-1` has its own camera and planet selection; an Earth drag on `DP-1`
+continues to control that Earth scene.
+
+### Two displays share Earth, a third explores the Milky Way
+
+This equivalent subtable form is easier to edit for a larger desk:
+
+```toml
+[behavior]
+wallpaper_effect = "astronomy"
+wallpaper_astronomy_scene = "earth"
+wallpaper_astronomy_layout = "independent"
+
+[behavior.wallpaper_astronomy_outputs."DP-1"]
+scene = "earth"
+group = "earth-desk"
+
+[behavior.wallpaper_astronomy_outputs."DP-2"]
+scene = "earth"
+group = "earth-desk"
+
+[behavior.wallpaper_astronomy_outputs."HDMI-1"]
+scene = "galaxy"
+group = "" # independent; omitting group means the same thing
+```
+
+Use either an inline map or subtables for `wallpaper_astronomy_outputs`, not
+both. The map permits at most 128 assignments; connector names are 1–256 bytes,
+group names are empty or 1–128 bytes, and neither accepts control characters.
+The picker merges only changed connectors when saving and checks shared-group
+consistency before publishing a file.
+
+## Mouse interaction
+
+Close the configurator and use an uncovered part of the desktop:
+
+| Gesture | Result |
+| --- | --- |
+| Left-drag a body | Rotate the body/camera in any direction, including through the poles. |
+| Left-drag the sky | Turn the panorama through 360°, with its own camera orientation. |
+| Wheel over a body | Zoom that body; loaded detail is bounded by the source and GPU limits. |
+| Wheel over sky | Change the sky's perspective field of view. |
+| Click a Solar System body | Enter an isolated close-up of that body against the sky. |
+| Right-click in a Solar System close-up | Return to the system view. |
+| Right-click an Astronomy canvas | Reset the pointed scene/group's interactive view. |
+
+Window operations, bars, modals and lock screens keep input priority. A drag is
+anchored to the scene where it began; crossing an output boundary does not select
+another scene. Shared groups share interaction state; unrelated Independent
+scenes do not. Manual camera/zoom state is session state, while scene selection,
+layout, grouping and the explicit configuration values are persisted.
+
+## Solar orbital clock
+
+```toml
+[behavior]
+wallpaper_effect = "astronomy"
+wallpaper_astronomy_scene = "solar-system"
+wallpaper_solar_orbit_mode = "ephemeris"
+wallpaper_solar_time_scale = 1.0
+wallpaper_solar_time_offset_days = 0.0
+```
+
+The native controls expose **Now**, **Pause orbits**, **1× / UTC plus date
+offset**, **1 day per second**, and date-offset changes of ±1 or ±30 days.
+Their rows are labelled **Global date-derived clock**. Activating any of them
+selects Ephemeris mode in the same saved transaction, so Pause stops the visible
+date-driven orbits even if the previous mode was the decorative orbit tour.
+
+| Setting/action | Meaning |
+| --- | --- |
+| `wallpaper_solar_time_scale = 1.0` | Follow current UTC plus the configured date offset. |
+| `0.0` | Pause the orbital positions at the current playback date. |
+| `86400.0` | Advance the orbital clock by one day per real second. |
+| Date offset | Re-anchor playback to current UTC plus that many days; finite `-19000..=8500`. |
+| Now | Restore offset `0` and speed `1`. |
+
+The speed accepts finite values in `0..=1000000`. A speed change to Pause or
+fast playback integrates the previous speed before switching. Selecting `1×`
+re-anchors to **UTC + offset**; it does not resume an accelerated date at normal
+speed. The ±day/month buttons change that configured offset, not elapsed
+accelerated playback time. A restart begins from current UTC plus the saved
+offset. The paused instant itself is not a persisted timestamp.
+
+The implemented playback interval is **1972-01-01 00:00:00 UTC through
+2049-12-31 23:58:00 UTC**. Playback clamps at an endpoint rather than extrapolating
+the ephemeris. The interval includes the implementation's UTC conversion limit
+and an upper conversion margin; it is narrower than the underlying JPL orbital
+fit's date range. The date-offset bounds also apply.
+
+These controls affect the Solar System's orbital clock. They do not change the
+OS clock, Earth/Moon Astronomy's current-UTC illumination, local timezone, or the
+separate `wallpaper_solar_spin_speed` presentation multiplier. Choosing
+`wallpaper_solar_orbit_mode = "illustrative"` uses the decorative orbital tour;
+choose `"ephemeris"` to inspect date-driven approximate positions.
+
+The default surface-spin multiplier is **718.035×**, making Earth's sidereal
+rotation take 120 seconds in a Solar System scene. Thus the orbital clock's
+`1×` is not real-time surface rotation. Set `wallpaper_solar_spin_speed = 1.0`
+as well for real-time sidereal spin, or `0.0` to stop surface spin. The picker
+shows the current spin multiplier separately from the date rate.
+
+## Scientific and illustrative presentation
+
+`wallpaper_astronomy_presentation = "scientific"` is the default; use
+`"illustrative"` for the explicitly artistic presentation. **Scientific does
+not mean photogrammetric terrain, current planetary weather, a navigation-grade
+ephemeris, true display radiance, or a complete measured galaxy.** The About rows
+name each installed material and distinguish observation-based composites from
+approximations. An authoritative source for a body's dimensions does not turn a
+procedural surface into measured geography.
+
+Both modes compress Solar System distances and enlarge bodies so they remain
+visible and selectable on a desktop. The source mean radii, sidereal periods
+and obliquities in About use real units. The default ephemeris retains orbital
+eccentricity and inclination within its model, but the displayed relative
+distances and sizes are not to scale. For source tables, textures, coordinate
+conventions and limitations, read [Astronomy science](astronomy-science.md).
 
 ## Configuration
 
@@ -27,7 +264,7 @@ wallpaper_timezone_offset_hours = 8 # retained compatibility setting, integer -1
 wallpaper_astronomy_layout = "span" # "per-output" shows one complete globe per screen
 ```
 
-Use the existing Wallpaper picker to select Astronomy Earth, or select a normal
+Use the existing Wallpaper picker to select any celestial scene, or select a normal
 image to return to static wallpaper. Existing `wallpaper`, per-monitor/tag
 choices and `wallpaper_rotation = "daily"` remain the fallback collection.
 No network fetch occurs inside JWM. The repository, source installer and release
@@ -54,19 +291,20 @@ restart JWM after a managed release rollback to use that release's executable an
 asset. Missing assets leave static wallpaper intact and the picker explains the
 missing prerequisite.
 
-`wallpaper_astronomy_layout = "span"` is the default: one globe is centered on
-the X framebuffer and spans adjacent monitors. Choose `"per-output"` to show a
-complete globe on each output, using that output's size and position. All globes
+`wallpaper_astronomy_layout = "span"` is the default: the selected scene spans
+the X framebuffer. With the default `wallpaper_astronomy_scene = "earth"`, this
+is one Earth globe. The legacy `"per-output"` value shows a complete Earth on
+each output, using that output's size and position. These legacy Earth copies
 share the same current UTC instant, geographic camera, and texture. Coordinates
-use framebuffer pixels.
+use framebuffer pixels. The new `"mirror"` and `"independent"` layouts extend
+this choice to every supported scene as described above.
 
 This setting controls Astronomy placement only. `wallpaper_mode` still controls
 static-image scaling (`fill`, `fit`, `stretch`, or `center`). Changing layout uses
 the existing config reload or hot-config path; selecting a static image in the
 Wallpaper picker preserves the Astronomy layout for the next time it is enabled.
-For a persistent per-screen choice, set `wallpaper_astronomy_layout = "per-output"`
-in `[behavior]` and reload the configuration. Hot changes are session-only unless
-also written to the configuration file.
+The native configurator saves its celestial changes. Direct IPC hot changes are
+session-only unless also written to the configuration file.
 
 ## Earth on one output, Moon on another
 
@@ -194,8 +432,8 @@ jwm-tool msg set_config_batch --args '{"values":{
 jwm-tool msg set_config --args '{"key":"behavior.wallpaper_moon_view","value":"fixed"}'
 ```
 
-The wallpaper effect must already be enabled, and Moon appears in the
-`earth-moon` layout. These IPC updates are session-only; save the same keys in
+The wallpaper effect must already be enabled. Moon can be selected directly or
+through the legacy `earth-moon` layout. These IPC updates are session-only; save the same keys in
 the config file for restart persistence. Invalid axes, angles or modes reject
 the whole batch without partially changing the scene. Orientation changes
 reuse loaded textures and request a frame using the current system instant.
@@ -212,9 +450,10 @@ on either X11 transport; no extra configuration or modifier key is needed.
 3. Release the left button to keep the resulting pose. A fixed view stays there;
    a rotating view resumes its configured tour smoothly from that pose.
 
-Only the body under the initial press is selected. Earth and Moon keep independent
-manual orientations and zoom; if the same body appears on several outputs,
-those copies share that body's state. A press on empty sky starts a panorama
+Only the body under the initial press is selected. Separate Independent scenes
+keep independent manual orientations and zoom, even for the same planet.
+Explicit groups share the scene's state; Mirror shares the global view. Legacy
+Earth/Moon layouts retain their body-based sharing. A press on empty sky starts a panorama
 gesture: drag horizontally, vertically or diagonally to look in any direction,
 passing through either pole without a latitude clamp. Release and grab again to
 continue looking around. The background keeps its own orientation and lens,
@@ -284,15 +523,16 @@ An explicit Earth or Moon texture path remains authoritative at every zoom
 level. JWM reads additional detail from that same source when available; it does
 not replace a custom map with a bundled NASA close-up. Bundled detail is likewise
 not substituted for a user data override. High-resolution images use mipmaps
-and stable longitude/pole gradients. The surface shader reveals restrained
-artistic material grain as the body grows; it does not infer measured elevation
-or create a displaced terrain mesh.
+and stable longitude/pole gradients. Illustrative presentation may reveal
+artistic material grain as the body grows; no mode infers measured elevation
+or creates a displaced terrain mesh.
 
 Scroll over empty sky to narrow or widen the panorama's perspective lens,
 independently of globe scale. Astronomy starts at a **60° vertical field of
 view**, bounded to **8°–110°**. A narrow lens reveals catalogue stars and finer
 nebula artwork; scrolling back out restores a wider view. Sky orientation and
-lens are shared across the Astronomy canvases for this session. Neither sky
+lens follow the scene/group's interaction state; legacy canvases retain their
+earlier shared sky. Neither sky
 zoom nor body zoom changes the current UTC Sun direction or lunar phase.
 
 ## Fixed geographic view and real daylight
@@ -304,7 +544,7 @@ This is not a precise home/device location. Configure latitude within
 −90..90 and longitude within −180..180 (finite degrees, east positive). The
 camera and land stay fixed throughout the day unless manually dragged; UTC,
 date and Earth's seasonal tilt move the sunlight and day/night boundary
-independently. All three layouts use the same policy. Reload/hot updates change
+independently. Every layout uses the same UTC lighting policy. Reload/hot updates change
 framing without decoding textures.
 
 The explicit `"rotating"` view retains accelerated camera tours:

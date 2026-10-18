@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Actual procedural solar shader rendering on desktop GL330 and GLES300 Mesa."""
-import ctypes as C, os, json, math, tempfile, subprocess, shutil, time, statistics, hashlib
+import ctypes as C, os, json, math, tempfile, subprocess, shutil, time, statistics, hashlib, datetime
 from pathlib import Path
 from PIL import Image, ImageChops, ImageStat
 os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE','1')
@@ -16,22 +16,28 @@ W,H=int(os.environ.get("PREVIEW_WIDTH",960)),int(os.environ.get("PREVIEW_HEIGHT"
 helper=ROOT/'solar_values.rs'
 helper.write_text('#[path='+json.dumps(str(REPO/'src/backend/compositor_common/animated_wallpaper.rs'))+'] mod animated_wallpaper;\n'
  +'#[path='+json.dumps(str(REPO/'src/backend/compositor_common/panorama.rs'))+'] mod panorama;\n'
- +'#[path='+json.dumps(str(REPO/'src/backend/compositor_common/solar_system.rs'))+'] mod solar;\n'+r"""
+ +'#[path='+json.dumps(str(REPO/'src/backend/compositor_common/solar_system.rs'))+'] mod solar_system;\n'
+ +'#[path='+json.dumps(str(REPO/'src/backend/compositor_common/celestial_catalog.rs'))+'] mod celestial_catalog;\n'
+ +'#[path='+json.dumps(str(REPO/'src/backend/compositor_common/kepler_ephemeris.rs'))+'] mod kepler_ephemeris;\n'
+ +'#[path='+json.dumps(str(REPO/'src/backend/compositor_common/solar_ephemeris.rs'))+'] mod solar_ephemeris;\nuse solar_system as solar;\n'+r"""
 fn main(){let raw:Vec<String>=std::env::args().skip(1).collect();
-if raw[0]=="explore"||raw[0]=="orbit"{
+if raw[0]=="explore"||raw[0]=="orbit"||raw[0]=="date"{
  let a:Vec<f64>=raw.iter().skip(1).map(|s|s.parse().unwrap()).collect();
  let body=a[0] as i32;let mut camera=solar::SolarCamera::default();
- let (phases,surface)=solar::scene_phases(a[5]);
- let target=if body>=0{camera.focus(body as u8,&phases);camera.zoom_body(body as u8,a[1]);solar::body_center(body as u8,&phases).unwrap()}else{[0.;3]};
+ let geometry=(raw[0]=="date").then(||solar_ephemeris::SolarEphemeris::at_unix(a[5]).unwrap());
+ let seconds=if geometry.is_some(){0.}else{a[5]};
+ let (phases,surface)=solar::scene_phases(seconds);
+ let target=if body>=0{let center=geometry.as_ref().map_or_else(||solar::body_center(body as u8,&phases).unwrap(),|g|g.centers[body as usize]);camera.focus_at(body as u8,center);camera.zoom_body(body as u8,a[1]);center}else{[0.;3]};
  let mut panorama=panorama::PanoramaView::default();if body<0{panorama.zoom(a[1]);}
  let rotation=animated_wallpaper::CelestialRotation::axis_angle([0.,1.,0.],a[2]).unwrap()
   .compose(animated_wallpaper::CelestialRotation::axis_angle([1.,0.,0.],a[3]).unwrap())
   .compose(animated_wallpaper::CelestialRotation::axis_angle([0.,0.,1.],a[4]).unwrap());
  let mut orbit=animated_wallpaper::CelestialRotation::from_matrix(&camera.orbit_matrix());
- if raw[0]=="orbit"{orbit=orbit.compose(rotation);}else{panorama.set_orientation(rotation);}
+ if raw[0]=="orbit"||raw[0]=="date"{orbit=orbit.compose(rotation);}else{panorama.set_orientation(rotation);}
  let scale=(panorama::PanoramaView::default().fov_degrees().to_radians()*0.5).tan()/(panorama.fov_degrees().to_radians()*0.5).tan();
- let viewport=[a[6] as u32,a[7] as u32];let p=camera.projection(target,orbit.matrix(),panorama.matrix(),viewport,phases,scale);
- for x in p.eye.into_iter().chain(phases).chain([surface]).chain(solar::scene_spin_phases(a[5]*718.035)).chain(p.basis).chain([p.focal]){print!("{} ",x);}
+ let viewport=[a[6] as u32,a[7] as u32];let mut p=camera.projection(target,orbit.matrix(),panorama.matrix(),viewport,phases,scale);p.centers=geometry.as_ref().map(|g|g.centers);p.body_axes=geometry.as_ref().map(|g|g.axes);p.focus=(body>=0).then_some(body as u8);
+ for x in p.eye.into_iter().chain(phases).chain([surface]).chain(solar::scene_spin_phases(seconds*718.035)).chain(p.basis).chain([p.focal,body as f32]){print!("{} ",x);}
+ if let Some(g)=geometry{for x in g.centers.iter().chain(g.ellipse_centers.iter()).chain(g.ellipse_u.iter()).chain(g.ellipse_v.iter()).chain(g.axes.iter()).flatten(){print!("{} ",x);}}
  for row in 0..5{for col in 0..9{let x=(col as f64+0.5)*a[6]/9.0-0.5;let y=a[7]-(row as f64+0.5)*a[7]/5.0-0.5;print!("{} ",p.pick(x,y).map_or(-1,|body|body as i32));}}
  return;
 }
@@ -104,7 +110,10 @@ for es in (False,True):
  unif1i(loc(prog,b'earth_map'),0);unif1i(loc(prog,b'earth_enabled'),int(bool(earth_enabled)))
 
  sky_filename='galaxy-nasa-4k.png' if (REPO/'assets/astronomy/galaxy-nasa-4k.png').is_file() else 'milkyway-nasa-gaia.jpg'
- for unit,key,filename in [(1,'cloud','earth-nasa-clouds.jpg'),(2,'sky',sky_filename)]:
+ planet_files={'mercury':'mercury-nasa-messenger.jpg','venus':'venus-nasa-clouds.jpg','mars':'mars-nasa-viking.jpg','jupiter':'jupiter-nasa-cassini.jpg','saturn':'saturn-nasa-cassini.jpg','uranus':'uranus-nasa-voyager.jpg','neptune':'neptune-nasa-voyager.jpg'}
+ material_files={'earth':'earth-nasa-october.jpg','cloud':'earth-nasa-clouds.jpg','sky':sky_filename,**planet_files}
+ material_units={key:i for i,key in enumerate(material_files)}
+ for unit,key,filename in [(i,key,filename) for i,(key,filename) in enumerate(material_files.items()) if i]:
   tex=U();gl('glGenTextures',None,[I,C.POINTER(U)])(1,C.byref(tex))
   gl('glActiveTexture',None,[U])(0x84C0+unit);gl('glBindTexture',None,[U,U])(0x0DE1,tex)
   for keyparam,val in ((0x2801,0x2601),(0x2800,0x2601),(0x2802,0x2901),(0x2803,0x812F)):param(0x0DE1,keyparam,val)
@@ -154,6 +163,20 @@ for es in (False,True):
   matrix3=gl('glUniformMatrix3fv',None,[I,I,C.c_ubyte,C.POINTER(F)])
   def exploration_uniforms(program,values):
    unif2(loc(program,b'resolution'),W,H)
+   unif2(loc(program,b'canvas_origin'),0,0)
+   dated=len(values)==202
+   unif1i(loc(program,b'ephemeris_enabled'),int(dated))
+   unif1i(loc(program,b'scientific_mode'),int(dated))
+   unif1i(loc(program,b'cosmic_scientific'),int(dated))
+   if dated:
+    offset=31
+    for key,count in [('body_centers',9),('ellipse_centers',8),('ellipse_u',8),('ellipse_v',8),('body_axes',9)]:
+     for i in range(count):unif3(loc(program,f'{key}[{i}]'.encode()),*values[offset+i*3:offset+i*3+3])
+     offset+=count*3
+   for key,filename in material_files.items():
+    unif1i(loc(program,(key+'_map').encode()),material_units[key])
+    enabled=(REPO/'assets/astronomy'/filename).is_file() and not os.environ.get('SOLAR_NO_'+key.upper())
+    unif1i(loc(program,(key+'_enabled').encode()),int(enabled))
    unif3(loc(program,b'camera_eye'),*values[:3])
    for i,phase in enumerate(values[3:11]):unif1f(loc(program,f'orbit_phase[{i}]'.encode()),phase)
    unif1f(loc(program,b'surface_phase'),values[11])
@@ -161,6 +184,8 @@ for es in (False,True):
    matrix3(loc(program,b'camera_basis'),1,0,(F*9)(*values[20:29]))
    unif1i(loc(program,b'camera_basis_enabled'),1)
    unif1f(loc(program,b'camera_focal'),values[29])
+   unif1i(loc(program,b'focus_enabled'),int(values[30]>=0))
+   unif1i(loc(program,b'focused_body'),int(max(0,values[30])))
   exploration_scenes=[]
   for body,name in enumerate(['sun','mercury','venus','earth','mars','jupiter','saturn','uranus','neptune']):
    exploration_scenes += [(f'focus-{name}','explore',body,0.,0.,0.,0.,0.),(f'near-{name}','orbit',body,4.,.45,-.35,.15,0.)]
@@ -172,9 +197,12 @@ for es in (False,True):
    ('sky-south','explore',-1,0.,0.,-math.pi/2,0.,0.),
    ('sky-rolled-zoom','explore',-1,4.,1.1,.8,1.3,0.),
   ]
+  dated_unix=datetime.datetime(2026,10,17,tzinfo=datetime.timezone.utc).timestamp()
+  exploration_scenes += [('dated-j2000','date',-1,0.,0.,0.,0.,946728000.),('dated-2026','date',-1,0.,0.,0.,0.,dated_unix)]
+  exploration_scenes += [(f'dated-{name}','date',body,0.,0.,0.,0.,dated_unix) for body,name in enumerate(['sun','mercury','venus','earth','mars','jupiter','saturn','uranus','neptune'])]
   for name,mode,body,zoom,yaw,pitch,roll,seconds in exploration_scenes:
    values=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),mode,*map(str,[body,zoom,yaw,pitch,roll,seconds,W,H])]).split()))
-   assert len(values)==75,(name,len(values))
+   assert len(values)==(202 if mode=='date' else 76),(name,len(values))
    exploration_uniforms(prog,values)
    gl('glDrawArrays',None,[U,I,I])(4,0,3)
    buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
@@ -186,7 +214,32 @@ for es in (False,True):
   for name in ['mercury','earth','mars','jupiter','saturn','uranus','neptune']:
    before=Image.open(ROOT/f'{kind}-focus-{name}.png');after=Image.open(ROOT/f'{kind}-near-{name}.png')
    assert sum(ImageStat.Stat(ImageChops.difference(before,after)).mean[:3])>1., ('focus approach/orbit',name)
+  dated_a=Image.open(ROOT/f'{kind}-dated-j2000.png');dated_b=Image.open(ROOT/f'{kind}-dated-2026.png')
+  assert sum(ImageStat.Stat(ImageChops.difference(dated_a,dated_b)).mean[:3])>.05, 'dated orbital positions must change the rendered system'
+  # A solar canvas must have the same pixels after moving to another output;
+  # rendering it must leave a neighbouring theme's pixels untouched.
+  half=W//2
+  translated=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),'date',*map(str,[3,0.,0.,0.,0.,dated_unix,half,H])]).split()))
+  exploration_uniforms(prog,translated)
+  unif2(loc(prog,b'resolution'),half,H)
+  gl('glEnable',None,[U])(0x0C11);gl('glScissor',None,[I,I,I,I])(0,0,half,H)
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  canvas_pixels=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,canvas_pixels)
+  reference=Image.frombytes('RGBA',(W,H),bytes(canvas_pixels)).crop((0,0,half,H))
+  gl('glDisable',None,[U])(0x0C11)
+  gl('glClearColor',None,[F,F,F,F])(1.,0.,1.,1.);gl('glClear',None,[U])(0x4000)
+  unif2(loc(prog,b'canvas_origin'),W-half,0)
+  gl('glEnable',None,[U])(0x0C11);gl('glScissor',None,[I,I,I,I])(W-half,0,half,H)
+  gl('glDrawArrays',None,[U,I,I])(4,0,3)
+  gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,canvas_pixels)
+  moved=Image.frombytes('RGBA',(W,H),bytes(canvas_pixels))
+  assert moved.crop((W-half,0,W,H)).tobytes()==reference.tobytes(), 'canvas origin must preserve camera rays and material gradients'
+  assert moved.crop((0,0,W-half,H)).getextrema()==((255,255),(0,0),(255,255),(255,255)), 'solar canvas overwrote an adjacent theme'
+  moved.transpose(Image.Transpose.FLIP_TOP_BOTTOM).save(ROOT/f'{kind}-independent-output.png')
+  gl('glDisable',None,[U])(0x0C11)
+  unif2(loc(prog,b'canvas_origin'),0,0);unif2(loc(prog,b'resolution'),W,H)
   # Restore the original overview before partial-damage and performance checks.
+  for key in [b'ephemeris_enabled',b'scientific_mode',b'cosmic_scientific',b'focus_enabled']:unif1i(loc(prog,key),0)
   unif1i(loc(prog,b'camera_basis_enabled'),0)
   values=list(map(float,subprocess.check_output([str(ROOT/'solar_values'),'.4','.65','35','0']).split()))
   unif3(loc(prog,b'camera_eye'),*values[:3])
@@ -203,7 +256,7 @@ for es in (False,True):
  finish=gl('glFinish',None,[]);finish();timings=[]
  for _ in range(6):
   start=time.perf_counter();gl('glDrawArrays',None,[U,I,I])(4,0,3);finish();timings.append((time.perf_counter()-start)*1000.)
- results[kind]={'renderer':renderer,'version':version,'samples':len(samples),'exploration_frames':len(exploration_values),'scissor_preserved':True,'median_full_frame_ms':statistics.median(timings),'resolution':[W,H]}
+ results[kind]={'renderer':renderer,'version':version,'samples':len(samples),'exploration_frames':len(exploration_values),'scissor_preserved':True,'independent_canvas_translation_preserved':not BENCH_ONLY,'median_full_frame_ms':statistics.median(timings),'resolution':[W,H]}
 
  # Compile diagnostics from the actual production functions, not Python copies.
  if not BENCH_ONLY:
@@ -222,9 +275,9 @@ void main(){
  float inverse_length;vec3 right,up;
  vec3 ray=solar_ray(pixel,inverse_length,right,up);
  float nearest=1e5;int body=-1;
- for(int i=0;i<9;i++){float distance=sphere(camera_eye,ray,center(i),radius[i]);if(distance<nearest){nearest=distance;body=i;}}
+ for(int i=0;i<9;i++){if(focus_enabled!=0&&focused_body!=i)continue;float distance=sphere(camera_eye,ray,center(i),radius[i]);if(distance<nearest){nearest=distance;body=i;}}
  vec3 normal=body_axis(6),saturn=center(6);float denominator=dot(ray,normal);
- if(abs(denominator)>.0001){float distance=dot(saturn-camera_eye,normal)/denominator;
+ if((focus_enabled==0||focused_body==6)&&abs(denominator)>.0001){float distance=dot(saturn-camera_eye,normal)/denominator;
   if(distance>0.&&distance<nearest){float opacity=ring_opacity(length(camera_eye+ray*distance-saturn));if(opacity>.001)body=6;}}
  frag_color=vec4(vec3(float(body+1)/10.),1.);
 }
@@ -234,7 +287,7 @@ void main(){
    exploration_uniforms(picking,values)
    gl('glDrawArrays',None,[U,I,I])(4,0,3)
    pixels=(C.c_ubyte*(9*5*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,9,5,0x1908,0x1401,pixels)
-   expected=[round((body+1)*255/10) for body in values[30:]]
+   expected=[round((body+1)*255/10) for body in values[-45:]]
    actual=list(pixels)[::4]
    assert all(abs(a-b)<=1 for a,b in zip(actual,expected)),('CPU/GLSL scene picks',name,actual,expected)
   results[kind]['exploration_pick_probes']=45*len(exploration_values)
@@ -272,9 +325,9 @@ void main(){
 }
 """)
   unif2(loc(atlas,b'resolution'),W,H)
-  for key,unit in [('earth',0),('cloud',1),('sky',2)]:
+  for key,unit in material_units.items():
    unif1i(loc(atlas,(key+'_map').encode()),unit)
-   enabled=(REPO/'assets/astronomy'/dict(earth='earth-nasa-october.jpg',cloud='earth-nasa-clouds.jpg',sky=sky_filename)[key]).is_file() and not os.environ.get('SOLAR_NO_'+key.upper())
+   enabled=(REPO/'assets/astronomy'/material_files[key]).is_file() and not os.environ.get('SOLAR_NO_'+key.upper())
    unif1i(loc(atlas,(key+'_enabled').encode()),int(enabled))
   gl('glDrawArrays',None,[U,I,I])(4,0,3)
   buf=(C.c_ubyte*(W*H*4))();gl('glReadPixels',None,[I,I,I,I,U,U,P])(0,0,W,H,0x1908,0x1401,buf)
@@ -374,10 +427,10 @@ for name in comparison_names:
 for kind in results:
  results[kind]['gl_gles_max_channel_difference']=max_channel_difference
  results[kind]['expanded_shader_sha256']=hashlib.sha256(source.encode()).hexdigest()
- results[kind]['source_sha256']={(str(path.relative_to(REPO)) if path.is_relative_to(REPO) else str(path)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [SOURCE,REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl',REPO/'src/backend/compositor_common/solar_system.rs',REPO/'src/backend/compositor_common/panorama.rs',REPO/'src/backend/compositor_common/animated_wallpaper.rs']}
+ results[kind]['source_sha256']={(str(path.relative_to(REPO)) if path.is_relative_to(REPO) else str(path)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [SOURCE,REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl',REPO/'src/backend/compositor_common/solar_system.rs',REPO/'src/backend/compositor_common/panorama.rs',REPO/'src/backend/compositor_common/animated_wallpaper.rs',REPO/'src/backend/compositor_common/celestial_catalog.rs',REPO/'src/backend/compositor_common/kepler_ephemeris.rs',REPO/'src/backend/compositor_common/solar_ephemeris.rs']}
  if not BENCH_ONLY:
   from PIL import ImageDraw
-  tile=(320,180);sheet=Image.new('RGB',(tile[0]*4,(tile[1]+22)*6),(7,11,19));draw=ImageDraw.Draw(sheet)
+  tile=(320,180);sheet=Image.new('RGB',(tile[0]*4,(tile[1]+22)*math.ceil(len(exploration_scenes)/4)),(7,11,19));draw=ImageDraw.Draw(sheet)
   for i,scene in enumerate(exploration_scenes):
    name=scene[0];thumb=Image.open(ROOT/f'{kind}-{name}.png').convert('RGB').resize(tile,Image.Resampling.LANCZOS)
    x=(i%4)*tile[0];y=(i//4)*(tile[1]+22)

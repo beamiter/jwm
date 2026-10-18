@@ -4,17 +4,49 @@
 # Celestial effects require the X11 compositor. Native Wayland uses static wallpaper.
 [behavior]
 
-# Live effect: "off" (default) = static; "astronomy" = animated Earth/Moon;
-# "solar-system" = the interactive Sun and eight planets.
+# Live effect: "off" (default) = static; "astronomy" = configurable celestial scenes.
+# Legacy "solar-system" remains supported; use scene = "solar-system" in new layouts.
 wallpaper_effect = "astronomy"
-# "span" (default): one Earth across the framebuffer.
-# "per-output": complete Earth on every screen.
-# "earth-moon": independent bodies on each screen, assigned below.
-wallpaper_astronomy_layout = "earth-moon"
+# Native picker: Alt+Ctrl+W; Apply to chooses all screens or a connector/group.
+# Select a scene, layout or Share with row; celestial choices persist in the config.
+# About rows provide reference dimensions, material provenance and source URLs.
+# Scene tokens: earth, moon, sun, mercury, venus, mars, jupiter, saturn, uranus,
+# neptune, solar-system, galaxy. This global scene is also the hotplug fallback.
+wallpaper_astronomy_scene = "earth"
+# "span" (default): one shared scene across the whole framebuffer.
+# "mirror": one complete view per screen, with shared camera/interaction.
+# "independent": a scene per connector; a nonempty group spans its named members.
+# Legacy "per-output" = Earth per screen; "earth-moon" uses the old bodies map below.
+wallpaper_astronomy_layout = "independent"
+# Replace connector names with your actual outputs. Unplugged assignments are retained.
+# Same scene alone does not share navigation; group names explicitly join screens.
+# Every member of a group must specify the same scene.
+wallpaper_astronomy_outputs = { "DP-1" = { scene = "earth", group = "earth-desk" }, "DP-2" = { scene = "earth", group = "earth-desk" }, "HDMI-1" = { scene = "solar-system" } }
+# Delete group or set group = "" for an independent canvas. For example:
+# wallpaper_astronomy_outputs = { "DP-1" = { scene = "saturn" }, "HDMI-1" = { scene = "galaxy" } }
+# Scientific uses restrained lighting and labels approximate materials; it does not
+# imply measured terrain or true physical display scale. Illustrative enables art layers.
+wallpaper_astronomy_presentation = "scientific"
 
-# Mouse: hold left button on the visible Earth/Moon and drag in any direction.
+# Solar orbital mode and clocks are global across Solar System scenes.
+# JPL approximate positions are the default; "illustrative" retains the decorative tour.
+# Both modes compress distances and enlarge bodies for visible, clickable navigation.
+# Native Global date-derived clock actions also select ephemeris, including Pause.
+wallpaper_solar_orbit_mode = "ephemeris"
+# Finite 0..1000000: 0 pauses orbital date, 1 follows UTC + offset, 86400 = 1 day/second.
+wallpaper_solar_time_scale = 1.0
+# Finite -19000..8500 days relative to current UTC, reanchors playback when changed.
+# Runtime dates clamp to 1972-01-01 through 2049-12-31 23:58 UTC; no extrapolation.
+wallpaper_solar_time_offset_days = 0.0
+# Self-rotation is separate: finite 0..10000, 1 = sidereal real time, 0 stops spin.
+# Default 718.035 makes Earth turn in 120 seconds even when orbital date is at 1x.
+wallpaper_solar_spin_speed = 718.035
+# Solar clock changes never retime the independent Earth/Moon UTC day/night/phase.
+# Full accuracy boundaries and sources: docs/astronomy-science.md.
+
+# Mouse: hold left button on the visible body and drag in any direction.
 # Edge drags also roll; release keeps the pose and resumes any automatic tour.
-# Wheel over a body scales it from 0.35x to 8x; Earth/Moon keep independent zoom.
+# Wheel over a gallery body scales it from 0.35x to 8x; scenes keep independent zoom.
 # Left-drag empty sky to look through the entire celestial sphere, including poles.
 # Wheel over sky changes the perspective lens (Astronomy vertical FOV 8..110 degrees).
 # The sky tour defaults to 1440 minutes; wallpaper_sky_rotation_minutes = 0 stops
@@ -23,7 +55,7 @@ wallpaper_astronomy_layout = "earth-moon"
 # A captured gesture can continue across windows and other outputs.
 # Manual poses, zoom and lens are session-only; no extra enable key.
 # Changing a body's orientation/mode/period resets its manual pose and zoom.
-# Solar System: click Sun/planet for a close-up; drag bodies to orbit, sky to look.
+# Solar System: click Sun/planet for an isolated close-up; drag to orbit, sky to look.
 # Wheel on a focused body approaches/recedes; right-click uncovered wallpaper
 # restores the saved overview. A drag never becomes a click by returning to its start.
 # Shared controls, detail and sky sources: docs/celestial-explorer.md.
@@ -46,7 +78,7 @@ wallpaper_earth_rotation_axis = [0.0, 1.0, 0.0]
 # Integer minutes per turn, 1..525600; used only by the "rotating" view.
 wallpaper_earth_rotation_minutes = 1440
 
-# Moon applies only in earth-moon layout. Default "rotating" preserves its
+# Moon applies whenever a Moon gallery scene is selected. Default "rotating" preserves its
 # original texture tour; "fixed" stops texture motion while real lunar phase updates.
 wallpaper_moon_view = "rotating"
 wallpaper_moon_latitude = 10.313240312354818 # original 0.18-radian tilt; -90..90

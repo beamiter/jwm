@@ -94,8 +94,10 @@ Gaia DR2: ESA/Gaia/DPAC. Visualization by Ernie Wright (USRA).
 This is NASA SVS's catalogue-derived faint-star map in galactic coordinates,
 not a photograph, live sky, nebula gas simulation, or view from the user's location.
 It omits the bright Hipparcos/Tycho foreground. Its stellar-density structure
-reveals the Milky Way and dark dust lanes. JWM uses a fixed, rotated decorative
-crop and reduced display brightness; it is not an astronomical orientation tool.
+reveals the Milky Way and dark dust lanes. The independent sky/body gallery uses
+a rotated presentation frame and reduced display brightness. Date-derived Solar
+System mode transforms its J2000 ecliptic directions into this Galactic frame;
+its compressed scene is still not an observer-location sky chart.
 No constellation overlays, logos, third-party photographs, or AI-generated pixels
 are included. No procedural stars are added when this texture is available.
 
@@ -124,8 +126,8 @@ are included. No procedural stars are added when this texture is available.
   Consortium (DPAC). Funding for the DPAC has been provided by national
   institutions, in particular the institutions participating in the Gaia
   Multilateral Agreement.
-- If this optional asset is missing or cannot be decoded, JWM retains its
-  original stationary procedural background instead of blocking the wallpaper.
+- If this optional asset is missing or cannot be decoded, JWM keeps a plain
+  background in science mode. Illustration mode can use the procedural sky.
 
 ## Full-sky star and constellation atlas
 
@@ -164,9 +166,107 @@ Nebula artwork and text labels are not baked into this data asset.
   GPU limit when needed. The prior faint-star JPEG remains a compatibility asset.
   NASA SVS usage and Gaia acknowledgement above also apply to this atlas.
 
+## Mercury: observed monochrome MESSENGER mosaic
+
+Credit: NASA / Johns Hopkins University Applied Physics Laboratory /
+Carnegie Institution of Washington. The MESSENGER Dual Imaging System (MDIS)
+wide- and narrow-angle cameras supplied the primary-mission mosaic in NASA
+Photojournal PIA16298, *A World View*. The source reports more than 99.9% surface
+coverage and a simple cylindrical projection.
+
+- Source: https://science.nasa.gov/photojournal/a-world-view/
+- Original JPEG: https://assets.science.nasa.gov/content/dam/science/psd/photojournal/pia/pia16/pia16298/PIA16298.jpg
+- File: mercury-nasa-messenger.jpg (3060 × 1530, monochrome JPEG, 1,125,514 bytes,
+  unchanged original)
+- SHA256: 6a99105fd4bcf9649977b5f163db0303bfe07c48354bcc3f1bc69ccd9566a438
+
+This is an observation-derived morphology mosaic, not a true-colour image or
+photometrically calibrated albedo texture. Lighting and seams inherited from
+the source remain visible; small dark polar gaps are not invented terrain.
+JWM preserves the original north-up image and native longitude sequence. The
+JPEG does not provide independently verified longitude-registration metadata;
+the displayed prime-meridian phase is not an IAU rotation solution. Lambertian
+display lighting over this mosaic can therefore include both its original
+shading and the renderer's shading. No crater or colour detail was generated.
+
+## Mars: observed Viking surface mosaic
+
+Credit: NASA / JPL / USGS. NASA's 3D resource identifies this global colour map
+as Viking imagery processed at the USGS. JPL's texture catalogue documents
+the same Viking/USGS map family and the native 1440 × 720 grid.
+
+- NASA source: https://science.nasa.gov/3d-resources/mars/
+- Provenance: https://maps.jpl.nasa.gov/tmaps/mars.html
+- Original JPEG: https://raw.githubusercontent.com/nasa/NASA-3D-Resources/master/Images%20and%20Textures/Mars/Mars.jpg
+- Source Git blob: d60372df53b665e7fb05b4e1757d68b9152e6278
+- File: mars-nasa-viking.jpg (1440 × 720 RGB JPEG, 972,896 bytes, unchanged original)
+- SHA256: 12ec6bf02ebd42a246edc778cb2ce8c595b4d9f0892badf0bfff8abb2303c780
+
+The source is a historical, processed colour mosaic for visualization, not
+current surface conditions, dust, weather or a measured elevation model. JPL's
+[texture catalogue notes](https://maps.jpl.nasa.gov/tmaps/) explain that its
+display textures can include aesthetic processing and are not scientific
+measurement products. Geographic features are observations; the rendered
+colours and added illumination are not calibrated radiance.
+
+The original north-up map and longitude sequence are preserved without
+upscaling or a horizontal flip. Recognizable landmarks are consistent with a
+prime-meridian-centred, east-increasing grid, but that is a visual check, not
+independent georeferencing metadata embedded in this JPEG. JWM does not claim
+an epoch-calibrated Martian prime meridian from this asset alone.
+
+## Jupiter: observed Cassini cloud mosaic
+
+Credit: NASA / JPL / Space Science Institute. NASA Photojournal PIA07782,
+*Cassini's Best Maps of Jupiter (Cylindrical Map)*, combines 36 Cassini images
+from 11–12 December 2000. The source used 750 nm near-infrared and 451 nm blue
+filters to reconstruct a near-visible colour appearance. Its finest discernible
+features are approximately 120 km; polar projection and haze reduce detail.
+
+- Source: https://www.jpl.nasa.gov/images/pia07782-cassinis-best-maps-of-jupiter-cylindrical-map/
+- Original JPEG: https://d2pn8kiwq2w21t.cloudfront.net/original_images/jpegPIA07782.jpg
+- Original size: 3601 × 1801 RGB JPEG, 441,285 bytes
+- Original SHA256: 6b835ddd8036ea9efd25def04f75aa60b69b096025a37eeae5e9b6978e0a2281
+- File: jupiter-nasa-cassini.jpg (3600 × 1800 RGB JPEG, 1,293,216 bytes)
+- File SHA256: 147a68a29590299a052d402cda76c29877ba5ebd4a6cab752aeb5e5166f507ec
+- Derivation: Pillow 12.3.0 resamples the entire 3601 × 1801 grid once with
+  Lanczos to 3600 × 1800, then encodes JPEG at quality 95, 4:4:4, optimized,
+  non-progressive. No crop, flip, tone adjustment, sharpening or synthetic
+  detail is applied. This small downsampling satisfies the globe decoder's
+  exact 2:1 requirement.
+- Reproduction: `python3 scripts/prepare-astronomy-jupiter.py SOURCE.jpg`
+
+The source describes equal increments of planetocentric latitude and longitude
+covering 180° latitude and 360° longitude. The odd original dimensions are
+consistent with an inclusive grid. However, the first and last JPEG longitude
+columns are similar rather than byte-identical, so this derivation does not
+claim to delete an independently established duplicate endpoint. It resamples
+the full image domain, preserves its native meridian orientation and does not
+discard a row or column. The reconstruction remains a historical cloud map;
+the Great Red Spot, storms, colours and cloud drift are not today's weather or
+an IAU System III longitude observation at the selected playback date.
+
+## Sources deliberately not promoted to measured maps
+
+NASA hosting alone does not make a texture an observation. NASA's 3D
+[Saturn resource](https://science.nasa.gov/3d-resources/saturn/) and its
+[JPL provenance](https://maps.jpl.nasa.gov/tmaps/saturn.html) identify the
+Don Davis map as fictional, including the storms. It is not bundled as an
+observed Saturn map. Saturn's default cloud material and analytic rings are
+explicit visual approximations. Venus radar surface data are likewise not a
+visible-light view through its opaque clouds; no such map is silently used as
+visible cloud colour. The Sun, Venus, Saturn, Uranus and Neptune have restrained
+scientific fallback materials unless a user supplies an appropriate image.
+Optional illustration mode may use clearly described procedural detail.
+
+The Mercury, Mars and Jupiter maps above are installed, offline data. A missing
+or rejected map uses the selected mode's fallback. User-supplied maps keep
+their own provenance; catalogue credits describe the bundled defaults.
+
 ## Usage and installation
 
 - NASA images and media usage guidance: https://www.nasa.gov/nasa-brand-center/images-and-media/
+- JPL image usage guidance: https://www.jpl.nasa.gov/jpl-image-use-policy/
 
 NASA imagery is generally available for informational use under that guidance;
 third-party materials have their own restrictions. These NASA sources are credited

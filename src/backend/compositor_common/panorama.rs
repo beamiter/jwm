@@ -15,10 +15,15 @@ pub(crate) const PANORAMA_MAX_FOV: f32 = 110.0;
 /// Keeping expansion explicit also lets the headless tests compile the exact
 /// production source without introducing a runtime file or GLSL extension.
 pub(crate) fn cosmic_shader_source(source: &str) -> String {
-    source.replace(
-        "// JWM_COSMIC_SKY_INCLUDE",
-        include_str!("../x11/compositor/shaders/cosmic_sky.glsl"),
-    )
+    source
+        .replace(
+            "// JWM_COSMIC_SKY_INCLUDE",
+            include_str!("../x11/compositor/shaders/cosmic_sky.glsl"),
+        )
+        .replace(
+            "// JWM_PLANET_SURFACE_INCLUDE",
+            include_str!("../x11/compositor/shaders/planet_surface.glsl"),
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

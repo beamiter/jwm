@@ -4,9 +4,12 @@ on:
   push:
     paths:
       - src/backend/compositor_common/animated_wallpaper.rs
+      - src/backend/compositor_common/celestial_layout.rs
+      - src/backend/compositor_common/celestial_catalog.rs
       - src/backend/compositor_common/panorama.rs
       - src/backend/x11/compositor/astronomy_wallpaper.rs
       - src/backend/x11/compositor/shaders/animated_wallpaper.frag
+      - src/backend/x11/compositor/shaders/planet_surface.glsl
       - src/backend/x11/compositor/shaders/cosmic_sky.glsl
       - src/backend/x11/compositor/procedural_wallpaper_cache.rs
       - src/config.rs
@@ -22,9 +25,12 @@ on:
   pull_request:
     paths:
       - src/backend/compositor_common/animated_wallpaper.rs
+      - src/backend/compositor_common/celestial_layout.rs
+      - src/backend/compositor_common/celestial_catalog.rs
       - src/backend/compositor_common/panorama.rs
       - src/backend/x11/compositor/astronomy_wallpaper.rs
       - src/backend/x11/compositor/shaders/animated_wallpaper.frag
+      - src/backend/x11/compositor/shaders/planet_surface.glsl
       - src/backend/x11/compositor/shaders/cosmic_sky.glsl
       - src/backend/x11/compositor/procedural_wallpaper_cache.rs
       - src/config.rs

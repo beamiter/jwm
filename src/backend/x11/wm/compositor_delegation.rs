@@ -396,6 +396,10 @@ macro_rules! delegate_compositor_capabilities {
                 self.compositor.as_mut().is_some_and(|c| c.astronomy_zoom(root_x, root_y, steps))
             }
 
+            fn compositor_astronomy_reset(&mut self, root_x: f64, root_y: f64) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.astronomy_reset(root_x, root_y))
+            }
+
             fn compositor_solar_system_interactive(&self) -> bool {
                 self.compositor.as_ref().is_some_and(|c| c.solar_system_interactive())
             }

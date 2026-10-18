@@ -2657,24 +2657,14 @@ impl SystemUiState {
                 data: RowData::Wallpaper,
             })
             .collect();
-        let astronomy = crate::jwm::features::wallpaper::ASTRONOMY_CHOICE;
-        let marker = if current == astronomy {
-            "\u{f00c}"
-        } else {
-            " "
-        };
-        rows.push(ListRow {
-            key: astronomy.into(),
-            text: format!("\u{f0ac} {marker} Astronomy Earth"),
-            data: RowData::Wallpaper,
-        });
-        let solar = crate::jwm::features::wallpaper::SOLAR_SYSTEM_CHOICE;
-        let marker = if current == solar { "\u{f00c}" } else { " " };
-        rows.push(ListRow {
-            key: solar.into(),
-            text: format!("\u{f0ac} {marker} Solar System 3D · drag to orbit"),
-            data: RowData::Wallpaper,
-        });
+        for (key, _, label) in crate::jwm::features::wallpaper::SCENE_CHOICES {
+            let marker = if current == key { "\u{f00c}" } else { " " };
+            rows.push(ListRow {
+                key: key.into(),
+                text: format!("\u{f0ac} {marker} {label}"),
+                data: RowData::Wallpaper,
+            });
+        }
         // Start on the wallpaper already in use, so Escape-ing out of the
         // panel and reopening does not lose the user's place.
         let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
@@ -2696,6 +2686,131 @@ impl SystemUiState {
         self.is_list(ListKind::Wallpaper)
     }
 
+    pub(crate) fn wallpaper_target(&self) -> crate::jwm::features::wallpaper::WallpaperTarget {
+        let Self::ListPanel {
+            kind: ListKind::Wallpaper,
+            source_rows,
+            rows,
+            ..
+        } = self
+        else {
+            return Default::default();
+        };
+        source_rows
+            .as_deref()
+            .unwrap_or(rows)
+            .iter()
+            .find_map(|row| crate::jwm::features::wallpaper::WallpaperTarget::from_key(&row.key))
+            .unwrap_or_default()
+    }
+
+    /// Targets, placement and encyclopedia rows live in the same immutable
+    /// search source as image choices. Filtering cannot silently reset scope.
+    pub(crate) fn set_wallpaper_astronomy_controls(
+        &mut self,
+        behavior: &crate::config::BehaviorConfig,
+        connectors: &[String],
+        target: &crate::jwm::features::wallpaper::WallpaperTarget,
+    ) {
+        use crate::jwm::features::wallpaper;
+        let controls = wallpaper::astronomy_controls(behavior, target, connectors)
+            .into_iter()
+            .map(|(key, text)| ListRow {
+                key,
+                text,
+                data: RowData::Wallpaper,
+            })
+            .collect();
+        let scene = wallpaper::target_scene(behavior, target, connectors);
+        let mixed = matches!(target, wallpaper::WallpaperTarget::All)
+            && behavior.wallpaper_astronomy_layout == "independent"
+            && behavior
+                .wallpaper_astronomy_outputs
+                .values()
+                .any(|output| output.scene != scene);
+        let current = wallpaper::SCENE_CHOICES
+            .iter()
+            .find_map(|(key, candidate, _)| {
+                (!mixed && behavior.wallpaper_effect != "off" && *candidate == scene)
+                    .then_some(*key)
+            })
+            .unwrap_or("");
+        self.replace_wallpaper_controls(controls, current);
+    }
+
+    fn replace_wallpaper_controls(&mut self, controls: Vec<ListRow>, current: &str) {
+        use crate::jwm::features::wallpaper;
+        let Self::ListPanel {
+            kind: ListKind::Wallpaper,
+            source_rows,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let highlighted = rows.get(*selected).map(|row| row.key.clone());
+        let source = source_rows.as_deref().unwrap_or(rows);
+        let images: Vec<_> = source
+            .iter()
+            .filter(|row| {
+                !wallpaper::is_control_choice(&row.key) && !wallpaper::is_effect_choice(&row.key)
+            })
+            .cloned()
+            .collect();
+        let mut next =
+            Vec::with_capacity(controls.len() + images.len() + wallpaper::SCENE_CHOICES.len());
+        // Scope/layout are visible before the twelve scene choices; advanced
+        // time controls and the encyclopedia follow, then static images.
+        next.extend(controls.iter().take(4).cloned());
+        for (key, _, label) in wallpaper::SCENE_CHOICES {
+            let marker = if key == current { "\u{f00c}" } else { " " };
+            next.push(ListRow {
+                key: key.into(),
+                text: format!("\u{f0ac} {marker} {label}"),
+                data: RowData::Wallpaper,
+            });
+        }
+        next.extend(controls.into_iter().skip(4));
+        next.extend(images);
+        *rows = next.clone();
+        *source_rows = Some(next.into());
+        *selected = highlighted
+            .as_ref()
+            .and_then(|key| rows.iter().position(|row| &row.key == key))
+            .unwrap_or(0);
+        self.refresh_matches();
+    }
+
+    pub(crate) fn wallpaper_show_details(&mut self) {
+        if let Self::ListPanel {
+            kind: ListKind::Wallpaper,
+            query,
+            ..
+        } = self
+        {
+            query.clear();
+        }
+        self.refresh_matches();
+        if let Self::ListPanel {
+            kind: ListKind::Wallpaper,
+            rows,
+            selected,
+            ..
+        } = self
+            && let Some(index) = rows
+                .iter()
+                .position(|row| row.key == "jwm-wallpaper:detail:0")
+        {
+            let last = rows
+                .iter()
+                .rposition(|row| row.key.starts_with("jwm-wallpaper:detail:"))
+                .unwrap_or(index);
+            *selected = (index + ListKind::Wallpaper.window().saturating_sub(1)).min(last);
+        }
+    }
+
     /// Adopt an asynchronous scan without discarding a filter typed while the
     /// folder was loading. Keep its highlighted result when that result still
     /// matches; an untouched picker opens on the effective configuration.
@@ -2706,6 +2821,28 @@ impl SystemUiState {
         directory: &str,
         status: String,
     ) {
+        let (controls, scene_marker) = if let Self::ListPanel {
+            source_rows, rows, ..
+        } = self
+        {
+            let source = source_rows.as_deref().unwrap_or(rows);
+            let controls: Vec<_> = source
+                .iter()
+                .filter(|row| crate::jwm::features::wallpaper::is_control_choice(&row.key))
+                .cloned()
+                .collect();
+            let marker = source
+                .iter()
+                .find(|row| {
+                    crate::jwm::features::wallpaper::is_effect_choice(&row.key)
+                        && row.text.contains('\u{f00c}')
+                })
+                .map(|row| row.key.clone())
+                .unwrap_or_default();
+            (controls, marker)
+        } else {
+            (Vec::new(), String::new())
+        };
         let Self::ListPanel {
             kind: ListKind::Wallpaper,
             query,
@@ -2716,11 +2853,14 @@ impl SystemUiState {
         else {
             return;
         };
-        let highlighted = (!query.is_empty())
+        let highlighted = (!query.is_empty() || !controls.is_empty())
             .then(|| rows.get(*selected).map(|row| row.key.clone()))
             .flatten();
         let query = std::mem::take(query);
         let mut next = Self::wallpaper_picker(paths, current, directory);
+        if !controls.is_empty() {
+            next.replace_wallpaper_controls(controls, &scene_marker);
+        }
         if let Self::ListPanel {
             query: next_query,
             message,
@@ -2743,8 +2883,10 @@ impl SystemUiState {
     /// Image path for the side preview. Effect identities never reach the
     /// image decoder; applying a choice uses `selected_wallpaper_choice`.
     pub fn selected_wallpaper(&self) -> Option<&str> {
-        self.selected_wallpaper_choice()
-            .filter(|key| !crate::jwm::features::wallpaper::is_effect_choice(key))
+        self.selected_wallpaper_choice().filter(|key| {
+            !crate::jwm::features::wallpaper::is_effect_choice(key)
+                && !crate::jwm::features::wallpaper::is_control_choice(key)
+        })
     }
 
     /// Selection identity for committing; unlike the preview this includes effects.
@@ -6918,6 +7060,94 @@ mod tests {
     }
 
     #[test]
+    fn celestial_picker_exposes_every_scene_layout_and_display_target() {
+        use crate::jwm::features::wallpaper::{SCENE_CHOICES, WallpaperTarget};
+        let config = crate::config::Config::default();
+        let connectors = vec!["DP-1".into(), "HDMI-1".into()];
+        let mut picker = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        let target = WallpaperTarget::Output("HDMI-1".into());
+        picker.set_wallpaper_astronomy_controls(config.behavior(), &connectors, &target);
+        assert_eq!(picker.wallpaper_target(), target);
+        let SystemUiState::ListPanel { rows, .. } = &picker else {
+            panic!("wallpaper list");
+        };
+        for (key, _, _) in SCENE_CHOICES {
+            assert_eq!(rows.iter().filter(|row| row.key == key).count(), 1);
+        }
+        for key in [
+            "jwm-wallpaper:layout:span",
+            "jwm-wallpaper:layout:mirror",
+            "jwm-wallpaper:layout:independent",
+            "jwm-wallpaper:share:DP-1",
+            "jwm-wallpaper:time:now",
+        ] {
+            assert!(rows.iter().any(|row| row.key == key), "missing {key}");
+        }
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.key == "jwm-wallpaper:share:HDMI-1")
+        );
+        picker.wallpaper_show_details();
+        assert_eq!(picker.selected_wallpaper(), None);
+        assert!(
+            picker
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|line| line.contains("Mean radius:"))
+        );
+        assert!(
+            picker
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|line| line.contains("Sidereal rotation:"))
+        );
+    }
+
+    #[test]
+    fn celestial_picker_target_survives_filtering_and_a_late_image_scan() {
+        use crate::jwm::features::wallpaper::WallpaperTarget;
+        let config = crate::config::Config::default();
+        let connectors = vec!["DP-1".into(), "HDMI-1".into()];
+        let target = WallpaperTarget::Output("HDMI-1".into());
+        let mut picker = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        picker.set_wallpaper_astronomy_controls(config.behavior(), &connectors, &target);
+        for ch in "saturn".chars() {
+            picker.push_char(ch);
+        }
+        assert_eq!(
+            picker.selected_wallpaper_choice(),
+            Some("jwm-effect:saturn")
+        );
+        picker.refresh_wallpaper_picker(
+            &[PathBuf::from("/walls/Saturn.png")],
+            "/walls/Saturn.png",
+            "/walls",
+            "finished".into(),
+        );
+        assert_eq!(picker.wallpaper_target(), target);
+        assert_eq!(
+            picker.selected_wallpaper_choice(),
+            Some("jwm-effect:saturn")
+        );
+        assert_eq!(picker.selected_wallpaper(), None);
+        assert_eq!(picker.overlay_parts().query.as_deref(), Some("saturn"));
+        picker.clear_search_query();
+        picker.set_wallpaper_astronomy_controls(config.behavior(), &["DP-1".into()], &target);
+        assert_eq!(
+            picker.wallpaper_target(),
+            target,
+            "unplug must never silently retarget a choice"
+        );
+        let SystemUiState::ListPanel { rows, .. } = &picker else {
+            panic!("wallpaper list");
+        };
+        assert!(rows[0].text.contains("disconnected"));
+    }
+
+    #[test]
     fn the_side_preview_payload_is_the_highlighted_candidates_path() {
         let paths: Vec<std::path::PathBuf> =
             ["/walls/alps.jpg", "/walls/beach.png", "/walls/city.webp"]
@@ -6965,7 +7195,10 @@ mod tests {
         assert!(panel.has_search_query());
         panel.clear_search_query();
         assert!(!panel.has_search_query());
-        assert_eq!(panel.overlay_parts().scroll.unwrap().total, paths.len() + 2);
+        assert_eq!(
+            panel.overlay_parts().scroll.unwrap().total,
+            paths.len() + crate::jwm::features::wallpaper::SCENE_CHOICES.len()
+        );
         assert_eq!(panel.selected_wallpaper(), Some("/walls/Été Alps.png"));
     }
 

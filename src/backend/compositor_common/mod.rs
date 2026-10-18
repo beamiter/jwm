@@ -10,6 +10,9 @@ pub(crate) mod border_style;
 pub mod capture;
 pub(crate) mod capture_hint;
 pub(crate) mod capture_veil;
+pub(crate) mod celestial_catalog;
+#[cfg(feature = "x11-backends")]
+pub(crate) mod celestial_layout;
 pub(crate) mod debug_hud;
 pub(crate) mod dynamic_island;
 pub mod effects;
@@ -17,9 +20,13 @@ pub mod event_coalescer;
 pub mod expose;
 pub(crate) mod genie;
 pub(crate) mod image_source;
+#[cfg(feature = "x11-backends")]
+pub(crate) mod kepler_ephemeris;
 pub mod layout_strip;
 pub mod math;
 pub mod media;
+#[cfg(feature = "x11-backends")]
+pub(crate) mod solar_ephemeris;
 #[cfg(feature = "x11-backends")]
 pub(crate) mod solar_system;
 // Phase-one foundation: the cache is intentionally not connected to backend

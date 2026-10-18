@@ -552,7 +552,7 @@ The built-in shell — the [control center](docs/control-center.md), native
 [media controls](docs/media-controls.md) driven from MPRIS, the
 [calendar](docs/calendar.md), the [application launcher](docs/launcher.md),
 the [wallpaper picker and its colour theming](docs/wallpaper.md),
-[per-output spinning Earth and Moon wallpapers](docs/astronomy-wallpaper.md#earth-on-one-output-moon-on-another),
+[interactive celestial 3D wallpapers and multi-display scenes](docs/astronomy-wallpaper.md),
 [clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md),
 the [resource rows](docs/resources.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per
@@ -565,6 +565,19 @@ toggle: `Alt+F10`, `Alt+F11`, `Alt+F12`, `Alt+F9` and the rest each take their
 own surface back down, so nobody has to reach for `Esc`. They are mutually
 exclusive too — one panel's key replaces whatever other panel is up, keeping
 the grabs — and none of them replaces the lock screen.
+
+On X11, the native **Wallpaper** configurator (`Alt+Ctrl+W`) offers the Sun,
+eight planets, Moon, Solar System 3D and a Milky Way panorama. Drag bodies or
+the sky, zoom, and click a Solar System planet for an isolated close-up. Choose
+**Span**, **Mirror**, or **Independent** layouts; connector-based assignments
+and shared groups can give several screens one scene while another screen uses
+its own theme. The picker saves these choices and includes source-backed body
+facts, material provenance and orbital-clock controls. Solar distances are
+compressed and bodies enlarged for navigation; see the
+[celestial wallpaper guide](docs/astronomy-wallpaper.md) and
+[scientific model notes](docs/astronomy-science.md). Native Wayland retains the
+static-wallpaper fallback.
+
 The Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition are both
 the Compiz-style lit prism documented in [cube effects](docs/cube-effects.md).
 `Alt+Tab` is a hold-the-modifier MRU [window switcher](docs/window-switcher.md),

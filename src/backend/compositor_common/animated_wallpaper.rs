@@ -24,6 +24,23 @@ pub(crate) fn resolve_moon_texture(configured: &str) -> Option<String> {
     resolve_body_texture(configured, "moon-nasa-lroc.jpg")
 }
 
+/// Optional observed surface maps. Missing maps leave a labelled, neutral
+/// material in scientific mode; they must never silently borrow Earth's map.
+pub(crate) fn resolve_planet_texture(body: CelestialBody) -> Option<String> {
+    let asset = match body {
+        CelestialBody::Mercury => "mercury-nasa-messenger.jpg",
+        CelestialBody::Venus => "venus-nasa-clouds.jpg",
+        CelestialBody::Mars => "mars-nasa-viking.jpg",
+        CelestialBody::Jupiter => "jupiter-nasa-cassini.jpg",
+        CelestialBody::Saturn => "saturn-nasa-cassini.jpg",
+        CelestialBody::Uranus => "uranus-nasa-voyager.jpg",
+        CelestialBody::Neptune => "neptune-nasa-voyager.jpg",
+        CelestialBody::Sun => "sun-nasa-visible.jpg",
+        _ => return None,
+    };
+    resolve_body_texture("", asset)
+}
+
 /// Optional near-view source. A custom map stays authoritative at every LOD;
 /// absence of the bundled detail map leaves the already loaded base in use.
 pub(crate) fn resolve_moon_detail_texture(configured: &str) -> Option<String> {
@@ -2701,11 +2718,55 @@ mod layout_tests {
 }
 
 /// Decorative, independently rotating materials; not a lunar ephemeris.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum CelestialBody {
     #[default]
     Earth,
     Moon,
+    Sun,
+    Mercury,
+    Venus,
+    Mars,
+    Jupiter,
+    Saturn,
+    Uranus,
+    Neptune,
+    Galaxy,
+}
+
+impl CelestialBody {
+    pub(crate) fn from_scene(scene: &str) -> Self {
+        match scene {
+            "sun" => Self::Sun,
+            "mercury" => Self::Mercury,
+            "venus" => Self::Venus,
+            "moon" => Self::Moon,
+            "mars" => Self::Mars,
+            "jupiter" => Self::Jupiter,
+            "saturn" => Self::Saturn,
+            "uranus" => Self::Uranus,
+            "neptune" => Self::Neptune,
+            "galaxy" => Self::Galaxy,
+            _ => Self::Earth,
+        }
+    }
+
+    /// Shared with the shader and catalogue ordering (Moon follows Neptune).
+    pub(crate) fn shader_id(self) -> i32 {
+        match self {
+            Self::Sun => 0,
+            Self::Mercury => 1,
+            Self::Venus => 2,
+            Self::Earth => 3,
+            Self::Mars => 4,
+            Self::Jupiter => 5,
+            Self::Saturn => 6,
+            Self::Uranus => 7,
+            Self::Neptune => 8,
+            Self::Moon => 9,
+            Self::Galaxy => 10,
+        }
+    }
 }
 
 /// Connector identity is independent of enumeration and desktop coordinates.

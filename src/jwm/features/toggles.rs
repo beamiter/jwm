@@ -36,6 +36,32 @@ fn set_wallpaper_picker_message(state: &mut SystemUiState, text: &str) {
         *message = text.to_string();
     }
 }
+
+/// Stable physical connector names, bounded and sorted independently of the
+/// backend's current output enumeration. Zero-size disconnected outputs are
+/// not action targets; their persisted scene assignments stay in the config.
+fn wallpaper_connectors(backend: &dyn Backend) -> Vec<String> {
+    let mut names: Vec<_> = backend
+        .output_ops()
+        .enumerate_outputs()
+        .into_iter()
+        .filter(|output| output.width > 0 && output.height > 0)
+        .map(|output| {
+            if output.identity.connector.is_empty() {
+                output.name
+            } else {
+                output.identity.connector
+            }
+        })
+        .filter(|name| {
+            !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names.truncate(crate::config::astronomy::MAX_ASTRONOMY_OUTPUTS);
+    names
+}
 const RECORDING_CONCAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 pub(crate) const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool {
@@ -1006,7 +1032,10 @@ impl Jwm {
     /// the configured paths too; both run on the worker now. The frame tick
     /// fills the rows in through [`Self::poll_wallpaper_listing_job`] while
     /// this picker is still up.
-    fn wallpaper_picker_state(&mut self) -> crate::jwm::features::SystemUiState {
+    fn wallpaper_picker_state(
+        &mut self,
+        backend: &dyn Backend,
+    ) -> crate::jwm::features::SystemUiState {
         use crate::jwm::features::wallpaper;
 
         let (current, configured_dir, fallback) = {
@@ -1046,6 +1075,14 @@ impl Jwm {
             }
         });
         let mut state = crate::jwm::features::SystemUiState::wallpaper_picker(&[], &current, "");
+        state.set_wallpaper_astronomy_controls(
+            CONFIG.load().behavior(),
+            &wallpaper_connectors(backend),
+            &wallpaper::WallpaperTarget::All,
+        );
+        if let SystemUiState::ListPanel { selected, .. } = &mut state {
+            *selected = 0;
+        }
         if job.started() {
             // Replacing an older listing cancels its scan; only this answer lands.
             self.features.wallpaper_listing = Some(self.track_background_job(job));
@@ -1198,7 +1235,7 @@ impl Jwm {
                 SystemUiState::clipboard_picker(&self.features.clipboard)
             }
             ShellHubRoute::Calendar => SystemUiState::calendar(chrono::Local::now().naive_local()),
-            ShellHubRoute::Wallpaper => self.wallpaper_picker_state(),
+            ShellHubRoute::Wallpaper => self.wallpaper_picker_state(backend),
             ShellHubRoute::Theme => Self::theme_picker_state(),
         };
 
@@ -1554,20 +1591,18 @@ impl Jwm {
         )?;
         // Built once the grabs are held, so a picker that cannot open never
         // starts a directory scan.
-        let next = self.wallpaper_picker_state();
+        let next = self.wallpaper_picker_state(backend);
         self.features.system_ui_return_to_hub = false;
         self.features.system_ui = next;
         self.sync_system_ui(backend);
         Ok(())
     }
 
-    /// Publish the session choice and run the normal apply-config path.
-    /// Daily rotation uses a date-scoped fallback; static selection changes
-    /// the global path. Neither choice writes the configuration file.
+    /// Apply celestial actions as atomic, persisted config changes while the
+    /// picker stays open for multi-display editing. Static images keep their
+    /// existing session/daily selection behavior.
     pub(crate) fn apply_selected_wallpaper(&mut self, backend: &mut dyn Backend) {
-        if self.features.wallpaper_listing.is_some() {
-            return;
-        }
+        use crate::jwm::features::wallpaper;
         let Some(path) = self
             .features
             .system_ui
@@ -1576,10 +1611,48 @@ impl Jwm {
         else {
             return;
         };
-        let astronomy = path == crate::jwm::features::wallpaper::ASTRONOMY_CHOICE;
-        let solar = path == crate::jwm::features::wallpaper::SOLAR_SYSTEM_CHOICE;
-        let effect = astronomy || solar;
-        if effect && crate::config::get_backend_family() == crate::config::BackendFamily::Wayland {
+        let connectors = wallpaper_connectors(backend);
+        let target = self.features.system_ui.wallpaper_target();
+        if wallpaper::WallpaperTarget::from_key(&path).is_some() {
+            let next = target.next(&connectors);
+            self.features.system_ui.set_wallpaper_astronomy_controls(
+                CONFIG.load().behavior(),
+                &connectors,
+                &next,
+            );
+            self.mark_system_ui_dirty();
+            return;
+        }
+        if path == "jwm-wallpaper:info" {
+            self.features.system_ui.wallpaper_show_details();
+            set_wallpaper_picker_message(
+                &mut self.features.system_ui,
+                "Reference data use real units; solar views are not to scale.",
+            );
+            self.mark_system_ui_dirty();
+            return;
+        }
+        if path.starts_with("jwm-wallpaper:detail:") {
+            return;
+        }
+        let effect = wallpaper::is_effect_choice(&path);
+        let control = wallpaper::is_control_choice(&path);
+        if !effect && !control && matches!(target, wallpaper::WallpaperTarget::Output(_)) {
+            set_wallpaper_picker_message(
+                &mut self.features.system_ui,
+                "Images change the global wallpaper. Choose All screens first.",
+            );
+            self.mark_system_ui_dirty();
+            return;
+        }
+        // Astronomy settings are usable immediately even if an image folder
+        // is slow or remote. Only image choices depend on the finished scan.
+        if !effect && !control && self.features.wallpaper_listing.is_some() {
+            return;
+        }
+        if (effect || control)
+            && crate::config::get_backend_family() == crate::config::BackendFamily::Wayland
+        {
             set_wallpaper_picker_message(
                 &mut self.features.system_ui,
                 "Live wallpapers require the X11 compositor; choose an image on Wayland.",
@@ -1587,7 +1660,7 @@ impl Jwm {
             self.mark_system_ui_dirty();
             return;
         }
-        if effect && !backend.has_compositor() {
+        if (effect || control) && !backend.has_compositor() {
             set_wallpaper_picker_message(
                 &mut self.features.system_ui,
                 "Enable the X11 compositor to use live wallpapers.",
@@ -1595,11 +1668,11 @@ impl Jwm {
             self.mark_system_ui_dirty();
             return;
         }
-        if astronomy {
+        if wallpaper::choice_scene(&path) == Some("earth") {
             let ready = {
                 let cfg = CONFIG.load();
                 let behavior = cfg.behavior();
-                crate::jwm::features::wallpaper::astronomy_texture_ready(
+                wallpaper::astronomy_texture_ready(
                     behavior.wallpaper_effect == "astronomy",
                     &behavior.wallpaper_earth_texture,
                     |path| {
@@ -1625,23 +1698,71 @@ impl Jwm {
                 return;
             }
         }
-        let effect_name = if solar {
-            "solar-system"
-        } else if astronomy {
-            "astronomy"
-        } else {
-            "off"
-        };
-        let result = if effect {
-            CONFIG
-                .load()
-                .with_validated_value("behavior.wallpaper_effect", &serde_json::json!(effect_name))
-        } else {
-            CONFIG
-                .load()
-                .with_picker_wallpaper(&path, crate::jwm::features::wallpaper_rotation::local_day())
-        };
-        let updated = match result {
+        if effect || control {
+            let previous = (**CONFIG.load()).clone();
+            let changes = match wallpaper::astronomy_changes(
+                previous.behavior(),
+                &target,
+                &connectors,
+                &path,
+            ) {
+                Ok(changes) => changes,
+                Err(error) => {
+                    self.features.system_ui.set_wallpaper_astronomy_controls(
+                        previous.behavior(),
+                        &connectors,
+                        &target,
+                    );
+                    set_wallpaper_picker_message(&mut self.features.system_ui, &error);
+                    self.mark_system_ui_dirty();
+                    return;
+                }
+            };
+            let mut updated = previous.clone();
+            if let Err(error) = updated.set_values(&changes) {
+                set_wallpaper_picker_message(
+                    &mut self.features.system_ui,
+                    &format!("Celestial settings were not applied: {error}"),
+                );
+                self.mark_system_ui_dirty();
+                return;
+            }
+            CONFIG.store(std::sync::Arc::new(updated));
+            self.apply_config_changes(backend);
+            self.observe_config_reload(std::time::Instant::now(), "pre-save celestial settings");
+            let persisted = CONFIG.load().persist_wallpaper_changes(
+                &changes,
+                &previous.behavior().wallpaper_astronomy_outputs,
+            );
+            let message = match persisted {
+                Ok(revision) => {
+                    self.note_config_written_by_us(revision);
+                    "Celestial settings saved · Escape closes the configurator.".to_owned()
+                }
+                Err(error) => {
+                    error!("Wallpaper: celestial settings are live but not saved: {error}");
+                    format!("Applied for this session; not saved: {error}")
+                }
+            };
+            for (key, value) in changes {
+                self.broadcast_ipc_event(
+                    "config/changed",
+                    serde_json::json!({ "key": key, "value": value }),
+                );
+            }
+            self.features.system_ui.set_wallpaper_astronomy_controls(
+                CONFIG.load().behavior(),
+                &connectors,
+                &target,
+            );
+            set_wallpaper_picker_message(&mut self.features.system_ui, &message);
+            self.mark_system_ui_dirty();
+            return;
+        }
+        let updated = match CONFIG
+            .load()
+            .with_picker_wallpaper(&path, crate::jwm::features::wallpaper_rotation::local_day())
+        {
             Ok(updated) => updated,
             Err(error) => {
                 error!("Wallpaper: {error}");
@@ -1653,14 +1774,14 @@ impl Jwm {
         info!("Wallpaper: {path}");
         self.broadcast_ipc_event(
             "config/changed",
-            serde_json::json!({ "key": "behavior.wallpaper_effect", "value": effect_name }),
+            serde_json::json!({ "key": "behavior.wallpaper_effect", "value": "off" }),
         );
-        if !effect && CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
+        if CONFIG.load().behavior().wallpaper_daily_pick.is_some() {
             self.broadcast_ipc_event(
                 "config/wallpaper",
                 serde_json::json!({ "path": path, "scope": "today", "rotation": "daily" }),
             );
-        } else if !effect {
+        } else {
             self.broadcast_ipc_event(
                 "config/changed",
                 serde_json::json!({ "key": "behavior.wallpaper", "value": path }),
@@ -6909,9 +7030,26 @@ mod modal_grab_tests {
         let cancellation = crate::jwm::features::wallpaper::ScanCancellation::default();
         let cancelled = cancellation.observer();
         jwm.features.wallpaper_scan_cancellation = Some(cancellation);
-        jwm.features.system_ui = scanning_wallpaper_picker();
+        // Image choices must still wait for their listing. Celestial rows
+        // are intentionally usable during a scan, so explicitly exercise a
+        // pending image instead of accidentally applying the Earth row.
+        jwm.features.system_ui = SystemUiState::wallpaper_picker(
+            &[PathBuf::from("/pending/image.png")],
+            "/pending/image.png",
+            "/pending",
+        );
+        set_wallpaper_picker_message(&mut jwm.features.system_ui, WALLPAPER_SCANNING);
+        let before = crate::config::CONFIG.load_full();
         jwm.apply_selected_wallpaper(&mut backend);
         assert!(jwm.features.system_ui.is_wallpaper_picker());
+        assert_eq!(
+            jwm.features.system_ui.selected_wallpaper(),
+            Some("/pending/image.png")
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &before,
+            &crate::config::CONFIG.load_full()
+        ));
         assert!(!cancelled());
         jwm.close_system_ui(&mut backend);
         assert!(cancelled(), "closing the picker must stop the raw scan");

@@ -9,6 +9,10 @@ uniform vec3 sun_direction;
 uniform mat3 view_to_body;
 uniform sampler2D earth_map;
 uniform bool moon_material;
+// Zero retains legacy Earth/Moon shader probes; production uploads catalogue
+// ID + 1. A missing optional planet map uses a labelled material, never Earth.
+uniform int celestial_body;
+uniform bool surface_mapped;
 // Session zoom controls only a restrained, filtered material grain. Actual
 // continents, maria and craters always come from the selected NASA colour map.
 uniform float surface_detail;
@@ -26,6 +30,7 @@ uniform float panorama_fov;
 out vec4 frag_color;
 const float PI = 3.141592653589793;
 // JWM_COSMIC_SKY_INCLUDE
+// JWM_PLANET_SURFACE_INCLUDE
 // Analytic gradients of an equirectangular lookup. Taking dFdx(atan(...))
 // mistakes the longitude wrap for a full-texture jump and blurs a visible seam.
 // Analytic ray/sphere differentials also remain defined in silhouette branches.
@@ -186,13 +191,26 @@ vec3 atmosphere(vec2 p, float radius2) {
 
 void main() {
     vec2 pixel = gl_FragCoord.xy - canvas_origin;
+    int body = celestial_body == 0 ? (moon_material ? 9 : 3) : celestial_body - 1;
+    if (body == 10) {
+        frag_color = vec4(galaxy_background(pixel),1.0);
+        return;
+    }
     vec2 p = (pixel - resolution * 0.5) / max(sphere_radius, 1.0);
     float radius2 = dot(p, p);
     // One framebuffer pixel of analytic silhouette coverage, stable over motion.
     float edge = max(fwidth(radius2), 0.000001);
     float coverage = 1.0 - smoothstep(1.0-edge*0.5, 1.0+edge*0.5, radius2);
     if (coverage <= 0.0) {
-        frag_color = vec4(galaxy_background(pixel) + atmosphere(p, radius2), 1.0);
+        vec3 halo = body == 3 ? atmosphere(p,radius2)
+            : planet_halo(body,view_to_body*vec3(normalize(p),0.0),sun_direction,radius2);
+        vec3 color = galaxy_background(pixel)+halo;
+        if (body == 6) {
+            vec4 ring = planet_saturn_ring(p,-1000.0,view_to_body,sun_direction,
+                1.0/max(sphere_radius,1.0),cosmic_scientific!=0);
+            color = mix(color,ring.rgb,ring.a);
+        }
+        frag_color = vec4(color,1.0);
         return;
     }
     vec3 n = vec3(p, sqrt(max(0.0, 1.0 - radius2)));
@@ -208,6 +226,21 @@ void main() {
     vec3 normal_dy = earth_normal(vec3(0.0,inverse_radius,-p.y*inverse_radius/normal_z));
     vec2 uv_dx = equirect_gradient(earth_n,normal_dx);
     vec2 uv_dy = equirect_gradient(earth_n,normal_dy);
+    if (body != 3 && body != 9) {
+        vec3 albedo = surface_mapped
+            ? pow(textureGrad(earth_map,uv,uv_dx,uv_dy).rgb,vec3(2.2))
+            : planet_display_albedo(body,earth_n,max(length(normal_dx),length(normal_dy)),cosmic_scientific!=0);
+        float surface_z = sqrt(max(0.0,1.0-radius2));
+        vec3 color = planet_shade(body,earth_n,sun_direction,surface_z,albedo);
+        if (coverage < 1.0) color = mix(galaxy_background(pixel),color,coverage);
+        if (body == 6) {
+            vec4 ring = planet_saturn_ring(p,surface_z,view_to_body,sun_direction,
+                inverse_radius,cosmic_scientific!=0);
+            color = mix(color,ring.rgb,ring.a);
+        }
+        frag_color = vec4(color,1.0);
+        return;
+    }
     vec3 surface = textureGrad(earth_map,uv,uv_dx,uv_dy).rgb;
     vec3 albedo = pow(surface, vec3(2.2));
     float grain = surface_grain(earth_n, normal_dx, normal_dy);

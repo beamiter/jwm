@@ -21,8 +21,10 @@ use std::time::Duration;
 use crate::backend::common_define::keys as k;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 
+pub(crate) mod astronomy;
 mod validation;
 
+pub use astronomy::AstronomyOutputConfig;
 pub use validation::{ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDiagnostics};
 
 pub const LOAD_LOCAL_CONFIG: bool = true;
@@ -1323,9 +1325,33 @@ pub struct BehaviorConfig {
     /// Stable connector-name assignments for earth-moon layout (earth or moon).
     #[serde(default)]
     pub wallpaper_astronomy_bodies: std::collections::BTreeMap<String, String>,
+    /// Global celestial scene. Earth/Moon retain their UTC illumination.
+    /// Per-output scene assignments take effect in independent layout.
+    #[serde(default = "default_wallpaper_astronomy_scene")]
+    pub wallpaper_astronomy_scene: String,
+    /// Connector-stable scene assignments. Nonempty groups share one canvas;
+    /// disconnected entries remain configured for their next hotplug.
+    #[serde(default)]
+    pub wallpaper_astronomy_outputs: std::collections::BTreeMap<String, AstronomyOutputConfig>,
+    /// "scientific" lighting or an explicitly "illustrative" presentation.
+    /// Solar-system distances are compressed and body sizes enlarged in both.
+    #[serde(default = "default_wallpaper_astronomy_presentation")]
+    pub wallpaper_astronomy_presentation: String,
+    /// "ephemeris" uses approximate JPL positions; "illustrative" is a tour.
+    #[serde(default = "default_wallpaper_solar_orbit_mode")]
+    pub wallpaper_solar_orbit_mode: String,
+    /// Solar date-derived orbital-clock multiplier, 0..=1,000,000. Zero pauses
+    /// ephemeris orbits; the separate illustrative tour does not use this clock.
+    /// Never alters Earth/Moon astronomy's real UTC day/night illumination.
+    #[serde(default = "default_wallpaper_solar_time_scale")]
+    pub wallpaper_solar_time_scale: f64,
+    /// Solar orbital-clock offset from current UTC, -19000..=8500 days.
+    /// The renderer separately checks the JPL approximation's date validity.
+    #[serde(default)]
+    pub wallpaper_solar_time_offset_days: f64,
     /// Solar-system self-spin multiplier, finite 0..=10000.
     /// 0 pauses spin; 1 is real time; 718.035 gives Earth a 120-second sidereal day.
-    /// Independent of orbital illustration and the Earth/Moon astronomy settings.
+    /// Independent of orbital playback and the Earth/Moon astronomy settings.
     #[serde(default = "default_wallpaper_solar_spin_speed")]
     pub wallpaper_solar_spin_speed: f64,
     /// Decorative galaxy travel: minutes per revolution, 0 disables, 1..=525600.
@@ -1386,7 +1412,8 @@ pub struct BehaviorConfig {
     /// Legacy astronomy presentation UTC offset; does not change Earth framing or sunlight.
     #[serde(default = "default_wallpaper_timezone_offset_hours")]
     pub wallpaper_timezone_offset_hours: i32,
-    /// Astronomy placement: span, per-output Earth, or independent earth-moon canvases.
+    /// Celestial placement: span, mirror, or independent connector/group scenes.
+    /// Legacy per-output Earth and earth-moon retain their original semantics.
     /// Independent of wallpaper_mode, which scales static image wallpapers.
     #[serde(default = "default_wallpaper_astronomy_layout")]
     pub wallpaper_astronomy_layout: String,
@@ -1811,6 +1838,22 @@ fn default_particle_gravity() -> f32 {
 }
 fn default_wallpaper_astronomy_layout() -> String {
     "span".into()
+}
+
+fn default_wallpaper_astronomy_scene() -> String {
+    "earth".into()
+}
+
+fn default_wallpaper_astronomy_presentation() -> String {
+    "scientific".into()
+}
+
+fn default_wallpaper_solar_orbit_mode() -> String {
+    "ephemeris".into()
+}
+
+fn default_wallpaper_solar_time_scale() -> f64 {
+    1.0
 }
 
 fn default_wallpaper_astronomy_timezone() -> String {
@@ -2447,6 +2490,12 @@ impl Default for Config {
                     wallpaper_earth_texture: String::new(),
                     wallpaper_moon_texture: String::new(),
                     wallpaper_astronomy_bodies: std::collections::BTreeMap::new(),
+                    wallpaper_astronomy_scene: default_wallpaper_astronomy_scene(),
+                    wallpaper_astronomy_outputs: std::collections::BTreeMap::new(),
+                    wallpaper_astronomy_presentation: default_wallpaper_astronomy_presentation(),
+                    wallpaper_solar_orbit_mode: default_wallpaper_solar_orbit_mode(),
+                    wallpaper_solar_time_scale: default_wallpaper_solar_time_scale(),
+                    wallpaper_solar_time_offset_days: 0.0,
                     wallpaper_solar_spin_speed: default_wallpaper_solar_spin_speed(),
                     wallpaper_sky_rotation_minutes: default_wallpaper_sky_rotation_minutes(),
                     wallpaper_earth_view: default_wallpaper_earth_view(),
@@ -4266,6 +4315,84 @@ impl Config {
         self.persist_ui_theme_to(Self::resolve_load_path(), theme)
     }
 
+    /// Save only the celestial picker settings involved in one action. Scene
+    /// map edits merge changed connectors into the fresh disk snapshot, so an
+    /// unrelated output edited between refresh and save is not overwritten.
+    pub(crate) fn persist_wallpaper_changes(
+        &self,
+        changes: &[(String, serde_json::Value)],
+        previous_outputs: &std::collections::BTreeMap<String, AstronomyOutputConfig>,
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        self.persist_wallpaper_changes_to(Self::resolve_load_path(), changes, previous_outputs)
+    }
+
+    fn persist_wallpaper_changes_to<P: AsRef<Path>>(
+        &self,
+        path: P,
+        changes: &[(String, serde_json::Value)],
+        previous_outputs: &std::collections::BTreeMap<String, AstronomyOutputConfig>,
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        let invalid = |message: String| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            ))
+        };
+        let mut verified = self.clone();
+        verified.set_values(changes).map_err(invalid)?;
+        let path = path.as_ref();
+        let existing = match read_config_text(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(verified.save_to_file_with_outcome(path)?.revision?);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut owned = std::collections::BTreeMap::new();
+        for (key, value) in changes {
+            let field = key
+                .strip_prefix("behavior.")
+                .filter(|field| astronomy::PERSISTED_KEYS.contains(field))
+                .ok_or_else(|| invalid(format!("the celestial picker cannot save {key}")))?;
+            owned.insert(field.to_owned(), value.clone());
+        }
+        if owned.contains_key("wallpaper_astronomy_outputs") {
+            let parsed: toml::Table = toml::from_str(&existing)?;
+            let mut disk_outputs: std::collections::BTreeMap<String, AstronomyOutputConfig> =
+                parsed
+                    .get("behavior")
+                    .and_then(|behavior| behavior.get("wallpaper_astronomy_outputs"))
+                    .cloned()
+                    .map(toml::Value::try_into)
+                    .transpose()?
+                    .unwrap_or_default();
+            let next_outputs = &verified.behavior().wallpaper_astronomy_outputs;
+            for (connector, output) in next_outputs {
+                if previous_outputs.get(connector) != Some(output) {
+                    disk_outputs.insert(connector.clone(), output.clone());
+                }
+            }
+            for connector in previous_outputs.keys() {
+                if !next_outputs.contains_key(connector) {
+                    disk_outputs.remove(connector);
+                }
+            }
+            if let Some(error) = astronomy::outputs_error(&disk_outputs) {
+                return Err(invalid(format!(
+                    "cannot merge celestial output assignments: {error}"
+                )));
+            }
+            owned.insert(
+                "wallpaper_astronomy_outputs".into(),
+                serde_json::json!(disk_outputs),
+            );
+        }
+        let text = astronomy::edit_values(&existing, &owned).map_err(|error| {
+            invalid(format!("celestial settings could not be saved without changing other settings ({error}); {} was left unchanged", path.display()))
+        })?;
+        Ok(atomic_write_with_outcome(path, text.as_bytes())?.revision?)
+    }
+
     /// [`Self::persist_ui_theme`] against an explicit path.
     pub fn persist_ui_theme_to<P: AsRef<Path>>(
         &self,
@@ -4635,13 +4762,13 @@ impl Config {
                 "# Example: wallpaper_earth_texture = \"/home/alice/Pictures/earth.jpg\"\n",
             )),
             ("behavior", "wallpaper_moon_texture") => Some(concat!(
-                "# Earth-moon layout only: default \"\" uses the bundled NASA Moon texture.\n",
+                "# Moon gallery scenes: default \"\" uses the bundled NASA Moon texture.\n",
                 "# Example: wallpaper_moon_texture = \"/home/alice/Pictures/moon.jpg\"\n",
             )),
             ("behavior", "wallpaper_solar_spin_speed") => Some(concat!(
                 "# Solar-system self-spin multiplier: finite number in 0..10000.\n",
                 "# Examples: 0 = paused spin; 1 = real time; 718.035 = default (Earth turns in 120s).\n",
-                "# Scales sidereal spin only; orbital illustration and Earth/Moon settings are independent.\n",
+                "# Scales sidereal spin only; orbital playback and Earth/Moon settings are independent.\n",
                 "# See docs/solar-system-wallpaper.md for the solar-system wallpaper settings.\n",
             )),
             ("behavior", "wallpaper_sky_rotation_minutes") => Some(concat!(
@@ -4679,7 +4806,7 @@ impl Config {
                 "# Default 1440 = 24 hours; example: wallpaper_earth_rotation_minutes = 20\n",
             )),
             ("behavior", "wallpaper_moon_view") => Some(concat!(
-                "# Earth-moon layout: \"rotating\" (default) tours the Moon texture around its axis.\n",
+                "# Moon gallery view: \"rotating\" (default) tours the Moon texture around its axis.\n",
                 "# \"fixed\" freezes the texture framing; both modes keep the current real lunar phase.\n",
             )),
             ("behavior", "wallpaper_moon_latitude") => Some(concat!(
@@ -4717,10 +4844,34 @@ impl Config {
                 "# or if system timezone lookup fails. Does not change Earth framing or sunlight.\n",
             )),
             ("behavior", "wallpaper_astronomy_layout") => Some(concat!(
-                "# Astronomy placement only; requires wallpaper_effect = \"astronomy\".\n",
-                "# \"span\" (default): one Earth across the framebuffer; \"per-output\": Earth per screen.\n",
-                "# \"earth-moon\": independent complete bodies per output (see connector map below).\n",
-                "# Example: wallpaper_astronomy_layout = \"earth-moon\"\n",
+                "# Celestial placement: \"span\" (default) spans one scene across all screens.\n",
+                "# \"mirror\" repeats a shared interactive scene; \"independent\" uses connector scene/group assignments.\n",
+                "# Legacy \"per-output\" keeps Earth per screen; \"earth-moon\" keeps the original alternating bodies.\n",
+                "# Configure these from the native Wallpaper picker, including joining selected screens into groups.\n",
+            )),
+            ("behavior", "wallpaper_astronomy_scene") => Some(concat!(
+                "# Global celestial scene: earth (default), moon, sun, mercury, venus, mars, jupiter, saturn,\n",
+                "# uranus, neptune, solar-system, or galaxy. Requires a live wallpaper effect.\n",
+                "# Independent outputs without an assignment inherit this scene.\n",
+            )),
+            ("behavior", "wallpaper_astronomy_presentation") => Some(concat!(
+                "# \"scientific\" (default) or \"illustrative\" lighting/material presentation.\n",
+                "# Both modes compress solar-system distances and enlarge visible bodies; the display is not to scale.\n",
+                "# The native picker explains measured data versus illustrations in About this scene.\n",
+            )),
+            ("behavior", "wallpaper_solar_orbit_mode") => Some(concat!(
+                "# \"ephemeris\" (default) uses JPL approximate orbital positions; \"illustrative\" is a decorative tour.\n",
+                "# The approximation is date-limited and is not a navigation-grade ephemeris.\n",
+            )),
+            ("behavior", "wallpaper_solar_time_scale") => Some(concat!(
+                "# Ephemeris orbital-clock multiplier, finite 0..1000000. Default 1 = UTC + offset; 0 pauses; 86400 = 1 day/s.\n",
+                "# Native date-derived clock actions also select ephemeris mode; the illustrative tour uses its own time.\n",
+                "# Independent of decorative self-spin and of Earth/Moon astronomy's actual UTC illumination.\n",
+            )),
+            ("behavior", "wallpaper_solar_time_offset_days") => Some(concat!(
+                "# Solar orbital-clock offset from current UTC, finite -19000..8500 days; default 0.\n",
+                "# Runtime UTC playback clamps to 1972-01-01 through 2049-12-31 23:58; no extrapolation.\n",
+                "# Native picker Now restores offset 0 and real-time speed. This never changes the OS clock.\n",
             )),
             ("behavior", "wallpaper_mode") => Some(concat!(
                 "# Static image scaling only (default \"fill\"); does not resize Astronomy bodies.\n",
@@ -4768,6 +4919,13 @@ impl Config {
                 "# Values: \"earth\" or \"moon\". Inline example in [behavior] (instead of this subtable):\n",
                 "# wallpaper_astronomy_bodies = { \"DP-1\" = \"earth\", \"HDMI-1\" = \"moon\" }\n",
                 "# Subtable example below its header: \"DP-1\" = \"earth\"\n",
+            )),
+            ("behavior", "wallpaper_astronomy_outputs")
+            | ("behavior.wallpaper_astronomy_outputs", "") => Some(concat!(
+                "# Independent layout: connector-stable scenes. Disconnected assignments are retained.\n",
+                "# A nonempty group spans one shared canvas across its connected member outputs; group members must use one scene.\n",
+                "# Inline example under [behavior] instead of this table:\n",
+                "# wallpaper_astronomy_outputs = { \"DP-1\" = { scene = \"earth\", group = \"desk\" }, \"DP-2\" = { scene = \"earth\", group = \"desk\" }, \"HDMI-1\" = { scene = \"saturn\" } }\n",
             )),
             ("behavior", "transition_mode") => Some(
                 "# available: slide, cube, fade, flip, zoom, stack, blinds, coverflow, helix, portal, book\n",
@@ -5111,12 +5269,61 @@ impl Config {
             }
             "behavior.wallpaper_astronomy_layout" => {
                 let layout = as_string()?;
-                if !["span", "per-output", "earth-moon"].contains(&layout.as_str()) {
+                if !astronomy::ASTRONOMY_LAYOUTS.contains(&layout.as_str()) {
                     return Err(
-                        "behavior.wallpaper_astronomy_layout must be span, per-output, or earth-moon".into(),
+                        "behavior.wallpaper_astronomy_layout must be span, mirror, independent, per-output, or earth-moon".into(),
                     );
                 }
                 self.inner.behavior.wallpaper_astronomy_layout = layout;
+            }
+            "behavior.wallpaper_astronomy_scene" => {
+                let scene = as_string()?;
+                if !astronomy::is_scene(&scene) {
+                    return Err(format!("{key}: unknown celestial scene {scene:?}"));
+                }
+                self.inner.behavior.wallpaper_astronomy_scene = scene;
+            }
+            "behavior.wallpaper_astronomy_outputs" => {
+                let outputs: std::collections::BTreeMap<String, AstronomyOutputConfig> =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        format!("{key} must map connector names to scene/group objects: {error}")
+                    })?;
+                if let Some(error) = astronomy::outputs_error(&outputs) {
+                    return Err(format!("{key}: {error}"));
+                }
+                self.inner.behavior.wallpaper_astronomy_outputs = outputs;
+            }
+            "behavior.wallpaper_astronomy_presentation" => {
+                let mode = as_string()?;
+                if !["scientific", "illustrative"].contains(&mode.as_str()) {
+                    return Err(format!("{key} must be scientific or illustrative"));
+                }
+                self.inner.behavior.wallpaper_astronomy_presentation = mode;
+            }
+            "behavior.wallpaper_solar_orbit_mode" => {
+                let mode = as_string()?;
+                if !["ephemeris", "illustrative"].contains(&mode.as_str()) {
+                    return Err(format!("{key} must be ephemeris or illustrative"));
+                }
+                self.inner.behavior.wallpaper_solar_orbit_mode = mode;
+            }
+            "behavior.wallpaper_solar_time_scale" | "behavior.wallpaper_solar_time_offset_days" => {
+                let number = value
+                    .as_f64()
+                    .ok_or_else(|| format!("{key} must be a finite number"))?;
+                let (minimum, maximum) = if key == "behavior.wallpaper_solar_time_scale" {
+                    (0.0, 1_000_000.0)
+                } else {
+                    (-19000.0, 8500.0)
+                };
+                if !number.is_finite() || !(minimum..=maximum).contains(&number) {
+                    return Err(format!("{key} must be finite in {minimum}..={maximum}"));
+                }
+                if key == "behavior.wallpaper_solar_time_scale" {
+                    self.inner.behavior.wallpaper_solar_time_scale = number;
+                } else {
+                    self.inner.behavior.wallpaper_solar_time_offset_days = number;
+                }
             }
             "behavior.wallpaper_astronomy_timezone" => {
                 let timezone = as_string()?;
@@ -7361,11 +7568,37 @@ mod tests {
     }
 
     #[test]
-    fn built_in_status_bar_matches_installer_default() {
-        let expected = format!("JWM_BAR_NAME=\"{STATUS_BAR_NAME}\"");
+    fn built_in_and_installer_status_bars_are_supported_independent_choices() {
+        let installer = include_str!("../scripts/install_jwm_scripts.sh");
+        let (_, bars) = installer
+            .split_once("ALL_BARS=(")
+            .expect("installer declares its supported bars");
+        let (bars, _) = bars
+            .split_once("\n)")
+            .expect("installer uses a multiline supported-bar array");
+        let supported: Vec<_> = bars
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or_default().trim())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let selected = installer
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("JWM_BAR_NAME=\"")
+                    .and_then(|value| value.strip_suffix('"'))
+            })
+            .expect("installer declares its default bar selection");
+        for bar in [STATUS_BAR_NAME, selected] {
+            assert!(supported.contains(&bar), "unsupported default bar: {bar}");
+        }
+        // The source installer may choose a different supported bar than
+        // the built-in fallback; its selected name must still be persisted
+        // after configuration generation, rather than silently discarded.
         assert!(
-            include_str!("../scripts/install_jwm_scripts.sh").contains(&expected),
-            "installer default must match {STATUS_BAR_NAME}"
+            installer
+                .lines()
+                .any(|line| line.trim() == r#"sync_selected_bar_config "$JWM_BAR_NAME""#),
+            "installer must save its independent bar selection"
         );
     }
 
@@ -8600,6 +8833,12 @@ border_px = 3
             "wallpaper_astronomy_timezone",
             "wallpaper_timezone_offset_hours",
             "wallpaper_astronomy_layout",
+            "wallpaper_astronomy_scene",
+            "wallpaper_astronomy_outputs",
+            "wallpaper_astronomy_presentation",
+            "wallpaper_solar_orbit_mode",
+            "wallpaper_solar_time_scale",
+            "wallpaper_solar_time_offset_days",
             "wallpaper_mode",
             "wallpaper_rotation",
             "wallpaper_rotation_paths",

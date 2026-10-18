@@ -5,8 +5,11 @@ use crate::backend::compositor_common::animated_wallpaper::{
     POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan, astronomy_frame_interval,
     celestial_assignments, lunar_phase_light, material_load_frame, presentation_offset,
     resolve_cloud_texture, resolve_earth_texture, resolve_moon_detail_texture,
-    resolve_moon_texture, resolve_sky_texture, sky_rotation, solar_direction, transform_direction,
-    wall_clock_seconds,
+    resolve_moon_texture, resolve_planet_texture, resolve_sky_texture, sky_rotation,
+    solar_direction, transform_direction, wall_clock_seconds,
+};
+use crate::backend::compositor_common::celestial_layout::{
+    CelestialCanvas, resolve_celestial_canvases,
 };
 use crate::backend::compositor_common::panorama::{PanoramaDrag, PanoramaView, panorama_rotation};
 use glow::HasContext;
@@ -59,6 +62,7 @@ impl AstronomyZoom {
 }
 
 struct AstronomyDrag {
+    group: String,
     body: CelestialBody,
     canvas: AstronomyDraw,
     arcball: CelestialArcball,
@@ -66,6 +70,7 @@ struct AstronomyDrag {
     pending_point: [f64; 2],
     pending_before_begin: bool,
     zoom_before_begin: AstronomyZoom,
+    reset_before_begin: bool,
 }
 
 /// Close-up surfaces are optional and independent from the required startup
@@ -78,6 +83,7 @@ struct AstronomyDetail {
 }
 
 struct AstronomySkyDrag {
+    group: String,
     canvas: AstronomyDraw,
     gesture: PanoramaDrag,
     orientation: CelestialRotation,
@@ -85,6 +91,7 @@ struct AstronomySkyDrag {
     pending_before_begin: bool,
     view_before_begin: PanoramaView,
     requested_before_begin: Option<PanoramaView>,
+    reset_before_begin: bool,
 }
 
 struct AstronomyRelease {
@@ -132,40 +139,57 @@ fn decode_astronomy_sky(
     max_edge: u32,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Option<WallpaperImageData> {
+    decode_celestial_map(path, max_edge, 4096, cancelled)
+}
+
+fn decode_celestial_map(
+    path: &str,
+    max_edge: u32,
+    source_edge: u32,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Option<WallpaperImageData> {
     use std::sync::atomic::Ordering;
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
     let img = match crate::backend::compositor_common::image_source::open_regular_image_bounded(
         path,
-        4096,
-        2048,
-        32 * 1024 * 1024,
+        source_edge,
+        source_edge / 2,
+        128 * 1024 * 1024,
     ) {
         Ok(img) => img,
         Err(error) => {
-            log::warn!(
-                "astronomy wallpaper: optional sky unavailable; using procedural sky: {error}"
-            );
+            log::warn!("astronomy wallpaper: optional catalogue/surface unavailable: {error}");
             return None;
         }
     };
-    if cancelled.load(Ordering::Acquire) || img.width() != img.height().saturating_mul(2) {
+    // A few NASA cylindrical maps retain the duplicated endpoint column/row
+    // (Cassini PIA07782 is 3601×1801). Normalize that one-pixel boundary without
+    // admitting arbitrary non-equirectangular photographs as planetary maps.
+    let exact = img.width() == img.height().saturating_mul(2);
+    let boundary_sample =
+        img.width() >= 1024 && img.width().abs_diff(img.height().saturating_mul(2)) == 1;
+    if cancelled.load(Ordering::Acquire) || (!exact && !boundary_sample) {
         return None;
     }
     let edge = if max_edge == 0 {
         4096
     } else {
-        max_edge.min(4096) & !1
+        max_edge.min(source_edge) & !1
     };
     if edge == 0 {
         return None;
     }
-    let img = if img.width() > edge {
+    let width = img.width().min(edge) & !1;
+    if width == 0 {
+        return None;
+    }
+    let img = if img.width() != width || img.height() != width / 2 {
         // These are independent data channels. Inverse constellation intensity
         // is not opacity: preserve its RGB even where alpha is zero. image's
         // resampler filters channels independently and does not premultiply.
-        img.resize(edge, edge / 2, image::imageops::FilterType::Lanczos3)
+        img.resize_exact(width, width / 2, image::imageops::FilterType::Lanczos3)
     } else {
         img
     };
@@ -220,6 +244,9 @@ struct AstronomyProgram {
     resolution: Option<glow::UniformLocation>,
     sphere_radius: Option<glow::UniformLocation>,
     surface_detail: Option<glow::UniformLocation>,
+    celestial_body: Option<glow::UniformLocation>,
+    surface_mapped: Option<glow::UniformLocation>,
+    cosmic_scientific: Option<glow::UniformLocation>,
 }
 
 impl AstronomyProgram {
@@ -243,9 +270,78 @@ impl AstronomyProgram {
                 resolution: gl.get_uniform_location(program, "resolution"),
                 sphere_radius: gl.get_uniform_location(program, "sphere_radius"),
                 surface_detail: gl.get_uniform_location(program, "surface_detail"),
+                celestial_body: gl.get_uniform_location(program, "celestial_body"),
+                surface_mapped: gl.get_uniform_location(program, "surface_mapped"),
+                cosmic_scientific: gl.get_uniform_location(program, "cosmic_scientific"),
             }
         }
     }
+}
+
+/// Only navigation is duplicated per scene group. Large decoded maps, textures,
+/// the frame cache and the wallpaper worker remain shared across all outputs.
+#[derive(Default)]
+struct AstronomyNavigation {
+    reset_requested: bool,
+    earth_offset: Option<CelestialRotation>,
+    moon_offset: Option<CelestialRotation>,
+    earth_release: Option<AstronomyRelease>,
+    moon_release: Option<AstronomyRelease>,
+    earth_zoom: AstronomyZoom,
+    moon_zoom: AstronomyZoom,
+    presented_earth: Option<[f32; 9]>,
+    presented_moon: Option<[f32; 9]>,
+    panorama: PanoramaView,
+    requested_panorama: Option<PanoramaView>,
+    sky_offset: CelestialRotation,
+    sky_release: Option<AstronomyRelease>,
+    presented_sky: Option<PanoramaView>,
+}
+
+impl AstronomyNavigation {
+    fn exchange(&mut self, wallpaper: &mut AstronomyWallpaper) {
+        std::mem::swap(&mut self.reset_requested, &mut wallpaper.reset_requested);
+        std::mem::swap(&mut self.earth_offset, &mut wallpaper.earth_offset);
+        std::mem::swap(&mut self.moon_offset, &mut wallpaper.moon_offset);
+        std::mem::swap(&mut self.earth_release, &mut wallpaper.earth_release);
+        std::mem::swap(&mut self.moon_release, &mut wallpaper.moon_release);
+        std::mem::swap(&mut self.earth_zoom, &mut wallpaper.earth_zoom);
+        std::mem::swap(&mut self.moon_zoom, &mut wallpaper.moon_zoom);
+        std::mem::swap(&mut self.presented_earth, &mut wallpaper.presented_earth);
+        std::mem::swap(&mut self.presented_moon, &mut wallpaper.presented_moon);
+        std::mem::swap(&mut self.panorama, &mut wallpaper.panorama);
+        std::mem::swap(
+            &mut self.requested_panorama,
+            &mut wallpaper.requested_panorama,
+        );
+        std::mem::swap(&mut self.sky_offset, &mut wallpaper.sky_offset);
+        std::mem::swap(&mut self.sky_release, &mut wallpaper.sky_release);
+        std::mem::swap(&mut self.presented_sky, &mut wallpaper.presented_sky);
+    }
+
+    fn zoom(&self, body: CelestialBody) -> &AstronomyZoom {
+        if body == CelestialBody::Moon {
+            &self.moon_zoom
+        } else {
+            &self.earth_zoom
+        }
+    }
+}
+
+#[derive(Default)]
+struct PlanetMap {
+    pending: Option<wallpaper::DeferredWallpaperLoad>,
+    texture: Option<glow::Texture>,
+}
+
+struct AstronomyFrame {
+    canvas: AstronomyDraw,
+    body: CelestialBody,
+    group: String,
+    basis: [f32; 9],
+    light: [f32; 3],
+    sky: PanoramaView,
+    zoom: f32,
 }
 
 #[derive(Default)]
@@ -265,12 +361,23 @@ pub(super) struct AstronomyWallpaper {
     sky_texture: Option<glow::Texture>,
     sky_path: String,
     dual_material: bool,
+    earth_material: bool,
     sky_period: u32,
     earth_period: u32,
     earth_view: CelestialView,
     moon_view: CelestialView,
     moon_period: u32,
-    // One session-only orientation per body, shared by its output assignments.
+    // The active group retains the legacy fields; inactive groups exchange this
+    // compact navigation state without duplicating material/GPU resources.
+    active_navigation: String,
+    reset_requested: bool,
+    navigation_states: std::collections::BTreeMap<String, AstronomyNavigation>,
+    scene_plan: Vec<CelestialCanvas>,
+    default_scene: String,
+    output_scenes: std::collections::BTreeMap<String, crate::config::AstronomyOutputConfig>,
+    presentation: String,
+    planet_maps: std::collections::BTreeMap<CelestialBody, PlanetMap>,
+    // One session-only orientation per body, shared by its scene group.
     // None preserves the original no-interaction f32 matrix bit-for-bit.
     earth_offset: Option<CelestialRotation>,
     moon_offset: Option<CelestialRotation>,
@@ -315,6 +422,202 @@ pub(super) struct AstronomyWallpaper {
 }
 
 impl AstronomyWallpaper {
+    fn canvas_group(&self, index: usize) -> &str {
+        self.scene_plan
+            .get(index)
+            .map_or(self.active_navigation.as_str(), |s| s.group_key.as_str())
+    }
+
+    fn activate_navigation(&mut self, group: &str) {
+        if self.active_navigation == group {
+            return;
+        }
+        if self.active_navigation.is_empty() && self.navigation_states.is_empty() {
+            self.active_navigation = group.into();
+            return;
+        }
+        let mut next = self.navigation_states.remove(group).unwrap_or_default();
+        next.exchange(self);
+        let previous = std::mem::replace(&mut self.active_navigation, group.into());
+        self.navigation_states.insert(previous, next);
+    }
+
+    fn visit_navigation(&mut self, mut visit: impl FnMut(&mut Self)) {
+        let original = self.active_navigation.clone();
+        let groups: Vec<_> = self.navigation_states.keys().cloned().collect();
+        visit(self);
+        for group in groups {
+            self.activate_navigation(&group);
+            visit(self);
+        }
+        self.activate_navigation(&original);
+    }
+
+    fn canvas_zoom_scale(&self, index: usize, presented: bool) -> f32 {
+        let group = self.canvas_group(index);
+        let body = self.canvas_body(index);
+        let zoom = if group == self.active_navigation {
+            Some(self.body_zoom(body))
+        } else {
+            self.navigation_states.get(group).map(|n| n.zoom(body))
+        };
+        zoom.map_or(1.0, |z| {
+            if presented {
+                z.presented_scale()
+            } else {
+                z.scale()
+            }
+        })
+    }
+
+    fn body_contains(&self, index: usize, point: [f64; 2]) -> bool {
+        let body = self.canvas_body(index);
+        if body == CelestialBody::Galaxy {
+            return false;
+        }
+        if point[0].hypot(point[1]) <= 1.0 {
+            return true;
+        }
+        if body != CelestialBody::Saturn {
+            return false;
+        }
+        let group = self.canvas_group(index);
+        let basis = if group == self.active_navigation {
+            self.presented_earth
+        } else {
+            self.navigation_states
+                .get(group)
+                .and_then(|n| n.presented_earth)
+        };
+        let Some(basis) = basis else {
+            return false;
+        };
+        // The same orthographic camera ray and body-equatorial plane as the
+        // Saturn ring shader, so grabbing a visible ring rotates the planet.
+        let origin = transform_direction(&basis, [point[0] as f32, point[1] as f32, 3.0]);
+        let direction = transform_direction(&basis, [0.0, 0.0, -1.0]);
+        if direction[1].abs() < 1e-5 {
+            return false;
+        }
+        let distance = -origin[1] / direction[1];
+        let x = origin[0] + distance * direction[0];
+        let z = origin[2] + distance * direction[2];
+        let radius = x.hypot(z);
+        distance > 0.0 && ((1.24..=1.951).contains(&radius) || (2.027..=2.269).contains(&radius))
+    }
+
+    fn pointer_canvas(&self, root: [f64; 2]) -> Option<usize> {
+        if !root.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let pixel = [
+            root[0] + 0.5,
+            f64::from(self.layout_screen.1) - root[1] - 0.5,
+        ];
+        self.draw_plan
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, canvas)| {
+                let (x, y, w, h) = canvas.clip;
+                (pixel[0] >= f64::from(x)
+                    && pixel[0] < f64::from(x) + f64::from(w)
+                    && pixel[1] >= f64::from(y)
+                    && pixel[1] < f64::from(y) + f64::from(h))
+                .then_some(index)
+            })
+    }
+
+    fn clear_presented(&mut self) {
+        self.visit_navigation(|a| {
+            a.presented_earth = None;
+            a.presented_moon = None;
+            a.presented_sky = None;
+            a.earth_zoom.presented = None;
+            a.moon_zoom.presented = None;
+        });
+    }
+
+    fn update_scene_plan(
+        &mut self,
+        behavior: &crate::config::BehaviorConfig,
+        enabled: bool,
+        force: bool,
+    ) -> bool {
+        if !force
+            && enabled == self.enabled
+            && self.default_scene == behavior.wallpaper_astronomy_scene
+            && self.output_scenes == behavior.wallpaper_astronomy_outputs
+            && self.presentation == behavior.wallpaper_astronomy_presentation
+        {
+            return false;
+        }
+        let mut identities = self.output_identities.clone();
+        if identities.is_empty() {
+            identities.extend(
+                self.layout_outputs
+                    .iter()
+                    .map(|&(x, y, w, h)| (format!("geometry:{x}:{y}:{w}:{h}"), x, y, w, h)),
+            );
+        }
+        let plan = if enabled {
+            resolve_celestial_canvases(self.layout_screen, &identities, behavior)
+                .into_iter()
+                .filter(|s| s.scene != "solar-system")
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let changed = self.scene_plan != plan;
+        if changed || force {
+            self.end_drag(self.sample_unix);
+            self.scene_plan = plan;
+            self.draw_plan = self
+                .scene_plan
+                .iter()
+                .map(|s| {
+                    let mut canvas = s.canvas.clone();
+                    // Leave space for Saturn's measured outer A-ring radius.
+                    if s.scene == "saturn" {
+                        canvas.radius *= 0.48;
+                    }
+                    canvas
+                })
+                .collect();
+            self.bodies = self
+                .scene_plan
+                .iter()
+                .map(|s| CelestialBody::from_scene(&s.scene))
+                .collect();
+            let groups: std::collections::BTreeSet<_> = self
+                .scene_plan
+                .iter()
+                .map(|s| s.group_key.clone())
+                .collect();
+            if !groups.contains(&self.active_navigation)
+                && let Some(group) = groups.first()
+            {
+                self.activate_navigation(group);
+            }
+            self.navigation_states
+                .retain(|group, _| groups.contains(group));
+            for group in groups {
+                if group != self.active_navigation {
+                    self.navigation_states.entry(group).or_default();
+                }
+            }
+            self.clear_presented();
+        }
+        self.default_scene
+            .clone_from(&behavior.wallpaper_astronomy_scene);
+        self.output_scenes
+            .clone_from(&behavior.wallpaper_astronomy_outputs);
+        let presentation_changed = self.presentation != behavior.wallpaper_astronomy_presentation;
+        self.presentation
+            .clone_from(&behavior.wallpaper_astronomy_presentation);
+        changed || presentation_changed
+    }
+
     fn config_matches(&self, behavior: &crate::config::BehaviorConfig) -> bool {
         let (earth, moon) = configured_views(behavior);
         self.enabled
@@ -323,6 +626,9 @@ impl AstronomyWallpaper {
             && self.configured_path == behavior.wallpaper_earth_texture
             && self.moon_configured_path == behavior.wallpaper_moon_texture
             && self.body_overrides == behavior.wallpaper_astronomy_bodies
+            && self.default_scene == behavior.wallpaper_astronomy_scene
+            && self.output_scenes == behavior.wallpaper_astronomy_outputs
+            && self.presentation == behavior.wallpaper_astronomy_presentation
             && self.earth_view == earth
             && self.moon_view == moon
             && self.earth_period == behavior.wallpaper_earth_rotation_minutes
@@ -335,7 +641,11 @@ impl AstronomyWallpaper {
     }
 
     fn sky_view(&self, unix: f64) -> PanoramaView {
-        let orientation = if let Some(drag) = &self.sky_drag {
+        let orientation = if let Some(drag) = self
+            .sky_drag
+            .as_ref()
+            .filter(|d| d.group == self.active_navigation)
+        {
             drag.orientation
         } else if let Some(release) = &self.sky_release {
             CelestialRotation::from_matrix(&release.presented)
@@ -349,17 +659,36 @@ impl AstronomyWallpaper {
 
     fn reset_sky(&mut self) {
         self.sky_drag = None;
-        self.sky_offset = CelestialRotation::default();
-        self.sky_release = None;
-        self.presented_sky = None;
-        self.panorama = PanoramaView::default();
-        self.requested_panorama = None;
+        self.visit_navigation(|a| {
+            a.sky_offset = CelestialRotation::default();
+            a.sky_release = None;
+            a.presented_sky = None;
+            a.panorama = PanoramaView::default();
+            a.requested_panorama = None;
+        });
         self.interaction_revision = self.interaction_revision.wrapping_add(1);
     }
 
     fn reset_orientation(&mut self, body: CelestialBody) {
+        self.visit_navigation(|a| a.reset_active_orientation(body));
+        if self.drag.as_ref().is_some_and(|drag| drag.body == body) {
+            self.drag = None;
+        }
+        self.interaction_revision = self.interaction_revision.wrapping_add(1);
+    }
+
+    fn reset_active_orientation(&mut self, body: CelestialBody) {
         match body {
-            CelestialBody::Earth => {
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => {
                 self.earth_offset = None;
                 self.earth_release = None;
                 self.presented_earth = None;
@@ -372,26 +701,44 @@ impl AstronomyWallpaper {
                 self.moon_zoom = AstronomyZoom::default();
             }
         }
-        if self.drag.as_ref().is_some_and(|drag| drag.body == body) {
-            self.drag = None;
-        }
-        self.interaction_revision = self.interaction_revision.wrapping_add(1);
     }
 
     fn base_rotation(&self, body: CelestialBody, unix: f64) -> CelestialRotation {
         let basis = match body {
-            CelestialBody::Earth => self.earth_view.matrix(unix, self.earth_period),
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => self.earth_view.matrix(unix, self.earth_period),
             CelestialBody::Moon => self.moon_view.matrix(unix, self.moon_period),
         };
         CelestialRotation::from_matrix(&basis)
     }
 
     fn body_matrix(&self, body: CelestialBody, unix: f64) -> [f32; 9] {
-        if let Some(drag) = self.drag.as_ref().filter(|drag| drag.body == body) {
+        if let Some(drag) = self
+            .drag
+            .as_ref()
+            .filter(|drag| drag.body == body && drag.group == self.active_navigation)
+        {
             return drag.orientation.matrix();
         }
         let (view, period, offset, release) = match body {
-            CelestialBody::Earth => (
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => (
                 self.earth_view,
                 self.earth_period,
                 self.earth_offset,
@@ -421,7 +768,7 @@ impl AstronomyWallpaper {
         for (index, base_canvas) in self.draw_plan.iter().enumerate().rev() {
             let body = self.canvas_body(index);
             let mut canvas = base_canvas.clone();
-            canvas.radius *= self.body_zoom(body).presented_scale();
+            canvas.radius *= self.canvas_zoom_scale(index, true);
             let (pixel, point) = canvas_pointer(&canvas, root, self.layout_screen.1)?;
             let (x, y, w, h) = canvas.clip;
             if pixel[0] < f64::from(x)
@@ -431,7 +778,7 @@ impl AstronomyWallpaper {
             {
                 continue;
             }
-            if point[0].hypot(point[1]) > 1.0 {
+            if !self.body_contains(index, point) {
                 return None;
             }
             return Some((body, canvas, point));
@@ -440,16 +787,26 @@ impl AstronomyWallpaper {
     }
 
     fn canvas_body(&self, index: usize) -> CelestialBody {
-        if self.dual_material && self.bodies.get(index) == Some(&CelestialBody::Moon) {
-            CelestialBody::Moon
-        } else {
-            CelestialBody::Earth
+        // Old low-level callers have no scene plan and retain Earth-only
+        // assignment outside the historic dual-material layout.
+        if self.scene_plan.is_empty() && !self.dual_material {
+            return CelestialBody::Earth;
         }
+        self.bodies.get(index).copied().unwrap_or_default()
     }
 
     fn body_zoom(&self, body: CelestialBody) -> &AstronomyZoom {
         match body {
-            CelestialBody::Earth => &self.earth_zoom,
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => &self.earth_zoom,
             CelestialBody::Moon => &self.moon_zoom,
         }
     }
@@ -458,6 +815,11 @@ impl AstronomyWallpaper {
         if self.has_drag() || !self.enabled || self.failed || !self.powered {
             return false;
         }
+        let Some(index) = self.pointer_canvas(root) else {
+            return false;
+        };
+        let group = self.canvas_group(index).to_owned();
+        self.activate_navigation(&group);
         let Some((body, _, _)) = self.hit_test(root) else {
             if self.sky_hit_test(root).is_none() || self.presented_sky.is_none() {
                 return false;
@@ -471,7 +833,16 @@ impl AstronomyWallpaper {
             return true;
         };
         let (zoom, presented) = match body {
-            CelestialBody::Earth => (&mut self.earth_zoom, self.presented_earth),
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => (&mut self.earth_zoom, self.presented_earth),
             CelestialBody::Moon => (&mut self.moon_zoom, self.presented_moon),
         };
         if presented.is_none() || !zoom.request(steps) {
@@ -485,11 +856,25 @@ impl AstronomyWallpaper {
         if self.has_drag() || !self.enabled || self.failed || !self.powered {
             return false;
         }
+        let Some(index) = self.pointer_canvas(root) else {
+            return false;
+        };
+        let group = self.canvas_group(index).to_owned();
+        self.activate_navigation(&group);
         let Some((body, canvas, point)) = self.hit_test(root) else {
             return self.begin_sky_drag(root);
         };
         let Some(presented) = (match body {
-            CelestialBody::Earth => self.presented_earth,
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => self.presented_earth,
             CelestialBody::Moon => self.presented_moon,
         }) else {
             // Texture loading and static fallback never capture desktop clicks.
@@ -500,7 +885,16 @@ impl AstronomyWallpaper {
             return false;
         };
         let zoom = match body {
-            CelestialBody::Earth => &mut self.earth_zoom,
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => &mut self.earth_zoom,
             CelestialBody::Moon => &mut self.moon_zoom,
         };
         let zoom_before_begin = *zoom;
@@ -510,6 +904,7 @@ impl AstronomyWallpaper {
         zoom.admitted_log = f64::from(zoom.presented_scale()).ln();
         zoom.requested_log = zoom.admitted_log;
         self.drag = Some(AstronomyDrag {
+            group,
             body,
             canvas,
             arcball,
@@ -517,7 +912,9 @@ impl AstronomyWallpaper {
             pending_point: point,
             pending_before_begin: self.interaction_pending,
             zoom_before_begin,
+            reset_before_begin: self.reset_requested,
         });
+        self.reset_requested = false;
         self.interaction_pending = true;
         true
     }
@@ -527,7 +924,7 @@ impl AstronomyWallpaper {
     fn sky_hit_test(&self, root: [f64; 2]) -> Option<AstronomyDraw> {
         for (index, base_canvas) in self.draw_plan.iter().enumerate().rev() {
             let mut canvas = base_canvas.clone();
-            canvas.radius *= self.body_zoom(self.canvas_body(index)).presented_scale();
+            canvas.radius *= self.canvas_zoom_scale(index, true);
             let (pixel, point) = canvas_pointer(&canvas, root, self.layout_screen.1)?;
             let (x, y, w, h) = canvas.clip;
             if pixel[0] < f64::from(x)
@@ -537,12 +934,17 @@ impl AstronomyWallpaper {
             {
                 continue;
             }
-            return (point[0].hypot(point[1]) > 1.0).then_some(canvas);
+            return (!self.body_contains(index, point)).then_some(canvas);
         }
         None
     }
 
     fn begin_sky_drag(&mut self, root: [f64; 2]) -> bool {
+        let Some(index) = self.pointer_canvas(root) else {
+            return false;
+        };
+        let group = self.canvas_group(index).to_owned();
+        self.activate_navigation(&group);
         let Some(canvas) = self.sky_hit_test(root) else {
             return false;
         };
@@ -556,6 +958,7 @@ impl AstronomyWallpaper {
             return false;
         };
         self.sky_drag = Some(AstronomySkyDrag {
+            group,
             canvas,
             gesture,
             orientation: CelestialRotation::from_matrix(&presented.matrix()),
@@ -563,7 +966,9 @@ impl AstronomyWallpaper {
             pending_before_begin: self.interaction_pending,
             view_before_begin: self.panorama,
             requested_before_begin: self.requested_panorama,
+            reset_before_begin: self.reset_requested,
         });
+        self.reset_requested = false;
         self.panorama = presented;
         self.requested_panorama = None;
         self.interaction_pending = true;
@@ -574,14 +979,27 @@ impl AstronomyWallpaper {
     /// consumed this just-created gesture; restore any earlier queued release.
     fn abort_drag(&mut self) {
         if let Some(drag) = self.drag.take() {
+            self.activate_navigation(&drag.group);
             self.interaction_pending = drag.pending_before_begin;
+            self.reset_requested = drag.reset_before_begin;
             match drag.body {
-                CelestialBody::Earth => self.earth_zoom = drag.zoom_before_begin,
+                CelestialBody::Earth
+                | CelestialBody::Sun
+                | CelestialBody::Mercury
+                | CelestialBody::Venus
+                | CelestialBody::Mars
+                | CelestialBody::Jupiter
+                | CelestialBody::Saturn
+                | CelestialBody::Uranus
+                | CelestialBody::Neptune
+                | CelestialBody::Galaxy => self.earth_zoom = drag.zoom_before_begin,
                 CelestialBody::Moon => self.moon_zoom = drag.zoom_before_begin,
             }
         }
         if let Some(drag) = self.sky_drag.take() {
+            self.activate_navigation(&drag.group);
             self.interaction_pending = drag.pending_before_begin;
+            self.reset_requested = drag.reset_before_begin;
             self.panorama = drag.view_before_begin;
             self.requested_panorama = drag.requested_before_begin;
         }
@@ -615,6 +1033,7 @@ impl AstronomyWallpaper {
     /// Sun/phase clock untouched, even after a long hold or wall-clock correction.
     fn end_drag(&mut self, unix: f64) -> bool {
         if let Some(drag) = self.sky_drag.take() {
+            self.activate_navigation(&drag.group);
             let orientation = drag
                 .gesture
                 .orientation_at(drag.pending_point)
@@ -633,6 +1052,7 @@ impl AstronomyWallpaper {
         let Some(drag) = self.drag.take() else {
             return false;
         };
+        self.activate_navigation(&drag.group);
         let orientation = drag
             .arcball
             .orientation_at(drag.pending_point)
@@ -642,13 +1062,31 @@ impl AstronomyWallpaper {
             .inverse()
             .compose(orientation);
         let presented = match drag.body {
-            CelestialBody::Earth => self.presented_earth,
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => self.presented_earth,
             CelestialBody::Moon => self.presented_moon,
         }
         .unwrap_or_else(|| drag.orientation.matrix());
         let release = AstronomyRelease { presented, offset };
         match drag.body {
-            CelestialBody::Earth => self.earth_release = Some(release),
+            CelestialBody::Earth
+            | CelestialBody::Sun
+            | CelestialBody::Mercury
+            | CelestialBody::Venus
+            | CelestialBody::Mars
+            | CelestialBody::Jupiter
+            | CelestialBody::Saturn
+            | CelestialBody::Uranus
+            | CelestialBody::Neptune
+            | CelestialBody::Galaxy => self.earth_release = Some(release),
             CelestialBody::Moon => self.moon_release = Some(release),
         }
         self.interaction_pending = true;
@@ -656,6 +1094,10 @@ impl AstronomyWallpaper {
     }
 
     fn commit_releases(&mut self) {
+        self.visit_navigation(Self::commit_active_releases);
+    }
+
+    fn commit_active_releases(&mut self) {
         let mut changed = false;
         if let Some(release) = self.earth_release.take() {
             self.earth_offset = Some(release.offset);
@@ -687,11 +1129,7 @@ impl AstronomyWallpaper {
             return false;
         }
         self.commit_releases();
-        self.earth_zoom.admit();
-        self.moon_zoom.admit();
-        if let Some(view) = self.requested_panorama.take() {
-            self.panorama = view;
-        }
+        self.admit_navigation();
         if let Some(drag) = self.drag.as_mut()
             && let Some(orientation) = drag.arcball.orientation_at(drag.pending_point)
         {
@@ -712,13 +1150,49 @@ impl AstronomyWallpaper {
         // Pausing/teardown must not strand the release in a permanently frozen
         // state. Rendering resumes with a fresh time sample and this offset.
         self.commit_releases();
-        self.earth_zoom.admit();
-        self.moon_zoom.admit();
-        if let Some(view) = self.requested_panorama.take() {
-            self.panorama = view;
-        }
+        self.admit_navigation();
         self.interaction_pending = false;
         self.last_interaction_frame = None;
+    }
+
+    fn admit_navigation(&mut self) {
+        self.visit_navigation(|a| {
+            if a.reset_requested {
+                a.reset_requested = false;
+                a.reset_active_orientation(CelestialBody::Earth);
+                a.reset_active_orientation(CelestialBody::Moon);
+                a.sky_offset = CelestialRotation::default();
+                a.sky_release = None;
+                a.panorama = PanoramaView::default();
+                a.requested_panorama = None;
+            }
+            a.earth_zoom.admit();
+            a.moon_zoom.admit();
+            if let Some(view) = a.requested_panorama.take() {
+                a.panorama = view;
+            }
+        });
+    }
+
+    fn reset_at(&mut self, root: [f64; 2]) -> bool {
+        if self.has_drag() || !self.enabled || self.failed || !self.powered {
+            return false;
+        }
+        let Some(index) = self.pointer_canvas(root) else {
+            return false;
+        };
+        let group = self.canvas_group(index).to_owned();
+        self.activate_navigation(&group);
+        if self.presented_earth.is_none()
+            && self.presented_moon.is_none()
+            && self.presented_sky.is_none()
+        {
+            return false;
+        }
+        self.reset_requested = true;
+        self.interaction_pending = true;
+        self.interaction_revision = self.interaction_revision.wrapping_add(1);
+        true
     }
 
     /// Camera-only updates do not reload surfaces or reset animation clocks.
@@ -740,35 +1214,34 @@ impl AstronomyWallpaper {
     fn frame_interval(&self) -> Duration {
         let mut earth_visible = false;
         let mut moon_visible = false;
+        let mut moving_sky_visible = false;
         let mut radius = 0.0_f32;
         for (index, canvas) in self.draw_plan.iter().enumerate() {
-            radius = radius.max(canvas.radius * self.body_zoom(self.canvas_body(index)).scale());
-            if self.dual_material && self.bodies.get(index) == Some(&CelestialBody::Moon) {
+            radius = radius.max(canvas.radius * self.canvas_zoom_scale(index, false));
+            let group = self.canvas_group(index);
+            let captured = self
+                .drag
+                .as_ref()
+                .is_some_and(|d| d.group == group && d.body == self.canvas_body(index));
+            moving_sky_visible |= !self.sky_drag.as_ref().is_some_and(|d| d.group == group);
+            if self.canvas_body(index) == CelestialBody::Moon && !captured {
                 moon_visible = true;
-            } else {
+            } else if !matches!(
+                self.canvas_body(index),
+                CelestialBody::Galaxy | CelestialBody::Moon
+            ) && !captured
+            {
                 earth_visible = true;
             }
         }
         astronomy_frame_interval(
             radius,
-            (earth_visible
-                && self.earth_view.rotating
-                && !self
-                    .drag
-                    .as_ref()
-                    .is_some_and(|drag| drag.body == CelestialBody::Earth))
-            .then_some(self.earth_period),
-            (moon_visible
-                && self.moon_view.rotating
-                && !self
-                    .drag
-                    .as_ref()
-                    .is_some_and(|drag| drag.body == CelestialBody::Moon))
-            .then_some(self.moon_period),
-            if self.sky_drag.is_some() {
-                0
-            } else {
+            (earth_visible && self.earth_view.rotating).then_some(self.earth_period),
+            (moon_visible && self.moon_view.rotating).then_some(self.moon_period),
+            if moving_sky_visible {
                 self.sky_period
+            } else {
+                0
             },
         )
     }
@@ -822,6 +1295,14 @@ impl AstronomyWallpaper {
         )
             .hash(&mut hash);
         (self.earth_detail.texture, self.moon_detail.texture).hash(&mut hash);
+        (&self.default_scene, &self.presentation).hash(&mut hash);
+        for scene in &self.scene_plan {
+            (&scene.scene, &scene.group_key, &scene.connector).hash(&mut hash);
+        }
+        for (body, map) in &self.planet_maps {
+            body.hash(&mut hash);
+            map.texture.hash(&mut hash);
+        }
         for view in [self.earth_view, self.moon_view] {
             view.rotating.hash(&mut hash);
             for degrees in [view.latitude, view.longitude, view.roll] {
@@ -845,7 +1326,10 @@ impl AstronomyWallpaper {
         outputs: impl Iterator<Item = (i32, i32, u32, u32)> + Clone,
     ) -> bool {
         let a = self;
-        let per_output = matches!(layout, "per-output" | "earth-moon");
+        let per_output = matches!(
+            layout,
+            "per-output" | "earth-moon" | "mirror" | "independent"
+        );
         let output_count = if enabled && per_output {
             outputs.clone().take(129).count()
         } else {
@@ -928,36 +1412,128 @@ impl AstronomyWallpaper {
         if edge == 0 {
             return;
         }
-        let earth_visible = !self.dual_material || self.bodies.contains(&CelestialBody::Earth);
-        let moon_visible = self.dual_material && self.bodies.contains(&CelestialBody::Moon);
-        if earth_visible && self.earth_zoom.scale() > 1.3 && !self.earth_detail.attempted {
-            self.earth_detail.attempted = true;
-            if edge > self.earth_width && !self.path.is_empty() {
-                self.earth_detail.pending = Some(
-                    crate::backend::compositor_common::wallpaper_decode::load_wallpaper(
-                        &self.path,
-                        edge,
-                        edge / 2,
-                        WallpaperMode::Stretch,
-                    ),
-                );
+        let mut earth_zoom = 0.0_f32;
+        let mut moon_zoom = 0.0_f32;
+        for index in 0..self.draw_plan.len() {
+            match self.canvas_body(index) {
+                CelestialBody::Earth => {
+                    earth_zoom = earth_zoom.max(self.canvas_zoom_scale(index, false))
+                }
+                CelestialBody::Moon => {
+                    moon_zoom = moon_zoom.max(self.canvas_zoom_scale(index, false))
+                }
+                _ => {}
             }
         }
-        if moon_visible && self.moon_zoom.scale() > 1.3 && !self.moon_detail.attempted {
+        if earth_zoom > 1.3 && !self.earth_detail.attempted {
+            self.earth_detail.attempted = true;
+            if edge > self.earth_width && !self.path.is_empty() {
+                let path = self.path.clone();
+                self.earth_detail.pending =
+                    Some(wallpaper::DeferredWallpaperLoad::new(move |cancelled| {
+                        decode_celestial_map(&path, edge, 8192, cancelled)
+                    }));
+            }
+        }
+        if moon_zoom > 1.3 && !self.moon_detail.attempted {
             self.moon_detail.attempted = true;
             if edge > self.moon_width
                 && let Some(path) = resolve_moon_detail_texture(&self.moon_configured_path)
             {
-                self.moon_detail.pending = Some(
-                    crate::backend::compositor_common::wallpaper_decode::load_wallpaper(
-                        &path,
-                        edge,
-                        edge / 2,
-                        WallpaperMode::Stretch,
-                    ),
-                );
+                self.moon_detail.pending =
+                    Some(wallpaper::DeferredWallpaperLoad::new(move |cancelled| {
+                        decode_celestial_map(&path, edge, 8192, cancelled)
+                    }));
             }
         }
+    }
+
+    fn request_planet_maps(&mut self) {
+        if !self.enabled || self.failed || !self.powered {
+            return;
+        }
+        let visible: std::collections::BTreeSet<_> = self
+            .bodies
+            .iter()
+            .copied()
+            .filter(|b| {
+                !matches!(
+                    b,
+                    CelestialBody::Earth | CelestialBody::Moon | CelestialBody::Galaxy
+                )
+            })
+            .collect();
+        let removed: Vec<_> = self
+            .planet_maps
+            .keys()
+            .copied()
+            .filter(|b| !visible.contains(b))
+            .collect();
+        for body in removed {
+            if let Some(map) = self.planet_maps.remove(&body) {
+                self.retired.extend(map.texture);
+            }
+        }
+        for body in visible {
+            self.planet_maps.entry(body).or_insert_with(|| {
+                let pending = resolve_planet_texture(body).map(|path| {
+                    wallpaper::DeferredWallpaperLoad::new(move |cancelled| {
+                        decode_celestial_map(&path, 4096, 8192, cancelled)
+                    })
+                });
+                PlanetMap {
+                    pending,
+                    texture: None,
+                }
+            });
+        }
+    }
+
+    fn material_frames(&mut self) -> Vec<AstronomyFrame> {
+        let original = self.active_navigation.clone();
+        let mut frames = Vec::with_capacity(self.draw_plan.len());
+        for index in 0..self.draw_plan.len() {
+            let body = self.canvas_body(index);
+            let group = self.canvas_group(index).to_owned();
+            self.activate_navigation(&group);
+            let basis = self.body_matrix(body, self.sample_unix);
+            let light = match body {
+                CelestialBody::Earth => solar_direction(self.sample_unix),
+                CelestialBody::Moon => {
+                    transform_direction(&basis, lunar_phase_light(self.sample_unix))
+                }
+                // A fixed display light reveals mapped surfaces. These closeups
+                // do not claim an IAU body-fixed ephemeris/observer position.
+                _ => transform_direction(&basis, [0.48, 0.25, 0.841_486_75]),
+            };
+            frames.push(AstronomyFrame {
+                canvas: self.draw_plan[index].clone(),
+                body,
+                group,
+                basis,
+                light,
+                sky: self.sky_view(self.sample_unix),
+                zoom: self.body_zoom(body).scale(),
+            });
+        }
+        self.activate_navigation(&original);
+        frames
+    }
+
+    fn record_presented(&mut self, frames: &[AstronomyFrame]) {
+        let original = self.active_navigation.clone();
+        for frame in frames {
+            self.activate_navigation(&frame.group);
+            if frame.body == CelestialBody::Moon {
+                self.presented_moon = Some(frame.basis);
+                self.moon_zoom.presented = Some(frame.zoom);
+            } else if frame.body != CelestialBody::Galaxy {
+                self.presented_earth = Some(frame.basis);
+                self.earth_zoom.presented = Some(frame.zoom);
+            }
+            self.presented_sky = Some(frame.sky);
+        }
+        self.activate_navigation(&original);
     }
     pub(super) fn deadline(&self, now: Instant) -> Option<Duration> {
         if !self.enabled || self.failed {
@@ -984,9 +1560,11 @@ impl AstronomyWallpaper {
     fn take_failed_material(&mut self) -> [Option<glow::Texture>; 6] {
         self.end_drag(self.sample_unix);
         self.clear_interaction_wake();
-        self.presented_earth = None;
-        self.presented_moon = None;
-        self.presented_sky = None;
+        self.clear_presented();
+        for (_, mut map) in std::mem::take(&mut self.planet_maps) {
+            map.pending = None;
+            self.retired.extend(map.texture.take());
+        }
         self.pending = None;
         self.moon_pending = None;
         self.cloud_pending = None;
@@ -1014,15 +1592,22 @@ impl AstronomyWallpaper {
                 gl.delete_texture(texture);
             }
         }
+        for texture in self.retired.drain(..) {
+            unsafe {
+                gl.delete_texture(texture);
+            }
+        }
     }
 
     pub(super) unsafe fn cleanup(&mut self, gl: &glow::Context) {
         self.drag = None;
         self.sky_drag = None;
         self.clear_interaction_wake();
-        self.presented_earth = None;
-        self.presented_moon = None;
-        self.presented_sky = None;
+        self.clear_presented();
+        for (_, mut map) in std::mem::take(&mut self.planet_maps) {
+            map.pending = None;
+            self.retired.extend(map.texture.take());
+        }
         unsafe {
             self.cache.cleanup(gl);
         }
@@ -1061,13 +1646,15 @@ impl<C: CompositorConnection> Compositor<C> {
             && !a.identities_changed
             && a.layout_screen == (self.screen_w, self.screen_h)
             && a.config_matches(crate::config::CONFIG.load().behavior())
-            && (!matches!(a.layout.as_str(), "per-output" | "earth-moon")
-                || self
-                    .monitor_wallpapers
-                    .iter()
-                    .take(129)
-                    .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
-                    .eq(a.layout_outputs.iter().copied()))
+            && (!matches!(
+                a.layout.as_str(),
+                "per-output" | "earth-moon" | "mirror" | "independent"
+            ) || self
+                .monitor_wallpapers
+                .iter()
+                .take(129)
+                .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
+                .eq(a.layout_outputs.iter().copied()))
             && !self.overview_active
             && !self.overview_closing
             && !self.expose_active
@@ -1112,6 +1699,13 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn astronomy_zoom(&mut self, root_x: f64, root_y: f64, steps: f64) -> bool {
         self.astronomy_interaction_available()
             && self.astronomy_wallpaper.zoom([root_x, root_y], steps)
+    }
+
+    /// Reset the scene under the pointer, including every output in its group.
+    /// The physical UTC illumination sample remains unchanged.
+    pub(crate) fn astronomy_reset(&mut self, root_x: f64, root_y: f64) -> bool {
+        self.astronomy_interaction_available()
+            && self.astronomy_wallpaper.reset_at([root_x, root_y])
     }
 
     fn poll_astronomy_detail(
@@ -1159,15 +1753,34 @@ impl<C: CompositorConnection> Compositor<C> {
         })
     }
 
+    /// Decode at native resolution and only shrink to the GPU/source budget.
+    /// This avoids inventing resolution or wasting VRAM on small observed maps.
+    pub(super) fn load_celestial_map_async(
+        path: String,
+        max_edge: u32,
+    ) -> wallpaper::DeferredWallpaperLoad {
+        wallpaper::DeferredWallpaperLoad::new(move |cancelled| {
+            decode_celestial_map(&path, max_edge, 8192, cancelled)
+        })
+    }
+
     pub(crate) fn set_astronomy_output_identities(
         &mut self,
         outputs: &[crate::backend::api::OutputInfo],
     ) {
+        self.set_solar_output_identities(outputs);
         let mut identities: Vec<_> = outputs
             .iter()
             .take(128)
             .filter(|o| o.width > 0 && o.height > 0)
-            .map(|o| (o.name.clone(), o.x, o.y, o.width as u32, o.height as u32))
+            .map(|o| {
+                let connector = if o.identity.connector.is_empty() {
+                    &o.name
+                } else {
+                    &o.identity.connector
+                };
+                (connector.clone(), o.x, o.y, o.width as u32, o.height as u32)
+            })
             .collect();
         // Mirrors with different connector names choose the first name consistently.
         identities.sort_unstable();
@@ -1216,15 +1829,20 @@ impl<C: CompositorConnection> Compositor<C> {
                 .iter()
                 .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h)),
         );
-        let dual = layout == "earth-moon";
         let moon_configured = &cfg.behavior().wallpaper_moon_texture;
         let overrides = &cfg.behavior().wallpaper_astronomy_bodies;
-        let bodies_changed = a.update_bodies(overrides, layout_changed);
+        let assignments_changed = a.update_bodies(overrides, layout_changed);
+        let scenes_changed = a.update_scene_plan(
+            cfg.behavior(),
+            enabled,
+            assignments_changed || layout_changed,
+        );
+        let bodies_changed = assignments_changed || scenes_changed;
+        let dual = a.bodies.contains(&CelestialBody::Moon);
+        let earth_required = a.bodies.contains(&CelestialBody::Earth);
         if layout_changed || bodies_changed {
             a.end_drag(sample_unix);
-            a.presented_earth = None;
-            a.presented_moon = None;
-            a.presented_sky = None;
+            a.clear_presented();
         }
         let (earth_view, moon_view) = configured_views(cfg.behavior());
         let view_changed = a.update_views(earth_view, moon_view);
@@ -1248,17 +1866,22 @@ impl<C: CompositorConnection> Compositor<C> {
         let changed = a.enabled != enabled
             || a.configured_path != *configured
             || a.moon_configured_path != *moon_configured
-            || a.dual_material != dual;
+            || a.dual_material != dual
+            || a.earth_material != earth_required;
         if changed {
             a.end_drag(sample_unix);
-            a.presented_earth = None;
-            a.presented_moon = None;
-            a.presented_sky = None;
+            a.clear_presented();
             a.cache.invalidate();
             a.enabled = enabled;
+            if !enabled {
+                for (_, map) in std::mem::take(&mut a.planet_maps) {
+                    a.retired.extend(map.texture);
+                }
+            }
             a.configured_path = configured.clone();
             a.moon_configured_path = moon_configured.clone();
             a.dual_material = dual;
+            a.earth_material = earth_required;
             a.moon_pending = None;
             a.retired.extend(a.moon_texture.take());
             a.cloud_pending = None;
@@ -1272,7 +1895,7 @@ impl<C: CompositorConnection> Compositor<C> {
             a.moon_detail = AstronomyDetail::default();
             a.earth_width = 0;
             a.moon_width = 0;
-            a.path = if enabled {
+            a.path = if enabled && earth_required {
                 resolve_earth_texture(configured).unwrap_or_default()
             } else {
                 String::new()
@@ -1283,13 +1906,8 @@ impl<C: CompositorConnection> Compositor<C> {
             a.last_power_query = None;
             a.clock = WallpaperClock::default();
             if enabled && !a.path.is_empty() {
-                a.pending = Some(Self::load_wallpaper_async(
-                    &a.path,
-                    4096,
-                    2048,
-                    WallpaperMode::Stretch,
-                ));
-            } else if enabled {
+                a.pending = Some(Self::load_celestial_map_async(a.path.clone(), 4096));
+            } else if enabled && a.bodies.contains(&CelestialBody::Earth) {
                 a.failed = true;
                 log::warn!(
                     "astronomy wallpaper: Earth texture unavailable; keeping static wallpaper"
@@ -1297,7 +1915,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             // The optional historic cloud composite is aligned with the bundled Earth map.
             // Do not paint it over an explicitly configured user texture.
-            if enabled && configured.is_empty() {
+            if enabled && earth_required && configured.is_empty() {
                 if let Some(path) = resolve_cloud_texture() {
                     a.cloud_pending = Some(Self::load_wallpaper_async(
                         &path,
@@ -1316,12 +1934,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             if enabled && dual {
                 if let Some(path) = resolve_moon_texture(moon_configured) {
-                    a.moon_pending = Some(Self::load_wallpaper_async(
-                        &path,
-                        2048,
-                        1024,
-                        WallpaperMode::Stretch,
-                    ));
+                    a.moon_pending = Some(Self::load_celestial_map_async(path, 2048));
                 } else {
                     a.failed = true;
                     log::warn!(
@@ -1352,6 +1965,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let changed = a.update_clock(now, sample_unix, offset_seconds, occluded, invalidated);
         if !occluded {
             a.request_details();
+            a.request_planet_maps();
         }
         changed
     }
@@ -1384,6 +1998,12 @@ impl<C: CompositorConnection> Compositor<C> {
         if !a.powered {
             return;
         }
+        if a.draw_plan.is_empty() {
+            unsafe {
+                a.cache.cleanup(&self.gl);
+            }
+            return;
+        }
         // First adoption changes the entire material, so wait for a frame
         // whose prepare step already requested full repair/blur invalidation.
         // Unrelated client damage between animation ticks must stay static.
@@ -1392,7 +2012,8 @@ impl<C: CompositorConnection> Compositor<C> {
             a.cloud_pending.is_some()
                 || a.sky_pending.is_some()
                 || a.earth_detail.pending.is_some()
-                || a.moon_detail.pending.is_some(),
+                || a.moon_detail.pending.is_some()
+                || a.planet_maps.values().any(|map| map.pending.is_some()),
             a.frame_changed,
         );
         if !may_draw {
@@ -1568,10 +2189,41 @@ impl<C: CompositorConnection> Compositor<C> {
             if earth_changed || moon_changed {
                 a.cache.invalidate();
             }
+            for map in a.planet_maps.values_mut() {
+                let Some(load) = map.pending.as_ref() else {
+                    continue;
+                };
+                match load.try_recv() {
+                    Ok(data) => {
+                        map.pending = None;
+                        if data.width != data.height.saturating_mul(2)
+                            || (a.max_texture_edge != 0 && data.width > a.max_texture_edge)
+                        {
+                            log::warn!(
+                                "astronomy wallpaper: optional planet map is not a supported 2:1 image"
+                            );
+                            continue;
+                        }
+                        map.texture = Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                        if let Some(texture) = map.texture {
+                            unsafe {
+                                procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                    &self.gl, texture,
+                                );
+                            }
+                            a.cache.invalidate();
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        map.pending = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
         }
-        let Some(texture) = a.texture else {
+        if a.earth_material && a.texture.is_none() {
             return;
-        };
+        }
         if a.dual_material && a.moon_texture.is_none() {
             return;
         }
@@ -1600,9 +2252,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        let Some(program) = a.program.as_ref() else {
-            return;
-        };
         let cached = unsafe {
             a.cache
                 .ensure(&self.gl, self.screen_w, self.screen_h, cache_ten_bit)
@@ -1616,19 +2265,10 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         let cache_state = cached.then(|| unsafe { a.cache.begin(&self.gl) });
         let repair = if cached { None } else { repair };
-        let sun = solar_direction(a.sample_unix);
-        // Compute each body's orthonormal basis once per material frame, not
-        // once per output or fragment. Decorative motion never advances UTC.
-        let earth_basis = a.body_matrix(CelestialBody::Earth, a.sample_unix);
-        let moon_frame = (a.dual_material && a.bodies.contains(&CelestialBody::Moon)).then(|| {
-            let basis = a.body_matrix(CelestialBody::Moon, a.sample_unix);
-            // Retain the real Earth-observer phase while presenting any
-            // lunar surface orientation: dot(M*n, M*light) == dot(n, light).
-            let light = transform_direction(&basis, lunar_phase_light(a.sample_unix));
-            (basis, light)
-        });
-        let earth_frame = (earth_basis, sun);
-        let sky_view = a.sky_view(a.sample_unix);
+        let frames = a.material_frames();
+        let Some(program) = a.program.as_ref() else {
+            return;
+        };
         unsafe {
             let gl = &self.gl;
             gl.use_program(Some(program.program));
@@ -1641,12 +2281,10 @@ impl<C: CompositorConnection> Compositor<C> {
             let roll = sky_rotation(a.sample_unix, a.sky_period);
             gl.uniform_2_f32(program.sky_rotation.as_ref(), roll[0], roll[1]);
             gl.uniform_1_i32(program.panorama_enabled.as_ref(), 1);
-            gl.uniform_matrix_3_f32_slice(
-                program.panorama_view.as_ref(),
-                false,
-                &sky_view.matrix(),
+            gl.uniform_1_i32(
+                program.cosmic_scientific.as_ref(),
+                i32::from(a.presentation == "scientific"),
             );
-            gl.uniform_1_f32(program.panorama_fov.as_ref(), sky_view.fov_degrees());
             gl.uniform_1_i32(program.sky_map.as_ref(), 2);
             gl.uniform_1_i32(
                 program.sky_enabled.as_ref(),
@@ -1657,27 +2295,36 @@ impl<C: CompositorConnection> Compositor<C> {
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, a.cloud_texture);
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.enable(glow::SCISSOR_TEST);
-            for (index, canvas) in a.draw_plan.iter().enumerate() {
-                let moon = a.dual_material && a.bodies.get(index) == Some(&CelestialBody::Moon);
+            for frame in &frames {
+                let canvas = &frame.canvas;
+                let moon = frame.body == CelestialBody::Moon;
                 gl.uniform_1_i32(program.moon_material.as_ref(), i32::from(moon));
-                let (basis, light) = if moon {
-                    moon_frame.as_ref().unwrap_or(&earth_frame)
-                } else {
-                    &earth_frame
-                };
-                gl.uniform_matrix_3_f32_slice(program.view_to_body.as_ref(), false, basis);
-                gl.uniform_3_f32(program.sun_direction.as_ref(), light[0], light[1], light[2]);
-                gl.bind_texture(
-                    glow::TEXTURE_2D,
-                    if moon {
-                        a.moon_detail.texture.or(a.moon_texture)
-                    } else {
-                        a.earth_detail.texture.or(Some(texture))
-                    },
+                gl.uniform_1_i32(program.celestial_body.as_ref(), frame.body.shader_id() + 1);
+                gl.uniform_matrix_3_f32_slice(program.view_to_body.as_ref(), false, &frame.basis);
+                gl.uniform_3_f32(
+                    program.sun_direction.as_ref(),
+                    frame.light[0],
+                    frame.light[1],
+                    frame.light[2],
                 );
+                gl.uniform_matrix_3_f32_slice(
+                    program.panorama_view.as_ref(),
+                    false,
+                    &frame.sky.matrix(),
+                );
+                gl.uniform_1_f32(program.panorama_fov.as_ref(), frame.sky.fov_degrees());
+                let texture = match frame.body {
+                    CelestialBody::Earth => a.earth_detail.texture.or(a.texture),
+                    CelestialBody::Moon => a.moon_detail.texture.or(a.moon_texture),
+                    _ => a.planet_maps.get(&frame.body).and_then(|map| map.texture),
+                };
+                gl.uniform_1_i32(
+                    program.surface_mapped.as_ref(),
+                    i32::from(texture.is_some()),
+                );
+                gl.bind_texture(glow::TEXTURE_2D, texture);
                 let clip = if let Some(repair) = repair {
                     let Some(clip) = canvas.repair_clip(Some(repair)) else {
                         continue;
@@ -1693,9 +2340,15 @@ impl<C: CompositorConnection> Compositor<C> {
                     canvas.origin[1],
                 );
                 gl.uniform_2_f32(program.resolution.as_ref(), canvas.size[0], canvas.size[1]);
-                let zoom = a.body_zoom(a.canvas_body(index)).scale();
-                gl.uniform_1_f32(program.sphere_radius.as_ref(), canvas.radius * zoom);
-                gl.uniform_1_f32(program.surface_detail.as_ref(), zoom);
+                gl.uniform_1_f32(program.sphere_radius.as_ref(), canvas.radius * frame.zoom);
+                gl.uniform_1_f32(
+                    program.surface_detail.as_ref(),
+                    if a.presentation == "scientific" {
+                        1.0
+                    } else {
+                        frame.zoom
+                    },
+                );
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
             if let Some(clip) = repair {
@@ -1720,11 +2373,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     .present(&self.gl, a.draw_plan.iter().map(|canvas| canvas.clip));
             }
         }
-        a.presented_earth = Some(earth_basis);
-        a.presented_moon = moon_frame.map(|(basis, _)| basis);
-        a.earth_zoom.presented = Some(a.earth_zoom.scale());
-        a.moon_zoom.presented = a.presented_moon.map(|_| a.moon_zoom.scale());
-        a.presented_sky = Some(sky_view);
+        a.record_presented(&frames);
     }
 }
 
@@ -1736,6 +2385,8 @@ mod tests {
         AstronomyWallpaper {
             enabled: true,
             powered: true,
+            default_scene: "earth".into(),
+            presentation: "scientific".into(),
             earth_period: 20,
             moon_period: 30,
             draw_plan: astronomy_draw_plan((1920, 1080), &[], false, None),
@@ -1767,6 +2418,143 @@ mod tests {
             + f64::from(canvas.size[1]) * 0.5
             + f64::from(canvas.radius.max(1.0)) * point[1];
         [x - 0.5, f64::from(height) - y - 0.5]
+    }
+
+    fn independent_scenes(
+        scene: &str,
+        shared: bool,
+    ) -> (AstronomyWallpaper, crate::config::BehaviorConfig) {
+        let mut b = crate::config::Config::default().behavior().clone();
+        b.wallpaper_astronomy_layout = "independent".into();
+        b.wallpaper_astronomy_scene = scene.into();
+        let mut a = active_wallpaper();
+        a.layout = b.wallpaper_astronomy_layout.clone();
+        a.layout_screen = (600, 200);
+        a.sample_unix = 1_792_108_800.0;
+        (a.earth_view, a.moon_view) = configured_views(&b);
+        a.output_identities = vec![
+            ("A".into(), 0, 0, 200, 200),
+            ("B".into(), 200, 0, 200, 200),
+            ("C".into(), 400, 0, 200, 200),
+        ];
+        if shared {
+            for name in ["A", "B"] {
+                b.wallpaper_astronomy_outputs.insert(
+                    name.into(),
+                    crate::config::AstronomyOutputConfig {
+                        scene: scene.into(),
+                        group: "observatory".into(),
+                    },
+                );
+            }
+        }
+        assert!(a.update_scene_plan(&b, true, true));
+        a.dual_material = scene == "moon";
+        let frames = a.material_frames();
+        a.record_presented(&frames);
+        (a, b)
+    }
+
+    #[test]
+    fn equal_planets_on_independent_connectors_keep_separate_pending_zoom_and_drag() {
+        let (mut a, _) = independent_scenes("earth", false);
+        let now = Instant::now();
+        let left = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        let right = pointer_at(&a.draw_plan[1], 200, [0.0, 0.0]);
+        assert!(a.zoom(left, 2.0));
+        assert!(a.zoom(right, 4.0));
+        assert!(a.consume_interaction(now));
+        let frames = a.material_frames();
+        assert!(frames[1].zoom > frames[0].zoom && frames[0].zoom > 1.0);
+        assert_eq!(frames[2].zoom, 1.0);
+        a.record_presented(&frames);
+        let frozen = frames[1].basis;
+        assert!(a.begin_drag(left));
+        let captured = a.drag.as_ref().unwrap().canvas.clone();
+        assert!(a.drag_motion(pointer_at(&captured, 200, [0.3, -0.35])));
+        assert!(a.consume_interaction(now + DRAG_FRAME_INTERVAL));
+        let moving = a.material_frames();
+        assert_ne!(moving[0].basis, frames[0].basis);
+        assert_eq!(moving[1].basis, frozen);
+        assert_eq!(moving[0].light, moving[1].light);
+        assert!(a.end_drag(a.sample_unix));
+    }
+
+    #[test]
+    fn grouped_spanning_canvases_share_zoom_and_reset_without_changing_other_groups_or_utc() {
+        let (mut a, _) = independent_scenes("earth", true);
+        let now = Instant::now();
+        let left = pointer_at(&a.draw_plan[0], 200, [-0.5, 0.0]);
+        let third = pointer_at(&a.draw_plan[2], 200, [0.0, 0.0]);
+        assert!(a.zoom(left, 2.0));
+        assert!(a.zoom(third, 3.0));
+        assert!(a.consume_interaction(now));
+        let before = a.material_frames();
+        assert_eq!(before[0].zoom, before[1].zoom);
+        assert_ne!(before[0].zoom, before[2].zoom);
+        a.record_presented(&before);
+        let unix = a.sample_unix;
+        let right = pointer_at(&a.draw_plan[1], 200, [0.5, 0.0]);
+        assert!(a.reset_at(right));
+        // Queued reset may not alter hit testing before the replacement pixels.
+        assert_eq!(a.canvas_zoom_scale(0, true), before[0].zoom);
+        assert!(a.consume_interaction(now + DRAG_FRAME_INTERVAL));
+        let after = a.material_frames();
+        assert_eq!((after[0].zoom, after[1].zoom), (1.0, 1.0));
+        assert_eq!(after[2].zoom, before[2].zoom);
+        assert_eq!(a.sample_unix, unix);
+        assert_eq!(after[0].light, before[0].light);
+    }
+
+    #[test]
+    fn independent_galaxy_panoramas_hold_their_own_pose_and_lens() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let now = Instant::now();
+        let baseline = a.material_frames();
+        assert!(a.begin_drag([100.0, 100.0]));
+        assert!(a.sky_drag.is_some() && a.drag.is_none());
+        assert!(a.drag_motion([580.0, 350.0]));
+        assert!(a.consume_interaction(now));
+        let moved = a.material_frames();
+        assert_ne!(moved[0].sky.matrix(), baseline[0].sky.matrix());
+        assert_eq!(moved[1].sky, baseline[1].sky);
+        a.record_presented(&moved);
+        assert!(a.end_drag(a.sample_unix));
+        assert!(a.zoom([300.0, 100.0], 3.0));
+        assert!(a.consume_interaction(now + DRAG_FRAME_INTERVAL));
+        let zoomed = a.material_frames();
+        assert_eq!(zoomed[0].sky.fov_degrees(), baseline[0].sky.fov_degrees());
+        assert!(zoomed[1].sky.fov_degrees() < baseline[1].sky.fov_degrees());
+    }
+
+    #[test]
+    fn scene_navigation_follows_connector_across_reordering_and_geometry_changes() {
+        let (mut a, b) = independent_scenes("mars", false);
+        let center = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.zoom(center, 3.0));
+        assert!(a.consume_interaction(Instant::now()));
+        let before = a.material_frames();
+        a.record_presented(&before);
+        a.output_identities[0].1 = 400;
+        a.output_identities[2].1 = 0;
+        a.output_identities.reverse();
+        a.update_scene_plan(&b, true, true);
+        let after = a.material_frames();
+        let a_frame = after.iter().find(|f| f.group == before[0].group).unwrap();
+        assert_eq!(a_frame.zoom, before[0].zoom);
+        assert_eq!(a_frame.canvas.origin, [400.0, 0.0]);
+        assert_eq!(after[0].zoom, 1.0);
+    }
+
+    #[test]
+    fn a_visible_saturn_ring_grabs_the_body_instead_of_the_background_panorama() {
+        let (mut a, _) = independent_scenes("saturn", false);
+        let point = pointer_at(&a.draw_plan[0], 200, [1.6, 0.0]);
+        assert_eq!(a.hit_test(point).unwrap().0, CelestialBody::Saturn);
+        assert!(a.begin_drag(point));
+        assert!(a.drag.is_some() && a.sky_drag.is_none());
+        a.abort_drag();
+        assert!(!a.has_drag());
     }
 
     fn assert_same_basis(actual: [f32; 9], expected: [f32; 9]) {
@@ -2076,6 +2864,12 @@ mod tests {
         let native = decode_astronomy_sky(path.to_str().unwrap(), 0, &cancelled).unwrap();
         assert_eq!((native.width, native.height), (16, 8));
         assert_eq!(&*native.rgba, fixture.as_raw());
+        let detail = decode_celestial_map(path.to_str().unwrap(), 8192, 8192, &cancelled).unwrap();
+        assert_eq!(
+            (detail.width, detail.height),
+            (16, 8),
+            "detail requests must never upscale a small observed image"
+        );
         let reduced = decode_astronomy_sky(path.to_str().unwrap(), 8, &cancelled).unwrap();
         assert_eq!((reduced.width, reduced.height), (8, 4));
         for pixel in reduced.rgba.chunks_exact(4) {
@@ -2094,6 +2888,10 @@ mod tests {
         assert!(legacy.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
         image::RgbaImage::new(3, 2).save(&path).unwrap();
         assert!(decode_astronomy_sky(path.to_str().unwrap(), 4096, &cancelled).is_none());
+        image::RgbaImage::new(1025, 513).save(&path).unwrap();
+        let boundary =
+            decode_celestial_map(path.to_str().unwrap(), 4096, 8192, &cancelled).unwrap();
+        assert_eq!((boundary.width, boundary.height), (1024, 512));
         cancelled.store(true, Ordering::Release);
         assert!(decode_astronomy_sky(path.to_str().unwrap(), 4096, &cancelled).is_none());
         std::fs::remove_dir_all(directory).unwrap();

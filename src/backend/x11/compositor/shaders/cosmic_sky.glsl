@@ -5,6 +5,9 @@
 // Old opaque sky JPEGs naturally have no figure overlay.
 const float COSMIC_PI = 3.141592653589793;
 const float COSMIC_TAU = 6.283185307179586;
+// Zero preserves legacy diagnostic probes. Production scientific mode sets 1:
+// an observed catalogue may be shown; invented stars/nebula morphology may not.
+uniform int cosmic_scientific;
 
 // One fixed, right-handed framing in every mode. Camera-forward initially
 // faces the Galactic centre with a 22-degree roll. Manual orientation then
@@ -134,7 +137,7 @@ vec3 cosmic_sky(vec3 world, vec3 world_dx, vec3 world_dy, bool mapped) {
         float guide_visibility = 0.08+0.92*smoothstep(0.00025,0.0015,footprint);
         color += vec3(0.0035,0.010,0.018)*figures*0.22*guide_visibility;
     } else {
-        color = cosmic_fallback(q,footprint);
+        color = cosmic_scientific != 0 ? vec3(0.00035,0.00055,0.0010) : cosmic_fallback(q,footprint);
     }
-    return color + cosmic_nebulae(q,footprint);
+    return cosmic_scientific != 0 ? color : color + cosmic_nebulae(q,footprint);
 }
