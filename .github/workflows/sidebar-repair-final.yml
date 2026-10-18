@@ -1,0 +1,125 @@
+name: Final managed sidebar validation
+on:
+  push:
+    branches: [automation/sidebar-repair-20261018]
+    paths: [.github/workflows/sidebar-repair-final.yml]
+permissions:
+  contents: write
+concurrency:
+  group: sidebar-repair-20261018
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.repository == 'beamiter/jwm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-bars
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: cf9223da3e1da176e0678ac0f875788d43545d8f
+          persist-credentials: true
+      - name: Install native validation dependencies including software Vulkan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config libasound2-dev libdbus-1-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libudev-dev fonts-dejavu-core libgtk-3-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev python3-yaml python3-pil xvfb xauth xdotool imagemagick mesa-vulkan-drivers libvulkan1 libgl1-mesa-dri
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: native-bars-protocol-core
+          cache-on-failure: true
+      - name: Recover the already-reproduced patch and production tests
+        shell: bash
+        run: |
+          git fetch --depth=1 origin 770a7fb52c134bee988581581b934cb733df5422
+          git show 770a7fb52c134bee988581581b934cb733df5422:.github/workflows/sidebar-repair-once.yml > /tmp/sidebar-recipe.yml
+          git show 770a7fb52c134bee988581581b934cb733df5422:.github/workflows/sidebar-repair-resume.yml > /tmp/sidebar-native-recipe.yml
+          /usr/bin/python3 - <<'PY'
+          import yaml
+          from pathlib import Path
+          steps = {s.get('name'): s for s in yaml.safe_load(Path('/tmp/sidebar-recipe.yml').read_text())['jobs']['verify']['steps']}
+          test = steps['Install production Cairo regression tests']['run']
+          test = test.replace('painted.chunks_exact(4)', 'painted.as_chunks::<4>().0.iter()')
+          test = test.replace('u32::from_ne_bytes(pixel.try_into().unwrap())', 'u32::from_ne_bytes(*pixel)')
+          test = test.replace('if alpha == 0 { 0 } else { ((component * 255 + alpha / 2) / alpha).min(255) as u8 }', '(component * 255 + alpha / 2).checked_div(alpha).unwrap_or(0).min(255) as u8')
+          assert 'chunks_exact' not in test and 'checked_div' in test
+          Path('/tmp/install-sidebar-test.sh').write_text(test)
+          Path('/tmp/apply-sidebar-fix.py').write_text(steps['Apply bounded sidebar padding fix']['run'])
+          native_steps = {s.get('name'): s for s in yaml.safe_load(Path('/tmp/sidebar-native-recipe.yml').read_text())['jobs']['verify']['steps']}
+          native = native_steps['Left and right native windows at 1x and 2x']['run']
+          native = native.replace('import os, pathlib, subprocess, tempfile, time', 'import os, pathlib, subprocess, tempfile, time\nfrom PIL import Image')
+          old = "                        subprocess.run(['import', '-window', window, str(output / f'{name}.png')], env=env, check=True, timeout=10)"
+          new = """                        # Mapping can precede the first GL/Vulkan frame. A
+                                  # successful size assertion is not evidence of visible UI.
+                                  painted = False
+                                  for attempt in range(60):
+                                      assert process.poll() is None, f'{name} exited before painting'
+                                      capture = output / f'{name}.png'
+                                      subprocess.run(['import', '-window', window, str(capture)], env=env, check=True, timeout=10)
+                                      with Image.open(capture) as image:
+                                          colors = image.convert('RGB').getcolors(65536)
+                                          painted = colors is None or len(colors) > 64
+                                      if painted:
+                                          print(name, 'visible painted frame', flush=True)
+                                          break
+                                      time.sleep(0.2)
+                                  assert painted, f'{name} mapped but never painted visible controls'"""
+          assert native.count(old) == 1, 'native capture step changed'
+          native = native.replace(old, new)
+          native = native.replace('python3 /tmp/sidebar-native.py', '/usr/bin/python3 /tmp/sidebar-native.py')
+          Path('/tmp/verify-native-sidebars.sh').write_text(native)
+          PY
+          bash -e /tmp/install-sidebar-test.sh
+          python3 /tmp/apply-sidebar-fix.py
+          rustfmt --edition 2024 crates/xbar_core/src/presentation.rs crates/xbar_core/tests/managed_sidebars.rs
+      - name: Shared core tests, actual glyph pixels and strict lint
+        shell: bash
+        run: |
+          XBAR_SIDEBAR_PREVIEWS=/tmp/jwm-managed-sidebars cargo test --locked -p xbar_core --all-features
+          cargo clippy --locked -p xbar_core --all-features --all-targets --no-deps -- -D warnings
+          cargo run --locked -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-standalone-bars
+      - name: Compile and test both Tao frontends
+        shell: bash
+        run: |
+          for bar in tao_glow_bar tao_pixels_bar; do
+            cargo check --manifest-path "bars/$bar/Cargo.toml" --all-targets --locked
+            cargo test --manifest-path "bars/$bar/Cargo.toml" --all-targets --locked
+            cargo build --manifest-path "bars/$bar/Cargo.toml" --locked
+          done
+      - name: Verify mapped geometry and visible controls for eight native windows
+        shell: bash
+        run: bash -e /tmp/verify-native-sidebars.sh
+      - name: Publish only the validated source repair
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = cf9223da3e1da176e0678ac0f875788d43545d8f
+          git diff --check
+          git add crates/xbar_core/src/presentation.rs crates/xbar_core/tests/managed_sidebars.rs docs/bars-four-edges.md
+          test "$(git diff --cached --name-only | wc -l)" -eq 3
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(bars): keep managed sidebars readable at physical-pixel DPI scales' -m 'Bound outer and inner sidebar padding before it consumes the text area. Add 96 Cairo/Pango configurations asserting actual glyph pixels and full-width hits. The tests reproduce the pre-fix failure; core tests and strict Clippy pass after the fix. Both Tao frontends compile and pass tests; native left/right windows have correct geometry and painted UI at 1x and 2x under Xvfb/software rendering.' -m "Validation run: https://github.com/beamiter/jwm/actions/runs/${GITHUB_RUN_ID}"
+          git push origin HEAD:refs/heads/fix/managed-sidebar-readable-20261018
+          git show --stat --oneline HEAD
+          git diff HEAD^ HEAD -- crates/xbar_core/src/presentation.rs
+      - name: Retain source patch and render evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p /tmp/jwm-sidebar-evidence
+          git diff -- crates/xbar_core/src/presentation.rs > /tmp/jwm-sidebar-evidence/working.patch
+          cp -f /tmp/sidebar-native.py /tmp/jwm-sidebar-evidence/ 2>/dev/null || true
+      - name: Upload actual rendering evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: managed-sidebar-render-validation
+          path: |
+            /tmp/jwm-managed-sidebars
+            /tmp/jwm-standalone-bars
+            /tmp/jwm-native-sidebars
+            /tmp/jwm-sidebar-evidence
+          retention-days: 7
