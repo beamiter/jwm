@@ -1,0 +1,261 @@
+name: Validate managed sidebar repair
+on:
+  push:
+    branches: [automation/sidebar-repair-20261018]
+    paths: [.github/workflows/sidebar-repair-once.yml]
+permissions:
+  contents: write
+concurrency:
+  group: sidebar-repair-20261018
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.repository == 'beamiter/jwm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/native-bars
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 296c601d8b92869fd0a54de756ff15b279b05021
+          persist-credentials: true
+      - name: Install build and font dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libasound2-dev libdbus-1-dev libglib2.0-dev libcairo2-dev libpango1.0-dev libudev-dev fonts-dejavu-core libgtk-3-dev libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxrandr-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: native-bars-protocol-core
+      - name: Install production Cairo regression tests
+        shell: bash
+        run: |
+          mkdir -p crates/xbar_core/tests
+          cat > crates/xbar_core/tests/managed_sidebars.rs <<'RS'
+          //! Fixed physical thickness is not the same as a fixed logical width.
+          //! Exercise the production layout and Pango rasterizer at managed DPI.
+          #![cfg(feature = "render-cairo")]
+
+          use cairo::{Context, Format, ImageSurface};
+          use pango::FontDescription;
+          use xbar_core::presentation::{
+              InteractionState, LayoutEngine, NodeId, PresentationConfig, Rect, Scene, SceneNode, Size,
+          };
+          use xbar_core::render::cairo::CairoRenderer;
+          use xbar_core::{BarEdge, BarModel, TagId, TagState, ThemeMode};
+
+          fn raster(renderer: &CairoRenderer, scene: &Scene, width: u32, height: u32, scale: f64) -> Vec<u8> {
+              let mut surface = ImageSurface::create(Format::ARgb32, width as i32, height as i32).unwrap();
+              let context = Context::new(&surface).unwrap();
+              context.scale(scale, scale);
+              renderer.render(&context, scene).unwrap();
+              drop(context);
+              surface.flush();
+              assert_eq!(surface.stride() as u32, width * 4);
+              surface.data().unwrap().to_vec()
+          }
+
+          fn contains_ink(a: &[u8], b: &[u8], width: u32, height: u32, rect: Rect, scale: f64) -> bool {
+              let left = (f64::from(rect.x) * scale).floor().max(0.0) as u32;
+              let top = (f64::from(rect.y) * scale).floor().max(0.0) as u32;
+              let right = ((f64::from(rect.right()) * scale).ceil() as u32).min(width);
+              let bottom = ((f64::from(rect.bottom()) * scale).ceil() as u32).min(height);
+              (top..bottom).any(|y| (left..right).any(|x| {
+                  let offset = ((y * width + x) * 4) as usize;
+                  a[offset..offset + 4] != b[offset..offset + 4]
+              }))
+          }
+
+          fn exercise(edge: BarEdge, padding: f32) {
+              let active = TagId::new(2).unwrap();
+              let mut snapshot = BarModel::default().snapshot();
+              snapshot.wm_available = true;
+              snapshot.wm_session_id = 1;
+              snapshot.wm_sequence = Some(1);
+              snapshot.active_tag = Some(active);
+              snapshot.tags = (0..9).map(|index| TagState {
+                  selected: index == 2,
+                  occupied: index == 2,
+                  ..TagState::default()
+              }).collect();
+              snapshot.time = "12:34".into();
+              for physical in [32_u32, 42, 48] {
+                  for scale in [1.0_f64, 1.25, 1.5, 2.0] {
+                      for theme in [ThemeMode::Dark, ThemeMode::Light] {
+                          snapshot.theme = theme;
+                          let mut config = PresentationConfig {
+                              edge,
+                              physical_thickness: Some(physical),
+                              bar_height: (f64::from(physical) / scale) as f32,
+                              vertical_padding: padding,
+                              tag_labels: (1..=9).map(|n| n.to_string()).collect(),
+                              ..PresentationConfig::default()
+                          };
+                          config.labels.clock.clear();
+                          let viewport = Size::new(config.logical_thickness(scale) as f32, (1440.0 / scale) as f32);
+                          let measure_surface = ImageSurface::create(Format::ARgb32, physical as i32, 1440).unwrap();
+                          let context = Context::new(&measure_surface).unwrap();
+                          context.scale(scale, scale);
+                          let renderer = CairoRenderer::new(FontDescription::from_string("DejaVu Sans"));
+                          let engine = LayoutEngine::new(config, renderer.text_measurer(&context));
+                          let scene = engine.build(snapshot.view(), viewport, &InteractionState::default());
+                          let painted = raster(&renderer, &scene, physical, 1440, scale);
+                          for (id, expected) in [(NodeId::Tag(active), "3"), (NodeId::Clock, "12"), (NodeId::Clock, "34")] {
+                              let label = scene.nodes.iter().find_map(|node| match node {
+                                  SceneNode::Text { id: actual, text, bounds, .. } if *actual == id && text == expected => Some(*bounds),
+                                  _ => None,
+                              });
+                              assert!(label.is_some(), "managed sidebar lost {id:?} label {expected:?}: edge={edge:?}, physical={physical}, scale={scale}, padding={padding}");
+                              let bounds = label.unwrap();
+                              assert!(bounds.x >= 0.0 && bounds.right() <= viewport.width + 0.01);
+                              assert!(bounds.y >= 0.0 && bounds.bottom() <= viewport.height + 0.01);
+                              let hit = scene.hits.iter().find(|hit| hit.id == id).unwrap();
+                              assert!(hit.primary.is_some());
+                              assert!(hit.bounds.x.abs() < 0.01 && (hit.bounds.width - viewport.width).abs() < 0.01);
+                              let mut without = scene.clone();
+                              without.nodes.retain(|node| !matches!(node, SceneNode::Text { id: actual, text, .. } if *actual == id && text == expected));
+                              let empty = raster(&renderer, &without, physical, 1440, scale);
+                              assert!(contains_ink(&painted, &empty, physical, 1440, bounds, scale), "label has no rasterized pixels: {edge:?} {physical}px {scale}x {id:?} {expected}");
+                          }
+                          if let Some(directory) = std::env::var_os("XBAR_SIDEBAR_PREVIEWS") {
+                              let directory = std::path::PathBuf::from(directory);
+                              std::fs::create_dir_all(&directory).unwrap();
+                              let rgba: Vec<u8> = painted.chunks_exact(4).flat_map(|pixel| {
+                                  let argb = u32::from_ne_bytes(pixel.try_into().unwrap());
+                                  let alpha = (argb >> 24) & 255;
+                                  let straight = |component: u32| if alpha == 0 { 0 } else { ((component * 255 + alpha / 2) / alpha).min(255) as u8 };
+                                  [straight((argb >> 16) & 255), straight((argb >> 8) & 255), straight(argb & 255), alpha as u8]
+                              }).collect();
+                              let name = format!("{}-{physical}px-{}pct-{theme:?}-pad{padding}", edge.as_str(), (scale * 100.0).round() as u32);
+                              image::save_buffer(directory.join(format!("{name}.png")), &rgba, physical, 1440, image::ColorType::Rgba8).unwrap();
+                              std::fs::write(directory.join(format!("{name}.json")), serde_json::to_vec_pretty(&scene).unwrap()).unwrap();
+                          }
+                      }
+                  }
+              }
+          }
+
+          #[test]
+          fn managed_left_sidebar_retains_readable_labels_and_full_width_hits() {
+              exercise(BarEdge::Left, 6.0);
+          }
+
+          #[test]
+          fn managed_right_sidebar_retains_readable_labels_and_full_width_hits() {
+              exercise(BarEdge::Right, 6.0);
+          }
+
+          #[test]
+          fn oversized_sidebar_padding_cannot_consume_all_text_space() {
+              exercise(BarEdge::Left, 24.0);
+              exercise(BarEdge::Right, 24.0);
+          }
+          RS
+          rustfmt --edition 2024 crates/xbar_core/tests/managed_sidebars.rs
+      - name: Prove that the tests reproduce the baseline failure
+        shell: bash
+        run: |
+          set +e
+          cargo test --locked -p xbar_core --all-features --test managed_sidebars -- --nocapture > /tmp/sidebar-before.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/sidebar-before.log
+          test "$result" -ne 0
+          grep -q 'managed sidebar lost' /tmp/sidebar-before.log
+      - name: Apply bounded sidebar padding fix
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('crates/xbar_core/src/presentation.rs')
+          source = path.read_text()
+          old = '''        let cross_padding =
+                      finite_non_negative(self.config.vertical_padding).min(axis.cross_len() * 0.5);'''
+          new = '''        // Managed thickness is physical: 42 px at 2x leaves only 21 logical
+                  // pixels. Fixed outer padding plus pill padding used to consume the
+                  // entire sidebar label. Preserve room for an icon/two clock digits
+                  // before allocating decorative cross-axis spacing.
+                  let cross_padding_limit = if axis.vertical {
+                      (axis.cross_len() - self.font_size() * 2.0).max(0.0) * 0.5
+                  } else {
+                      axis.cross_len() * 0.5
+                  };
+                  let cross_padding =
+                      finite_non_negative(self.config.vertical_padding).min(cross_padding_limit);'''
+          assert source.count(old) == 1, 'cross-axis patch does not match the pinned baseline'
+          source = source.replace(old, new, 1)
+          old = '''        let text_bounds = bounds.inset(padding, 0.0);
+                  let text = self.fit_text(&spec.text, text_bounds.width, 0.0);'''
+          new = '''        // On a narrow sidebar the inner and outer padding share one width
+                  // budget. Reducing only the outer inset still loses two-digit clock
+                  // components once DPI leaves less than a normal pill's logical width.
+                  let padding = if self.config.edge.is_vertical() {
+                      padding.min((bounds.width - self.font_size() * 2.0).max(0.0) * 0.5)
+                  } else {
+                      padding
+                  };
+                  let text_bounds = bounds.inset(padding, 0.0);
+                  let text = self.fit_text(&spec.text, text_bounds.width, 0.0);'''
+          assert source.count(old) == 1, 'pill patch does not match the pinned baseline'
+          path.write_text(source.replace(old, new, 1))
+          guide = Path('docs/bars-four-edges.md')
+          guide.write_text(guide.read_text() + '''
+          ## Fixed-physical sidebar regression
+
+          Managed sidebars retain readable workspace labels and clock digits at 32,
+          42 and 48 physical pixels across 1x, 1.25x, 1.5x and 2x output scales.
+          Decorative outer and inner padding yield to the available logical width;
+          text stays upright and the pointer target still spans the full bar width.
+          This is different from a 42-logical-pixel standalone fixture, which grows
+          to 84 physical pixels at 2x and did not expose the blank-sidebar regression.
+
+          The production Cairo/Pango test checks both edges, both themes, normal and
+          oversized padding, complete clock/workspace labels, actual glyph pixels,
+          containment and full-width hit targets (96 configurations):
+
+          ```sh
+          XBAR_SIDEBAR_PREVIEWS=/tmp/jwm-managed-sidebars \\
+            cargo test --locked -p xbar_core --all-features --test managed_sidebars
+          ```
+
+          PNG and Scene JSON outputs are optional; the regression always runs under
+          the existing all-feature/all-target core test job without a display server.
+          ''')
+      - name: Format and validate shared core
+        shell: bash
+        run: |
+          rustfmt --edition 2024 crates/xbar_core/src/presentation.rs crates/xbar_core/tests/managed_sidebars.rs
+          cargo clippy --locked -p xbar_core --all-features --all-targets --no-deps -- -D warnings
+          cargo test --locked -p xbar_core --all-features
+          XBAR_SIDEBAR_PREVIEWS=/tmp/jwm-managed-sidebars cargo test --locked -p xbar_core --all-features --test managed_sidebars
+          cargo run --locked -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-standalone-bars
+      - name: Check and test the default Tao Glow frontend
+        shell: bash
+        run: |
+          cargo check --manifest-path bars/tao_glow_bar/Cargo.toml --all-targets --locked
+          cargo test --manifest-path bars/tao_glow_bar/Cargo.toml --all-targets --locked
+      - name: Publish only verified source changes to the repair ref
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 296c601d8b92869fd0a54de756ff15b279b05021
+          git diff --check
+          git add crates/xbar_core/src/presentation.rs crates/xbar_core/tests/managed_sidebars.rs docs/bars-four-edges.md
+          test "$(git diff --cached --name-only | wc -l)" -eq 3
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(bars): keep managed sidebars readable at physical-pixel DPI scales' -m 'Bound outer and inner cross-axis padding before it consumes narrow sidebar text. Add 96 production Cairo/Pango regressions for both edges, physical sizes, DPI, themes and large configured padding, with pixel and hit-target assertions. Baseline regression failed before this fix; core tests, Clippy and Tao Glow checks passed.'
+          git push origin HEAD:refs/heads/fix/managed-sidebar-readable-20261018
+          git show --stat --oneline HEAD
+          git diff HEAD^ HEAD -- crates/xbar_core/src/presentation.rs
+      - name: Upload actual rendered fixtures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: managed-sidebar-render-validation
+          path: |
+            /tmp/sidebar-before.log
+            /tmp/jwm-managed-sidebars
+            /tmp/jwm-standalone-bars
+          retention-days: 7
