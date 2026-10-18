@@ -7,6 +7,7 @@ use crate::backend::api::Backend;
 use crate::backend::common_define::{EventMaskBits, StdCursorKind, WindowId};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
+use crate::core::types::Rect;
 use crate::jwm::features::switcher;
 use crate::jwm::features::system_ui::{ListRow, RowData};
 use crate::jwm::features::toggles::SystemUiPointerGrab;
@@ -60,7 +61,62 @@ pub(crate) fn tag_switch_motion(
     TagSwitchMotion::Layout
 }
 
+
+/**
+ * Select the workarea common to both tags. Tag-specific bars and docks can
+ * appear or disappear between the snapshots; the intersection prevents
+ * either tag's persistent chrome from entering any compositor transition.
+ * Coordinates stay in physical screen pixels, preserving monitor offsets.
+ */
+fn transition_capture_rect(
+    monitor: Rect,
+    old_work: Option<Rect>,
+    new_work: Option<Rect>,
+) -> Option<(i32, i32, u32, u32)> {
+    if monitor.w <= 0 || monitor.h <= 0 {
+        return None;
+    }
+    let mut x0 = i64::from(monitor.x);
+    let mut y0 = i64::from(monitor.y);
+    let mut x1 = x0 + i64::from(monitor.w);
+    let mut y1 = y0 + i64::from(monitor.h);
+
+    // A missing workarea (e.g. during output initialization) falls back to
+    // that output; never use another output's workspace or guess a top strip.
+    for work in [old_work, new_work].into_iter().flatten() {
+        if work.w <= 0 || work.h <= 0 {
+            return None;
+        }
+        x0 = x0.max(i64::from(work.x));
+        y0 = y0.max(i64::from(work.y));
+        x1 = x1.min(i64::from(work.x) + i64::from(work.w));
+        y1 = y1.min(i64::from(work.y) + i64::from(work.h));
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some((
+        i32::try_from(x0).ok()?,
+        i32::try_from(y0).ok()?,
+        u32::try_from(x1 - x0).ok()?,
+        u32::try_from(y1 - y0).ok()?,
+    ))
+}
+
 impl Jwm {
+    fn transition_capture_rect_for_monitor(
+        &self,
+        mon_key: MonitorKey,
+        old_work: Option<Rect>,
+    ) -> Option<(i32, i32, u32, u32)> {
+        let geometry = &self.state.monitors.get(mon_key)?.geometry;
+        transition_capture_rect(
+            Rect::new(geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h),
+            old_work,
+            self.monitor_work_area(mon_key),
+        )
+    }
+
     pub(crate) fn can_focus_switch(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let sel_client_key = self.get_selected_client_key().ok_or("No selected client")?;
 
@@ -832,6 +888,9 @@ impl Jwm {
             }
         }
 
+        // Remember the outgoing tag's reservations before its visibility changes.
+        let old_transition_work = self.monitor_work_area(sel_mon_key);
+
         // 2. 状态变更 (纯逻辑)
         let mut client_to_focus = None;
         let mut old_tag_mask = 0u32;
@@ -855,7 +914,7 @@ impl Jwm {
 
         // 3. 副作用 (Backend / Arrange)
         // Notify compositor to capture old scene for slide transition
-        let motion = tag_switch_motion(
+        let mut motion = tag_switch_motion(
             backend.has_compositor(),
             cfg.animation_enabled(),
             self.features.system_ui.is_active(),
@@ -864,14 +923,15 @@ impl Jwm {
         if motion == TagSwitchMotion::Transition {
             let direction =
                 Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
-            let mon_rect = self.monitor_rect(sel_mon_key);
-            let exclude_top = self.tag_transition_exclude_top(sel_mon_key);
-            backend.compositor_notify_tag_switch(
-                cfg.animation_duration(),
-                direction,
-                exclude_top,
-                mon_rect,
-            );
+            if let Some(mon_rect) =
+                self.transition_capture_rect_for_monitor(sel_mon_key, old_transition_work)
+            {
+                // The rect already excludes top/bottom/left/right chrome.
+                backend.compositor_notify_tag_switch(cfg.animation_duration(), direction, 0, mon_rect);
+            } else {
+                // No overlap means there is no workspace to animate safely.
+                motion = TagSwitchMotion::Layout;
+            }
         }
         self.focus(backend, client_to_focus)?;
         self.suppress_layout_animation = motion != TagSwitchMotion::Layout;
@@ -914,6 +974,7 @@ impl Jwm {
             return Ok(());
         }
         let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+        let old_transition_work = self.monitor_work_area(sel_mon_key);
 
         // 1. 状态变更
         let mut old_tag_mask = 0u32;
@@ -934,15 +995,17 @@ impl Jwm {
             {
                 let direction =
                     Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
-                let mon_rect = self.monitor_rect(sel_mon_key);
-                let exclude_top = self.tag_transition_exclude_top(sel_mon_key);
-                backend.compositor_notify_tag_switch(
-                    cfg.animation_duration(),
-                    direction,
-                    exclude_top,
-                    mon_rect,
-                );
-                transitioning = true;
+                if let Some(mon_rect) =
+                    self.transition_capture_rect_for_monitor(sel_mon_key, old_transition_work)
+                {
+                    backend.compositor_notify_tag_switch(
+                        cfg.animation_duration(),
+                        direction,
+                        0,
+                        mon_rect,
+                    );
+                    transitioning = true;
+                }
             }
         }
         self.focus(backend, None)?;
@@ -1107,10 +1170,67 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientKey, TagSwitchMotion, adjusted_client_factor, tag_switch_motion};
+    use super::{
+        ClientKey, TagSwitchMotion, adjusted_client_factor, tag_switch_motion,
+        transition_capture_rect,
+    };
+    use crate::core::types::Rect;
     use crate::Jwm;
     use crate::config::CONFIG;
     use slotmap::SlotMap;
+
+
+    #[test]
+    fn tag_transition_excludes_each_bar_edge_from_both_snapshots() {
+        let monitor = Rect::new(100, 50, 800, 600);
+        for (workspace, expected) in [
+            (Rect::new(100, 98, 800, 552), (100, 98, 800, 552)), // top
+            (Rect::new(100, 50, 800, 552), (100, 50, 800, 552)), // bottom
+            (Rect::new(148, 50, 752, 600), (148, 50, 752, 600)), // left
+            (Rect::new(100, 50, 752, 600), (100, 50, 752, 600)), // right
+        ] {
+            assert_eq!(
+                transition_capture_rect(monitor, Some(workspace), Some(workspace)),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn tag_transition_keeps_both_tags_chrome_stationary_when_visibility_changes() {
+        let monitor = Rect::new(0, 0, 1000, 800);
+        // The outgoing tag reserves the top, the incoming tag the bottom.
+        assert_eq!(
+            transition_capture_rect(
+                monitor,
+                Some(Rect::new(0, 50, 1000, 750)),
+                Some(Rect::new(0, 0, 1000, 750)),
+            ),
+            Some((0, 50, 1000, 700))
+        );
+        assert_eq!(transition_capture_rect(monitor, None, None), Some((0, 0, 1000, 800)));
+        assert_eq!(
+            transition_capture_rect(monitor, Some(Rect::new(0, 0, 0, 800)), None),
+            None
+        );
+    }
+
+    #[test]
+    fn tag_transition_is_monitor_local_even_with_negative_offsets() {
+        let monitor = Rect::new(-1920, -120, 1920, 1080);
+        assert_eq!(
+            transition_capture_rect(
+                monitor,
+                Some(Rect::new(-1872, -120, 1872, 1080)),
+                Some(Rect::new(-1920, -120, 1920, 1032)),
+            ),
+            Some((-1872, -120, 1872, 1032))
+        );
+        assert_eq!(
+            transition_capture_rect(monitor, Some(Rect::new(0, 0, 100, 100)), None),
+            None
+        );
+    }
 
     #[test]
     fn a_tag_jump_slides_only_with_no_shell_panel_on_screen() {

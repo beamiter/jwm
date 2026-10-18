@@ -1638,34 +1638,6 @@ impl Jwm {
         has_membership_change
     }
 
-    /// Return the number of pixels at the top of the monitor to exclude from
-    /// the tag-switch transition. Use the monitor workarea so compositor
-    /// transitions respect any top-reserved space, whether it comes from the
-    /// built-in bar, secondary bars, or external panels via struts.
-    fn tag_transition_exclude_top(&self, mon_key: MonitorKey) -> u32 {
-        let Some(monitor) = self.state.monitors.get(mon_key) else {
-            return 0;
-        };
-
-        let monitor_top = monitor.geometry.m_y;
-        let workarea_top = self
-            .monitor_work_area(mon_key)
-            .map(|rect| rect.y)
-            .unwrap_or(monitor.geometry.w_y);
-
-        (workarea_top - monitor_top).max(0) as u32
-    }
-
-    /// Return the (x, y, w, h) rect of the given monitor for compositor transitions.
-    fn monitor_rect(&self, mon_key: MonitorKey) -> (i32, i32, u32, u32) {
-        if let Some(mon) = self.state.monitors.get(mon_key) {
-            let g = &mon.geometry;
-            (g.m_x, g.m_y, g.m_w.max(1) as u32, g.m_h.max(1) as u32)
-        } else {
-            (0, 0, 1, 1)
-        }
-    }
-
     fn wintoclient(&self, win: WindowId) -> Option<ClientKey> {
         self.state.win_to_client.get(&win).copied()
     }
