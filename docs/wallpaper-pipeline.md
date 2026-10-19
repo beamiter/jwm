@@ -129,6 +129,15 @@ existing visible cadence and pauses when all of its own clips are hidden.
 No real-display FPS, power, or HDR improvement is claimed from software-renderer
 or CPU scheduling tests.
 
+### Solar wheel targets
+
+Solar wheel picking and camera/sky routing use the same actually displayed
+view. A wheel arriving before an entered or exited close-up has been presented
+takes over that visible view, even if the other transition was already admitted
+for rendering. Same-focus wheel bursts continue accumulating pending zoom.
+Retaining a displayed close-up also retains its overview return destination;
+zero, invalid, or saturated wheel requests do not cancel a queued transition.
+
 ### Source texture quality
 
 Earth, Moon, cloud and sky maps receive mipmaps once when their successful

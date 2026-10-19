@@ -401,15 +401,38 @@ impl SolarView {
         {
             return false;
         }
-        let hit = self
-            .presented
-            .and_then(|presented| presented.projection.pick(point[0], point[1]));
-        let changed = if let Some(body) = self.navigation.focus.filter(|body| Some(*body) == hit) {
-            self.navigation.camera.zoom_body(body, steps)
+        if steps == 0.0 {
+            return true;
+        }
+        let shown = self.presented.unwrap();
+        let mut navigation = self.navigation;
+        let mut overview = self.overview;
+        if navigation.focus != shown.navigation.focus {
+            // A new wheel gesture takes over the view actually displayed,
+            // including while another focus transition was admitted but has
+            // not reached the screen. Same-focus bursts still accumulate on
+            // the pending navigation instead of repeatedly starting over.
+            if shown.navigation.focus.is_none() {
+                overview = None;
+            } else if navigation.focus.is_none() {
+                // A queued leave already took the old overview out of its
+                // slot. Keep that return destination when retaining the
+                // displayed close-up, so a later leave still returns there.
+                overview = Some(navigation);
+            }
+            navigation = shown.navigation;
+        }
+        let hit = shown.projection.pick(point[0], point[1]);
+        let changed = if let Some(body) = navigation.focus.filter(|body| Some(*body) == hit) {
+            navigation.camera.zoom_body(body, steps)
         } else {
-            self.navigation.panorama.zoom(steps)
+            navigation.panorama.zoom(steps)
         };
         if changed {
+            // Invalid, zero or saturated input must not cancel a pending
+            // transition merely because target resolution needed a rebase.
+            self.navigation = navigation;
+            self.overview = overview;
             self.request_interaction();
         }
         true
@@ -1940,6 +1963,100 @@ mod tests {
         assert!(a.interaction_after.is_none());
         assert!(a.drag.is_none());
         assert_eq!(a.frame_navigation, a.navigation);
+    }
+
+    #[test]
+    fn wheel_before_focus_is_presented_targets_the_visible_overview() {
+        for admitted in [false, true] {
+            let mut a = visible_scene();
+            let shown = a.presented.unwrap();
+            let earth = shown
+                .projection
+                .project(body_center(3, &shown.projection.phases).unwrap())
+                .unwrap();
+            assert!(a.focus_body(3, &shown.projection.phases));
+            if admitted {
+                assert!(a.advance_interaction(Instant::now()));
+                assert_eq!(a.frame_navigation.focus, Some(3));
+            }
+            assert!(a.zoom(earth, 2.0));
+            assert_eq!(a.navigation.focus, None);
+            assert_eq!(a.navigation.camera, shown.navigation.camera);
+            assert!(a.navigation.panorama.fov_degrees() < shown.navigation.panorama.fov_degrees());
+            assert!(a.overview.is_none());
+            assert!(a.interaction_pending);
+            assert!(!a.leave_closeup());
+        }
+    }
+
+    #[test]
+    fn wheel_before_leave_is_presented_preserves_body_and_overview_return() {
+        let mut a = visible_scene();
+        let now = Instant::now();
+        assert!(a.zoom([10.0, 10.0], 2.0));
+        show_navigation(&mut a, now, 0.0);
+        let overview = a.navigation;
+        assert!(a.focus_body(3, &scene_phases(0.0).0));
+        show_navigation(&mut a, now + Duration::from_secs(1), 0.0);
+        let shown = a.presented.unwrap();
+        assert!(a.leave_closeup());
+        assert_eq!(a.navigation, overview);
+        assert!(a.zoom([399.5, 299.5], 2.0));
+        assert_eq!(a.navigation.focus, Some(3));
+        assert!(a.navigation.camera.distance < shown.navigation.camera.distance);
+        assert_eq!(a.navigation.panorama, shown.navigation.panorama);
+        assert_eq!(a.overview, Some(overview));
+        assert!(a.leave_closeup());
+        assert_eq!(a.navigation, overview);
+    }
+
+    #[test]
+    fn wheel_invalid_or_saturated_requests_preserve_pending_focus_transition() {
+        for leaving in [false, true] {
+            let mut a = visible_scene();
+            assert!(a.focus_body(3, &scene_phases(0.0).0));
+            if leaving {
+                show_navigation(&mut a, Instant::now(), 0.0);
+                assert!(a.leave_closeup());
+            }
+            let pending = a.navigation;
+            let overview = a.overview;
+            let after = a.interaction_after;
+            for steps in [0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                // Finite events on this view are consumed, even at a limit;
+                // consumption is independent of whether navigation changes.
+                assert_eq!(a.zoom([399.5, 299.5], steps), steps.is_finite());
+                assert_eq!(a.navigation, pending);
+                assert_eq!(a.overview, overview);
+                assert_eq!(a.interaction_after, after);
+            }
+        }
+        let mut a = visible_scene();
+        assert!(a.zoom([10.0, 10.0], 1000.0));
+        show_navigation(&mut a, Instant::now(), 0.0);
+        assert!(a.focus_body(3, &scene_phases(0.0).0));
+        let pending = a.navigation;
+        let overview = a.overview;
+        assert!(a.zoom([10.0, 10.0], 1.0));
+        assert_eq!(a.navigation, pending);
+        assert_eq!(a.overview, overview);
+    }
+
+    #[test]
+    fn wheel_same_displayed_focus_accumulates_unpresented_steps() {
+        let mut a = visible_scene();
+        assert!(a.focus_body(3, &scene_phases(0.0).0));
+        show_navigation(&mut a, Instant::now(), 0.0);
+        let shown = a.presented.unwrap();
+        assert!(a.zoom([399.5, 299.5], 1.0));
+        let first = a.navigation.camera.distance;
+        assert!(a.zoom([399.5, 299.5], 1.0));
+        assert!(a.navigation.camera.distance < first);
+        let mut expected = shown.navigation.camera;
+        assert!(expected.zoom_body(3, 2.0));
+        assert!((a.navigation.camera.distance - expected.distance).abs() < 0.00001);
+        assert_eq!(a.navigation.focus, shown.navigation.focus);
+        assert_eq!(a.frame_navigation, shown.navigation);
     }
     #[test]
     fn optional_material_polling_is_frozen_during_partial_damage() {
