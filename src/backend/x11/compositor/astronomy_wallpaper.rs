@@ -9,7 +9,8 @@ use crate::backend::compositor_common::animated_wallpaper::{
     solar_direction, transform_direction, wall_clock_seconds,
 };
 use crate::backend::compositor_common::celestial_layout::{
-    CelestialCanvas, resolve_celestial_canvases,
+    CelestialCanvas, MAX_CELESTIAL_OCCLUSION_CLIPS, celestial_clip_fully_covered,
+    resolve_celestial_canvases,
 };
 use crate::backend::compositor_common::panorama::{PanoramaDrag, PanoramaView, panorama_rotation};
 use glow::HasContext;
@@ -417,6 +418,8 @@ pub(super) struct AstronomyWallpaper {
     frame_changed: bool,
     layout: String,
     draw_plan: Vec<AstronomyDraw>,
+    visible_canvases: Vec<bool>,
+    material_active: bool,
     layout_screen: (u32, u32),
     layout_outputs: Vec<(i32, i32, u32, u32)>,
 }
@@ -519,6 +522,9 @@ impl AstronomyWallpaper {
             .enumerate()
             .rev()
             .find_map(|(index, canvas)| {
+                if !self.canvas_visible(index) {
+                    return None;
+                }
                 let (x, y, w, h) = canvas.clip;
                 (pixel[0] >= f64::from(x)
                     && pixel[0] < f64::from(x) + f64::from(w)
@@ -766,6 +772,9 @@ impl AstronomyWallpaper {
         // The complete topmost canvas (including its sky) hides earlier canvases.
         // Do not select a lower globe through the background of an overlapping output.
         for (index, base_canvas) in self.draw_plan.iter().enumerate().rev() {
+            if !self.canvas_visible(index) {
+                continue;
+            }
             let body = self.canvas_body(index);
             let mut canvas = base_canvas.clone();
             canvas.radius *= self.canvas_zoom_scale(index, true);
@@ -923,6 +932,9 @@ impl AstronomyWallpaper {
     /// globe always wins; empty pixels cannot expose a lower monitor's scene.
     fn sky_hit_test(&self, root: [f64; 2]) -> Option<AstronomyDraw> {
         for (index, base_canvas) in self.draw_plan.iter().enumerate().rev() {
+            if !self.canvas_visible(index) {
+                continue;
+            }
             let mut canvas = base_canvas.clone();
             canvas.radius *= self.canvas_zoom_scale(index, true);
             let (pixel, point) = canvas_pointer(&canvas, root, self.layout_screen.1)?;
@@ -1117,7 +1129,7 @@ impl AstronomyWallpaper {
     }
 
     fn interaction_deadline(&self, now: Instant) -> Option<Duration> {
-        (self.interaction_pending && self.powered && !self.draw_plan.is_empty()).then(|| {
+        (self.interaction_pending && self.powered && self.any_canvas_visible()).then(|| {
             self.last_interaction_frame.map_or(Duration::ZERO, |last| {
                 DRAG_FRAME_INTERVAL.saturating_sub(now.saturating_duration_since(last))
             })
@@ -1156,22 +1168,68 @@ impl AstronomyWallpaper {
     }
 
     fn admit_navigation(&mut self) {
+        self.visit_navigation(Self::admit_active_navigation);
+    }
+
+    fn admit_active_navigation(&mut self) {
+        if self.reset_requested {
+            self.reset_requested = false;
+            self.reset_active_orientation(CelestialBody::Earth);
+            self.reset_active_orientation(CelestialBody::Moon);
+            self.sky_offset = CelestialRotation::default();
+            self.sky_release = None;
+            self.panorama = PanoramaView::default();
+            self.requested_panorama = None;
+        }
+        self.earth_zoom.admit();
+        self.moon_zoom.admit();
+        if let Some(view) = self.requested_panorama.take() {
+            self.panorama = view;
+        }
+    }
+
+    fn active_navigation_pending(&self) -> bool {
+        self.reset_requested
+            || self.requested_panorama.is_some()
+            || self.earth_release.is_some()
+            || self.moon_release.is_some()
+            || self.sky_release.is_some()
+            || self.earth_zoom.requested_log != self.earth_zoom.admitted_log
+            || self.moon_zoom.requested_log != self.moon_zoom.admitted_log
+    }
+
+    /// A covered group must not retain a 60 Hz pointer wake or a frozen release.
+    /// Keep other groups' pending navigation and shared groups with any visible
+    /// clip intact. Committing hidden state is safe: reveal samples current UTC.
+    fn settle_hidden_navigation(&mut self, unix: f64) {
+        let visible: std::collections::BTreeSet<_> = (0..self.draw_plan.len())
+            .filter(|&index| self.canvas_visible(index))
+            .map(|index| self.canvas_group(index).to_owned())
+            .collect();
+        let original = self.active_navigation.clone();
+        let pending = self.interaction_pending;
+        if self
+            .drag
+            .as_ref()
+            .is_some_and(|d| !visible.contains(&d.group))
+            || self
+                .sky_drag
+                .as_ref()
+                .is_some_and(|d| !visible.contains(&d.group))
+        {
+            self.end_drag(unix);
+        }
+        let mut visible_pending = false;
         self.visit_navigation(|a| {
-            if a.reset_requested {
-                a.reset_requested = false;
-                a.reset_active_orientation(CelestialBody::Earth);
-                a.reset_active_orientation(CelestialBody::Moon);
-                a.sky_offset = CelestialRotation::default();
-                a.sky_release = None;
-                a.panorama = PanoramaView::default();
-                a.requested_panorama = None;
-            }
-            a.earth_zoom.admit();
-            a.moon_zoom.admit();
-            if let Some(view) = a.requested_panorama.take() {
-                a.panorama = view;
+            if visible.contains(&a.active_navigation) {
+                visible_pending |= a.active_navigation_pending();
+            } else {
+                a.commit_active_releases();
+                a.admit_active_navigation();
             }
         });
+        self.activate_navigation(&original);
+        self.interaction_pending = visible_pending || (pending && self.has_drag());
     }
 
     fn reset_at(&mut self, root: [f64; 2]) -> bool {
@@ -1209,41 +1267,119 @@ impl AstronomyWallpaper {
         changed
     }
 
-    /// Only visible, rotating bodies contribute to the animation cadence.
-    /// A hidden fast Moon must not keep an Earth-only desktop at 15 Hz.
-    fn frame_interval(&self) -> Duration {
-        let mut earth_visible = false;
-        let mut moon_visible = false;
-        let mut moving_sky_visible = false;
-        let mut radius = 0.0_f32;
-        for (index, canvas) in self.draw_plan.iter().enumerate() {
-            radius = radius.max(canvas.radius * self.canvas_zoom_scale(index, false));
-            let group = self.canvas_group(index);
-            let captured = self
-                .drag
-                .as_ref()
-                .is_some_and(|d| d.group == group && d.body == self.canvas_body(index));
-            moving_sky_visible |= !self.sky_drag.as_ref().is_some_and(|d| d.group == group);
-            if self.canvas_body(index) == CelestialBody::Moon && !captured {
-                moon_visible = true;
-            } else if !matches!(
-                self.canvas_body(index),
-                CelestialBody::Galaxy | CelestialBody::Moon
-            ) && !captured
-            {
-                earth_visible = true;
-            }
+    /// An absent mask is conservative for legacy low-level callers. Production
+    /// preparation refreshes the complete mask after resolving current layout.
+    fn canvas_visible(&self, index: usize) -> bool {
+        self.visible_canvases.get(index).copied().unwrap_or(true)
+    }
+
+    fn any_canvas_visible(&self) -> bool {
+        (0..self.draw_plan.len()).any(|index| self.canvas_visible(index))
+    }
+
+    /// Whole-desktop wallpaper readback must not sample clips deliberately
+    /// omitted from this renderer's cache/presentation while covered.
+    pub(super) fn has_hidden_clips(&self) -> bool {
+        self.enabled
+            && !self.failed
+            && (0..self.draw_plan.len()).any(|index| !self.canvas_visible(index))
+    }
+
+    fn body_visible(&self, body: CelestialBody) -> bool {
+        (0..self.draw_plan.len())
+            .any(|index| self.canvas_visible(index) && self.canvas_body(index) == body)
+    }
+
+    fn update_visibility(&mut self, opaque_rects: &[(i32, i32, u32, u32)]) -> bool {
+        // Layout overlap subtraction can legally produce thousands of clips.
+        // Bound coverage work independently of that geometry complexity; extra
+        // drawing is preferable to delaying input or falsely hiding a scene.
+        let visible: Vec<_> = if self.draw_plan.len() > MAX_CELESTIAL_OCCLUSION_CLIPS {
+            vec![true; self.draw_plan.len()]
+        } else {
+            self.draw_plan
+                .iter()
+                .map(|canvas| {
+                    !celestial_clip_fully_covered(self.layout_screen, canvas.clip, opaque_rects)
+                })
+                .collect()
+        };
+        let changed = self.visible_canvases != visible;
+        self.visible_canvases = visible;
+        changed
+    }
+
+    fn canvas_panorama(&self, index: usize) -> PanoramaView {
+        let group = self.canvas_group(index);
+        if group == self.active_navigation {
+            self.panorama
+        } else {
+            self.navigation_states
+                .get(group)
+                .map_or_else(PanoramaView::default, |n| n.panorama)
         }
-        astronomy_frame_interval(
-            radius,
-            (earth_visible && self.earth_view.rotating).then_some(self.earth_period),
-            (moon_visible && self.moon_view.rotating).then_some(self.moon_period),
-            if moving_sky_visible {
-                self.sky_period
-            } else {
-                0
-            },
-        )
+    }
+
+    /// Only visible, uncaptured motion contributes. Compute each canvas before
+    /// taking the minimum so a covered fast Moon or unrelated large zoom cannot
+    /// raise the cadence of the Earth that is actually visible.
+    fn frame_interval(&self) -> Option<Duration> {
+        self.draw_plan
+            .iter()
+            .enumerate()
+            .filter_map(|(index, canvas)| {
+                if !self.canvas_visible(index) {
+                    return None;
+                }
+                let body = self.canvas_body(index);
+                let group = self.canvas_group(index);
+                let captured = self
+                    .drag
+                    .as_ref()
+                    .is_some_and(|d| d.group == group && d.body == body);
+                let moving_sky = !self.sky_drag.as_ref().is_some_and(|d| d.group == group);
+                let period = if captured || body == CelestialBody::Galaxy {
+                    None
+                } else if body == CelestialBody::Moon {
+                    self.moon_view.rotating.then_some(self.moon_period)
+                } else {
+                    self.earth_view.rotating.then_some(self.earth_period)
+                };
+                astronomy_frame_interval(
+                    canvas.radius
+                        * self.canvas_zoom_scale(index, false)
+                        * if body == CelestialBody::Saturn {
+                            2.269
+                        } else {
+                            1.0
+                        },
+                    period,
+                    moving_sky.then_some((
+                        canvas.size,
+                        self.canvas_panorama(index).fov_degrees(),
+                        self.sky_period,
+                    )),
+                    matches!(body, CelestialBody::Earth | CelestialBody::Moon),
+                )
+            })
+            .min()
+    }
+
+    fn visible_material_pending(&self) -> bool {
+        if !self.any_canvas_visible() {
+            return false;
+        }
+        self.sky_pending.is_some()
+            || (self.body_visible(CelestialBody::Earth)
+                && (self.pending.is_some()
+                    || self.cloud_pending.is_some()
+                    || self.earth_detail.pending.is_some()))
+            || (self.body_visible(CelestialBody::Moon)
+                && (self.moon_pending.is_some() || self.moon_detail.pending.is_some()))
+            || self
+                .planet_maps
+                .iter()
+                .any(|(body, map)| map.pending.is_some() && self.body_visible(*body))
     }
 
     /// Sample one real instant for both bodies on every material repaint.
@@ -1258,16 +1394,28 @@ impl AstronomyWallpaper {
     ) -> bool {
         let timezone_changed = self.sample_offset != offset_seconds;
         self.sample_offset = offset_seconds;
-        if !self.enabled || !self.powered || occluded || self.draw_plan.is_empty() {
+        let active = self.enabled && self.powered && !occluded && self.any_canvas_visible();
+        let revealed = active && !self.material_active;
+        self.material_active = active;
+        if !active {
             self.end_drag(unix);
             self.clear_interaction_wake();
         }
         let interaction = self.consume_interaction(now);
-        self.clock.set_interval(self.frame_interval());
-        self.clock
-            .set_paused(!self.enabled || !self.powered || occluded || self.draw_plan.is_empty());
+        // Decoders expose polling slots, not a completion event. Static scenes
+        // therefore poll at 1 Hz while a visible material is pending, and stop
+        // as soon as adoption/failure clears the slot. Never return a permanent
+        // zero deadline just because a decode has not finished yet.
+        let interval = self.frame_interval().or_else(|| {
+            self.visible_material_pending()
+                .then_some(Duration::from_secs(1))
+        });
+        if let Some(interval) = interval {
+            self.clock.set_interval(interval);
+        }
+        self.clock.set_paused(!active || interval.is_none());
         let tick = self.clock.tick(now);
-        self.frame_changed = invalidated || timezone_changed || tick || interaction;
+        self.frame_changed = invalidated || timezone_changed || revealed || tick || interaction;
         if self.frame_changed {
             self.sample_unix = unix;
             self.cache.invalidate();
@@ -1415,6 +1563,9 @@ impl AstronomyWallpaper {
         let mut earth_zoom = 0.0_f32;
         let mut moon_zoom = 0.0_f32;
         for index in 0..self.draw_plan.len() {
+            if !self.canvas_visible(index) {
+                continue;
+            }
             match self.canvas_body(index) {
                 CelestialBody::Earth => {
                     earth_zoom = earth_zoom.max(self.canvas_zoom_scale(index, false))
@@ -1475,6 +1626,9 @@ impl AstronomyWallpaper {
             }
         }
         for body in visible {
+            if !self.body_visible(body) {
+                continue;
+            }
             self.planet_maps.entry(body).or_insert_with(|| {
                 let pending = resolve_planet_texture(body).map(|path| {
                     wallpaper::DeferredWallpaperLoad::new(move |cancelled| {
@@ -1493,6 +1647,9 @@ impl AstronomyWallpaper {
         let original = self.active_navigation.clone();
         let mut frames = Vec::with_capacity(self.draw_plan.len());
         for index in 0..self.draw_plan.len() {
+            if !self.canvas_visible(index) {
+                continue;
+            }
             let body = self.canvas_body(index);
             let group = self.canvas_group(index).to_owned();
             self.activate_navigation(&group);
@@ -1793,7 +1950,10 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// CPU/X11-only maintenance, deliberately before fullscreen/unchanged gates.
-    pub(super) fn prepare_astronomy_wallpaper(&mut self, occluded: bool) -> bool {
+    pub(super) fn prepare_astronomy_wallpaper(
+        &mut self,
+        opaque_rects: &[(i32, i32, u32, u32)],
+    ) -> bool {
         let now = Instant::now();
         let cfg = crate::config::CONFIG.load();
         let enabled = cfg.behavior().wallpaper_effect == "astronomy";
@@ -1818,7 +1978,7 @@ impl<C: CompositorConnection> Compositor<C> {
             system_offset,
         );
         let a = &mut self.astronomy_wallpaper;
-        if a.has_drag() && (!a.config_matches(cfg.behavior()) || occluded) {
+        if a.has_drag() && !a.config_matches(cfg.behavior()) {
             a.end_drag(wall_clock_seconds(SystemTime::now()));
         }
         let layout_changed = a.update_layout(
@@ -1838,6 +1998,11 @@ impl<C: CompositorConnection> Compositor<C> {
             assignments_changed || layout_changed,
         );
         let bodies_changed = assignments_changed || scenes_changed;
+        let visibility_changed = a.update_visibility(opaque_rects);
+        if visibility_changed {
+            a.settle_hidden_navigation(sample_unix);
+        }
+        let occluded = !a.any_canvas_visible();
         let dual = a.bodies.contains(&CelestialBody::Moon);
         let earth_required = a.bodies.contains(&CelestialBody::Earth);
         if layout_changed || bodies_changed {
@@ -1961,11 +2126,18 @@ impl<C: CompositorConnection> Compositor<C> {
             || bodies_changed
             || periods_changed
             || view_changed
-            || power_changed;
+            || power_changed
+            || visibility_changed;
+        // Static planet scenes need the pending slot visible to update_clock
+        // on this same preparation; otherwise first adoption waits for DPMS.
+        if !occluded {
+            a.request_planet_maps();
+        }
         let changed = a.update_clock(now, sample_unix, offset_seconds, occluded, invalidated);
         if !occluded {
+            // Earth/Moon already retain the 1 Hz physical-light floor. Detail
+            // requests must see navigation admitted by update_clock above.
             a.request_details();
-            a.request_planet_maps();
         }
         changed
     }
@@ -2004,11 +2176,16 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             return;
         }
+        if !a.any_canvas_visible() {
+            return;
+        }
         // First adoption changes the entire material, so wait for a frame
         // whose prepare step already requested full repair/blur invalidation.
         // Unrelated client damage between animation ticks must stay static.
+        let earth_visible = a.body_visible(CelestialBody::Earth);
+        let moon_visible = a.body_visible(CelestialBody::Moon);
         let (may_draw, poll_optional) = material_load_frame(
-            a.pending.is_some() || a.moon_pending.is_some(),
+            (earth_visible && a.pending.is_some()) || (moon_visible && a.moon_pending.is_some()),
             a.cloud_pending.is_some()
                 || a.sky_pending.is_some()
                 || a.earth_detail.pending.is_some()
@@ -2027,7 +2204,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE).max(0) as u32;
             }
         }
-        if let Some(load) = a.pending.as_ref() {
+        if let Some(load) = a.pending.as_ref().filter(|_| earth_visible) {
             match load.try_recv() {
                 Ok(data) => {
                     a.cache.invalidate();
@@ -2072,7 +2249,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
             }
         }
-        if let Some(load) = a.moon_pending.as_ref() {
+        if let Some(load) = a.moon_pending.as_ref().filter(|_| moon_visible) {
             match load.try_recv() {
                 Ok(data) => {
                     a.cache.invalidate();
@@ -2117,7 +2294,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
             }
         }
-        if let Some(load) = a.cloud_pending.as_ref().filter(|_| poll_optional) {
+        if let Some(load) = a
+            .cloud_pending
+            .as_ref()
+            .filter(|_| poll_optional && earth_visible)
+        {
             match load.try_recv() {
                 Ok(data) => {
                     a.cache.invalidate();
@@ -2182,14 +2363,21 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         if poll_optional {
-            let earth_changed =
-                Self::poll_astronomy_detail(&self.gl, &mut a.earth_detail, a.earth_width);
-            let moon_changed =
-                Self::poll_astronomy_detail(&self.gl, &mut a.moon_detail, a.moon_width);
+            let earth_changed = earth_visible
+                && Self::poll_astronomy_detail(&self.gl, &mut a.earth_detail, a.earth_width);
+            let moon_changed = moon_visible
+                && Self::poll_astronomy_detail(&self.gl, &mut a.moon_detail, a.moon_width);
             if earth_changed || moon_changed {
                 a.cache.invalidate();
             }
-            for map in a.planet_maps.values_mut() {
+            let visible_bodies: std::collections::BTreeSet<_> = (0..a.draw_plan.len())
+                .filter(|&index| a.canvas_visible(index))
+                .map(|index| a.canvas_body(index))
+                .collect();
+            for (body, map) in &mut a.planet_maps {
+                if !visible_bodies.contains(body) {
+                    continue;
+                }
                 let Some(load) = map.pending.as_ref() else {
                     continue;
                 };
@@ -2221,10 +2409,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        if a.earth_material && a.texture.is_none() {
+        if earth_visible && a.texture.is_none() {
             return;
         }
-        if a.dual_material && a.moon_texture.is_none() {
+        if moon_visible && a.moon_texture.is_none() {
             return;
         }
         if a.program.is_none() {
@@ -2258,8 +2446,14 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         if cached && a.cache.valid() {
             unsafe {
-                a.cache
-                    .present(&self.gl, a.draw_plan.iter().map(|canvas| canvas.clip));
+                a.cache.present(
+                    &self.gl,
+                    a.draw_plan
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| a.canvas_visible(*index))
+                        .map(|(_, canvas)| canvas.clip),
+                );
             }
             return;
         }
@@ -2369,8 +2563,14 @@ impl<C: CompositorConnection> Compositor<C> {
         if cached {
             a.cache.finish();
             unsafe {
-                a.cache
-                    .present(&self.gl, a.draw_plan.iter().map(|canvas| canvas.clip));
+                a.cache.present(
+                    &self.gl,
+                    a.draw_plan
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| a.canvas_visible(*index))
+                        .map(|(_, canvas)| canvas.clip),
+                );
             }
         }
         a.record_presented(&frames);
@@ -2685,7 +2885,7 @@ mod tests {
             .unwrap();
         assert!(a.update_clock(now, unix, 28800, false, false));
         assert_same_basis(a.sky_view(unix).matrix(), displayed.matrix());
-        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
         assert!(a.drag_motion([200.0, 500.0]));
         assert!(a.drag_motion(endpoint));
         assert!(a.update_clock(
@@ -2957,7 +3157,7 @@ mod tests {
         let unix = a.sample_unix;
         assert!(a.update_clock(now, unix, 28800, false, false));
         assert_same_basis(a.body_matrix(CelestialBody::Earth, unix), displayed);
-        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
         let sun = solar_direction(a.sample_unix);
         let phase = lunar_phase_light(a.sample_unix);
         assert!(a.update_clock(
@@ -3381,6 +3581,275 @@ mod tests {
         assert!(a.retired.is_empty());
     }
 
+    fn cadence_scene(body: CelestialBody, size: (u32, u32)) -> AstronomyWallpaper {
+        let mut a = active_wallpaper();
+        a.layout_screen = size;
+        a.draw_plan = astronomy_draw_plan(size, &[], false, None);
+        a.bodies = vec![body];
+        a.scene_plan = vec![CelestialCanvas {
+            scene: "cadence-test".into(),
+            group_key: "cadence-test".into(),
+            connector: "DP-1".into(),
+            canvas: a.draw_plan[0].clone(),
+        }];
+        a.active_navigation = "cadence-test".into();
+        a
+    }
+
+    #[test]
+    fn settled_static_galaxy_has_no_material_deadline() {
+        let mut a = cadence_scene(CelestialBody::Galaxy, (3840, 2160));
+        let now = Instant::now();
+        assert!(a.update_clock(now, 1000.0, 0, false, true));
+        assert_eq!(a.clock.deadline(now), None);
+        assert!(!a.update_clock(now + Duration::from_secs(2), 1002.0, 0, false, false));
+        assert_eq!(a.sample_unix, 1000.0);
+    }
+
+    #[test]
+    fn admitted_panorama_lens_changes_sky_cadence() {
+        let mut a = cadence_scene(CelestialBody::Galaxy, (3840, 2160));
+        a.sky_period = 120;
+        let wide = a.frame_interval();
+        let mut requested = a.panorama;
+        assert!(requested.zoom(1000.0));
+        a.requested_panorama = Some(requested);
+        assert_eq!(a.frame_interval(), wide);
+        a.admit_navigation();
+        assert!(a.frame_interval() < wide);
+    }
+
+    fn cadence_pair(left: CelestialBody, right: CelestialBody) -> AstronomyWallpaper {
+        let mut a = cadence_scene(left, (3840, 1080));
+        a.draw_plan = astronomy_draw_plan(
+            (3840, 1080),
+            &[(0, 0, 1920, 1080), (1920, 0, 1920, 1080)],
+            true,
+            None,
+        );
+        a.bodies = vec![left, right];
+        a.scene_plan = a
+            .draw_plan
+            .iter()
+            .enumerate()
+            .map(|(index, canvas)| CelestialCanvas {
+                scene: "cadence-test".into(),
+                group_key: format!("group:{index}"),
+                connector: format!("DP-{index}"),
+                canvas: canvas.clone(),
+            })
+            .collect();
+        a.active_navigation = "group:0".into();
+        a.navigation_states
+            .insert("group:1".into(), AstronomyNavigation::default());
+        a.sample_unix = 1000.0;
+        let frames = a.material_frames();
+        a.record_presented(&frames);
+        a
+    }
+
+    #[test]
+    fn cadence_hidden_fast_moon_cannot_drive_visible_slow_earth() {
+        let mut a = cadence_pair(CelestialBody::Earth, CelestialBody::Moon);
+        a.earth_view.rotating = true;
+        a.moon_view.rotating = true;
+        a.earth_period = 1440;
+        a.moon_period = 1;
+        assert_eq!(
+            a.frame_interval(),
+            Some(crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL)
+        );
+        assert!(a.update_visibility(&[(1920, 0, 1920, 1080)]));
+        assert_eq!(a.visible_canvases, [true, false]);
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
+        assert_eq!(a.material_frames().len(), 1);
+        assert!(!a.body_visible(CelestialBody::Moon));
+        let now = Instant::now();
+        assert!(a.update_clock(now, 1000.0, 0, false, true));
+        assert!(!a.update_clock(now + Duration::from_millis(100), 1000.1, 0, false, false));
+        let revealed = a.update_visibility(&[]);
+        assert!(revealed);
+        assert!(a.update_clock(
+            now + Duration::from_millis(101),
+            -5000.0,
+            0,
+            false,
+            revealed
+        ));
+        assert_eq!(a.sample_unix, -5000.0);
+        assert_eq!(a.material_frames().len(), 2);
+        assert!(!a.update_clock(now + Duration::from_millis(101), -5000.0, 0, false, false));
+        // A single visible column remains conservatively animated.
+        a.update_visibility(&[(1921, 0, 1919, 1080)]);
+        assert!(a.body_visible(CelestialBody::Moon));
+    }
+
+    #[test]
+    fn cadence_uses_each_visible_groups_admitted_lens_and_body_zoom() {
+        let mut a = cadence_pair(CelestialBody::Galaxy, CelestialBody::Galaxy);
+        a.sky_period = 120;
+        let wide = a.frame_interval();
+        a.activate_navigation("group:1");
+        let mut zoomed = a.panorama;
+        zoomed.zoom(1000.0);
+        a.requested_panorama = Some(zoomed);
+        a.presented_sky = Some(zoomed);
+        a.activate_navigation("group:0");
+        assert_eq!(a.frame_interval(), wide);
+        a.admit_navigation();
+        assert!(a.frame_interval() < wide);
+        a.update_visibility(&[(1920, 0, 1920, 1080)]);
+        assert_eq!(a.frame_interval(), wide);
+        let mut a = cadence_pair(CelestialBody::Earth, CelestialBody::Moon);
+        a.earth_view.rotating = true;
+        a.earth_period = 120;
+        a.moon_view.rotating = false;
+        let small = a.frame_interval();
+        a.earth_zoom.request(1000.0);
+        a.earth_zoom.presented = Some(8.0);
+        assert_eq!(a.frame_interval(), small);
+        a.admit_navigation();
+        assert!(a.frame_interval() < small);
+    }
+
+    #[test]
+    fn cadence_stationary_grabs_suppress_only_their_groups_decorative_motion() {
+        let mut a = cadence_pair(CelestialBody::Galaxy, CelestialBody::Galaxy);
+        a.sky_period = 1;
+        let now = Instant::now();
+        assert!(a.begin_sky_drag([959.5, 539.5]));
+        assert!(a.consume_interaction(now));
+        a.update_visibility(&[(1920, 0, 1920, 1080)]);
+        assert_eq!(a.frame_interval(), None);
+        assert_eq!(a.interaction_deadline(now), None);
+        a.update_visibility(&[]);
+        assert_eq!(
+            a.frame_interval(),
+            Some(crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL)
+        );
+        let mut a = cadence_pair(CelestialBody::Earth, CelestialBody::Moon);
+        a.earth_view.rotating = true;
+        a.earth_period = 1;
+        a.update_visibility(&[(1920, 0, 1920, 1080)]);
+        assert!(a.begin_drag([959.5, 539.5]));
+        assert!(a.consume_interaction(now));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn cadence_hidden_group_settles_input_without_losing_visible_pending_navigation() {
+        let mut a = cadence_pair(CelestialBody::Galaxy, CelestialBody::Galaxy);
+        let now = Instant::now();
+        assert!(a.zoom([2879.5, 539.5], 2.0));
+        assert!(a.begin_sky_drag([959.5, 539.5]));
+        assert!(a.drag_motion([1059.5, 539.5]));
+        a.update_visibility(&[(0, 0, 1920, 1080)]);
+        a.settle_hidden_navigation(1100.0);
+        assert!(!a.has_drag());
+        assert!(a.interaction_pending);
+        assert!(a.consume_interaction(now));
+        assert!(a.canvas_panorama(1).fov_degrees() < 60.0);
+        assert!(!a.interaction_pending);
+        a.activate_navigation("group:0");
+        assert!(a.sky_release.is_none());
+        assert_eq!(a.pointer_canvas([959.5, 539.5]), None);
+        // Both output clips in one group share a gesture until its last clip hides.
+        let mut a = cadence_pair(CelestialBody::Galaxy, CelestialBody::Galaxy);
+        a.scene_plan[1].group_key = "group:0".into();
+        assert!(a.begin_sky_drag([959.5, 539.5]));
+        a.update_visibility(&[(0, 0, 1920, 1080)]);
+        a.settle_hidden_navigation(1100.0);
+        assert!(a.has_drag());
+        a.update_visibility(&[(0, 0, 3840, 1080)]);
+        a.settle_hidden_navigation(1101.0);
+        assert!(!a.has_drag() && !a.interaction_pending);
+    }
+
+    #[test]
+    fn cadence_static_galaxy_refreshes_for_reveal_input_config_and_power_only() {
+        let mut a = cadence_scene(CelestialBody::Galaxy, (1920, 1080));
+        let now = Instant::now();
+        assert!(!a.observe_power(now, Some(true)));
+        assert!(a.update_clock(now, 1000.0, 0, false, true));
+        assert_eq!(a.clock.deadline(now), None);
+        for seconds in [2, 4, 1000] {
+            let time = now + Duration::from_secs(seconds);
+            let changed = a.observe_power(time, Some(true));
+            assert!(!a.update_clock(time, 1000.0 + seconds as f64, 0, false, changed));
+        }
+        assert_eq!(a.sample_unix, 1000.0);
+        assert!(a.update_clock(now + Duration::from_secs(1001), 5000.0, 0, false, true));
+        let frames = a.material_frames();
+        a.record_presented(&frames);
+        assert!(a.zoom([959.5, 539.5], 1.0));
+        assert!(a.update_clock(now + Duration::from_secs(1002), 5001.0, 0, false, false));
+        assert_eq!(a.clock.deadline(now + Duration::from_secs(1002)), None);
+        assert!(!a.update_clock(now + Duration::from_secs(1003), 5002.0, 0, true, false));
+        assert!(a.update_clock(now + Duration::from_secs(1004), -1000.0, 0, false, false));
+        assert_eq!(a.sample_unix, -1000.0);
+        assert!(!a.update_clock(now + Duration::from_secs(1004), -1000.0, 0, false, false));
+        let off = a.observe_power(now + Duration::from_secs(1005), Some(false));
+        a.update_clock(now + Duration::from_secs(1005), 0.0, 0, false, off);
+        let on = a.observe_power(now + Duration::from_secs(1006), Some(true));
+        assert!(a.update_clock(now + Duration::from_secs(1006), 9000.0, 0, false, on));
+        assert_eq!(a.sample_unix, 9000.0);
+        assert_eq!(a.clock.deadline(now + Duration::from_secs(1006)), None);
+    }
+
+    #[test]
+    fn cadence_pending_static_material_has_bounded_polling_and_stops_after_adoption() {
+        let mut a = cadence_scene(CelestialBody::Galaxy, (1920, 1080));
+        a.sky_pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| None));
+        let now = Instant::now();
+        assert!(a.update_clock(now, 1000.0, 0, false, true));
+        assert_eq!(a.clock.deadline(now), Some(Duration::from_secs(1)));
+        for ms in 1..1000 {
+            assert!(!a.update_clock(now + Duration::from_millis(ms), 1000.0, 0, false, false));
+        }
+        assert!(a.update_clock(now + Duration::from_secs(1), 1001.0, 0, false, false));
+        // Model draw's adoption/failure clearing the production deferred slot.
+        a.sky_pending = None;
+        assert!(!a.update_clock(now + Duration::from_secs(2), 1002.0, 0, false, false));
+        assert_eq!(a.clock.deadline(now + Duration::from_secs(2)), None);
+        a.pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| None));
+        assert!(!a.visible_material_pending());
+        a.sky_pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| None));
+        a.update_visibility(&[(0, 0, 1920, 1080)]);
+        assert!(!a.visible_material_pending());
+        assert!(!a.update_clock(now + Duration::from_secs(3), 1003.0, 0, true, false));
+        assert_eq!(a.clock.deadline(now + Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn cadence_hidden_clips_block_whole_desktop_readback_until_reveal() {
+        let mut a = cadence_pair(CelestialBody::Earth, CelestialBody::Moon);
+        assert!(!a.has_hidden_clips());
+        a.update_visibility(&[(1920, 0, 1920, 1080)]);
+        assert!(a.has_hidden_clips() && a.any_canvas_visible());
+        a.failed = true;
+        assert!(!a.has_hidden_clips());
+        a.failed = false;
+        a.enabled = false;
+        assert!(!a.has_hidden_clips());
+        a.enabled = true;
+        a.update_visibility(&[]);
+        assert!(!a.has_hidden_clips());
+    }
+
+    #[test]
+    fn cadence_excessive_clips_conservatively_skip_coverage_work() {
+        let mut a = cadence_scene(CelestialBody::Galaxy, (1920, 1080));
+        a.draw_plan = vec![a.draw_plan[0].clone(); 128];
+        a.update_visibility(&[(0, 0, 1920, 1080)]);
+        assert!(a.visible_canvases.iter().all(|visible| !visible));
+        a.draw_plan.push(a.draw_plan[0].clone());
+        assert!(a.update_visibility(&[(0, 0, 1920, 1080)]));
+        assert_eq!(a.visible_canvases.len(), 129);
+        assert!(a.visible_canvases.iter().all(|visible| *visible));
+        assert!(!a.has_hidden_clips());
+        assert!(!a.update_visibility(&[(0, 0, 1920, 1080)]));
+    }
+
     #[test]
     fn fixed_and_hidden_bodies_do_not_raise_render_cadence() {
         let mut a = active_wallpaper();
@@ -3389,26 +3858,26 @@ mod tests {
         a.moon_view.rotating = true;
         a.bodies = vec![CelestialBody::Moon];
         // A Moon assignment is ignored outside earth-moon layout.
-        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
         a.earth_view.rotating = true;
         assert_eq!(
             a.frame_interval(),
-            crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL
+            Some(crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL)
         );
         a.dual_material = true;
         a.moon_view.rotating = false;
-        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
         a.moon_view.rotating = true;
         a.moon_period = 39343;
-        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
         a.bodies = vec![CelestialBody::Earth];
         a.earth_view.rotating = false;
         a.moon_period = 1;
-        assert_eq!(a.frame_interval(), Duration::from_secs(1));
+        assert_eq!(a.frame_interval(), Some(Duration::from_secs(1)));
         a.sky_period = 1;
         assert_eq!(
             a.frame_interval(),
-            crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL
+            Some(crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL)
         );
     }
 

@@ -160,35 +160,50 @@ fn resolve_earth_texture_from(
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_nanos(66_666_667);
 pub(crate) const POWER_QUERY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Keep the fastest visible decorative rotation below roughly half a pixel per
-/// update, bounded to 1–15 Hz. Physical sunlight still refreshes at least once a
-/// second. Match the shader's period clamping, including the static-sky sentinel.
+/// Per-canvas automatic cadence, bounded to 1–15 Hz when animation is active.
+/// Body motion uses the admitted projected radius. Perspective sky motion uses
+/// the admitted vertical FOV and full canvas size, matching panorama_ray().
+/// Its worst-case screen derivative is f * (1 + r²) pixels/radian, where r is
+/// the corner ray's distance from the optical axis. This bounds every rotation
+/// axis and aspect ratio, rather than only a feature at the screen center.
+/// Earth/Moon retain a 1 Hz physical-light floor; a stationary sky needs none.
 pub(crate) fn astronomy_frame_interval(
     radius: f32,
-    earth_minutes: Option<u32>,
-    moon_minutes: Option<u32>,
-    sky_minutes: u32,
-) -> Duration {
-    let radius = if radius.is_finite() {
-        f64::from(radius.max(0.0))
-    } else {
-        0.0
+    body_minutes: Option<u32>,
+    sky: Option<([f32; 2], f32, u32)>,
+    physical_light: bool,
+) -> Option<Duration> {
+    let speed = |pixels_per_radian: f64, minutes: u32| {
+        pixels_per_radian * std::f64::consts::TAU / (f64::from(minutes.clamp(1, 525_600)) * 60.0)
     };
-    let fastest = [
-        earth_minutes,
-        moon_minutes,
-        (sky_minutes != 0).then_some(sky_minutes),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|m| m.clamp(1, 525_600))
-    .min();
-    let hz = fastest.map_or(1.0, |minutes| {
-        (radius * std::f64::consts::TAU / (f64::from(minutes) * 60.0) / 0.5)
-            .ceil()
-            .clamp(1.0, 15.0)
-    });
-    Duration::from_secs_f64(1.0 / hz).max(FRAME_INTERVAL)
+    let mut pixels_per_second = 0.0_f64;
+    let mut moving = false;
+    if let Some(minutes) = body_minutes {
+        moving = true;
+        // Invalid geometry is conservatively capped, never allowed to select
+        // a zero cadence or cause Duration::from_secs_f64 to panic.
+        if !radius.is_finite() {
+            return Some(FRAME_INTERVAL);
+        }
+        pixels_per_second = speed(f64::from(radius.max(0.0)), minutes);
+    }
+    if let Some((size, fov, minutes)) = sky.filter(|(_, _, minutes)| *minutes != 0) {
+        moving = true;
+        if !size.iter().all(|v| v.is_finite()) || !fov.is_finite() {
+            return Some(FRAME_INTERVAL);
+        }
+        let width = f64::from(size[0].max(1.0));
+        let height = f64::from(size[1].max(1.0));
+        let tangent = (f64::from(fov.clamp(8.0, 110.0)).to_radians() * 0.5).tan();
+        let focal = height / (2.0 * tangent);
+        let corner_squared = tangent * tangent * (1.0 + (width / height).powi(2));
+        pixels_per_second = pixels_per_second.max(speed(focal * (1.0 + corner_squared), minutes));
+    }
+    if !moving && !physical_light {
+        return None;
+    }
+    let hz = (pixels_per_second / 0.5).ceil().clamp(1.0, 15.0);
+    Some(Duration::from_secs_f64(1.0 / hz).max(FRAME_INTERVAL))
 }
 
 #[derive(Debug)]
@@ -242,33 +257,90 @@ mod tests {
     use super::*;
     #[test]
     fn astronomy_cadence_follows_visible_speed_and_bounds() {
+        assert_eq!(astronomy_frame_interval(1000.0, None, None, false), None);
         assert_eq!(
-            astronomy_frame_interval(1000.0, None, None, 0),
-            Duration::from_secs(1)
+            astronomy_frame_interval(1000.0, None, None, true),
+            Some(Duration::from_secs(1))
         );
         assert_eq!(
-            astronomy_frame_interval(1000.0, Some(1440), None, 0),
-            Duration::from_secs(1)
+            astronomy_frame_interval(1000.0, Some(1440), None, true),
+            Some(Duration::from_secs(1))
         );
         assert_eq!(
-            astronomy_frame_interval(1000.0, Some(1), None, 0),
-            FRAME_INTERVAL
+            astronomy_frame_interval(1000.0, Some(1), None, true),
+            Some(FRAME_INTERVAL)
         );
-        let slow = astronomy_frame_interval(1000.0, Some(60), None, 0);
-        let fast = astronomy_frame_interval(1000.0, Some(20), None, 0);
+        let slow = astronomy_frame_interval(1000.0, Some(60), None, false).unwrap();
+        let fast = astronomy_frame_interval(1000.0, Some(20), None, false).unwrap();
         assert!(fast < slow && fast > FRAME_INTERVAL);
+        // Body period zero is clamped like CelestialView; sky zero is static.
         assert_eq!(
-            astronomy_frame_interval(1000.0, None, Some(1), 0),
-            FRAME_INTERVAL
+            astronomy_frame_interval(1000.0, Some(0), None, false),
+            Some(FRAME_INTERVAL)
         );
         assert_eq!(
-            astronomy_frame_interval(1000.0, None, None, 1),
-            FRAME_INTERVAL
+            astronomy_frame_interval(0.0, None, Some(([3840.0, 2160.0], 8.0, 0)), false),
+            None
         );
-        assert_eq!(
-            astronomy_frame_interval(f32::NAN, None, None, 0),
-            Duration::from_secs(1)
-        );
+    }
+
+    #[test]
+    fn perspective_cadence_bounds_center_and_corner_motion_until_capped() {
+        for size in [
+            [1920.0, 1080.0],
+            [3840.0, 2160.0],
+            [7680.0, 1080.0],
+            [1080.0, 3840.0],
+        ] {
+            for fov in [8.0_f32, 60.0, 110.0] {
+                for minutes in [1, 120, 1440, 525_600, u32::MAX] {
+                    let dt = astronomy_frame_interval(0.0, None, Some((size, fov, minutes)), false)
+                        .unwrap();
+                    assert!((FRAME_INTERVAL..=Duration::from_secs(1)).contains(&dt));
+                    let tangent = (f64::from(fov).to_radians() * 0.5).tan();
+                    let focal = f64::from(size[1]) / (2.0 * tangent);
+                    let corner = tangent
+                        * tangent
+                        * (1.0 + (f64::from(size[0]) / f64::from(size[1])).powi(2));
+                    let velocity = focal * (1.0 + corner) * std::f64::consts::TAU
+                        / (f64::from(minutes.clamp(1, 525_600)) * 60.0);
+                    assert!(velocity * dt.as_secs_f64() <= 0.500_001 || dt == FRAME_INTERVAL);
+                }
+            }
+        }
+        let sky =
+            |size, fov| astronomy_frame_interval(0.0, None, Some((size, fov, 120)), false).unwrap();
+        assert!(sky([3840.0, 2160.0], 8.0) < sky([3840.0, 2160.0], 60.0));
+        assert!(sky([3840.0, 2160.0], 60.0) < sky([1920.0, 1080.0], 60.0));
+        assert!(sky([7680.0, 1080.0], 60.0) < sky([1920.0, 1080.0], 60.0));
+    }
+
+    #[test]
+    fn cadence_handles_nonfinite_and_extreme_inputs_without_panics() {
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                astronomy_frame_interval(invalid, Some(20), None, false),
+                Some(FRAME_INTERVAL)
+            );
+            assert_eq!(
+                astronomy_frame_interval(1.0, None, Some(([invalid, 2160.0], 60.0, 120)), false),
+                Some(FRAME_INTERVAL)
+            );
+            assert_eq!(
+                astronomy_frame_interval(1.0, None, Some(([3840.0, 2160.0], invalid, 120)), false),
+                Some(FRAME_INTERVAL)
+            );
+        }
+        for size in [[0.0, 0.0], [-1.0, -1.0], [f32::MAX, 1.0], [1.0, f32::MAX]] {
+            let interval = astronomy_frame_interval(
+                f32::MAX,
+                Some(u32::MAX),
+                Some((size, f32::MAX, u32::MAX)),
+                false,
+            )
+            .unwrap();
+            assert!((FRAME_INTERVAL..=Duration::from_secs(1)).contains(&interval));
+        }
     }
     #[test]
     fn interval_changes_do_not_reset_or_burst_clock() {

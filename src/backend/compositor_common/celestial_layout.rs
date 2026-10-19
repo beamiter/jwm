@@ -18,6 +18,56 @@ pub(crate) struct CelestialCanvas {
 
 const MAX_OUTPUTS: usize = 128;
 const MAX_CLIPS: usize = 4096;
+/// Pathological overlapping outputs may fragment into thousands of clips.
+/// Above this work budget, renderers conservatively keep every clip visible
+/// instead of multiplying client-union coverage work by that fragmentation.
+pub(crate) const MAX_CELESTIAL_OCCLUSION_CLIPS: usize = 128;
+
+/// Coverage of one resolved GL clip by conservative X11 client rectangles.
+/// Resolve the current topology first: shared groups and overlapping outputs
+/// can have clips smaller than their complete navigation canvas.
+pub(crate) fn celestial_clip_fully_covered(
+    screen: (u32, u32),
+    clip: (i32, i32, i32, i32),
+    occluders: &[(i32, i32, u32, u32)],
+) -> bool {
+    let (x, y, w, h) = clip;
+    if w <= 0 || h <= 0 || x < 0 || y < 0 || occluders.is_empty() || occluders.len() > 128 {
+        return false;
+    }
+    let (left, top) = (
+        i64::from(x),
+        i64::from(screen.1) - i64::from(y) - i64::from(h),
+    );
+    let (width, height) = (i64::from(w), i64::from(h));
+    if top < 0 || left + width > i64::from(screen.0) {
+        return false;
+    }
+    if occluders.iter().any(|&(ox, oy, ow, oh)| {
+        i64::from(ox) <= left
+            && i64::from(oy) <= top
+            && i64::from(ox) + i64::from(ow) >= left + width
+            && i64::from(oy) + i64::from(oh) >= top + height
+    }) {
+        return true;
+    }
+    let covers: Vec<_> = occluders
+        .iter()
+        .filter_map(|&(ox, oy, ow, oh)| {
+            let x0 = (i64::from(ox) - left).max(0);
+            let y0 = (i64::from(oy) - top).max(0);
+            let x1 = (i64::from(ox) + i64::from(ow) - left).min(width);
+            let y1 = (i64::from(oy) + i64::from(oh) - top).min(height);
+            (x0 < x1 && y0 < y1).then_some((
+                x0 as i32,
+                y0 as i32,
+                (x1 - x0) as u32,
+                (y1 - y0) as u32,
+            ))
+        })
+        .collect();
+    super::animated_wallpaper::fully_covered(w as u32, h as u32, &covers)
+}
 
 fn global_canvas(screen: (u32, u32), scene: &str) -> Vec<CelestialCanvas> {
     astronomy_draw_plan(screen, &[], false, None)
@@ -192,6 +242,83 @@ fn subtract_clip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_follows_resolved_scene_clips_not_other_outputs() {
+        let screen = (3840, 2160);
+        let earth = (0, 1080, 1920, 1080);
+        let solar = (1920, 0, 1920, 1080);
+        let cover = [(1920, 1080, 1920, 1080)];
+        assert!(!celestial_clip_fully_covered(screen, earth, &cover));
+        assert!(celestial_clip_fully_covered(screen, solar, &cover));
+        assert!(!celestial_clip_fully_covered(
+            screen,
+            solar,
+            &[(1920, 1080, 1919, 1080)]
+        ));
+        assert!(celestial_clip_fully_covered(
+            screen,
+            solar,
+            &[(1920, 1080, 960, 1080), (2880, 1080, 960, 1080)]
+        ));
+    }
+
+    #[test]
+    fn coverage_rejects_invalid_clips_and_excessive_clients() {
+        for clip in [
+            (0, 0, 0, 8),
+            (-1, 0, 8, 8),
+            (0, -1, 8, 8),
+            (0, 0, 9, 8),
+            (0, 0, 8, 9),
+            (0, i32::MAX, 8, 8),
+        ] {
+            assert!(!celestial_clip_fully_covered((8, 8), clip, &[(0, 0, 8, 8)]));
+        }
+        assert!(!celestial_clip_fully_covered((8, 8), (0, 0, 8, 8), &[]));
+        assert!(!celestial_clip_fully_covered(
+            (8, 8),
+            (0, 0, 8, 8),
+            &vec![(0, 0, 8, 8); 129]
+        ));
+        assert!(celestial_clip_fully_covered(
+            (8, 8),
+            (0, 0, 8, 8),
+            &[(i32::MIN, i32::MIN, u32::MAX, u32::MAX)]
+        ));
+    }
+
+    #[test]
+    fn clip_coverage_matches_small_pixel_oracle() {
+        for seed in 0_u32..512 {
+            let clip = ((seed % 4) as i32, ((seed / 4) % 4) as i32, 4, 4);
+            let mut value = seed;
+            let covers: Vec<_> = (0..5)
+                .map(|_| {
+                    value = value.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (
+                        (value % 12) as i32 - 2,
+                        ((value / 12) % 12) as i32 - 2,
+                        (value / 144) % 10,
+                        (value / 1440) % 10,
+                    )
+                })
+                .collect();
+            let top = 8 - clip.1 - clip.3;
+            let expected = (clip.0..clip.0 + clip.2).all(|x| {
+                (top..top + clip.3).all(|y| {
+                    covers.iter().any(|&(ox, oy, w, h)| {
+                        x >= ox && y >= oy && x < ox + w as i32 && y < oy + h as i32
+                    })
+                })
+            });
+            assert_eq!(
+                celestial_clip_fully_covered((8, 8), clip, &covers),
+                expected,
+                "seed {seed}"
+            );
+        }
+    }
     use crate::config::AstronomyOutputConfig;
 
     fn outputs() -> Vec<CelestialOutput> {

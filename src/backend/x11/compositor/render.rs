@@ -5061,7 +5061,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let mut explicit_render = std::mem::take(&mut self.needs_render) || bar_wallpaper_probe;
         let mut damage_wakeup = std::mem::take(&mut self.damage_render_pending);
         let astronomy_cfg = crate::config::CONFIG.load();
-        let astronomy_occluded = if matches!(
+        let celestial_occluders = if matches!(
             astronomy_cfg.behavior().wallpaper_effect.as_str(),
             "astronomy" | "solar-system"
         ) && !self.overview_active
@@ -5071,7 +5071,7 @@ impl<C: CompositorConnection> Compositor<C> {
             && self.genie_active.is_empty()
             && !self.transition_active()
         {
-            let opaque_rects: Vec<_> = scene
+            scene
                 .iter()
                 .filter_map(|&(win, x, y, w, h)| {
                     let wt = self.windows.get(&win)?;
@@ -5108,29 +5108,30 @@ impl<C: CompositorConnection> Compositor<C> {
                     .then_some((x, y, w, h))
                 })
                 .take(129)
-                .collect();
-            // Use this frame's monitor geometry, not Astronomy's cached draw
-            // plan: prepare updates that cache only after this decision.
-            // All celestial layouts paint only active output pixels. Desktop
-            // holes between staggered monitors cannot keep an invisible scene awake.
-            let outputs: Vec<_> = self
-                .monitor_wallpapers
-                .iter()
-                .take(129)
-                .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
-                .collect();
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        drop(astronomy_cfg);
+        // Resolve current scene clips independently: a visible Earth must not
+        // keep hidden Solar outputs ticking or a fast covered Moon animating.
+        let astronomy_changed = self.prepare_astronomy_wallpaper(&celestial_occluders)
+            | self.prepare_solar_system_wallpaper(&celestial_occluders);
+        // Wallpaper-only bar readback still needs conservative whole-output
+        // coverage, independently of each celestial renderer's visible clips.
+        let outputs: Vec<_> = self
+            .monitor_wallpapers
+            .iter()
+            .take(129)
+            .map(|m| (m.mon_x, m.mon_y, m.mon_w, m.mon_h))
+            .collect();
+        let astronomy_occluded =
             crate::backend::compositor_common::animated_wallpaper::astronomy_fully_covered(
                 (self.screen_w, self.screen_h),
                 &outputs,
                 true,
-                &opaque_rects,
-            )
-        } else {
-            false
-        };
-        drop(astronomy_cfg);
-        let astronomy_changed = self.prepare_astronomy_wallpaper(astronomy_occluded)
-            | self.prepare_solar_system_wallpaper(astronomy_occluded);
+                &celestial_occluders,
+            );
         explicit_render |= astronomy_changed;
 
         // Auto-enable profiler when benchmark is running
@@ -6281,10 +6282,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        if !astronomy_occluded {
-            self.draw_astronomy_wallpaper(use_scissor.then_some(damage_scissor));
-            self.draw_solar_system_wallpaper(use_scissor.then_some(damage_scissor));
-        }
+        self.draw_astronomy_wallpaper(use_scissor.then_some(damage_scissor));
+        self.draw_solar_system_wallpaper(use_scissor.then_some(damage_scissor));
 
         // Wallpaper-only readback MUST precede the first client/overlay draw.
         // Failed/partial probes queue a single full repair; static success is cached.
@@ -6326,20 +6325,27 @@ impl<C: CompositorConnection> Compositor<C> {
                     .monitor_wallpapers
                     .iter()
                     .any(|wallpaper| wallpaper.previous.is_some());
-            // Do not change caller GL state, and never let a PBO or pack offset
-            // turn a bounded scanline into an out-of-bounds driver write.
-            let pack_safe =
-                crate::backend::compositor_common::bar_wallpaper::sample_due(key.finish(), dynamic)
-                    && unsafe {
-                        [
-                            glow::PIXEL_PACK_BUFFER_BINDING,
-                            glow::PACK_ROW_LENGTH,
-                            glow::PACK_SKIP_PIXELS,
-                            glow::PACK_SKIP_ROWS,
-                        ]
-                        .iter()
-                        .all(|&p| self.gl.get_parameter_i32(p) == 0)
-                    };
+            // Omitted celestial clips contain the static fallback, not a valid
+            // wallpaper-only sample. Defer all bar readback conservatively
+            // until every celestial clip is drawn again. This does not resume
+            // hidden animation, and ineligible probes do not request repairs.
+            // Never let a PBO or pack offset make a driver write unbounded.
+            let pack_safe = !self.astronomy_wallpaper.has_hidden_clips()
+                && !self.solar_system_wallpaper.has_hidden_clips()
+                && crate::backend::compositor_common::bar_wallpaper::sample_due(
+                    key.finish(),
+                    dynamic,
+                )
+                && unsafe {
+                    [
+                        glow::PIXEL_PACK_BUFFER_BINDING,
+                        glow::PACK_ROW_LENGTH,
+                        glow::PACK_SKIP_PIXELS,
+                        glow::PACK_SKIP_ROWS,
+                    ]
+                    .iter()
+                    .all(|&p| self.gl.get_parameter_i32(p) == 0)
+                };
             crate::backend::compositor_common::bar_wallpaper::sample_frame(
                 key.finish(),
                 dynamic,

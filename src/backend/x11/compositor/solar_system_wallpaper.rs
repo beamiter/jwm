@@ -5,7 +5,10 @@ use crate::backend::compositor_common::{
         AstronomyDraw, CelestialArcball, CelestialBody, CelestialRotation, POWER_QUERY_INTERVAL,
         WallpaperClock, resolve_planet_texture,
     },
-    celestial_layout::{CelestialCanvas, CelestialOutput, resolve_celestial_canvases},
+    celestial_layout::{
+        CelestialCanvas, CelestialOutput, MAX_CELESTIAL_OCCLUSION_CLIPS,
+        celestial_clip_fully_covered, resolve_celestial_canvases,
+    },
     panorama::{PanoramaDrag, PanoramaView},
     solar_ephemeris::{SolarDateClock, SolarEphemeris},
     solar_system::{
@@ -146,6 +149,7 @@ pub(super) struct SolarSystemWallpaper {
     program: Option<SolarProgram>,
     views: BTreeMap<String, SolarView>,
     canvases: Vec<CelestialCanvas>,
+    visible_clips: Vec<bool>,
     presentations: Vec<SolarCanvasPresentation>,
     output_identities: Vec<CelestialOutput>,
     layout_screen: (u32, u32),
@@ -445,6 +449,78 @@ impl SolarSystemWallpaper {
         };
         canvases.retain(|canvas| canvas.scene == "solar-system");
         canvases
+    }
+
+    fn canvas_visible(&self, index: usize) -> bool {
+        self.visible_clips.get(index).copied().unwrap_or(true)
+    }
+
+    fn fully_occluded(&self) -> bool {
+        self.canvases.is_empty()
+            || (0..self.canvases.len()).all(|index| !self.canvas_visible(index))
+    }
+
+    pub(super) fn has_hidden_clips(&self) -> bool {
+        self.enabled
+            && !self.failed
+            && (0..self.canvases.len()).any(|index| !self.canvas_visible(index))
+    }
+
+    fn update_visibility(&mut self, occluders: &[(i32, i32, u32, u32)]) -> bool {
+        let bounded = self.canvases.len() <= MAX_CELESTIAL_OCCLUSION_CLIPS;
+        let visible: Vec<_> = self
+            .canvases
+            .iter()
+            .map(|entry| {
+                !bounded
+                    || !celestial_clip_fully_covered(
+                        self.layout_screen,
+                        entry.canvas.clip,
+                        occluders,
+                    )
+            })
+            .collect();
+        let changed = self.visible_clips != visible;
+        self.visible_clips = visible;
+        // A captured scene may disappear while another independent scene is
+        // still exposed. Drop only hidden groups' pending input deadlines.
+        for (key, view) in &mut self.views {
+            if !self
+                .canvases
+                .iter()
+                .zip(&self.visible_clips)
+                .any(|(canvas, visible)| *visible && &canvas.group_key == key)
+            {
+                view.suspend_interaction();
+            }
+        }
+        if self.active_drag.as_ref().is_some_and(|(key, _)| {
+            !self
+                .canvases
+                .iter()
+                .zip(&self.visible_clips)
+                .any(|(canvas, visible)| *visible && &canvas.group_key == key)
+        }) {
+            self.active_drag = None;
+        }
+        if changed {
+            self.presentations.clear();
+        }
+        changed
+    }
+
+    fn update_frame_clock(&mut self, now: Instant) -> bool {
+        let occluded = self.fully_occluded();
+        self.clock.set_paused(!self.powered || occluded);
+        if !self.powered || occluded {
+            self.suspend_interaction();
+        }
+        if self.clock.tick(now) {
+            let epoch = *self.epoch.get_or_insert(now);
+            self.sample_seconds = now.saturating_duration_since(epoch).as_secs_f64();
+            return true;
+        }
+        false
     }
 
     fn suspend_interaction(&mut self) {
@@ -791,7 +867,10 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    pub(super) fn prepare_solar_system_wallpaper(&mut self, occluded: bool) -> bool {
+    pub(super) fn prepare_solar_system_wallpaper(
+        &mut self,
+        occluders: &[(i32, i32, u32, u32)],
+    ) -> bool {
         let now = Instant::now();
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
@@ -813,6 +892,8 @@ impl<C: CompositorConnection> Compositor<C> {
             a.canvases = canvases;
             a.layout_screen = screen;
         }
+        changed |= a.update_visibility(occluders);
+        let occluded = a.fully_occluded();
         let scientific = behavior.wallpaper_astronomy_presentation == "scientific";
         changed |=
             a.scientific != scientific || a.orbit_mode != behavior.wallpaper_solar_orbit_mode;
@@ -903,15 +984,7 @@ impl<C: CompositorConnection> Compositor<C> {
             now.saturating_duration_since(epoch).as_secs_f64(),
             spin_rate,
         );
-        a.clock.set_paused(!a.powered || occluded);
-        if !a.powered || occluded {
-            a.suspend_interaction();
-        }
-        if a.clock.tick(now) {
-            let epoch = *a.epoch.get_or_insert(now);
-            a.sample_seconds = now.saturating_duration_since(epoch).as_secs_f64();
-            changed = true;
-        }
+        changed |= a.update_frame_clock(now);
         for view in a.views.values_mut() {
             if std::mem::take(&mut view.camera_dirty) {
                 view.frame_navigation = view.navigation;
@@ -955,7 +1028,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             return;
         }
-        if !a.powered {
+        if !a.powered || a.fully_occluded() {
             return;
         }
         if a.texture_max_edge == 0 {
@@ -1211,8 +1284,14 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         if cached && a.cache.valid() {
             unsafe {
-                a.cache
-                    .present(&self.gl, a.canvases.iter().map(|entry| entry.canvas.clip));
+                a.cache.present(
+                    &self.gl,
+                    a.canvases
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| a.canvas_visible(*index))
+                        .map(|(_, entry)| entry.canvas.clip),
+                );
             }
             a.rendered = true;
             return;
@@ -1278,7 +1357,10 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             gl.bind_vertex_array(Some(self.quad_vao));
             gl.enable(glow::SCISSOR_TEST);
-            for entry in &a.canvases {
+            for (index, entry) in a.canvases.iter().enumerate() {
+                if !a.visible_clips.get(index).copied().unwrap_or(true) {
+                    continue;
+                }
                 let Some(view) = a.views.get_mut(&entry.group_key) else {
                     continue;
                 };
@@ -1339,8 +1421,14 @@ impl<C: CompositorConnection> Compositor<C> {
         if cached {
             a.cache.finish();
             unsafe {
-                a.cache
-                    .present(&self.gl, a.canvases.iter().map(|entry| entry.canvas.clip));
+                a.cache.present(
+                    &self.gl,
+                    a.canvases
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| a.canvas_visible(*index))
+                        .map(|(_, entry)| entry.canvas.clip),
+                );
             }
         }
         a.rendered = true;
@@ -1351,6 +1439,125 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn visibility_wallpaper() -> SolarSystemWallpaper {
+        let canvases: Vec<_> = ["left", "right"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| CelestialCanvas {
+                scene: "solar-system".into(),
+                group_key: group.into(),
+                connector: group.into(),
+                canvas: AstronomyDraw {
+                    origin: [index as f32 * 100.0, 0.0],
+                    size: [100.0, 100.0],
+                    radius: 42.0,
+                    clip: (index as i32 * 100, 0, 100, 100),
+                },
+            })
+            .collect();
+        SolarSystemWallpaper {
+            enabled: true,
+            powered: true,
+            layout_screen: (200, 100),
+            views: canvases
+                .iter()
+                .map(|canvas| (canvas.group_key.clone(), SolarView::default()))
+                .collect(),
+            canvases,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn solar_visibility_is_per_scene_and_clears_hidden_group_input() {
+        let mut a = visibility_wallpaper();
+        a.views.get_mut("left").unwrap().interaction_pending = true;
+        a.views.get_mut("right").unwrap().interaction_pending = true;
+        a.active_drag = Some(("right".into(), a.canvases[1].canvas.clone()));
+        assert!(a.update_visibility(&[(100, 0, 100, 100)]));
+        assert_eq!(a.visible_clips, [true, false]);
+        assert!(!a.fully_occluded());
+        assert!(a.has_hidden_clips());
+        assert!(a.views["left"].interaction_pending);
+        assert!(!a.views["right"].interaction_pending);
+        assert!(a.active_drag.is_none());
+        assert!(!a.update_visibility(&[(100, 0, 100, 100)]));
+        assert!(a.update_visibility(&[(0, 0, 200, 100)]));
+        assert!(a.fully_occluded());
+        assert!(!a.views["left"].interaction_pending);
+    }
+
+    #[test]
+    fn partial_celestial_coverage_disables_wallpaper_only_readback() {
+        let mut a = visibility_wallpaper();
+        a.update_visibility(&[]);
+        assert!(!a.has_hidden_clips());
+        a.update_visibility(&[(100, 0, 100, 100)]);
+        assert!(a.has_hidden_clips() && !a.fully_occluded());
+        let render = include_str!("render.rs");
+        assert!(render.contains("!self.astronomy_wallpaper.has_hidden_clips()"));
+        assert!(render.contains("!self.solar_system_wallpaper.has_hidden_clips()"));
+        a.update_visibility(&[]);
+        assert!(!a.has_hidden_clips());
+        a.enabled = false;
+        a.visible_clips = vec![false, false];
+        assert!(!a.has_hidden_clips());
+    }
+
+    #[test]
+    fn fragmented_solar_layout_bounds_coverage_work_conservatively() {
+        let mut a = visibility_wallpaper();
+        let canvas = a.canvases[0].clone();
+        a.canvases = vec![canvas.clone(); MAX_CELESTIAL_OCCLUSION_CLIPS];
+        a.update_visibility(&[(0, 0, 200, 100)]);
+        assert!(a.fully_occluded());
+        a.canvases.push(canvas);
+        a.update_visibility(&[(0, 0, 200, 100)]);
+        assert!(a.visible_clips.iter().all(|visible| *visible));
+        assert!(!a.fully_occluded());
+        assert!(!a.has_hidden_clips());
+    }
+
+    #[test]
+    fn solar_hidden_clock_has_no_tick_and_reveal_samples_current_time_once() {
+        let now = Instant::now();
+        let mut a = visibility_wallpaper();
+        a.update_visibility(&[]);
+        assert!(a.update_frame_clock(now));
+        a.update_visibility(&[(0, 0, 200, 100)]);
+        assert!(!a.update_frame_clock(now + Duration::from_secs(1)));
+        assert_eq!(a.clock.deadline(now + Duration::from_secs(3600)), None);
+        a.update_visibility(&[]);
+        assert!(a.update_frame_clock(now + Duration::from_secs(3600)));
+        assert_eq!(a.sample_seconds, 3600.0);
+        assert!(!a.update_frame_clock(now + Duration::from_secs(3600)));
+        assert_eq!(
+            a.clock.deadline(now + Duration::from_secs(3600)),
+            Some(crate::backend::compositor_common::animated_wallpaper::FRAME_INTERVAL)
+        );
+        a.powered = false;
+        assert!(!a.update_frame_clock(now + Duration::from_secs(3601)));
+        a.powered = true;
+        assert!(a.update_frame_clock(now + Duration::from_secs(7200)));
+        assert_eq!(a.sample_seconds, 7200.0);
+    }
+
+    #[test]
+    fn solar_shared_group_retains_input_while_any_clip_is_visible() {
+        let mut a = visibility_wallpaper();
+        a.canvases[1].group_key = "left".into();
+        a.views.get_mut("left").unwrap().interaction_pending = true;
+        a.active_drag = Some(("left".into(), a.canvases[1].canvas.clone()));
+        a.update_visibility(&[(100, 0, 100, 100)]);
+        assert!(a.views["left"].interaction_pending);
+        assert!(a.active_drag.is_some());
+        a.canvases.remove(0);
+        a.update_visibility(&[(100, 0, 100, 100)]);
+        assert!(a.fully_occluded());
+        assert!(!a.views["left"].interaction_pending);
+        assert!(a.active_drag.is_none());
+    }
 
     fn visible_scene() -> SolarView {
         let navigation = SolarNavigation::default();

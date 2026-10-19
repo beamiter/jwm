@@ -101,11 +101,33 @@ its canvases, preserving static wallpaper gaps. Material, layout/camera, sampled
 time, size, and precision changes invalidate the cache. Allocation failure falls
 back to direct rendering; disable/cleanup releases resources.
 
-Astronomy updates adapt between 1 and 15 Hz using visible decorative rotation
-speed and canvas radius. Physical sunlight refreshes at least once per second;
-wall-clock sampling and pause/resume behavior are preserved. Solar-system timing
-keeps its existing cadence. No real-display FPS, power, or HDR improvement is
-claimed from software-renderer tests.
+Each renderer checks the current resolved output clips against conservative
+opaque client coverage. Hidden clips do not draw or contribute animation work:
+a covered Solar scene or fast Moon cannot keep another exposed scene ticking.
+Rounded, translucent, shaped, transformed or transitioning clients remain
+conservative, and even a one-pixel gap keeps its scene visible. A shared scene
+group stays interactive while any of its clips is visible; fully hidden groups
+release their pending input. A visibility or topology change invalidates the
+cache, so revealing a clip immediately paints it using a fresh time sample.
+If overlapping outputs fragment one renderer into more than 128 clips, that
+renderer conservatively keeps all its clips visible instead of running an
+excessive repetition of coverage checks. This trades rare-layout power
+savings for predictable CPU work and never suppresses visible pixels.
+Wallpaper-only bar luminance readback is deferred while any celestial clip is
+omitted, rather than sampling its static fallback or waking hidden animation.
+
+Astronomy updates adapt between 1 and 15 Hz from each visible body's admitted
+radius and rotation speed, plus the sky's admitted perspective FOV and full
+canvas geometry. The sky budget accounts for both center and corner motion,
+aiming at roughly half a pixel per update; the 15 Hz ceiling takes priority for
+fast or strongly zoomed scenes. Earth and Moon retain a 1 Hz physical-light
+refresh. A stationary Galaxy has no ordinary animation deadline once its maps
+are settled. Input, configuration changes and newly visible clips still repaint;
+pending visible maps poll at a bounded 1 Hz until adoption, and separate 2-second
+power checks do not themselves invalidate unchanged pixels. Solar keeps its
+existing visible cadence and pauses when all of its own clips are hidden.
+No real-display FPS, power, or HDR improvement is claimed from software-renderer
+or CPU scheduling tests.
 
 ### Source texture quality
 
