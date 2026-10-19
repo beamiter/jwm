@@ -5,6 +5,23 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Bars: responsive controls and retained rendering
+
+- Compact all workspaces before introducing overflow; retain the actual active
+  workspace during multi-selection and expose hidden urgency with `!+N`.
+  Cramped names use stable workspace numbers instead of identical ellipses.
+- Normalize Tao/Winit mouse-wheel and touchpad input across four bar edges and
+  DPI scales, suppress repeated navigation from one precision gesture, and
+  cancel interrupted presses and popup momentum safely.
+- Give the seven HTML bars one keyboard entry, recover focus after reactive
+  updates, expose selected/current/urgent state, and protect volume/brightness
+  from accidental scroll gestures while retaining their fixed-width geometry.
+- Reuse the default OpenGL bar's CPU canvas and GPU texture, upload damaged
+  regions when no external backdrop requires a full frame, coalesce native
+  redraws and bound opaque-wallpaper property probes.
+  Invalidate retained pixels for font, opacity, DPI and backdrop changes and
+  recover complete uploads after a GL error.
+
 ### Audit follow-up
 
 - Keep fractional pointer motion, monitor focus and drag snapping on the

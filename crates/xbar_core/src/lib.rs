@@ -32,6 +32,7 @@ pub mod frontend;
 #[cfg(feature = "glass")]
 pub mod glass;
 pub mod icon_font;
+pub mod input;
 #[cfg(feature = "runtime-linux")]
 pub mod linux;
 #[cfg(feature = "logging-flexi")]
@@ -82,6 +83,10 @@ pub use dock::{
 pub use frontend::{
     ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, FrontendSession,
     SessionOutput, SnapshotCursor, snapshot_changes,
+};
+pub use input::{
+    ADJUSTMENT_SCROLL_PIXELS, NAVIGATION_SCROLL_PIXELS, SCROLL_GESTURE_IDLE, ScrollAccumulator,
+    ScrollDelta, ScrollMode, ScrollPhase, ScrollStep,
 };
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,

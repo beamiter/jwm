@@ -138,8 +138,14 @@ The supported Tao/Glow bar and the other Scene consumers use one
 - Clock components stack as upright `HH`, `MM` and optional `SS`. Short metric
   values stack beneath their icons. Native tooltips and accessible labels can
   retain the complete semantic description.
-- The active workspace stays visible when the full workspace strip cannot
-  fit. Urgent and occupied workspaces receive priority. `+N` advances to the
+- Workspace allocation first tries full labels, then every workspace at its
+  compact width, and only then hides workspaces behind overflow. Names that
+  cannot remain distinct at the compact font floor use their workspace number;
+  the semantic control retains its complete configured name.
+- The WM's actual active workspace stays visible when the full strip cannot
+  fit, including when earlier workspaces are also selected. Urgent, selected
+  and occupied workspaces receive priority. Hidden urgent workspaces mark the
+  overflow `!+N` as well as using the urgent color. `+N` advances to the
   next workspace; right-click goes to the previous one. The wheel over any
   workspace or overflow control traverses the full workspace list.
 - The layout button opens available choices. Right-click or wheel cycles
@@ -159,6 +165,12 @@ and secondary toggles; volume and brightness respond to the wheel; the clock
 opens Calendar and right-click toggles seconds. Press and release must resolve
 to the same control and captured action, so a model update cannot substitute a
 new workspace-overflow action or a new incarnation of a minimized window.
+
+Tao/Winit presenters share precision-scroll accumulation with logical-DPI
+thresholds and gesture boundaries. A mouse notch remains immediate; a fine
+touchpad gesture commits navigation once, while volume/brightness can keep
+adjusting. See [wheel and touchpad input](../bars/README.md#wheel-and-touchpad-input)
+for thresholds, axis behavior and the exact frontend scope.
 
 ### Stable telemetry slots
 
@@ -215,12 +227,24 @@ edge.
 
 The HTML adapter shared by Dioxus and all six Tauri applications installs:
 
-- Native Tab/Shift+Tab focus, visible focus indication, and Enter/Space
-  activation for legacy controls that were previously click-only elements.
+- One Tab entry for the toolbar, visible focus indication, and Enter/Space
+  activation for legacy controls. Tab/Shift+Tab can leave the toolbar instead
+  of visiting every workspace and status pill. Initial entry prefers the
+  actual active workspace; re-entry remembers the previous control.
 - Left/Right navigation for horizontal bars and Up/Down for sidebars, following
   displayed control order. Home/End selects the first/last available control.
-- Automatic scrolling of focused controls into view. Disabled controls are
-  skipped and do not activate.
+- Automatic scrolling of focused controls into view, with overflow-edge cues
+  that reserve no layout space. Disabled controls are skipped and do not
+  activate. A removed or replaced focused control recovers to its equivalent
+  or the nearest remaining control while the bar still owns document focus.
+- PageUp/PageDown or plus/minus adjusts a focused volume/brightness control;
+  Escape closes the layout choices. Modifier gestures and horizontal movement
+  cannot accidentally enter a metric's vertical wheel handler. Fractional
+  pixel scrolling accumulates before changing volume/brightness, and a group
+  scroll keeps ownership when a status control moves beneath the pointer.
+- Explicit selected/current workspace semantics remain available when urgent
+  styling takes priority. Icon glyphs are decorative for accessibility; status
+  readings and mute/expanded states have semantic labels.
 - Upright compact clock text, semantic ARIA labels and bounded scrollable
   workspace/status groups. The clock and frequently used controls begin the
   sidebar status group so they remain initially visible.
@@ -229,6 +253,39 @@ The adapter preserves each frontend's action dispatch. An example frontend
 can retain its existing primary/secondary behavior rather than adopting every
 Scene binding. Popovers and compositor-owned Dock previews open toward the
 usable output interior where their host supports them.
+
+### Default OpenGL rendering
+
+`tao_glow_bar` retains a reusable Cairo CPU canvas and a GL texture. A size
+change allocates the texture. Without an external backdrop, later frames
+upload only the shared damage rectangle, including padded source rows, and
+identical frames skip uploading.
+Native expose events still repaint the window's back buffer. WM, pointer and
+resize invalidations share one pending native redraw, so a burst of updates
+paints the latest model without synchronously presenting intermediate states.
+There is no continuously running frame timer.
+
+The shared CPU canvas invalidates its complete frame on DPI changes and
+conservatively uploads every pixel while an external backdrop is present,
+including the first frame after its removal. Renderer/font/opacity changes
+also invalidate pixels even when scene geometry stays equal. A failed GL
+upload discards its retained-state acknowledgement so the next redraw replaces
+the whole texture. The opaque X11 wallpaper source bounds root-pixmap lookup
+passes to one per 200 ms, including lookups made by the render path.
+
+The native pixel regression exercises the production uploader against full
+Cairo frames on all four edges at 1x, 1.5x and 2x. It also checks padded rows,
+partial updates, resize and recovery from invalidated texture storage:
+
+```sh
+xvfb-run -a cargo test --manifest-path bars/tao_glow_bar/Cargo.toml \
+  retained_texture_matches_full_frames -- --ignored
+```
+
+This test needs X11/EGL and is deliberately ignored by a display-free unit
+test invocation. It establishes pixel correctness, not GPU timing on a user's
+physical desktop. The rendering changes here target the supported default GL
+bar; experimental presenters retain their own presentation scheduling.
 
 ### Minimized-window Dock
 

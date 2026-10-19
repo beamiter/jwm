@@ -18,7 +18,8 @@ use crate::presentation::{
     Size, Stroke, TextAlign, TextMeasurer, build_scene,
 };
 use crate::{
-    BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate, UserAction,
+    BarEdge, BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate,
+    ScrollAccumulator, ScrollDelta, ScrollMode, ScrollPhase, ScrollStep, UserAction,
 };
 
 const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
@@ -187,15 +188,16 @@ impl CairoRenderer {
         self.background_opacity = opacity.map(normalize_opacity);
     }
 
-    fn synchronize_icon_font(&mut self, configured: Option<&str>) {
+    fn synchronize_icon_font(&mut self, configured: Option<&str>) -> bool {
         if let AppliedIconFont::Synchronized(applied) = &self.applied_icon_font
             && applied.as_deref() == configured
         {
-            return;
+            return false;
         }
 
         self.font = crate::icon_font::with_icon_fallback(&self.base_font, configured);
         self.applied_icon_font = AppliedIconFont::Synchronized(configured.map(Box::<str>::from));
+        true
     }
 
     /// Create a text measurer using the exact Pango context associated with
@@ -573,9 +575,28 @@ impl PointerButton {
 pub enum PointerInput {
     Move(Point),
     Leave,
-    Press { point: Point, button: PointerButton },
-    Release { point: Point, button: PointerButton },
-    Scroll { point: Point, delta_y: f64 },
+    /// A grab/focus transition cancelled the press, but the cursor can still
+    /// be inside the bar. Preserve its location for the next stationary click.
+    Cancel,
+    Press {
+        point: Point,
+        button: PointerButton,
+    },
+    Release {
+        point: Point,
+        button: PointerButton,
+    },
+    /// Legacy line-based wheel input, including X11 core wheel buttons.
+    Scroll {
+        point: Point,
+        delta_y: f64,
+    },
+    /// Native wheel/trackpad input with source units and gesture boundaries.
+    Wheel {
+        point: Point,
+        delta: ScrollDelta,
+        phase: ScrollPhase,
+    },
 }
 
 impl PointerInput {
@@ -607,6 +628,14 @@ impl PointerInput {
             (5, true) => Some(Self::Scroll {
                 point,
                 delta_y: -1.0,
+            }),
+            (6, true) | (7, true) => Some(Self::Wheel {
+                point,
+                delta: ScrollDelta::Lines {
+                    x: if button == 6 { 1.0 } else { -1.0 },
+                    y: 0.0,
+                },
+                phase: ScrollPhase::Moved,
             }),
             _ => None,
         }
@@ -644,8 +673,10 @@ pub struct CairoBar {
     interaction: InteractionState,
     last_pointer: Option<Point>,
     pressed_button: Option<PointerButton>,
+    scroll: ScrollAccumulator<(crate::presentation::NodeId, BarEdge)>,
     scene: Scene,
     renderer: CairoRenderer,
+    renderer_dirty: bool,
     last_damage: Damage,
     pending_runtime: RuntimeUpdate,
     dock_reporter: DockReporter,
@@ -671,8 +702,10 @@ impl CairoBar {
             interaction: InteractionState::default(),
             last_pointer: None,
             pressed_button: None,
+            scroll: ScrollAccumulator::default(),
             scene: empty_scene(),
             renderer,
+            renderer_dirty: true,
             last_damage: Damage::default(),
             pending_runtime: RuntimeUpdate::default(),
             dock_reporter: DockReporter::new(),
@@ -757,6 +790,9 @@ impl CairoBar {
     }
 
     pub const fn renderer_mut(&mut self) -> &mut CairoRenderer {
+        // Paint state such as fonts and opacity lives outside Scene nodes.
+        // A retained presenter cannot infer these changes from scene damage.
+        self.renderer_dirty = true;
         &mut self.renderer
     }
 
@@ -800,7 +836,8 @@ impl CairoBar {
                     transparent,
                 )));
         }
-        self.renderer
+        self.renderer_dirty |= self
+            .renderer
             .synchronize_icon_font(self.config.icon_font.as_deref());
         let measurer = self.renderer.text_measurer(context);
         let mut next_interaction = self.interaction;
@@ -826,12 +863,15 @@ impl CairoBar {
             );
         }
         self.renderer.render_over(context, &next_scene, backdrop)?;
-        self.last_damage =
-            if material_changed || previous_opacity != self.renderer.background_opacity() {
-                next_scene.damage_from(&empty_scene())
-            } else {
-                next_scene.damage_from(&self.scene)
-            };
+        self.last_damage = if self.renderer_dirty
+            || material_changed
+            || previous_opacity != self.renderer.background_opacity()
+        {
+            next_scene.damage_from(&empty_scene())
+        } else {
+            next_scene.damage_from(&self.scene)
+        };
+        self.renderer_dirty = false;
         self.interaction = next_interaction;
         self.scene = next_scene;
         self.synchronize_dock_scene(scale_factor);
@@ -1075,6 +1115,13 @@ impl CairoBar {
     pub fn pointer_motion(&mut self, point: Point) -> bool {
         self.last_pointer = Some(point);
         let transition = self.interaction.update_hover_transition(&self.scene, point);
+        if transition.target_changed() {
+            if transition.previous.map(scroll_group) == transition.current.map(scroll_group) {
+                self.scroll.discard_partial();
+            } else {
+                self.scroll.reset();
+            }
+        }
         self.synchronize_dock_model();
         self.flush_dock_commands(Instant::now());
         transition.needs_redraw()
@@ -1084,6 +1131,7 @@ impl CairoBar {
     pub fn pointer_leave(&mut self) -> bool {
         self.last_pointer = None;
         self.pressed_button = None;
+        self.scroll.reset();
         let changed = self.interaction.clear_hover();
         self.synchronize_dock_model();
         self.flush_dock_commands(Instant::now());
@@ -1102,8 +1150,8 @@ impl CairoBar {
     /// Process a complete pointer state transition.
     ///
     /// Button activation occurs only when press and release use the same
-    /// button and resolve to the same stable scene node. Scroll actions are
-    /// immediate and zero/non-finite deltas are ignored.
+    /// button and resolve to the same stable scene node. Whole-line wheel
+    /// notches remain immediate; precision deltas accumulate per control.
     pub fn handle_pointer(&mut self, input: PointerInput) -> PointerUpdate {
         match input {
             PointerInput::Move(point) => PointerUpdate {
@@ -1114,7 +1162,18 @@ impl CairoBar {
                 redraw: self.pointer_leave(),
                 runtime: std::mem::take(&mut self.pending_runtime),
             },
+            PointerInput::Cancel => {
+                let redraw = self.interaction.pressed().is_some();
+                self.interaction.cancel_press();
+                self.pressed_button = None;
+                self.scroll.cancel(Instant::now());
+                PointerUpdate {
+                    redraw,
+                    runtime: std::mem::take(&mut self.pending_runtime),
+                }
+            }
             PointerInput::Press { point, button } => {
+                self.scroll.reset();
                 self.last_pointer = Some(point);
                 let hover_changed = self.interaction.update_hover(&self.scene, point);
                 let press_changed = self.interaction.press(&self.scene, point);
@@ -1149,23 +1208,71 @@ impl CairoBar {
                     runtime,
                 }
             }
-            PointerInput::Scroll { point, delta_y } => {
-                self.last_pointer = Some(point);
-                let hover_changed = self.interaction.update_hover(&self.scene, point);
-                let action = PointerAction::from_vertical_delta(delta_y)
-                    .and_then(|action| self.scene.action_at(point, action))
-                    .map(|action| self.enrich_scene_action(action));
-                self.synchronize_dock_model();
-                self.flush_dock_commands(Instant::now());
-                let runtime = match action {
-                    Some(action) => self.dispatch_scene_action(action),
-                    None => std::mem::take(&mut self.pending_runtime),
+            PointerInput::Scroll { point, delta_y } => self.handle_scroll(
+                point,
+                ScrollDelta::Lines { x: 0.0, y: delta_y },
+                ScrollPhase::Moved,
+            ),
+            PointerInput::Wheel {
+                point,
+                delta,
+                phase,
+            } => self.handle_scroll(point, delta, phase),
+        }
+    }
+
+    fn handle_scroll(
+        &mut self,
+        point: Point,
+        delta: ScrollDelta,
+        phase: ScrollPhase,
+    ) -> PointerUpdate {
+        self.last_pointer = Some(point);
+        let hover_changed = self.interaction.update_hover(&self.scene, point);
+        let had_press = self.interaction.pressed().is_some();
+        self.interaction.cancel_press();
+        self.pressed_button = None;
+        let action = match self
+            .scene
+            .hit_test(point)
+            .filter(|hit| hit.scroll_up.is_some() || hit.scroll_down.is_some())
+        {
+            Some(hit) => {
+                let mode = match hit.id {
+                    crate::presentation::NodeId::Audio
+                    | crate::presentation::NodeId::Brightness => ScrollMode::Adjustment,
+                    _ => ScrollMode::Navigation,
                 };
-                PointerUpdate {
-                    redraw: hover_changed || runtime.needs_redraw(),
-                    runtime,
-                }
+                self.scroll
+                    .step(
+                        (scroll_group(hit.id), self.config.edge),
+                        delta,
+                        phase,
+                        mode,
+                        !self.config.edge.is_vertical(),
+                        Instant::now(),
+                    )
+                    .and_then(|step| {
+                        hit.action(match step {
+                            ScrollStep::Up => PointerAction::ScrollUp,
+                            ScrollStep::Down => PointerAction::ScrollDown,
+                        })
+                    })
             }
+            None => {
+                self.scroll.reset();
+                None
+            }
+        };
+        self.synchronize_dock_model();
+        self.flush_dock_commands(Instant::now());
+        let runtime = match action {
+            Some(action) => self.dispatch_scene_action(action),
+            None => std::mem::take(&mut self.pending_runtime),
+        };
+        PointerUpdate {
+            redraw: hover_changed || had_press || runtime.needs_redraw(),
+            runtime,
         }
     }
 
@@ -1186,6 +1293,17 @@ impl CairoBar {
     }
 }
 
+fn scroll_group(id: crate::presentation::NodeId) -> crate::presentation::NodeId {
+    use crate::presentation::NodeId;
+    match id {
+        // Adaptive workspace strips can replace the active tag underneath a
+        // stationary pointer after a WM snapshot. They are one gesture target,
+        // so the new tag's identity must not rearm the same swipe's momentum.
+        NodeId::Tag(_) | NodeId::WorkspaceOverflow => NodeId::WorkspaceOverflow,
+        id => id,
+    }
+}
+
 /// Reusable owned `ARgb32` CPU canvas for GPU-upload frontends.
 ///
 /// wgpu bars keep one canvas alive, render each frame into it, and upload the
@@ -1197,6 +1315,8 @@ pub struct CpuCanvas {
     width: u32,
     height: u32,
     stride: u32,
+    last_scale_factor: Option<f64>,
+    had_backdrop: bool,
 }
 
 /// Device-pixel rectangle inside a CPU frame.
@@ -1285,7 +1405,14 @@ impl CpuCanvas {
             scale_factor,
             backdrop,
         )?;
-        let damage = if reallocated {
+        // Scene nodes cannot describe external wallpaper pixels or a Cairo
+        // transform change. Presenters retaining a GPU texture must replace
+        // every pixel for those transitions, including backdrop removal.
+        let damage = if reallocated
+            || self.last_scale_factor != Some(scale_factor)
+            || backdrop.is_some()
+            || self.had_backdrop
+        {
             None
         } else {
             Some(physical_damage(
@@ -1295,6 +1422,8 @@ impl CpuCanvas {
                 self.height,
             ))
         };
+        self.last_scale_factor = Some(scale_factor);
+        self.had_backdrop = backdrop.is_some();
         Ok(CpuFrame {
             data: &self.data,
             width: self.width,
@@ -1740,7 +1869,28 @@ mod tests {
                 delta_y: -1.0,
             })
         );
-        for (detail, pressed) in [(2, true), (2, false), (4, false), (5, false), (6, true)] {
+        for detail in [6, 7] {
+            assert_eq!(
+                PointerInput::from_x11_button(point, detail, true),
+                Some(PointerInput::Wheel {
+                    point,
+                    delta: ScrollDelta::Lines {
+                        x: if detail == 6 { 1.0 } else { -1.0 },
+                        y: 0.0,
+                    },
+                    phase: ScrollPhase::Moved,
+                })
+            );
+        }
+        for (detail, pressed) in [
+            (2, true),
+            (2, false),
+            (4, false),
+            (5, false),
+            (6, false),
+            (7, false),
+            (8, true),
+        ] {
             assert_eq!(PointerInput::from_x11_button(point, detail, pressed), None);
         }
     }
@@ -2536,6 +2686,7 @@ mod tests {
             width: 2,
             height: 2,
             stride: 8,
+            ..CpuCanvas::default()
         };
         let mut bar = CairoBar::new(
             BarRuntime::default(),
@@ -2549,6 +2700,137 @@ mod tests {
         );
         assert_eq!((canvas.width, canvas.height, canvas.stride), (2, 2, 8));
         assert_eq!(canvas.data, vec![0xA5; 16]);
+    }
+
+    #[test]
+    fn cpu_canvas_invalidates_backdrops_and_scale_without_reallocating() {
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+        let mut canvas = CpuCanvas::new();
+        let initial = canvas.render(&mut bar, 640, 42, 1.0).unwrap();
+        let storage = initial.data.as_ptr();
+        assert_eq!(initial.damage, None);
+        assert!(
+            canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+
+        let backdrop = ImageSurface::create(Format::ARgb32, 640, 42).unwrap();
+        for red in [0.1, 0.7] {
+            let context = Context::new(&backdrop).unwrap();
+            context.set_source_rgb(red, 0.2, 0.3);
+            context.paint().unwrap();
+            let frame = canvas
+                .render_over(&mut bar, 640, 42, 1.0, Some(&backdrop))
+                .unwrap();
+            assert_eq!(frame.damage, None, "wallpaper pixels are not scene nodes");
+            assert_eq!(
+                frame.data.as_ptr(),
+                storage,
+                "stable dimensions reuse storage"
+            );
+        }
+        assert_eq!(canvas.render(&mut bar, 640, 42, 1.0).unwrap().damage, None);
+        assert!(
+            canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+        for scale in [2.0, 1.5, 1.0] {
+            let frame = canvas.render(&mut bar, 640, 42, scale).unwrap();
+            assert_eq!(
+                frame.damage, None,
+                "a new Cairo transform requires full upload"
+            );
+            assert_eq!(frame.data.as_ptr(), storage);
+            assert!(
+                canvas
+                    .render(&mut bar, 640, 42, scale)
+                    .unwrap()
+                    .damage
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn retained_frames_invalidate_renderer_state_outside_scene_nodes() {
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+        let mut canvas = CpuCanvas::new();
+        canvas.render(&mut bar, 640, 42, 1.0).unwrap();
+        assert!(
+            canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+        let scene = bar.scene().clone();
+        bar.renderer_mut().set_background_opacity(Some(0.25));
+        assert!(
+            !canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            bar.scene(),
+            &scene,
+            "opacity changes paint without changing Scene"
+        );
+        assert!(
+            canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+
+        bar.config_mut().icon_font = Some("Xbar Test Font Policy".to_owned());
+        assert!(
+            !canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
+        *bar.renderer_mut() = CairoRenderer::new(FontDescription::from_string("Sans"));
+        assert!(
+            !canvas
+                .render(&mut bar, 640, 42, 1.0)
+                .unwrap()
+                .damage
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2590,6 +2872,20 @@ mod tests {
             point,
             button: PointerButton::Primary,
         });
+        let cancelled = bar.handle_pointer(PointerInput::Cancel);
+        assert!(cancelled.needs_redraw());
+        assert_eq!(bar.last_pointer, Some(point));
+        let late_release = bar.handle_pointer(PointerInput::Release {
+            point,
+            button: PointerButton::Primary,
+        });
+        assert!(late_release.runtime.is_empty());
+        assert_eq!(bar.snapshot().theme, ThemeMode::Dark);
+
+        let _ = bar.handle_pointer(PointerInput::Press {
+            point,
+            button: PointerButton::Primary,
+        });
         let release = bar.handle_pointer(PointerInput::Release {
             point,
             button: PointerButton::Primary,
@@ -2602,6 +2898,172 @@ mod tests {
             delta_y: f64::NAN,
         });
         assert!(ignored.runtime.is_empty());
+    }
+
+    #[test]
+    fn cairo_bar_precision_scroll_isolates_targets_and_respects_all_four_edges() {
+        use crate::presentation::HitRegion;
+
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let mut bar = CairoBar::new(
+                BarRuntime::default(),
+                crate::presentation::PresentationConfig {
+                    edge,
+                    ..Default::default()
+                },
+                FontDescription::from_string("Sans"),
+            );
+            // A deterministic navigation fixture observes dispatch through a
+            // real model change without needing an external WM transport.
+            bar.scene = Scene {
+                viewport: Size::new(100.0, 100.0),
+                clip: Rect::new(0.0, 0.0, 100.0, 100.0),
+                nodes: Vec::new(),
+                hits: vec![HitRegion {
+                    id: NodeId::LayoutButton,
+                    bounds: Rect::new(0.0, 0.0, 40.0, 40.0),
+                    primary: Some(UserAction::ToggleTheme),
+                    secondary: None,
+                    scroll_up: Some(UserAction::ToggleTheme),
+                    scroll_down: Some(UserAction::ToggleTheme),
+                }],
+            };
+            let point = Point::new(20.0, 20.0);
+            let _ = bar.handle_pointer(PointerInput::Move(point));
+            let packet = PointerInput::Wheel {
+                point,
+                delta: ScrollDelta::Pixels { x: 0.0, y: 20.0 },
+                phase: ScrollPhase::Moved,
+            };
+            assert!(bar.handle_pointer(packet).runtime.is_empty());
+            let _ = bar.handle_pointer(PointerInput::Move(Point::new(80.0, 80.0)));
+            let _ = bar.handle_pointer(PointerInput::Move(point));
+            assert!(bar.handle_pointer(packet).runtime.is_empty());
+            assert!(
+                bar.handle_pointer(packet)
+                    .runtime
+                    .changes
+                    .contains(DirtyBits::THEME_CHANGED)
+            );
+            assert_eq!(bar.snapshot().theme, ThemeMode::Light);
+            for _ in 0..8 {
+                assert!(bar.handle_pointer(packet).runtime.is_empty());
+            }
+            let _ = bar.handle_pointer(PointerInput::Leave);
+            let horizontal = bar.handle_pointer(PointerInput::Wheel {
+                point,
+                delta: ScrollDelta::Pixels { x: 40.0, y: 2.0 },
+                phase: ScrollPhase::Moved,
+            });
+            assert_eq!(
+                horizontal
+                    .runtime
+                    .changes
+                    .contains(DirtyBits::THEME_CHANGED),
+                !edge.is_vertical()
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_workspace_redraw_does_not_rearm_the_same_precision_gesture() {
+        use crate::{BarEffect, BarEvent, ModelConfig, TagId, TagState, WmCommand, WmSnapshot};
+
+        let snapshot = |active: usize| {
+            let mut tags = vec![TagState::default(); 32];
+            tags[active].selected = true;
+            WmSnapshot {
+                tags,
+                ..WmSnapshot::default()
+            }
+        };
+        let view_commands = |update: &RuntimeUpdate| {
+            update
+                .platform_effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    BarEffect::WindowManager(WmCommand::ViewTag { tag, .. }) => Some(*tag),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let runtime = BarRuntime::new(ModelConfig {
+                tag_count: 32,
+                ..ModelConfig::default()
+            })
+            .unwrap();
+            let mut bar = CairoBar::new(
+                runtime,
+                crate::presentation::PresentationConfig {
+                    edge,
+                    ..Default::default()
+                },
+                FontDescription::from_string("Sans 12"),
+            );
+            let (width, height) = if edge.is_vertical() {
+                (42, 100)
+            } else {
+                (100, 42)
+            };
+            let surface = ImageSurface::create(Format::ARgb32, width, height).unwrap();
+            let context = Context::new(&surface).unwrap();
+            let viewport = Size::new(width as f32, height as f32);
+            let update = bar
+                .runtime_mut()
+                .apply_event(BarEvent::WindowManager(snapshot(31)));
+            assert!(update.issues.is_empty());
+            bar.render(&context, viewport).unwrap();
+            let bounds = bar
+                .scene
+                .hits
+                .iter()
+                .find(|hit| hit.id == NodeId::Tag(TagId::new(31).unwrap()))
+                .expect("adaptive strip preserves its active workspace")
+                .bounds;
+            let point = Point::new(
+                bounds.x + bounds.width / 2.0,
+                bounds.y + bounds.height / 2.0,
+            );
+            let _ = bar.handle_pointer(PointerInput::Move(point));
+            let _ = bar.take_pending_runtime();
+            let packet = PointerInput::Wheel {
+                point,
+                delta: ScrollDelta::Pixels { x: 0.0, y: 40.0 },
+                phase: ScrollPhase::Moved,
+            };
+            assert_eq!(
+                view_commands(&bar.handle_pointer(packet).runtime),
+                vec![TagId::new(30).unwrap()]
+            );
+
+            // The WM accepts the first step. A real redraw replaces the only
+            // visible Tag31 cell with Tag30 under the unmoved pointer.
+            let update = bar
+                .runtime_mut()
+                .apply_event(BarEvent::WindowManager(snapshot(30)));
+            assert!(update.issues.is_empty());
+            bar.render(&context, viewport).unwrap();
+            assert_eq!(
+                bar.scene.hit_test(point).map(|hit| hit.id),
+                Some(NodeId::Tag(TagId::new(30).unwrap()))
+            );
+            for _ in 0..8 {
+                assert!(
+                    view_commands(&bar.handle_pointer(packet).runtime).is_empty(),
+                    "{edge:?}: momentum rearmed after the active tag's identity changed"
+                );
+            }
+            let next_gesture = PointerInput::Wheel {
+                point,
+                delta: ScrollDelta::Pixels { x: 0.0, y: 40.0 },
+                phase: ScrollPhase::Started,
+            };
+            assert_eq!(
+                view_commands(&bar.handle_pointer(next_gesture).runtime),
+                vec![TagId::new(29).unwrap()]
+            );
+        }
     }
 
     #[test]

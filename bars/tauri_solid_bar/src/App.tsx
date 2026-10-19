@@ -50,6 +50,7 @@ interface BarSnapshot {
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
+  active_tag?: number | null;
   monitor: number;
   layout_symbol: string;
   client_name: string;
@@ -749,6 +750,8 @@ function App() {
                   return (
                     <button
                       class={`${getButtonClass(tag())}${pressed() === index() ? " pressed" : ""}`}
+                      aria-pressed={tag().selected}
+                      aria-current={current().active_tag === index() ? 'true' : undefined}
                       onMouseDown={() => setPressed(index())}
                       onClick={() => {
                         setPressed(null);

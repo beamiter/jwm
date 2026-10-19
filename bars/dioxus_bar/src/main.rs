@@ -1337,6 +1337,8 @@ fn App() -> Element {
                 for (i , icon) in TAG_ICONS.iter().enumerate() {
                     {
                         let base_class = get_button_class(i, wm_tags);
+                        let is_selected = wm_tags.get(i).is_some_and(|tag| tag.selected);
+                        let is_current = state.active_tag.is_some_and(|tag| tag.index() == i);
                         let is_pressed = pressed_button() == Some(i);
                         let button_class = if is_pressed {
                             format!("{} pressed", base_class)
@@ -1347,6 +1349,8 @@ fn App() -> Element {
                             button {
                                 key: "{i}",
                                 class: "{button_class}",
+                                "aria-pressed": "{is_selected}",
+                                "aria-current": "{is_current}",
                                 title: "Tag {i + 1}",
                                 onmousedown: move |_| handle_button_press(i),
                                 onmouseleave: move |_| handle_button_leave(i),

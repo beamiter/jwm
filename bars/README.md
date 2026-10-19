@@ -99,9 +99,45 @@ restores the most recent locally omitted window.
 GTK/Relm and HTML bars retain overflowing control groups in native or DOM
 scrollers. GTK controls support native focus and tooltips. The common HTML
 adapter adds visible keyboard focus, Enter/Space activation, arrow navigation
-along the displayed axis, and Home/End. Focused controls scroll into view.
+along the displayed axis, and Home/End. Its single Tab entry prefers the
+active workspace; focused controls scroll into view. Escape closes the layout
+selector. PageUp/PageDown and +/− adjust focused volume/brightness controls
+using their existing step sizes.
 The [interaction guide](../docs/bars-four-edges.md#interaction-and-overflow)
 distinguishes these adapters from the shared Scene's pointer controls.
+
+The Dioxus and six Tauri frontends also share overflow edge cues and focus
+repair when controls appear or disappear. A scrolling gesture stays with its
+initial scroller until 250 ms of inactivity; moving content cannot steal it
+and accidentally change a setting. Precision volume/brightness input
+accumulates to 16 logical pixels or one line, with one adjustment per event.
+Horizontal and pinch gestures leave those settings alone.
+
+## Wheel and touchpad input
+
+The default `tao_glow_bar` and the other Tao/Winit presenters retain scroll
+units, both axes and gesture phases. One ordinary mouse-wheel notch performs
+one existing action. Precision scrolling accumulates to **40 logical pixels**
+or one fractional-line unit before changing workspace, layout or Shell Hub
+page; the rest of that gesture cannot trigger more navigation. Volume and
+brightness accumulate to **16 logical pixels** or one line per adjustment and
+can repeat as the finger moves. Large packets never queue an action backlog.
+
+Physical pixel packets are converted at the output's scale factor. Explicit
+gesture boundaries take precedence; streams without them, including X11
+fractional lines, start a new gesture after **250 ms** of inactivity. Partial
+distance does not carry across controls, axes, direction changes or bar edges.
+Workspace cells share one navigation gesture: changing the active cell during
+a redraw, or crossing into another workspace cell, cannot rearm its momentum.
+Leaving the bar clears it. Focus loss cancels any pressed control and fences
+the interrupted scroll, including momentum after a popup opens, while keeping
+the cursor usable for a new stationary click.
+
+Top/bottom bars also accept a predominantly horizontal gesture; left/right
+bars ignore predominantly horizontal input and its small vertical jitter.
+Vertical wheel input works on all four edges. The shared Cairo X11 button
+translator also recognizes horizontal wheel buttons 6/7 and ignores all wheel
+releases. GTK, GPUI, Iced and web frontends retain their toolkit input paths.
 
 ## Package boundaries and checks
 

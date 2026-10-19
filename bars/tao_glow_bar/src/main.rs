@@ -1,5 +1,9 @@
 #[path = "../../native_x11.rs"]
 mod native_x11;
+mod redraw;
+#[path = "../../tao_scroll.rs"]
+mod tao_scroll;
+mod texture_upload;
 
 use anyhow::{Context as _, Result};
 use log::{info, warn};
@@ -20,6 +24,8 @@ use tao::{
 
 use glow::HasContext;
 use glutin::prelude::GlSurface;
+use redraw::RedrawGate;
+use texture_upload::TextureUpload;
 use x11rb::rust_connection::RustConnection;
 use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::glass::{
@@ -56,16 +62,6 @@ fn bgra_frame_len(width: u32, height: u32) -> Result<usize> {
     })
 }
 
-fn allocate_bgra_frame(width: u32, height: u32) -> Result<Vec<u8>> {
-    let len = bgra_frame_len(width, height)?;
-    let mut frame = Vec::new();
-    frame
-        .try_reserve_exact(len)
-        .map_err(|error| anyhow::anyhow!("failed to reserve {len}-byte BGRA frame: {error}"))?;
-    frame.resize(len, 0);
-    Ok(frame)
-}
-
 #[derive(Debug)]
 enum UserEvent {
     Tick,
@@ -82,6 +78,8 @@ struct GlPresenter {
     program: glow::NativeProgram,
     vao: glow::NativeVertexArray,
     texture: glow::NativeTexture,
+    canvas: CpuCanvas,
+    upload: TextureUpload,
     alpha_supported: bool,
 }
 
@@ -115,6 +113,8 @@ impl GlPresenter {
             program,
             vao,
             texture,
+            canvas: CpuCanvas::new(),
+            upload: TextureUpload::default(),
             alpha_supported,
         })
     }
@@ -127,18 +127,11 @@ impl GlPresenter {
         scale: f64,
         backdrop: Option<&cairo::ImageSurface>,
     ) -> Result<()> {
-        let mut frame = allocate_bgra_frame(width, height)?;
-        bar.render_into_bgra_over(
-            &mut frame,
-            width,
-            height,
-            width.saturating_mul(4),
-            scale,
-            backdrop,
-        )?;
+        let frame = self
+            .canvas
+            .render_over(bar, width, height, scale, backdrop)?;
         let _ = bar.runtime_mut().take_changes();
-
-        upload_bgra_frame(&self.gl, self.texture, width, height, &frame);
+        self.upload.upload(&self.gl, self.texture, &frame)?;
         draw_fullscreen_quad(&self.gl, self.vao, self.program, self.texture);
         self.surface
             .swap_buffers(&self.context)
@@ -265,6 +258,7 @@ struct App {
     dock_hints: native_x11::DockHints,
     last_physical_size: PhysicalSize<u32>,
     last_cursor_pos: Option<Point>,
+    redraw_gate: RedrawGate,
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
@@ -281,6 +275,7 @@ struct App {
     glass: Option<GlassBackdrop<OpaqueWallpaper>>,
     frosted_params: GlassParams,
     last_wallpaper_revision: Option<u64>,
+    last_wallpaper_poll: Option<Instant>,
     started_at: Instant,
     saw_root_pixmap: bool,
 }
@@ -329,6 +324,7 @@ impl App {
             dock_hints: native_x11::DockHints::default(),
             last_physical_size: physical_size,
             last_cursor_pos: None,
+            redraw_gate: RedrawGate::default(),
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
@@ -336,6 +332,7 @@ impl App {
             depth_check_pending: true,
             opaque: !compositor_active,
             last_wallpaper_revision: None,
+            last_wallpaper_poll: None,
             started_at: Instant::now(),
             saw_root_pixmap: !compositor_active && glass.is_none(),
             glass,
@@ -365,6 +362,9 @@ impl App {
     }
 
     fn redraw(&mut self) -> Result<()> {
+        if !self.redraw_gate.begin_frame() {
+            return Ok(());
+        }
         let PhysicalSize { width, height } = self.last_physical_size;
         if width == 0 || height == 0 {
             return Ok(());
@@ -407,8 +407,10 @@ impl App {
         Ok(())
     }
 
-    fn request_redraw(&self) {
-        self.window.request_redraw();
+    fn request_redraw(&mut self) {
+        if self.redraw_gate.request() {
+            self.window.request_redraw();
+        }
     }
 
     fn resize(&mut self, physical_size: PhysicalSize<u32>) {
@@ -417,9 +419,12 @@ impl App {
             // Stop redraws against the old presenter extent until the
             // compositor supplies a valid size again.
             self.last_physical_size = PhysicalSize::new(0, 0);
+            self.redraw_gate.set_drawable(false);
             return;
         }
         self.last_physical_size = physical_size;
+        self.redraw_gate
+            .set_drawable(physical_size.width > 0 && physical_size.height > 0);
         if let Some(height) = logical_bar_height(
             self.bar
                 .config()
@@ -473,8 +478,10 @@ impl App {
     fn apply_transport_update(&mut self, update: RuntimeUpdate) {
         let needs_redraw = self.apply_runtime_update(update);
         self.sync_transport_wake();
-        if needs_redraw && let Err(error) = self.redraw() {
-            warn!("immediate shared-state redraw failed: {error:#}");
+        if needs_redraw {
+            // The native redraw turn paints the latest complete model. A
+            // burst of WM snapshots must not synchronously rasterize every
+            // intermediate state before mouse/resize events are serviced.
             self.request_redraw();
         }
     }
@@ -493,6 +500,19 @@ impl App {
         if !self.opaque {
             return false;
         }
+        let now = Instant::now();
+        let interval = if self.awaiting_root_wallpaper(now) {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(1)
+        };
+        if self
+            .last_wallpaper_poll
+            .is_some_and(|last| now.saturating_duration_since(last) < interval)
+        {
+            return false;
+        }
+        self.last_wallpaper_poll = Some(now);
         let Some(glass) = self.glass.as_mut() else {
             return false;
         };
@@ -508,13 +528,16 @@ impl App {
     }
 
     fn wallpaper_poll_deadline(&self, now: Instant) -> Option<Instant> {
-        if !self.opaque || self.saw_root_pixmap {
-            return None;
-        }
-        if now.saturating_duration_since(self.started_at) >= Duration::from_secs(30) {
-            return None;
-        }
-        Some(now + Duration::from_millis(200))
+        self.awaiting_root_wallpaper(now).then(|| {
+            self.last_wallpaper_poll
+                .map_or(now, |last| last + Duration::from_millis(200))
+        })
+    }
+
+    fn awaiting_root_wallpaper(&self, now: Instant) -> bool {
+        self.opaque
+            && !self.saw_root_pixmap
+            && now.saturating_duration_since(self.started_at) < Duration::from_secs(30)
     }
 
     fn sync_transport_wake(&mut self) {
@@ -604,6 +627,7 @@ impl App {
             glass.cache_mut().invalidate();
         }
         self.last_wallpaper_revision = None;
+        self.last_wallpaper_poll = None;
         self.request_redraw();
     }
 
@@ -886,30 +910,6 @@ fn create_texture(gl: &glow::Context) -> glow::NativeTexture {
     }
 }
 
-fn upload_bgra_frame(
-    gl: &glow::Context,
-    texture: glow::NativeTexture,
-    width: u32,
-    height: u32,
-    frame: &[u8],
-) {
-    unsafe {
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            glow::RGBA as i32,
-            width as i32,
-            height as i32,
-            0,
-            glow::BGRA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(Some(frame)),
-        );
-        gl.bind_texture(glow::TEXTURE_2D, None);
-    }
-}
-
 fn draw_fullscreen_quad(
     gl: &glow::Context,
     vao: glow::NativeVertexArray,
@@ -1016,6 +1016,7 @@ struct RootPixmapSource {
     esetroot: u32,
     pixmap: u32,
     revision: u64,
+    last_probe: Option<Instant>,
 }
 
 impl RootPixmapSource {
@@ -1046,6 +1047,7 @@ impl RootPixmapSource {
             esetroot,
             pixmap: 0,
             revision: 0,
+            last_probe: None,
         }
     }
 
@@ -1071,6 +1073,22 @@ impl RootPixmapSource {
         self.pixmap_atom(self.xrootpmap)
             .or_else(|| self.pixmap_atom(self.esetroot))
     }
+
+    fn refresh_pixmap(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_probe
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(200))
+        {
+            return;
+        }
+        self.last_probe = Some(now);
+        let pixmap = self.current_pixmap().unwrap_or(0);
+        if pixmap != self.pixmap {
+            self.pixmap = pixmap;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
 }
 
 fn intern_atom(conn: &RustConnection, name: &[u8]) -> u32 {
@@ -1084,18 +1102,18 @@ fn intern_atom(conn: &RustConnection, name: &[u8]) -> u32 {
 
 impl WallpaperSource for RootPixmapSource {
     fn revision(&mut self) -> u64 {
-        let pixmap = self.current_pixmap().unwrap_or(0);
-        if pixmap != self.pixmap {
-            self.pixmap = pixmap;
-            self.revision = self.revision.wrapping_add(1);
-        }
+        // GlassBackdrop also asks for the revision while painting. Throttle
+        // here, so high-rate pointer frames cannot bypass the host's poll
+        // cadence and turn every redraw into X11 property round trips.
+        self.refresh_pixmap();
         self.revision
     }
 
     fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
         use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 
-        let pixmap = self.current_pixmap().ok_or_else(|| {
+        self.refresh_pixmap();
+        let pixmap = (self.pixmap != 0).then_some(self.pixmap).ok_or_else(|| {
             GlassError::Unavailable("root wallpaper pixmap is not published yet".into())
         })?;
         let geometry = self
@@ -1341,6 +1359,9 @@ fn main() -> Result<()> {
                     app.last_cursor_pos = None;
                     app.handle_pointer_input(PointerInput::Leave);
                 }
+                WindowEvent::Focused(false) => {
+                    app.handle_pointer_input(PointerInput::Cancel);
+                }
                 WindowEvent::MouseInput { state, button, .. } => {
                     use tao::event::{ElementState, MouseButton};
                     if let Some(point) = app.last_cursor_pos {
@@ -1360,15 +1381,11 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                WindowEvent::MouseWheel { delta, .. } => {
-                    use tao::event::MouseScrollDelta;
+                WindowEvent::MouseWheel { delta, phase, .. } => {
                     if let Some(point) = app.last_cursor_pos {
-                        let y = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                            MouseScrollDelta::PixelDelta(position) => position.y,
-                            _ => 0.0,
-                        };
-                        app.handle_pointer_input(PointerInput::Scroll { point, delta_y: y });
+                        let input =
+                            tao_scroll::pointer_scroll(point, delta, phase, app.scale_factor);
+                        app.handle_pointer_input(input);
                     }
                 }
                 _ => {}

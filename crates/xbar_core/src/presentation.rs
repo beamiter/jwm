@@ -1268,6 +1268,7 @@ struct ControlGroupContext<'a> {
     gap: f32,
     interaction: &'a InteractionState,
     palette: Palette,
+    active_tag: Option<TagId>,
 }
 
 /// Coordinate vocabulary shared by layout and Dock reporting. Only rectangles
@@ -1569,8 +1570,11 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             fill: palette.background,
         });
 
-        let main_padding =
-            finite_non_negative(self.config.horizontal_padding).min(axis.main_len() * 0.5);
+        let target = self.minimum_target_extent();
+        // Decorative insets yield before the final usable workspace target.
+        // A short output may have exactly one target's worth of room.
+        let main_padding = finite_non_negative(self.config.horizontal_padding)
+            .min((axis.main_len() - target).max(0.0) * 0.5);
         // Managed thickness is physical: 42 px at 2x leaves only 21 logical
         // pixels. Fixed outer padding plus pill padding used to consume the
         // entire sidebar label. Preserve room for an icon/two clock digits
@@ -1578,7 +1582,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         let cross_padding_limit = if axis.vertical {
             (axis.cross_len() - self.font_size() * 2.0).max(0.0) * 0.5
         } else {
-            axis.cross_len() * 0.5
+            (axis.cross_len() - self.font_size()).max(0.0) * 0.5
         };
         let cross_padding =
             finite_non_negative(self.config.vertical_padding).min(cross_padding_limit);
@@ -1591,7 +1595,6 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         let start = axis.main_start() + main_padding;
         let end = (axis.main_end() - main_padding).max(start);
         let total = end - start;
-        let target = self.minimum_target_extent();
         if total < target {
             return scene;
         }
@@ -1652,6 +1655,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             gap,
             interaction,
             palette,
+            active_tag: view.active_tag,
         };
         let mut trailing = self.push_status_group(
             &mut scene,
@@ -1924,6 +1928,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             gap,
             interaction,
             palette,
+            active_tag: _,
         } = context;
         if controls.is_empty() || budget < self.minimum_target_extent() {
             return end;
@@ -2036,6 +2041,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             gap,
             interaction,
             palette,
+            active_tag,
         } = context;
         let target = self.minimum_target_extent();
         if controls.is_empty() || budget < target {
@@ -2047,17 +2053,30 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             .collect();
         let full_width =
             natural.iter().sum::<f32>() + controls.len().saturating_sub(1) as f32 * gap;
-        let active = controls
-            .iter()
-            .position(|control| control.state.selected)
+        // Multiple tags can be selected at once. Their first selected index
+        // is not necessarily the WM's active workspace, which must survive
+        // even when this strip has room for just one target.
+        let active = active_tag
+            .and_then(|tag| {
+                controls
+                    .iter()
+                    .position(|control| control.id == NodeId::Tag(tag))
+            })
+            .or_else(|| controls.iter().position(|control| control.state.selected))
             .unwrap_or(0);
         let mut selected = vec![false; controls.len()];
-        let overflow = full_width > budget && budget >= target * 2.0 + gap;
+        // Try the complete compact strip before spending a target on
+        // overflow. Long names alone must not hide otherwise usable tags.
+        let compact_width =
+            controls.len() as f32 * target + controls.len().saturating_sub(1) as f32 * gap;
+        let overflow = compact_width > budget && budget >= target * 2.0 + gap;
         let mut remaining = budget - if overflow { target + gap } else { 0.0 };
         let mut order: Vec<_> = (0..controls.len()).collect();
         order.sort_by_key(|index| {
             let state = controls[*index].state;
+            let is_active = *index == active && state.selected;
             (
+                !is_active,
                 !state.selected,
                 !state.urgent,
                 !state.occupied,
@@ -2077,6 +2096,16 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             }
         }
         let missing = selected.iter().filter(|selected| !**selected).count();
+        let hidden_state = controls
+            .iter()
+            .zip(&selected)
+            .filter(|(_, visible)| !**visible)
+            .fold(VisualState::default(), |mut state, (control, _)| {
+                state.selected |= control.state.selected || control.state.filled;
+                state.urgent |= control.state.urgent;
+                state.occupied |= control.state.occupied;
+                state
+            });
         let previous = controls[active].bindings.scroll_up;
         let next = controls[active].bindings.scroll_down;
         let enabled = controls[active].state.enabled;
@@ -2090,18 +2119,28 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             } else {
                 target
             };
-            let spec = PillSpec {
+            let bounds = axis.rect(cursor, cross, extent, cross_size);
+            let mut spec = PillSpec {
                 tag_palette: Some(tag_palette),
                 ..self.pill_spec(control, full_width > budget)
             };
-            self.push_pill(
-                scene,
-                axis.rect(cursor, cross, extent, cross_size),
-                spec,
-                interaction,
-                palette,
-                Some(axis.bounds),
-            );
+            if (spec.compact || axis.vertical)
+                && let NodeId::Tag(id) = spec.id
+            {
+                // Names with the same prefix must not become identical
+                // ellipses. Preserve readable short labels/icons; otherwise
+                // show the stable workspace number. The semantic control
+                // retains its complete configured name for tooltips.
+                let padding = self.pill_text_padding(bounds.width, spec.compact);
+                let minimum_size = self.font_size().min(bounds.height).min(9.0);
+                if self.measurer.measure(&spec.text, minimum_size).width
+                    > (bounds.width - padding * 2.0).max(0.0)
+                {
+                    spec.text = (usize::from(id) + 1).to_string();
+                    spec.lines.clear();
+                }
+            }
+            self.push_pill(scene, bounds, spec, interaction, palette, Some(axis.bounds));
             cursor += extent + gap;
         }
         if overflow && missing > 0 {
@@ -2110,7 +2149,8 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 axis.rect(cursor, cross, target, cross_size),
                 PillSpec {
                     id: NodeId::WorkspaceOverflow,
-                    text: format!("+{missing}"),
+                    // Keep hidden urgency perceptible without color alone.
+                    text: format!("{}+{missing}", if hidden_state.urgent { "!" } else { "" }),
                     lines: Vec::new(),
                     network: None,
                     percentage: None,
@@ -2119,9 +2159,9 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     secondary: enabled.then_some(previous).flatten(),
                     scroll_up: enabled.then_some(previous).flatten(),
                     scroll_down: enabled.then_some(next).flatten(),
-                    state: VisualState::default(),
+                    state: hidden_state,
                     progress: None,
-                    tag_palette: None,
+                    tag_palette: Some(tag_palette),
                 },
                 interaction,
                 palette,
@@ -2524,19 +2564,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
 
         // Text always lives in physical x/y boxes. A sidebar may stack two
         // short lines, but never rotates glyphs, titles or progress labels.
-        let padding = if self.config.edge.is_vertical() || spec.compact {
-            self.horizontal_text_padding().min(4.0)
-        } else {
-            self.horizontal_text_padding()
-        };
-        // On a narrow sidebar the inner and outer padding share one width
-        // budget. Reducing only the outer inset still loses two-digit clock
-        // components once DPI leaves less than a normal pill's logical width.
-        let padding = if self.config.edge.is_vertical() {
-            padding.min((bounds.width - self.font_size() * 2.0).max(0.0) * 0.5)
-        } else {
-            padding
-        };
+        let padding = self.pill_text_padding(bounds.width, spec.compact);
         let text_bounds = bounds.inset(padding, 0.0);
         let text = self.fit_text(&spec.text, text_bounds.width, 0.0);
         let marker_fits = tag_colors.is_some() && spec.state.occupied && bounds.width >= 10.0 && {
@@ -2858,6 +2886,21 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
 
     fn horizontal_text_padding(&self) -> f32 {
         finite_non_negative(self.config.pill_horizontal_padding)
+    }
+
+    fn pill_text_padding(&self, width: f32, compact: bool) -> f32 {
+        let padding = if self.config.edge.is_vertical() || compact {
+            self.horizontal_text_padding().min(4.0)
+        } else {
+            self.horizontal_text_padding()
+        };
+        // Inner and outer sidebar padding share one width budget. Keep room
+        // for two digits before allocating decorative space.
+        if self.config.edge.is_vertical() {
+            padding.min((width - self.font_size() * 2.0).max(0.0) * 0.5)
+        } else {
+            padding
+        }
     }
 
     fn minimum_visible_width(&self) -> f32 {
@@ -4405,6 +4448,213 @@ mod tests {
                 ),
                 Some(UserAction::VolumeUp)
             );
+        }
+    }
+
+    #[test]
+    fn workspace_strip_compacts_every_tag_before_hiding_any() {
+        use crate::placement::BarEdge;
+        let mut tags = vec![TagState::default(); 4];
+        tags[3].selected = true;
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let engine = LayoutEngine::new(
+                PresentationConfig {
+                    edge,
+                    tag_labels: (1..=4).map(|index| format!("Workspace {index}")).collect(),
+                    ..PresentationConfig::default()
+                },
+                ApproximateTextMeasurer::default(),
+            );
+            // Four 32px targets plus their three gaps fit, while their full
+            // labels do not. An overflow button would consume a usable tag.
+            let viewport = if edge.is_vertical() {
+                Size::new(42.0, 460.0)
+            } else {
+                Size::new(460.0, 42.0)
+            };
+            let scene = engine.build(view(&tags, ""), viewport, &InteractionState::default());
+            for index in 0..tags.len() {
+                assert!(
+                    scene
+                        .hits
+                        .iter()
+                        .any(|hit| hit.id == NodeId::Tag(TagId::new(index).unwrap())),
+                    "compact workspace {} was needlessly hidden on {edge:?}",
+                    index + 1,
+                );
+                assert!(scene.nodes_for(NodeId::Tag(TagId::new(index).unwrap())).any(|node| {
+                    matches!(node, SceneNode::Text { text, .. } if *text == (index + 1).to_string())
+                }), "compact labels must preserve workspace identity on {edge:?}");
+            }
+            assert!(
+                scene
+                    .hits
+                    .iter()
+                    .all(|hit| hit.id != NodeId::WorkspaceOverflow)
+            );
+        }
+    }
+
+    #[test]
+    fn actual_active_workspace_wins_when_several_tags_are_selected() {
+        use crate::placement::BarEdge;
+        let tags = vec![
+            TagState {
+                selected: true,
+                ..TagState::default()
+            };
+            MAX_MODEL_TAGS
+        ];
+        let active = TagId::new(MAX_MODEL_TAGS - 1).unwrap();
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let engine = LayoutEngine::new(
+                PresentationConfig {
+                    edge,
+                    ..PresentationConfig::default()
+                },
+                ApproximateTextMeasurer::default(),
+            );
+            for extent in [100.0, 160.0, 220.0, 300.0] {
+                let viewport = if edge.is_vertical() {
+                    Size::new(42.0, extent)
+                } else {
+                    Size::new(extent, 42.0)
+                };
+                let scene = engine.build(
+                    BarView {
+                        active_tag: Some(active),
+                        ..view(&tags, "")
+                    },
+                    viewport,
+                    &InteractionState::default(),
+                );
+                let hit = scene
+                    .hits
+                    .iter()
+                    .find(|hit| hit.id == NodeId::Tag(active))
+                    .unwrap_or_else(|| {
+                        panic!("actual active workspace disappeared on {edge:?} at {extent}")
+                    });
+                assert_eq!(hit.primary, Some(UserAction::ViewTag(active)));
+                assert_eq!(
+                    hit.scroll_down,
+                    Some(UserAction::ViewTag(TagId::new(0).unwrap()))
+                );
+                if let Some(overflow) = scene.nodes_for(NodeId::WorkspaceOverflow).next() {
+                    assert!(
+                        matches!(overflow, SceneNode::RoundedRect { state, .. } if state.selected)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_overflow_reports_hidden_urgency_without_replacing_navigation() {
+        use crate::placement::BarEdge;
+        let mut tags = vec![TagState::default(); MAX_MODEL_TAGS];
+        tags[MAX_MODEL_TAGS - 1].selected = true;
+        for tag in &mut tags[..8] {
+            tag.urgent = true;
+            tag.occupied = true;
+        }
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let engine = LayoutEngine::new(
+                PresentationConfig {
+                    edge,
+                    ..PresentationConfig::default()
+                },
+                ApproximateTextMeasurer::default(),
+            );
+            let viewport = if edge.is_vertical() {
+                Size::new(42.0, 300.0)
+            } else {
+                Size::new(300.0, 42.0)
+            };
+            let scene = engine.build(view(&tags, ""), viewport, &InteractionState::default());
+            assert!(
+                scene.nodes_for(NodeId::WorkspaceOverflow).any(|node| {
+                    matches!(node, SceneNode::Text { text, state, .. }
+                    if text.contains('!') && state.urgent && state.occupied)
+                }),
+                "hidden attention was lost on {edge:?}"
+            );
+            let hit = scene
+                .hits
+                .iter()
+                .find(|hit| hit.id == NodeId::WorkspaceOverflow)
+                .expect("workspace overflow");
+            assert_eq!(
+                hit.primary,
+                Some(UserAction::ViewTag(TagId::new(0).unwrap()))
+            );
+            let mut quiet_tags = tags.clone();
+            quiet_tags.iter_mut().for_each(|tag| tag.urgent = false);
+            let quiet = engine.build(
+                view(&quiet_tags, ""),
+                viewport,
+                &InteractionState::default(),
+            );
+            assert!(quiet.nodes_for(NodeId::WorkspaceOverflow).any(|node| {
+                matches!(node, SceneNode::Text { text, state, .. }
+                    if !text.contains('!') && !state.urgent)
+            }));
+            assert_eq!(
+                quiet
+                    .hits
+                    .iter()
+                    .find(|hit| hit.id == NodeId::WorkspaceOverflow),
+                Some(hit)
+            );
+        }
+    }
+
+    #[test]
+    fn tiny_bars_release_padding_before_dropping_the_active_workspace() {
+        use crate::placement::BarEdge;
+        let mut tags = vec![TagState::default(); MAX_MODEL_TAGS];
+        tags[MAX_MODEL_TAGS - 1].selected = true;
+        let active = TagId::new(MAX_MODEL_TAGS - 1).unwrap();
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            for thickness in [8.0, 12.0, 24.0, 42.0] {
+                let engine = LayoutEngine::new(
+                    PresentationConfig {
+                        edge,
+                        bar_height: thickness,
+                        ..PresentationConfig::default()
+                    },
+                    ApproximateTextMeasurer::default(),
+                );
+                for extent in [32.0, 40.0, 51.0] {
+                    let viewport = if edge.is_vertical() {
+                        Size::new(thickness, extent)
+                    } else {
+                        Size::new(extent, thickness)
+                    };
+                    let scene =
+                        engine.build(view(&tags, ""), viewport, &InteractionState::default());
+                    let hit = scene
+                        .hits
+                        .iter()
+                        .find(|hit| hit.id == NodeId::Tag(active))
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "padding swallowed the active workspace on {edge:?} in {viewport:?}"
+                            )
+                        });
+                    assert_eq!(hit.bounds.intersection(scene.clip), Some(hit.bounds));
+                    let point = Point::new(hit.bounds.x, hit.bounds.y);
+                    assert_eq!(
+                        scene.action_at(point, PointerAction::Primary),
+                        Some(UserAction::ViewTag(active))
+                    );
+                    assert!(BarAxis::from_rect(edge, hit.bounds).main_len() >= 32.0);
+                    for node in &scene.nodes {
+                        assert!(!node.bounds().is_empty());
+                        assert_eq!(node.bounds().intersection(scene.clip), Some(node.bounds()));
+                    }
+                }
+            }
         }
     }
 

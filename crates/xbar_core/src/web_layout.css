@@ -25,6 +25,21 @@ html[data-bar-edge] :is(.buttons-container, .right-info-container) {
   min-width: 0;
   scrollbar-width: thin;
   overscroll-behavior: contain;
+  scroll-padding: 3px;
+  --xbar-scroll-before: transparent;
+  --xbar-scroll-after: transparent;
+}
+/* Inset overflow cues reserve no space, so appearing/disappearing scroll
+   affordances never move a percentage, hover target or dock anchor. */
+html[data-bar-edge] [data-xbar-scroll-before="true"] { --xbar-scroll-before: #66b3ff; }
+html[data-bar-edge] [data-xbar-scroll-after="true"] { --xbar-scroll-after: #66b3ff; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"])
+  :is(.buttons-container, .right-info-container) {
+  box-shadow: inset 2px 0 var(--xbar-scroll-before), inset -2px 0 var(--xbar-scroll-after);
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"])
+  :is(.buttons-container, .right-info-container) {
+  box-shadow: inset 0 2px var(--xbar-scroll-before), inset 0 -2px var(--xbar-scroll-after);
 }
 html[data-bar-edge="top"] :is(.buttons-container, .right-info-container),
 html[data-bar-edge="bottom"] :is(.buttons-container, .right-info-container) {
@@ -261,6 +276,17 @@ html:is([data-bar-edge="left"], [data-bar-edge="right"])
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+  html[data-bar-edge] .button-row :is(.emoji-button, .minimized-item, .minimized-dock-card) {
+    transform: none !important;
+  }
+}
+@media (forced-colors: active) {
+  html[data-bar-edge] .button-row :is(button, [role="button"]):focus-visible {
+    outline-color: Highlight !important;
+  }
+  html[data-bar-edge] .button-row [aria-pressed="true"] {
+    border-color: Highlight !important;
   }
 }
 

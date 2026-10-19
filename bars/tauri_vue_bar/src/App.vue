@@ -10,6 +10,8 @@
         v-for="(icon, i) in TAG_ICONS"
         :key="i"
         :class="buttonClass(i)"
+        :aria-pressed="monitorSnapshot.tags[i]?.selected ?? false"
+        :aria-current="monitorSnapshot.active_tag === i ? 'true' : undefined"
         @mousedown="pressedButton = i"
         @click="onTagRelease(i)"
         @mouseleave="pressedButton = null"
@@ -256,6 +258,7 @@ interface BarSnapshot {
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
+  active_tag?: number | null;
   monitor: number;
   layout_symbol: string;
   client_name: string;

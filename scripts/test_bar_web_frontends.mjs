@@ -33,17 +33,22 @@ try {
       const page = await browser.newPage({ viewport: vertical ? { width: 42, height: 450 } : { width: 900, height: 42 }, reducedMotion: 'reduce' });
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
-      await page.setContent(`<style>${css}</style><style>${layout}</style><div id="app"><div id="root"></div></div>`);
+      // Match the actual entry document. Svelte appends into #app, so an
+      // extra, full-height #root would incorrectly push its bar offscreen.
+      const mountId = framework === 'react' || framework === 'solid' ? 'root' : 'app';
+      await page.setContent(`<style>${css}</style><style>${layout}</style><div id="${mountId}"></div>`);
       await page.evaluate(`(function(){const edge='${edge}';const thickness=42;${installer}})()`);
       await page.evaluate(vertical => {
         const callbacks = new Map();
         const listeners = new Map();
         let id = 0;
+        let revision = 0;
         window.__barRequests = [];
         const snapshot = {
           wm_available: true, wm_sequence: 7, wm_session_id: 11,
           geometry: { x: -900, y: 80, width: vertical ? 42 : 900, height: vertical ? 450 : 800 },
-          tags: Array.from({ length: 9 }, (_, index) => ({ selected: index === 2, occupied: index % 2 === 0, urgent: index === 7, filled: false })),
+          tags: Array.from({ length: 9 }, (_, index) => ({ selected: index === 2 || index === 7, occupied: index % 2 === 0, urgent: index === 7, filled: false })),
+          active_tag: 7,
           monitor: 0, layout_symbol: '[]=', client_name: 'Browser regression', time: '18:42:09',
           show_seconds: true, layout_selector_open: false,
           audio_device: { name: 'Test speakers', volume: 50, is_muted: false },
@@ -52,6 +57,15 @@ try {
           minimized_windows: Array.from({ length: 3 }, (_, index) => ({ token: index + 1, monitor: 0, title: `Window ${index + 1}`, app_id: 'test', flags: 1 })),
           minimized_overflow: false,
         };
+        const publish = () => {
+          revision++;
+          for (const [handler, event] of listeners) {
+            if (event === 'xbar-state') callbacks.get(handler)?.({ event, id: handler, payload: {
+              revision, changes: 0xffffffff, partition_changes: 0xffffffff, snapshot: structuredClone(snapshot),
+            } });
+          }
+        };
+        window.__barPublish = patch => { Object.assign(snapshot, patch); publish(); };
         window.__TAURI_INTERNALS__ = {
           metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main', windowLabel: 'main' } },
           transformCallback(callback) { callbacks.set(++id, callback); return id; },
@@ -62,9 +76,7 @@ try {
             if (command === 'plugin:window|scale_factor') return 1;
             if (command === 'plugin:window|inner_position') return { x: -900, y: 80 };
             if (command === 'frontend_ready') {
-              for (const [handler, event] of listeners) {
-                if (event === 'xbar-state') callbacks.get(handler)?.({ event, id: handler, payload: { revision: 1, changes: 0xffffffff, partition_changes: 0xffffffff, snapshot } });
-              }
+              publish();
               return;
             }
             if (command === 'dispatch_action') { window.__barRequests.push(args.request); return; }
@@ -76,7 +88,11 @@ try {
       await page.addScriptTag({ type: 'module', content: script });
       await page.waitForSelector('.time-pill', { timeout: 5000 });
       await page.waitForFunction(() => document.querySelector('.button-row')?.getAttribute('role') === 'toolbar');
+      await page.waitForFunction(() => document.querySelector('.emoji-button[aria-current="true"]')?.tabIndex === 0);
       const description = `${framework}/${edge}`;
+      assert.equal(await page.locator('.emoji-button').nth(7).getAttribute('aria-pressed'), 'true', `${description}: urgent workspace retains actual selected semantics`);
+      assert.equal(await page.locator('.emoji-button').nth(7).getAttribute('aria-current'), 'true', `${description}: active workspace is exposed`);
+      assert.equal(await page.locator('.emoji-button').nth(7).evaluate(node => node.tabIndex), 0, `${description}: active workspace is the initial toolbar entry`);
       await page.locator('.emoji-button').first().focus();
       await page.keyboard.press('Enter');
       assert.equal(await page.evaluate(() => window.__barRequests.filter(request => request.action === 'view_tag_on').length), 1,
@@ -104,6 +120,31 @@ try {
         assert.equal(await page.evaluate(() => document.activeElement.classList.contains('volume-pill')), true,
           `${description}: live toolbar follows visual order`);
       }
+      for (const [selector, action] of [['.volume-pill', 'adjust_volume'], ['.brightness-pill', 'adjust_brightness']]) {
+        await page.locator(selector).focus();
+        for (const key of ['PageUp', 'PageDown', '+', '-']) {
+          const before = await page.evaluate(action => window.__barRequests.filter(request => request.action === action).length, action);
+          await page.keyboard.press(key);
+          const adjusted = await page.evaluate(action => window.__barRequests.filter(request => request.action === action), action);
+          assert.equal(adjusted.length, before + 1, `${description}: ${selector} ${key} dispatches exactly once`);
+          assert.equal(Math.sign(adjusted.at(-1).delta), key === 'PageUp' || key === '+' ? 1 : -1, `${description}: ${selector} ${key} direction`);
+        }
+      }
+      await page.locator('[data-window-id="2"]').focus();
+      await page.evaluate(() => window.__barPublish({ wm_sequence: 8, time: '18:42:10' }));
+      await page.waitForFunction(() => document.activeElement.dataset.windowId === '2' &&
+        window.__barRequests.some(request => request.action === 'set_dock_geometry' && request.minimized_generation === 8));
+      assert.equal(await page.evaluate(() => [...document.querySelectorAll('.button-row button, .button-row [role="button"]')].filter(node => node.tabIndex === 0).length), 1,
+        `${description}: generation replacement preserves a single focused toolbar control`);
+      await page.evaluate(() => window.__barPublish({ layout_selector_open: true }));
+      await page.waitForFunction(() => document.querySelector('.layout-option')?.hasAttribute('tabindex') && document.querySelector('.layout-toggle')?.getAttribute('aria-expanded') === 'true');
+      await page.locator('.layout-option').first().focus();
+      const togglesBeforeEscape = await page.evaluate(() => window.__barRequests.filter(request => request.action === 'toggle_layout_selector').length);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() => window.__barRequests.filter(request => request.action === 'toggle_layout_selector').length), togglesBeforeEscape + 1,
+        `${description}: Escape uses the frontend's layout toggle action`);
+      await page.evaluate(() => window.__barPublish({ layout_selector_open: false }));
+      await page.waitForFunction(() => !document.querySelector('.layout-option') && document.activeElement.classList.contains('layout-toggle'));
       await page.waitForFunction(() => window.__barRequests.some(request => request.action === 'set_dock_geometry' && request.window_id === 3));
       const previous = await page.evaluate(() => window.__barRequests.filter(request => request.action === 'set_dock_geometry').length);
       await page.locator('.right-info-container').evaluate((node, vertical) => vertical ? node.scrollTo(0, node.scrollHeight) : node.scrollTo(node.scrollWidth, 0), vertical);
@@ -132,4 +173,4 @@ try {
 } finally {
   await browser.close();
 }
-console.log(`PASS: ${cases} production-bundle cases; readiness, keyboard actions, scroll-triggered anchor publication, clipped withdrawal, and restore.`);
+console.log(`PASS: ${cases} production-bundle cases; workspace semantics, keyboard actions/adjustments, reactive focus preservation, Escape, scroll-triggered anchor publication, clipped withdrawal, and restore.`);

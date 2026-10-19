@@ -132,6 +132,8 @@ struct BarSnapshot {
     #[serde(default)]
     geometry: Option<DockGeometry>,
     tags: Vec<TagState>,
+    #[serde(default)]
+    active_tag: Option<usize>,
     monitor: i32,
     layout_symbol: String,
     client_name: String,
@@ -1161,6 +1163,7 @@ fn App() -> impl IntoView {
                 let minimized_generation = current.wm_sequence.unwrap_or_default();
                 let monitor = current.monitor;
                 let tags = current.tags;
+                let active_tag = current.active_tag;
                 let layout_symbol = current.layout_symbol;
                 let layout_open = current.layout_selector_open;
                 let system = current.system_details;
@@ -1252,6 +1255,8 @@ fn App() -> impl IntoView {
                                     view! {
                                         <button
                                             class=class
+                                            aria-pressed=tag.selected.to_string()
+                                            aria-current=(active_tag == Some(index)).to_string()
                                             on:mousedown=move |_| set_pressed.set(Some(index))
                                             on:click=move |_| {
                                                 set_pressed.set(None);

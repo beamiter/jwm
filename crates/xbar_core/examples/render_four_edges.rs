@@ -2,6 +2,8 @@
 //! Wayland, a running WM, providers, or screenshot timing dependencies.
 //!
 //! cargo run -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-bar-previews
+//! Append `named` for compact named workspaces or `crowded` for multi-selection
+//! and hidden urgent workspaces on a short output.
 //!
 //! PNGs use portable text labels so geometry can be inspected even on CI hosts
 //! without Nerd Fonts. JSON contains the identical scene and pointer targets.
@@ -21,7 +23,7 @@ mod preview {
         TagId, TagState, ThemeMode, WindowToken,
     };
 
-    pub fn run(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn run(directory: &Path, scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(directory)?;
         let mut snapshot = BarModel::default().snapshot();
         snapshot.wm_available = true;
@@ -73,15 +75,56 @@ mod preview {
         config.labels.theme_light = "◑".to_owned();
         config.labels.shell_routes[0] = "≡".to_owned();
 
+        match scenario {
+            "standard" => {}
+            "named" => {
+                snapshot.tags = (0..4)
+                    .map(|index| TagState {
+                        selected: index == 3,
+                        occupied: true,
+                        ..TagState::default()
+                    })
+                    .collect();
+                snapshot.active_tag = TagId::new(3);
+                snapshot.minimized_windows.clear();
+                config.tag_labels = (1..=4).map(|index| format!("Workspace {index}")).collect();
+            }
+            "crowded" => {
+                snapshot.tags = (0..32)
+                    .map(|index| TagState {
+                        selected: index < 4 || index == 31,
+                        occupied: index < 8 || index == 31,
+                        urgent: index < 8,
+                        ..TagState::default()
+                    })
+                    .collect();
+                snapshot.active_tag = TagId::new(31);
+                snapshot.minimized_windows.clear();
+                config.tag_labels = (1..=32).map(|index| format!("Workspace {index}")).collect();
+            }
+            _ => {
+                return Err(format!(
+                    "Unknown scenario {scenario:?}: use standard, named or crowded"
+                )
+                .into());
+            }
+        }
+
         for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
             for scale in [1_u32, 2] {
                 for theme in [ThemeMode::Dark, ThemeMode::Light] {
                     snapshot.theme = theme;
                     config.edge = edge;
+                    let extent = match scenario {
+                        "named" => 460.0,
+                        "crowded" => 300.0,
+                        _ if edge.is_vertical() => 1100.0,
+                        _ => 1600.0,
+                    };
                     let viewport = if edge.is_vertical() {
-                        Size::new(42.0, 1100.0)
+                        Size::new(42.0, extent)
                     } else {
-                        Size::new(1600.0, 42.0)
+                        Size::new(extent, 42.0)
                     };
                     let width = viewport.width as u32 * scale;
                     let height = viewport.height as u32 * scale;
@@ -157,7 +200,7 @@ mod preview {
             }
         }
         println!(
-            "Rendered four edges, two themes and two scales to {}",
+            "Rendered {scenario} across four edges, two themes and two scales to {}",
             directory.display()
         );
         Ok(())
@@ -170,7 +213,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/jwm-bar-previews"));
-    preview::run(&directory)
+    let scenario = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "standard".to_owned());
+    preview::run(&directory, &scenario)
 }
 
 #[cfg(not(feature = "render-cairo"))]

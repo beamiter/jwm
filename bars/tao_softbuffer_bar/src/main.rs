@@ -1,5 +1,7 @@
 #[path = "../../native_x11.rs"]
 mod native_x11;
+#[path = "../../tao_scroll.rs"]
+mod tao_scroll;
 
 use anyhow::{Context as _, Result};
 use log::warn;
@@ -602,6 +604,9 @@ fn main() -> Result<()> {
                     app.last_cursor_pos = None;
                     app.handle_pointer_input(PointerInput::Leave);
                 }
+                WindowEvent::Focused(false) => {
+                    app.handle_pointer_input(PointerInput::Cancel);
+                }
                 WindowEvent::MouseInput { state, button, .. } => {
                     use tao::event::{ElementState, MouseButton};
                     if let Some(point) = app.last_cursor_pos {
@@ -621,15 +626,11 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                WindowEvent::MouseWheel { delta, .. } => {
-                    use tao::event::MouseScrollDelta;
+                WindowEvent::MouseWheel { delta, phase, .. } => {
                     if let Some(point) = app.last_cursor_pos {
-                        let y = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                            MouseScrollDelta::PixelDelta(position) => position.y,
-                            _ => 0.0,
-                        };
-                        app.handle_pointer_input(PointerInput::Scroll { point, delta_y: y });
+                        let input =
+                            tao_scroll::pointer_scroll(point, delta, phase, app.scale_factor);
+                        app.handle_pointer_input(input);
                     }
                 }
                 _ => {}

@@ -52,6 +52,7 @@ interface BarSnapshot {
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
+  active_tag?: number | null;
   monitor: number;
   layout_symbol: string;
   client_name: string;
@@ -632,7 +633,7 @@ function MinimizedDock({
   );
 }
 
-function TagButtons({ tags, monitor }: { tags: TagState[]; monitor: number }) {
+function TagButtons({ tags, monitor, activeTag }: { tags: TagState[]; monitor: number; activeTag?: number | null }) {
   const [pressedButton, setPressedButton] = useState<number | null>(null);
 
   return (
@@ -650,6 +651,8 @@ function TagButtons({ tags, monitor }: { tags: TagState[]; monitor: number }) {
           <button
             key={index}
             className={buttonClass}
+            aria-pressed={tag.selected}
+            aria-current={activeTag === index ? 'true' : undefined}
             onMouseDown={() => setPressedButton(index)}
             onClick={() => {
               setPressedButton(null);
@@ -912,7 +915,7 @@ function App() {
   return (
     <div className="button-row">
       <div className="buttons-container">
-        <TagButtons tags={snapshot.tags} monitor={snapshot.monitor} />
+        <TagButtons tags={snapshot.tags} monitor={snapshot.monitor} activeTag={snapshot.active_tag} />
         <LayoutControls
           symbol={snapshot.layout_symbol}
           monitor={snapshot.monitor}

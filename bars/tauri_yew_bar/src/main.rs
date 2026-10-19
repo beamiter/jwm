@@ -131,6 +131,8 @@ struct BarSnapshot {
     #[serde(default)]
     geometry: Option<DockGeometry>,
     tags: Vec<TagState>,
+    #[serde(default)]
+    active_tag: Option<usize>,
     monitor: i32,
     layout_symbol: String,
     client_name: String,
@@ -1146,6 +1148,7 @@ fn app() -> Html {
     let minimized_generation = current.wm_sequence.unwrap_or_default();
     let monitor = current.monitor;
     let tags = current.tags;
+    let active_tag = current.active_tag;
     let layout_symbol = current.layout_symbol;
     let layout_open = current.layout_selector_open;
     let system = current.system_details;
@@ -1327,6 +1330,8 @@ fn app() -> Html {
                             <button
                                 key={index}
                                 class={class}
+                                aria-pressed={tag.selected.to_string()}
+                                aria-current={(active_tag == Some(index)).to_string()}
                                 onmousedown={on_press(index)}
                                 onclick={on_release(index)}
                                 onmouseleave={on_leave.clone()}

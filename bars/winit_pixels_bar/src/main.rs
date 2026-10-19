@@ -616,6 +616,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.last_cursor_pos = None;
                 self.handle_pointer_input(PointerInput::Leave);
             }
+            WindowEvent::Focused(false) => {
+                self.handle_pointer_input(PointerInput::Cancel);
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::{ElementState, MouseButton};
                 let Some(point) = self.last_cursor_pos else {
@@ -637,16 +640,29 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handle_pointer_input(input);
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                use winit::event::MouseScrollDelta;
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                use winit::event::{MouseScrollDelta, TouchPhase};
+                use xbar_core::{ScrollDelta, ScrollPhase};
                 if let Some(point) = self.last_cursor_pos {
-                    let vertical = match delta {
-                        MouseScrollDelta::LineDelta(_, value) => f64::from(value),
-                        MouseScrollDelta::PixelDelta(position) => position.y,
+                    let delta = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => ScrollDelta::Lines {
+                            x: f64::from(x),
+                            y: f64::from(y),
+                        },
+                        MouseScrollDelta::PixelDelta(position) => {
+                            ScrollDelta::physical_pixels(position.x, position.y, self.scale_factor)
+                        }
                     };
-                    self.handle_pointer_input(PointerInput::Scroll {
+                    let phase = match phase {
+                        TouchPhase::Started => ScrollPhase::Started,
+                        TouchPhase::Moved => ScrollPhase::Moved,
+                        TouchPhase::Ended => ScrollPhase::Ended,
+                        TouchPhase::Cancelled => ScrollPhase::Cancelled,
+                    };
+                    self.handle_pointer_input(PointerInput::Wheel {
                         point,
-                        delta_y: vertical,
+                        delta,
+                        phase,
                     });
                 }
             }

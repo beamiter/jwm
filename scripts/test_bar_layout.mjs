@@ -131,12 +131,119 @@ async function assertHoverStability(page, description) {
   await page.evaluate(() => document.querySelectorAll('.buttons-container, .right-info-container').forEach(node => node.scrollTo(0, 0)));
 }
 
+async function assertToolbarInteraction(page, install, vertical, description) {
+  const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const tabStops = () => page.evaluate(() => [...document.querySelectorAll('.button-row button, .button-row [role="button"]')]
+    .filter(node => node.tabIndex === 0).length);
+  const volume = page.locator('.volume-pill');
+  await volume.evaluate(node => node.removeAttribute('aria-disabled'));
+  await settle();
+  await volume.focus();
+  assert.equal(await tabStops(), 1, `${description}: a toolbar has one tab stop`);
+  await page.evaluate(() => {
+    const exit = document.createElement('button');
+    exit.id = 'toolbar-exit';
+    exit.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';
+    document.body.append(exit);
+  });
+  await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'toolbar-exit', `${description}: Tab leaves the toolbar`);
+  await page.keyboard.press('Shift+Tab');
+  assert.equal(await volume.evaluate(node => document.activeElement === node), true, `${description}: Shift+Tab returns to the remembered control`);
+
+  await page.evaluate(() => {
+    window.metricSteps = [];
+    document.querySelectorAll('.volume-pill, .brightness-pill').forEach(node =>
+      node.addEventListener('wheel', event => window.metricSteps.push(Math.sign(event.deltaY))));
+  });
+  for (const key of ['PageUp', 'PageDown', '+', '-']) await page.keyboard.press(key);
+  assert.deepEqual(await page.evaluate(() => window.metricSteps), [-1, 1, -1, 1], `${description}: keyboard adjusts metrics exactly once`);
+  await page.evaluate(install);
+  await page.evaluate(() => {
+    window.metricSteps = [];
+    const metric = document.querySelector('.volume-pill');
+    const wheel = init => metric.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ...init }));
+    wheel({ deltaX: 30 });
+    wheel({ deltaY: 30, ctrlKey: true });
+    wheel({ deltaY: 30, metaKey: true });
+    wheel({ deltaY: 30, altKey: true });
+  });
+  assert.deepEqual(await page.evaluate(() => window.metricSteps), [], `${description}: horizontal and modified wheel gestures cannot change system settings`);
+  await page.evaluate(install);
+  await page.evaluate(() => {
+    const metric = document.querySelector('.volume-pill');
+    const wheel = (deltaY, deltaMode = 0) => metric.dispatchEvent(new WheelEvent('wheel', { deltaY, deltaMode, bubbles: true, cancelable: true }));
+    for (let i = 0; i < 15; i++) wheel(1);
+    window.beforeThreshold = window.metricSteps.length;
+    wheel(1);
+    wheel(100);
+    wheel(-1);
+    wheel(-15);
+    for (let i = 0; i < 4; i++) wheel(0.25, 1);
+  });
+  assert.equal(await page.evaluate(() => window.beforeThreshold), 0, `${description}: precision wheel noise is accumulated`);
+  assert.deepEqual(await page.evaluate(() => window.metricSteps), [1, 1, -1, 1], `${description}: pixels, notches, direction reversal and fractional lines`);
+
+  await page.evaluate(install);
+  const scroll = await page.evaluate(vertical => {
+    window.metricSteps = [];
+    const group = document.querySelector('.right-info-container');
+    group.scrollTo(0, 0);
+    const before = vertical ? group.scrollTop : group.scrollLeft;
+    const initial = document.querySelector('.usage-pill');
+    initial.dispatchEvent(new WheelEvent('wheel', { deltaY: 32, bubbles: true, cancelable: true }));
+    document.querySelector('.volume-pill').dispatchEvent(new WheelEvent('wheel', { deltaY: 16, bubbles: true, cancelable: true }));
+    return { before, after: vertical ? group.scrollTop : group.scrollLeft };
+  }, vertical);
+  assert(scroll.after > scroll.before, `${description}: wheel moves content along the bar axis`);
+  assert.deepEqual(await page.evaluate(() => window.metricSteps), [], `${description}: moving controls cannot steal a scrolling gesture`);
+  await settle();
+  assert.equal(await page.locator('.right-info-container').getAttribute('data-xbar-scroll-before'), 'true', `${description}: overflow direction is discoverable`);
+
+  await page.locator('.layout-option').first().focus();
+  await page.evaluate(() => {
+    window.removedOption = document.querySelector('.layout-option');
+    window.optionParent = window.removedOption.parentElement;
+    window.removedOption.remove();
+  });
+  await settle();
+  assert.equal(await page.evaluate(() => document.activeElement.classList.contains('layout-toggle')), true, `${description}: removed layout options return focus to their toggle`);
+  await page.evaluate(() => window.optionParent.prepend(window.removedOption));
+  await settle();
+  await page.locator('[data-window-id="2"]').focus();
+  await page.evaluate(() => {
+    window.originalWindow = document.querySelector('[data-window-id="2"]');
+    window.originalWindow.replaceWith(window.originalWindow.cloneNode(true));
+  });
+  await settle();
+  assert.equal(await page.evaluate(() => document.activeElement.dataset.windowId), '2', `${description}: reactive replacement preserves focused window identity`);
+  await page.evaluate(() => document.querySelector('[data-window-id="2"]').replaceWith(window.originalWindow));
+  await settle();
+  await page.locator('.emoji-button').first().focus();
+  await page.locator('.emoji-button').first().evaluate(node => node.disabled = true);
+  await settle();
+  assert.equal(await page.evaluate(() => document.activeElement.title), 'Workspace 2', `${description}: a disabled active control repairs focus`);
+  await page.locator('.emoji-button').first().evaluate(node => node.disabled = false);
+
+  await page.locator('#toolbar-exit').focus();
+  await page.evaluate(() => document.querySelector('[data-window-id="2"]').replaceWith(window.originalWindow.cloneNode(true)));
+  await settle();
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'toolbar-exit', `${description}: updates never steal focus from outside`);
+  await page.evaluate(() => {
+    document.querySelector('[data-window-id="2"]').replaceWith(window.originalWindow);
+    document.querySelector('#toolbar-exit').remove();
+  });
+  await settle();
+  assert.equal(await tabStops(), 1, `${description}: dynamic updates retain a single toolbar entry`);
+}
+
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_BIN || undefined,
   headless: true,
 });
 let cases = 0;
 let metricCases = 0;
+let interactionCases = 0;
 try {
   for (const [name, path] of styles) {
     const source = await read(path);
@@ -149,7 +256,7 @@ try {
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
         const tags = Array.from({ length: 9 }, (_, i) =>
-          `<button class="emoji-button" title="Workspace ${i + 1}">${i + 1}</button>`).join('');
+          `<button class="emoji-button" title="Workspace ${i + 1}" aria-pressed="${i === 2 || i === 7}" aria-current="${i === 7}">${i + 1}</button>`).join('');
         const cards = Array.from({ length: 3 }, (_, i) => name === 'dioxus'
           ? `<div class="minimized-dock-slot"><div class="minimized-dock-card" data-window-id="${i + 1}" title="Restore window ${i + 1}">${i + 1}</div></div>`
           : `<button class="minimized-item" data-window-id="${i + 1}" title="Restore window ${i + 1}"><span class="minimized-thumbnail"><span class="minimized-initial">${i + 1}</span></span></button>`).join('');
@@ -163,13 +270,16 @@ try {
           <${metricTag} class="pill volume-pill" title="Volume"><span class="nf-icon">V</span>50%</${metricTag}>
           <div class="shell-menu"><div class="pill shell-pill" title="Control center">S</div></div>
           <div class="pill screenshot-pill" title="Screenshot">P</div>
-          <div class="pill time-pill"><span class="nf-icon">T</span>18:42:09</div>
+          <div class="pill time-pill" title="Toggle seconds"><span class="nf-icon">T</span>18:42:09</div>
           <div class="pill monitor-pill">1</div><div class="pill scale-pill">1.00</div>
           </div></div></div></body></html>`);
         const install = `(function(){const edge='${edge}';const thickness=${thickness};${installer}})()`;
         await page.evaluate(install);
         // Readiness replay must replace listeners, not double activation.
         await page.evaluate(install);
+        assert.equal(await page.locator('.emoji-button').nth(7).evaluate(node => node.tabIndex), 0,
+          `${name}/${edge}: the current workspace wins over earlier selected workspaces for initial keyboard entry`);
+        assert.equal(await page.locator('.time-pill').getAttribute('title'), 'Toggle seconds', `${name}/${edge}: keep the framework's clock action tooltip`);
         await page.evaluate(() => {
           window.activations = 0;
           document.querySelectorAll('button, [role="button"]').forEach(node =>
@@ -223,14 +333,20 @@ try {
             `${description}: keyboard follows the visual status order`);
         }
         await page.locator('.volume-pill').evaluate(node => node.setAttribute('aria-disabled', 'true'));
-        await page.locator('.volume-pill').focus();
-        await page.keyboard.press('Enter');
-        assert.equal(await page.evaluate(() => window.activations), 2, `${description}: disabled activation`);
+        await page.locator('.volume-pill').evaluate(node => {
+          node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          node.click();
+        });
+        assert.equal(await page.evaluate(() => window.activations), 2, `${description}: disabled keyboard and pointer activation`);
         await page.keyboard.press('End');
         assert.equal(await page.evaluate(vertical => vertical
           ? document.activeElement.dataset.windowId === '3'
           : document.activeElement.classList.contains('time-pill'), vertical), true, description);
         assert.deepEqual(errors, [], description);
+        if (length === 900) {
+          await assertToolbarInteraction(page, install, vertical, description);
+          interactionCases++;
+        }
         if (process.env.BAR_SCREENSHOTS && length === 900 && (name === 'react' || name === 'dioxus')) {
           await page.locator('.time-pill').blur();
           await page.evaluate(() => document.querySelectorAll('.buttons-container, .right-info-container').forEach(node => node.scrollTo(0, 0)));
@@ -315,4 +431,4 @@ try {
 } finally {
   await browser.close();
 }
-console.log(`PASS: ${cases} browser layout/accessibility cases (7 frontends × 4 edges × 3 sizes), ${metricCases} metric transitions, stable hover targets, transformed/scrolling geometry, and 4 pinned core dock allocations.`);
+console.log(`PASS: ${cases} browser layout/accessibility cases (7 frontends × 4 edges × 3 sizes), ${metricCases} metric transitions, ${interactionCases} toolbar interaction cases, stable hover targets, transformed/scrolling geometry, and 4 pinned core dock allocations.`);
