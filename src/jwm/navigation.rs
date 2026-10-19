@@ -61,7 +61,6 @@ pub(crate) fn tag_switch_motion(
     TagSwitchMotion::Layout
 }
 
-
 /**
  * Select the workarea common to both tags. Tag-specific bars and docks can
  * appear or disappear between the snapshots; the intersection prevents
@@ -927,7 +926,12 @@ impl Jwm {
                 self.transition_capture_rect_for_monitor(sel_mon_key, old_transition_work)
             {
                 // The rect already excludes top/bottom/left/right chrome.
-                backend.compositor_notify_tag_switch(cfg.animation_duration(), direction, 0, mon_rect);
+                backend.compositor_notify_tag_switch(
+                    cfg.animation_duration(),
+                    direction,
+                    0,
+                    mon_rect,
+                );
             } else {
                 // No overlap means there is no workspace to animate safely.
                 motion = TagSwitchMotion::Layout;
@@ -1174,11 +1178,10 @@ mod tests {
         ClientKey, TagSwitchMotion, adjusted_client_factor, tag_switch_motion,
         transition_capture_rect,
     };
-    use crate::core::types::Rect;
     use crate::Jwm;
     use crate::config::CONFIG;
+    use crate::core::types::Rect;
     use slotmap::SlotMap;
-
 
     #[test]
     fn tag_transition_excludes_each_bar_edge_from_both_snapshots() {
@@ -1208,7 +1211,10 @@ mod tests {
             ),
             Some((0, 50, 1000, 700))
         );
-        assert_eq!(transition_capture_rect(monitor, None, None), Some((0, 0, 1000, 800)));
+        assert_eq!(
+            transition_capture_rect(monitor, None, None),
+            Some((0, 0, 1000, 800))
+        );
         assert_eq!(
             transition_capture_rect(monitor, Some(Rect::new(0, 0, 0, 800)), None),
             None
