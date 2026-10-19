@@ -16,7 +16,9 @@ use gtk4::{
     Overlay, glib,
 };
 use xbar_core::controls::ControlSpec;
-use xbar_core::presentation::{NetworkTextMetrics, NodeId, PointerAction, Rgba};
+use xbar_core::presentation::{
+    NetworkTextMetrics, NodeId, PercentTextMetrics, PointerAction, Rgba,
+};
 use xbar_core::{BarEdge, ShellRoute, UserAction};
 
 use crate::theme::Metrics;
@@ -48,6 +50,9 @@ pub struct PillStyle {
     /// Both connection glyphs reserve one stable slot, including while the
     /// provider is starting or reconnecting.
     pub network_icons: [String; 2],
+    /// Bounded glyph candidates for every percentage control, including mute,
+    /// charging, and unavailable states. Live text never sizes these columns.
+    pub metric_icons: [(NodeId, Vec<String>); 5],
 }
 
 pub struct Pill {
@@ -55,6 +60,8 @@ pub struct Pill {
     button: Button,
     label: Label,
     network_labels: Option<NetworkLabels>,
+    percent_labels: Option<PercentLabels>,
+    sidebar_metric: Option<SidebarMetric>,
     font: FontDescription,
     vertical: bool,
     minimum_height: i32,
@@ -67,7 +74,7 @@ pub struct Pill {
     bindings: Rc<RefCell<Bindings>>,
 }
 
-/// Only the horizontal network pill uses fixed text columns. Arrow and icon
+/// Horizontal network pills use fixed text columns. Arrow and icon
 /// positions stay still while right-aligned rates change digits or IEC units.
 struct NetworkLabels {
     row: gtk4::Box,
@@ -84,36 +91,23 @@ impl NetworkLabels {
         let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         row.set_halign(gtk4::Align::Center);
         row.set_hexpand(false);
-        let icon = Self::slot(metrics.icon_width, 0.5);
+        let icon = fixed_text_slot(metrics.icon_width, 0.5);
         if metrics.icon_width > 0.0 {
             icon.set_margin_end((metrics.gap * 2.0).ceil() as i32);
             row.append(&icon);
         }
         let rates = [
-            Self::slot(metrics.rate_width, 1.0),
-            Self::slot(metrics.rate_width, 1.0),
+            fixed_text_slot(metrics.rate_width, 1.0),
+            fixed_text_slot(metrics.rate_width, 1.0),
         ];
         for (index, arrow) in ["\u{2193}", "\u{2191}"].into_iter().enumerate() {
-            let direction = Self::slot(metrics.arrow_width, 0.5);
+            let direction = fixed_text_slot(metrics.arrow_width, 0.5);
             direction.set_text(arrow);
             row.append(&direction);
             row.append(&rates[index]);
         }
         rates[0].set_margin_end(metrics.gap.ceil() as i32);
         Self { row, icon, rates }
-    }
-
-    fn slot(width: f32, align: f32) -> Label {
-        let label = Label::new(None);
-        label.set_single_line_mode(true);
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        // A size request is only a minimum in GTK. Cap the label's natural
-        // request too, so later text never enlarges this measured slot.
-        label.set_max_width_chars(1);
-        label.set_size_request(width.ceil() as i32, -1);
-        label.set_hexpand(false);
-        label.set_xalign(align);
-        label
     }
 
     fn update(&self, spec: &ControlSpec) {
@@ -126,6 +120,101 @@ impl NetworkLabels {
                     label.set_text(rate);
                 }
             }
+        }
+    }
+}
+
+/// Percentage glyphs and numbers each get an independent stable column. A
+/// centered combined string would still move the icon when 9% becomes 100%.
+struct PercentLabels {
+    row: gtk4::Box,
+    icon: Label,
+    value: Label,
+}
+
+impl PercentLabels {
+    fn new(font: &FontDescription, icons: &[String]) -> Self {
+        let probe = Label::new(None);
+        let candidates: Vec<_> = icons.iter().map(String::as_str).collect();
+        let metrics =
+            PercentTextMetrics::measure(&candidates, |text| text_width(&probe, font, text) as f32);
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        row.set_halign(gtk4::Align::Center);
+        row.set_hexpand(false);
+        let icon = fixed_text_slot(metrics.icon_width, 0.5);
+        if metrics.icon_width > 0.0 {
+            icon.set_margin_end(metrics.gap.ceil() as i32);
+            row.append(&icon);
+        }
+        let value = fixed_text_slot(metrics.value_width, 1.0);
+        row.append(&value);
+        Self { row, icon, value }
+    }
+
+    fn update(&self, spec: &ControlSpec) {
+        if self.icon.text() != spec.icon {
+            self.icon.set_text(&spec.icon);
+        }
+        if self.value.text() != spec.value {
+            self.value.set_text(&spec.value);
+        }
+    }
+}
+
+fn fixed_text_slot(width: f32, align: f32) -> Label {
+    let label = Label::new(None);
+    label.set_single_line_mode(true);
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    // A size request is only a minimum in GTK. Cap the label's natural
+    // request too, so later text never enlarges this measured slot.
+    label.set_max_width_chars(1);
+    label.set_size_request(width.ceil() as i32, -1);
+    label.set_hexpand(false);
+    label.set_xalign(align);
+    label
+}
+
+/// Sidebars keep their compact upright lines, reserving the icon row if any
+/// configured state uses it. An empty mute/charging icon must not move all
+/// controls below it by one line.
+struct SidebarMetric {
+    icon_row: bool,
+    height: i32,
+}
+
+impl SidebarMetric {
+    fn new(font: &FontDescription, icons: &[String], minimum_height: i32) -> Self {
+        let icon_row = icons.iter().any(|icon| !icon.is_empty());
+        let line_height =
+            (f64::from(font.size()) / f64::from(gtk4::pango::SCALE)).ceil() as i32 + 3;
+        let mut height = line_height * if icon_row { 2 } else { 1 };
+        // Reserve tall fallback glyphs too; setting a minimum based only on
+        // the font size still allows an emoji state to grow GTK's request.
+        let probe = Label::new(None);
+        for icon in icons {
+            let text = if icon_row {
+                format!("{icon}\n100%")
+            } else {
+                "100%".to_owned()
+            };
+            let layout = probe.create_pango_layout(Some(&text));
+            layout.set_font_description(Some(font));
+            let (ink, logical) = layout.pixel_extents();
+            let top = ink.y().min(logical.y());
+            let bottom = (ink.y() + ink.height()).max(logical.y() + logical.height());
+            height = height.max(bottom - top);
+        }
+        Self {
+            icon_row,
+            height: (height + 6).max(minimum_height),
+        }
+    }
+
+    fn text(&self, spec: &ControlSpec) -> String {
+        if self.icon_row {
+            format!("{}\n{}", spec.icon, spec.value)
+        } else {
+            spec.value.clone()
         }
     }
 }
@@ -171,10 +260,16 @@ impl Pill {
             accent,
             font,
             network_icons,
-        } = style.clone();
+            metric_icons,
+        } = style;
+        let accent = *accent;
+        let minimum_height = metrics.pill_height.round().max(1.0) as i32;
+        let icons = metric_icons
+            .iter()
+            .find_map(|(id, icons)| (*id == spec.id).then_some(icons.as_slice()));
 
-        // Ordinary horizontal pills keep their natural text width; network
-        // rates use fixed slots so telemetry cannot move adjacent controls.
+        // Ordinary horizontal pills keep their natural text width; telemetry
+        // uses fixed slots so changing readings cannot move adjacent controls.
         let label = Label::new(None);
         label.set_single_line_mode(!edge.is_vertical());
         if edge.is_vertical() {
@@ -218,9 +313,17 @@ impl Pill {
 
         let overlay = Overlay::new();
         let network_labels = (spec.id == NodeId::Network && !edge.is_vertical())
-            .then(|| NetworkLabels::new(&font, &network_icons));
+            .then(|| NetworkLabels::new(font, network_icons));
+        let percent_labels = icons
+            .filter(|_| !edge.is_vertical())
+            .map(|icons| PercentLabels::new(font, icons));
+        let sidebar_metric = icons
+            .filter(|_| edge.is_vertical())
+            .map(|icons| SidebarMetric::new(font, icons, minimum_height));
         if let Some(network) = &network_labels {
             overlay.set_child(Some(&network.row));
+        } else if let Some(percent) = &percent_labels {
+            overlay.set_child(Some(&percent.row));
         } else {
             overlay.set_child(Some(&label));
         }
@@ -332,9 +435,11 @@ impl Pill {
             button,
             label,
             network_labels,
-            font,
+            percent_labels,
+            sidebar_metric,
+            font: font.clone(),
             vertical: edge.is_vertical(),
-            minimum_height: metrics.pill_height.round().max(1.0) as i32,
+            minimum_height,
             progress_area,
             occupancy_marker,
             progress,
@@ -360,8 +465,12 @@ impl Pill {
 
         if let Some(network) = &self.network_labels {
             network.update(spec);
+        } else if let Some(percent) = &self.percent_labels {
+            percent.update(spec);
         } else {
-            let text = if self.vertical {
+            let text = if let Some(metric) = &self.sidebar_metric {
+                metric.text(spec)
+            } else if self.vertical {
                 spec.sidebar_lines().join("\n")
             } else {
                 spec.text()
@@ -375,8 +484,13 @@ impl Pill {
                     let line_height = (f64::from(self.font.size()) / f64::from(gtk4::pango::SCALE))
                         .ceil() as i32
                         + 3;
-                    let height = (text.lines().count().max(1) as i32 * line_height + 6)
-                        .max(self.minimum_height);
+                    let height = self.sidebar_metric.as_ref().map_or_else(
+                        || {
+                            (text.lines().count().max(1) as i32 * line_height + 6)
+                                .max(self.minimum_height)
+                        },
+                        |metric| metric.height,
+                    );
                     self.button.set_size_request(self.minimum_height, height);
                 } else {
                     let width = if text.is_empty() {

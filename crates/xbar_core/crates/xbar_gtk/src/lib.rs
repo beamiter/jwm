@@ -21,7 +21,7 @@ use gtk4::prelude::*;
 use gtk4::{Label, Orientation};
 use xbar_core::config::BarConfig;
 use xbar_core::controls::BarPresentation;
-use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
+use xbar_core::presentation::{NodeId, Palette, PresentationConfig, PresentationLabels};
 use xbar_core::tag_contrast::{TagContrastMode, TagPalette};
 use xbar_core::{BarSnapshot, ThemeMode};
 
@@ -100,16 +100,22 @@ impl BarTheme {
                 presentation.labels.network.as_str(),
                 presentation.labels.network_offline.as_str(),
             ]
-            .map(|icon| {
-                // PillStyle is cloned for every control. Bound before that
-                // copy, matching the semantic projection's UTF-8 limit.
-                let mut end = icon
-                    .len()
-                    .min(xbar_core::controls::MAX_PROJECTED_CONTROL_TEXT_BYTES);
-                while !icon.is_char_boundary(end) {
-                    end -= 1;
-                }
-                icon[..end].to_owned()
+            .map(bounded_icon),
+            metric_icons: [
+                NodeId::Cpu,
+                NodeId::Memory,
+                NodeId::Brightness,
+                NodeId::Battery,
+                NodeId::Audio,
+            ]
+            .map(|id| {
+                let icons = presentation
+                    .metric_icon_candidates(id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(bounded_icon)
+                    .collect();
+                (id, icons)
             }),
         };
 
@@ -138,6 +144,18 @@ impl BarTheme {
             *self.provider.borrow_mut() = Some((display, provider));
         }
     }
+}
+
+/// Style copies carry only projected-size glyphs, never a duplicate of an
+/// unbounded user configuration for each retained widget.
+fn bounded_icon(icon: &str) -> String {
+    let mut end = icon
+        .len()
+        .min(xbar_core::controls::MAX_PROJECTED_CONTROL_TEXT_BYTES);
+    while !icon.is_char_boundary(end) {
+        end -= 1;
+    }
+    icon[..end].to_owned()
 }
 
 impl Drop for BarTheme {

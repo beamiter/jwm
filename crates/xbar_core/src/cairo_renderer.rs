@@ -25,6 +25,8 @@ const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
 const MAX_SCENE_IMAGE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SCENE_IMAGE_CACHE_ENTRIES: usize = 128;
 const MAX_SCENE_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TEXT_MEASURE_CACHE_ENTRIES: usize = 512;
+const MAX_CACHED_MEASURE_TEXT_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Default)]
 struct SceneImageCache {
@@ -1376,6 +1378,47 @@ struct TextStyle {
 pub struct PangoTextMeasurer {
     context: pango::Context,
     font: FontDescription,
+    cache: RefCell<TextMeasureCache>,
+}
+
+/// A measurer belongs to one immutable font/context snapshot. In CairoBar it
+/// is recreated for each frame, so DPI/font changes cannot reuse old widths.
+/// Repeated glyph probes, compact/full layout and pointer re-hit passes share
+/// measurements without repeatedly constructing identical Pango layouts.
+#[derive(Debug, Clone, Default)]
+struct TextMeasureCache {
+    by_size: HashMap<u32, HashMap<String, Size>>,
+    entries: usize,
+}
+
+impl TextMeasureCache {
+    fn get(&self, text: &str, size: f32) -> Option<Size> {
+        self.by_size
+            .get(&size.to_bits())
+            .and_then(|texts| texts.get(text))
+            .copied()
+    }
+
+    fn insert(&mut self, text: &str, size: f32, measured: Size) {
+        if text.len() > MAX_CACHED_MEASURE_TEXT_BYTES {
+            return;
+        }
+        // Public LayoutEngine users can retain a measurer across many
+        // snapshots. Bound both entry count and retained string lengths.
+        if self.entries == MAX_TEXT_MEASURE_CACHE_ENTRIES {
+            self.by_size.clear();
+            self.entries = 0;
+        }
+        if self
+            .by_size
+            .entry(size.to_bits())
+            .or_default()
+            .insert(text.to_owned(), measured)
+            .is_none()
+        {
+            self.entries += 1;
+        }
+    }
 }
 
 impl PangoTextMeasurer {
@@ -1386,6 +1429,7 @@ impl PangoTextMeasurer {
         Self {
             context: font_map.create_context(),
             font,
+            cache: RefCell::new(TextMeasureCache::default()),
         }
     }
 
@@ -1396,6 +1440,7 @@ impl PangoTextMeasurer {
         Self {
             context: pangocairo::functions::create_context(context),
             font,
+            cache: RefCell::new(TextMeasureCache::default()),
         }
     }
 
@@ -1411,6 +1456,9 @@ impl TextMeasurer for PangoTextMeasurer {
         if text.is_empty() || size <= 0.0 {
             return Size::new(0.0, 0.0);
         }
+        if let Some(measured) = self.cache.borrow().get(text, size) {
+            return measured;
+        }
 
         let layout = Layout::new(&self.context);
         layout.set_single_paragraph_mode(true);
@@ -1418,10 +1466,12 @@ impl TextMeasurer for PangoTextMeasurer {
         // Report the same ink/logical union the renderer paints, so layout
         // reserves enough pill width for overflowing icon glyphs.
         let extents = layout_paint_extents(&layout);
-        Size::new(
+        let measured = Size::new(
             extents.width().max(0) as f32,
             extents.height().max(0) as f32,
-        )
+        );
+        self.cache.borrow_mut().insert(text, size, measured);
+        measured
     }
 }
 
@@ -2122,6 +2172,29 @@ mod tests {
         assert!(large.width > short.width);
         assert!(large.height > short.height);
         assert_eq!(measurer.measure("", 12.0), Size::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn pango_measure_cache_keeps_font_sizes_distinct_and_retention_bounded() {
+        let measurer = PangoTextMeasurer::new(FontDescription::from_string("DejaVu Sans"));
+        let small = measurer.measure("100%", 11.0);
+        let large = measurer.measure("100%", 22.0);
+        assert!(large.width > small.width);
+        for _ in 0..3 {
+            assert_eq!(measurer.measure("100%", 11.0), small);
+            assert_eq!(measurer.measure("100%", 22.0), large);
+        }
+        assert_eq!(measurer.cache.borrow().entries, 2);
+
+        let long = "a".repeat(MAX_CACHED_MEASURE_TEXT_BYTES + 1);
+        assert!(measurer.measure(&long, 11.0).width > small.width);
+        assert_eq!(measurer.cache.borrow().entries, 2);
+        for index in 0..MAX_TEXT_MEASURE_CACHE_ENTRIES + 1 {
+            measurer.measure(&format!("title {index}"), 11.0);
+            assert!(measurer.cache.borrow().entries <= MAX_TEXT_MEASURE_CACHE_ENTRIES);
+        }
+        assert_eq!(measurer.measure("100%", 11.0), small);
+        assert_eq!(measurer.measure("100%", 22.0), large);
     }
 
     #[test]

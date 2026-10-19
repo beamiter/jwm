@@ -160,6 +160,46 @@ opens Calendar and right-click toggles seconds. Press and release must resolve
 to the same control and captured action, so a model update cannot substitute a
 new workspace-overflow action or a new incarnation of a minimized window.
 
+### Stable telemetry slots
+
+Shared Scene bars reserve independent icon and value columns for CPU, memory,
+volume, brightness and battery percentages. The value column holds the whole
+`0%` through `100%` range and the unknown reading `--`, and aligns numbers to
+the right. Column widths come from the configured font's measured glyphs,
+including every mute, charging and unavailable icon candidate. Proportional
+fonts therefore do not need padding spaces or a hard-coded pixel width.
+Network receive/transmit columns retain their existing independent slots.
+
+The same fixed dimensions participate in compact/full allocation, so changes
+in CPU or memory usage do not make neighboring controls toggle between full
+and compact modes near a width boundary. Sidebars reserve a stable icon row
+and fit their numeric font size against the complete percentage range. This
+also keeps `100%` readable in a 42-physical-pixel bar at 2x scaling without
+changing the value's size when the next reading is `9%` or `--`. Viewport,
+font, configuration and visible-control changes may still change the layout;
+critical battery priority is retained when space is insufficient.
+
+GTK/Relm use separately constrained native labels for icon and value, capping
+both minimum and natural requests. The shared HTML adapter gives percentage
+pills fixed grid columns with tabular numerals. Hover highlights retain their
+one-pixel border and use an inset shadow, avoiding the previous border-width
+change. No additional configuration is required for these paths. GPUI,
+GPUI-component, Iced and Xilem retain their experimental widget renderers.
+
+Pango measurement memoization shares repeated glyph probes within one
+font/context snapshot. The normal Cairo presenter recreates that snapshot
+each frame, keeping DPI and font changes current; retained standalone
+measurers cap the cache at 512 short strings across font sizes.
+
+Run the actual Pango/Cairo allocation and pixel regressions with:
+
+```sh
+cargo test --locked -p xbar_core --features render-cairo --test metric_columns
+```
+
+Set `XBAR_METRIC_PREVIEW=/tmp/jwm-metric-preview.png` to also save a six-row
+CPU/memory comparison for `0%`, `9%`, `10%`, `99%`, `100%` and `--`.
+
 ### Widget and HTML bars
 
 GTK/Relm and retained toolkits adapt their groups to the selected axis. GTK

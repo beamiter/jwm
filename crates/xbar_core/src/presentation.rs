@@ -1000,6 +1000,42 @@ impl Default for PresentationConfig {
 }
 
 impl PresentationConfig {
+    /// Every icon a percentage control can display, independently of its
+    /// current reading. Renderers reserve the widest candidate so mute,
+    /// charging and unavailable transitions cannot resize a numeric cell.
+    #[must_use]
+    pub fn metric_icon_candidates(&self, id: NodeId) -> Option<Vec<&str>> {
+        let labels = &self.labels;
+        Some(match id {
+            NodeId::Cpu => vec![labels.cpu.as_str()],
+            NodeId::Memory => vec![labels.memory.as_str()],
+            NodeId::Brightness => vec![labels.brightness.as_str()],
+            NodeId::Battery => self.icon_set.as_ref().map_or_else(
+                || vec![labels.battery.as_str(), labels.charging.as_str()],
+                |icons| {
+                    vec![
+                        icons.battery.as_str(),
+                        icons.battery_charging.as_str(),
+                        icons.unavailable.as_str(),
+                    ]
+                },
+            ),
+            NodeId::Audio => self.icon_set.as_ref().map_or_else(
+                || vec![labels.audio.as_str(), labels.muted.as_str()],
+                |icons| {
+                    vec![
+                        icons.volume_unavailable.as_str(),
+                        icons.volume_muted.as_str(),
+                        icons.volume_low.as_str(),
+                        icons.volume_medium.as_str(),
+                        icons.volume_high.as_str(),
+                    ]
+                },
+            ),
+            _ => return None,
+        })
+    }
+
     /// The native surface's thickness in logical units. WM pixels are already
     /// physical; scaling them twice would reserve and paint different strips.
     #[must_use]
@@ -1112,6 +1148,57 @@ struct LayoutPass<'a, M> {
     config: &'a PresentationConfig,
     measurer: &'a M,
     network_metrics: std::cell::OnceCell<NetworkTextMetrics>,
+    percent_metrics: [std::cell::OnceCell<PercentTextMetrics>; 5],
+}
+
+/// Stable icon and right-aligned value slots for the 0..=100% controls.
+/// The dimensions follow the actual font; no live reading or assumed
+/// monospace advance participates in allocation.
+#[derive(Debug, Clone, Copy)]
+pub struct PercentTextMetrics {
+    pub icon_width: f32,
+    pub value_width: f32,
+    pub gap: f32,
+}
+
+impl PercentTextMetrics {
+    #[must_use]
+    pub fn measure(icons: &[&str], mut measure: impl FnMut(&str) -> f32) -> Self {
+        let mut width = |text: &str| finite_non_negative(measure(text));
+        let icon_width = icons
+            .iter()
+            .map(|icon| width(&bounded_borrowed_control_text(icon)))
+            .fold(0.0_f32, f32::max);
+        let digit_width = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            .into_iter()
+            .map(&mut width)
+            .fold(0.0_f32, f32::max);
+        let value_width = (digit_width * 3.0 + width("%"))
+            .max(width("100%"))
+            .max(width(crate::controls::UNKNOWN_VALUE));
+        let gap = if icon_width > 0.0 { width("  ") } else { 0.0 };
+        Self {
+            icon_width,
+            value_width,
+            gap,
+        }
+    }
+
+    #[must_use]
+    pub fn width(self) -> f32 {
+        self.icon_width + self.gap + self.value_width
+    }
+}
+
+fn percent_metric_index(id: NodeId) -> Option<usize> {
+    match id {
+        NodeId::Cpu => Some(0),
+        NodeId::Memory => Some(1),
+        NodeId::Brightness => Some(2),
+        NodeId::Battery => Some(3),
+        NodeId::Audio => Some(4),
+        _ => None,
+    }
 }
 
 /// Font-derived, stable horizontal network columns shared by scene and
@@ -1443,6 +1530,7 @@ pub(crate) fn build_scene<M: TextMeasurer>(
         config,
         measurer,
         network_metrics: std::cell::OnceCell::new(),
+        percent_metrics: std::array::from_fn(|_| std::cell::OnceCell::new()),
     }
     .build(view, viewport, interaction)
 }
@@ -1713,11 +1801,46 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         })
     }
 
+    fn percent_text_metrics(&self, id: NodeId) -> Option<PercentTextMetrics> {
+        let index = percent_metric_index(id)?;
+        Some(*self.percent_metrics[index].get_or_init(|| {
+            let icons = self.config.metric_icon_candidates(id).unwrap_or_default();
+            PercentTextMetrics::measure(&icons, |text| {
+                self.measurer.measure(text, self.font_size()).width
+            })
+        }))
+    }
+
     fn control_extent(&self, control: &ControlSpec, compact: bool) -> f32 {
         if self.config.edge.is_vertical() {
-            let lines = control.sidebar_lines().len().max(1) as f32;
+            let lines = self.percent_text_metrics(control.id).map_or_else(
+                || control.sidebar_lines().len().max(1) as f32,
+                |metrics| if metrics.icon_width > 0.0 { 2.0 } else { 1.0 },
+            );
             (lines * (self.font_size() + 2.0) + 8.0).max(self.minimum_target_extent())
         } else {
+            if let Some(metrics) = self.percent_text_metrics(control.id) {
+                let (width, padding) = if compact {
+                    let icon_can_be_empty = self
+                        .config
+                        .metric_icon_candidates(control.id)
+                        .is_some_and(|icons| icons.iter().any(|icon| icon.is_empty()));
+                    (
+                        if icon_can_be_empty {
+                            metrics.icon_width.max(metrics.value_width)
+                        } else {
+                            metrics.icon_width
+                        },
+                        self.horizontal_text_padding().min(4.0),
+                    )
+                } else {
+                    (metrics.width(), self.horizontal_text_padding())
+                };
+                // A full reading either fits in its reserved slot or remains
+                // compact. Never let the generic text cap clip 100% at large
+                // font sizes or change the overflow decision with each sample.
+                return (width + padding * 2.0).max(self.minimum_target_extent());
+            }
             if control.id == NodeId::Network {
                 let metrics = self.network_text_metrics();
                 if !compact {
@@ -1759,7 +1882,16 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
 
     fn pill_spec(&self, control: ControlSpec, compact: bool) -> PillSpec {
         let lines = if self.config.edge.is_vertical() {
-            control.sidebar_lines()
+            if let Some(metrics) = self.percent_text_metrics(control.id) {
+                if metrics.icon_width > 0.0 {
+                    // Keep the row even when one icon candidate is empty.
+                    vec![control.icon.clone(), control.value.clone()]
+                } else {
+                    vec![control.value.clone()]
+                }
+            } else {
+                control.sidebar_lines()
+            }
         } else {
             Vec::new()
         };
@@ -1869,6 +2001,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     text: "…".to_owned(),
                     lines: Vec::new(),
                     network: None,
+                    percentage: None,
                     compact: true,
                     primary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
                     secondary: Some(UserAction::OpenAudioControl),
@@ -1980,6 +2113,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     text: format!("+{missing}"),
                     lines: Vec::new(),
                     network: None,
+                    percentage: None,
                     compact: true,
                     primary: enabled.then_some(next).flatten(),
                     secondary: enabled.then_some(previous).flatten(),
@@ -2420,8 +2554,14 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             .network
             .as_ref()
             .filter(|_| !self.config.edge.is_vertical() && !spec.compact);
+        let percent_columns = spec.percentage.as_ref().filter(|columns| {
+            !self.config.edge.is_vertical() && (!spec.compact || columns[0].is_empty())
+        });
         let lines: Vec<&str> = if let Some(columns) = network_columns {
             self.push_network_text(scene, text_bounds, columns, color, spec.state);
+            Vec::new()
+        } else if let Some(columns) = percent_columns {
+            self.push_percent_text(scene, text_bounds, &spec, columns, color);
             Vec::new()
         } else if spec.lines.is_empty() {
             vec![&spec.text]
@@ -2434,7 +2574,17 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         let top = text_bounds.y + (text_bounds.height - block_height) * 0.5;
         for (index, line) in lines.iter().enumerate() {
             let mut size = self.font_size().min(row_height.max(1.0));
-            if self.config.edge.is_vertical() || spec.compact {
+            if self.config.edge.is_vertical() && spec.percentage.is_some() {
+                // Fit the complete percentage range, not today's digits.
+                // A fixed-physical HiDPI sidebar may need smaller logical
+                // type; keep that size stable through 9% -> 100% -> --.
+                size = self.percent_sidebar_font_size(
+                    spec.id,
+                    lines.len() > 1 && index == 0,
+                    text_bounds.width,
+                    size,
+                );
+            } else if self.config.edge.is_vertical() || spec.compact {
                 let natural = self.measurer.measure(line, size).width;
                 if natural > text_bounds.width && natural.is_finite() {
                     size = (size * text_bounds.width / natural).max(9.0).min(size);
@@ -2543,6 +2693,89 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         self.fit_text_sized(text, available, outer_padding, self.font_size())
     }
 
+    fn percent_sidebar_font_size(
+        &self,
+        id: NodeId,
+        icon_row: bool,
+        available: f32,
+        mut size: f32,
+    ) -> f32 {
+        let icons = self.config.metric_icon_candidates(id).unwrap_or_default();
+        for _ in 0..8 {
+            let width = if icon_row {
+                icons
+                    .iter()
+                    .map(|icon| {
+                        self.measurer
+                            .measure(&bounded_borrowed_control_text(icon), size)
+                            .width
+                    })
+                    .fold(0.0_f32, f32::max)
+            } else {
+                PercentTextMetrics::measure(&[], |text| self.measurer.measure(text, size).width)
+                    .value_width
+            };
+            if !width.is_finite() || width <= available || size <= 1.0 {
+                break;
+            }
+            size = (size * available / width).min(size - 0.5).max(1.0);
+        }
+        size
+    }
+
+    fn push_percent_text(
+        &self,
+        scene: &mut Scene,
+        bounds: Rect,
+        spec: &PillSpec,
+        columns: &[String; 2],
+        color: Rgba,
+    ) {
+        let Some(metrics) = self.percent_text_metrics(spec.id) else {
+            return;
+        };
+        let value_width = metrics.value_width.min(bounds.width);
+        let value_x = if spec.compact {
+            bounds.right() - value_width
+        } else {
+            bounds.x
+                + (bounds.width - metrics.width()).max(0.0) * 0.5
+                + metrics.icon_width
+                + metrics.gap
+        };
+        let icon_x = value_x - metrics.gap - metrics.icon_width;
+        let size = self.font_size().min(bounds.height.max(1.0));
+        let cells = [
+            (
+                columns[0].as_str(),
+                Rect::new(icon_x, bounds.y, metrics.icon_width, bounds.height),
+                TextAlign::Center,
+            ),
+            (
+                columns[1].as_str(),
+                Rect::new(value_x, bounds.y, value_width, bounds.height),
+                TextAlign::End,
+            ),
+        ];
+        for (text, cell, align) in cells {
+            let Some(cell) = cell.intersection(bounds) else {
+                continue;
+            };
+            let fitted = self.fit_text_sized(text, cell.width, 0.0, size);
+            if !fitted.is_empty() {
+                scene.nodes.push(SceneNode::Text {
+                    id: spec.id,
+                    bounds: cell,
+                    text: fitted,
+                    size,
+                    color,
+                    align,
+                    state: spec.state,
+                });
+            }
+        }
+    }
+
     fn fit_text_sized(&self, text: &str, available: f32, outer_padding: f32, size: f32) -> String {
         let available = (available - 2.0 * finite_non_negative(outer_padding)).max(0.0);
         if available <= 0.0 {
@@ -2639,6 +2872,8 @@ struct PillSpec {
     lines: Vec<String>,
     /// Icon, receive rate and transmit rate, without presentation padding.
     network: Option<[String; 3]>,
+    /// Icon and unpadded percentage/unknown value in independent fixed slots.
+    percentage: Option<[String; 2]>,
     compact: bool,
     primary: Option<UserAction>,
     secondary: Option<UserAction>,
@@ -2655,6 +2890,8 @@ impl From<ControlSpec> for PillSpec {
         let network = control
             .network_rates()
             .map(|[rx, tx]| [control.icon.clone(), rx.to_owned(), tx.to_owned()]);
+        let percentage =
+            percent_metric_index(control.id).map(|_| [control.icon.clone(), control.value.clone()]);
         let bindings = if control.state.enabled {
             control.bindings
         } else {
@@ -2665,6 +2902,7 @@ impl From<ControlSpec> for PillSpec {
             text,
             lines: Vec::new(),
             network,
+            percentage,
             compact: false,
             primary: bindings.primary,
             secondary: bindings.secondary,
