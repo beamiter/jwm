@@ -96,6 +96,21 @@ impl BarTheme {
             // theme toggle without being rebuilt.
             accent: Palette::for_theme(ThemeMode::Dark).accent,
             font: pill_font(&config.font, presentation.font_size),
+            network_icons: [
+                presentation.labels.network.as_str(),
+                presentation.labels.network_offline.as_str(),
+            ]
+            .map(|icon| {
+                // PillStyle is cloned for every control. Bound before that
+                // copy, matching the semantic projection's UTF-8 limit.
+                let mut end = icon
+                    .len()
+                    .min(xbar_core::controls::MAX_PROJECTED_CONTROL_TEXT_BYTES);
+                while !icon.is_char_boundary(end) {
+                    end -= 1;
+                }
+                icon[..end].to_owned()
+            }),
         };
 
         Self {

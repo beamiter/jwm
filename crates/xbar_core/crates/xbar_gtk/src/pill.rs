@@ -16,7 +16,7 @@ use gtk4::{
     Overlay, glib,
 };
 use xbar_core::controls::ControlSpec;
-use xbar_core::presentation::{NodeId, PointerAction, Rgba};
+use xbar_core::presentation::{NetworkTextMetrics, NodeId, PointerAction, Rgba};
 use xbar_core::{BarEdge, ShellRoute, UserAction};
 
 use crate::theme::Metrics;
@@ -45,12 +45,16 @@ pub struct PillStyle {
     /// configured absolute size. Pill widths are derived from it directly so
     /// this bar reserves the same width for the same glyphs.
     pub font: FontDescription,
+    /// Both connection glyphs reserve one stable slot, including while the
+    /// provider is starting or reconnecting.
+    pub network_icons: [String; 2],
 }
 
 pub struct Pill {
     id: NodeId,
     button: Button,
     label: Label,
+    network_labels: Option<NetworkLabels>,
     font: FontDescription,
     vertical: bool,
     minimum_height: i32,
@@ -61,6 +65,69 @@ pub struct Pill {
     /// `bindings`, so a pill updates in place instead of being rebuilt.
     progress: Rc<Cell<Option<f32>>>,
     bindings: Rc<RefCell<Bindings>>,
+}
+
+/// Only the horizontal network pill uses fixed text columns. Arrow and icon
+/// positions stay still while right-aligned rates change digits or IEC units.
+struct NetworkLabels {
+    row: gtk4::Box,
+    icon: Label,
+    rates: [Label; 2],
+}
+
+impl NetworkLabels {
+    fn new(font: &FontDescription, icons: &[String; 2]) -> Self {
+        let probe = Label::new(None);
+        let metrics = NetworkTextMetrics::measure(&icons[0], &icons[1], |text| {
+            text_width(&probe, font, text) as f32
+        });
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        row.set_halign(gtk4::Align::Center);
+        row.set_hexpand(false);
+        let icon = Self::slot(metrics.icon_width, 0.5);
+        if metrics.icon_width > 0.0 {
+            icon.set_margin_end((metrics.gap * 2.0).ceil() as i32);
+            row.append(&icon);
+        }
+        let rates = [
+            Self::slot(metrics.rate_width, 1.0),
+            Self::slot(metrics.rate_width, 1.0),
+        ];
+        for (index, arrow) in ["\u{2193}", "\u{2191}"].into_iter().enumerate() {
+            let direction = Self::slot(metrics.arrow_width, 0.5);
+            direction.set_text(arrow);
+            row.append(&direction);
+            row.append(&rates[index]);
+        }
+        rates[0].set_margin_end(metrics.gap.ceil() as i32);
+        Self { row, icon, rates }
+    }
+
+    fn slot(width: f32, align: f32) -> Label {
+        let label = Label::new(None);
+        label.set_single_line_mode(true);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        // A size request is only a minimum in GTK. Cap the label's natural
+        // request too, so later text never enlarges this measured slot.
+        label.set_max_width_chars(1);
+        label.set_size_request(width.ceil() as i32, -1);
+        label.set_hexpand(false);
+        label.set_xalign(align);
+        label
+    }
+
+    fn update(&self, spec: &ControlSpec) {
+        if self.icon.text() != spec.icon {
+            self.icon.set_text(&spec.icon);
+        }
+        if let Some(rates) = spec.network_rates() {
+            for (label, rate) in self.rates.iter().zip(rates) {
+                if label.text() != rate {
+                    label.set_text(rate);
+                }
+            }
+        }
+    }
 }
 
 /// The actions a pill currently answers to. Cleared while the control is
@@ -103,12 +170,11 @@ impl Pill {
             metrics,
             accent,
             font,
+            network_icons,
         } = style.clone();
 
-        // No ellipsizing: a pill is sized by its own text, and the client name
-        // is the one cell that gives up width. That is also how `LayoutEngine`
-        // divides a bar — status cells keep their natural width and are
-        // dropped whole rather than squeezed.
+        // Ordinary horizontal pills keep their natural text width; network
+        // rates use fixed slots so telemetry cannot move adjacent controls.
         let label = Label::new(None);
         label.set_single_line_mode(!edge.is_vertical());
         if edge.is_vertical() {
@@ -151,7 +217,13 @@ impl Pill {
         });
 
         let overlay = Overlay::new();
-        overlay.set_child(Some(&label));
+        let network_labels = (spec.id == NodeId::Network && !edge.is_vertical())
+            .then(|| NetworkLabels::new(&font, &network_icons));
+        if let Some(network) = &network_labels {
+            overlay.set_child(Some(&network.row));
+        } else {
+            overlay.set_child(Some(&label));
+        }
         overlay.add_overlay(&progress_area);
         let occupancy_marker = matches!(spec.id, NodeId::Tag(_)).then(|| {
             // Do not alter the label's request or placement. Paint only when
@@ -259,6 +331,7 @@ impl Pill {
             id: spec.id,
             button,
             label,
+            network_labels,
             font,
             vertical: edge.is_vertical(),
             minimum_height: metrics.pill_height.round().max(1.0) as i32,
@@ -285,25 +358,34 @@ impl Pill {
     pub fn update(&self, spec: &ControlSpec) {
         debug_assert_eq!(self.id, spec.id, "a pill only ever shows its own control");
 
-        let text = if self.vertical {
-            spec.sidebar_lines().join("\n")
+        if let Some(network) = &self.network_labels {
+            network.update(spec);
         } else {
-            spec.text()
-        };
-        if self.label.text() != text {
-            self.label.set_text(&text);
-            // GTK would size the label by its logical extents alone, which
-            // under-reports Nerd Font icons whose ink overflows their advance
-            // — the pill would then be narrower here than in the Cairo bars.
-            if self.vertical {
-                self.label.set_size_request(0, -1);
-                let line_height =
-                    (f64::from(self.font.size()) / f64::from(gtk4::pango::SCALE)).ceil() as i32 + 3;
-                let height =
-                    (text.lines().count().max(1) as i32 * line_height + 6).max(self.minimum_height);
-                self.button.set_size_request(self.minimum_height, height);
+            let text = if self.vertical {
+                spec.sidebar_lines().join("\n")
             } else {
-                self.label.set_size_request(self.text_width(&text), -1);
+                spec.text()
+            };
+            if self.label.text() != text {
+                self.label.set_text(&text);
+                // Reserve the union of icon ink and logical extents, as the
+                // Cairo bars do, rather than GTK's logical extents alone.
+                if self.vertical {
+                    self.label.set_size_request(0, -1);
+                    let line_height = (f64::from(self.font.size()) / f64::from(gtk4::pango::SCALE))
+                        .ceil() as i32
+                        + 3;
+                    let height = (text.lines().count().max(1) as i32 * line_height + 6)
+                        .max(self.minimum_height);
+                    self.button.set_size_request(self.minimum_height, height);
+                } else {
+                    let width = if text.is_empty() {
+                        -1
+                    } else {
+                        text_width(&self.label, &self.font, &text)
+                    };
+                    self.label.set_size_request(width, -1);
+                }
             }
         }
         let accessible = spec.accessible_label();
@@ -343,25 +425,22 @@ impl Pill {
     }
 }
 
-impl Pill {
-    /// The union of a text's ink and logical extents, which is what
-    /// `xbar_core`'s Pango measurer reports and what its layout engine turns
-    /// into a pill width.
-    fn text_width(&self, text: &str) -> i32 {
-        if text.is_empty() {
-            return -1;
-        }
-        let layout = self.label.create_pango_layout(Some(text));
-        layout.set_single_paragraph_mode(true);
-        layout.set_font_description(Some(&self.font));
-        let (ink, logical) = layout.pixel_extents();
-        if ink.width() <= 0 || ink.height() <= 0 {
-            return logical.width().max(0);
-        }
-        let left = ink.x().min(logical.x());
-        let right = (ink.x() + ink.width()).max(logical.x() + logical.width());
-        (right - left).max(0)
+/// The union of a text's ink and logical extents, matching the shared Pango
+/// measurer rather than GTK's logical-only label request.
+fn text_width(label: &Label, font: &FontDescription, text: &str) -> i32 {
+    if text.is_empty() {
+        return 0;
     }
+    let layout = label.create_pango_layout(Some(text));
+    layout.set_single_paragraph_mode(true);
+    layout.set_font_description(Some(font));
+    let (ink, logical) = layout.pixel_extents();
+    if ink.width() <= 0 || ink.height() <= 0 {
+        return logical.width().max(0);
+    }
+    let left = ink.x().min(logical.x());
+    let right = (ink.x() + ink.width()).max(logical.x() + logical.width());
+    (right - left).max(0)
 }
 
 /// Marker coordinates inside the button's one-pixel layout border. Keeping a

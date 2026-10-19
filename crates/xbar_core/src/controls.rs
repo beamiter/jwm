@@ -129,6 +129,19 @@ impl ControlSpec {
         }
     }
 
+    /// Separate rate readings for renderers that reserve stable network
+    /// columns. Keep the semantic value unpadded for tooltips/accessibility;
+    /// disconnected and not-yet-sampled readings remain explicit unknowns.
+    #[must_use]
+    pub fn network_rates(&self) -> Option<[&str; 2]> {
+        (self.id == NodeId::Network).then(|| {
+            self.value
+                .strip_prefix('\u{2193}')
+                .and_then(|rates| rates.split_once(" \u{2191}"))
+                .map_or([UNKNOWN_VALUE; 2], |(rx, tx)| [rx, tx])
+        })
+    }
+
     /// Human-readable name independent of an icon font. Toolkits use this as
     /// the accessible name and retain the complete value when space forces an
     /// icon-only or ellipsized visual presentation.
@@ -258,6 +271,8 @@ impl ControlSpec {
                 .to_owned()
         } else if !self.icon.is_empty() {
             self.icon.clone()
+        } else if self.id == NodeId::Network {
+            "\u{2193}\u{2191}".to_owned()
         } else {
             self.value.clone()
         }

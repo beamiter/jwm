@@ -1111,6 +1111,64 @@ pub struct LayoutEngine<M> {
 struct LayoutPass<'a, M> {
     config: &'a PresentationConfig,
     measurer: &'a M,
+    network_metrics: std::cell::OnceCell<NetworkTextMetrics>,
+}
+
+/// Font-derived, stable horizontal network columns shared by scene and
+/// widget renderers. Live rates never participate in width calculation.
+#[derive(Debug, Clone, Copy)]
+pub struct NetworkTextMetrics {
+    pub icon_width: f32,
+    pub arrow_width: f32,
+    pub rate_width: f32,
+    pub gap: f32,
+}
+
+impl NetworkTextMetrics {
+    #[must_use]
+    pub fn measure(
+        online_icon: &str,
+        offline_icon: &str,
+        mut measure: impl FnMut(&str) -> f32,
+    ) -> Self {
+        let mut width = |text: &str| finite_non_negative(measure(text));
+        let icon_width = width(&bounded_borrowed_control_text(online_icon))
+            .max(width(&bounded_borrowed_control_text(offline_icon)));
+        let arrow_width = width("\u{2193}").max(width("\u{2191}"));
+        let gap = width(" ");
+        let digit_width = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            .into_iter()
+            .map(&mut width)
+            .fold(0.0_f32, f32::max);
+        let unit_width = ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s", "PiB/s", "EiB/s"]
+            .into_iter()
+            .map(&mut width)
+            .fold(0.0_f32, f32::max);
+        // format_transfer_rate can round a value just below a unit boundary
+        // to 1024.0, so reserve five digits plus the decimal point. Measure
+        // all digits/units instead of assuming a monospace font or that 8/M
+        // are the widest glyphs. Unknown readings use these same columns.
+        let rate_width = (digit_width * 5.0 + width(".") + gap + unit_width)
+            .max(width(crate::controls::UNKNOWN_VALUE));
+        Self {
+            icon_width,
+            arrow_width,
+            rate_width,
+            gap,
+        }
+    }
+
+    #[must_use]
+    pub fn width(self) -> f32 {
+        self.icon_width
+            + if self.icon_width > 0.0 {
+                self.gap * 2.0
+            } else {
+                0.0
+            }
+            + 2.0 * (self.arrow_width + self.rate_width)
+            + self.gap
+    }
 }
 
 /// One frame's geometry and paint context shared by the two control groups.
@@ -1381,7 +1439,12 @@ pub(crate) fn build_scene<M: TextMeasurer>(
     viewport: Size,
     interaction: &InteractionState,
 ) -> Scene {
-    LayoutPass { config, measurer }.build(view, viewport, interaction)
+    LayoutPass {
+        config,
+        measurer,
+        network_metrics: std::cell::OnceCell::new(),
+    }
+    .build(view, viewport, interaction)
 }
 
 impl<M: TextMeasurer> LayoutPass<'_, M> {
@@ -1640,11 +1703,44 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         32.0_f32.max(self.font_size() * 1.8)
     }
 
+    fn network_text_metrics(&self) -> NetworkTextMetrics {
+        *self.network_metrics.get_or_init(|| {
+            NetworkTextMetrics::measure(
+                &self.config.labels.network,
+                &self.config.labels.network_offline,
+                |text| self.measurer.measure(text, self.font_size()).width,
+            )
+        })
+    }
+
     fn control_extent(&self, control: &ControlSpec, compact: bool) -> f32 {
         if self.config.edge.is_vertical() {
             let lines = control.sidebar_lines().len().max(1) as f32;
             (lines * (self.font_size() + 2.0) + 8.0).max(self.minimum_target_extent())
         } else {
+            if control.id == NodeId::Network {
+                let metrics = self.network_text_metrics();
+                if !compact {
+                    // Full readings either fit as a whole or stay compact.
+                    // Do not cap at the generic 240px limit: larger fonts
+                    // still need room for both complete rate columns.
+                    return (metrics.width() + self.horizontal_text_padding() * 2.0)
+                        .max(self.minimum_target_extent());
+                }
+                let mut width = metrics.icon_width;
+                if self.config.labels.network.is_empty()
+                    || self.config.labels.network_offline.is_empty()
+                {
+                    width = width.max(
+                        self.measurer
+                            .measure("\u{2193}\u{2191}", self.font_size())
+                            .width,
+                    );
+                }
+                return (width + self.horizontal_text_padding().min(4.0) * 2.0)
+                    .max(self.minimum_target_extent())
+                    .min(240.0);
+            }
             let text = if compact {
                 control.compact_value()
             } else {
@@ -1772,6 +1868,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     id: NodeId::StatusOverflow,
                     text: "…".to_owned(),
                     lines: Vec::new(),
+                    network: None,
                     compact: true,
                     primary: Some(UserAction::OpenShellHub(ShellRoute::Hub)),
                     secondary: Some(UserAction::OpenAudioControl),
@@ -1882,6 +1979,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     id: NodeId::WorkspaceOverflow,
                     text: format!("+{missing}"),
                     lines: Vec::new(),
+                    network: None,
                     compact: true,
                     primary: enabled.then_some(next).flatten(),
                     secondary: enabled.then_some(previous).flatten(),
@@ -2318,7 +2416,14 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         } else {
             palette.text
         };
-        let lines: Vec<&str> = if spec.lines.is_empty() {
+        let network_columns = spec
+            .network
+            .as_ref()
+            .filter(|_| !self.config.edge.is_vertical() && !spec.compact);
+        let lines: Vec<&str> = if let Some(columns) = network_columns {
+            self.push_network_text(scene, text_bounds, columns, color, spec.state);
+            Vec::new()
+        } else if spec.lines.is_empty() {
             vec![&spec.text]
         } else {
             spec.lines.iter().map(String::as_str).collect()
@@ -2462,6 +2567,58 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         ellipsis.to_owned()
     }
 
+    fn push_network_text(
+        &self,
+        scene: &mut Scene,
+        bounds: Rect,
+        columns: &[String; 3],
+        color: Rgba,
+        state: VisualState,
+    ) {
+        let metrics = self.network_text_metrics();
+        let icon_gap = if metrics.icon_width > 0.0 {
+            metrics.gap * 2.0
+        } else {
+            0.0
+        };
+        let cells = [
+            (
+                columns[0].as_str(),
+                metrics.icon_width,
+                TextAlign::Center,
+                icon_gap,
+            ),
+            ("\u{2193}", metrics.arrow_width, TextAlign::Center, 0.0),
+            (
+                columns[1].as_str(),
+                metrics.rate_width,
+                TextAlign::End,
+                metrics.gap,
+            ),
+            ("\u{2191}", metrics.arrow_width, TextAlign::Center, 0.0),
+            (columns[2].as_str(), metrics.rate_width, TextAlign::End, 0.0),
+        ];
+        let size = self.font_size().min(bounds.height.max(1.0));
+        let mut x = bounds.x;
+        for (text, width, align, gap) in cells {
+            if let Some(cell) = Rect::new(x, bounds.y, width, bounds.height).intersection(bounds) {
+                let fitted = self.fit_text_sized(text, cell.width, 0.0, size);
+                if !fitted.is_empty() {
+                    scene.nodes.push(SceneNode::Text {
+                        id: NodeId::Network,
+                        bounds: cell,
+                        text: fitted,
+                        size,
+                        color,
+                        align,
+                        state,
+                    });
+                }
+            }
+            x += width + gap;
+        }
+    }
+
     fn font_size(&self) -> f32 {
         finite_non_negative(self.config.font_size).max(1.0)
     }
@@ -2480,6 +2637,8 @@ struct PillSpec {
     id: NodeId,
     text: String,
     lines: Vec<String>,
+    /// Icon, receive rate and transmit rate, without presentation padding.
+    network: Option<[String; 3]>,
     compact: bool,
     primary: Option<UserAction>,
     secondary: Option<UserAction>,
@@ -2493,6 +2652,9 @@ struct PillSpec {
 impl From<ControlSpec> for PillSpec {
     fn from(control: ControlSpec) -> Self {
         let text = control.text();
+        let network = control
+            .network_rates()
+            .map(|[rx, tx]| [control.icon.clone(), rx.to_owned(), tx.to_owned()]);
         let bindings = if control.state.enabled {
             control.bindings
         } else {
@@ -2502,6 +2664,7 @@ impl From<ControlSpec> for PillSpec {
             id: control.id,
             text,
             lines: Vec::new(),
+            network,
             compact: false,
             primary: bindings.primary,
             secondary: bindings.secondary,
