@@ -4799,6 +4799,13 @@ impl XcbOutputOps {
                         if output.name.is_empty() {
                             output.name = format!("Monitor-{idx}");
                         }
+                        // Names arrive after the batched GetOutputInfo replies.
+                        // build_output_info initially received an empty name,
+                        // so finish the identity too before caching or exposing
+                        // the output to restart/layout matching.
+                        output.identity = crate::backend::api::OutputIdentity::connector_only(
+                            output.name.clone(),
+                        );
                     }
                     if !outputs.is_empty() {
                         return outputs;
@@ -8175,6 +8182,82 @@ mod parity_tests {
                 arm.contains(&hit),
                 "the xcb {event} mapping must hit-test with `{hit}`"
             );
+        }
+    }
+
+    #[test]
+    fn xcb_randr15_outputs_preserve_connector_identity_after_name_resolution() {
+        use super::XcbOutputOps;
+        use crate::backend::api::OutputOps;
+        use crate::backend::common_define::OutputId;
+        use std::sync::Arc;
+        use xcb::Xid;
+
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let (conn, screen) = xcb::Connection::connect(Some(x11.name())).unwrap();
+        let conn = Arc::new(conn);
+        let root = conn
+            .get_setup()
+            .roots()
+            .nth(screen as usize)
+            .unwrap()
+            .root();
+        let version = conn
+            .wait_for_reply(conn.send_request(&xcb::randr::QueryVersion {
+                major_version: 1,
+                minor_version: 5,
+            }))
+            .unwrap();
+        assert!(
+            version.major_version() > 1
+                || (version.major_version() == 1 && version.minor_version() >= 5),
+            "the regression must exercise RandR 1.5, not the CRTC fallback"
+        );
+        let monitors = conn
+            .wait_for_reply(conn.send_request(&xcb::randr::GetMonitors {
+                window: root,
+                get_active: true,
+            }))
+            .unwrap();
+        let expected: Vec<_> = monitors
+            .monitors()
+            .filter(|monitor| monitor.width() > 0 && monitor.height() > 0)
+            .map(|monitor| {
+                let output = *monitor
+                    .outputs()
+                    .first()
+                    .expect("Xvfb's active monitor must have a connector");
+                let info = conn
+                    .wait_for_reply(conn.send_request(&xcb::randr::GetOutputInfo {
+                        output,
+                        config_timestamp: 0,
+                    }))
+                    .unwrap();
+                let name = String::from_utf8(info.name().to_vec()).unwrap();
+                assert!(
+                    !name.is_empty(),
+                    "the server must return a real output name"
+                );
+                (OutputId(output.resource_id() as u64), name)
+            })
+            .collect();
+        assert!(!expected.is_empty(), "the RandR 1.5 path must have outputs");
+
+        let ops = XcbOutputOps::new(Arc::clone(&conn), root, 800, 600);
+        // Check the initial producer, its cached result and a fresh query:
+        // restart and per-tag persistence consume this same OutputOps API.
+        for invalidate in [false, false, true] {
+            if invalidate {
+                ops.invalidate_output_cache();
+            }
+            let outputs = ops.enumerate_outputs();
+            assert_eq!(outputs.len(), expected.len());
+            for (id, name) in &expected {
+                let output = outputs.iter().find(|output| output.id == *id).unwrap();
+                assert_eq!(&output.name, name);
+                assert_eq!(&output.identity.connector, name);
+                assert_eq!(&output.identity.stable_key, name);
+            }
         }
     }
 

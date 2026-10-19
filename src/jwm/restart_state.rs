@@ -104,6 +104,10 @@ struct Monitor {
     order: Vec<u32>,
     selected: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mru: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tag_selected: Vec<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     shapes: Vec<ShapeContext>,
 }
 
@@ -197,6 +201,8 @@ struct Client {
     monitor: usize,
     #[serde(default = "default_client_fact")]
     client_fact: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maximize_anchor: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -230,6 +236,13 @@ impl RestartSnapshot {
                     && (0.25..=4.0).contains(&client.client_fact)
                     && client.tags != 0
                     && client.monitor < self.monitors.len()
+                    && client.maximize_anchor.is_none_or(|anchor| {
+                        anchor != client.xid
+                            && self
+                                .clients
+                                .iter()
+                                .any(|other| other.xid == anchor && other.monitor == client.monitor)
+                    })
             })
             && self
                 .monitors
@@ -237,6 +250,7 @@ impl RestartSnapshot {
                 .enumerate()
                 .all(|(monitor_index, monitor)| {
                     let mut ordered = HashSet::new();
+                    let mut stacked = HashSet::new();
                     let mut scopes = HashSet::new();
                     let monitor_ids: HashSet<_> = self
                         .clients
@@ -269,6 +283,18 @@ impl RestartSnapshot {
                         && monitor
                             .selected
                             .is_none_or(|id| monitor.order.contains(&id))
+                        && monitor.mru.len() <= MAX_CLIENTS
+                        && monitor
+                            .mru
+                            .iter()
+                            .all(|id| monitor_ids.contains(id) && stacked.insert(*id))
+                        && (monitor.tag_selected.is_empty()
+                            || monitor.tag_selected.len() == monitor.tags.len())
+                        && monitor
+                            .tag_selected
+                            .iter()
+                            .flatten()
+                            .all(|id| monitor_ids.contains(id))
                         && monitor.shapes.iter().all(|shape| {
                             scopes.insert((shape.tag_mask, shape.layout.as_str()))
                                 && shape.validate(&monitor_ids)
@@ -374,9 +400,43 @@ impl RestartSnapshot {
 }
 
 /// A unique panel identity wins over enumeration order. An ambiguous identity
-/// never picks the first duplicate. Geometry is only a placement fallback and
-/// never grants ownership of another output's layout settings.
+/// never picks the first duplicate. Only a complete, unchanged legacy topology
+/// can recover unnamed XCB outputs by geometry; named outputs never use it.
 fn exact_output(saved: &Output, live: &[Output], sources: &[Output]) -> Option<usize> {
+    if !saved.stable_key.is_empty() || !saved.connector.is_empty() {
+        return named_output(saved, live, sources);
+    }
+    // Older XCB processes wrote two empty identity strings. Upgrade those
+    // snapshots only when the *whole* output geometry is unchanged and has
+    // a unique one-to-one match. Partial or mirrored topologies and changed
+    // rectangle sets provide no identity evidence and must not claim a panel.
+    if live.len() != sources.len() || !sources.contains(saved) {
+        return None;
+    }
+    let mut claimed = HashSet::new();
+    for source in sources {
+        let mut candidates = live
+            .iter()
+            .enumerate()
+            .filter(|(_, output)| output.rect == source.rect)
+            .map(|(index, _)| index);
+        let index = candidates.next()?;
+        if candidates.next().is_some() || !claimed.insert(index) {
+            return None;
+        }
+        // Named panels keep identity precedence even in a mixed legacy
+        // snapshot. Their movement/removal cannot make an anonymous source
+        // inherit a known panel's old or new slot.
+        if (!source.stable_key.is_empty() || !source.connector.is_empty())
+            && named_output(source, live, sources) != Some(index)
+        {
+            return None;
+        }
+    }
+    live.iter().position(|output| output.rect == saved.rect)
+}
+
+fn named_output(saved: &Output, live: &[Output], sources: &[Output]) -> Option<usize> {
     let stable: Vec<_> = live
         .iter()
         .enumerate()
@@ -566,16 +626,30 @@ impl Jwm {
                 .iter()
                 .position(|(key, _)| Some(*key) == client.mon)
                 .ok_or("X11 restart client has no live output")?;
-            let xid =
+            let client_id =
                 xid(backend, client.win).ok_or("X11 restart client has no native identity")?;
             clients.push(Client {
-                xid,
+                xid: client_id,
                 tags: client.state.tags,
                 monitor,
                 client_fact: client.state.client_fact,
+                maximize_anchor: client
+                    .state
+                    .maximize_restore_anchor
+                    .filter(|anchor| {
+                        *anchor != key
+                            && client.state.maximize_restore_tiled
+                            && client.state.maximized_axes().any()
+                    })
+                    .and_then(|anchor| self.state.clients.get(anchor))
+                    .filter(|anchor| anchor.mon == client.mon)
+                    .and_then(|anchor| xid(backend, anchor.win)),
             });
         }
         let captured: HashSet<_> = clients.iter().map(|client| client.xid).collect();
+        for client in &mut clients {
+            client.maximize_anchor = client.maximize_anchor.filter(|id| captured.contains(id));
+        }
         let monitors: Vec<Monitor> = live
             .iter()
             .map(|(key, output)| {
@@ -591,6 +665,7 @@ impl Jwm {
                     pertag.m_facts.len(),
                     pertag.gaps.len(),
                     pertag.show_bars.len(),
+                    pertag.sel.len(),
                 ]
                 .into_iter()
                 .any(|len| len != count)
@@ -616,6 +691,30 @@ impl Jwm {
                     .and_then(|key| self.state.clients.get(key))
                     .and_then(|client| xid(backend, client.win))
                     .filter(|id| order.contains(id));
+                let saved_id = |client_key| {
+                    self.state
+                        .clients
+                        .get(client_key)
+                        .filter(|client| client.mon == Some(*key))
+                        .and_then(|client| xid(backend, client.win))
+                        .filter(|id| order.contains(id))
+                };
+                let mut stacked = HashSet::new();
+                let mru = self
+                    .state
+                    .monitor_stack
+                    .get(*key)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter_map(saved_id)
+                    .filter(|id| stacked.insert(*id))
+                    .collect();
+                let tag_selected = pertag
+                    .sel
+                    .iter()
+                    .map(|selected| selected.and_then(saved_id))
+                    .collect();
                 let mut tags = Vec::new();
                 for index in 0..pertag.lts.len() {
                     tags.push(Tag {
@@ -636,6 +735,8 @@ impl Jwm {
                     tags,
                     order,
                     selected,
+                    mru,
+                    tag_selected,
                     shapes: Vec::new(),
                 })
             })
@@ -949,7 +1050,12 @@ impl Jwm {
             }
             monitor.reload_current_tag_context();
             if let Some(pertag) = monitor.pertag.as_mut() {
-                pertag.prev_tag = pertag.clamp_tag(saved.prev_tag);
+                pertag.prev_tag = restored_tag_slot(
+                    saved.prev_tag,
+                    monitor.tag_set[1 - monitor.sel_tags],
+                    tagmask,
+                    pertag.lts.len() - 1,
+                );
             }
             if snapshot.selected_monitor == Some(source) {
                 self.state.sel_mon = Some(key);
@@ -1064,6 +1170,21 @@ impl Jwm {
         )
     }
 
+    fn restart_focus_eligible(&self, key: ClientKey, monitor: MonitorKey, tags: u32) -> bool {
+        self.is_application_focus_eligible(key)
+            && self.state.clients.get(key).is_some_and(|client| {
+                client.mon == Some(monitor)
+                    && !client.state.is_hidden
+                    && !client.state.is_swallowed
+                    && (client.state.is_sticky || client.state.tags & tags != 0)
+            })
+            && self
+                .state
+                .monitor_clients
+                .get(monitor)
+                .is_some_and(|clients| clients.contains(&key))
+    }
+
     pub(crate) fn finish_restart_adoption(&mut self, backend: &mut dyn Backend) {
         // Other initial windows (shell/transient clients) must not change the
         // saved view. Reconcile again after the single authoritative scan.
@@ -1115,25 +1236,218 @@ impl Jwm {
             .iter()
             .map(|monitor| monitor.output.clone())
             .collect();
-        for saved in &snapshot.monitors {
-            let Some(index) = exact_output(&saved.output, &outputs, &sources) else {
+        let destinations: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                let exact = exact_output(source, &outputs, &sources);
+                (exact, exact.or_else(|| fallback_output(source, &outputs)))
+            })
+            .collect();
+
+        // Maximize adopts before attach and therefore cannot recover a tile's
+        // old successor at manage time. Rebind both ends only after every
+        // surviving window has passed generation and runtime-key checks.
+        let anchors: Vec<_> = snapshot
+            .clients
+            .iter()
+            .filter_map(|saved| {
+                let key = *restored.get(&saved.xid)?;
+                let client = self.state.clients.get(key)?;
+                if !client.state.maximize_restore_tiled || !client.state.maximized_axes().any() {
+                    return None;
+                }
+                let anchor = saved
+                    .maximize_anchor
+                    .and_then(|id| restored.get(&id))
+                    .copied()
+                    .filter(|anchor| {
+                        self.state.clients.get(*anchor).is_some_and(|other| {
+                            other.mon == client.mon
+                                && (!other.state.is_floating || other.state.maximize_restore_tiled)
+                        }) && client.mon.is_some_and(|monitor| {
+                            self.state
+                                .monitor_clients
+                                .get(monitor)
+                                .is_some_and(|clients| {
+                                    clients.contains(&key) && clients.contains(anchor)
+                                })
+                        })
+                    });
+                Some((key, anchor))
+            })
+            .collect();
+        for (key, anchor) in anchors {
+            self.state.clients[key].state.maximize_restore_anchor = anchor;
+        }
+
+        // Preserve each surviving panel's MRU ahead of clients arriving from
+        // a missing panel. New/unverified clients keep their ordinary relative
+        // order after the saved stack. Legacy snapshots leave it untouched.
+        for (index, (key, _)) in live.iter().enumerate() {
+            if !snapshot.monitors.iter().enumerate().any(|(source, saved)| {
+                destinations[source].1 == Some(index) && !saved.mru.is_empty()
+            }) {
+                continue;
+            }
+            let mut stack = Vec::new();
+            let mut seen = HashSet::new();
+            for exact in [true, false] {
+                for (source, saved) in snapshot.monitors.iter().enumerate() {
+                    let (owner, destination) = destinations[source];
+                    if destination != Some(index) || owner.is_some() != exact {
+                        continue;
+                    }
+                    for id in &saved.mru {
+                        if let Some(client_key) = restored.get(id).copied().filter(|client_key| {
+                            self.state.clients[*client_key].mon == Some(*key)
+                                && self.is_application_focus_eligible(*client_key)
+                                && self
+                                    .state
+                                    .monitor_clients
+                                    .get(*key)
+                                    .is_some_and(|clients| clients.contains(client_key))
+                        }) {
+                            if seen.insert(client_key) {
+                                stack.push(client_key);
+                            }
+                        }
+                    }
+                }
+            }
+            for client_key in self.state.monitor_stack.get(*key).into_iter().flatten() {
+                if self
+                    .state
+                    .clients
+                    .get(*client_key)
+                    .is_some_and(|client| client.mon == Some(*key))
+                    && seen.insert(*client_key)
+                {
+                    stack.push(*client_key);
+                }
+            }
+            self.state.monitor_stack.insert(*key, stack);
+        }
+
+        let tagmask = CONFIG.load().tagmask();
+        let mut claimed = HashSet::new();
+        for (source, saved) in snapshot.monitors.iter().enumerate() {
+            let Some(index) = destinations[source].0 else {
                 continue;
             };
+            if !claimed.insert(index) {
+                continue;
+            }
             let key = live[index].0;
-            if let Some(selected) = saved
+            let monitor = &self.state.monitors[key];
+            let active = monitor.get_active_tags();
+            let history = (!saved.tag_selected.is_empty()).then(|| {
+                (0..monitor.pertag.as_ref().map_or(0, |pertag| pertag.sel.len()))
+                    .map(|slot| {
+                        let tags = if slot == 0 {
+                            tagmask
+                        } else {
+                            1u32 << (slot - 1)
+                        };
+                        saved
+                            .tag_selected
+                            .get(slot)
+                            .copied()
+                            .flatten()
+                            .and_then(|id| restored.get(&id))
+                            .copied()
+                            .filter(|client| self.restart_focus_eligible(*client, key, tags))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let selected = saved
                 .selected
                 .and_then(|id| restored.get(&id))
                 .copied()
-                .filter(|selected| self.state.clients[*selected].mon == Some(key))
+                .filter(|selected| self.restart_focus_eligible(*selected, key, active))
+                .or_else(|| {
+                    history.as_ref().and_then(|history| {
+                        monitor
+                            .pertag
+                            .as_ref()
+                            .and_then(|pertag| history.get(pertag.cur_tag).copied().flatten())
+                    })
+                })
+                .or_else(|| {
+                    monitor
+                        .sel
+                        .filter(|selected| self.restart_focus_eligible(*selected, key, active))
+                })
+                .or_else(|| {
+                    self.state
+                        .monitor_stack
+                        .get(key)
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .find(|selected| self.restart_focus_eligible(*selected, key, active))
+                });
+            if let Some(history) = history
+                && let Some(pertag) = self.state.monitors[key].pertag.as_mut()
             {
-                self.state.monitors[key].set_selected_client_for_current_tag(Some(selected));
+                pertag.sel = history;
+            }
+            self.state.monitors[key].set_selected_client_for_current_tag(selected);
+            if let Some(selected) = selected {
                 if let Some(stack) = self.state.monitor_stack.get_mut(key) {
                     stack.retain(|entry| *entry != selected);
                     stack.insert(0, selected);
                 }
             }
         }
+
+        // A removed selected output may have sent its still-live focused
+        // window to a surviving panel. Follow that verified placement without
+        // replacing the survivor's tag/layout. Focus it only on a visible tag.
+        if let Some(source) = snapshot.selected_monitor
+            && destinations[source].0.is_none()
+            && let Some(selected) = snapshot.monitors[source]
+                .selected
+                .and_then(|id| restored.get(&id))
+                .copied()
+            && let Some(monitor) = self.state.clients[selected].mon
+            && let Some(target) = self.state.monitors.get(monitor)
+        {
+            let active = target.get_active_tags();
+            self.state.sel_mon = Some(monitor);
+            if self.restart_focus_eligible(selected, monitor, active) {
+                self.state.monitors[monitor].set_selected_client_for_current_tag(Some(selected));
+                if let Some(stack) = self.state.monitor_stack.get_mut(monitor) {
+                    stack.retain(|entry| *entry != selected);
+                    stack.insert(0, selected);
+                }
+            }
+        }
         self.restore_restart_shapes(backend);
+        self.protect_restart_focus(backend);
+    }
+
+    pub(crate) fn protect_restart_focus(&mut self, backend: &mut dyn Backend) {
+        if self.restart_state.snapshot.is_none() {
+            return;
+        }
+        // Restart can finish long after manage's last focus guard, or with
+        // no managed windows at all. Re-arm it at the completed handoff and
+        // seed pointer-monitor history from today's pointer, so stationary
+        // pointer motion on another screen does not undo keyboard selection.
+        self.state.motion_mon = backend
+            .input_ops()
+            .get_pointer_position()
+            .ok()
+            .and_then(|(x, y)| {
+                self.last_mouse_root = (x, y);
+                self.recttomon(backend, x.floor() as i32, y.floor() as i32)
+            })
+            .or(self.state.sel_mon);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        self.suppress_mouse_focus_until = Some(
+            self.suppress_mouse_focus_until
+                .map_or(deadline, |previous| previous.max(deadline)),
+        );
     }
 
     /// A saved XID is usable only through the generation-verified slotmap key.
@@ -1315,6 +1629,76 @@ mod policy_tests {
     }
 
     #[test]
+    fn legacy_empty_output_identities_restore_only_a_complete_unique_geometry_bijection() {
+        let left = output("", "", 0);
+        let right = output("", "", 1920);
+        let saved = vec![left.clone(), right.clone()];
+        let live = vec![
+            output("new-right", "DP-2", 1920),
+            output("new-left", "DP-1", 0),
+        ];
+        assert_eq!(exact_output(&left, &live, &saved), Some(1));
+        assert_eq!(exact_output(&right, &live, &saved), Some(0));
+        assert_eq!(exact_output(&left, &saved, &saved), Some(0));
+        assert_eq!(exact_output(&right, &saved, &saved), Some(1));
+
+        // Missing, added, moved/resized, and mirrored panels provide no safe
+        // identity for *any* of the old anonymous monitor contexts.
+        let mut resized = live.clone();
+        resized[0].rect[2] = 1280;
+        for changed in [
+            vec![live[0].clone()],
+            vec![
+                live[0].clone(),
+                live[1].clone(),
+                output("extra", "DP-3", 3840),
+            ],
+            vec![live[0].clone(), output("left", "DP-1", -1920)],
+            resized,
+            vec![live[1].clone(), live[1].clone()],
+        ] {
+            assert_eq!(exact_output(&left, &changed, &saved), None);
+            assert_eq!(exact_output(&right, &changed, &saved), None);
+        }
+        assert_eq!(
+            exact_output(&left, &live, &[left.clone(), left.clone()]),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_geometry_never_replaces_named_panel_identity() {
+        let anonymous = output("", "", 0);
+        let named = output("named", "DP-2", 1920);
+        let saved = vec![anonymous.clone(), named.clone()];
+        let unchanged = vec![output("left", "DP-1", 0), named.clone()];
+        assert_eq!(exact_output(&anonymous, &unchanged, &saved), Some(0));
+        assert_eq!(exact_output(&named, &unchanged, &saved), Some(1));
+
+        let moved = vec![
+            output("named", "DP-1", 0),
+            output("replacement", "DP-2", 1920),
+        ];
+        assert_eq!(exact_output(&anonymous, &moved, &saved), None);
+        assert_eq!(exact_output(&named, &moved, &saved), Some(0));
+
+        let missing = output("gone", "gone-connector", 0);
+        assert_eq!(
+            exact_output(&missing, &[output("new", "new", 0)], &[missing.clone()]),
+            None
+        );
+        let partial_identity = output("known-stable", "", 0);
+        assert_eq!(
+            exact_output(
+                &partial_identity,
+                &[output("new", "new", 0)],
+                &[partial_identity.clone()]
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn unplugged_duplicate_edid_cannot_claim_the_remaining_panel() {
         let a = output("same-edid", "DP-1", 0);
         let b = output("same-edid", "DP-2", 1920);
@@ -1479,6 +1863,8 @@ mod codec_tests {
                 tags: vec![tag; 4],
                 order: vec![42],
                 selected: Some(42),
+                mru: Vec::new(),
+                tag_selected: Vec::new(),
                 shapes: Vec::new(),
             }],
             clients: vec![Client {
@@ -1486,6 +1872,7 @@ mod codec_tests {
                 tags: 0b101,
                 monitor: 0,
                 client_fact: 2.5,
+                maximize_anchor: None,
             }],
             selected_monitor: Some(0),
         }
@@ -1509,6 +1896,78 @@ mod codec_tests {
         let saved = snapshot();
         let bytes = saved.encode().expect("valid snapshot");
         assert_eq!(RestartSnapshot::decode(&bytes, &saved.intent), Some(saved));
+    }
+
+    #[test]
+    fn restart_focus_history_and_maximize_anchor_roundtrip_with_legacy_defaults() {
+        let legacy = snapshot();
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert!(encoded["monitors"][0].get("mru").is_none());
+        assert!(encoded["monitors"][0].get("tag_selected").is_none());
+        assert!(encoded["clients"][0].get("maximize_anchor").is_none());
+        assert_eq!(
+            RestartSnapshot::decode(&legacy.encode().unwrap(), &intent()),
+            Some(legacy)
+        );
+
+        let mut saved = snapshot();
+        saved.clients.push(Client {
+            xid: 43,
+            ..saved.clients[0].clone()
+        });
+        saved.clients[0].maximize_anchor = Some(43);
+        saved.monitors[0].order.push(43);
+        saved.monitors[0].mru = vec![42, 43];
+        saved.monitors[0].tag_selected = vec![Some(43), Some(42), None, Some(43)];
+        assert_eq!(
+            RestartSnapshot::decode(&saved.encode().unwrap(), &intent()),
+            Some(saved)
+        );
+    }
+
+    #[test]
+    fn restart_focus_history_and_maximize_anchor_reject_invalid_references() {
+        for mru in [vec![42, 42], vec![43], vec![0]] {
+            let mut saved = snapshot();
+            saved.monitors[0].mru = mru;
+            assert!(!saved.validate());
+        }
+        for history in [
+            vec![Some(42)],
+            vec![None; 5],
+            vec![None, Some(43), None, None],
+        ] {
+            let mut saved = snapshot();
+            saved.monitors[0].tag_selected = history;
+            assert!(!saved.validate());
+        }
+        for anchor in [0, 42, 43] {
+            let mut saved = snapshot();
+            saved.clients[0].maximize_anchor = Some(anchor);
+            assert!(!saved.validate());
+        }
+        let mut saved = snapshot();
+        let mut other = saved.monitors[0].clone();
+        other.order = vec![43];
+        other.selected = Some(43);
+        saved.monitors.push(other);
+        saved.clients.push(Client {
+            xid: 43,
+            monitor: 1,
+            ..saved.clients[0].clone()
+        });
+        assert!(saved.validate());
+        saved.clients[0].maximize_anchor = Some(43);
+        assert!(
+            !saved.validate(),
+            "an anchor cannot cross saved output ownership"
+        );
+        saved.clients[0].maximize_anchor = None;
+        saved.monitors[0].tag_selected = vec![None, Some(43), None, None];
+        assert!(
+            !saved.validate(),
+            "a per-tag selection cannot cross saved output ownership"
+        );
     }
 
     #[test]
@@ -2032,6 +2491,7 @@ mod codec_tests {
                 tags: 1,
                 monitor: 0,
                 client_fact: 1.0,
+                maximize_anchor: None,
             });
         }
         saved.monitors[0].order = saved.clients.iter().map(|client| client.xid).collect();

@@ -319,9 +319,9 @@ impl Jwm {
     /// Write out anything still pending, debounce or not.
     ///
     /// Called on the way out, so quitting or restarting inside the debounce
-    /// window keeps the arrangement that was on screen — which is the whole
-    /// point on the restart path, where the next process reads it straight
-    /// back in.
+    /// window keeps the arrangement that was on screen. A user edit waiting
+    /// to be reloaded takes precedence over this durable default; the restart
+    /// snapshot separately carries the live arrangement to the next process.
     ///
     /// A retryable failure is returned with the write still pending: restart
     /// preparation propagates it and resumes this same event loop, so a later
@@ -334,6 +334,14 @@ impl Jwm {
         backend: &dyn crate::backend::api::Backend,
     ) -> Result<(), ConfigError> {
         if self.layout_persist_dirty.is_none() || !CONFIG.load().layout_persist_tags() {
+            return Ok(());
+        }
+        // Restart can arrive before either the debounce or the next mtime
+        // poll. Preserve a newly edited config just as the periodic flush
+        // does, leaving the pending runtime write intact if restart is later
+        // cancelled and the current event loop resumes.
+        self.observe_config_reload(Instant::now(), "pre-exit save check");
+        if self.config_reload_is_pending() {
             return Ok(());
         }
         let result = self.save_layout_tags(backend);
@@ -558,6 +566,105 @@ mod tests {
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Exercise the real exit path, mtime observation and file writer in an
+    /// isolated process. Changing XDG_CONFIG_HOME in the parent would race
+    /// unrelated tests and could direct their writes into this fixture.
+    #[test]
+    fn exit_flush_preserves_an_unpolled_user_layout_edit() {
+        const CHILD_DIR: &str = "JWM_TEST_LAYOUT_EXIT_DIR";
+        let Some(directory) = std::env::var_os(CHILD_DIR) else {
+            let path = std::env::temp_dir().join(format!(
+                "jwm-layout-exit-edit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&path).expect("create fixture directory");
+            let directory = ReadOnlyFixtureDir(path);
+            let output = std::process::Command::new(
+                std::env::current_exe().expect("the unit-test executable"),
+            )
+            .args([
+                "--exact",
+                "jwm::layout::persist::tests::exit_flush_preserves_an_unpolled_user_layout_edit",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, &directory.0)
+            .env("XDG_CONFIG_HOME", &directory.0)
+            .output()
+            .expect("run the isolated exit-flush fixture");
+            assert!(
+                output.status.success(),
+                "isolated exit flush failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        use std::fs::{File, FileTimes};
+        use std::time::SystemTime;
+
+        let path = Config::get_default_config_path();
+        assert!(path.starts_with(&directory), "the fixture must be isolated");
+        std::fs::create_dir_all(path.parent().expect("config directory"))
+            .expect("create config directory");
+        let initial = "[layout]\n[[layout.tags]]\ntag = 3\nmonitor = 0\nlayout = \"tile\"\n";
+        std::fs::write(&path, initial).expect("write initial config");
+        let set_revision = |seconds| {
+            File::open(&path)
+                .expect("open fixture config")
+                .set_times(
+                    FileTimes::new()
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)),
+                )
+                .expect("set deterministic config revision");
+        };
+        set_revision(1_000_000);
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test")
+            .expect("create the running window manager");
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor]
+            .pertag
+            .as_mut()
+            .expect("per-tag layout")
+            .m_facts[3] = 0.61;
+        jwm.mark_layout_dirty();
+        let dirty = jwm.layout_persist_dirty;
+        assert!(dirty.is_some(), "a live edit is waiting for debounce");
+
+        let edited = "# user edit before restart\n[layout]\n[[layout.tags]]\ntag = 3\nmonitor = 0\nlayout = \"grid\"\nm_fact = 0.75\n";
+        std::fs::write(&path, edited).expect("edit the config before the next poll");
+        set_revision(1_000_001);
+        assert!(
+            !jwm.config_reload_is_pending(),
+            "the edit is not observed yet"
+        );
+
+        jwm.flush_layout_persistence_on_exit(&backend)
+            .expect("a pending user edit must not refuse restart");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+        assert!(
+            jwm.config_reload_is_pending(),
+            "the user edit still needs reload"
+        );
+        assert_eq!(
+            jwm.layout_persist_dirty, dirty,
+            "a cancelled restart can resume"
+        );
+        assert_eq!(
+            jwm.state.monitors[monitor].pertag.as_ref().unwrap().m_facts[3],
+            0.61,
+            "the restart snapshot can still capture the live arrangement"
+        );
     }
 
     /// The classification has to match what the real writer returns, not

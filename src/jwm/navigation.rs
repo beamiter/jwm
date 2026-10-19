@@ -1140,6 +1140,9 @@ impl Jwm {
         self.ensure_native_root_wallpaper(backend);
 
         backend.window_ops().flush()?;
+        // Arranging and publishing the restored desktop can outlast the
+        // adoption guard. Start its grace period after setup has completed.
+        self.protect_restart_focus(backend);
         Ok(())
     }
 

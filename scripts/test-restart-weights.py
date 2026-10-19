@@ -43,7 +43,7 @@ for name in ['RestartIntent','Output','Tag','Monitor','ShapeContext','ResizeAnch
 parts.append('impl ShapeContext {' + item(restart, '    fn validate(&self, monitor_ids:') + '}')
 snapshot_impl = restart[restart.index('impl RestartSnapshot {'):]
 parts.append('impl RestartSnapshot {' + item(snapshot_impl, '    fn validate(') + '}')
-for name in ['canonical_shape_layout','exact_shape_tags','default_client_fact','exact_output','fallback_output','legal_tags']:
+for name in ['canonical_shape_layout','exact_shape_tags','default_client_fact','exact_output','named_output','fallback_output','legal_tags']:
     parts.append(item(restart, 'fn ' + name + '('))
 for name in ['LayoutClient','LayoutParams','LayoutResult']:
     parts.append('#[derive(Clone)]\n' + item(layout,'pub struct ' + name))
@@ -79,8 +79,8 @@ parts.append('impl Jwm {' + method + '}')
 parts.append(r'''
 fn fixture()->(Jwm,Mock) {
  let outputs:Vec<_>=(0..2).map(|i|(i,Output{stable_key:format!("panel-{i}"),connector:format!("DP-{i}"),rect:[i as i32*1920,0,1920,1080]})).collect();
- let clients:Vec<_>=(0..4).map(|i|Client{xid:10+i,tags:1,monitor:(i/2) as usize,client_fact:[0.5,2.5,1.5,3.5][i as usize]}).collect();
- let monitors=outputs.iter().map(|(i,o)|Monitor{output:o.clone(),tag_set:[1,2],sel_tags:0,cur_tag:1,prev_tag:2,tags:vec![Tag{layout:"tile".into(),alt:"float".into(),n_master:0,m_fact:0.55,gap:8,show_bar:true};4],order:vec![10+*i as u32*2,11+*i as u32*2],selected:None,shapes:vec![]}).collect();
+ let clients:Vec<_>=(0..4).map(|i|Client{xid:10+i,tags:1,monitor:(i/2) as usize,client_fact:[0.5,2.5,1.5,3.5][i as usize],maximize_anchor:None}).collect();
+ let monitors=outputs.iter().map(|(i,o)|Monitor{output:o.clone(),tag_set:[1,2],sel_tags:0,cur_tag:1,prev_tag:2,tags:vec![Tag{layout:"tile".into(),alt:"float".into(),n_master:0,m_fact:0.55,gap:8,show_bar:true};4],order:vec![10+*i as u32*2,11+*i as u32*2],selected:None,mru:vec![],tag_selected:vec![],shapes:vec![]}).collect();
  let intent=RestartIntent{version:1,pid:42,captured_ms:0,generation:"abc".into()};
  let markers=clients.iter().map(|c|(c.xid,b"abc".to_vec())).collect();
  let live=clients.iter().map(|c|LiveClient{win:c.xid,mon:Some(0),state:ClientState{tags:1,client_fact:1.0}}).collect();

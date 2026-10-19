@@ -547,6 +547,8 @@ fn output_identity_seed_key(identity: &crate::backend::api::OutputIdentity) -> O
 /// by position. On Wayland a non-tail unplug and re-plug leaves `monitor_order`
 /// in a different order than `enumerate_outputs`, and handing out by position
 /// then swaps geometry between two monitors that both still have their output.
+/// X11 also uses this plan when the output-id set is unchanged, so a RandR
+/// enumeration reorder or moving a panel keeps that output's workspace.
 /// Here a surviving position (one below the output count;
 /// `remove_excess_monitors` drops the tail) whose mapped output is still
 /// enumerated keeps it; every other position takes the next unclaimed output
@@ -593,10 +595,11 @@ fn plan_monitor_rects_by_output(
 /// Which output each monitor stands for after a display refresh, as
 /// `(monitor, output)` pairs in `monitors` order.
 ///
-/// X11 reports every display change as "the layout changed": `updategeom`
-/// hands the enumerated rectangles to the monitors by position and creates or
-/// drops monitors at the tail, so the output id a monitor was created with no
-/// longer says which output it covers, and a monitor created there has none.
+/// X11 reports every display change as "the layout changed". Its add/remove
+/// path still hands rectangles out by position and creates or drops monitors
+/// at the tail, so a changed topology can invalidate a monitor's output id,
+/// and a monitor created there has none. Refreshes of an unchanged output-id
+/// set keep their existing assignment before reaching this reconciliation.
 /// Pointer lookups (`recttomon`) resolve through these ids, and a monitor
 /// without the right one can never be selected by the pointer.
 ///
@@ -1441,6 +1444,17 @@ impl Jwm {
     pub(crate) fn updategeom(&mut self, backend: &mut dyn Backend) -> bool {
         info!("[updategeom]");
         let outputs = backend.output_ops().enumerate_outputs();
+        let output_ids: HashSet<OutputId> = outputs.iter().map(|output| output.id).collect();
+        let mapped_ids: HashSet<OutputId> = self
+            .state
+            .monitor_order
+            .iter()
+            .filter_map(|key| self.state.output_map.get(*key).copied())
+            .collect();
+        let same_outputs = !outputs.is_empty()
+            && outputs.len() == self.state.monitor_order.len()
+            && output_ids.len() == outputs.len()
+            && mapped_ids == output_ids;
 
         let dirty = if outputs.len() <= 1 {
             let output = outputs
@@ -1452,11 +1466,12 @@ impl Jwm {
             self.setup_single_monitor(backend, output, connector)
         } else {
             let (mons, connectors): (Vec<(i32, i32, i32, i32)>, Vec<Option<&str>>) =
-                if get_backend_family() == BackendFamily::Wayland {
-                    // Wayland outputs carry stable ids that `output_map` tracks
-                    // through hotplug, so each monitor keeps its own output. X11
-                    // keeps the positional hand-out: RandR's order is what the
-                    // monitors are numbered by.
+                if get_backend_family() == BackendFamily::Wayland || same_outputs {
+                    // A refresh of the same X11 outputs can change RandR's
+                    // enumeration order without changing the user's monitors.
+                    // Keep their tags/layouts attached to the known output ids.
+                    // X11 add/remove still uses the existing positional path:
+                    // this planner alone cannot preserve a non-tail survivor.
                     let monitor_outputs: Vec<Option<OutputId>> = self
                         .state
                         .monitor_order
@@ -1497,7 +1512,13 @@ impl Jwm {
         // re-pick below included.
         self.reconcile_output_map(&outputs);
 
-        if dirty {
+        if dirty
+            && !(same_outputs
+                && self
+                    .state
+                    .sel_mon
+                    .is_some_and(|key| self.state.monitors.contains_key(key)))
+        {
             let root_window = backend.root_window();
             self.state.sel_mon = self.wintomon(backend, root_window);
             if self.state.sel_mon.is_none() && !self.state.monitor_order.is_empty() {
@@ -2910,7 +2931,7 @@ mod tests {
     }
 
     #[test]
-    fn x11_display_changes_keep_output_ids_on_the_monitors_that_cover_them() {
+    fn x11_display_changes_keep_surviving_output_ids_and_pointer_mapping() {
         let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
         let mut jwm = jwm_on(&mut backend);
         let left = jwm.state.monitor_order[0];
@@ -2923,14 +2944,14 @@ mod tests {
         assert_eq!(jwm.state.output_map.get(right), Some(&OutputId(2)));
         assert_eq!(jwm.recttomon(&mut backend, 2500, 500), Some(right));
 
-        // The outputs trade places: each id follows its rectangle, not the
-        // monitor it used to be.
+        // The same outputs trade places: each workspace follows its output,
+        // and pointer lookup follows that output's new rectangle.
         backend.output_ops.outputs =
             vec![output(2, 0, 0, 1920, 1080), output(1, 1920, 0, 1920, 1080)];
         jwm.updategeom(&mut backend);
-        assert_eq!(jwm.state.output_map.get(left), Some(&OutputId(2)));
-        assert_eq!(jwm.state.output_map.get(right), Some(&OutputId(1)));
-        assert_eq!(jwm.recttomon(&mut backend, 2500, 500), Some(right));
+        assert_eq!(jwm.state.output_map.get(left), Some(&OutputId(1)));
+        assert_eq!(jwm.state.output_map.get(right), Some(&OutputId(2)));
+        assert_eq!(jwm.recttomon(&mut backend, 2500, 500), Some(left));
 
         // Unplugging one leaves the survivor mapped to the output that is
         // still there, not to the one that went away.
@@ -2939,6 +2960,56 @@ mod tests {
         assert_eq!(jwm.state.monitor_order, vec![left]);
         assert_eq!(jwm.state.output_map.get(left), Some(&OutputId(1)));
         assert_eq!(jwm.state.output_map.len(), 1);
+    }
+
+    #[test]
+    fn x11_reordered_outputs_keep_tag3_tag7_and_keyboard_selection() {
+        let first = output(1, 0, 0, 1920, 1080);
+        let second = output(2, 1920, 0, 1920, 1080);
+        let mut backend = DisplaySpyBackend::new(vec![first.clone(), second.clone()]);
+        let mut jwm = jwm_on(&mut backend);
+        let mon1 = jwm.state.monitor_order[0];
+        let mon2 = jwm.state.monitor_order[1];
+        jwm.state.monitors[mon1].view_tag(1 << 2, false);
+        jwm.state.monitors[mon2].view_tag(1 << 6, false);
+        jwm.state.sel_mon = Some(mon2);
+        let window = floating_client_on(&mut jwm, 0x3d1, mon2, Rect::new(2000, 100, 800, 600));
+        let old_work = work_of(&jwm, mon2);
+
+        // Primary-output changes may only reorder RandR's result. Nothing
+        // should move, and the remembered keyboard screen must stay selected.
+        backend.output_ops.outputs = vec![second, first];
+        assert!(!jwm.updategeom(&mut backend));
+        assert_eq!(jwm.state.sel_mon, Some(mon2));
+        assert_eq!(
+            live_of(&jwm.state.clients[window]),
+            Rect::new(2000, 100, 800, 600)
+        );
+
+        // A real geometry change still carries windows with their connector.
+        // The dummy pointer remains on mon1; it is not a selection command.
+        backend.output_ops.outputs =
+            vec![output(2, -1920, 0, 1920, 1080), output(1, 0, 0, 2560, 1440)];
+        assert!(jwm.updategeom(&mut backend));
+        assert_eq!(jwm.state.sel_mon, Some(mon2));
+        assert_eq!(jwm.state.monitors[mon1].get_active_tags(), 1 << 2);
+        assert_eq!(jwm.state.monitors[mon2].get_active_tags(), 1 << 6);
+        assert_eq!(jwm.state.monitors[mon1].pertag.as_ref().unwrap().cur_tag, 3);
+        assert_eq!(jwm.state.monitors[mon2].pertag.as_ref().unwrap().cur_tag, 7);
+        assert_eq!(jwm.state.output_map.get(mon1), Some(&OutputId(1)));
+        assert_eq!(jwm.state.output_map.get(mon2), Some(&OutputId(2)));
+        assert_eq!(jwm.state.clients[window].mon, Some(mon2));
+        let new_work = work_of(&jwm, mon2);
+        assert_eq!(
+            live_of(&jwm.state.clients[window]),
+            Rect::new(
+                new_work.x + 2000 - old_work.x,
+                new_work.y + 100 - old_work.y,
+                800,
+                600
+            )
+        );
+        assert_eq!(jwm.recttomon(&mut backend, -1000, 500), Some(mon2));
     }
 
     #[test]

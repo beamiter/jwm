@@ -6971,6 +6971,25 @@ mod unmanage_minimized_tests {
         (old, backend, key)
     }
 
+    fn insert_restart_fixture_client(
+        jwm: &mut Jwm,
+        raw: u64,
+        monitor: MonitorKey,
+        tags: u32,
+    ) -> ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.class = "RestartFixture".into();
+        client.instance = "restart-fixture".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.state.client_fact = 1.0;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        key
+    }
+
     #[test]
     fn x11_restart_off_view_clients_never_configure_onscreen() {
         for (floating, fullscreen, maximized) in [
@@ -8148,8 +8167,10 @@ mod unmanage_minimized_tests {
         use crate::core::layout::LayoutEnum;
 
         for case in ["verified", "removed", "recycled", "unmarked", "moved"] {
-            let (old, mut backend, _) = restart_shape_fixture(LayoutEnum::SCROLLING);
+            let (mut old, mut backend, keys) = restart_shape_fixture(LayoutEnum::SCROLLING);
             let old_mon = old.state.monitor_order[0];
+            old.state.clients[keys[0]].state.tags |= 2;
+            old.state.monitors[old_mon].pertag.as_mut().unwrap().sel[2] = Some(keys[0]);
             let saved_order: Vec<_> = old.state.monitor_clients[old_mon]
                 .iter()
                 .map(|key| old.state.clients[*key].win)
@@ -8218,6 +8239,11 @@ mod unmanage_minimized_tests {
                 fresh.state.monitors[mon].sel,
                 Some(expected_selection),
                 "{case}"
+            );
+            assert_eq!(
+                fresh.state.monitors[mon].pertag.as_ref().unwrap().sel[2],
+                (case == "verified").then_some(original),
+                "inactive-tag history also requires the original runtime identity: {case}"
             );
             let mut expected_order: Vec<_> = saved_order
                 .into_iter()
@@ -8297,6 +8323,434 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn x11_restart_legacy_xcb_empty_identities_restore_tag3_and_tag7() {
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        set_class(&backend, "RestartFixture", "restart-fixture");
+        let named = vec![
+            DummyOutputOps.enumerate_outputs().remove(0),
+            second_output(),
+        ];
+        let mut anonymous = named.clone();
+        for output in &mut anonymous {
+            output.identity = crate::backend::api::OutputIdentity::connector_only("");
+        }
+        backend.output_ops.overrides = Some(anonymous);
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        for (index, monitor) in old.state.monitor_order.clone().into_iter().enumerate() {
+            let tag = 3 + index * 4;
+            let key = insert_restart_fixture_client(
+                &mut old,
+                901 + index as u64,
+                monitor,
+                1 << (tag - 1),
+            );
+            let mon = &mut old.state.monitors[monitor];
+            mon.tag_set = [1 << (tag - 1), 1 << (tag - 2)];
+            mon.sel_tags = 0;
+            let pertag = mon.pertag.as_mut().unwrap();
+            pertag.cur_tag = tag;
+            pertag.prev_tag = tag - 1;
+            pertag.gaps[tag] = 10 + index as i32;
+            mon.set_selected_client_for_current_tag(Some(key));
+        }
+        old.state.sel_mon = Some(old.state.monitor_order[1]);
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        // A real old binary had neither the identity fix nor these newly
+        // optional history fields. Exercise that exact upgrade shape.
+        let root = backend.root_window().unwrap();
+        let bytes = backend
+            .property_ops
+            .get_restart_property(root, RestartProperty::Snapshot)
+            .unwrap()
+            .unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for monitor in legacy["monitors"].as_array_mut().unwrap() {
+            monitor.as_object_mut().unwrap().remove("mru");
+            monitor.as_object_mut().unwrap().remove("tag_selected");
+        }
+        for client in legacy["clients"].as_array_mut().unwrap() {
+            client.as_object_mut().unwrap().remove("maximize_anchor");
+        }
+        backend
+            .property_ops
+            .set_restart_property(
+                root,
+                RestartProperty::Snapshot,
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .unwrap();
+        backend.output_ops.overrides = Some(named.into_iter().rev().collect());
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        for raw in [902, 901] {
+            manage_window(&mut fresh, &mut backend, raw);
+        }
+        fresh.finish_restart_adoption(&mut backend);
+        for (index, name) in ["Virtual-1", "Virtual-2"].into_iter().enumerate() {
+            let key = fresh
+                .wintoclient(WindowId::from_raw(901 + index as u64))
+                .unwrap();
+            let monitor = fresh.state.clients[key].mon.unwrap();
+            assert_eq!(
+                fresh.output_key_for_monitor(&backend, monitor).as_deref(),
+                Some(name)
+            );
+            let mon = &fresh.state.monitors[monitor];
+            assert_eq!(mon.get_active_tags(), 1 << (2 + index * 4));
+            assert_eq!(mon.pertag.as_ref().unwrap().cur_tag, 3 + index * 4);
+            assert_eq!(mon.pertag.as_ref().unwrap().prev_tag, 2 + index * 4);
+            assert_eq!(mon.layout.gap, 10 + index as i32);
+            assert_eq!(mon.sel, Some(key));
+        }
+        fresh.focus(&mut backend, None).unwrap();
+        assert_eq!(
+            backend.focus_changes.last(),
+            Some(&Some(WindowId::from_raw(902)))
+        );
+        assert_eq!(
+            fresh
+                .output_key_for_monitor(&backend, fresh.state.sel_mon.unwrap())
+                .as_deref(),
+            Some("Virtual-2")
+        );
+    }
+
+    #[test]
+    fn x11_restart_restores_mru_and_inactive_tag_focus_before_new_windows() {
+        let mut backend = ClientSpyBackend::new();
+        backend.restart_identity = true;
+        set_class(&backend, "RestartFixture", "restart-fixture");
+        let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = old.state.monitor_order[0];
+        let keys: Vec<_> = [(911, 1), (912, 1), (913, 2), (914, 2)]
+            .into_iter()
+            .map(|(raw, tags)| insert_restart_fixture_client(&mut old, raw, mon, tags))
+            .collect();
+        old.state
+            .monitor_stack
+            .insert(mon, vec![keys[0], keys[2], keys[3], keys[1]]);
+        let pertag = old.state.monitors[mon].pertag.as_mut().unwrap();
+        pertag.sel[0] = Some(keys[3]);
+        pertag.sel[2] = Some(keys[2]);
+        // A stale selection on an unrelated tag must not be revived.
+        pertag.sel[3] = Some(keys[1]);
+        old.state.monitors[mon].set_selected_client_for_current_tag(Some(keys[0]));
+        let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+        let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        fresh.suppress_layout_animation = true;
+        fresh.install_restart_state(&backend, &intent).unwrap();
+        fresh.restore_restart_monitors(&mut backend);
+        for raw in [912, 913, 911, 914, 915] {
+            manage_window(&mut fresh, &mut backend, raw);
+        }
+        fresh.finish_restart_adoption(&mut backend);
+        let mon = fresh.state.monitor_order[0];
+        let stack: Vec<_> = fresh.state.monitor_stack[mon]
+            .iter()
+            .map(|key| fresh.state.clients[*key].win.raw())
+            .collect();
+        assert_eq!(stack, vec![911, 913, 914, 912, 915]);
+        assert!(fresh.state.monitors[mon].pertag.as_ref().unwrap().sel[3].is_none());
+        fresh.consume_restart_state(&backend, &intent);
+        for (mask, expected) in [(2, 913), (CONFIG.load().tagmask(), 914), (1, 911)] {
+            fresh
+                .view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(mask))
+                .unwrap();
+            let selected = fresh.state.monitors[mon].sel.unwrap();
+            assert_eq!(fresh.state.clients[selected].win.raw(), expected);
+        }
+    }
+
+    #[test]
+    fn x11_restart_maximized_tiles_return_to_their_original_slots() {
+        use crate::core::layout::LayoutEnum;
+        use crate::core::maximize::MaximizeOrigin;
+        for (unmaximize, invalid_reference) in [
+            (vec![0], ""),
+            (vec![0, 1], ""),
+            (vec![1, 0], ""),
+            (vec![0], "owner"),
+            (vec![0], "anchor"),
+            (vec![0], "recycled-anchor"),
+        ] {
+            let (mut old, mut backend, keys) = restart_shape_fixture(LayoutEnum::TILE);
+            // New windows normally attach at the master position. Establish
+            // the order explicitly so 301 is the master whose slot we restore.
+            let mon = old.state.clients[keys[0]].mon.unwrap();
+            old.state.monitor_clients.insert(mon, keys.clone());
+            old.arrange(&mut backend, None);
+            for key in keys.iter().take(unmaximize.len()) {
+                old.set_client_maximized(
+                    &mut backend,
+                    *key,
+                    MaximizeAxes::BOTH,
+                    MaximizeOrigin::User,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                old.state.clients[keys[0]].state.maximize_restore_anchor,
+                Some(keys[1])
+            );
+            let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+            if matches!(invalid_reference, "owner" | "anchor") {
+                let raw = if invalid_reference == "owner" {
+                    301
+                } else {
+                    302
+                };
+                backend
+                    .property_ops
+                    .set_restart_property(
+                        WindowId::from_raw(raw),
+                        RestartProperty::ClientGeneration,
+                        b"unrelated-generation",
+                    )
+                    .unwrap();
+            }
+            let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            fresh.suppress_layout_animation = true;
+            fresh.install_restart_state(&backend, &intent).unwrap();
+            fresh.restore_restart_monitors(&mut backend);
+            for raw in [304, 301, 303, 302] {
+                let previous =
+                    &old.state.clients[old.wintoclient(WindowId::from_raw(raw)).unwrap()];
+                let axes = previous.state.maximized_axes();
+                backend
+                    .property_ops
+                    .maximized_vert
+                    .store(axes.vert, Ordering::Relaxed);
+                backend
+                    .property_ops
+                    .maximized_horz
+                    .store(axes.horz, Ordering::Relaxed);
+                *backend.property_ops.maximize_restore.lock().unwrap() = previous
+                    .geometry
+                    .maximize_restore_rect
+                    .map(|rect| MaximizeRestoreState {
+                        restore_rect: MinimizedRestoreRect {
+                            x: rect.x,
+                            y: rect.y,
+                            w: rect.w,
+                            h: rect.h,
+                        },
+                        promoted: previous.state.maximize_restore_tiled,
+                    });
+                manage_window(&mut fresh, &mut backend, raw);
+            }
+            if invalid_reference == "recycled-anchor" {
+                let original = fresh.wintoclient(WindowId::from_raw(302)).unwrap();
+                fresh.unmanage(&mut backend, Some(original), true).unwrap();
+                backend
+                    .property_ops
+                    .set_restart_property(
+                        WindowId::from_raw(302),
+                        RestartProperty::ClientGeneration,
+                        b"unrelated-generation",
+                    )
+                    .unwrap();
+                backend
+                    .property_ops
+                    .maximized_vert
+                    .store(false, Ordering::Relaxed);
+                backend
+                    .property_ops
+                    .maximized_horz
+                    .store(false, Ordering::Relaxed);
+                *backend.property_ops.maximize_restore.lock().unwrap() = None;
+                let replacement = manage_window(&mut fresh, &mut backend, 302);
+                assert_ne!(replacement, original);
+            }
+            fresh.finish_restart_adoption(&mut backend);
+            let first = fresh.wintoclient(WindowId::from_raw(301)).unwrap();
+            let second = fresh.wintoclient(WindowId::from_raw(302)).unwrap();
+            assert_eq!(
+                fresh.state.clients[first].state.maximize_restore_anchor,
+                invalid_reference.is_empty().then_some(second),
+                "{invalid_reference}"
+            );
+            if !invalid_reference.is_empty() {
+                continue;
+            }
+            fresh.consume_restart_state(&backend, &intent);
+            for index in unmaximize {
+                let key = fresh.wintoclient(WindowId::from_raw(301 + index)).unwrap();
+                fresh
+                    .set_client_maximized(
+                        &mut backend,
+                        key,
+                        MaximizeAxes::NONE,
+                        MaximizeOrigin::User,
+                    )
+                    .unwrap();
+            }
+            let mon = fresh.state.clients[first].mon.unwrap();
+            let order: Vec<_> = fresh.state.monitor_clients[mon]
+                .iter()
+                .map(|key| fresh.state.clients[*key].win.raw())
+                .collect();
+            assert_eq!(order, vec![301, 302, 303, 304]);
+        }
+    }
+
+    #[test]
+    fn x11_restart_rearms_pointer_focus_guard_after_empty_or_slow_adoption() {
+        use std::time::{Duration, Instant};
+        for has_client in [false, true] {
+            let mut backend = ClientSpyBackend::new();
+            backend.restart_identity = true;
+            set_class(&backend, "RestartFixture", "restart-fixture");
+            backend.output_ops.overrides = Some(vec![
+                DummyOutputOps.enumerate_outputs().remove(0),
+                second_output(),
+            ]);
+            let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let selected = old.state.monitor_order[1];
+            for (index, key) in old.state.monitor_order.clone().into_iter().enumerate() {
+                let mon = &mut old.state.monitors[key];
+                mon.tag_set = [1 << (2 + index * 4), 1];
+                mon.pertag.as_mut().unwrap().cur_tag = 3 + index * 4;
+            }
+            if has_client {
+                let client = insert_restart_fixture_client(&mut old, 921, selected, 1 << 6);
+                old.state.monitors[selected].set_selected_client_for_current_tag(Some(client));
+            }
+            old.state.sel_mon = Some(selected);
+            let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+            let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            fresh.suppress_layout_animation = true;
+            fresh.install_restart_state(&backend, &intent).unwrap();
+            fresh.restore_restart_monitors(&mut backend);
+            if has_client {
+                manage_window(&mut fresh, &mut backend, 921);
+            }
+            fresh.suppress_mouse_focus_until = Some(Instant::now() - Duration::from_secs(1));
+            let finished = Instant::now();
+            fresh.finish_restart_adoption(&mut backend);
+            let left = fresh.state.monitor_order[0];
+            let right = fresh.state.monitor_order[1];
+            assert_eq!(fresh.state.sel_mon, Some(right));
+            assert_eq!(fresh.state.motion_mon, Some(left));
+            assert_eq!(fresh.last_mouse_root, (0.0, 0.0));
+            assert!(
+                fresh.suppress_mouse_focus_until.unwrap() >= finished + Duration::from_millis(300)
+            );
+
+            // Setup may spend more time arranging bars or loading wallpaper
+            // after adoption. Its final handoff must restart the guard too.
+            fresh.suppress_mouse_focus_until = Some(Instant::now() - Duration::from_secs(1));
+            let completed = Instant::now();
+            fresh.protect_restart_focus(&mut backend);
+            assert!(
+                fresh.suppress_mouse_focus_until.unwrap() >= completed + Duration::from_millis(300)
+            );
+            fresh.suppress_mouse_focus_until = Some(Instant::now() - Duration::from_secs(1));
+            fresh
+                .on_motion_notify_internal(&mut backend, None, 1, 1, 0)
+                .unwrap();
+            assert_eq!(
+                fresh.state.sel_mon,
+                Some(right),
+                "stationary pointer must retain the restored screen"
+            );
+            fresh
+                .on_motion_notify_internal(&mut backend, None, 1921, 1, 0)
+                .unwrap();
+            fresh.suppress_mouse_focus_until = Some(Instant::now() - Duration::from_secs(1));
+            fresh
+                .on_motion_notify_internal(&mut backend, None, 1, 1, 0)
+                .unwrap();
+            assert_eq!(
+                fresh.state.sel_mon,
+                Some(left),
+                "crossing screens must resume ordinary pointer focus"
+            );
+        }
+    }
+
+    #[test]
+    fn x11_restart_missing_selected_output_follows_focus_without_replacing_survivor_tag() {
+        use crate::core::layout::LayoutEnum;
+        for survivor_tag in [3, 7] {
+            let mut backend = ClientSpyBackend::new();
+            backend.restart_identity = true;
+            set_class(&backend, "RestartFixture", "restart-fixture");
+            let first = DummyOutputOps.enumerate_outputs().remove(0);
+            let second = second_output();
+            let mut third = second.clone();
+            third.id = crate::backend::common_define::OutputId(2);
+            third.name = "Virtual-3".into();
+            third.identity = crate::backend::api::OutputIdentity::connector_only("Virtual-3");
+            third.x = 3840;
+            backend.output_ops.overrides = Some(vec![first.clone(), second.clone(), third]);
+            let mut old = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            for (index, tag) in [(1, survivor_tag), (2, 3)] {
+                let key = old.state.monitor_order[index];
+                let client = insert_restart_fixture_client(
+                    &mut old,
+                    930 + index as u64,
+                    key,
+                    1 << (tag - 1),
+                );
+                let mon = &mut old.state.monitors[key];
+                mon.tag_set = [1 << (tag - 1), 2];
+                let pertag = mon.pertag.as_mut().unwrap();
+                pertag.cur_tag = tag;
+                pertag.prev_tag = 2;
+                pertag.lts[tag] = std::rc::Rc::new(LayoutEnum::TILE);
+                pertag.m_facts[tag] = 0.63;
+                pertag.gaps[tag] = 9;
+                mon.set_selected_client_for_current_tag(Some(client));
+            }
+            old.state.sel_mon = Some(old.state.monitor_order[2]);
+            let intent = old.prepare_restart_state(&backend).unwrap().unwrap();
+            backend.output_ops.overrides = Some(vec![second, first]);
+            let mut fresh = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            fresh.suppress_layout_animation = true;
+            fresh.install_restart_state(&backend, &intent).unwrap();
+            fresh.restore_restart_monitors(&mut backend);
+            for raw in [932, 931] {
+                manage_window(&mut fresh, &mut backend, raw);
+            }
+            fresh.state.sel_mon = fresh.state.monitor_order.iter().copied().find(|key| {
+                fresh.output_key_for_monitor(&backend, *key).as_deref() == Some("Virtual-1")
+            });
+            fresh.finish_restart_adoption(&mut backend);
+            let migrated = fresh.wintoclient(WindowId::from_raw(932)).unwrap();
+            let survivor = fresh.wintoclient(WindowId::from_raw(931)).unwrap();
+            let mon = fresh.state.clients[survivor].mon.unwrap();
+            assert_eq!(fresh.state.clients[migrated].mon, Some(mon));
+            assert_eq!(fresh.state.clients[migrated].state.tags, 1 << 2);
+            assert_eq!(fresh.state.sel_mon, Some(mon));
+            assert_eq!(
+                fresh.output_key_for_monitor(&backend, mon).as_deref(),
+                Some("Virtual-2")
+            );
+            let monitor = &fresh.state.monitors[mon];
+            assert_eq!(monitor.get_active_tags(), 1 << (survivor_tag - 1));
+            assert_eq!(monitor.pertag.as_ref().unwrap().cur_tag, survivor_tag);
+            assert_eq!(monitor.pertag.as_ref().unwrap().prev_tag, 2);
+            assert_eq!(monitor.layout.m_fact, 0.63);
+            assert_eq!(monitor.layout.gap, 9);
+            assert_eq!(*monitor.lt, LayoutEnum::TILE);
+            let expected = if survivor_tag == 3 {
+                migrated
+            } else {
+                survivor
+            };
+            assert_eq!(monitor.sel, Some(expected));
+            fresh.focus(&mut backend, None).unwrap();
+            assert_eq!(
+                backend.focus_changes.last(),
+                Some(&Some(fresh.state.clients[expected].win))
+            );
+        }
+    }
+
+    #[test]
     fn x11_restart_two_monitor_state_roundtrips_after_reversed_enumeration() {
         let mut backend = ClientSpyBackend::new();
         backend.restart_identity = true;
@@ -8311,7 +8765,7 @@ mod unmanage_minimized_tests {
                     100 + index as u64 * 10 + offset,
                 ));
                 client.mon = Some(mon);
-                client.state.tags = 1 << (index * 2);
+                client.state.tags = 1 << (2 + index * 4);
                 client.state.client_fact = offset as f32 + index as f32 * 0.25;
                 client.class = "RestartFixture".into();
                 let key = old.insert_client(client);
@@ -8320,11 +8774,12 @@ mod unmanage_minimized_tests {
             old.state.monitor_clients.insert(mon, keys.clone());
             old.state.monitor_stack.insert(mon, keys.clone());
             let monitor = &mut old.state.monitors[mon];
-            monitor.tag_set = [1 << (index * 2), 1 << (index * 2 + 1)];
-            monitor.sel_tags = 0;
+            monitor.sel_tags = index;
+            monitor.tag_set[index] = 1 << (2 + index * 4);
+            monitor.tag_set[1 - index] = 1 << (1 + index * 4);
             let pertag = monitor.pertag.as_mut().unwrap();
-            pertag.cur_tag = index * 2 + 1;
-            pertag.prev_tag = index * 2 + 2;
+            pertag.cur_tag = 3 + index * 4;
+            pertag.prev_tag = 2 + index * 4;
             pertag.lts[pertag.cur_tag] = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
             pertag.prev_lts[pertag.cur_tag] =
                 std::rc::Rc::new(crate::core::layout::LayoutEnum::FLOAT);
@@ -8354,11 +8809,13 @@ mod unmanage_minimized_tests {
                 .find(|key| fresh.output_key_for_monitor(&backend, *key).as_deref() == Some(name))
                 .unwrap();
             let monitor = &fresh.state.monitors[mon];
-            assert_eq!(monitor.tag_set, [1 << (index * 2), 1 << (index * 2 + 1)]);
+            assert_eq!(monitor.sel_tags, index);
+            assert_eq!(monitor.tag_set[index], 1 << (2 + index * 4));
+            assert_eq!(monitor.tag_set[1 - index], 1 << (1 + index * 4));
             let pertag = monitor.pertag.as_ref().unwrap();
             assert_eq!(
                 (pertag.cur_tag, pertag.prev_tag),
-                (index * 2 + 1, index * 2 + 2)
+                (3 + index * 4, 2 + index * 4)
             );
             assert_eq!(monitor.layout.n_master, 2 + index as u32);
             assert_eq!(monitor.layout.m_fact, 0.6 + index as f32 * 0.1);
