@@ -6,6 +6,26 @@ the window folds into a bar shelf, remains represented by a compact thumbnail,
 expands around the pointer, shows a compositor-retained preview on hover, and folds
 back out when restored.
 
+## Restoring a window
+
+`Alt+N` minimizes the focused window. `Alt+Ctrl+N` opens the minimized-window
+restore preview (`restore_preview`), also available through a three-finger
+downward swipe or `jwm-tool msg restore_preview`. Choose a window and press
+`Enter`, or click its row, to restore only that window. Opening the preview
+changes no window state; `Escape` cancels without restoring anything. Clicking
+a minimized window's Dock card restores it directly.
+
+Restore selects the window's monitor and tag and retains its floating/tiled,
+fullscreen, PiP and maximized state. Ordinary floating windows return to their
+saved position and size, adjusted if monitor geometry has changed. Tiled windows
+rejoin the current layout, so their geometry follows its current windows,
+layout settings and work area.
+
+Older configuration key lists gain `Alt+Ctrl+N` in memory when no key or chord
+binding already uses `restore_preview` and `Alt+Ctrl+N` is unused as a key or
+chord leader. Existing assignments take precedence; the configuration file is
+not rewritten.
+
 ## Ownership
 
 - JWM owns window identity, minimized state, focus/tag restoration, and the

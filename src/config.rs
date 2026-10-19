@@ -2611,6 +2611,15 @@ impl Default for Config {
 
 #[allow(dead_code)]
 impl Config {
+    fn default_restore_preview_key() -> KeyConfig {
+        KeyConfig {
+            modifier: vec!["Mod1".to_string(), "Control".to_string()],
+            key: "n".to_string(),
+            function: "restore_preview".to_string(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
     fn get_default_keys() -> Vec<KeyConfig> {
         vec![
             KeyConfig {
@@ -3014,6 +3023,7 @@ impl Config {
                 function: "minimize".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
+            Self::default_restore_preview_key(),
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "t".to_string(),
@@ -3640,6 +3650,28 @@ impl Config {
         })
     }
 
+    /// Keep restore reachable in older key lists, using the same eligibility
+    /// decision for runtime bindings and the shortcut viewer. An explicit
+    /// restore binding, another action on this key, or a chord leader wins.
+    pub fn restore_preview_fallback_key(&self) -> Option<KeyConfig> {
+        let fallback = Self::default_restore_preview_key();
+        let modifiers = self.parse_modifiers(&fallback.modifier);
+        let key_sym = self.parse_keysym(&fallback.key)?;
+        let occupied = self.key_configs().iter().any(|key| {
+            key.function == "restore_preview"
+                || (self.parse_modifiers(&key.modifier) == modifiers
+                    && self.parse_keysym(&key.key) == Some(key_sym))
+        });
+        let chord = self.chord_config();
+        let restore_in_chord = chord
+            .bindings
+            .iter()
+            .any(|key| key.function == "restore_preview");
+        let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
+            && self.parse_keysym(&chord.leader_key) == Some(key_sym);
+        (!occupied && !restore_in_chord && !leader_occupied).then_some(fallback)
+    }
+
     pub fn get_keys(&self) -> Vec<WMKey> {
         let mut keys = Vec::new();
 
@@ -3829,6 +3861,14 @@ impl Config {
                 }
             }
         }
+        if let Some(fallback) = self.restore_preview_fallback_key()
+            && let Some(binding) = self.convert_key_config(&fallback)
+        {
+            log::info!(
+                "[config] legacy key list detected; enabling restore preview on Alt+Ctrl+N"
+            );
+            keys.push(binding);
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -3962,6 +4002,7 @@ impl Config {
             "restart" => Some(Jwm::restart),
             "killclient" => Some(Jwm::killclient),
             "minimize" => Some(Jwm::minimize),
+            "restore_preview" => Some(Jwm::restore_preview),
             "zoom" => Some(Jwm::zoom),
             "snap_window" => Some(Jwm::snap_window),
 

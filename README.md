@@ -341,6 +341,8 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
 | XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
+| Alt+N | Minimize focused client |
+| Alt+Control+N | Choose a minimized window to restore; Enter or click restores it, Escape cancels |
 | Alt+Control+Left / Right | Shrink / grow master width (2.5%); works with stack focus too |
 | Alt+Control+Up / Down | Shrink / grow it vertically (2.5%) |
 | Alt+Control+Home | Reset layout-local resized dimensions |
@@ -350,6 +352,10 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Left / Right | Focus the left / right column in scrolling (no-op in other layouts) |
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor's work area |
 | Alt+Shift+Up | Toggle maximize of the focused floating window (fills the work area; press again to restore) |
+
+Older key lists gain `Alt+Control+N` in memory when `restore_preview` has no
+configured key or chord binding and that shortcut is unused as a key or chord
+leader. See [restoring minimized windows](docs/minimized-dock.md#restoring-a-window).
 
 Master resizing also works with a single client, in every layout. Alt+right-drag
 keeps a master tiled; larger masters reallocate neighbouring space. See

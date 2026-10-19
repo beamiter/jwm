@@ -2474,8 +2474,12 @@ impl Jwm {
         info!("[show_keybindings]");
 
         let cfg = CONFIG.load();
+        let mut key_configs = cfg.key_configs().to_vec();
+        if let Some(fallback) = cfg.restore_preview_fallback_key() {
+            key_configs.push(fallback);
+        }
         let lines = keybinding_viewer_lines(
-            cfg.key_configs(),
+            &key_configs,
             cfg.tags_length(),
             &cfg.behavior().gesture_swipe,
             cfg.modkey(),
@@ -2835,6 +2839,7 @@ fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConf
             _ => "previous layout".to_string(),
         },
         "lastlayout" => "previous layout".to_string(),
+        "restore_preview" => "restore minimized window".to_string(),
         "focusstack" => match argument {
             crate::config::ArgumentConfig::Int(i) => {
                 if *i > 0 {
