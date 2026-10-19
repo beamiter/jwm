@@ -642,6 +642,25 @@ impl SolarSystemWallpaper {
         .flatten()
         .collect()
     }
+
+    fn cancel_earth_load(&mut self) {
+        // A cancelled close-up was never adopted, so the next activation must
+        // be allowed to request it again. Completed uploads and terminal
+        // failures have no pending slot: retain their one-attempt throttle.
+        if self.earth_pending.take().is_some() {
+            self.earth_detail_requested = false;
+        }
+    }
+
+    fn needs_earth_detail(&self) -> bool {
+        !self.earth_detail_requested
+            && self.earth_pending.is_none()
+            && self
+                .views
+                .values()
+                .any(|view| view.frame_navigation.focus == Some(3))
+    }
+
     // A partial repair must neither start a decode nor adopt a completed material.
     fn poll_material<T>(frame_changed: bool, receive: impl FnOnce() -> T) -> Option<T> {
         frame_changed.then(receive)
@@ -819,7 +838,7 @@ impl<C: CompositorConnection> Compositor<C> {
             a.clock = WallpaperClock::default();
             a.planet_requested = false;
             a.planet_pending = Default::default();
-            a.earth_pending = None;
+            a.cancel_earth_load();
             if enabled && a.earth_texture.is_none() {
                 if let Some(path) =
                     crate::backend::compositor_common::animated_wallpaper::resolve_earth_texture("")
@@ -1031,12 +1050,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // Keep the light 2K overview. Only approaching Earth requests the
             // bundled 5400-pixel map; the previous complete mip pyramid stays
             // visible until the off-thread decode and upload both succeed.
-            if a.views
-                .values()
-                .any(|view| view.frame_navigation.focus == Some(3))
-                && !a.earth_detail_requested
-                && a.earth_pending.is_none()
-            {
+            if a.needs_earth_detail() {
                 a.earth_detail_requested = true;
                 if let Some(path) =
                     crate::backend::compositor_common::animated_wallpaper::resolve_earth_texture("")
@@ -1740,6 +1754,77 @@ mod tests {
         );
         assert_eq!(polls, 1);
     }
+
+    #[test]
+    fn cancelled_earth_detail_retries_when_focused_again() {
+        let mut a = SolarSystemWallpaper::default();
+        let base = glow::NativeTexture(std::num::NonZeroU32::new(1).unwrap());
+        a.earth_texture = Some(base);
+        a.views
+            .entry("test".into())
+            .or_default()
+            .frame_navigation
+            .focus = Some(3);
+        a.earth_detail_requested = true;
+        a.earth_pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| {
+            panic!("cancelling a queued Earth detail must not start its decode")
+        }));
+        assert!(!a.needs_earth_detail());
+
+        // Switching away drops this unadopted request. Returning starts with
+        // an overview; focusing Earth again must be able to retry the detail.
+        a.cancel_earth_load();
+        a.views.clear();
+        assert!(a.earth_pending.is_none());
+        assert!(!a.earth_detail_requested);
+        assert_eq!(a.earth_texture, Some(base));
+        assert!(!a.needs_earth_detail());
+        a.views
+            .entry("test".into())
+            .or_default()
+            .frame_navigation
+            .focus = Some(3);
+        assert!(a.needs_earth_detail());
+    }
+
+    #[test]
+    fn completed_earth_detail_attempts_remain_throttled_across_activation() {
+        // Both a successful high-resolution adoption and a terminal failure
+        // clear the pending slot. Neither should trigger repeated I/O merely
+        // because the user switches scenes; the displayed texture is retained.
+        for texture_id in [1, 2] {
+            let mut a = SolarSystemWallpaper::default();
+            let retained = glow::NativeTexture(std::num::NonZeroU32::new(texture_id).unwrap());
+            a.earth_texture = Some(retained);
+            a.earth_detail_requested = true;
+            a.views
+                .entry("test".into())
+                .or_default()
+                .frame_navigation
+                .focus = Some(3);
+            a.cancel_earth_load();
+            assert!(a.earth_detail_requested);
+            assert_eq!(a.earth_texture, Some(retained));
+            assert!(!a.needs_earth_detail());
+        }
+    }
+
+    #[test]
+    fn earth_detail_waits_for_base_load_and_a_focused_view() {
+        let mut a = SolarSystemWallpaper::default();
+        assert!(!a.needs_earth_detail());
+        a.views
+            .entry("test".into())
+            .or_default()
+            .frame_navigation
+            .focus = Some(3);
+        a.earth_pending = Some(wallpaper::DeferredWallpaperLoad::new(|_| None));
+        assert!(!a.needs_earth_detail());
+        a.cancel_earth_load();
+        assert!(!a.earth_detail_requested);
+        assert!(a.needs_earth_detail());
+    }
+
     #[test]
     fn optional_handles_invalidate_bar_identity_and_release_once() {
         let mut a = SolarSystemWallpaper::default();

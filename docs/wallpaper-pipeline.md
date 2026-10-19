@@ -33,9 +33,18 @@ unpack-buffer, alignment, row-length and skip state on success and failure.
 Global image changes use smoothstep crossfades. The old texture and its layout
 remain visible until a replacement decode and upload succeed. Monitor refreshes
 match generation-bearing monitor identities separately from configuration slots,
-then compare content, requested mode, and sampling dimensions, so moved/reordered/unchanged outputs keep textures and pending decodes.
+then compare content, requested mode, and required sampling dimensions, so
+moved/reordered outputs and compatible resizes keep textures and pending decodes.
+Center keeps native pixels across every resize; other modes reuse a request when
+neither output dimension grows. Failed requests still retry on refresh.
 Unmatched jobs are cancelled and removed textures are retired once. Global
 fallback outputs share the global image/crossfade rather than duplicating it.
+Explicit monitor/tag image or mode rules own independent textures even when
+those values currently equal the global setting. Changing the global wallpaper
+therefore keeps a previously loaded, unchanged override visible, without an
+unnecessary reload that could show the wrong fallback while pending or after
+failure. Until an output's first successful decode, the existing global fallback
+still applies.
 
 Successful replacements of an already loaded monitor/tag image now use the same
 configurable crossfade timing as the global image. Each output owns its previous

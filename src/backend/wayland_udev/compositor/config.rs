@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::compositor_common::effects::finite_clamp;
 use crate::backend::compositor_common::wallpaper::{
-    parse_wallpaper_mode, resolve_wallpaper_for_tag_at,
+    parse_wallpaper_mode, resolve_wallpaper_selection_for_tag_at,
 };
 use crate::config::CONFIG;
 use crate::core::animation::AnimationSpeed;
@@ -1836,9 +1836,11 @@ impl WaylandCompositor {
             .iter()
             .enumerate()
             .map(|(slot, &(idx, x, y, w, h, tags))| {
-                let (path, mode) = resolve_wallpaper_for_tag_at(
+                let selection = resolve_wallpaper_selection_for_tag_at(
                     behavior,
-                    if behavior.wallpaper_rotation == "daily" {
+                    if behavior.wallpaper_rotation == "daily"
+                        && !behavior.wallpaper_rotation_paths.is_empty()
+                    {
                         slot as u32
                     } else {
                         idx
@@ -1846,15 +1848,9 @@ impl WaylandCompositor {
                     tags,
                     day,
                 );
-                let mode = parse_wallpaper_mode(mode);
-                let global =
-                    crate::backend::compositor_common::wallpaper::uses_global_wallpaper_fallback(
-                        path,
-                        mode,
-                        &behavior.wallpaper,
-                        parse_wallpaper_mode(&behavior.wallpaper_mode),
-                        behavior.wallpaper_rotation == "daily",
-                    );
+                let path = selection.path;
+                let mode = parse_wallpaper_mode(selection.mode);
+                let global = selection.inherits_global;
                 (
                     self.monitor_identities.get(slot).copied(),
                     x,

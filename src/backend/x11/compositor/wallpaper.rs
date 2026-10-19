@@ -4,9 +4,6 @@ use glow::HasContext;
 
 use crate::backend::x11::compositor_common::wallpaper::{PREVIEW_THUMB_EDGE, parse_wallpaper_mode};
 
-#[cfg(test)]
-use crate::backend::compositor_common::wallpaper::uses_global_wallpaper_fallback;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WallpaperUploadFormat {
     internal: i32,
@@ -209,9 +206,11 @@ impl<C: CompositorConnection> Compositor<C> {
             .iter()
             .enumerate()
             .map(|(slot, &(idx, x, y, w, h, tags))| {
-                let (path, mode) = resolve_wallpaper_for_tag_at(
+                let selection = resolve_wallpaper_selection_for_tag_at(
                     behavior,
-                    if behavior.wallpaper_rotation == "daily" {
+                    if behavior.wallpaper_rotation == "daily"
+                        && !behavior.wallpaper_rotation_paths.is_empty()
+                    {
                         slot as u32
                     } else {
                         idx
@@ -219,15 +218,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     tags,
                     day,
                 );
-                let mode = parse_wallpaper_mode(mode);
-                let global =
-                    crate::backend::compositor_common::wallpaper::uses_global_wallpaper_fallback(
-                        path,
-                        mode,
-                        &behavior.wallpaper,
-                        parse_wallpaper_mode(&behavior.wallpaper_mode),
-                        behavior.wallpaper_rotation == "daily",
-                    );
+                let path = selection.path;
+                let mode = parse_wallpaper_mode(selection.mode);
+                let global = selection.inherits_global;
                 (
                     self.monitor_identities.get(slot).copied(),
                     x,
@@ -358,8 +351,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{uses_global_wallpaper_fallback, wallpaper_upload_format};
-    use crate::backend::compositor_common::wallpaper::WallpaperMode;
+    use super::wallpaper_upload_format;
 
     #[test]
     fn rgba8_wallpaper_source_format_is_valid_for_gles_and_hdr_outputs() {
@@ -370,42 +362,12 @@ mod tests {
     }
 
     #[test]
-    fn daily_selection_is_independent_of_global_crossfade() {
-        assert!(!uses_global_wallpaper_fallback(
-            "global.png",
-            WallpaperMode::Fill,
-            "global.png",
-            WallpaperMode::Fill,
-            true,
-        ));
-    }
-
-    #[test]
-    fn identical_monitor_selection_reuses_global_texture() {
-        assert!(uses_global_wallpaper_fallback(
-            "global.png",
-            WallpaperMode::Fill,
-            "global.png",
-            WallpaperMode::Fill,
-            false,
-        ));
-    }
-
-    #[test]
-    fn monitor_path_or_layout_difference_is_an_override() {
-        assert!(!uses_global_wallpaper_fallback(
-            "monitor.png",
-            WallpaperMode::Fill,
-            "global.png",
-            WallpaperMode::Fill,
-            false,
-        ));
-        assert!(!uses_global_wallpaper_fallback(
-            "global.png",
-            WallpaperMode::Fit,
-            "global.png",
-            WallpaperMode::Fill,
-            false,
-        ));
+    fn monitor_texture_sharing_uses_selection_provenance() {
+        let production = include_str!("wallpaper.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(production.contains("resolve_wallpaper_selection_for_tag_at("));
+        assert!(production.contains("let global = selection.inherits_global;"));
     }
 }

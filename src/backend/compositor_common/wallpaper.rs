@@ -23,14 +23,19 @@ pub(crate) fn wallpaper_request_needs_reload(
     load_failed || current_path != new_path || current_mode != new_mode
 }
 
-/// A moved/reordered output may keep an existing decode/texture only when its
-/// content and sampling target are unchanged. Failed loads retry on refresh.
+/// A moved/reordered/resized output may keep an existing decode/texture when
+/// its content is unchanged and its sampled pixels still meet the new target.
+/// Center retains native pixels at every output size. Failed loads retry.
 pub(crate) fn wallpaper_texture_reusable(
     previous: (&str, WallpaperMode, u32, u32),
     requested: (&str, WallpaperMode, u32, u32),
     load_failed: bool,
 ) -> bool {
-    !load_failed && previous == requested
+    !load_failed
+        && previous.0 == requested.0
+        && previous.1 == requested.1
+        && (requested.1 == WallpaperMode::Center
+            || (requested.2 <= previous.2 && requested.3 <= previous.3))
 }
 
 /// Stable identity is independent of the dense slot used for user configuration.
@@ -44,7 +49,7 @@ pub(crate) struct WallpaperOutputKey<'a> {
 }
 
 /// Each old owner is consumed at most once. A changed request still keeps its
-/// own visible texture; only an unchanged request carries its pending job along.
+/// own visible texture; only a sampling-compatible request carries its pending job along.
 pub(crate) fn wallpaper_output_plan(
     previous: &[WallpaperOutputKey<'_>],
     requested: &[WallpaperOutputKey<'_>],
@@ -79,16 +84,6 @@ pub(crate) fn wallpaper_resize_needs_reload(
     new: (u32, u32),
 ) -> bool {
     !path.is_empty() && mode != WallpaperMode::Center && (new.0 > old.0 || new.1 > old.1)
-}
-
-pub(crate) fn uses_global_wallpaper_fallback(
-    resolved_path: &str,
-    resolved_mode: WallpaperMode,
-    global_path: &str,
-    global_mode: WallpaperMode,
-    daily_rotation: bool,
-) -> bool {
-    !daily_rotation && resolved_path == global_path && resolved_mode == global_mode
 }
 
 #[derive(Clone)]
@@ -330,6 +325,45 @@ mod quality_tests {
         }
     }
     #[test]
+    fn compatible_output_resizes_reuse_loaded_pixels_and_pending_decodes() {
+        for mode in [
+            WallpaperMode::Fill,
+            WallpaperMode::Fit,
+            WallpaperMode::Stretch,
+        ] {
+            let old = ("a.png", mode, 1920, 1080);
+            for size in [(1920, 1080), (1280, 720), (1280, 1080), (1920, 720)] {
+                let requested = ("a.png", mode, size.0, size.1);
+                assert!(wallpaper_texture_reusable(old, requested, false));
+                assert!(!wallpaper_texture_reusable(old, requested, true));
+            }
+            for size in [(1921, 1080), (1920, 1081), (1921, 720), (1280, 1081)] {
+                assert!(!wallpaper_texture_reusable(
+                    old,
+                    ("a.png", mode, size.0, size.1),
+                    false,
+                ));
+            }
+        }
+        let old = ("a.png", WallpaperMode::Center, 1920, 1080);
+        for size in [(3840, 2160), (1280, 720), (3840, 720), (1280, 2160)] {
+            let requested = ("a.png", WallpaperMode::Center, size.0, size.1);
+            assert!(wallpaper_texture_reusable(old, requested, false));
+            assert!(!wallpaper_texture_reusable(old, requested, true));
+        }
+        let key = |size: (u32, u32)| WallpaperOutputKey {
+            identity: Some(11),
+            position: (0, 0),
+            image: ("a.png", WallpaperMode::Fit, size.0, size.1),
+            failed: false,
+        };
+        assert_eq!(
+            wallpaper_output_plan(&[key((1920, 1080))], &[key((1280, 720))]),
+            vec![(Some(0), true)]
+        );
+    }
+
+    #[test]
     fn modes_preserve_native_center_and_fill_detail() {
         for (mode, size) in [
             (WallpaperMode::Fill, (400, 100)),
@@ -365,26 +399,48 @@ pub(crate) fn daily_picker_wallpaper_at(behavior: &BehaviorConfig, day: i32) -> 
         .map(|(_, path)| path.as_str())
 }
 
-/// Resolve one dense monitor slot against one sampled local civil day.
-/// Daily rotation temporarily takes priority over static overrides without
-/// mutating them, so turning it off restores the original selection.
+/// Selection provenance determines texture ownership. Explicit image or mode
+/// rules retain an independent output slot even while they equal the global
+/// setting: a later global change must not discard an already loaded override
+/// and replace it with a fallback while an unnecessary decode is pending or fails.
+/// Before an output's first successful load, the global fallback still applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WallpaperSelection<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) mode: &'a str,
+    pub(crate) inherits_global: bool,
+}
+
 pub(crate) fn resolve_wallpaper_for_tag_at(
     behavior: &BehaviorConfig,
     monitor_idx: u32,
     active_tags: u32,
     day: i32,
 ) -> (&str, &str) {
+    let selected = resolve_wallpaper_selection_for_tag_at(behavior, monitor_idx, active_tags, day);
+    (selected.path, selected.mode)
+}
+
+/// Resolve one dense monitor slot against one sampled local civil day.
+/// Daily rotation temporarily takes priority over static overrides without
+/// mutating them, so turning it off restores the original selection.
+pub(crate) fn resolve_wallpaper_selection_for_tag_at(
+    behavior: &BehaviorConfig,
+    monitor_idx: u32,
+    active_tags: u32,
+    day: i32,
+) -> WallpaperSelection<'_> {
     let manual = daily_picker_wallpaper_at(behavior, day);
-    if behavior.wallpaper_rotation == "daily"
-        && !behavior.wallpaper_rotation_paths.is_empty()
-        && manual.is_none()
-    {
+    let daily_active =
+        behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty();
+    if daily_active && manual.is_none() {
         let count = behavior.wallpaper_rotation_paths.len() as i64;
         let slot = (i64::from(day) + i64::from(monitor_idx)).rem_euclid(count) as usize;
-        return (
-            &behavior.wallpaper_rotation_paths[slot],
-            &behavior.wallpaper_mode,
-        );
+        return WallpaperSelection {
+            path: &behavior.wallpaper_rotation_paths[slot],
+            mode: &behavior.wallpaper_mode,
+            inherits_global: false,
+        };
     }
     // A manual daily pick replaces the global fallback, preserving explicit
     // monitor/tag choices. Without a manual pick the automatic daily branch
@@ -420,7 +476,11 @@ pub(crate) fn resolve_wallpaper_for_tag_at(
         } else {
             &wt.mode
         };
-        return (&wt.path, mode);
+        return WallpaperSelection {
+            path: &wt.path,
+            mode,
+            inherits_global: false,
+        };
     }
 
     if let Some(pm) = behavior
@@ -438,9 +498,17 @@ pub(crate) fn resolve_wallpaper_for_tag_at(
         } else {
             &pm.mode
         };
-        return (path, mode);
+        return WallpaperSelection {
+            path,
+            mode,
+            inherits_global: !daily_active && pm.path.is_empty() && pm.mode.is_empty(),
+        };
     }
-    (fallback, &behavior.wallpaper_mode)
+    WallpaperSelection {
+        path: fallback,
+        mode: &behavior.wallpaper_mode,
+        inherits_global: !daily_active,
+    }
 }
 
 /// Cap on a native X11 root pixmap so a bogus screen size cannot allocate
@@ -644,6 +712,130 @@ mod tests {
             })
             .collect();
         behavior
+    }
+
+    #[test]
+    fn an_explicit_equal_global_image_keeps_its_independent_owner() {
+        use super::{
+            WallpaperOutputKey, resolve_wallpaper_selection_for_tag_at, wallpaper_output_plan,
+        };
+        let mut behavior = behavior_with_tags(&[]);
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 0,
+            path: behavior.wallpaper.clone(),
+            mode: String::new(),
+        }];
+        let before = resolve_wallpaper_selection_for_tag_at(&behavior, 0, 1, 0);
+        assert!(!before.inherits_global);
+        let retained_path = before.path.to_owned();
+        let retained_mode = super::parse_wallpaper_mode(before.mode);
+        behavior.wallpaper = "/walls/new-global.png".into();
+        let after = resolve_wallpaper_selection_for_tag_at(&behavior, 0, 1, 0);
+        assert!(!after.inherits_global);
+        assert_eq!(after.path, retained_path);
+        let key = |path, mode| WallpaperOutputKey {
+            identity: Some(11),
+            position: (0, 0),
+            image: (path, mode, 1920, 1080),
+            failed: false,
+        };
+        // The real set_monitors methods preserve an already loaded texture
+        // and any pending job on this plan. Global B cannot replace a working
+        // independent A through an unnecessary decode or a failed retry.
+        assert_eq!(
+            wallpaper_output_plan(
+                &[key(&retained_path, retained_mode)],
+                &[key(after.path, super::parse_wallpaper_mode(after.mode))],
+            ),
+            vec![(Some(0), true)]
+        );
+    }
+
+    #[test]
+    fn an_explicit_equal_global_mode_keeps_its_independent_owner() {
+        use super::resolve_wallpaper_selection_for_tag_at as resolve;
+        let mut behavior = behavior_with_tags(&[]);
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 0,
+            path: String::new(),
+            mode: "fill".into(),
+        }];
+        assert!(!resolve(&behavior, 0, 1, 0).inherits_global);
+        behavior.wallpaper_mode = "center".into();
+        let selected = resolve(&behavior, 0, 1, 0);
+        assert_eq!(selected.mode, "fill");
+        assert!(!selected.inherits_global);
+    }
+
+    #[test]
+    fn only_truly_inherited_monitor_fields_share_the_global_texture() {
+        use super::resolve_wallpaper_selection_for_tag_at as resolve;
+        let mut behavior = behavior_with_tags(&[]);
+        assert!(resolve(&behavior, 0, 1, 0).inherits_global);
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 0,
+            path: String::new(),
+            mode: String::new(),
+        }];
+        assert!(resolve(&behavior, 0, 1, 0).inherits_global);
+        behavior.wallpaper = "/walls/changed.png".into();
+        behavior.wallpaper_mode = "fit".into();
+        let selected = resolve(&behavior, 0, 1, 0);
+        assert_eq!(
+            (selected.path, selected.mode),
+            ("/walls/changed.png", "fit")
+        );
+        assert!(selected.inherits_global);
+    }
+
+    #[test]
+    fn explicit_tag_selection_preserves_precedence_and_texture_ownership() {
+        use super::resolve_wallpaper_selection_for_tag_at as resolve;
+        let mut behavior = behavior_with_tags(&[(0, "/walls/any.png")]);
+        behavior.wallpaper_tags.push(WallpaperTagConfig {
+            tag: 0,
+            monitor: 1,
+            path: behavior.wallpaper.clone(),
+            mode: String::new(),
+        });
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 1,
+            path: "/walls/monitor.png".into(),
+            mode: "fit".into(),
+        }];
+        let selected = resolve(&behavior, 1, 1, 0);
+        assert_eq!(selected.path, behavior.wallpaper);
+        assert!(!selected.inherits_global);
+        assert_eq!(resolve(&behavior, 0, 1, 0).path, "/walls/any.png");
+        assert_eq!(resolve(&behavior, 1, 2, 0).path, "/walls/monitor.png");
+        assert!(resolve(&behavior, 0, 2, 0).inherits_global);
+        behavior.wallpaper_tags[0].path.clear();
+        assert!(resolve(&behavior, 0, 1, 0).inherits_global);
+    }
+
+    #[test]
+    fn daily_and_manual_selections_never_alias_the_static_global_texture() {
+        use super::resolve_wallpaper_selection_for_tag_at as resolve;
+        let mut behavior = behavior_with_tags(&[(0, "/walls/tag.png")]);
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths = vec![behavior.wallpaper.clone()];
+        let automatic = resolve(&behavior, 0, 1, 100);
+        assert_eq!(automatic.path, behavior.wallpaper);
+        assert!(!automatic.inherits_global);
+        behavior.wallpaper_daily_pick = Some((100, "/walls/picked.png".into()));
+        assert_eq!(resolve(&behavior, 0, 1, 100).path, "/walls/tag.png");
+        let manual = resolve(&behavior, 0, 2, 100);
+        assert_eq!(manual.path, "/walls/picked.png");
+        assert!(!manual.inherits_global);
+        assert_eq!(resolve(&behavior, 0, 1, 101).path, behavior.wallpaper);
+        behavior.wallpaper_rotation = "off".into();
+        assert!(resolve(&behavior, 0, 2, 101).inherits_global);
+        assert_eq!(resolve(&behavior, 0, 1, 101).path, "/walls/tag.png");
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths.clear();
+        let inactive = resolve(&behavior, 0, 2, 100);
+        assert!(inactive.inherits_global);
+        assert_eq!(inactive.path, behavior.wallpaper);
     }
 
     #[test]

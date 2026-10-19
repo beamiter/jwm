@@ -8968,7 +8968,29 @@ border_px = 3
             toml::to_string(&loaded.inner).unwrap(),
             toml::to_string(&config.inner).unwrap()
         );
-        assert_eq!(loaded.behavior().wallpaper_astronomy_layout, "earth-moon");
+        assert_eq!(loaded.behavior().wallpaper_astronomy_layout, "independent");
+        assert_eq!(
+            loaded.behavior().wallpaper_astronomy_outputs["DP-1"].scene,
+            "earth"
+        );
+        assert_eq!(
+            loaded.behavior().wallpaper_astronomy_outputs["DP-1"].group,
+            "earth-desk"
+        );
+        assert_eq!(
+            loaded.behavior().wallpaper_astronomy_outputs["DP-2"],
+            loaded.behavior().wallpaper_astronomy_outputs["DP-1"]
+        );
+        assert_eq!(
+            loaded.behavior().wallpaper_astronomy_outputs["HDMI-1"].scene,
+            "solar-system"
+        );
+        assert!(
+            loaded.behavior().wallpaper_astronomy_outputs["HDMI-1"]
+                .group
+                .is_empty()
+        );
+        // The legacy mapping is retained for switching back to earth-moon.
         assert_eq!(
             loaded.behavior().wallpaper_astronomy_bodies["HDMI-1"],
             "moon"
