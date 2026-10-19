@@ -332,6 +332,11 @@ impl SolarView {
             // A new gesture deliberately takes over the overview actually
             // displayed, even if an earlier click was waiting to enter a body.
             self.overview = None;
+        } else if self.navigation.focus.is_none() {
+            // A queued leave already took the return slot. Valid motion
+            // resumes the close-up captured at press time, even if a newer
+            // frame has appeared since, so retain the displaced overview.
+            self.overview = Some(self.navigation);
         }
         if navigation != self.navigation {
             self.navigation = navigation;
@@ -1963,6 +1968,116 @@ mod tests {
         assert!(a.interaction_after.is_none());
         assert!(a.drag.is_none());
         assert_eq!(a.frame_navigation, a.navigation);
+    }
+
+    fn closeup_with_nondefault_overview() -> (SolarView, SolarNavigation, Instant) {
+        let now = Instant::now();
+        let mut a = visible_scene();
+        assert!(a.zoom([10.0, 10.0], 2.0));
+        show_navigation(&mut a, now, 0.0);
+        let overview = a.navigation;
+        assert!(a.focus_body(3, &scene_phases(0.0).0));
+        show_navigation(&mut a, now + Duration::from_secs(1), 0.0);
+        (a, overview, now + Duration::from_secs(2))
+    }
+
+    #[test]
+    fn drag_after_unpresented_leave_preserves_original_overview() {
+        for admitted in [false, true] {
+            for origin in [[10.0, 10.0], [399.5, 299.5]] {
+                let (mut a, overview, now) = closeup_with_nondefault_overview();
+                assert!(a.leave_closeup());
+                if admitted {
+                    assert!(a.advance_interaction(now));
+                    assert_eq!(a.frame_navigation, overview);
+                }
+                assert!(a.begin_drag(origin));
+                assert!(a.drag_motion([origin[0] + 50.0, origin[1] + 30.0]));
+                assert_eq!(a.navigation.focus, Some(3));
+                assert_eq!(a.overview, Some(overview));
+                // More motion and retracing keep the same return destination.
+                assert!(a.drag_motion([origin[0] + 100.0, origin[1] - 20.0]));
+                assert!(a.drag_motion(origin));
+                assert_eq!(a.overview, Some(overview));
+                a.end_drag(false);
+                assert!(a.leave_closeup());
+                assert_eq!(a.navigation, overview);
+            }
+        }
+    }
+
+    #[test]
+    fn drag_without_valid_motion_preserves_queued_leave() {
+        for action in 0..3 {
+            let (mut a, overview, _) = closeup_with_nondefault_overview();
+            assert!(a.leave_closeup());
+            let frame = a.frame_navigation;
+            let after = a.interaction_after;
+            assert!(a.begin_drag([10.0, 10.0]));
+            if action == 1 {
+                assert!(a.drag_motion([10.0, 10.0]));
+            } else if action == 2 {
+                for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    assert!(!a.drag_motion([invalid, 10.0]));
+                    assert!(!a.drag_motion([10.0, invalid]));
+                }
+            }
+            assert!(!a.drag.unwrap().moved);
+            if action == 0 {
+                // Same path used when the native grab is refused.
+                a.abort_drag();
+            } else {
+                // Empty-sky release cannot activate a planet candidate.
+                a.end_drag(true);
+            }
+            assert_eq!(a.navigation, overview);
+            assert!(a.overview.is_none());
+            assert_eq!(a.frame_navigation, frame);
+            assert_eq!(a.interaction_after, after);
+            assert!(a.interaction_pending);
+            assert!(a.drag.is_none());
+        }
+    }
+
+    #[test]
+    fn drag_started_after_presented_leave_stays_in_overview() {
+        let (mut a, overview, now) = closeup_with_nondefault_overview();
+        assert!(a.leave_closeup());
+        show_navigation(&mut a, now, 0.0);
+        assert_eq!(a.presented.unwrap().navigation, overview);
+        assert!(a.begin_drag([10.0, 10.0]));
+        assert!(a.drag_motion([90.0, 60.0]));
+        assert_eq!(a.navigation.focus, None);
+        assert_ne!(a.navigation.panorama, overview.panorama);
+        assert!(a.overview.is_none());
+        a.end_drag(false);
+        assert!(!a.leave_closeup());
+    }
+
+    #[test]
+    fn drag_keeps_capture_when_earlier_return_frame_is_presented() {
+        let (mut a, overview, now) = closeup_with_nondefault_overview();
+        assert!(a.leave_closeup());
+        assert!(a.advance_interaction(now));
+        assert!(a.begin_drag([10.0, 10.0]));
+        // An already-admitted return frame may appear after capture began.
+        // Motion still uses the close-up projection saved at press time.
+        a.presented = Some(SolarPresented {
+            navigation: a.frame_navigation,
+            projection: a
+                .frame_navigation
+                .projection([800, 600], scene_phases(0.0).0),
+        });
+        assert_eq!(a.presented.unwrap().navigation.focus, None);
+        assert!(a.drag_motion([100.0, 80.0]));
+        assert_eq!(a.navigation.focus, Some(3));
+        assert_eq!(a.overview, Some(overview));
+        let moved = a.navigation;
+        a.abort_drag();
+        assert_eq!(a.navigation, moved);
+        assert_eq!(a.overview, Some(overview));
+        assert!(a.leave_closeup());
+        assert_eq!(a.navigation, overview);
     }
 
     #[test]

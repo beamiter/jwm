@@ -138,6 +138,13 @@ for rendering. Same-focus wheel bursts continue accumulating pending zoom.
 Retaining a displayed close-up also retains its overview return destination;
 zero, invalid, or saturated wheel requests do not cancel a queued transition.
 
+Solar drags instead keep the projection captured at press time, including when
+an already-admitted frame appears during capture. Valid motion that resumes a
+close-up after a queued exit preserves its original overview return view.
+Refused grabs, stationary empty-sky releases, and invalid motion leave the
+queued exit intact. Canceling after valid motion retains the moved pose and
+its return view, without activating the pressed planet.
+
 ### Source texture quality
 
 Earth, Moon, cloud and sky maps receive mipmaps once when their successful
