@@ -5918,6 +5918,52 @@ mod tests {
     };
 
     #[test]
+    fn closed_placement_config_migration_preserves_only_explicit_opt_in() {
+        let cfg = Config::default();
+        assert!(!cfg.behavior().remember_closed_placement);
+        let serialized = toml::to_string(&cfg.inner).unwrap();
+        let omitted = serialized
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("remember_closed_placement"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&omitted).unwrap();
+        assert!(!parsed.behavior.remember_closed_placement);
+        for enabled in [true, false] {
+            let mut cfg = Config::default();
+            cfg.set_value(
+                "behavior.remember_closed_placement",
+                &serde_json::json!(enabled),
+            )
+            .unwrap();
+            let persisted = toml::to_string(&cfg.inner).unwrap();
+            let restarted: TomlConfig = toml::from_str(&persisted).unwrap();
+            assert_eq!(restarted.behavior.remember_closed_placement, enabled);
+        }
+    }
+
+    #[test]
+    fn closed_placement_set_value_supports_live_transitions_and_rejects_invalid_values() {
+        let mut cfg = Config::default();
+        for enabled in [true, false, true, false] {
+            cfg.set_value(
+                "behavior.remember_closed_placement",
+                &serde_json::json!(enabled),
+            )
+            .unwrap();
+            assert_eq!(cfg.behavior().remember_closed_placement, enabled);
+        }
+        assert!(
+            cfg.set_value(
+                "behavior.remember_closed_placement",
+                &serde_json::json!("true")
+            )
+            .is_err()
+        );
+        assert!(!cfg.behavior().remember_closed_placement);
+    }
+
+    #[test]
     fn x11_compositor_environment_override_has_process_lifetime_precedence() {
         use std::ffi::OsStr;
 

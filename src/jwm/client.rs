@@ -6692,6 +6692,89 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn disabled_memory_reopens_on_the_focused_tag_and_monitor() {
+        // None exercises the actual built-in default; Some(false) the explicit opt-out.
+        for enabled in [None, Some(false)] {
+            for cross_monitor in [false, true] {
+                let mut backend = ClientSpyBackend::new();
+                let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                if let Some(enabled) = enabled {
+                    jwm.closed_placements.set_enabled_for_test(enabled);
+                }
+                jwm.add_monitor(second_output());
+                let first = jwm.state.monitor_order[0];
+                let second = jwm.state.monitor_order[1];
+                set_class(&backend, "PlacementRegression", "placement-regression");
+                jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b100))
+                    .unwrap();
+                let old = manage_window(&mut jwm, &mut backend, 0x9b01);
+                jwm.unmanage(&mut backend, Some(old), true).unwrap();
+                assert!(jwm.closed_placements.is_empty());
+                let target = if cross_monitor { second } else { first };
+                jwm.switch_to_monitor(&mut backend, target).unwrap();
+                jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1000000))
+                    .unwrap();
+                let reopened = manage_window(&mut jwm, &mut backend, 0x9b02);
+                assert_eq!(jwm.state.clients[reopened].mon, Some(target));
+                assert_eq!(jwm.state.clients[reopened].state.tags, 0b1000000);
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_memory_ignores_stale_history_for_terminal_launched_windows() {
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, first, second) =
+            jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        // Deliberately retain stale entries to verify the application gate independently
+        // of reload cleanup (including a snapshot that could not be removed).
+        jwm.closed_placements.set_enabled_for_test(false);
+        jwm.note_jwm_launch(external_pid(), std::time::Instant::now());
+        let _terminal = focused_terminal(&mut jwm, &mut backend, 0x9b10);
+        let reopened = manage_window(&mut jwm, &mut backend, 0x9b11);
+        assert_eq!(jwm.state.clients[reopened].mon, Some(first));
+        assert_eq!(
+            jwm.state.clients[reopened].state.tags,
+            active_tags(&jwm, first)
+        );
+        assert_eq!(active_tags(&jwm, second), 1);
+        assert!(!jwm.closed_placements.is_empty());
+        jwm.reconcile_closed_placement_config(false);
+        assert!(jwm.closed_placements.is_empty());
+    }
+
+    #[test]
+    fn transient_parent_placement_wins_with_memory_on_or_off() {
+        for enabled in [false, true] {
+            let mut backend = ClientSpyBackend::new();
+            let (mut jwm, first, second) =
+                jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+            jwm.closed_placements.set_enabled_for_test(enabled);
+            set_class(&backend, "PlacementParent", "placement-parent");
+            let parent = manage_window(&mut jwm, &mut backend, 0x9b20);
+            let parent_tags = jwm.state.clients[parent].state.tags;
+            jwm.switch_to_monitor(&mut backend, second).unwrap();
+            jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1000000))
+                .unwrap();
+            set_class(&backend, "firefox", "Navigator");
+            backend
+                .property_ops
+                .popup_properties
+                .lock()
+                .unwrap()
+                .insert(
+                    WindowId::from_raw(0x9b21),
+                    (WindowType::Dialog, Some(jwm.state.clients[parent].win)),
+                );
+            let dialog = manage_window(&mut jwm, &mut backend, 0x9b21);
+            assert_eq!(jwm.state.clients[dialog].mon, Some(first));
+            assert_eq!(jwm.state.clients[dialog].state.tags, parent_tags);
+            assert!(jwm.state.clients[dialog].state.is_floating);
+            assert!(!jwm.state.clients[dialog].state.remembers_closed_placement);
+        }
+    }
+
+    #[test]
     fn a_window_opened_from_outside_jwm_returns_to_where_its_class_was_closed() {
         let mut backend = ClientSpyBackend::new();
         let (mut jwm, first, second) =
