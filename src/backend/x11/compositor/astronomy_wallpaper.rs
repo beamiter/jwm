@@ -41,7 +41,9 @@ const GALAXY_TARGET_DIRECTIONS: [[f64; 3]; 12] = [
     [-0.891847080, -0.399069159, 0.212961479],
     [0.094967342, 0.014311211, 0.995377513],
 ];
-const GALAXY_TARGET_RADII: [f64; 12] = [0.032, 0.026, 0.039, 0.025, 0.062, 0.048, 0.034, 0.036, 0.023, 0.033, 0.038, 0.037];
+const GALAXY_TARGET_RADII: [f64; 12] = [
+    0.032, 0.026, 0.039, 0.025, 0.062, 0.048, 0.034, 0.036, 0.023, 0.033, 0.038, 0.037,
+];
 
 /// The shader maps camera-world vectors to galactic coordinates with its
 /// 22-degree reference roll. CPU picking uses the exact same transformation.
@@ -54,11 +56,7 @@ fn galaxy_galactic_direction(world: [f64; 3]) -> [f64; 3] {
 }
 
 /// Only real clicks inside the bounded rendered landmark caps may navigate.
-fn galaxy_pick_target(
-    shown: PanoramaView,
-    point: [f64; 2],
-    size: [f64; 2],
-) -> Option<u8> {
+fn galaxy_pick_target(shown: PanoramaView, point: [f64; 2], size: [f64; 2]) -> Option<u8> {
     let ray = shown.ray(point, size)?;
     let q = galaxy_galactic_direction(ray);
     let mut nearest: Option<(u8, f64)> = None;
@@ -1184,7 +1182,10 @@ impl AstronomyWallpaper {
     fn finish_drag(&mut self, unix: f64, activate_click: bool) -> bool {
         if let Some(drag) = self.sky_drag.take() {
             self.activate_navigation(&drag.group);
-            if activate_click && !drag.moved && let Some(target) = drag.candidate {
+            if activate_click
+                && !drag.moved
+                && let Some(target) = drag.candidate
+            {
                 return self.focus_galaxy_target(target, unix);
             }
             let orientation = drag
