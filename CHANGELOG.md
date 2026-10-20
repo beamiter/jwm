@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Window placement defaults
+
+- Disable `behavior.remember_closed_placement` by default, including when the
+  setting is omitted. New windows open on the focused monitor's active tags,
+  subject to explicit rules and transient-parent placement. Existing explicit
+  `true` settings remain opt-ins; set the key to `false` for current-tag placement.
+
 ### Bars: responsive controls and retained rendering
 
 - Compact all workspaces before introducing overflow; retain the actual active
@@ -3154,7 +3161,7 @@ monorepo use independent Semantic Versions.
   IPC event and a `locked` flag on `get_monitors`/`get_tree`. See
   [docs/monitor-lock.md](docs/monitor-lock.md).
 
-- Closed-placement memory: a regular window's monitor and tags are
+- Opt-in closed-placement memory: a regular window's monitor and tags are
   remembered under its `WM_CLASS` when it closes, and the next window with
   that identity that JWM did not launch itself (opened from a terminal, by an
   agent inside one, or by a running application) returns there. A window
@@ -3162,7 +3169,7 @@ monorepo use independent Semantic Versions.
   focus or switches the view; its tag is marked urgent and opens on it.
   Keybinding, launcher, scratchpad and shell-panel launches keep the
   pointer's monitor and tag; `[[rules]]` still win. New
-  `behavior.remember_closed_placement` (default `true`). See
+  `behavior.remember_closed_placement` (default `false`; set `true` to opt in). See
   [docs/window-placement.md](docs/window-placement.md).
 
 - Tab bar frosted glass is common-linear-aware: backdrop capture follows the

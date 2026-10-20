@@ -590,7 +590,9 @@ impl ClientMoveResize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     pub focus_follows_new_window: bool,
-    /// Put a window back where its application was last closed. Closing a
+    /// Put a window back where its application was last closed. Disabled by
+    /// default: new windows use the focused monitor's active tags, subject to
+    /// explicit rules and transient-parent placement. When enabled, closing a
     /// regular window records its monitor and tags under its WM_CLASS; the
     /// next window with that identity that JWM did not launch itself (a
     /// keybinding `spawn`, the launcher, a scratchpad, a shell panel) is
@@ -600,7 +602,7 @@ pub struct BehaviorConfig {
     /// switches the view; its tag is marked urgent instead. `[[rules]]`
     /// entries that pin tags or a monitor still win. See
     /// docs/window-placement.md.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub remember_closed_placement: bool,
     /// Where a newly-managed window lands in its monitor's client list, which
     /// is what decides its slot in tiling layouts:
@@ -2330,7 +2332,7 @@ impl Default for Config {
                 },
                 behavior: BehaviorConfig {
                     focus_follows_new_window: false,
-                    remember_closed_placement: true,
+                    remember_closed_placement: false,
                     new_client_position: default_new_client_position(),
                     drag_threshold_px: default_drag_threshold_px(),
                     client_moveresize: default_client_moveresize(),

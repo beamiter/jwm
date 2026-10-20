@@ -5,24 +5,28 @@ this order:
 
 1. A transient window (a dialog with `WM_TRANSIENT_FOR`) follows its parent's
    monitor and tags and floats.
-2. Everything else starts on the selected monitor, on that monitor's active
-   tags: wherever the pointer is.
+2. Everything else starts on the currently focused monitor, on that monitor's
+   active tags.
 3. A matching `[[rules]]` entry can pin the tags, the monitor, or both.
-4. The closed-placement memory, described below, moves the window to where
-   the same application was last closed, unless a rule already pinned that
-   part or JWM launched the window itself.
+4. If explicitly enabled, the closed-placement memory described below moves
+   the window to where the same application was last closed, unless a rule
+   already pinned that part or JWM launched the window itself.
 
-Step 2 is the right default for a window the user asked for with a
-keybinding or from the launcher: they acted on this monitor, on this tag,
-and expect the window here. It is the wrong default for most other windows.
-A browser reopened from a shell, a viewer that an agent (`claude`, `codex`)
-spawns from inside a terminal, an application's own second top-level: each
-of those has a place it was last seen, and step 4 sends it back there.
+By default, new windows open on the currently focused tag, including windows
+reopened from a terminal, by an agent (`claude`, `codex`), or by a running
+application. For example, closing a browser on tag 3 and reopening it while
+tag 7 is focused opens the new window on tag 7. Explicit window rules and
+transient-parent placement still take precedence.
 
 ```toml
 [behavior]
-remember_closed_placement = true   # default
+remember_closed_placement = false  # default
 ```
+
+Omitting this key also disables the memory. Set it to `true` to opt into
+returning applications to their last closed monitor and tags. Existing
+configurations that explicitly set `true` keep that setting after an upgrade;
+change it to `false` to use the current tag.
 
 The key is hot-reloadable and accepts `set_config`. Switching it off also
 forgets everything remembered so far — both the in-memory map and the on-disk
@@ -45,9 +49,10 @@ the transfer and pulls the window back onto its own unlocked output.
 
 ## What is remembered
 
-When a regular top-level window is unmanaged, closed by the user or by its
-process, JWM records its output identity and tag mask under its `WM_CLASS`
-(class and instance, matched exactly). The output is remembered by
+With the feature enabled, when a regular top-level window is unmanaged,
+closed by the user or by its process, JWM records its output identity and tag
+mask under its `WM_CLASS` (class and instance, matched exactly). The output is
+remembered by
 `OutputIdentity.stable_key` (the connector name when EDID is absent), with
 the monitor number kept as a fallback for older snapshots and for moments
 when the output map has no identity. The newest close of an identity
@@ -65,8 +70,9 @@ launcher windows is process-only and is not written to disk.
 
 ## Who gets the memory
 
-The exclusion is about who launched the window, not what it is. JWM records
-the PID of every child it spawns itself: keybinding `spawn` commands, the
+When the feature is enabled, the exclusion is about who launched the window,
+not what it is. JWM records the PID of every child it spawns itself: keybinding
+`spawn` commands, the
 application launcher, scratchpads, the session menu and other shell panels.
 When a new window maps, JWM walks its process ancestry and stops at the
 first process it recognises:

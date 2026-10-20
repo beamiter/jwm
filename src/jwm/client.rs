@@ -6647,6 +6647,7 @@ mod unmanage_minimized_tests {
         backend: &mut ClientSpyBackend,
     ) -> (Jwm, MonitorKey, MonitorKey) {
         let mut jwm = Jwm::new_with_runtime_backend(backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         jwm.add_monitor(second_output());
         let first = jwm.state.monitor_order[0];
         let second = jwm.state.monitor_order[1];
@@ -6808,6 +6809,7 @@ mod unmanage_minimized_tests {
     fn a_window_returning_to_another_tag_of_the_selected_monitor_leaves_focus_alone() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         let monitor = jwm.state.monitor_order[0];
         backend
             .property_ops
@@ -6849,6 +6851,7 @@ mod unmanage_minimized_tests {
     fn a_window_returning_into_the_current_view_takes_focus_as_usual() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         backend
             .property_ops
             .window_pid
@@ -6871,6 +6874,7 @@ mod unmanage_minimized_tests {
     fn a_newer_close_replaces_the_remembered_placement() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         set_class(&backend, "Alacritty", "Alacritty");
         backend
             .property_ops
@@ -6899,6 +6903,7 @@ mod unmanage_minimized_tests {
     fn a_dock_window_is_never_remembered() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         set_class(&backend, "Polybar", "polybar");
         backend
             .property_ops
@@ -6919,6 +6924,7 @@ mod unmanage_minimized_tests {
     fn an_anonymous_window_is_never_remembered() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         backend
             .property_ops
             .window_pid
@@ -6938,6 +6944,7 @@ mod unmanage_minimized_tests {
     fn switching_the_feature_off_forgets_what_was_learned() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
         set_class(&backend, "Alacritty", "Alacritty");
         backend
             .property_ops
@@ -6952,8 +6959,20 @@ mod unmanage_minimized_tests {
             !jwm.closed_placements.is_empty(),
             "still on: nothing forgotten"
         );
+        jwm.closed_placements.set_enabled_for_test(false);
         jwm.reconcile_closed_placement_config(false);
         assert!(jwm.closed_placements.is_empty());
+
+        let while_disabled = manage_window(&mut jwm, &mut backend, 0x9602);
+        jwm.unmanage(&mut backend, Some(while_disabled), true).unwrap();
+        assert!(jwm.closed_placements.is_empty(), "disabled: nothing learned");
+
+        jwm.closed_placements.set_enabled_for_test(true);
+        jwm.reconcile_closed_placement_config(true);
+        assert!(jwm.closed_placements.is_empty(), "re-enabled: no stale history");
+        let after_reenable = manage_window(&mut jwm, &mut backend, 0x9603);
+        jwm.unmanage(&mut backend, Some(after_reenable), true).unwrap();
+        assert!(!jwm.closed_placements.is_empty());
     }
     fn restart_fixture() -> (Jwm, ClientSpyBackend, ClientKey) {
         let mut backend = ClientSpyBackend::new();

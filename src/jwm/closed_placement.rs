@@ -243,6 +243,8 @@ impl ClosedPlacementSnapshot {
         Ok(ClosedPlacementMemory {
             by_identity,
             next_seq,
+            #[cfg(test)]
+            enabled_for_test: None,
         })
     }
 
@@ -259,6 +261,10 @@ impl ClosedPlacementSnapshot {
 pub(crate) struct ClosedPlacementMemory {
     by_identity: HashMap<PlacementIdentity, RememberedPlacement>,
     next_seq: u64,
+    // Opt-in fixtures must not mutate the process-wide CONFIG while other
+    // unit tests are running with the built-in defaults.
+    #[cfg(test)]
+    enabled_for_test: Option<bool>,
 }
 
 /// Path of the closed-placement snapshot: same XDG state directory as
@@ -472,6 +478,19 @@ fn clear_closed_placement_file(path: &Path) {
 }
 
 impl ClosedPlacementMemory {
+    fn is_enabled(&self, configured: bool) -> bool {
+        #[cfg(test)]
+        if let Some(enabled) = self.enabled_for_test {
+            return enabled;
+        }
+        configured
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_enabled_for_test(&mut self, enabled: bool) {
+        self.enabled_for_test = Some(enabled);
+    }
+
     #[must_use]
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -947,7 +966,10 @@ impl Jwm {
         }
 
         let cfg = CONFIG.load();
-        if !cfg.behavior().remember_closed_placement {
+        if !self
+            .closed_placements
+            .is_enabled(cfg.behavior().remember_closed_placement)
+        {
             return false;
         }
         let Some(remembered) = self.closed_placements.lookup(&identity) else {
@@ -1317,7 +1339,10 @@ impl Jwm {
         client_key: ClientKey,
     ) {
         let cfg = CONFIG.load();
-        if !cfg.behavior().remember_closed_placement {
+        if !self
+            .closed_placements
+            .is_enabled(cfg.behavior().remember_closed_placement)
+        {
             return;
         }
         let Some(client) = self.state.clients.get(client_key) else {
