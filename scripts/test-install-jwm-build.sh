@@ -62,6 +62,11 @@ STUB
 cat > "$TEST_ROOT/bin/install" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CASE_DIR/system.log"
+# Stub system-wide installs, but actually copy the isolated fixture image so
+# this test can assert the wallpaper content (not just the logged invocation).
+if [[ " $* " == *"/assets/wallpapers/"* ]]; then
+    /usr/bin/install "$@"
+fi
 STUB
 cat > "$TEST_ROOT/bin/tee" <<'STUB'
 #!/usr/bin/env bash
@@ -102,7 +107,7 @@ run_case() {
     printf '[status_bar]\nname = "old"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
     cp "$CASE_DIR/config/jwm/config_x11.toml" "$CASE_DIR/config/jwm/config_wayland.toml"
     TMPDIR="$CASE_DIR" SUDO_USER="$sudo_user" XDG_DATA_HOME="$data_home" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" CARGO_TARGET_DIR="$target" \
-        bash "$REPO/scripts/install_jwm_scripts.sh" --mode "$mode" --jobs 2 > "$CASE_DIR/output.log" 2>&1 || status=$?
+        bash "$REPO/scripts/install_jwm_scripts.sh" --mode "$mode" --jobs 2 --bar tao_glow_bar > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $status == "$expected" ]] || fail "$scenario/$mode status $status, expected $expected"
     for binary in jwm jwm-tool jwm-support jwm-remote; do
         if [[ $expected == 0 ]]; then
