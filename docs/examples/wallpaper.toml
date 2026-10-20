@@ -140,8 +140,9 @@ wallpaper_rotation_paths = []
 # the manual pick replaces only the global fallback; monitor/tag overrides still apply.
 # It lasts for today in this session; reload discards it. The collection is retained.
 
-# Picker directory: default "" tries current image's directory,
-# then ~/Pictures/Wallpapers, then ~/Pictures.
+# Picker directory: default "" tries the current image's directory, then
+# ~/.config/jwm/wallpapers (or XDG_CONFIG_HOME/jwm/wallpapers), then Pictures.
+# Bundled and configured/user images are listed together (up to 200 total).
 wallpaper_dir = ""
 # Default true: derive accent colors in memory. false + reload restores file colors.
 wallpaper_colors = true

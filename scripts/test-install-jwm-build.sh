@@ -5,8 +5,9 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
-mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bridge/dist" "$TEST_ROOT/bin"
-cp "$ROOT/scripts/install_jwm_scripts.sh" "$REPO/scripts/"
+mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bridge/dist" "$REPO/assets/wallpapers" "$TEST_ROOT/bin"
+cp "$ROOT/scripts/install_jwm_scripts.sh" "$ROOT/scripts/install-wallpapers.sh" "$REPO/scripts/"
+printf 'bundled fixture\n' > "$REPO/assets/wallpapers/01-fixture.png"
 touch "$REPO/bars/tao_glow_bar/Cargo.toml" "$REPO/bridge/Cargo.toml" "$REPO/bridge/dist/org.freedesktop.Notifications.service"
 cat > "$TEST_ROOT/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
@@ -121,6 +122,11 @@ run_case() {
     if [[ $expected == 0 ]]; then
         grep -Fq '<-p> <jwm-bridge>' "$CASE_DIR/cargo.log" || fail 'bridge build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
+        if [[ $scenario == sudo-target ]]; then
+            grep -Fq -- "-u fixture-user bash $REPO/scripts/install-wallpapers.sh --dest $CASE_DIR/config/jwm/wallpapers" "$CASE_DIR/system.log" || fail 'sudo wallpaper install did not switch user'
+        else
+            [[ $(cat "$CASE_DIR/config/jwm/wallpapers/01-fixture.png") == "bundled fixture" ]] || fail 'bundled wallpaper install missing'
+        fi
     else
         if [[ $scenario != bridge-failure && $scenario != install-failure ]]; then
             [[ ! -e $CASE_DIR/system.log ]] || fail 'failed build installed system files'

@@ -33,6 +33,7 @@ cargo fmt --all -- --check
 scripts/lint-shell.sh
 scripts/test-git-update-all.sh
 scripts/test-install-jwm-build.sh
+scripts/test-wallpaper-install.sh
 scripts/test-install-portal.sh
 scripts/test-runtime-helpers.sh
 scripts/test-bootstrap-deps.sh

@@ -1,8 +1,8 @@
 {
   "generator": "built-in image_gen",
   "count": 14,
-  "rotation_enabled": true,
-  "multimonitor_assignment_enabled": true,
+  "source_directory": "assets/wallpapers",
+  "user_install_subdirectory": "jwm/wallpapers",
   "files": [
     {
       "file": "01-alpine-dawn.png",
@@ -116,11 +116,5 @@
       "bytes": 2288005,
       "sha256": "cf112c26c304a3fe5dca948e08a997488baf3d174ae4c1d2b3b2961bfdde3c28"
     }
-  ],
-  "rotation_policy": "local-calendar-day plus dense output slot, modulo 14",
-  "installed_directory": "/home/ubuntu/.local/share/jwm/wallpapers/jwm-14",
-  "enabled_config_families": [
-    "x11",
-    "wayland"
   ]
 }

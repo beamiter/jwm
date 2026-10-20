@@ -1176,9 +1176,18 @@ impl Jwm {
             if cancelled() {
                 return (std::path::PathBuf::new(), Vec::new()).into();
             }
-            let directory = wallpaper::resolve_directory(&configured_dir, &worker_current, &home);
+            let bundled = wallpaper::bundled_wallpaper_directory(
+                &home,
+                std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            );
+            let directory = wallpaper::resolve_picker_directory(
+                &configured_dir,
+                &worker_current,
+                &home,
+                &bundled,
+            );
             let (mut paths, summary) =
-                wallpaper::scan_wallpapers_cancellable(&directory, &cancelled);
+                wallpaper::scan_wallpapers_with_bundled(&directory, &bundled, &cancelled);
             let selection =
                 wallpaper::resolve_selection(&mut paths, &requested_current, &home, &cancelled);
             wallpaper::WallpaperListing {

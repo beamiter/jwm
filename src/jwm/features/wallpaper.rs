@@ -793,6 +793,46 @@ pub fn resolve_directory(configured_dir: &str, current_wallpaper: &str, home: &P
     home.join("Pictures")
 }
 
+/// User-local bundled wallpapers are not hidden behind an application-specific
+/// prefix: the source installer copies them into this flat XDG directory.
+#[must_use]
+pub fn bundled_wallpaper_directory(
+    home: &Path,
+    xdg_config_home: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    xdg_config_home
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .map_or_else(|| home.join(".config"), Path::to_path_buf)
+        .join("jwm/wallpapers")
+}
+
+/// Prefer the bundled collection on a fresh install, but never override an
+/// explicitly configured folder or a valid current picture's directory.
+/// The background scanner also appends bundled entries if another folder wins.
+#[must_use]
+pub fn resolve_picker_directory(
+    configured_dir: &str,
+    current_wallpaper: &str,
+    home: &Path,
+    bundled: &Path,
+) -> PathBuf {
+    if !configured_dir.trim().is_empty() {
+        return resolve_directory(configured_dir, current_wallpaper, home);
+    }
+    let current = current_wallpaper.trim();
+    if !current.is_empty()
+        && let Some(parent) = expand_home(current, home).parent()
+        && parent.is_dir()
+    {
+        return parent.to_path_buf();
+    }
+    if bundled.is_dir() {
+        return bundled.to_path_buf();
+    }
+    resolve_directory(configured_dir, current_wallpaper, home)
+}
+
 /// Expand a leading `~` against `home`; other paths are taken as given.
 #[must_use]
 pub fn expand_home(path: &str, home: &Path) -> PathBuf {
@@ -862,6 +902,54 @@ pub fn scan_wallpapers_cancellable(
         });
     let (paths, images) = select_wallpapers_counted(candidates, Path::is_file);
     summary.images = images;
+    (paths, summary)
+}
+
+/// Read the user's preferred directory and the installed JWM collection on
+/// the same background worker. Bundled images reserve bounded slots even when
+/// the user's folder has hundreds of images, so they remain picker-visible.
+/// The original directory wins for aliases to the same on-disk picture.
+#[must_use]
+pub fn scan_wallpapers_with_bundled(
+    primary: &Path,
+    bundled: &Path,
+    cancelled: impl Fn() -> bool,
+) -> (Vec<PathBuf>, ScanSummary) {
+    let (mut paths, mut summary) = scan_wallpapers_cancellable(primary, &cancelled);
+    if cancelled() || !bundled.is_dir() || primary == bundled {
+        return (paths, summary);
+    }
+    if let (Ok(first), Ok(second)) = (
+        std::fs::canonicalize(primary),
+        std::fs::canonicalize(bundled),
+    ) && first == second
+    {
+        return (paths, summary);
+    }
+    let (mut extras, additional) = scan_wallpapers_cancellable(bundled, &cancelled);
+    if cancelled() || additional.error.is_some() {
+        return (paths, summary);
+    }
+    // Canonicalization is bounded to <=400 retained candidates and never runs
+    // on the compositor event loop. It avoids duplicate rows for symlinked
+    // collections without following symlinked directories recursively.
+    let mut seen: std::collections::HashSet<PathBuf> = paths
+        .iter()
+        .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        .collect();
+    extras.retain(|path| {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        seen.insert(target)
+    });
+    paths.truncate(MAX_ENTRIES.saturating_sub(extras.len()));
+    paths.extend(extras);
+    paths.sort_unstable_by(|a, b| sort_key(a).cmp(&sort_key(b)).then_with(|| a.cmp(b)));
+    summary.images = summary.images.saturating_add(additional.images);
+    summary.visited = summary.visited.saturating_add(additional.visited);
+    summary.unreadable = summary.unreadable.saturating_add(additional.unreadable);
+    summary.unsupported_names = summary
+        .unsupported_names
+        .saturating_add(additional.unsupported_names);
     (paths, summary)
 }
 
@@ -1576,6 +1664,78 @@ mod tests {
         assert_eq!(resolved, dir);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bundled_directory_honors_only_absolute_xdg_config_home() {
+        let home = Path::new("/home/ada");
+        assert_eq!(
+            bundled_wallpaper_directory(home, None),
+            PathBuf::from("/home/ada/.config/jwm/wallpapers")
+        );
+        assert_eq!(
+            bundled_wallpaper_directory(home, Some(std::ffi::OsStr::new("/tmp/xdg config"))),
+            PathBuf::from("/tmp/xdg config/jwm/wallpapers")
+        );
+        assert_eq!(
+            bundled_wallpaper_directory(home, Some(std::ffi::OsStr::new("relative/xdg"))),
+            PathBuf::from("/home/ada/.config/jwm/wallpapers")
+        );
+    }
+
+    #[test]
+    fn a_fresh_picker_prefers_bundled_but_keeps_explicit_and_current_directories() {
+        let home = temp_dir("preferred-home");
+        let bundled = home.join(".config/jwm/wallpapers");
+        std::fs::create_dir_all(&bundled).unwrap();
+        assert_eq!(resolve_picker_directory("", "", &home, &bundled), bundled);
+        assert_eq!(
+            resolve_picker_directory("~/custom", "", &home, &bundled),
+            home.join("custom")
+        );
+        let current = home.join("Pictures/other.png");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, b"x").unwrap();
+        assert_eq!(
+            resolve_picker_directory("", current.to_str().unwrap(), &home, &bundled),
+            home.join("Pictures")
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn bundled_images_are_always_visible_alongside_a_capped_custom_directory() {
+        let primary = temp_dir("large-custom");
+        let bundled = temp_dir("bundled");
+        for index in 0..(MAX_ENTRIES + 5) {
+            std::fs::write(primary.join(format!("{index:04}.png")), b"x").unwrap();
+        }
+        for file in ["01-bundled.png", "02-bundled.jpg"] {
+            std::fs::write(bundled.join(file), b"x").unwrap();
+        }
+        let (paths, summary) = scan_wallpapers_with_bundled(&primary, &bundled, || false);
+        assert_eq!(paths.len(), MAX_ENTRIES);
+        assert_eq!(summary.images, MAX_ENTRIES + 7);
+        assert!(paths.contains(&bundled.join("01-bundled.png")));
+        assert!(paths.contains(&bundled.join("02-bundled.jpg")));
+        let (same, summary) = scan_wallpapers_with_bundled(&bundled, &bundled, || false);
+        assert_eq!(same.len(), 2);
+        assert_eq!(summary.images, 2);
+        std::fs::remove_dir_all(primary).unwrap();
+        std::fs::remove_dir_all(bundled).unwrap();
+    }
+
+    #[test]
+    fn bundled_symlink_aliases_do_not_create_duplicate_rows() {
+        let primary = temp_dir("custom-alias");
+        let bundled = temp_dir("bundled-alias");
+        let picture = bundled.join("image.png");
+        std::fs::write(&picture, b"x").unwrap();
+        std::os::unix::fs::symlink(&picture, primary.join("alias.png")).unwrap();
+        let (paths, _) = scan_wallpapers_with_bundled(&primary, &bundled, || false);
+        assert_eq!(paths, [primary.join("alias.png")]);
+        std::fs::remove_dir_all(primary).unwrap();
+        std::fs::remove_dir_all(bundled).unwrap();
     }
 
     #[test]

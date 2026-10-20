@@ -33,23 +33,29 @@ twin of `Enter` — and closes the picker the same way a list-row click does.
 wallpaper_dir = "~/Pictures/Wallpapers"
 ```
 
-Left empty (the default), the picker looks beside the current wallpaper —
-whoever set one almost certainly keeps the rest in the same place — then falls
-back to `~/Pictures/Wallpapers`, then `~/Pictures`. A leading `~` is expanded.
+Left empty (the default), the picker prefers the current wallpaper's folder
+if it still exists. Otherwise it opens JWM's installed bundled collection,
+then `~/Pictures/Wallpapers`, then `~/Pictures`. A leading `~` is expanded.
+An explicit `wallpaper_dir` remains the primary directory, but the installed
+JWM collection is also included in the picker, so choosing a custom folder does
+not make the bundled wallpapers disappear.
 
 `png`, `jpg`, `jpeg`, `webp`, `bmp`, and `gif` are listed, sorted
 case-insensitively by name (names that differ only in case keep a fixed
 order), and capped at 200 entries. Selection keeps at most 400 candidates
 in memory while reading the directory, retaining the first 200 names in
 global order even when better names arrive at the end of the scan, within the
-100,000 raw-entry scan limit. The current wallpaper is kept even if it falls
-outside those names or lives in another directory; when necessary it replaces
-the last retained item without exceeding the 200-image cap.
+100,000 raw-entry scan limit per directory. Bundled JWM images reserve up to
+their own count of those 200 slots if the preferred directory is different.
+Symlink aliases of already listed pictures do not create duplicate entries.
+The current wallpaper is kept even if it falls outside those names or lives in
+another directory; when necessary it replaces the last retained item without
+exceeding the 200-image cap.
 The status distinguishes an empty folder from a
 read error, reports skipped entries and warns when a cap is reached. Search
 covers the retained image list (up to 200 images), plus the built-in effects;
 it does not search beyond that cap or recurse into subdirectories.
-The directory is read on a worker thread:
+Both directories are read on one worker thread:
 the panel opens at once with a `Scanning…` status line and the rows fill in
 when the listing lands, so an enormous pictures directory or a slow network
 mount never stalls the frame that opened the panel. Choosing the directory
@@ -61,6 +67,43 @@ lands drops the answer, and each opening starts its own scan, so only the
 newest one fills the rows. Only an image whose type the directory entry
 cannot settle (a symlink, a filesystem without entry types) costs a `stat`;
 a symlink to an image is listed, one to a folder or a dangling one is not.
+
+## Bundled static wallpapers
+
+The source tree contains 14 ordinary images directly under
+`assets/wallpapers/`, without a nested collection folder. A successful full
+`scripts/install_jwm_scripts.sh` install copies them to:
+
+```text
+~/.config/jwm/wallpapers/01-alpine-dawn.png
+~/.config/jwm/wallpapers/02-ocean-aerial.png
+...
+~/.config/jwm/wallpapers/14-luminous-tide.png
+```
+
+With an absolute `XDG_CONFIG_HOME`, replace `~/.config` with that directory.
+The target belongs to the login user even when JWM is built with `sudo`.
+For a lightweight, build-free install or refresh:
+
+```bash
+bash scripts/install-wallpapers.sh
+```
+
+Only changed *managed* image files are upgraded: the installer records SHA-256
+hashes in `wallpapers/.jwm-bundled-sha256` and never overwrites a same-named
+custom file, a symlink, or an edited installed image. It does not delete unknown
+files or modify `config_x11.toml` / `config_wayland.toml`. Older user collections
+under `~/.local/share/jwm/wallpapers/jwm-14/` are deliberately left untouched;
+existing explicit paths pointing there continue working while the files remain.
+To switch an old persistent `wallpaper` or `wallpaper_rotation_paths` entry
+to the new collection, change the paths in your own config.
+
+Bundled static images are **not** enabled as daily rotation automatically.
+The picker can apply a picture immediately, or you can persist a single image
+in `behavior.wallpaper` with `wallpaper_rotation = "off"`. To rotate this collection
+daily, explicitly set `wallpaper_rotation = "daily"` and supply its 14 installed
+paths in `wallpaper_rotation_paths`. The same ordered collection is used on
+both X11 and Wayland; connected displays receive consecutive offsets.
 
 ## How it applies
 
@@ -138,9 +181,9 @@ source identity, resource lifetime and reproducible rendering checks.
 [behavior]
 wallpaper_rotation = "daily" # "off" restores static wallpaper selection
 wallpaper_rotation_paths = [
-  "/home/me/.local/share/jwm/wallpapers/01.png",
-  "/home/me/.local/share/jwm/wallpapers/02.png",
-  "/home/me/.local/share/jwm/wallpapers/03.png",
+  "/home/me/.config/jwm/wallpapers/01-alpine-dawn.png",
+  "/home/me/.config/jwm/wallpapers/02-ocean-aerial.png",
+  "/home/me/.config/jwm/wallpapers/03-aurora-fjord.png",
 ]
 ```
 

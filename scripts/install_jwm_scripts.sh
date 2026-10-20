@@ -136,6 +136,7 @@ usage() {
   --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
   --skip-bar                  跳过 bar 安装
   --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
+  单独安装/更新内置壁纸（无需编译）: bash scripts/install-wallpapers.sh
   -h, --help                  显示此帮助信息
 
 说明:
@@ -148,6 +149,8 @@ usage() {
   - jwm / jwm-tool / jwm-support / jwm-remote 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
+  - 完整安装还将内置静态壁纸复制到 ~/.config/jwm/wallpapers/（支持 XDG_CONFIG_HOME）；
+    重装只更新原样保留的受管文件，不覆盖用户修改或同名自定义文件。
   - 安装完成后，脚本会把选中的 bar 同步写入 config_x11.toml 和 config_wayland.toml；
     如果任一配置文件不存在，会先运行 jwm --gen-config 生成默认配置。
 
@@ -338,10 +341,26 @@ target_user_data_home() {
 }
 
 jwm_config_dir() {
-    if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    # XDG only permits absolute paths; a relative override must not install
+    # resources outside the target user's config home.
+    if [[ ${XDG_CONFIG_HOME:-} == /* ]]; then
         echo "$XDG_CONFIG_HOME/jwm"
     else
         echo "$(target_user_home)/.config/jwm"
+    fi
+}
+
+install_bundled_wallpapers() {
+    local destination
+    destination="$(jwm_config_dir)/wallpapers"
+    info "安装内置静态壁纸到 $destination ..."
+
+    # sudo builds must not produce root-owned files in the login user's home.
+    # Pass a resolved path instead of relying on sudo's HOME/XDG inheritance.
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" bash "$PROJECT_ROOT/scripts/install-wallpapers.sh" --dest "$destination"
+    else
+        bash "$PROJECT_ROOT/scripts/install-wallpapers.sh" --dest "$destination"
     fi
 }
 
@@ -810,6 +829,7 @@ fi
 # 2. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
+    install_bundled_wallpapers
     # Only migrate the legacy cargo installation after every replacement and
     # its session/bridge integration succeeded. A skipped or failed install
     # must leave the user's previously working commands available.

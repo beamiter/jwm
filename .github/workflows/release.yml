@@ -123,6 +123,7 @@ jobs:
       - name: Test source installer build recovery
         run: |
           bash scripts/test-install-jwm-build.sh
+          bash scripts/test-wallpaper-install.sh
           bash scripts/test-runtime-helpers.sh
           bash scripts/test-bootstrap-deps.sh
           python3 scripts/test-release-install-failures.py

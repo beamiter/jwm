@@ -127,6 +127,20 @@ configuration unless `--gen-config` is used:
 scripts/install_jwm_scripts.sh --help
 ```
 
+The source installer also installs all 14 bundled static PNG wallpapers into
+`~/.config/jwm/wallpapers/` (or `$XDG_CONFIG_HOME/jwm/wallpapers/`). Open the
+wallpaper picker with **Alt+Ctrl+W** to choose them alongside your own images.
+To install or refresh only those pictures without compiling:
+
+```bash
+bash scripts/install-wallpapers.sh
+bash scripts/test-wallpaper-install.sh  # offline regression test
+```
+
+Reinstalls update JWM-managed images only while their content is unchanged;
+custom or edited images are never replaced, and existing wallpaper settings are
+preserved. See [static wallpaper installation](docs/wallpaper.md#bundled-static-wallpapers).
+
 The installer uses `CARGO_TARGET_DIR` when set (relative paths are resolved from
 the project root), otherwise `target/`. Native bar installation uses a separate
 `bar-install/<bar>` cache and the bar's committed dependency lock. If Cargo
