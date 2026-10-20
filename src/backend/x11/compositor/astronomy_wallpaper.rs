@@ -2782,6 +2782,86 @@ mod tests {
         a
     }
 
+    #[test]
+    fn galaxy_landmark_picking_matches_shader_galactic_coordinates() {
+        for (index, expected) in GALAXY_TARGET_DIRECTIONS.iter().enumerate() {
+            let mut view = PanoramaView::default();
+            view.set_orientation(galaxy_target_orientation(index as u8).unwrap());
+            let ray = view.ray([960.0, 540.0], [1920.0, 1080.0]).unwrap();
+            let galactic = galaxy_galactic_direction(ray);
+            for axis in 0..3 {
+                assert!((galactic[axis] - expected[axis]).abs() < 1e-5);
+            }
+            assert_eq!(
+                galaxy_pick_target(view, [960.0, 540.0], [1920.0, 1080.0]),
+                Some(index as u8)
+            );
+            assert!(galaxy_target_orientation(12).is_none());
+        }
+    }
+
+    #[test]
+    fn galaxy_click_focus_zoom_and_return_preserve_other_outputs() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let now = Instant::now();
+        let left = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        let right = pointer_at(&a.draw_plan[1], 200, [0.0, 0.0]);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let oriented = galaxy_target_orientation(4).unwrap();
+        a.sky_offset = panorama_rotation(a.sample_unix, a.sky_period)
+            .inverse()
+            .compose(oriented);
+        let before = a.material_frames();
+        a.record_presented(&before);
+        assert!(a.begin_drag(left));
+        assert_eq!(a.sky_drag.as_ref().unwrap().candidate, Some(4));
+        assert!(a.finish_drag(a.sample_unix, true));
+        assert_eq!(a.galaxy_focus, Some(4));
+        assert!(a.galaxy_overview.is_some());
+        assert!(a.consume_interaction(now));
+        let focused = a.material_frames();
+        assert!(focused[0].sky.fov_degrees() < before[0].sky.fov_degrees());
+        assert_eq!(focused[1].sky, before[1].sky);
+        a.record_presented(&focused);
+        assert!(a.zoom(left, 1.0));
+        assert!(a.consume_interaction(now + DRAG_FRAME_INTERVAL));
+        let zoomed = a.material_frames();
+        assert!(zoomed[0].sky.fov_degrees() < focused[0].sky.fov_degrees());
+        assert_eq!(zoomed[1].sky, before[1].sky);
+        assert!(a.reset_at(left));
+        assert!(a.galaxy_focus.is_none());
+        assert!(a.galaxy_overview.is_none());
+        let restored = a.material_frames();
+        assert_eq!(restored[0].sky.fov_degrees(), before[0].sky.fov_degrees());
+        assert_eq!(restored[1].sky, before[1].sky);
+        assert!(a.reset_at(right));
+    }
+
+    #[test]
+    fn galaxy_drag_and_refused_grab_do_not_activate_landmarks() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let orientation = galaxy_target_orientation(0).unwrap();
+        a.sky_offset = panorama_rotation(a.sample_unix, a.sky_period)
+            .inverse()
+            .compose(orientation);
+        let frames = a.material_frames();
+        a.record_presented(&frames);
+        let left = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.begin_drag(left));
+        assert_eq!(a.sky_drag.as_ref().unwrap().candidate, Some(0));
+        assert!(a.drag_motion([left[0] + 100.0, left[1] + 70.0]));
+        assert!(a.drag_motion(left));
+        assert!(a.finish_drag(a.sample_unix, true));
+        assert_eq!(a.galaxy_focus, None);
+        a.record_presented(&a.material_frames());
+        assert!(a.begin_drag(left));
+        a.abort_drag();
+        assert!(a.galaxy_focus.is_none());
+    }
+
     fn pointer_at(canvas: &AstronomyDraw, height: u32, point: [f64; 2]) -> [f64; 2] {
         let x = f64::from(canvas.origin[0])
             + f64::from(canvas.size[0]) * 0.5
