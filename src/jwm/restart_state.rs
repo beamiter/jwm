@@ -1684,7 +1684,7 @@ mod policy_tests {
 
         let missing = output("gone", "gone-connector", 0);
         assert_eq!(
-            exact_output(&missing, &[output("new", "new", 0)], &[missing.clone()]),
+            exact_output(&missing, &[output("new", "new", 0)], std::slice::from_ref(&missing)),
             None
         );
         let partial_identity = output("known-stable", "", 0);
@@ -1692,7 +1692,7 @@ mod policy_tests {
             exact_output(
                 &partial_identity,
                 &[output("new", "new", 0)],
-                &[partial_identity.clone()]
+                std::slice::from_ref(&partial_identity)
             ),
             None
         );
