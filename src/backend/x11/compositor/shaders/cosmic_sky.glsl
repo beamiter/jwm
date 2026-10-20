@@ -68,26 +68,35 @@ vec3 cosmic_fallback(vec3 q, float footprint) {
          + vec3(0.009,0.011,0.018)*band*(0.3+clouds)*(1.0-0.7*dust);
 }
 
-// Four small, fixed-direction nebula landmarks. Positions are converted from
-// the cited ICRS coordinates in docs/celestial-explorer.md. Colours, angular
-// extent and filament morphology below are ORIGINAL ART, not telescope data
-// or measured three-dimensional gas volumes. No artificial relief is added to
-// the NASA star map, and no clock input makes clouds boil during navigation.
-const vec3 COSMIC_NEBULA_DIRECTION[4] = vec3[4](
+// Deep-sky landmarks in galactic l/b frame. The first four preserve the
+// preceding renderer's coordinates. Additional positions are IAU galactic
+// catalogue approximations; the artistic morphologies are NOT telescope data.
+// The CPU picking catalogue uses the same centres and radii.
+uniform int cosmic_focus_target; // 0=overview; 1..12=close-up
+const vec3 COSMIC_NEBULA_DIRECTION[12] = vec3[12](
     vec3(-0.824943831, -0.331876518, -0.457521204), // Orion / M42
     vec3( 0.994392948, -0.020361000,  0.103769428), // Lagoon / M8
     vec3( 0.299894690, -0.010897463, -0.953910069), // Carina / NGC 3372
-    vec3( 0.956448362,  0.013831226,  0.291573709)  // Eagle / M16
+    vec3( 0.956448362,  0.013831226,  0.291573709), // Eagle / M16
+    vec3(-0.481332547, -0.367637672,  0.795714472), // Andromeda / M31
+    vec3(-0.589171791, -0.519966434,  0.618475147), // Triangulum / M33
+    vec3(-0.895824129, -0.036120457, -0.442938419), // Rosette / NGC 2237
+    vec3( 0.272581208, -0.148499838,  0.950603641), // Veil / NGC 6960
+    vec3(-0.991766641, -0.100709012, -0.079098822), // Crab / M1
+    vec3( 0.437945624, -0.840188215,  0.319824004), // Helix / NGC 7293
+    vec3(-0.891847080, -0.399069159,  0.212961479), // Pleiades / M45
+    vec3( 0.094967342,  0.014311211,  0.995377513) // North America / NGC 7000
 );
-const float COSMIC_NEBULA_RADIUS[4] = float[4](0.032,0.026,0.039,0.025);
+const float COSMIC_NEBULA_RADIUS[12] = float[12](0.032, 0.026, 0.039, 0.025, 0.062, 0.048, 0.034, 0.036, 0.023, 0.033, 0.038, 0.037);
 
 vec3 cosmic_nebulae(vec3 q, float footprint) {
     vec3 emission = vec3(0.0);
-    for (int i=0; i<4; i++) {
+    for (int i=0; i<12; i++) {
+        // A selected close-up keeps the genuine starfield but subdues unrelated
+        // illustrative clouds, so neighbouring landmarks cannot occlude it.
+        if (cosmic_focus_target != 0 && cosmic_focus_target != i+1) continue;
         vec3 centre = COSMIC_NEBULA_DIRECTION[i];
         float radius = COSMIC_NEBULA_RADIUS[i];
-        // Spherical chord distance is continuous even across atan's seam.
-        // The cheap bounding cap skips ALL noise outside a visible landmark.
         vec3 delta = (q-centre)/radius;
         float radius2 = dot(delta,delta);
         if (radius2 >= 4.0) continue;
@@ -106,8 +115,30 @@ vec3 cosmic_nebulae(vec3 q, float footprint) {
         float lane = exp(-pow((p.y + 0.20*sin(p.x*4.0+float(i)))*5.0,2.0));
         vec3 warm = i==2 ? vec3(0.16,0.065,0.020) : vec3(0.15,0.024,0.060);
         vec3 cool = i==0 ? vec3(0.030,0.105,0.14) : vec3(0.032,0.066,0.13);
-        emission += mix(warm,cool,smoothstep(0.28,0.76,density))
-                  * envelope*(0.20+1.8*filament)*(1.0-0.78*lane);
+        float lum = envelope*(0.20+1.8*filament)*(1.0-0.78*lane);
+        if (i==4 || i==5) {
+            // Andromeda/Triangulum: tilted spiral-disk sketches with dust arms.
+            vec2 disk=vec2(p.x,p.y*1.6);
+            float r=length(disk), theta=atan(disk.y,disk.x);
+            float arms=0.50+0.50*cos(2.0*theta-r*9.0+1.5*density);
+            float bulge=exp(-r*r*8.0);
+            lum=exp(-r*r*1.1)*(0.3+1.25*arms*filament)+bulge*0.55;
+            warm=vec3(0.16,0.11,0.065);
+            cool=vec3(0.028,0.070,0.14);
+        } else if (i==9) {
+            // Helix: luminous ring with a dim central cavity.
+            lum *= 0.22+1.9*exp(-pow((length(p.xy)-0.78)*2.1,2.0));
+            cool=vec3(0.025,0.15,0.14);
+        } else if (i==10) {
+            // Pleiades: compact cluster stars and fine blue reflection haze.
+            float stars=pow(cos(p.x*17.0)*cos(p.y*13.0)*0.5+0.5,18.0);
+            lum=lum*0.55+envelope*stars*0.9;
+            cool=vec3(0.048,0.11,0.19);
+        } else if (i==7 || i==8) {
+            // Veil and Crab: sparse supernova filaments rather than full discs.
+            lum *= 0.30+1.6*abs(sin(p.x*8.0+p.y*3.0+density*7.0));
+        }
+        emission += mix(warm,cool,smoothstep(0.28,0.76,density))*lum;
     }
     return emission;
 }

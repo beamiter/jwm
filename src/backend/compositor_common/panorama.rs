@@ -50,7 +50,6 @@ impl PanoramaView {
         self.orientation.matrix()
     }
 
-    #[cfg(test)]
     pub(crate) fn orientation(self) -> CelestialRotation {
         self.orientation
     }
@@ -61,6 +60,13 @@ impl PanoramaView {
 
     pub(crate) fn fov_degrees(self) -> f32 {
         self.fov
+    }
+
+    /// A bounded close-up lens used by deep-sky catalogue navigation.
+    pub(crate) fn set_fov_degrees(&mut self, degrees: f32) {
+        if degrees.is_finite() {
+            self.fov = degrees.clamp(PANORAMA_MIN_FOV, PANORAMA_MAX_FOV);
+        }
     }
 
     /// Positive wheel detents narrow the perspective lens. Bounded logarithmic
@@ -97,8 +103,7 @@ impl PanoramaView {
         })
     }
 
-    /// Independent CPU perspective reference for navigation regressions.
-    #[cfg(test)]
+    /// CPU ray used by both click picking and navigation regression tests.
     pub(crate) fn ray(self, point: [f64; 2], viewport: [f64; 2]) -> Option<[f64; 3]> {
         self.begin_drag(point, viewport)?;
         let scale = 2.0 * (f64::from(self.fov).to_radians() * 0.5).tan() / viewport[1];

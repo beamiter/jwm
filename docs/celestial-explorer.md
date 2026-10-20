@@ -36,6 +36,9 @@ right button and the ordinary vertical wheel; no modifier is needed.
 | Body surface in a single-body Astronomy scene | Wheel up/down | That body's size increases/decreases from 0.35× to 8× |
 | Empty sky in any celestial effect | Hold left and drag | The viewing direction turns through 360°, including both poles |
 | Empty sky | Wheel up/down | The perspective lens narrows/widens |
+| Visible nebula, galaxy or star cluster in Milky Way | Left-click | Centre and magnify the deep-sky target |
+| Focused Milky Way target | Wheel or left-button drag | Explore the target with more zoom or orbit the sky |
+| Milky Way close-up | Right-click | Restore the original sky orientation and perspective lens |
 | Sun or planet in Solar System | Left-click | A close-up opens for the selected body |
 | Visible body in Solar System | Hold left and drag | The camera orbits the overview or current close-up target in all directions |
 | Focused body in Solar System | Wheel up/down | The camera approaches/recedes from that body |
@@ -142,9 +145,10 @@ not overwhelm close views of the star field.
 
 The prior `milkyway-nasa-gaia.jpg` remains available for compatibility and user
 overrides. If no sky image loads, a seamless procedural star and dust field
-still covers the full sphere. Four additional procedural nebula landmarks use
-published celestial directions. Their placement anchors come from these source
-image positions:
+still covers the full sphere. Twelve bounded deep-sky landmarks now provide
+clickable destinations, including spiral galaxies, nebulae, supernova remnants
+and a star cluster. The first four preserve their earlier catalogue directions.
+Their original position sources are:
 
 | Landmark | Right ascension | Declination | Direction source |
 | --- | --- | --- | --- |
@@ -160,6 +164,15 @@ ascending-node longitude 32.93192°. The conversion fixes directions only.
 Nebula colours, filament shapes, brightness and apparent extent are original
 artwork, with bounded, filtered detail. They are not reproductions of the linked
 telescope images, observational angular sizes or reconstructed 3D gas volumes.
+
+Eight more clickable catalogue locations are **Andromeda (M31)**,
+**Triangulum (M33)**, **Rosette (NGC 2237)**, **Veil (NGC 6960)**,
+**Crab (M1)**, **Helix (NGC 7293)**, **Pleiades (M45)** and
+**North America (NGC 7000)**. Their drawn appearance is an artistic guide,
+not scientific imagery. Click only a visible landmark to move into its
+bounded close-up; small unintentional mouse movements do not activate it.
+A right-click restores the exact prior sky perspective. Each monitor or
+explicitly shared monitor group retains its own focus and overview.
 
 ## Time, space and rendering limits
 

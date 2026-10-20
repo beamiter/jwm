@@ -25,6 +25,83 @@ const MIN_BODY_ZOOM: f64 = 0.35;
 const MAX_BODY_ZOOM: f64 = 8.0;
 const ZOOM_LOG_STEP: f64 = 0.15;
 
+// These fixed galactic unit vectors and artistic angular radii match
+// shaders/cosmic_sky.glsl. Distances are viewing aids, not 3D parallax.
+const GALAXY_TARGET_DIRECTIONS: [[f64; 3]; 12] = [
+    [-0.824943831, -0.331876518, -0.457521204],
+    [0.994392948, -0.020361000, 0.103769428],
+    [0.299894690, -0.010897463, -0.953910069],
+    [0.956448362, 0.013831226, 0.291573709],
+    [-0.481332547, -0.367637672, 0.795714472],
+    [-0.589171791, -0.519966434, 0.618475147],
+    [-0.895824129, -0.036120457, -0.442938419],
+    [0.272581208, -0.148499838, 0.950603641],
+    [-0.991766641, -0.100709012, -0.079098822],
+    [0.437945624, -0.840188215, 0.319824004],
+    [-0.891847080, -0.399069159, 0.212961479],
+    [0.094967342, 0.014311211, 0.995377513],
+];
+const GALAXY_TARGET_RADII: [f64; 12] = [
+    0.032, 0.026, 0.039, 0.025, 0.062, 0.048, 0.034, 0.036, 0.023, 0.033, 0.038, 0.037,
+];
+
+/// The shader maps camera-world vectors to galactic coordinates with its
+/// 22-degree reference roll. CPU picking uses the exact same transformation.
+fn galaxy_galactic_direction(world: [f64; 3]) -> [f64; 3] {
+    [
+        world[2],
+        -0.3746065934 * world[0] + 0.9271838546 * world[1],
+        -0.9271838546 * world[0] - 0.3746065934 * world[1],
+    ]
+}
+
+/// Only real clicks inside the bounded rendered landmark caps may navigate.
+fn galaxy_pick_target(shown: PanoramaView, point: [f64; 2], size: [f64; 2]) -> Option<u8> {
+    let ray = shown.ray(point, size)?;
+    let q = galaxy_galactic_direction(ray);
+    let mut nearest: Option<(u8, f64)> = None;
+    for (index, direction) in GALAXY_TARGET_DIRECTIONS.iter().enumerate() {
+        let distance2 = (q[0] - direction[0]).powi(2)
+            + (q[1] - direction[1]).powi(2)
+            + (q[2] - direction[2]).powi(2);
+        // Select the visible cloud, not an arbitrary patch of background sky.
+        let radius = GALAXY_TARGET_RADII[index] * 1.65;
+        if distance2 < radius * radius
+            && nearest.is_none_or(|(_, best_distance)| distance2 < best_distance)
+        {
+            nearest = Some((index as u8, distance2));
+        }
+    }
+    nearest.map(|(index, _)| index)
+}
+
+/// Build a camera-to-world rotation which places the selected galactic
+/// direction exactly on the +Z camera axis. No longitude singularity or
+/// latitude clamp appears at the poles.
+fn galaxy_target_orientation(target: u8) -> Option<CelestialRotation> {
+    let q = *GALAXY_TARGET_DIRECTIONS.get(usize::from(target))?;
+    let world = [
+        -0.3746065934 * q[1] - 0.9271838546 * q[2],
+        0.9271838546 * q[1] - 0.3746065934 * q[2],
+        q[0],
+    ];
+    let magnitude = world[0].hypot(world[1]).hypot(world[2]);
+    if !magnitude.is_finite() || magnitude <= 0.0 {
+        return None;
+    }
+    let axis = [-world[1], world[0], 0.0];
+    let angle = (world[2] / magnitude).clamp(-1.0, 1.0).acos();
+    if axis[0].hypot(axis[1]) < 1e-9 {
+        if world[2] >= 0.0 {
+            Some(CelestialRotation::default())
+        } else {
+            CelestialRotation::axis_angle([0.0, 1.0, 0.0], std::f64::consts::PI)
+        }
+    } else {
+        CelestialRotation::axis_angle(axis, angle)
+    }
+}
+
 /// Logarithmic wheel motion is reversible and independent of event grouping.
 /// Requested, admitted and actually presented scales are deliberately separate:
 /// a fast wheel burst must not change hit testing before its pixels are visible.
@@ -93,6 +170,9 @@ struct AstronomySkyDrag {
     view_before_begin: PanoramaView,
     requested_before_begin: Option<PanoramaView>,
     reset_before_begin: bool,
+    origin: [f64; 2],
+    moved: bool,
+    candidate: Option<u8>,
 }
 
 struct AstronomyRelease {
@@ -248,6 +328,7 @@ struct AstronomyProgram {
     celestial_body: Option<glow::UniformLocation>,
     surface_mapped: Option<glow::UniformLocation>,
     cosmic_scientific: Option<glow::UniformLocation>,
+    cosmic_focus_target: Option<glow::UniformLocation>,
 }
 
 impl AstronomyProgram {
@@ -274,6 +355,7 @@ impl AstronomyProgram {
                 celestial_body: gl.get_uniform_location(program, "celestial_body"),
                 surface_mapped: gl.get_uniform_location(program, "surface_mapped"),
                 cosmic_scientific: gl.get_uniform_location(program, "cosmic_scientific"),
+                cosmic_focus_target: gl.get_uniform_location(program, "cosmic_focus_target"),
             }
         }
     }
@@ -297,6 +379,8 @@ struct AstronomyNavigation {
     sky_offset: CelestialRotation,
     sky_release: Option<AstronomyRelease>,
     presented_sky: Option<PanoramaView>,
+    galaxy_overview: Option<PanoramaView>,
+    galaxy_focus: Option<u8>,
 }
 
 impl AstronomyNavigation {
@@ -318,6 +402,8 @@ impl AstronomyNavigation {
         std::mem::swap(&mut self.sky_offset, &mut wallpaper.sky_offset);
         std::mem::swap(&mut self.sky_release, &mut wallpaper.sky_release);
         std::mem::swap(&mut self.presented_sky, &mut wallpaper.presented_sky);
+        std::mem::swap(&mut self.galaxy_overview, &mut wallpaper.galaxy_overview);
+        std::mem::swap(&mut self.galaxy_focus, &mut wallpaper.galaxy_focus);
     }
 
     fn zoom(&self, body: CelestialBody) -> &AstronomyZoom {
@@ -343,6 +429,7 @@ struct AstronomyFrame {
     light: [f32; 3],
     sky: PanoramaView,
     zoom: f32,
+    galaxy_focus: Option<u8>,
 }
 
 #[derive(Default)]
@@ -400,6 +487,8 @@ pub(super) struct AstronomyWallpaper {
     sky_offset: CelestialRotation,
     sky_release: Option<AstronomyRelease>,
     presented_sky: Option<PanoramaView>,
+    galaxy_overview: Option<PanoramaView>,
+    galaxy_focus: Option<u8>,
     interaction_pending: bool,
     last_interaction_frame: Option<Instant>,
     interaction_revision: u64,
@@ -655,6 +744,9 @@ impl AstronomyWallpaper {
             drag.orientation
         } else if let Some(release) = &self.sky_release {
             CelestialRotation::from_matrix(&release.presented)
+        } else if self.galaxy_focus.is_some() {
+            // Deep-sky closeups stay anchored while decorative sky time flows.
+            self.panorama.orientation()
         } else {
             panorama_rotation(unix, self.sky_period).compose(self.sky_offset)
         };
@@ -671,6 +763,8 @@ impl AstronomyWallpaper {
             a.presented_sky = None;
             a.panorama = PanoramaView::default();
             a.requested_panorama = None;
+            a.galaxy_overview = None;
+            a.galaxy_focus = None;
         });
         self.interaction_revision = self.interaction_revision.wrapping_add(1);
     }
@@ -969,6 +1063,9 @@ impl AstronomyWallpaper {
         let Some(gesture) = presented.begin_drag(point, canvas.size.map(f64::from)) else {
             return false;
         };
+        let candidate = (self.canvas_body(index) == CelestialBody::Galaxy)
+            .then(|| galaxy_pick_target(presented, point, canvas.size.map(f64::from)))
+            .flatten();
         self.sky_drag = Some(AstronomySkyDrag {
             group,
             canvas,
@@ -979,6 +1076,9 @@ impl AstronomyWallpaper {
             view_before_begin: self.panorama,
             requested_before_begin: self.requested_panorama,
             reset_before_begin: self.reset_requested,
+            origin: point,
+            moved: false,
+            candidate,
         });
         self.reset_requested = false;
         self.panorama = presented;
@@ -1023,6 +1123,9 @@ impl AstronomyWallpaper {
                 return false;
             };
             if point != drag.pending_point {
+                let delta = [point[0] - drag.origin[0], point[1] - drag.origin[1]];
+                // Latch actual motion: returning to the origin is still a drag.
+                drag.moved |= delta[0] * delta[0] + delta[1] * delta[1] > 36.0;
                 drag.pending_point = point;
                 self.interaction_pending = true;
             }
@@ -1041,23 +1144,68 @@ impl AstronomyWallpaper {
         true
     }
 
+    /// A real short click focuses a deep-sky landmark, preserving the visible
+    /// overview. Drag, pointer-grab failure, scene teardown and power suspension
+    /// never trigger accidental navigation.
+    fn focus_galaxy_target(&mut self, target: u8, unix: f64) -> bool {
+        let (Some(orientation), Some(presented)) =
+            (galaxy_target_orientation(target), self.presented_sky)
+        else {
+            return false;
+        };
+        if self.galaxy_overview.is_none() {
+            self.galaxy_overview = Some(presented);
+        }
+        let mut closeup = presented;
+        closeup.set_orientation(orientation);
+        closeup.set_fov_degrees(
+            (GALAXY_TARGET_RADII[usize::from(target)] * 210.0).clamp(8.0, 20.0) as f32,
+        );
+        self.panorama = closeup;
+        self.requested_panorama = None;
+        self.sky_offset = panorama_rotation(unix, self.sky_period)
+            .inverse()
+            .compose(orientation);
+        self.sky_release = None;
+        self.reset_requested = false;
+        self.galaxy_focus = Some(target);
+        self.interaction_pending = true;
+        true
+    }
+
+    fn end_drag(&mut self, unix: f64) -> bool {
+        self.finish_drag(unix, false)
+    }
+
     /// Resume decorative motion from the released pose while leaving the real
     /// Sun/phase clock untouched, even after a long hold or wall-clock correction.
-    fn end_drag(&mut self, unix: f64) -> bool {
+    fn finish_drag(&mut self, unix: f64, activate_click: bool) -> bool {
         if let Some(drag) = self.sky_drag.take() {
             self.activate_navigation(&drag.group);
+            if activate_click
+                && !drag.moved
+                && let Some(target) = drag.candidate
+            {
+                return self.focus_galaxy_target(target, unix);
+            }
             let orientation = drag
                 .gesture
                 .orientation_at(drag.pending_point)
                 .unwrap_or(drag.orientation);
-            self.sky_release = Some(AstronomyRelease {
-                presented: self
-                    .presented_sky
-                    .map_or(drag.orientation.matrix(), |view| view.matrix()),
-                offset: panorama_rotation(unix, self.sky_period)
-                    .inverse()
-                    .compose(orientation),
-            });
+            if self.galaxy_focus.is_some() {
+                // A focused galaxy is a fixed observer target, not a clock orbit.
+                self.panorama.set_orientation(orientation);
+                self.sky_release = None;
+            } else {
+                self.sky_release = Some(AstronomyRelease {
+                    presented: self
+                        .presented_sky
+                        .map_or(drag.orientation.matrix(), |view| view.matrix()),
+                    offset: panorama_rotation(unix, self.sky_period)
+                        .inverse()
+                        .compose(orientation),
+                });
+            }
             self.interaction_pending = true;
             return true;
         }
@@ -1180,6 +1328,8 @@ impl AstronomyWallpaper {
             self.sky_release = None;
             self.panorama = PanoramaView::default();
             self.requested_panorama = None;
+            self.galaxy_overview = None;
+            self.galaxy_focus = None;
         }
         self.earth_zoom.admit();
         self.moon_zoom.admit();
@@ -1246,6 +1396,22 @@ impl AstronomyWallpaper {
             && self.presented_sky.is_none()
         {
             return false;
+        }
+        // The first secondary click restores the *actual* overview pose and
+        // lens; only a subsequent one requests the legacy complete reset.
+        if self.canvas_body(index) == CelestialBody::Galaxy
+            && let Some(overview) = self.galaxy_overview.take()
+        {
+            self.sky_offset = panorama_rotation(self.sample_unix, self.sky_period)
+                .inverse()
+                .compose(overview.orientation());
+            self.galaxy_focus = None;
+            self.panorama = overview;
+            self.requested_panorama = None;
+            self.sky_release = None;
+            self.interaction_pending = true;
+            self.interaction_revision = self.interaction_revision.wrapping_add(1);
+            return true;
         }
         self.reset_requested = true;
         self.interaction_pending = true;
@@ -1671,6 +1837,9 @@ impl AstronomyWallpaper {
                 light,
                 sky: self.sky_view(self.sample_unix),
                 zoom: self.body_zoom(body).scale(),
+                galaxy_focus: (body == CelestialBody::Galaxy)
+                    .then_some(self.galaxy_focus)
+                    .flatten(),
             });
         }
         self.activate_navigation(&original);
@@ -1844,7 +2013,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn astronomy_end_drag(&mut self) {
         self.astronomy_wallpaper
-            .end_drag(wall_clock_seconds(SystemTime::now()));
+            .finish_drag(wall_clock_seconds(SystemTime::now()), true);
     }
 
     pub(crate) fn astronomy_abort_drag(&mut self) {
@@ -2509,6 +2678,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     &frame.sky.matrix(),
                 );
                 gl.uniform_1_f32(program.panorama_fov.as_ref(), frame.sky.fov_degrees());
+                gl.uniform_1_i32(
+                    program.cosmic_focus_target.as_ref(),
+                    frame.galaxy_focus.map_or(0, |target| i32::from(target) + 1),
+                );
                 let texture = match frame.body {
                     CelestialBody::Earth => a.earth_detail.texture.or(a.texture),
                     CelestialBody::Moon => a.moon_detail.texture.or(a.moon_texture),
@@ -2608,6 +2781,87 @@ mod tests {
         let mut a = draggable_wallpaper();
         a.presented_sky = Some(a.sky_view(a.sample_unix));
         a
+    }
+
+    #[test]
+    fn galaxy_landmark_picking_matches_shader_galactic_coordinates() {
+        for (index, expected) in GALAXY_TARGET_DIRECTIONS.iter().enumerate() {
+            let mut view = PanoramaView::default();
+            view.set_orientation(galaxy_target_orientation(index as u8).unwrap());
+            let ray = view.ray([960.0, 540.0], [1920.0, 1080.0]).unwrap();
+            let galactic = galaxy_galactic_direction(ray);
+            for axis in 0..3 {
+                assert!((galactic[axis] - expected[axis]).abs() < 1e-5);
+            }
+            assert_eq!(
+                galaxy_pick_target(view, [960.0, 540.0], [1920.0, 1080.0]),
+                Some(index as u8)
+            );
+            assert!(galaxy_target_orientation(12).is_none());
+        }
+    }
+
+    #[test]
+    fn galaxy_click_focus_zoom_and_return_preserve_other_outputs() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let now = Instant::now();
+        let left = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        let right = pointer_at(&a.draw_plan[1], 200, [0.0, 0.0]);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let oriented = galaxy_target_orientation(4).unwrap();
+        a.sky_offset = panorama_rotation(a.sample_unix, a.sky_period)
+            .inverse()
+            .compose(oriented);
+        let before = a.material_frames();
+        a.record_presented(&before);
+        assert!(a.begin_drag(left));
+        assert_eq!(a.sky_drag.as_ref().unwrap().candidate, Some(4));
+        assert!(a.finish_drag(a.sample_unix, true));
+        assert_eq!(a.galaxy_focus, Some(4));
+        assert!(a.galaxy_overview.is_some());
+        assert!(a.consume_interaction(now));
+        let focused = a.material_frames();
+        assert!(focused[0].sky.fov_degrees() < before[0].sky.fov_degrees());
+        assert_eq!(focused[1].sky, before[1].sky);
+        a.record_presented(&focused);
+        assert!(a.zoom(left, 1.0));
+        assert!(a.consume_interaction(now + DRAG_FRAME_INTERVAL));
+        let zoomed = a.material_frames();
+        assert!(zoomed[0].sky.fov_degrees() < focused[0].sky.fov_degrees());
+        assert_eq!(zoomed[1].sky, before[1].sky);
+        assert!(a.reset_at(left));
+        assert!(a.galaxy_focus.is_none());
+        assert!(a.galaxy_overview.is_none());
+        let restored = a.material_frames();
+        assert_eq!(restored[0].sky.fov_degrees(), before[0].sky.fov_degrees());
+        assert_eq!(restored[1].sky, before[1].sky);
+        assert!(a.reset_at(right));
+    }
+
+    #[test]
+    fn galaxy_drag_and_refused_grab_do_not_activate_landmarks() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let orientation = galaxy_target_orientation(0).unwrap();
+        a.sky_offset = panorama_rotation(a.sample_unix, a.sky_period)
+            .inverse()
+            .compose(orientation);
+        let frames = a.material_frames();
+        a.record_presented(&frames);
+        let left = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.begin_drag(left));
+        assert_eq!(a.sky_drag.as_ref().unwrap().candidate, Some(0));
+        assert!(a.drag_motion([left[0] + 100.0, left[1] + 70.0]));
+        assert!(a.drag_motion(left));
+        assert!(a.finish_drag(a.sample_unix, true));
+        assert_eq!(a.galaxy_focus, None);
+        let frames = a.material_frames();
+        a.record_presented(&frames);
+        assert!(a.begin_drag(left));
+        a.abort_drag();
+        assert!(a.galaxy_focus.is_none());
     }
 
     fn pointer_at(canvas: &AstronomyDraw, height: u32, point: [f64; 2]) -> [f64; 2] {
