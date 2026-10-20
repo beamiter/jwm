@@ -7808,6 +7808,11 @@ pub(crate) mod keyboard_grab_tests {
         let hidden = overview_window(&mut jwm, 0x995);
         let visible = overview_window(&mut jwm, 0x996);
         jwm.state.clients[hidden].state.is_hidden = true;
+        let mk = jwm.state.sel_mon.unwrap();
+        jwm.state.monitors[mk].set_selected_client_for_current_tag(Some(visible));
+        let monitor_state = jwm.state.monitors[mk].clone();
+        let hidden_state = jwm.state.clients[hidden].clone();
+        let visible_geometry = jwm.state.clients[visible].geometry.clone();
         let monitor = jwm.state.sel_mon;
         for _ in 0..2 {
             jwm.restore_preview(&mut backend, &WMArgEnum::Int(0))
@@ -7818,6 +7823,11 @@ pub(crate) mod keyboard_grab_tests {
             assert_eq!(jwm.state.sel_mon, monitor);
         }
         jwm.close_system_ui(&mut backend);
+        assert_eq!(jwm.state.monitors[mk], monitor_state);
+        assert_eq!(jwm.get_selected_client_key(), Some(visible));
+        assert_eq!(jwm.state.clients[hidden].geometry, hidden_state.geometry);
+        assert_eq!(jwm.state.clients[hidden].state, hidden_state.state);
+        assert_eq!(jwm.state.clients[visible].geometry, visible_geometry);
         assert!(jwm.state.clients[hidden].state.is_hidden);
         assert!(!jwm.state.clients[visible].state.is_hidden);
     }

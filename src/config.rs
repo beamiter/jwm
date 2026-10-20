@@ -3658,15 +3658,19 @@ impl Config {
         let modifiers = self.parse_modifiers(&fallback.modifier);
         let key_sym = self.parse_keysym(&fallback.key)?;
         let occupied = self.key_configs().iter().any(|key| {
-            key.function == "restore_preview"
+            (key.function == "restore_preview" && self.convert_key_config(key).is_some())
                 || (self.parse_modifiers(&key.modifier) == modifiers
                     && self.parse_keysym(&key.key) == Some(key_sym))
         });
         let chord = self.chord_config();
-        let restore_in_chord = chord
-            .bindings
-            .iter()
-            .any(|key| key.function == "restore_preview");
+        // Disabled/invalid leaders and invalid second keys are not reachable.
+        // Keep the legacy fallback available when a stored chord is inactive.
+        let chord_enabled =
+            !chord.leader_key.is_empty() && self.parse_keysym(&chord.leader_key).is_some();
+        let restore_in_chord = chord_enabled
+            && chord.bindings.iter().any(|key| {
+                key.function == "restore_preview" && self.convert_key_config(key).is_some()
+            });
         let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
             && self.parse_keysym(&chord.leader_key) == Some(key_sym);
         (!occupied && !restore_in_chord && !leader_occupied).then_some(fallback)
@@ -9373,6 +9377,58 @@ border_px = 3
         assert!(!key_function_is_repeatable("spawn"));
         assert!(!key_function_is_repeatable("killclient"));
         assert!(!key_function_is_repeatable("take_screenshot"));
+    }
+
+    #[test]
+    fn restore_preview_fallback_respects_reachable_bindings_and_leaders() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "restore_preview");
+        let fallback = Config::default_restore_preview_key();
+        assert!(cfg.restore_preview_fallback_key().is_some());
+        let count = |cfg: &Config| {
+            cfg.get_keys()
+                .iter()
+                .filter(|key| {
+                    key.key_sym == cfg.parse_keysym("n").unwrap()
+                        && key.mask == (Mods::ALT | Mods::CONTROL)
+                })
+                .count()
+        };
+        assert_eq!(count(&cfg), 1);
+
+        // Modifier order does not affect collision detection.
+        let mut custom = fallback.clone();
+        custom.modifier.reverse();
+        custom.function = "minimize".into();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.restore_preview_fallback_key().is_none());
+        assert_eq!(count(&cfg), 1);
+        cfg.inner.keybindings.keys.pop();
+
+        let mut custom = fallback.clone();
+        custom.key = "F9".into();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.restore_preview_fallback_key().is_none());
+        cfg.inner.keybindings.keys.pop();
+
+        cfg.inner.keybindings.chord.leader_modifier = fallback.modifier.clone();
+        cfg.inner.keybindings.chord.leader_key = fallback.key.clone();
+        assert!(cfg.restore_preview_fallback_key().is_none());
+        cfg.inner.keybindings.chord.leader_key = "F9".into();
+        cfg.inner.keybindings.chord.bindings = vec![fallback];
+        assert!(cfg.restore_preview_fallback_key().is_none());
+
+        for leader in ["", "not-a-keysym"] {
+            cfg.inner.keybindings.chord.leader_key = leader.into();
+            assert!(cfg.restore_preview_fallback_key().is_some());
+            assert_eq!(count(&cfg), 1);
+        }
+        cfg.inner.keybindings.chord.leader_key = "F9".into();
+        cfg.inner.keybindings.chord.bindings[0].key = "not-a-keysym".into();
+        assert!(cfg.restore_preview_fallback_key().is_some());
     }
 
     #[test]

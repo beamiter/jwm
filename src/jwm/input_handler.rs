@@ -5480,6 +5480,33 @@ mod tests {
     }
 
     #[test]
+    fn restore_preview_escape_keeps_focus_geometry_and_tags() {
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = crate::core::models::WMClient::new(WindowId::from_raw(0x999));
+        client.mon = Some(monitor);
+        client.state.tags = 2;
+        client.state.is_hidden = true;
+        client.geometry.w = 400;
+        client.geometry.h = 300;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        let monitor_before = jwm.state.monitors[monitor].clone();
+        let client_before = jwm.state.clients[key].clone();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::open_restore_preview(
+            jwm.launcher_window_snapshot(),
+            vec![(0x999, key)],
+        );
+        input.select(crate::backend::common_define::keys::KEY_Escape);
+        jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[monitor], monitor_before);
+        assert_eq!(jwm.state.clients[key].state, client_before.state);
+        assert_eq!(jwm.state.clients[key].geometry, client_before.geometry);
+        assert_eq!(input.grabs.lock().unwrap().last(), Some(&false));
+    }
+
+    #[test]
     fn restore_preview_restores_only_the_selected_window() {
         let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
         let monitor = jwm.state.monitor_order[0];
