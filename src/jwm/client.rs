@@ -7047,14 +7047,22 @@ mod unmanage_minimized_tests {
         assert!(jwm.closed_placements.is_empty());
 
         let while_disabled = manage_window(&mut jwm, &mut backend, 0x9602);
-        jwm.unmanage(&mut backend, Some(while_disabled), true).unwrap();
-        assert!(jwm.closed_placements.is_empty(), "disabled: nothing learned");
+        jwm.unmanage(&mut backend, Some(while_disabled), true)
+            .unwrap();
+        assert!(
+            jwm.closed_placements.is_empty(),
+            "disabled: nothing learned"
+        );
 
         jwm.closed_placements.set_enabled_for_test(true);
         jwm.reconcile_closed_placement_config(true);
-        assert!(jwm.closed_placements.is_empty(), "re-enabled: no stale history");
+        assert!(
+            jwm.closed_placements.is_empty(),
+            "re-enabled: no stale history"
+        );
         let after_reenable = manage_window(&mut jwm, &mut backend, 0x9603);
-        jwm.unmanage(&mut backend, Some(after_reenable), true).unwrap();
+        jwm.unmanage(&mut backend, Some(after_reenable), true)
+            .unwrap();
         assert!(!jwm.closed_placements.is_empty());
     }
     fn restart_fixture() -> (Jwm, ClientSpyBackend, ClientKey) {

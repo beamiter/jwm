@@ -3870,9 +3870,7 @@ impl Config {
         if let Some(fallback) = self.restore_preview_fallback_key()
             && let Some(binding) = self.convert_key_config(&fallback)
         {
-            log::info!(
-                "[config] legacy key list detected; enabling restore preview on Alt+Ctrl+N"
-            );
+            log::info!("[config] legacy key list detected; enabling restore preview on Alt+Ctrl+N");
             keys.push(binding);
         }
         for i in 0..self.tags_length() {
