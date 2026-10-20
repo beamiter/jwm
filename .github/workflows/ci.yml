@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - feat/galaxy-nebula-focus-20261021
   pull_request:
     branches:
       - master
