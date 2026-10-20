@@ -284,3 +284,58 @@ queue.
   guessed by title or class: its pending entry expires and can be retried.
 
 `jwm-tool health` prints compact `minimized` for minimized dock operators.
+
+## Restore ownership and regression checks
+
+A restore is not a workspace undo operation. The client keeps its monitor/tag
+assignment, floating/tiled choice, logical tile order, mode flags and mode-return
+rectangles. Explicit moves and output removal while it is hidden update that
+assignment; restore must not resurrect an obsolete output. Named scratchpads are
+an intentional exception: revealing one places it on the selected monitor/tag.
+
+For tiled clients, the current tag's layout, master count/ratio, gaps and resize
+intentions belong to the workspace. Restore must not overwrite them from a
+minimize-time snapshot, nor convert a tile into a floating window just to replay
+an old rectangle. The geometry is recomputed with the current peers and work
+area. Thus exact historical tiled pixels are not promised after layout changes.
+Other tiles may naturally resize as the restored tile rejoins; an unrelated
+monitor's layout and geometry must remain unchanged. Successful explicit restore
+focuses the restored client and guards against stale pointer-enter focus events.
+
+Shortcut fallback considers only reachable restore actions: a disabled chord,
+an invalid leader or an invalid second key cannot suppress the fallback. An
+explicit assignment occupying Alt+Ctrl+N still wins, even if its action is
+invalid; this does not silently repurpose a user's reserved shortcut.
+
+Audit based on master `c04ac8792f16de6765adc98c2727ece13128b994`:
+
+- Rust X11rb build succeeded. The restore filter passed 172 tests, the window
+  state module passed 64 tests, and the focus/monitor module passed 26 tests
+  (these groups overlap; they are not additive). Regression
+  coverage includes modifier-order conflicts, custom bindings and chord leaders,
+  disabled/invalid chords, Escape cancellation, cross-tag/cross-monitor focus,
+  floating geometry, tile order/current layout preservation, fullscreen return
+  geometry, maximized axes and unmaximize geometry, PiP return geometry, and
+  failed restore rollback.
+- The fullscreen-to-PiP failure-injection test now targets the normal work area
+  restored after leaving fullscreen, rather than the fullscreen work area.
+  The pending-maximize test separately checks the fullscreen-time return slot
+  and the normal work-area refit after exit, including a minimize/reveal between
+  them; its final geometry assertion remains unchanged.
+- `scripts/test-restore-preview-x11.py` exercises the actual default keys,
+  cancellation and cross-tag floating restore in a private Xvfb session. The
+  audit environment had Rust and Xvfb but prohibited AF_UNIX socket creation
+  (`EPERM`); Xvfb could not open a listener. This integration test is **not yet
+  runtime-validated**. Its Python syntax was checked.
+- Wayland, physical multiple monitors, output hotplug/scaling and compositor
+  animation appearance were not exercised. Mock two-output policy tests do not
+  substitute for those checks. Only the X11rb feature profile was compiled.
+
+Reproduce on a Linux host that permits local sockets (Xvfb, xdpyinfo, xdotool and
+xmessage must be installed):
+
+```sh
+cargo test --locked --no-default-features --features backend-x11rb --lib restore -- --test-threads=1
+cargo build --locked --no-default-features --features backend-x11rb --bin jwm --bin jwm-tool
+python3 scripts/test-restore-preview-x11.py
+```

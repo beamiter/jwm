@@ -2141,6 +2141,83 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn restore_preserves_current_layout_and_client_placement_across_tags_and_monitors() {
+        for floating in [false, true] {
+            let mut jwm = empty_jwm();
+            jwm.add_monitor(output(1, 0));
+            jwm.add_monitor(output(2, 1200));
+            let source = jwm.state.monitor_order[0];
+            let target = jwm.state.monitor_order[1];
+            jwm.state.sel_mon = Some(target);
+            let mut backend = ScratchpadBackend::new();
+            jwm.view(&mut backend, &WMArgEnum::UInt(2)).unwrap();
+            let mut clients = Vec::new();
+            for raw in [0x731, 0x732] {
+                let mut client = WMClient::new(WindowId::from_raw(raw));
+                client.mon = Some(target);
+                client.state.tags = 2;
+                client.state.is_floating = floating;
+                client.size_hints.hints_valid = true;
+                client.geometry.x = 1300;
+                client.geometry.y = 100;
+                client.geometry.w = 500;
+                client.geometry.h = 360;
+                let key = jwm.insert_client(client);
+                jwm.attach_to_monitor(key, target);
+                clients.push(key);
+            }
+            let key = clients[0];
+            jwm.focus(&mut backend, Some(key)).unwrap();
+            jwm.arrange(&mut backend, Some(target));
+            let geometry = |jwm: &Jwm| {
+                let g = &jwm.state.clients[key].geometry;
+                Rect::new(g.x, g.y, g.w, g.h)
+            };
+            let before = geometry(&jwm);
+            let order = jwm.state.monitor_clients[target].clone();
+            jwm.set_client_minimized(&mut backend, key, true).unwrap();
+            // Changes made while hidden belong to the workspace, not the
+            // minimized window. Restoring must not undo them for its peers.
+            jwm.state.monitors[target].lt = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+            if let Some(p) = jwm.state.monitors[target].pertag.as_mut() {
+                p.lts[2] = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+            }
+            jwm.state.monitors[target].layout.m_fact = 0.73;
+            jwm.state.monitors[target].update_current_tag_layout_params();
+            let layout = jwm.state.monitors[target].layout.clone();
+            jwm.view(&mut backend, &WMArgEnum::UInt(4)).unwrap();
+            jwm.switch_to_monitor(&mut backend, source).unwrap();
+            let source_state = jwm.state.monitors[source].clone();
+            let win = jwm.state.clients[key].win;
+            assert!(jwm.reveal_and_focus(&mut backend, win).unwrap());
+            assert_eq!(jwm.state.sel_mon, Some(target));
+            assert_eq!(jwm.get_selected_client_key(), Some(key));
+            assert_eq!(jwm.state.clients[key].mon, Some(target));
+            assert_eq!(jwm.state.clients[key].state.tags, 2);
+            assert_eq!(jwm.state.clients[key].state.is_floating, floating);
+            assert!(!jwm.state.clients[key].state.is_hidden);
+            assert_eq!(jwm.state.monitors[target].get_active_tags(), 2);
+            assert_eq!(jwm.state.monitors[target].layout, layout);
+            assert_eq!(
+                *jwm.state.monitors[target].lt,
+                crate::core::layout::LayoutEnum::TILE
+            );
+            assert_eq!(jwm.state.monitor_clients[target], order);
+            assert_eq!(jwm.state.monitors[source], source_state);
+            if floating {
+                assert_eq!(geometry(&jwm), before);
+            } else {
+                // The result must already be the current layout's geometry,
+                // not a one-frame replay of the old window rectangle.
+                let restored = geometry(&jwm);
+                jwm.arrange(&mut backend, Some(target));
+                assert_eq!(geometry(&jwm), restored);
+                assert_ne!(restored, before);
+            }
+        }
+    }
+
+    #[test]
     fn failed_cross_monitor_restore_returns_to_the_original_monitor_and_tag() {
         let mut jwm = empty_jwm();
         jwm.add_monitor(output(1, 0));

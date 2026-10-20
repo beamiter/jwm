@@ -3724,7 +3724,9 @@ mod tests {
                         .fail_sticky_on
                         .store(true, Ordering::Relaxed),
                     "configure" => {
-                        let work = jwm.monitor_work_area(monitor).expect("monitor work area");
+                        // PiP is configured after leaving fullscreen, when the
+                        // normal bar/work area has been restored.
+                        let work = area;
                         *backend
                             .window_ops
                             .fail_configure_size
@@ -5966,6 +5968,53 @@ mod tests {
     }
 
     #[test]
+    fn minimize_restore_preserves_maximize_axes_and_unmaximize_geometry() {
+        for axes in [MAX_VERT, MAX_HORZ, MAX_BOTH] {
+            let mut backend = MinimizeSpyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let source = Rect::new(120, 100, 777, 555);
+            let (_, key) =
+                add_mode_client(&mut jwm, WindowId::from_raw(0x5a71), source, true, false);
+            jwm.set_client_maximized(&mut backend, key, axes, MaximizeOrigin::Client)
+                .unwrap();
+            let maximized = client_rect(&jwm, key);
+            jwm.set_client_minimized(&mut backend, key, true).unwrap();
+            let win = jwm.state.clients[key].win;
+            assert!(jwm.reveal_and_focus(&mut backend, win).unwrap());
+            assert_eq!(jwm.get_selected_client_key(), Some(key));
+            assert_eq!(jwm.state.clients[key].state.maximized_axes(), axes);
+            assert_eq!(client_rect(&jwm, key), maximized);
+            assert_eq!(
+                jwm.state.clients[key].geometry.maximize_restore_rect,
+                Some(source)
+            );
+            jwm.set_client_maximized(&mut backend, key, MAX_NONE, MaximizeOrigin::Client)
+                .unwrap();
+            assert_eq!(client_rect(&jwm, key), source);
+        }
+    }
+
+    #[test]
+    fn minimize_restore_preserves_pip_and_its_return_geometry() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = Rect::new(120, 100, 777, 555);
+        let (_, key) = add_mode_client(&mut jwm, WindowId::from_raw(0x5a72), source, true, false);
+        jwm.set_client_pip(&mut backend, key, true).unwrap();
+        let pip = client_rect(&jwm, key);
+        jwm.set_client_minimized(&mut backend, key, true).unwrap();
+        let win = jwm.state.clients[key].win;
+        assert!(jwm.reveal_and_focus(&mut backend, win).unwrap());
+        assert!(jwm.state.clients[key].state.is_pip);
+        assert!(jwm.state.clients[key].state.is_sticky);
+        assert_eq!(client_rect(&jwm, key), pip);
+        jwm.set_client_pip(&mut backend, key, false).unwrap();
+        assert!(!jwm.state.clients[key].state.is_sticky);
+        assert!(jwm.state.clients[key].state.is_floating);
+        assert_eq!(client_rect(&jwm, key), source);
+    }
+
+    #[test]
     fn maximize_axes_fill_the_work_area_per_axis_and_restore_exactly() {
         let mut backend = MinimizeSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
@@ -6183,12 +6232,26 @@ mod tests {
         assert_eq!(client.state.maximized_axes(), MAX_BOTH);
         assert_eq!(client.geometry.maximize_restore_rect, Some(previous_old));
         assert_eq!(client_rect(&jwm, client_key), monitor_rect);
-        assert_eq!(old_rect_of(&jwm, client_key), target);
+        // While fullscreen hides the bar, the pending return slot is based
+        // on today's work area. Leaving fullscreen must refit it to the normal
+        // area (asserted below), without changing the live fullscreen rect.
+        let pending = maximize_target(
+            previous_old,
+            jwm.maximize_work_area(monitor).unwrap(),
+            MAX_BOTH,
+            old_border_w,
+        );
+        assert_eq!(old_rect_of(&jwm, client_key), pending);
         assert_eq!(
             window_configures(&backend, window).last().copied(),
             Some(configure_of(window, monitor_rect, 0))
         );
 
+        jwm.set_client_minimized(&mut backend, client_key, true)
+            .unwrap();
+        assert!(jwm.reveal_and_focus(&mut backend, window).unwrap());
+        assert!(jwm.state.clients[client_key].state.is_fullscreen);
+        assert_eq!(client_rect(&jwm, client_key), monitor_rect);
         jwm.setfullscreen(&mut backend, client_key, false).unwrap();
         assert_eq!(client_rect(&jwm, client_key), target);
         assert_eq!(
