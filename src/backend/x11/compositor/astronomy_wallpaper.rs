@@ -2856,7 +2856,8 @@ mod tests {
         assert!(a.drag_motion(left));
         assert!(a.finish_drag(a.sample_unix, true));
         assert_eq!(a.galaxy_focus, None);
-        a.record_presented(&a.material_frames());
+        let frames = a.material_frames();
+        a.record_presented(&frames);
         assert!(a.begin_drag(left));
         a.abort_drag();
         assert!(a.galaxy_focus.is_none());
