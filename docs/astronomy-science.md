@@ -25,7 +25,7 @@ The material setting and the orbital model are independent:
 
 | Setting | Scientific/date-derived option | Illustration option |
 | --- | --- | --- |
-| `wallpaper_astronomy_presentation` | `"scientific"`: observed maps with analytic optical display layers and subdued fallback materials; no generated terrain, named storms or procedural nebula artwork | `"illustrative"`: optional artistic material detail, nebulae and enhanced lighting |
+| `wallpaper_astronomy_presentation` | `"scientific"`: observed maps with analytic optical display layers and subdued fallback materials; no generated planetary terrain or named storms; nebula volume depth is a visual model | `"illustrative"`: optional artistic material detail, nebulae and enhanced lighting |
 | `wallpaper_solar_orbit_mode` | `"ephemeris"`: offline JPL fitted Keplerian positions for the selected date | `"illustrative"`: the legacy animated orbital tour |
 
 Both presentations retain finite map resolution and enlarged display bodies.
@@ -343,11 +343,14 @@ The catalogue atlas provides a full surrounding sky with recognizable stellar
 patterns. Conventional constellation stick figures are not official IAU
 constellation boundaries. The Milky Way scene places twelve observed telescope
 fields at published directions and approximate distances, with the source image
-north angles and angular extents. Both modes use those observations rather than
-procedural cloud sketches. Other scenes can retain illustrative sky decoration.
-The fields are 3D image planes, not reconstructed gas volumes; the star catalogue
-still has no per-star distance or parallax. This is not a measured reconstruction
-of the whole Milky Way or a prediction of the changing sky above a user's horizon.
+north angles and angular extents. Both modes use those observations for source
+field geometry and broad colour references. Gas morphology, volumetric depth, turbulence, emission and dust
+absorption are independent three-dimensional visual models. The
+interactive close-up camera orbits and dollies through that 3D field. These
+internal structures and the schematic Milky Way disc are visual models, not
+measured tomography. Other scenes retain their existing 3D sphere/ring geometry.
+The distant star catalogue still has no per-star distance or parallax. This is
+not a measured reconstruction of the whole Milky Way or a prediction of the changing sky above a user's horizon.
 See [observed field sources](celestial-explorer.md#sky-catalogue-and-nebulae).
 
 Sources, image provenance and regression references were checked on

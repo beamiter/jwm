@@ -108,7 +108,9 @@ impl Jwm {
     fn finish_wallpaper_drag(&mut self, backend: &mut dyn Backend, released: bool) {
         if let Some(drag) = self.wallpaper_drag.take() {
             match drag.kind {
-                WallpaperDragKind::Astronomy => backend.compositor_astronomy_end_drag(),
+                WallpaperDragKind::Astronomy => {
+                    backend.compositor_astronomy_end_drag(released && !drag.moved);
+                }
                 WallpaperDragKind::SolarSystem => {
                     backend.compositor_solar_system_end_drag(released && !drag.moved);
                 }

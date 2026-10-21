@@ -249,10 +249,15 @@ for es in (False,True):
   if body_id!=10:assert max(output.getpixel((W//2,H//2)))>8,('black planet',name)
   catalogue_images[body_id]=output
   catalogue_frames.append({'scene':name,'body_id':body_id,'file':filename,'observed_surface':body_id in catalogue_textures,'center_rgb':output.getpixel((W//2,H//2))})
- scientific_blank=catalogue_image(10,sky=False)
+ # The Milky Way now has an explicit 3D gas/disc model even without the
+ # catalogue texture. Check the no-invented-stars policy on plain sky outside
+ # a body, independently of that intentionally modelled galactic structure.
+ scientific_blank=catalogue_image(1,sky=False).crop((0,0,W//8,H//8))
  assert all(low==high for low,high in scientific_blank.getextrema()),'scientific mode fabricated a star catalogue'
+ scientific_galaxy=catalogue_image(10,sky=False)
+ assert any(low!=high for low,high in scientific_galaxy.getextrema()),'3D galactic density disappeared without the sky texture'
  illustrative_blank=catalogue_image(10,scientific=False,sky=False)
- assert ImageChops.difference(scientific_blank,illustrative_blank).getbbox() is not None,'illustrative sky fallback disappeared'
+ assert ImageChops.difference(scientific_galaxy,illustrative_blank).getbbox() is not None,'illustrative sky fallback disappeared'
  neutral_a=catalogue_image(5,mapped=False,longitude=0)
  neutral_b=catalogue_image(5,mapped=False,longitude=91)
  assert max(high for _,high in ImageChops.difference(neutral_a,neutral_b).getextrema())<=1,'scientific fallback invented cloud geography'

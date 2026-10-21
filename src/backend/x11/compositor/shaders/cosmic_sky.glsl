@@ -5,8 +5,9 @@
 // Old opaque sky JPEGs naturally have no figure overlay.
 const float COSMIC_PI = 3.141592653589793;
 const float COSMIC_TAU = 6.283185307179586;
-// Zero preserves legacy diagnostic probes. Production scientific mode sets 1:
-// an observed catalogue may be shown; invented stars/nebula morphology may not.
+// Zero preserves legacy diagnostic probes. Production scientific mode sets 1
+// to suppress invented sky-sphere landmarks. The local 3D volumes below use
+// observed catalogue positions with explicitly illustrative internal geometry.
 uniform int cosmic_scientific;
 
 // One fixed, right-handed framing in every mode. Camera-forward initially
@@ -180,13 +181,211 @@ vec3 cosmic_sky(vec3 world, vec3 world_dx, vec3 world_dy, bool mapped) {
 // JWM_DEEP_SKY_CATALOG_INCLUDE
 uniform sampler2D deep_sky_map;
 uniform bool deep_sky_mapped;
+uniform float deep_sky_locator_radius;
+uniform mat3 nebula_orbit;
+uniform float nebula_distance;
+uniform float nebula_blend;
 
-// Telescope image planes use real heliocentric XYZ and physical field sizes.
-// The image's WCS fixes its north angle; selecting it changes only the camera.
+// Continuous model-space gas, dust and ionization. These are illustrative
+// three-dimensional structures, not a recovered gas distribution. The source
+// images only supply a colour palette; no photograph is extruded along an axis.
+vec4 cosmic_nebula_field(vec3 q, int target) {
+    vec3 seed=vec3(float(target)*7.13+3.0,19.3,float(target)*3.71);
+    vec3 warp=q+0.10*sin(q.yzx*5.0+seed)+0.06*sin(q.zxy*9.0+seed.yzx);
+    float coarse=cosmic_noise(warp*3.7+seed);
+    float middle=cosmic_noise(warp*9.1+seed.zxy);
+    float fine=cosmic_noise(warp*22.3+seed.yzx);
+    float cloud=0.56*coarse+0.29*middle+0.15*fine;
+    float filaments=pow(1.0-abs(middle*2.0-1.0),5.0);
+    vec3 lobe_a=(q-vec3(-0.24,-0.06,0.12))/vec3(0.65,0.80,0.64);
+    vec3 lobe_b=(q-vec3(0.35,0.22,-0.18))/vec3(0.65,0.52,0.64);
+    vec3 lobe_c=(q-vec3(0.08,-0.42,-0.13))/vec3(0.54,0.57,0.76);
+    float envelope=max(exp(-dot(lobe_a,lobe_a)*1.3),
+                       max(exp(-dot(lobe_b,lobe_b)*1.7),exp(-dot(lobe_c,lobe_c)*1.4)));
+    float gas=envelope*(0.018+4.2*pow(smoothstep(0.36,0.75,cloud+envelope*0.10),2.7));
+    float dust=envelope*smoothstep(0.46,0.70,coarse*0.65+fine*0.35)*2.2;
+    vec3 source=vec3(-0.20,0.10,0.16);
+    float ionization=exp(-dot(q-source,q-source)*4.5);
+
+    if (target == 4 || target == 5) {
+        // A stellar bulge plus a warped spiral disc, with its own finite
+        // thickness: orbiting sees a thin dusty edge and the opposite arms.
+        float radius=length(q.xy);
+        float z=q.z-0.055*sin(q.x*4.0+q.y*2.0);
+        float disc=exp(-z*z/(0.009+radius*radius*0.012))*exp(-radius*radius*2.4);
+        float angle=dot(q.xy,q.xy) > 1e-10 ? atan(q.y,q.x) : 0.0;
+        float arms=pow(0.5+0.5*cos(angle*(target==4 ? 2.0 : 3.0)-radius*13.0+coarse*1.4),3.0);
+        float bulge=exp(-dot(q/vec3(0.28,0.28,0.20),q/vec3(0.28,0.28,0.20))*1.5);
+        gas=disc*(0.16+arms*2.6)*(0.25+middle*1.4)*(0.65+filaments*0.5)+bulge*2.2;
+        dust=disc*pow(1.0-arms,3.0)*(0.5+middle)*1.7;
+        ionization=clamp(bulge+arms*0.25,0.0,1.0);
+    } else if (target == 9 || target == 11) {
+        // Closed, corrugated expanding shells, rather than a luminous image
+        // ring: the front/back wall and side rim remain separate in space.
+        float radius=length(q*vec3(1.0,1.0,target==9 ? 1.12 : 0.96));
+        float shell=exp(-pow((radius-0.68+(coarse-0.5)*0.12)/0.075,2.0));
+        float equator=target==9 ? 0.32+0.68*exp(-q.z*q.z*5.0) : 1.0;
+        gas=shell*equator*(0.35+cloud*1.7)+envelope*0.035+0.22*exp(-radius*radius*7.0);
+        dust=shell*smoothstep(0.48,0.72,middle)*0.65;
+        ionization=exp(-radius*radius*4.5);
+    } else if (target == 7 || target == 8) {
+        // Turbulent shock surfaces make filaments with different depths,
+        // visible as parallax and changing occlusion through a full orbit.
+        float radius=length(q*vec3(1.0,0.91,1.08));
+        float shock=exp(-pow((radius-0.70+(coarse-0.5)*0.21)/0.065,2.0));
+        float strands=0.2+1.7*pow(1.0-abs(middle*2.0-1.0),7.0);
+        gas=shock*strands*(target==7 ? smoothstep(-0.65,0.25,q.x+q.z*0.65) : 1.0)
+            +envelope*(target==8 ? 0.15 : 0.025);
+        dust=shock*smoothstep(0.56,0.76,cloud)*0.8;
+    } else if (target == 3 || target == 10) {
+        // Dust pillars are actual tapered 3D columns inside emissive gas.
+        // Shape is suggestive, not a claim to reconstruct the observed pillars.
+        float pillars=0.0;
+        for (int column=0; column<3; ++column) {
+            float x=(float(column)-1.0)*0.30+0.07*sin(q.y*5.0+float(column));
+            vec2 cross_section=(q.xz-vec2(x,float(column-1)*0.13))/vec2(0.115,0.19);
+            pillars+=exp(-dot(cross_section,cross_section)*1.8)
+                     *(1.0-smoothstep(0.05+float(column)*0.12,0.25+float(column)*0.12,q.y));
+        }
+        dust+=pillars*(0.9+cloud)*3.0;
+        gas*=0.8+0.45*filaments;
+    } else {
+        // Offset ionized cavities, torn edges and fine ridges form cloud
+        // complexes without a rectangular support or one preferred view.
+        float cavity=1.0-0.72*exp(-dot((q-source)*vec3(1.5,1.0,1.4),(q-source)*vec3(1.5,1.0,1.4))*13.0);
+        gas*=cavity*(0.75+filaments*0.5);
+    }
+    float boundary=(1.0-smoothstep(0.69,1.0,dot(q,q)))
+                  *smoothstep(0.08,0.46,envelope);
+    return vec4(gas,dust,ionization,filaments)*vec4(boundary,boundary,1.0,1.0);
+}
+
+vec3 cosmic_nebula_palette(int target, vec2 uv) {
+    if (!deep_sky_mapped) return vec3(0.026,0.026,0.032);
+    vec4 rect=DEEP_SKY_ATLAS_RECT[target];
+    float credit_top=(DEEP_SKY_CREDIT_RECT[target].y-rect.y)/rect.w;
+    uv.y*=max(0.1,credit_top-0.04);
+    // Broad colour swatches exclude both stellar point sources and all credit
+    // lettering. Palette samples never depend on camera or model depth.
+    vec3 value=textureLod(deep_sky_map,rect.xy+uv*rect.zw,5.0).rgb;
+    vec3 linear=value*(value*(value*0.305306011+0.682171111)+0.012522878);
+    float luminance=dot(linear,vec3(0.2126,0.7152,0.0722));
+    return linear/(0.025+luminance)*0.16;
+}
+
+// Integrate a soft ellipsoidal volume with independent gas emission and dust
+// extinction. Stable, ray-aligned steps need no frame-dependent jitter, so the
+// wallpaper rests without grain flicker when the pointer stops moving.
+vec3 cosmic_nebula_integrate(vec3 origin, vec3 ray, int target, vec3 background) {
+    float ratio=clamp(DEEP_SKY_HALF_SIZE_LY[target].x/DEEP_SKY_HALF_SIZE_LY[target].y,0.12,6.0);
+    vec3 extent=vec3(ratio,1.0,0.78);
+    vec3 scaled_origin=origin/extent, scaled_ray=ray/extent;
+    float speed2=dot(scaled_ray,scaled_ray);
+    // Closest-approach form avoids subtracting the squares of catalogue
+    // distances when rendering a physically tiny nebula in the overview.
+    float closest_t=-dot(scaled_origin,scaled_ray)/speed2;
+    vec3 closest=scaled_origin+scaled_ray*closest_t;
+    float half_interval2=(1.0-dot(closest,closest))/speed2;
+    if (half_interval2 <= 0.0) return background*0.15;
+    float half_interval=sqrt(half_interval2);
+    float near_t=max(0.0,closest_t-half_interval), far_t=closest_t+half_interval;
+    if (far_t <= near_t) return background*0.15;
+    vec3 warm=cosmic_nebula_palette(target,vec2(0.32,0.38));
+    vec3 cool=cosmic_nebula_palette(target,vec2(0.65,0.58));
+    vec3 middle=cosmic_nebula_palette(target,vec2(0.51,0.23));
+    if (deep_sky_mapped) {
+        // Observed broad-band colours mix with bounded emission/reflection
+        // palettes to retain distinct gas phases after a complete 3D orbit.
+        vec3 warm_phase=vec3(0.22,0.035,0.018), cool_phase=vec3(0.015,0.115,0.20);
+        if (target==2 || target==3 || target==10) warm_phase=vec3(0.20,0.105,0.035);
+        if (target==9 || target==11) cool_phase=vec3(0.020,0.17,0.18);
+        if (target==4 || target==5) warm_phase=vec3(0.20,0.14,0.075);
+        warm=mix(warm_phase,warm,0.38);
+        cool=mix(cool_phase,cool,0.38);
+    }
+    float step_size=(far_t-near_t)/32.0;
+    float transmission=1.0;
+    vec3 emission=vec3(0.0);
+    for (int sample_index=0; sample_index<32; ++sample_index) {
+        vec3 p=origin+ray*(near_t+(float(sample_index)+0.5)*step_size);
+        vec3 q=p/extent;
+        vec4 field=cosmic_nebula_field(q,target);
+        float extinction=field.x*1.9+field.y*3.2;
+        float opacity=1.0-exp(-extinction*step_size);
+        vec3 tint=mix(warm,cool,smoothstep(0.15,0.82,field.z));
+        tint=mix(tint,middle,field.w*0.23);
+        // Blue light from embedded young stars scatters off the gas, while
+        // colder foreground dust absorbs it independently of source colour.
+        vec3 illumination=vec3(0.40)+field.z*vec3(1.10,1.60,2.40);
+        if (target==4 || target==5) {
+            tint=mix(cool,warm,smoothstep(0.04,0.55,field.z));
+            illumination=mix(vec3(0.85,1.15,1.65),vec3(1.95,1.45,0.85),field.z);
+        }
+        float albedo=field.x/max(extinction,0.0001);
+        vec3 light=tint*illumination*albedo*2.8;
+        emission+=transmission*opacity*light;
+        if (target!=4 && target!=5 && deep_sky_mapped) {
+            // Compact model-space sources are embedded at different depths;
+            // front dust absorbs their glow as the camera passes behind it.
+            vec3 star_a=q-vec3(-0.20,0.10,0.16);
+            vec3 star_b=q-vec3(0.18,-0.14,-0.21);
+            float star=exp(-dot(star_a,star_a)*520.0)
+                      +0.55*exp(-dot(star_b,star_b)*680.0);
+            emission+=transmission*vec3(0.30,0.48,0.75)*star*step_size*9.0;
+        }
+        transmission*=1.0-opacity;
+        if (transmission < 0.012) break;
+    }
+    return emission+background*0.15*transmission;
+}
+
+vec3 cosmic_nebula_volume(vec2 screen, int target, vec3 background) {
+    vec3 origin=nebula_orbit*vec3(0.0,0.0,max(nebula_distance,0.7));
+    vec3 ray=normalize(nebula_orbit*vec3(screen*0.932615316,-1.0));
+    return cosmic_nebula_integrate(origin,ray,target,background);
+}
+
+// Preserve the original baked image credit as a readable, camera-independent
+// strip; letters never become luminous streaks inside the gas model.
+vec3 cosmic_nebula_credit(vec2 pixel, vec2 size, int target, vec3 color) {
+    if (!deep_sky_mapped) return color;
+    vec4 rect=DEEP_SKY_CREDIT_RECT[target];
+    vec2 native_size=rect.zw*vec2(textureSize(deep_sky_map,0));
+    float scale=min(1.0,size.x*0.88/native_size.x);
+    vec2 credit_size=native_size*scale;
+    vec2 local=(pixel-vec2((size.x-credit_size.x)*0.5,12.0))/credit_size;
+    if (all(greaterThanEqual(local,vec2(0.0))) && all(lessThanEqual(local,vec2(1.0)))) {
+        vec3 encoded=textureLod(deep_sky_map,rect.xy+vec2(local.x,1.0-local.y)*rect.zw,0.0).rgb;
+        vec3 linear=encoded*(encoded*(encoded*0.305306011+0.682171111)+0.012522878);
+        return mix(color,linear*0.65,nebula_blend);
+    }
+    return color;
+}
+
+// Schematic galactic disc and dust arms in a genuine spatial density field.
+// The distant star catalogue remains the skybox material. Normalized geometry
+// is deliberately not presented as a measured map of Milky Way gas.
+vec3 cosmic_galaxy_volume(vec3 q) {
+    vec3 light=vec3(0.0);
+    float transmission=1.0;
+    for (int i=0; i<12; ++i) {
+        vec3 p=vec3(-0.58,0.0,0.0)+q*((float(i)+0.5)*0.16);
+        float radius=length(p.xz);
+        float disc=exp(-p.y*p.y*700.0-radius*radius*2.5);
+        float arms=0.5+0.5*cos(atan(p.z,p.x)*4.0-radius*17.0);
+        float opacity=disc*(0.015+0.045*arms);
+        light+=transmission*opacity*mix(vec3(0.035,0.048,0.080),vec3(0.11,0.075,0.052),exp(-radius*radius*12.0));
+        transmission*=1.0-opacity;
+    }
+    return light;
+}
+
+// Volume centres use heliocentric XYZ and observed projected field sizes.
+// WCS fixes north; model depth is independent of source distance uncertainty.
 vec3 cosmic_deep_sky(vec3 world, vec3 world_dx, vec3 world_dy, vec3 background) {
     vec3 q=cosmic_galactic(world), dx=cosmic_galactic(world_dx), dy=cosmic_galactic(world_dy);
     float footprint=max(max(length(dx),length(dy)),1e-10);
-    vec3 color=cosmic_focus_target == 0 ? background : background*0.025;
+    vec3 color=background+cosmic_galaxy_volume(q)*(1.0-nebula_blend);
     for (int i=0; i<DEEP_SKY_COUNT; ++i) {
         if (cosmic_focus_target != 0 && cosmic_focus_target != i+1) continue;
         vec3 position=DEEP_SKY_POSITION_LY[i];
@@ -198,24 +397,19 @@ vec3 cosmic_deep_sky(vec3 world, vec3 world_dx, vec3 world_dy, vec3 background) 
         vec2 extent=2.0*DEEP_SKY_HALF_SIZE_LY[i]/distance_ly;
         vec2 uv=0.5+tangent/(extent*depth);
         if (deep_sky_mapped && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)))) {
-            vec2 tx=vec2(dot(dx,DEEP_SKY_RIGHT[i]),-dot(dx,DEEP_SKY_UP[i]));
-            vec2 ty=vec2(dot(dy,DEEP_SKY_RIGHT[i]),-dot(dy,DEEP_SKY_UP[i]));
-            vec2 uv_dx=(tx*depth-tangent*dot(dx,direction))/(extent*depth*depth);
-            vec2 uv_dy=(ty*depth-tangent*dot(dy,direction))/(extent*depth*depth);
-            vec4 rect=DEEP_SKY_ATLAS_RECT[i];
-            vec3 e=textureGrad(deep_sky_map,rect.xy+uv*rect.zw,uv_dx*rect.zw,uv_dy*rect.zw).rgb;
-            vec3 linear=e*(e*(e*0.305306011+0.682171111)+0.012522878);
-            vec2 edge=min(uv,1.0-uv);
-            float coverage=smoothstep(0.0,0.025,min(edge.x,edge.y));
-            color=mix(color,linear,coverage);
+            float units=DEEP_SKY_HALF_SIZE_LY[i].y;
+            vec3 local_origin=vec3(0.0,0.0,distance_ly/units);
+            vec3 local_ray=vec3(tangent.x,-tangent.y,-depth);
+            color=cosmic_nebula_integrate(local_origin,local_ray,i,color);
         }
         // Observed fields can be subpixel in a wide view. A quiet screen-sized
         // locator makes the real position discoverable without enlarging gas.
-        if (cosmic_focus_target == 0) {
+        if (deep_sky_locator_radius >= 0.0 && (cosmic_focus_target == 0 || nebula_blend < 1.0)) {
             float pixels=length(q-direction)/footprint;
-            float ring=1.0-smoothstep(0.65,1.65,abs(pixels-5.5));
+            float radius=max(deep_sky_locator_radius,5.5);
+            float ring=1.0-smoothstep(0.65,1.65,abs(pixels-radius));
             float centre=1.0-smoothstep(0.6,1.4,pixels);
-            color+=vec3(0.025,0.12,0.18)*(ring*0.65+centre*0.4);
+            color+=vec3(0.025,0.12,0.18)*(ring*0.65+centre*0.4)*(1.0-nebula_blend);
         }
     }
     return color;

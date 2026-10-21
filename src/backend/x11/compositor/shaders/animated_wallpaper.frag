@@ -106,8 +106,16 @@ vec3 galaxy_background(vec2 pixel) {
     if (panorama_enabled != 0) {
         vec3 dx,dy;
         vec3 ray = panorama_ray(pixel,dx,dy);
-        vec3 color = cosmic_sky_background(ray,dx,dy,sky_enabled,celestial_body == 12);
-        if (celestial_body == 12) color = cosmic_deep_sky(ray,dx,dy,color);
+        vec3 color = cosmic_sky_background(ray,dx,dy,sky_enabled,celestial_body == 11);
+        if (celestial_body == 11) {
+            vec3 background = color;
+            if (nebula_blend < 1.0) color = cosmic_deep_sky(ray,dx,dy,color);
+            if (cosmic_focus_target > 0 && nebula_blend > 0.0) {
+                vec3 volume = cosmic_nebula_volume((pixel-resolution*0.5)/max(resolution.y,1.0),cosmic_focus_target-1,background);
+                color = mix(color,volume,nebula_blend);
+                color = cosmic_nebula_credit(pixel,resolution,cosmic_focus_target-1,color);
+            }
+        }
         return pow(max(color,vec3(0.0)),vec3(1.0/2.2));
     }
     bool moving = dot(sky_rotation, sky_rotation) > 0.5;

@@ -2894,7 +2894,7 @@ mod tests {
         Begin(f64, f64),
         Motion(f64, f64),
         Abort,
-        End,
+        End(bool),
     }
 
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3059,10 +3059,11 @@ mod tests {
             self.astronomy_ready && self.astronomy_active
         }
 
-        fn compositor_astronomy_end_drag(&mut self) {
+        fn compositor_astronomy_end_drag(&mut self, activate_click: bool) {
             if self.astronomy_active {
                 self.astronomy_active = false;
-                self.astronomy_gestures.push(AstronomyGestureEvent::End);
+                self.astronomy_gestures
+                    .push(AstronomyGestureEvent::End(activate_click));
             }
         }
 
@@ -8154,7 +8155,7 @@ mod tests {
                 Begin(800.25, 500.5),
                 Motion(820.5, 540.25),
                 Motion(900.75, 480.5),
-                End,
+                End(false),
             ]
         );
         assert_eq!(jwm.last_mouse_root, (900.75, 480.5));
@@ -8184,7 +8185,7 @@ mod tests {
         capture_press(&mut jwm, &mut backend, 800.0, 500.0);
         astronomy_motion(&mut jwm, &mut backend, 800.0, 500.0);
         capture_release(&mut jwm, &mut backend, 800.0, 500.0);
-        assert_eq!(backend.astronomy_gestures, [Begin(800.0, 500.0), End]);
+        assert_eq!(backend.astronomy_gestures, [Begin(800.0, 500.0), End(true)]);
         assert_eq!(
             backend
                 .input_ops
@@ -8192,6 +8193,69 @@ mod tests {
                 .load(AtomicOrdering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn astronomy_target_activation_requires_a_natural_release_within_the_whole_gesture_slop() {
+        use AstronomyGestureEvent::*;
+        for (motions, release, activate) in [
+            (vec![], (800.0, 500.0), true),
+            (vec![(802.0, 501.0)], (803.0, 502.0), true),
+            (vec![], (804.0, 500.0), true),
+            (vec![], (804.01, 500.0), false),
+            (vec![(850.0, 510.0)], (800.0, 500.0), false),
+            (vec![(803.0, 503.0)], (800.0, 500.0), false),
+        ] {
+            let (mut jwm, mut backend) = astronomy_input_fixture();
+            capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+            for (x, y) in motions {
+                astronomy_motion(&mut jwm, &mut backend, x, y);
+            }
+            capture_release(&mut jwm, &mut backend, release.0, release.1);
+            assert_eq!(
+                backend.astronomy_gestures.last(),
+                Some(&End(activate)),
+                "release {release:?}"
+            );
+            assert!(!backend.astronomy_active);
+            assert!(jwm.wallpaper_drag.is_none());
+        }
+    }
+
+    #[test]
+    fn astronomy_stationary_capture_cancellation_never_activates_a_deep_sky_target() {
+        use AstronomyGestureEvent::*;
+        for cancel_at_fence in [false, true] {
+            let (mut jwm, mut backend) = astronomy_input_fixture();
+            capture_press(&mut jwm, &mut backend, 800.0, 500.0);
+            if cancel_at_fence {
+                backend
+                    .input_ops
+                    .solar_button_mask
+                    .store(0, AtomicOrdering::Relaxed);
+                jwm.tick_wallpaper_drag(&mut backend);
+                let token = backend
+                    .input_ops
+                    .pointer_drain_requests
+                    .load(AtomicOrdering::Relaxed);
+                jwm.handle_event(&mut backend, BackendEvent::PointerEventsDrained { token })
+                    .unwrap();
+            } else {
+                jwm.cancel_wallpaper_drag(&mut backend);
+            }
+            assert_eq!(
+                backend.astronomy_gestures,
+                [Begin(800.0, 500.0), End(false)]
+            );
+            assert!(jwm.wallpaper_drag.is_none());
+            assert_eq!(
+                backend
+                    .input_ops
+                    .pointer_ungrabs
+                    .load(AtomicOrdering::Relaxed),
+                1
+            );
+        }
     }
 
     #[test]
@@ -8217,7 +8281,7 @@ mod tests {
         capture_release(&mut jwm, &mut backend, 900.0, 600.0);
         assert_eq!(
             backend.astronomy_gestures,
-            [Begin(800.0, 500.0), Motion(900.0, 600.0), End]
+            [Begin(800.0, 500.0), Motion(900.0, 600.0), End(false)]
         );
         assert_eq!(
             backend
@@ -8460,7 +8524,7 @@ mod tests {
             assert!(jwm.wallpaper_drag.is_none());
             assert_eq!(
                 backend.astronomy_gestures,
-                [Begin(800.0, 500.0), Motion(825.0, 510.0), End]
+                [Begin(800.0, 500.0), Motion(825.0, 510.0), End(false)]
             );
             assert_eq!(
                 backend
@@ -8543,7 +8607,10 @@ mod tests {
             astronomy_motion(&mut jwm, &mut backend, 850.0, 550.0);
             jwm.tick_wallpaper_drag(&mut backend);
             assert!(jwm.wallpaper_drag.is_none(), "condition {condition}");
-            assert_eq!(backend.astronomy_gestures, [Begin(800.0, 500.0), End]);
+            assert_eq!(
+                backend.astronomy_gestures,
+                [Begin(800.0, 500.0), End(false)]
+            );
             assert_eq!(
                 backend
                     .input_ops
@@ -8576,7 +8643,10 @@ mod tests {
             assert!(jwm.maintenance_next_wakeup_at(std::time::Instant::now()) <= FRAME_INTERVAL);
             jwm.handle_event(&mut backend, event).unwrap();
             assert!(jwm.wallpaper_drag.is_none());
-            assert_eq!(backend.astronomy_gestures, [Begin(800.0, 500.0), End]);
+            assert_eq!(
+                backend.astronomy_gestures,
+                [Begin(800.0, 500.0), End(false)]
+            );
             assert!(backend.input_ops().grab_pointer(0, None).unwrap());
             jwm.tick_wallpaper_drag(&mut backend);
             jwm.cancel_wallpaper_drag(&mut backend);

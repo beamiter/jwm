@@ -734,6 +734,32 @@ impl CelestialRotation {
         }
     }
 
+    /// Shortest-arc interpolation keeps a camera flight orthonormal, including
+    /// when its endpoints straddle a pole or the quaternion sign boundary.
+    pub(crate) fn interpolate(self, other: Self, amount: f64) -> Self {
+        let amount = if amount.is_finite() {
+            amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mut q = other.quaternion;
+        let mut dot: f64 = self.quaternion.iter().zip(q).map(|(a, b)| a * b).sum();
+        if dot < 0.0 {
+            q = q.map(|v| -v);
+            dot = -dot;
+        }
+        let (a, b) = if dot > 0.9995 {
+            (1.0 - amount, amount)
+        } else {
+            let angle = dot.clamp(-1.0, 1.0).acos();
+            (
+                ((1.0 - amount) * angle).sin() / angle.sin(),
+                (amount * angle).sin() / angle.sin(),
+            )
+        };
+        Self::normalized(std::array::from_fn(|i| self.quaternion[i] * a + q[i] * b))
+    }
+
     fn between(from: [f64; 3], to: [f64; 3]) -> Self {
         let dot = from
             .iter()

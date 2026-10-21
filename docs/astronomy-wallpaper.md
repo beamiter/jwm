@@ -531,7 +531,7 @@ or creates a displaced terrain mesh.
 
 Scroll over empty sky to narrow or widen the panorama's perspective lens,
 independently of globe scale. Astronomy starts at a **60° vertical field of
-view**, bounded to **8°–110°**. A narrow lens reveals catalogue stars and finer
+view**, bounded to **8°–110°** (**2°–110°** for the Milky Way overview). A narrow lens reveals catalogue stars and finer
 nebula artwork; scrolling back out restores a wider view. Sky orientation and
 lens follow the scene/group's interaction state; legacy canvases retain their
 earlier shared sky. Neither sky
@@ -696,9 +696,9 @@ landmarks add artistic structure around sourced celestial directions; see the
 
 The renderer uses linear-light surface shading, a restrained ocean glint and
 thin Earth limb, and an airless lunar regolith lighting approximation. Surface
-grain, atmosphere and nebula appearance are visual models. They do not supply
-measured terrain displacement, a calibrated atmosphere or a volume of gas that
-the camera can fly through.
+grain and atmosphere are visual models. Milky Way nebulae have interactive
+3D gas volumes with modelled depth and absorption; their internal structure is
+not a measured reconstruction. See the [navigation controls](celestial-explorer.md).
 
 Full source and media-use attribution accompany all bundled images in
 `assets/astronomy/README.md`. Moon loading is also offline; if either required

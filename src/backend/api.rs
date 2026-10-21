@@ -3169,7 +3169,9 @@ pub trait CompositorControl: Send {
     }
 
     /// Retain the current globe pose, retire the gesture, and resume its clock.
-    fn compositor_astronomy_end_drag(&mut self) {}
+    /// Only a natural left release within the whole gesture's click slop may
+    /// activate a pressed deep-sky target; cancellation must pass false.
+    fn compositor_astronomy_end_drag(&mut self, _activate_click: bool) {}
 
     /// Zoom the Earth/Moon under the event point, or change the sky field of
     /// view when the event hits empty panorama. Positive wheel steps zoom in.

@@ -75,6 +75,52 @@ impl PanoramaView {
         }
     }
 
+    pub(crate) fn set_min_fov(&mut self, degrees: f32) {
+        if degrees.is_finite() && degrees > 0.0 {
+            self.min_fov = degrees.clamp(0.001, PANORAMA_MIN_FOV);
+        }
+    }
+
+    pub(crate) fn interpolate(self, destination: Self, amount: f64) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        if amount <= 0.0 {
+            return self;
+        }
+        if amount >= 1.0 {
+            return destination;
+        }
+        let mut result = destination;
+        result.orientation = self
+            .orientation
+            .interpolate(destination.orientation, amount);
+        // Logarithmic lens motion crosses arcminute fields without a final jump.
+        result.fov = ((f64::from(self.fov).ln() * (1.0 - amount)
+            + f64::from(destination.fov).ln() * amount)
+            .exp()) as f32;
+        result
+    }
+
+    pub(crate) fn zoom_at(&mut self, steps: f64, point: [f64; 2], size: [f64; 2]) -> bool {
+        let Some(before) = self.ray(point, size) else {
+            return false;
+        };
+        if !self.zoom(steps) {
+            return false;
+        }
+        let after = self.ray(point, size).unwrap_or(before);
+        let axis = [
+            after[1] * before[2] - after[2] * before[1],
+            after[2] * before[0] - after[0] * before[2],
+            after[0] * before[1] - after[1] * before[0],
+        ];
+        let sine = axis.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let cosine = after.iter().zip(before).map(|(a, b)| a * b).sum::<f64>();
+        if let Some(rotation) = CelestialRotation::axis_angle(axis, sine.atan2(cosine)) {
+            self.orientation = rotation.compose(self.orientation);
+        }
+        true
+    }
+
     /// Telescope fields can be only a few arcminutes wide. Keep their lens
     /// limits local to the focused view so ordinary sky/body zoom is unchanged.
     pub(crate) fn focus_field(&mut self, degrees: f32) {
@@ -157,6 +203,39 @@ impl PanoramaView {
                 .sum()
         }))
     }
+
+    /// Match panorama_ray's analytic pixel derivatives and cosmic_deep_sky's
+    /// footprint floor. A camera rotation preserves these lengths, so locator
+    /// picking can share the shader's angular distance even near a wide lens's
+    /// edges without rotating either derivative on the CPU.
+    pub(crate) fn angular_pixel_size(self, point: [f64; 2], viewport: [f64; 2]) -> Option<f64> {
+        self.begin_drag(point, viewport)?;
+        if !self.fov.is_finite() {
+            return None;
+        }
+        let scale = 2.0 * (f64::from(self.fov).clamp(0.001, 110.0).to_radians() * 0.5).tan()
+            / viewport[1].max(1.0);
+        let camera = [
+            (point[0] - viewport[0] * 0.5) * scale,
+            (point[1] - viewport[1] * 0.5) * scale,
+            1.0,
+        ];
+        let length = camera[0].hypot(camera[1]).hypot(1.0);
+        if !length.is_finite() {
+            return None;
+        }
+        let ray = camera.map(|v| v / length);
+        let derivative_length = |axis: usize| {
+            let derivative: [f64; 3] = std::array::from_fn(|component| {
+                ((if component == axis { scale } else { 0.0 })
+                    - ray[component] * (ray[axis] * scale))
+                    / length
+            });
+            derivative[0].hypot(derivative[1]).hypot(derivative[2])
+        };
+        let footprint = derivative_length(0).max(derivative_length(1));
+        footprint.is_finite().then_some(footprint.max(1e-10))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,6 +277,113 @@ pub(crate) fn panorama_rotation(unix: f64, minutes: u32) -> CelestialRotation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_anchored_zoom_and_flights_keep_the_target_under_the_cursor() {
+        let mut view = PanoramaView::default();
+        let size = [1920.0, 1080.0];
+        let point = [1300.0, 700.0];
+        let before = view.ray(point, size).unwrap();
+        assert!(view.zoom_at(5.0, point, size));
+        let after = view.ray(point, size).unwrap();
+        assert!(before.iter().zip(after).all(|(a, b)| (a - b).abs() < 1e-6));
+        let mut destination = view;
+        destination.focus_field(0.03);
+        destination.set_orientation(CelestialRotation::axis_angle([1.0, 0.3, 0.7], 3.0).unwrap());
+        for i in 0..=100 {
+            let frame = view.interpolate(destination, i as f64 / 100.0);
+            let m = frame.matrix();
+            for a in 0..3 {
+                for b in 0..3 {
+                    let dot: f32 = (0..3).map(|r| m[a * 3 + r] * m[b * 3 + r]).sum();
+                    assert!((dot - if a == b { 1.0 } else { 0.0 }).abs() < 1e-5);
+                }
+            }
+            assert!(frame.fov_degrees() >= destination.fov_degrees());
+        }
+    }
+
+    #[test]
+    fn angular_pixel_size_matches_ray_derivatives_at_wide_lens_edges_and_after_rotation() {
+        let rotation = CelestialRotation::axis_angle([0.4, -0.8, 0.3], 2.1).unwrap();
+        let step = 0.01;
+        for viewport in [
+            [1920.0, 1080.0],
+            [5120.0, 1440.0],
+            [1080.0, 1920.0],
+            [800.0, 600.0],
+        ] {
+            for fov in [110.0, 60.0, 2.0, 0.001] {
+                let mut view = PanoramaView::default();
+                view.set_min_fov(0.001);
+                view.set_fov_degrees(fov);
+                for fraction in [[0.5, 0.5], [0.03, 0.85], [0.95, 0.05], [-0.5, 1.25]] {
+                    let point = [fraction[0] * viewport[0], fraction[1] * viewport[1]];
+                    let unrotated = view.angular_pixel_size(point, viewport).unwrap();
+                    view.set_orientation(rotation);
+                    assert_eq!(view.angular_pixel_size(point, viewport), Some(unrotated));
+                    let mut derivative_lengths = [0.0_f64; 2];
+                    for axis in 0..2 {
+                        let mut before = point;
+                        let mut after = point;
+                        before[axis] -= step;
+                        after[axis] += step;
+                        let before = view.ray(before, viewport).unwrap();
+                        let after = view.ray(after, viewport).unwrap();
+                        let derivative: [f64; 3] =
+                            std::array::from_fn(|i| (after[i] - before[i]) / (2.0 * step));
+                        derivative_lengths[axis] =
+                            derivative[0].hypot(derivative[1]).hypot(derivative[2]);
+                    }
+                    let numerical = derivative_lengths[0].max(derivative_lengths[1]).max(1e-10);
+                    assert!(
+                        (unrotated - numerical).abs() < unrotated * 2e-6 + 1e-12,
+                        "{viewport:?} {fov} {point:?}: {unrotated} != {numerical}"
+                    );
+                    view.set_orientation(CelestialRotation::default());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn angular_pixel_size_preserves_shader_scale_limits_and_rejects_invalid_inputs() {
+        let view = PanoramaView::default();
+        let center = view
+            .angular_pixel_size([960.0, 540.0], [1920.0, 1080.0])
+            .unwrap();
+        let scale = 2.0 * (30.0_f64.to_radians()).tan() / 1080.0;
+        assert!((center - scale).abs() < 1e-15);
+        assert!(
+            view.angular_pixel_size([1920.0, 540.0], [1920.0, 1080.0])
+                .unwrap()
+                < center
+        );
+        assert_eq!(
+            view.angular_pixel_size([1920.0, 1080.0], [3840.0, 2160.0]),
+            Some(center * 0.5)
+        );
+        // GLSL protects a subpixel render height with max(resolution.y, 1).
+        assert_eq!(
+            view.angular_pixel_size([0.25, 0.25], [0.5, 0.5]),
+            Some(2.0 * (30.0_f64.to_radians()).tan())
+        );
+        assert_eq!(
+            view.angular_pixel_size([5e19, 5e19], [1e20, 1e20]),
+            Some(1e-10)
+        );
+        for viewport in [
+            [0.0, 100.0],
+            [100.0, -1.0],
+            [f64::INFINITY, 100.0],
+            [100.0, f64::NAN],
+        ] {
+            assert!(view.angular_pixel_size([0.0, 0.0], viewport).is_none());
+        }
+        for point in [[f64::NAN, 0.0], [0.0, f64::INFINITY]] {
+            assert!(view.angular_pixel_size(point, [800.0, 600.0]).is_none());
+        }
+    }
 
     fn close(a: &[f32; 9], b: &[f32; 9]) {
         assert!(a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.000003));

@@ -38,8 +38,9 @@ right button and the ordinary vertical wheel; no modifier is needed.
 | Empty sky in any celestial effect | Hold left and drag | The viewing direction turns through 360°, including both poles |
 | Empty sky | Wheel up/down | The perspective lens narrows/widens |
 | Nebula/galaxy image or its blue locator ring in Milky Way | Left-click | Open the observed telescope field |
-| Focused Milky Way target | Wheel up/down | Magnify or reduce the observed image |
+| Focused Milky Way target | Wheel up/down | Smoothly approach/retreat; scrolling out fully returns to the overview |
 | Focused Milky Way target | Hold left and drag | Pan around the target field |
+| Milky Way close-up | Hold left and drag | Orbit the 3D nebula and see depth, emission and dust occlusion |
 | Milky Way close-up | Right-click | Restore the original sky orientation and perspective lens |
 | Sun or planet in Solar System | Left-click | A close-up opens for the selected body |
 | Visible body in Solar System | Hold left and drag | The camera orbits the overview or current close-up target in all directions |
@@ -104,10 +105,30 @@ aspect-aware focal length; its exact vertical angle depends on the viewport.
 In a Solar close-up, scrolling on the focused body moves the camera instead,
 bounded to 1.12–40 body radii so it stays outside the sphere.
 
-Milky Way target close-ups fit the selected telescope field, including fields
-only a few arcminutes wide. Their own lens permits up to 16× further
-magnification, with a 0.001° floor. Right-click restores the exact overview
-orientation and lens. A stationary close-up pauses automatic sky touring.
+All animated wallpapers use three-dimensional geometry: the bodies and Solar
+System retain their sphere/ring models, and Milky Way uses a spatial disc/dust
+model, a distant star-catalogue skybox and twelve nebula volumes. Textures supply
+surface colour and reference morphology; the camera moves through a 3D scene.
+
+Milky Way's overview lens extends to **2°**. Locators grow with perspective
+magnification, capped at 42% of canvas height; their hit areas grow with them.
+Wheel zoom stays anchored to the cursor. At maximum zoom over a target, or on
+clicking its locator, a **1.4-second** eased camera flight blends into that target's
+volume. The flight interpolates orientation and logarithmic field of view while
+preserving apparent target size. Right-click starts a **0.9-second** reverse
+flight to the saved overview. A wheel-up during return reverses the flight
+from the current frame, preserving the focused camera.
+
+In the nebula view, hold left and drag to orbit freely, including the back and
+poles. Wheel motion dollies the camera between **0.7 and 30 model half-heights**;
+the near range allows looking through the gas. Wheel steps accumulate into a
+bounded **180 ms** logarithmic dolly, without a jump on each detent. Grabbing
+during a flight pauses the approach at the presented frame; release resumes it.
+The finite **32-sample** volume pass integrates emission and dust absorption,
+with continuous 3D turbulence, embedded light sources and cloud, dust-pillar,
+shock-filament, shell or spiral-disc morphology. Each output/group retains its
+own camera and transition. Covered or suspended scenes retire interaction wakeups; a still
+close-up does not keep automatic sky touring active.
 
 The renderer loads modest body images first, then requests larger maps when
 they can improve a close-up. This work uses the bounded background decoder;
@@ -154,8 +175,8 @@ The prior `milkyway-nasa-gaia.jpg` remains available for compatibility and user
 overrides. The Milky Way scene adds twelve observed telescope fields in both
 presentation modes. Each field uses its published J2000 right ascension,
 declination, angular width/height and north angle, plus an approximate distance,
-to form a heliocentric 3D image plane in light-years. Physical width is derived
-from distance and angular size. Images retain their observed extent in the sky;
+to place the centre and projected extent of a 3D volume in light-years. Physical
+width is derived from distance and angular size. Images retain their observed extent in the sky;
 small blue rings make even subpixel fields clickable from the overview.
 
 | Observed field | Approximate distance (ly) | Image/coordinate source |
@@ -182,14 +203,20 @@ Image credits remain attached to each field and are collected in the
 These are historical multi-filter observations, including infrared images and
 assigned-colour composites; their colours are not a naked-eye simulation.
 
-Click an image or its locator to fit the telescope field, then use the wheel to
-zoom in/out and drag to pan. A right-click restores the exact prior perspective.
-Dragging past the click threshold never activates a target. Each monitor or
+Click a target or its locator, or zoom fully into the locator, to enter the
+3D volume. Use the wheel to dolly and drag to orbit. A right-click restores the
+exact prior perspective.
+Dragging past the click threshold or cancelling pointer capture never activates
+a target. CPU picking uses the same angular pixel footprint as the shader,
+including stretched rings near the edge of a wide panorama. Each monitor or
 explicitly shared monitor group retains its own focus, lens and overview. The
 observed fields replace the former procedural landmark sketches; Horsehead and
 Bubble now occupy the previous Pleiades and North America catalogue slots.
-Distances are approximate source estimates. This locates observed fields in 3D
-without claiming to reconstruct their internal gas volumes or stellar parallax.
+Distances are approximate source estimates. The source field constrains
+position, orientation and projected extent; images supply broad colour references.
+Cloud shape, thickness, turbulence, internal emission/absorption and
+spiral/shell depth are illustrative 3D models, not measured gas tomography. The
+Milky Way disc is schematic; catalogue stars still have no measured parallax.
 
 ## Time, space and rendering limits
 
@@ -214,8 +241,8 @@ presentation reduces invented surface detail and artificial night-side fill;
 it does not turn approximate materials into measured terrain. The distant
 star sphere supplies view direction rather than stellar distances or parallax.
 Free translation between stars, gravitational N-body integration, a DE/SPICE
-ephemeris, fly-through nebula volumes and surface terrain traversal are not
-implemented. See [scientific model notes](astronomy-science.md) for orbital
+ephemeris, unrestricted interstellar flight and surface terrain traversal are
+not implemented. See [scientific model notes](astronomy-science.md) for orbital
 accuracy, source materials and the distinction between reference quantities
 and display geometry.
 
@@ -233,3 +260,12 @@ The [Astronomy](astronomy-wallpaper.md#validation-and-limits) and
 sections describe the production math, native input and GL/GLES regressions.
 Headless Mesa checks support correctness and regression comparison; they do
 not establish a frame rate, power saving or driver result on a particular GPU.
+
+The deep-sky renderer can be checked independently with
+`python3 scripts/test-deep-sky.py`. It compiles the actual GL330/GLES300 shader
+and reads scene IDs and camera fitting from Rust. It checks all twelve volumes
+from the front, edge-on and rear, a complete 360-degree return, independent
+geometry without a source texture, camera dolly, an inside-volume view, growing
+locators, transition frames and rejection of targets behind the observer.
+Image comparisons exclude the source-credit strip. Render timings and previews
+are written alongside the metrics; software timings are not desktop FPS claims.

@@ -12,7 +12,9 @@ use crate::backend::compositor_common::celestial_layout::{
     CelestialCanvas, MAX_CELESTIAL_OCCLUSION_CLIPS, celestial_clip_fully_covered,
     resolve_celestial_canvases,
 };
-use crate::backend::compositor_common::deep_sky::{DEEP_SKY_TARGETS, galactic_to_world};
+use crate::backend::compositor_common::deep_sky::{
+    DEEP_SKY_TARGETS, GALAXY_ENTRY_FOV, NebulaView, galactic_to_world, locator_radius,
+};
 use crate::backend::compositor_common::panorama::{PanoramaDrag, PanoramaView, panorama_rotation};
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -37,16 +39,28 @@ fn galaxy_galactic_direction(world: [f64; 3]) -> [f64; 3] {
 
 fn galaxy_pick_target(shown: PanoramaView, point: [f64; 2], size: [f64; 2]) -> Option<u8> {
     let q = galaxy_galactic_direction(shown.ray(point, size)?);
+    let footprint = shown.angular_pixel_size(point, size)?;
     let mut nearest: Option<(u8, f64)> = None;
     for (index, target) in DEEP_SKY_TARGETS.iter().enumerate() {
-        let Some(centre) = shown.project(galactic_to_world(target.direction()), size) else {
+        let direction = target.direction();
+        if shown.project(galactic_to_world(direction), size).is_none() {
             continue;
-        };
-        let distance2 = (point[0] - centre[0]).powi(2) + (point[1] - centre[1]).powi(2);
+        }
+        if q.iter().zip(direction).map(|(a, b)| a * b).sum::<f64>() <= 0.0 {
+            continue;
+        }
+        let distance2 = q
+            .iter()
+            .zip(direction)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            / footprint.powi(2);
         let inside_image = target
             .image_uv(q)
             .is_some_and(|uv| uv.iter().all(|&v| (0.025..=0.975).contains(&v)));
-        if (inside_image || distance2 <= 100.0) && nearest.is_none_or(|(_, best)| distance2 < best)
+        let radius = locator_radius(shown.fov_degrees(), size[1]) + 4.5;
+        if (inside_image || distance2 <= radius * radius)
+            && nearest.is_none_or(|(_, best)| distance2 < best)
         {
             nearest = Some((index as u8, distance2));
         }
@@ -132,6 +146,110 @@ struct AstronomySkyDrag {
     origin: [f64; 2],
     moved: bool,
     candidate: Option<u8>,
+    nebula_start: Option<NebulaView>,
+    nebula_before_begin: Option<NebulaNavigation>,
+}
+
+#[derive(Clone, Copy)]
+struct GalaxyFlight {
+    from: PanoramaView,
+    to: PanoramaView,
+    started: Instant,
+    paused_at: Option<Instant>,
+    exiting: bool,
+    from_blend: f32,
+}
+
+#[derive(Clone, Copy)]
+struct NebulaDolly {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+struct NebulaNavigation {
+    view: NebulaView,
+    presented: Option<NebulaView>,
+    flight: Option<GalaxyFlight>,
+    blend: f32,
+    field_fov: f32,
+    dolly: Option<NebulaDolly>,
+}
+
+impl NebulaNavigation {
+    fn animated(&self) -> bool {
+        self.dolly.is_some() || self.flight.is_some_and(|flight| flight.paused_at.is_none())
+    }
+
+    fn request_zoom(&mut self, steps: f64, now: Instant) -> bool {
+        let mut target = self.view;
+        target.distance = self.dolly.map_or(target.distance, |dolly| dolly.to);
+        if !target.zoom(steps) {
+            return false;
+        }
+        self.dolly = Some(NebulaDolly {
+            from: self.view.distance,
+            to: target.distance,
+            started: now,
+        });
+        true
+    }
+
+    fn pause(&mut self, now: Instant) {
+        self.dolly = None;
+        if let Some(flight) = &mut self.flight {
+            flight.paused_at = Some(now.max(flight.started));
+        }
+    }
+
+    fn resume(&mut self, now: Instant) {
+        if let Some(flight) = &mut self.flight
+            && let Some(paused) = flight.paused_at.take()
+        {
+            flight.started += now.saturating_duration_since(paused);
+        }
+    }
+
+    /// True means the reverse flight reached the saved overview. The caller
+    /// then restores its tour offset and retires the focused navigation state.
+    fn advance(&mut self, now: Instant, panorama: &mut PanoramaView) -> bool {
+        if let Some(dolly) = self.dolly {
+            let progress =
+                (now.saturating_duration_since(dolly.started).as_secs_f64() / 0.18).min(1.0);
+            let eased = progress * progress * (3.0 - 2.0 * progress);
+            self.view.distance = (f64::from(dolly.from).ln() * (1.0 - eased)
+                + f64::from(dolly.to).ln() * eased)
+                .exp() as f32;
+            if progress >= 1.0 {
+                self.view.distance = dolly.to;
+                self.dolly = None;
+            }
+        }
+        let Some(flight) = self.flight else {
+            return false;
+        };
+        if flight.paused_at.is_some() {
+            return false;
+        }
+        let duration = if flight.exiting { 0.9 } else { 1.4 };
+        let progress =
+            (now.saturating_duration_since(flight.started).as_secs_f64() / duration).min(1.0);
+        let eased = progress * progress * (3.0 - 2.0 * progress);
+        *panorama = flight.from.interpolate(flight.to, eased);
+        let fade = if flight.exiting {
+            (progress / 0.75).min(1.0)
+        } else {
+            ((progress - 0.35) / 0.65).clamp(0.0, 1.0)
+        };
+        let fade = (fade * fade * (3.0 - 2.0 * fade)) as f32;
+        let to_blend = if flight.exiting { 0.0 } else { 1.0 };
+        self.blend = flight.from_blend + (to_blend - flight.from_blend) * fade;
+        if progress >= 1.0 {
+            self.flight = None;
+        }
+        progress >= 1.0 && flight.exiting
+    }
 }
 
 struct AstronomyRelease {
@@ -290,6 +408,10 @@ struct AstronomyProgram {
     cosmic_focus_target: Option<glow::UniformLocation>,
     deep_sky_map: Option<glow::UniformLocation>,
     deep_sky_mapped: Option<glow::UniformLocation>,
+    nebula_orbit: Option<glow::UniformLocation>,
+    nebula_distance: Option<glow::UniformLocation>,
+    nebula_blend: Option<glow::UniformLocation>,
+    deep_sky_locator_radius: Option<glow::UniformLocation>,
 }
 
 impl AstronomyProgram {
@@ -319,6 +441,11 @@ impl AstronomyProgram {
                 cosmic_focus_target: gl.get_uniform_location(program, "cosmic_focus_target"),
                 deep_sky_map: gl.get_uniform_location(program, "deep_sky_map"),
                 deep_sky_mapped: gl.get_uniform_location(program, "deep_sky_mapped"),
+                nebula_orbit: gl.get_uniform_location(program, "nebula_orbit"),
+                nebula_distance: gl.get_uniform_location(program, "nebula_distance"),
+                nebula_blend: gl.get_uniform_location(program, "nebula_blend"),
+                deep_sky_locator_radius: gl
+                    .get_uniform_location(program, "deep_sky_locator_radius"),
             }
         }
     }
@@ -344,6 +471,7 @@ struct AstronomyNavigation {
     presented_sky: Option<PanoramaView>,
     galaxy_overview: Option<PanoramaView>,
     galaxy_focus: Option<u8>,
+    nebula: NebulaNavigation,
 }
 
 impl AstronomyNavigation {
@@ -367,6 +495,7 @@ impl AstronomyNavigation {
         std::mem::swap(&mut self.presented_sky, &mut wallpaper.presented_sky);
         std::mem::swap(&mut self.galaxy_overview, &mut wallpaper.galaxy_overview);
         std::mem::swap(&mut self.galaxy_focus, &mut wallpaper.galaxy_focus);
+        std::mem::swap(&mut self.nebula, &mut wallpaper.nebula);
     }
 
     fn zoom(&self, body: CelestialBody) -> &AstronomyZoom {
@@ -393,6 +522,8 @@ struct AstronomyFrame {
     sky: PanoramaView,
     zoom: f32,
     galaxy_focus: Option<u8>,
+    nebula: NebulaView,
+    nebula_blend: f32,
 }
 
 #[derive(Default)]
@@ -453,6 +584,7 @@ pub(super) struct AstronomyWallpaper {
     presented_sky: Option<PanoramaView>,
     galaxy_overview: Option<PanoramaView>,
     galaxy_focus: Option<u8>,
+    nebula: NebulaNavigation,
     interaction_pending: bool,
     last_interaction_frame: Option<Instant>,
     interaction_revision: u64,
@@ -592,6 +724,7 @@ impl AstronomyWallpaper {
             a.presented_earth = None;
             a.presented_moon = None;
             a.presented_sky = None;
+            a.nebula.presented = None;
             a.earth_zoom.presented = None;
             a.moon_zoom.presented = None;
         });
@@ -705,7 +838,11 @@ impl AstronomyWallpaper {
             .as_ref()
             .filter(|d| d.group == self.active_navigation)
         {
-            drag.orientation
+            if drag.nebula_start.is_some() {
+                self.panorama.orientation()
+            } else {
+                drag.orientation
+            }
         } else if let Some(release) = &self.sky_release {
             CelestialRotation::from_matrix(&release.presented)
         } else if self.galaxy_focus.is_some() {
@@ -729,6 +866,7 @@ impl AstronomyWallpaper {
             a.requested_panorama = None;
             a.galaxy_overview = None;
             a.galaxy_focus = None;
+            a.nebula = NebulaNavigation::default();
         });
         self.interaction_revision = self.interaction_revision.wrapping_add(1);
     }
@@ -879,7 +1017,13 @@ impl AstronomyWallpaper {
     }
 
     fn zoom(&mut self, root: [f64; 2], steps: f64) -> bool {
-        if self.has_drag() || !self.enabled || self.failed || !self.powered {
+        if !steps.is_finite()
+            || steps == 0.0
+            || self.has_drag()
+            || !self.enabled
+            || self.failed
+            || !self.powered
+        {
             return false;
         }
         let Some(index) = self.pointer_canvas(root) else {
@@ -891,8 +1035,57 @@ impl AstronomyWallpaper {
             if self.sky_hit_test(root).is_none() || self.presented_sky.is_none() {
                 return false;
             }
-            let mut view = self.requested_panorama.unwrap_or(self.panorama);
-            if !view.zoom(steps) {
+            if self.canvas_body(index) == CelestialBody::Galaxy && self.galaxy_focus.is_some() {
+                if self.nebula.flight.is_some_and(|flight| flight.exiting) {
+                    if steps > 0.0 {
+                        self.reverse_galaxy_return();
+                    }
+                    return steps.is_finite() && steps != 0.0;
+                }
+                let now = self.interaction_now();
+                let changed = self.nebula.request_zoom(steps, now);
+                if steps < 0.0
+                    && self
+                        .nebula
+                        .dolly
+                        .map_or(self.nebula.view.distance, |d| d.to)
+                        >= 29.999
+                {
+                    return self.return_galaxy_overview();
+                }
+                if !changed {
+                    return false;
+                }
+                self.interaction_pending = true;
+                return true;
+            }
+            let mut view = self
+                .requested_panorama
+                .unwrap_or_else(|| self.sky_view(self.sample_unix));
+            let galaxy = self.canvas_body(index) == CelestialBody::Galaxy;
+            let canvas = &self.draw_plan[index];
+            let Some(point) = panorama_pointer(canvas, root, self.layout_screen.1) else {
+                return false;
+            };
+            let candidate = galaxy
+                .then(|| galaxy_pick_target(view, point, canvas.size.map(f64::from)))
+                .flatten();
+            if galaxy {
+                view.set_min_fov(GALAXY_ENTRY_FOV);
+            }
+            let changed = if galaxy {
+                view.zoom_at(steps, point, canvas.size.map(f64::from))
+            } else {
+                view.zoom(steps)
+            };
+            if galaxy
+                && steps > 0.0
+                && view.fov_degrees() <= GALAXY_ENTRY_FOV + 0.001
+                && let Some(target) = candidate
+            {
+                return self.focus_galaxy_target(target, self.sample_unix);
+            }
+            if !changed {
                 return false;
             }
             self.requested_panorama = Some(view);
@@ -1024,7 +1217,15 @@ impl AstronomyWallpaper {
         let Some(point) = panorama_pointer(&canvas, root, self.layout_screen.1) else {
             return false;
         };
-        let Some(gesture) = presented.begin_drag(point, canvas.size.map(f64::from)) else {
+        let nebula_start = self
+            .galaxy_focus
+            .map(|_| self.nebula.presented.unwrap_or(self.nebula.view));
+        let nebula_before_begin = nebula_start.map(|_| self.nebula);
+        let gesture = nebula_start.map_or_else(
+            || presented.begin_drag(point, canvas.size.map(f64::from)),
+            |view| view.begin_drag(point, canvas.size.map(f64::from)),
+        );
+        let Some(gesture) = gesture else {
             return false;
         };
         let candidate = (self.canvas_body(index) == CelestialBody::Galaxy
@@ -1035,7 +1236,7 @@ impl AstronomyWallpaper {
             group,
             canvas,
             gesture,
-            orientation: CelestialRotation::from_matrix(&presented.matrix()),
+            orientation: nebula_start.map_or(presented.orientation(), |view| view.orientation),
             pending_point: point,
             pending_before_begin: self.interaction_pending,
             view_before_begin: self.panorama,
@@ -1044,7 +1245,13 @@ impl AstronomyWallpaper {
             origin: point,
             moved: false,
             candidate,
+            nebula_start,
+            nebula_before_begin,
         });
+        if nebula_start.is_some() {
+            self.nebula
+                .pause(self.last_interaction_frame.unwrap_or_else(Instant::now));
+        }
         self.reset_requested = false;
         self.panorama = presented;
         self.requested_panorama = None;
@@ -1079,6 +1286,9 @@ impl AstronomyWallpaper {
             self.reset_requested = drag.reset_before_begin;
             self.panorama = drag.view_before_begin;
             self.requested_panorama = drag.requested_before_begin;
+            if let Some(nebula) = drag.nebula_before_begin {
+                self.nebula = nebula;
+            }
         }
     }
 
@@ -1132,7 +1342,20 @@ impl AstronomyWallpaper {
                 f64::from(canvas.size[0] / canvas.size[1].max(1.0))
             });
         closeup.focus_field(DEEP_SKY_TARGETS[usize::from(target)].closeup_fov(aspect));
-        self.panorama = closeup;
+        self.nebula = NebulaNavigation {
+            view: NebulaView::fitted(DEEP_SKY_TARGETS[usize::from(target)], aspect),
+            field_fov: closeup.fov_degrees(),
+            flight: Some(GalaxyFlight {
+                from: presented,
+                to: closeup,
+                started: self.interaction_now(),
+                paused_at: None,
+                exiting: false,
+                from_blend: 0.0,
+            }),
+            ..Default::default()
+        };
+        self.panorama = presented;
         self.requested_panorama = None;
         self.sky_offset = panorama_rotation(unix, self.sky_period)
             .inverse()
@@ -1146,6 +1369,84 @@ impl AstronomyWallpaper {
 
     fn end_drag(&mut self, unix: f64) -> bool {
         self.finish_drag(unix, false)
+    }
+
+    fn interaction_now(&self) -> Instant {
+        let now = Instant::now();
+        self.last_interaction_frame
+            .map_or(now, |last| last.max(now))
+    }
+
+    fn return_galaxy_overview(&mut self) -> bool {
+        let Some(overview) = self.galaxy_overview else {
+            return false;
+        };
+        if self.nebula.flight.is_some_and(|flight| flight.exiting) {
+            return true;
+        }
+        let shown = self.presented_sky.unwrap_or(self.panorama);
+        self.panorama = shown;
+        self.nebula.dolly = None;
+        self.nebula.flight = Some(GalaxyFlight {
+            from: shown,
+            to: overview,
+            started: self.interaction_now(),
+            paused_at: None,
+            exiting: true,
+            from_blend: self.nebula.blend,
+        });
+        self.requested_panorama = None;
+        self.reset_requested = false;
+        self.sky_release = None;
+        self.interaction_pending = true;
+        self.interaction_revision = self.interaction_revision.wrapping_add(1);
+        true
+    }
+
+    fn reverse_galaxy_return(&mut self) {
+        let Some(orientation) = self.galaxy_focus.and_then(galaxy_target_orientation) else {
+            return;
+        };
+        let from = self.presented_sky.unwrap_or(self.panorama);
+        let mut to = from;
+        to.set_orientation(orientation);
+        to.focus_field(self.nebula.field_fov);
+        self.panorama = from;
+        self.nebula.flight = Some(GalaxyFlight {
+            from,
+            to,
+            started: self.interaction_now(),
+            paused_at: None,
+            exiting: false,
+            from_blend: self.nebula.blend,
+        });
+        self.interaction_pending = true;
+    }
+
+    fn finish_galaxy_return(&mut self, unix: f64) {
+        if let Some(overview) = self.galaxy_overview.take() {
+            self.panorama = overview;
+        }
+        self.sky_offset = panorama_rotation(unix, self.sky_period)
+            .inverse()
+            .compose(self.panorama.orientation());
+        self.sky_release = None;
+        self.galaxy_focus = None;
+        self.nebula = NebulaNavigation::default();
+    }
+
+    fn settle_nebula_navigation(&mut self, unix: f64) {
+        if let Some(dolly) = self.nebula.dolly.take() {
+            self.nebula.view.distance = dolly.to;
+        }
+        if let Some(flight) = self.nebula.flight.take() {
+            self.panorama = flight.to;
+            if flight.exiting {
+                self.finish_galaxy_return(unix);
+            } else {
+                self.nebula.blend = 1.0;
+            }
+        }
     }
 
     /// Resume decorative motion from the released pose while leaving the real
@@ -1163,7 +1464,11 @@ impl AstronomyWallpaper {
                 .gesture
                 .orientation_at(drag.pending_point)
                 .unwrap_or(drag.orientation);
-            if self.galaxy_focus.is_some() {
+            if let Some(mut view) = drag.nebula_start {
+                view.orientation = orientation;
+                self.nebula.view = view;
+                self.nebula.resume(self.interaction_now());
+            } else if self.galaxy_focus.is_some() {
                 // A focused galaxy is a fixed observer target, not a clock orbit.
                 self.panorama.set_orientation(orientation);
                 self.sky_release = None;
@@ -1255,7 +1560,12 @@ impl AstronomyWallpaper {
         })
     }
 
+    #[cfg(test)]
     fn consume_interaction(&mut self, now: Instant) -> bool {
+        self.consume_interaction_at(now, self.sample_unix)
+    }
+
+    fn consume_interaction_at(&mut self, now: Instant, unix: f64) -> bool {
         if self.interaction_deadline(now) != Some(Duration::ZERO) {
             return false;
         }
@@ -1271,17 +1581,37 @@ impl AstronomyWallpaper {
         {
             drag.orientation = orientation;
         }
-        self.interaction_pending = false;
+        if let Some(drag) = &self.sky_drag
+            && let Some(mut view) = drag.nebula_start
+        {
+            view.orientation = drag.orientation;
+            self.nebula.view = view;
+        }
+        let mut flying = false;
+        self.visit_navigation(|a| {
+            if a.nebula.advance(now, &mut a.panorama) {
+                a.finish_galaxy_return(unix);
+            }
+            flying |= a.nebula.animated();
+        });
+        self.interaction_pending = flying;
         self.last_interaction_frame = Some(now);
         self.interaction_revision = self.interaction_revision.wrapping_add(1);
         true
     }
 
     fn clear_interaction_wake(&mut self) {
+        self.clear_interaction_wake_at(self.sample_unix);
+    }
+
+    fn clear_interaction_wake_at(&mut self, unix: f64) {
         // Pausing/teardown must not strand the release in a permanently frozen
         // state. Rendering resumes with a fresh time sample and this offset.
         self.commit_releases();
         self.admit_navigation();
+        self.visit_navigation(|a| {
+            a.settle_nebula_navigation(unix);
+        });
         self.interaction_pending = false;
         self.last_interaction_frame = None;
     }
@@ -1301,16 +1631,21 @@ impl AstronomyWallpaper {
             self.requested_panorama = None;
             self.galaxy_overview = None;
             self.galaxy_focus = None;
+            self.nebula = NebulaNavigation::default();
         }
         self.earth_zoom.admit();
         self.moon_zoom.admit();
         if let Some(view) = self.requested_panorama.take() {
             self.panorama = view;
+            self.sky_offset = panorama_rotation(self.sample_unix, self.sky_period)
+                .inverse()
+                .compose(view.orientation());
         }
     }
 
     fn active_navigation_pending(&self) -> bool {
         self.reset_requested
+            || self.nebula.animated()
             || self.requested_panorama.is_some()
             || self.earth_release.is_some()
             || self.moon_release.is_some()
@@ -1347,6 +1682,7 @@ impl AstronomyWallpaper {
             } else {
                 a.commit_active_releases();
                 a.admit_active_navigation();
+                a.settle_nebula_navigation(unix);
             }
         });
         self.activate_navigation(&original);
@@ -1370,19 +1706,8 @@ impl AstronomyWallpaper {
         }
         // The first secondary click restores the *actual* overview pose and
         // lens; only a subsequent one requests the legacy complete reset.
-        if self.canvas_body(index) == CelestialBody::Galaxy
-            && let Some(overview) = self.galaxy_overview.take()
-        {
-            self.sky_offset = panorama_rotation(self.sample_unix, self.sky_period)
-                .inverse()
-                .compose(overview.orientation());
-            self.galaxy_focus = None;
-            self.panorama = overview;
-            self.requested_panorama = None;
-            self.sky_release = None;
-            self.interaction_pending = true;
-            self.interaction_revision = self.interaction_revision.wrapping_add(1);
-            return true;
+        if self.canvas_body(index) == CelestialBody::Galaxy && self.galaxy_overview.is_some() {
+            return self.return_galaxy_overview();
         }
         self.reset_requested = true;
         self.interaction_pending = true;
@@ -1549,9 +1874,9 @@ impl AstronomyWallpaper {
         self.material_active = active;
         if !active {
             self.end_drag(unix);
-            self.clear_interaction_wake();
+            self.clear_interaction_wake_at(unix);
         }
-        let interaction = self.consume_interaction(now);
+        let interaction = self.consume_interaction_at(now, unix);
         // Decoders expose polling slots, not a completion event. Static scenes
         // therefore poll at 1 Hz while a visible material is pending, and stop
         // as soon as adoption/failure clears the slot. Never return a permanent
@@ -1835,17 +2160,26 @@ impl AstronomyWallpaper {
                 // do not claim an IAU body-fixed ephemeris/observer position.
                 _ => transform_direction(&basis, [0.48, 0.25, 0.841_486_75]),
             };
+            let sky = self.sky_view(self.sample_unix);
+            let mut nebula = self.nebula.view;
+            if self.nebula.flight.is_some() {
+                let magnification = (sky.fov_degrees() * 0.5).to_radians().tan()
+                    / (self.nebula.field_fov * 0.5).to_radians().tan();
+                nebula.distance = 0.5 + (nebula.distance - 0.5) * magnification;
+            }
             frames.push(AstronomyFrame {
                 canvas: self.draw_plan[index].clone(),
                 body,
                 group,
                 basis,
                 light,
-                sky: self.sky_view(self.sample_unix),
+                sky,
                 zoom: self.body_zoom(body).scale(),
                 galaxy_focus: (body == CelestialBody::Galaxy)
                     .then_some(self.galaxy_focus)
                     .flatten(),
+                nebula,
+                nebula_blend: self.nebula.blend,
             });
         }
         self.activate_navigation(&original);
@@ -1864,6 +2198,12 @@ impl AstronomyWallpaper {
                 self.earth_zoom.presented = Some(frame.zoom);
             }
             self.presented_sky = Some(frame.sky);
+            if frame.body == CelestialBody::Galaxy {
+                self.nebula.presented = Some(NebulaView {
+                    distance: self.nebula.view.distance,
+                    ..frame.nebula
+                });
+            }
         }
         self.activate_navigation(&original);
     }
@@ -2015,7 +2355,7 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn astronomy_drag_motion(&mut self, root_x: f64, root_y: f64) -> bool {
         if !self.astronomy_drag_active() || !self.astronomy_wallpaper.drag_motion([root_x, root_y])
         {
-            self.astronomy_end_drag();
+            self.astronomy_end_drag(false);
             return false;
         }
         // deadline()/due() already join the compositor's wakeup and unchanged
@@ -2023,9 +2363,9 @@ impl<C: CompositorConnection> Compositor<C> {
         true
     }
 
-    pub(crate) fn astronomy_end_drag(&mut self) {
+    pub(crate) fn astronomy_end_drag(&mut self, activate_click: bool) {
         self.astronomy_wallpaper
-            .finish_drag(wall_clock_seconds(SystemTime::now()), true);
+            .finish_drag(wall_clock_seconds(SystemTime::now()), activate_click);
     }
 
     pub(crate) fn astronomy_abort_drag(&mut self) {
@@ -2732,6 +3072,17 @@ impl<C: CompositorConnection> Compositor<C> {
                     program.cosmic_focus_target.as_ref(),
                     frame.galaxy_focus.map_or(0, |target| i32::from(target) + 1),
                 );
+                gl.uniform_matrix_3_f32_slice(
+                    program.nebula_orbit.as_ref(),
+                    false,
+                    &frame.nebula.orientation.matrix(),
+                );
+                gl.uniform_1_f32(program.nebula_distance.as_ref(), frame.nebula.distance);
+                gl.uniform_1_f32(program.nebula_blend.as_ref(), frame.nebula_blend);
+                gl.uniform_1_f32(
+                    program.deep_sky_locator_radius.as_ref(),
+                    locator_radius(frame.sky.fov_degrees(), f64::from(frame.canvas.size[1])) as f32,
+                );
                 let texture = match frame.body {
                     CelestialBody::Earth => a.earth_detail.texture.or(a.texture),
                     CelestialBody::Moon => a.moon_detail.texture.or(a.moon_texture),
@@ -2803,6 +3154,16 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn close_matrix(actual: [f32; 9], expected: [f32; 9]) {
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 3e-6),
+            "{actual:?} != {expected:?}"
+        );
+    }
 
     fn active_wallpaper() -> AstronomyWallpaper {
         AstronomyWallpaper {
@@ -2883,15 +3244,15 @@ mod tests {
         assert!(a.finish_drag(a.sample_unix, true));
         assert_eq!(a.galaxy_focus, Some(4));
         assert!(a.galaxy_overview.is_some());
-        assert!(a.consume_interaction(now));
+        assert!(a.consume_interaction(now + Duration::from_secs(2)));
         let focused = a.material_frames();
         assert!(focused[0].sky.fov_degrees() < before[0].sky.fov_degrees());
         assert_eq!(focused[1].sky, before[1].sky);
         a.record_presented(&focused);
         assert!(a.zoom(left, 1.0));
-        assert!(a.consume_interaction(now + DRAG_FRAME_INTERVAL));
+        assert!(a.consume_interaction(now + Duration::from_secs(2) + DRAG_FRAME_INTERVAL));
         let zoomed = a.material_frames();
-        assert!(zoomed[0].sky.fov_degrees() < focused[0].sky.fov_degrees());
+        assert!(zoomed[0].nebula.distance < focused[0].nebula.distance);
         assert_eq!(zoomed[1].sky, before[1].sky);
         a.record_presented(&zoomed);
         assert!(a.begin_drag(left));
@@ -2899,6 +3260,9 @@ mod tests {
         assert!(a.finish_drag(a.sample_unix, true));
         assert_eq!(a.panorama.fov_degrees(), zoomed[0].sky.fov_degrees());
         assert!(a.reset_at(left));
+        assert!(a.nebula.flight.unwrap().exiting);
+        let return_start = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(return_start + Duration::from_secs(1)));
         assert!(a.galaxy_focus.is_none());
         assert!(a.galaxy_overview.is_none());
         let restored = a.material_frames();
@@ -2930,6 +3294,246 @@ mod tests {
         assert!(a.begin_drag(left));
         a.abort_drag();
         assert!(a.galaxy_focus.is_none());
+    }
+
+    #[test]
+    fn galaxy_wheel_enters_volume_gradually_then_orbits_and_retires_its_wake() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        a.sky_offset = galaxy_target_orientation(0).unwrap();
+        let before = a.material_frames();
+        a.record_presented(&before);
+        let root = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.zoom(root, 64.0));
+        assert_eq!(a.galaxy_focus, Some(0));
+        assert_eq!(a.nebula.blend, 0.0);
+        let start = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(start + Duration::from_millis(700)));
+        let halfway = a.material_frames();
+        assert!(halfway[0].nebula_blend > 0.0 && halfway[0].nebula_blend < 1.0);
+        assert!(halfway[0].sky.fov_degrees() < before[0].sky.fov_degrees());
+        assert_eq!(halfway[1].sky, before[1].sky);
+        assert!(
+            a.interaction_deadline(start + Duration::from_millis(800))
+                .is_some()
+        );
+        assert!(a.consume_interaction(start + Duration::from_millis(1500)));
+        let finished = a.material_frames();
+        a.record_presented(&finished);
+        assert_eq!(a.nebula.blend, 1.0);
+        assert!(a.nebula.flight.is_none());
+        assert!(
+            a.interaction_deadline(start + Duration::from_secs(2))
+                .is_none()
+        );
+        assert!(a.begin_drag(root));
+        assert!(a.drag_motion([root[0] + 80.0, root[1] + 40.0]));
+        assert!(a.consume_interaction(start + Duration::from_secs(2)));
+        let orbiting = a.material_frames();
+        assert_ne!(
+            orbiting[0].nebula.orientation,
+            finished[0].nebula.orientation
+        );
+        assert_eq!(orbiting[0].sky, finished[0].sky);
+        assert!(a.finish_drag(a.sample_unix, false));
+        assert!(a.reset_at(root));
+        let return_start = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(return_start + Duration::from_secs(1)));
+        assert_eq!(a.nebula.blend, 0.0);
+        assert!(a.galaxy_focus.is_none());
+    }
+
+    #[test]
+    fn galaxy_edge_locator_picking_uses_the_rendered_angular_footprint() {
+        let size = [3840.0, 1080.0];
+        let mut view = PanoramaView::default();
+        let scale = size[1] / (2.0 * (30.0_f64.to_radians()).tan());
+        let yaw = -(size[0] * 0.4 / scale).atan();
+        view.set_orientation(
+            galaxy_target_orientation(1)
+                .unwrap()
+                .compose(CelestialRotation::axis_angle([0.0, 1.0, 0.0], yaw).unwrap()),
+        );
+        let centre = view
+            .project(galactic_to_world(DEEP_SKY_TARGETS[1].direction()), size)
+            .unwrap();
+        let point = [centre[0] + 11.0, centre[1]];
+        let q = galaxy_galactic_direction(view.ray(point, size).unwrap());
+        let pixels = q
+            .iter()
+            .zip(DEEP_SKY_TARGETS[1].direction())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / view.angular_pixel_size(point, size).unwrap();
+        assert!(
+            (pixels - locator_radius(view.fov_degrees(), size[1])).abs() < 1.65,
+            "probe must lie on the actual shader's ring, {pixels}"
+        );
+        assert_eq!(galaxy_pick_target(view, point, size), Some(1));
+        assert!(DEEP_SKY_TARGETS[1].image_uv(q).unwrap()[0] > 1.0);
+    }
+
+    #[test]
+    fn nebula_zoom_eases_reversibly_without_an_idle_animation_wake() {
+        let now = Instant::now();
+        let mut navigation = NebulaNavigation::default();
+        let original = navigation.view.distance;
+        assert!(navigation.request_zoom(2.0, now));
+        let goal = navigation.dolly.unwrap().to;
+        assert_eq!(navigation.view.distance, original);
+        let mut panorama = PanoramaView::default();
+        navigation.advance(now + Duration::from_millis(90), &mut panorama);
+        assert!(navigation.view.distance > goal && navigation.view.distance < original);
+        assert!(navigation.request_zoom(-2.0, now + Duration::from_millis(90)));
+        navigation.advance(now + Duration::from_millis(270), &mut panorama);
+        assert!((navigation.view.distance - original).abs() < 1e-5);
+        assert!(!navigation.animated());
+        assert!(!navigation.request_zoom(f64::NAN, now));
+    }
+
+    #[test]
+    fn grabbing_an_entering_nebula_pauses_the_flight_at_the_presented_pose() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        assert!(a.focus_galaxy_target(0, a.sample_unix));
+        let start = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(start + Duration::from_millis(700)));
+        let before = a.material_frames();
+        a.record_presented(&before);
+        let root = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.begin_drag(root));
+        assert!(a.consume_interaction(start + Duration::from_secs(2)));
+        let held = a.material_frames();
+        assert_eq!(held[0].sky, before[0].sky);
+        assert_eq!(held[0].nebula, before[0].nebula);
+        assert_eq!(held[0].nebula_blend, before[0].nebula_blend);
+        assert!(
+            a.interaction_deadline(start + Duration::from_secs(3))
+                .is_none()
+        );
+        assert!(a.finish_drag(a.sample_unix, false));
+        assert!(a.consume_interaction(start + Duration::from_millis(2100)));
+        assert!(a.panorama.fov_degrees() < held[0].sky.fov_degrees());
+        assert!(a.consume_interaction(start + Duration::from_secs(4)));
+        assert!(a.nebula.flight.is_none());
+    }
+
+    #[test]
+    fn galaxy_return_is_smooth_reversible_and_wheel_can_restore_the_overview() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let original = a.material_frames();
+        a.record_presented(&original);
+        assert!(a.focus_galaxy_target(0, a.sample_unix));
+        let start = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(start + Duration::from_secs(2)));
+        let focused = a.material_frames();
+        a.record_presented(&focused);
+        let root = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.reset_at(root));
+        assert_eq!(a.material_frames()[0].sky, focused[0].sky);
+        let returning = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(returning + Duration::from_millis(450)));
+        assert!(a.nebula.blend > 0.0 && a.nebula.blend < 1.0);
+        let half = a.material_frames();
+        a.record_presented(&half);
+        assert!(half[0].sky.fov_degrees() > focused[0].sky.fov_degrees());
+        assert_eq!(half[1].sky, original[1].sky);
+        assert!(a.zoom(root, 1.0));
+        assert!(!a.nebula.flight.unwrap().exiting);
+        assert_eq!(a.material_frames()[0].sky, half[0].sky);
+        let reversed = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(reversed + Duration::from_secs(2)));
+        let focused_again = a.material_frames();
+        a.record_presented(&focused_again);
+        assert!(a.zoom(root, -64.0));
+        assert!(a.nebula.flight.unwrap().exiting);
+        let last = a.nebula.flight.unwrap().started;
+        assert!(a.consume_interaction(last + Duration::from_secs(1)));
+        let restored = a.material_frames();
+        assert_eq!(restored[0].sky, original[0].sky);
+        assert!(a.galaxy_focus.is_none());
+        assert!(
+            a.interaction_deadline(last + Duration::from_secs(2))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn galaxy_grab_before_the_first_entry_frame_can_pause_and_abort_without_a_jump() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let before = a.presented_sky.unwrap();
+        assert!(a.focus_galaxy_target(0, a.sample_unix));
+        let start = a.nebula.flight.unwrap().started;
+        assert!(a.nebula.presented.is_none());
+        let root = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        assert!(a.begin_drag(root));
+        assert!(a.nebula.flight.unwrap().paused_at.is_some());
+        a.abort_drag();
+        assert_eq!(a.nebula.flight.unwrap().started, start);
+        assert!(a.nebula.flight.unwrap().paused_at.is_none());
+        assert!(a.begin_drag(root));
+        assert!(a.consume_interaction(start + Duration::from_secs(2)));
+        assert_eq!(a.panorama, before);
+        assert_eq!(a.nebula.blend, 0.0);
+        assert!(
+            a.interaction_deadline(start + Duration::from_secs(3))
+                .is_none()
+        );
+        assert!(a.finish_drag(a.sample_unix, false));
+        assert!(a.consume_interaction(start + Duration::from_secs(4)));
+        assert_eq!(a.nebula.blend, 1.0);
+    }
+
+    #[test]
+    fn galaxy_return_rebases_the_tour_at_the_actual_completion_or_suspension_time() {
+        let (mut a, _) = independent_scenes("galaxy", false);
+        a.sky_period = 1;
+        let group = a.canvas_group(0).to_owned();
+        a.activate_navigation(&group);
+        let original = a.material_frames();
+        a.record_presented(&original);
+        let root = pointer_at(&a.draw_plan[0], 200, [0.0, 0.0]);
+        let unix = a.sample_unix;
+        assert!(a.focus_galaxy_target(0, unix));
+        let start = a.nebula.flight.unwrap().started;
+        assert!(a.update_clock(start + Duration::from_secs(2), unix + 2.0, 0, false, false));
+        let focused = a.material_frames();
+        a.record_presented(&focused);
+        assert!(a.reset_at(root));
+        let returning = a.nebula.flight.unwrap().started;
+        assert!(a.update_clock(
+            returning + Duration::from_secs(1),
+            unix + 12.0,
+            0,
+            false,
+            false
+        ));
+        let restored = a.material_frames();
+        close_matrix(restored[0].sky.matrix(), original[0].sky.matrix());
+        assert_eq!(restored[0].sky.fov_degrees(), original[0].sky.fov_degrees());
+        a.record_presented(&restored);
+        assert!(a.focus_galaxy_target(0, a.sample_unix));
+        let start = a.nebula.flight.unwrap().started;
+        assert!(a.update_clock(start + Duration::from_secs(2), unix + 14.0, 0, false, false));
+        let focused = a.material_frames();
+        a.record_presented(&focused);
+        assert!(a.reset_at(root));
+        a.powered = false;
+        a.update_clock(start + Duration::from_secs(3), unix + 30.0, 0, false, true);
+        assert!(a.galaxy_focus.is_none());
+        a.powered = true;
+        assert!(a.update_clock(start + Duration::from_secs(4), unix + 30.0, 0, false, false));
+        close_matrix(
+            a.material_frames()[0].sky.matrix(),
+            restored[0].sky.matrix(),
+        );
     }
 
     fn pointer_at(canvas: &AstronomyDraw, height: u32, point: [f64; 2]) -> [f64; 2] {

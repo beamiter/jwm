@@ -386,9 +386,9 @@ macro_rules! delegate_compositor_capabilities {
                 self.compositor.as_ref().is_some_and(|c| c.astronomy_drag_active())
             }
 
-            fn compositor_astronomy_end_drag(&mut self) {
+            fn compositor_astronomy_end_drag(&mut self, activate_click: bool) {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.astronomy_end_drag();
+                    compositor.astronomy_end_drag(activate_click);
                 }
             }
 
