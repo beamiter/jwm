@@ -120,6 +120,50 @@ class UpdateInstallTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(self.lines(), [])
 
+    def test_skip_build_keeps_git_updates_and_only_target_scope(self):
+        checkouts = {name: self.project(name, updated=True)
+                     for name in ('ember', 'frost', 'jwm')}
+        before = {name: self.git('-C', path, 'rev-parse', 'HEAD').stdout.strip()
+                  for name, path in checkouts.items()}
+        result = self.run_script('-B', '-q', '-T', 'ember,frost', '-X', 'ember,jwm')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lines(), ['installer:frost'])
+        for name in ('ember', 'frost'):
+            self.assertTrue((checkouts[name] / 'changed').exists(), name)
+            self.assertNotEqual(self.git('-C', checkouts[name], 'rev-parse', 'HEAD').stdout.strip(),
+                                before[name], name)
+        self.assertFalse((checkouts['jwm'] / 'changed').exists())
+        self.assertEqual(self.git('-C', checkouts['jwm'], 'rev-parse', 'HEAD').stdout.strip(),
+                         before['jwm'])
+
+    def test_skip_build_overrides_missing_artifacts_and_force_build(self):
+        checkout = self.project('ember')
+        (checkout / 'target' / 'release' / 'ember').unlink()
+        self.assertFalse((self.installed / 'ember').exists())
+        for options in (('-q', '-X', 'ember'), ('-B', '-q', '-X', 'ember')):
+            with self.subTest(options=options):
+                result = self.run_script(*options)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.lines(), [])
+
+    def test_skip_build_never_requests_jwm_sudo_credentials(self):
+        checkout = self.project('jwm', updated=True)
+        result = self.run_script('-B', '-q', '--skip-build=jwm')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((checkout / 'changed').exists())
+        self.assertEqual(self.lines(), [])
+
+    def test_skip_build_never_runs_jsh_toolchain_preflight(self):
+        self.project('jsh')
+        self.env['JSH_INSTALL_TARGET'] = 'x86_64-unknown-linux-musl'
+        self.executable(self.tools / 'x86_64-linux-musl-gcc', '#!/bin/sh\nexit 0\n')
+        self.executable(self.tools / 'rustup',
+                        '#!/bin/sh\nprintf "rustup:%s\\n" "$*" >> "$TEST_CALLS"\n'
+                        'printf "x86_64-unknown-linux-musl\\n"\n')
+        result = self.run_script('-B', '-C', '-q', '--skip-build', 'jsh')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lines(), [])
+
     def local_runner(self, status=0):
         runner = self.projects / 'jterm_core' / 'scripts' / 'family-cargo.py'
         runner.parent.mkdir(parents=True)

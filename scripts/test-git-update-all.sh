@@ -86,6 +86,43 @@ if /bin/bash "$UPDATER" "$TEST_ROOT/empty" "$TEST_ROOT/empty" >"$TEST_ROOT/roots
 fi
 assert_contains "$TEST_ROOT/roots.out" "只能指定一个扫描目录"
 
+# Invalid build exclusions must fail before even discovering repositories. The
+# Git wrapper delegates to the real tool if validation accidentally gets that
+# far, but its log makes any discovery/fetch observable without network access.
+INVALID_BIN="$TEST_ROOT/invalid-bin"
+mkdir -p "$INVALID_BIN"
+REAL_GIT="$(command -v git)"
+cat >"$INVALID_BIN/git" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"${GIT_UPDATE_INVALID_GIT_LOG:?}"
+exec "${GIT_UPDATE_REAL_GIT:?}" "$@"
+EOF
+chmod +x "$INVALID_BIN/git"
+
+assert_invalid_skip_build() {
+    local status=0
+    : >"$TEST_ROOT/invalid-skip-build.log"
+    (
+        cd "$TEST_ROOT/empty"
+        GIT_UPDATE_INVALID_GIT_LOG="$TEST_ROOT/invalid-skip-build.log" \
+            GIT_UPDATE_REAL_GIT="$REAL_GIT" PATH="$INVALID_BIN:$PATH" \
+            /bin/bash "$UPDATER" "$@"
+    ) >"$TEST_ROOT/invalid-skip-build.out" 2>&1 || status=$?
+    [ "$status" -eq 2 ] || fail "invalid build exclusion did not exit 2: $* (exit $status)"
+    [ ! -s "$TEST_ROOT/invalid-skip-build.log" ] \
+        || fail "invalid build exclusion reached repository discovery or fetch"
+}
+
+for invalid in unknown '' '   ' ',' ',jwm' 'jwm,' 'jwm,jwm,' 'jwm,,ember' 'j wm'; do
+    assert_invalid_skip_build -X "$invalid"
+done
+assert_invalid_skip_build -X
+assert_invalid_skip_build --skip-build
+assert_invalid_skip_build --skip-build=
+assert_invalid_skip_build --skip-build 'ember,'
+assert_invalid_skip_build -X jwm -X 'jwm,'
+assert_invalid_skip_build -X 'jwm,' -X ember
+
 # -T scopes updates as well as builds and accepts the LifeAI convenience alias.
 SCOPE_ROOT="$TEST_ROOT/scope"
 init_repo "$SCOPE_ROOT/jagent"
@@ -114,6 +151,24 @@ run_with_stubs "$TEST_ROOT/dispatch.log" -B -T jagent,jterm_core,cplus,LifeAI "$
     || fail "Rust library targets did not use the locked release build"
 assert_contains "$TEST_ROOT/dispatch.log" "bash:./build.sh"
 assert_contains "$TEST_ROOT/dispatch.log" "julia:--project=. --startup-file=no --history-file=no -e"
+
+# Build exclusions trim names, canonicalize aliases and accumulate across
+# repeated short/long options. -T still defines the repository update scope.
+: >"$TEST_ROOT/skip-build.log"
+run_with_stubs "$TEST_ROOT/skip-build.log" -B -T jagent,jterm_core,cplus,LifeAI \
+    -X ' LifeAI, LifeAI.jl ' -X ' cplus ' --skip-build ' jterm_core ' "$DISPATCH_ROOT" \
+    >"$TEST_ROOT/skip-build.out"
+[ "$(wc -l <"$TEST_ROOT/skip-build.log")" -eq 1 ] \
+    || fail "build exclusions were not normalized or accumulated"
+assert_contains "$TEST_ROOT/skip-build.log" 'cargo:build --release --locked'
+assert_contains "$TEST_ROOT/skip-build.out" '共 4 个'
+
+: >"$TEST_ROOT/skip-build-equals.log"
+run_with_stubs "$TEST_ROOT/skip-build-equals.log" -B -T jagent,LifeAI \
+    --skip-build=LifeAI "$DISPATCH_ROOT" >"$TEST_ROOT/skip-build-equals.out"
+[ "$(wc -l <"$TEST_ROOT/skip-build-equals.log")" -eq 1 ] \
+    || fail "--skip-build=LIST did not exclude the aliased target"
+assert_contains "$TEST_ROOT/skip-build-equals.log" 'cargo:build --release --locked'
 
 # Install targets own their backend selection. In particular anvil/forge's
 # default `--backend auto` must be allowed to choose Nix when Cargo is absent.

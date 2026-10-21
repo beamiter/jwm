@@ -58,6 +58,29 @@ without installing, and `-N` only updates repositories. `-I` explicitly selects
 the default build-and-install mode. Installation failures are included in the
 summary and produce a nonzero exit status.
 
+`-X LIST` / `--skip-build LIST` skips the named projects' compilation and
+installation while their Git updates and selected-source push behavior continue.
+It takes priority over `-B` and missing artifacts, and skips those projects'
+toolchain and sudo preflight checks. The build summary reports each exclusion.
+`-T` continues to select which repositories are updated at all.
+
+Names are comma-separated, accept surrounding whitespace and the `LifeAI` alias,
+and must belong to the known build targets. Repeated `-X` options accumulate;
+duplicates are ignored. Empty or unknown names fail before repository updates.
+The exclusion applies to a project's own entry point; another project's build
+tool may still compile shared dependencies it needs.
+
+```sh
+# Update every repository, but skip JWM's build and installation.
+./git-update-all.sh -X jwm ~/projects
+
+# Force other projects to rebuild, while skipping JWM and jsh.
+./git-update-all.sh -B --skip-build=jwm,jsh ~/projects
+
+# Update both terminals, but build/install only frost.
+./git-update-all.sh -B -T ember,frost -X ember ~/projects
+```
+
 ```sh
 # Build and install the current published terminal dependency revisions.
 ./git-update-all.sh -B -T anvil,ember,frost,forge ~/projects

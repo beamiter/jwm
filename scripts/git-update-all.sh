@@ -18,6 +18,7 @@ BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
 ONLY=""          # 逗号分隔的项目名白名单
+SKIP_BUILD=""    # 只排除构建/安装，仍然更新这些仓库
 SOURCE_MODE="github"
 SOURCE_HOST=""
 HOST_ROOT="projects"
@@ -58,29 +59,34 @@ in_scope() {
     return 1
 }
 
-normalize_only() {
-    local raw item normalized="" seen=" "
-    local -a requested=()
-    [ -z "$ONLY" ] && return 0
-    IFS=',' read -r -a requested <<<"$ONLY"
-    for raw in "${requested[@]}"; do
+normalize_targets() {
+    local option="$1" remaining="$2" raw item normalized="" seen=" "
+    [ -z "$remaining" ] && return 0
+    while :; do
+        raw="${remaining%%,*}"
         # Trim only at the edges; embedded whitespace remains invalid instead
         # of silently changing a mistyped project name.
         item="${raw#"${raw%%[![:space:]]*}"}"
         item="${item%"${item##*[![:space:]]}"}"
-        [ -n "$item" ] || { echo "-T 包含空项目名" >&2; return 1; }
+        [ -n "$item" ] || { echo "$option 包含空项目名" >&2; return 1; }
         item="$(canonical_target_name "$item")"
         is_known_target "$item" || {
-            echo "-T 包含未知项目: $(sanitize_text "$item")" >&2
+            echo "$option 包含未知项目: $(sanitize_text "$item")" >&2
             return 1
         }
-        case "$seen" in
-            *" $item "*) continue ;;
-        esac
-        seen+="$item "
-        normalized+="${normalized:+,}$item"
+        if [[ "$seen" != *" $item "* ]]; then
+            seen+="$item "
+            normalized+="${normalized:+,}$item"
+        fi
+        [[ "$remaining" = *,* ]] || break
+        remaining="${remaining#*,}"
     done
-    ONLY="$normalized"
+    printf '%s' "$normalized"
+}
+
+build_is_skipped() {
+    case ",$SKIP_BUILD," in *",$1,"*) return 0 ;; esac
+    return 1
 }
 
 # Remote commit subjects and filesystem names are not trusted terminal text.
@@ -166,6 +172,8 @@ usage() {
   -L            四终端用同级 jterm_core/jagent 源码联编，再安装产物
                 使用临时 manifest/lock，不改各仓库发布依赖版本
   -T 列表       只更新和构建这些项目，逗号分隔，如 -T jagent,jwm,LifeAI
+  -X, --skip-build 列表  这些项目仍更新仓库，但跳过编译和安装，如 -X jwm,jsh
+                可重复指定；优先于 -B 和产物缺失时的补编译
   -J N          同时构建几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
 
@@ -215,13 +223,14 @@ while [ $# -gt 0 ]; do
         --github) args+=(-g); shift ;;
         --upstream) args+=(-U); shift ;;
         --no-push) args+=(-p); shift ;;
-        --host|--host-root|--remote|--source)
+        --host|--host-root|--remote|--source|--skip-build)
             if [ $# -lt 2 ] || [ -z "$2" ]; then echo "$1 需要参数" >&2; exit 2; fi
             option="$1"; value="$2"; shift 2
             case "$option" in
                 --host) args+=(-H "$value") ;;
                 --host-root) args+=(-R "$value") ;;
                 --remote) args+=(-O "$value") ;;
+                --skip-build) args+=(-X "$value") ;;
                 --source)
                     case "$value" in
                         github) args+=(-g) ;;
@@ -229,7 +238,7 @@ while [ $# -gt 0 ]; do
                         *) echo "--source 需要 github 或 upstream" >&2; exit 2 ;;
                     esac ;;
             esac ;;
-        --host=*|--host-root=*|--remote=*|--source=*)
+        --host=*|--host-root=*|--remote=*|--source=*|--skip-build=*)
             option="${1%%=*}"; value="${1#*=}"; shift
             set -- "$option" "$value" "$@" ;;
         --) args+=("$@"); break ;;
@@ -238,7 +247,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- "${args[@]}"
-while getopts ":j:J:T:H:R:O:grfmsnPuqBCLNIhpU" opt; do
+while getopts ":j:J:T:X:H:R:O:grfmsnPuqBCLNIhpU" opt; do
     case "$opt" in
         j) JOBS="$OPTARG" ;;
         r) MODE="rebase" ;;
@@ -261,6 +270,9 @@ while getopts ":j:J:T:H:R:O:grfmsnPuqBCLNIhpU" opt; do
         I) INSTALL=1; BUILD=1 ;;
         L) LOCAL_SOURCES=1 ;;
         T) ONLY="$OPTARG" ;;
+        X)
+            [ -n "$OPTARG" ] || { echo "-X 包含空项目名" >&2; exit 2; }
+            SKIP_BUILD+="${SKIP_BUILD:+,}$OPTARG" ;;
         J) BUILD_JOBS="$OPTARG" ;;
         h) usage; exit 0 ;;
         \?) echo "未知选项: -$OPTARG" >&2; usage >&2; exit 2 ;;
@@ -299,7 +311,8 @@ if [ "$BUILD_JOBS" -lt 1 ] || [ "$BUILD_JOBS" -gt "$MAX_PARALLEL_JOBS" ]; then
     echo "-J 必须在 1..$MAX_PARALLEL_JOBS 之间" >&2
     exit 2
 fi
-normalize_only || exit 2
+ONLY="$(normalize_targets -T "$ONLY")" || exit 2
+SKIP_BUILD="$(normalize_targets -X "$SKIP_BUILD")" || exit 2
 if [ "$SOURCE_MODE" = host ]; then
     if [[ ! "$SOURCE_HOST" =~ ^([A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
         echo "--host 需要有效的 SSH 主机名或 user@host" >&2; exit 2
@@ -970,6 +983,10 @@ if [ "$BUILD" -eq 1 ]; then
         name="$(basename "${repos[$i]}")"
         is_known_target "$name" || continue
         in_scope "$name" || continue
+        if build_is_skipped "$name"; then
+            printf 'SKIP|%s|-X 排除编译和安装\n' "$name" >"$WORKDIR/b$i.status"
+            continue
+        fi
         st="${git_st[$i]:-FAIL}"
 
         # 更新失败或 stash 冲突未处理时，源码不在一个干净的已知状态，不碰它
@@ -1060,7 +1077,7 @@ if [ "$BUILD" -eq 1 ]; then
                 printf '\n%s\n' "${C_DIM}jwm 安装需要 sudo，先验证一次密码${C_RST}"
                 sudo -v || printf '%s\n' "${C_YLW}sudo 验证失败，jwm 安装大概率会失败${C_RST}" >&2
             else
-                printf '\n%s\n' "${C_YLW}jwm 安装需要 sudo，但当前不是交互终端；请先 sudo -v，或用 -T 把 jwm 排除${C_RST}" >&2
+                printf '\n%s\n' "${C_YLW}jwm 安装需要 sudo，但当前不是交互终端；请先 sudo -v，或用 -X jwm 跳过其编译安装${C_RST}" >&2
             fi
         fi
         break
