@@ -36,6 +36,8 @@ repo-file	assets/astronomy/earth-nasa-clouds.jpg	share/jwm/astronomy/earth-nasa-
 repo-file	assets/astronomy/milkyway-nasa-gaia.jpg	share/jwm/astronomy/milkyway-nasa-gaia.jpg	-	0644
 repo-file	assets/astronomy/moon-nasa-lroc-8k.jpg	share/jwm/astronomy/moon-nasa-lroc-8k.jpg	-	0644
 repo-file	assets/astronomy/galaxy-nasa-4k.png	share/jwm/astronomy/galaxy-nasa-4k.png	-	0644
+repo-file	assets/astronomy/deep-sky-atlas.jpg	share/jwm/astronomy/deep-sky-atlas.jpg	-	0644
+repo-file	assets/astronomy/deep-sky-catalog.json	share/jwm/astronomy/deep-sky-catalog.json	-	0644
 repo-file	assets/astronomy/mercury-nasa-messenger.jpg	share/jwm/astronomy/mercury-nasa-messenger.jpg	-	0644
 repo-file	assets/astronomy/mars-nasa-viking.jpg	share/jwm/astronomy/mars-nasa-viking.jpg	-	0644
 repo-file	assets/astronomy/jupiter-nasa-cassini.jpg	share/jwm/astronomy/jupiter-nasa-cassini.jpg	-	0644

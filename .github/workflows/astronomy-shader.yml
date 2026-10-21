@@ -7,17 +7,20 @@ on:
       - src/backend/compositor_common/celestial_layout.rs
       - src/backend/compositor_common/celestial_catalog.rs
       - src/backend/compositor_common/panorama.rs
+      - src/backend/compositor_common/deep_sky*.rs
       - src/backend/x11/compositor/astronomy_wallpaper.rs
       - src/backend/x11/compositor/shaders/animated_wallpaper.frag
       - src/backend/x11/compositor/shaders/planet_surface.glsl
       - src/backend/x11/compositor/shaders/solar_optics.glsl
       - src/backend/x11/compositor/shaders/cosmic_sky.glsl
+      - src/backend/x11/compositor/shaders/deep_sky_catalog.glsl
       - src/backend/x11/compositor/procedural_wallpaper_cache.rs
       - src/config.rs
       - src/config/**
       - assets/astronomy/**
       - scripts/test-astronomy-shader.py
       - scripts/test-astronomy-assets.py
+      - scripts/test-deep-sky.py
       - scripts/prepare-astronomy-*.py
       - scripts/install_jwm_scripts.sh
       - packaging/release-manifest.tsv
@@ -29,17 +32,20 @@ on:
       - src/backend/compositor_common/celestial_layout.rs
       - src/backend/compositor_common/celestial_catalog.rs
       - src/backend/compositor_common/panorama.rs
+      - src/backend/compositor_common/deep_sky*.rs
       - src/backend/x11/compositor/astronomy_wallpaper.rs
       - src/backend/x11/compositor/shaders/animated_wallpaper.frag
       - src/backend/x11/compositor/shaders/planet_surface.glsl
       - src/backend/x11/compositor/shaders/solar_optics.glsl
       - src/backend/x11/compositor/shaders/cosmic_sky.glsl
+      - src/backend/x11/compositor/shaders/deep_sky_catalog.glsl
       - src/backend/x11/compositor/procedural_wallpaper_cache.rs
       - src/config.rs
       - src/config/**
       - assets/astronomy/**
       - scripts/test-astronomy-shader.py
       - scripts/test-astronomy-assets.py
+      - scripts/test-deep-sky.py
       - scripts/prepare-astronomy-*.py
       - scripts/install_jwm_scripts.sh
       - packaging/release-manifest.tsv
@@ -99,7 +105,7 @@ jobs:
           import sys
           from pathlib import Path
           root = Path.cwd() / "src/backend/compositor_common"
-          modules = ("animated_wallpaper", "panorama")
+          modules = ("animated_wallpaper", "panorama", "deep_sky")
           Path(sys.argv[1]).write_text("".join(
               f"#[path={json.dumps(str(root / (name + '.rs')))}] mod {name};\n"
               for name in modules
@@ -110,6 +116,11 @@ jobs:
             -Awarnings -o "$ASTRONOMY_TEST_OUTPUT/astronomy-common-tests"
           "$ASTRONOMY_TEST_OUTPUT/astronomy-common-tests" \
             2>&1 | tee "$ASTRONOMY_TEST_OUTPUT/common-tests.log"
+
+      - name: Observed deep-sky catalogue and GL/GLES focus/zoom
+        run: |
+          python3 scripts/prepare-astronomy-nebulae.py --check
+          python3 scripts/test-deep-sky.py --output "$ASTRONOMY_TEST_OUTPUT/deep-sky"
 
       - name: Verify bundled assets through install, upgrade and rollback
         run: /usr/bin/python3 scripts/test-astronomy-assets.py
@@ -131,6 +142,7 @@ jobs:
           name: astronomy-shader-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.ASTRONOMY_TEST_OUTPUT }}/*.png
+            ${{ env.ASTRONOMY_TEST_OUTPUT }}/deep-sky/
             ${{ env.ASTRONOMY_TEST_OUTPUT }}/earth-validation.json
             ${{ env.ASTRONOMY_TEST_OUTPUT }}/*.log
           if-no-files-found: warn

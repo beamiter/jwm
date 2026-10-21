@@ -131,7 +131,7 @@ surface=egl('eglCreatePbufferSurface',P,[P,P,C.POINTER(I)])
 current=egl('eglMakeCurrent',U,[P,P,P,P])
 results={}
 PREVIEW_INSTANT=datetime.datetime.now(datetime.timezone.utc).timestamp()
-source=SOURCE.read_text().replace('// JWM_COSMIC_SKY_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl').read_text()).replace('// JWM_PLANET_SURFACE_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/planet_surface.glsl').read_text()).replace('// JWM_SOLAR_OPTICS_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/solar_optics.glsl').read_text())
+source=SOURCE.read_text().replace('// JWM_COSMIC_SKY_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/cosmic_sky.glsl').read_text()).replace('// JWM_DEEP_SKY_CATALOG_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/deep_sky_catalog.glsl').read_text()).replace('// JWM_PLANET_SURFACE_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/planet_surface.glsl').read_text()).replace('// JWM_SOLAR_OPTICS_INCLUDE',(REPO/'src/backend/x11/compositor/shaders/solar_optics.glsl').read_text())
 vert='#version 330 core\nvoid main(){ vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2); gl_Position=vec4(p*2.0-1.0,0,1); }'
 def prepare(s,es):
  return '#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\nprecision highp sampler3D;\n'+s.lstrip().split('\n',1)[1] if es else s

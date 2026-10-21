@@ -341,10 +341,14 @@ rotation or the time driving Earth and Moon illumination.
 
 The catalogue atlas provides a full surrounding sky with recognizable stellar
 patterns. Conventional constellation stick figures are not official IAU
-constellation boundaries. Illustration mode's coloured nebula shapes are
-artwork, even where their reference directions are sourced; science mode
-omits that artwork. Neither mode reconstructs the Milky Way as a measured
-three-dimensional galaxy or predicts the changing sky above a user's horizon.
+constellation boundaries. The Milky Way scene places twelve observed telescope
+fields at published directions and approximate distances, with the source image
+north angles and angular extents. Both modes use those observations rather than
+procedural cloud sketches. Other scenes can retain illustrative sky decoration.
+The fields are 3D image planes, not reconstructed gas volumes; the star catalogue
+still has no per-star distance or parallax. This is not a measured reconstruction
+of the whole Milky Way or a prediction of the changing sky above a user's horizon.
+See [observed field sources](celestial-explorer.md#sky-catalogue-and-nebulae).
 
 Sources, image provenance and regression references were checked on
 2026-10-17. Any future replacement map, expanded epoch interval or stronger

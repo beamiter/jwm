@@ -104,7 +104,7 @@ results={}
 
 shader_snapshots={SOURCE:SOURCE.read_bytes()}
 source=shader_snapshots[SOURCE].decode()
-for marker,filename in [('COSMIC_SKY','cosmic_sky.glsl'),('PLANET_SURFACE','planet_surface.glsl'),('SOLAR_OPTICS','solar_optics.glsl')]:
+for marker,filename in [('COSMIC_SKY','cosmic_sky.glsl'),('DEEP_SKY_CATALOG','deep_sky_catalog.glsl'),('PLANET_SURFACE','planet_surface.glsl'),('SOLAR_OPTICS','solar_optics.glsl')]:
  if '// JWM_'+marker+'_INCLUDE' in source:
   include=REPO/'src/backend/x11/compositor/shaders'/filename
   shader_snapshots[include]=include.read_bytes()
@@ -134,7 +134,9 @@ for es in ((False,True) if args.api=='both' else (args.api=='gles300',)):
   return sh
  vs=compile(vert,0x8B31); fs=compile(source,0x8B30)
  prog=gl('glCreateProgram',U,[])(); attach=gl('glAttachShader',None,[U,U]);attach(prog,vs);attach(prog,fs)
- gl('glLinkProgram',None,[U])(prog);ok=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(prog,0x8B82,C.byref(ok));assert ok.value,'link failed'
+ gl('glLinkProgram',None,[U])(prog);ok=I();gl('glGetProgramiv',None,[U,U,C.POINTER(I)])(prog,0x8B82,C.byref(ok))
+ link_log=C.create_string_buffer(8192);gl('glGetProgramInfoLog',None,[U,I,C.POINTER(I),P])(prog,8192,None,link_log)
+ assert ok.value,link_log.value.decode()
  gl('glUseProgram',None,[U])(prog)
  vao=U();gl('glGenVertexArrays',None,[I,C.POINTER(U)])(1,C.byref(vao));gl('glBindVertexArray',None,[U])(vao)
  gl('glViewport',None,[I,I,I,I])(0,0,W,H)

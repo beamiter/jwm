@@ -21,6 +21,8 @@ ASSETS = {
     "earth-nasa-clouds.jpg": "daddaad84d7a33bbbc86cdda3f591099f57cee8607b7bcf3b67eb7e4f7a1c793",
     "milkyway-nasa-gaia.jpg": "0c9247995a0f31eebe8ba49e3994d3fcc468c4cd4bf9a1555445141d81c8078e",
     "galaxy-nasa-4k.png": "f92ee3d1eff038c93200a79f0a0496edb4bb37cf397de676d7d57c1e85cc8d94",
+    "deep-sky-atlas.jpg": "3b58ff6787337f932d07e3c3932b64c490d20d755c545f28d3e953a5047da1e9",
+    "deep-sky-catalog.json": "38432f400e794b54cb34e03d05657a807acc666aff512088221520d6ef8ce728",
     "mercury-nasa-messenger.jpg": "6a99105fd4bcf9649977b5f163db0303bfe07c48354bcc3f1bc69ccd9566a438",
     "mars-nasa-viking.jpg": "12ec6bf02ebd42a246edc778cb2ce8c595b4d9f0892badf0bfff8abb2303c780",
     "jupiter-nasa-cassini.jpg": "147a68a29590299a052d402cda76c29877ba5ebd4a6cab752aeb5e5166f507ec",
@@ -39,8 +41,13 @@ HISTORICAL_ASSETS = {
         OCTOBER, JANUARY, "moon-nasa-lroc.jpg", "moon-nasa-lroc-8k.jpg",
         "earth-nasa-clouds.jpg", "milkyway-nasa-gaia.jpg", "galaxy-nasa-4k.png",
     ),
+    "astronomy-encyclopedia": (
+        OCTOBER, JANUARY, "moon-nasa-lroc.jpg", "moon-nasa-lroc-8k.jpg",
+        "earth-nasa-clouds.jpg", "milkyway-nasa-gaia.jpg", "galaxy-nasa-4k.png",
+        "mercury-nasa-messenger.jpg", "mars-nasa-viking.jpg", "jupiter-nasa-cassini.jpg",
+    ),
 }
-VERSION = "astronomy-encyclopedia"
+VERSION = "astronomy-deep-sky"
 VERSION_DIR = Path("usr/local/lib/jwm/versions")
 
 

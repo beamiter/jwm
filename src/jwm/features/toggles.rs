@@ -1746,15 +1746,6 @@ impl Jwm {
             self.mark_system_ui_dirty();
             return;
         }
-        if path == "jwm-wallpaper:info" {
-            self.features.system_ui.wallpaper_show_details();
-            set_wallpaper_picker_message(
-                &mut self.features.system_ui,
-                "Reference data use real units; solar views are not to scale.",
-            );
-            self.mark_system_ui_dirty();
-            return;
-        }
         if path.starts_with("jwm-wallpaper:detail:") {
             return;
         }
@@ -1860,7 +1851,7 @@ impl Jwm {
             let message = match persisted {
                 Ok(revision) => {
                     self.note_config_written_by_us(revision);
-                    "Celestial settings saved · Escape closes the configurator.".to_owned()
+                    String::new()
                 }
                 Err(error) => {
                     error!("Wallpaper: celestial settings are live but not saved: {error}");

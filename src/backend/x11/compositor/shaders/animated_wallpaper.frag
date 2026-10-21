@@ -92,7 +92,7 @@ vec3 procedural_background(vec2 pixel) {
 }
 
 vec3 panorama_ray(vec2 pixel, out vec3 world_dx, out vec3 world_dy) {
-    float scale = 2.0*tan(clamp(panorama_fov,8.0,110.0)*PI/360.0)
+    float scale = 2.0*tan(clamp(panorama_fov,0.001,110.0)*PI/360.0)
                 / max(resolution.y,1.0);
     vec3 camera = vec3((pixel-resolution*0.5)*scale,1.0);
     float inverse_length = inversesqrt(dot(camera,camera));
@@ -106,7 +106,8 @@ vec3 galaxy_background(vec2 pixel) {
     if (panorama_enabled != 0) {
         vec3 dx,dy;
         vec3 ray = panorama_ray(pixel,dx,dy);
-        vec3 color = cosmic_sky(ray,dx,dy,sky_enabled);
+        vec3 color = cosmic_sky_background(ray,dx,dy,sky_enabled,celestial_body == 12);
+        if (celestial_body == 12) color = cosmic_deep_sky(ray,dx,dy,color);
         return pow(max(color,vec3(0.0)),vec3(1.0/2.2));
     }
     bool moving = dot(sky_rotation, sky_rotation) > 0.5;

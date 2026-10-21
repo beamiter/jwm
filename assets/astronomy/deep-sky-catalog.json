@@ -1,0 +1,291 @@
+[
+  {
+    "id": "orion",
+    "name": "Orion Nebula / M42",
+    "ra_degrees": 83.79054166666666,
+    "dec_degrees": -5.413977777777778,
+    "distance_ly": 1400,
+    "field_arcmin": [
+      30.03,
+      30.03
+    ],
+    "north_left_degrees": 0.0,
+    "source_page": "https://esahubble.org/images/heic0601a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic0601a.jpg",
+    "source_sha256": "db35758ed21509a16974d0ad36383ee0dd515c88c806f83fd1a4ad5ad5ae1477",
+    "credit": "NASA , ESA , M. Robberto ( Space Telescope Science Institute / ESA ) and the Hubble Space Telescope Orion Treasury Project Team",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.00390625,
+      0.005208333333333333,
+      0.2421875,
+      0.3229166666666667
+    ],
+    "distance_source": "https://esahubble.org/images/heic0601a/"
+  },
+  {
+    "id": "lagoon",
+    "name": "Lagoon Nebula / M8",
+    "ra_degrees": 270.91425000000004,
+    "dec_degrees": -24.380491666666668,
+    "distance_ly": 4000,
+    "field_arcmin": [
+      3.19,
+      4.02
+    ],
+    "north_left_degrees": -45.1,
+    "source_page": "https://esahubble.org/images/heic1808a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic1808a.jpg",
+    "source_sha256": "dd8fc5cbaafe1c90dc632d08cbd3545cce5a95058554126358e41565ef908774",
+    "credit": "NASA, ESA, STScI",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.27880859375,
+      0.005208333333333333,
+      0.192138671875,
+      0.3229166666666667
+    ],
+    "distance_source": "https://esahubble.org/images/heic1808a/"
+  },
+  {
+    "id": "carina",
+    "name": "Carina Nebula / NGC 3372",
+    "ra_degrees": 161.11999999999998,
+    "dec_degrees": -59.596525,
+    "distance_ly": 7500,
+    "field_arcmin": [
+      24.6,
+      11.92
+    ],
+    "north_left_degrees": -50.3,
+    "source_page": "https://esahubble.org/images/heic0707a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic0707a.jpg",
+    "source_sha256": "193924c8a7b1dfae5d5adf2ade1740fd01082cde94e4487e8b93c998ce927d20",
+    "credit": "NASA , ESA , N. Smith (University of California, Berkeley), and The Hubble Heritage Team (STScI/AURA)",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.50390625,
+      0.08854166666666667,
+      0.2421875,
+      0.15625
+    ],
+    "distance_source": "https://esahubble.org/images/heic0707a/"
+  },
+  {
+    "id": "eagle",
+    "name": "Eagle Nebula / M16",
+    "ra_degrees": 274.7196666666666,
+    "dec_degrees": -13.839436111111112,
+    "distance_ly": 7000,
+    "field_arcmin": [
+      4.53,
+      4.72
+    ],
+    "north_left_degrees": 35.0,
+    "source_page": "https://esahubble.org/images/heic1501a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic1501a.jpg",
+    "source_sha256": "3dfcd16bb0a6cf11fb09d51d81686156d3a23401deef335a2613f5689992ff20",
+    "credit": "NASA , ESA/Hubble and the Hubble Heritage Team",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.7587890625,
+      0.005208333333333333,
+      0.232177734375,
+      0.3229166666666667
+    ],
+    "distance_source": "https://esahubble.org/images/heic1501a/"
+  },
+  {
+    "id": "andromeda",
+    "name": "Andromeda Galaxy / M31",
+    "ra_degrees": 11.154125,
+    "dec_degrees": 41.592725,
+    "distance_ly": 2500000,
+    "field_arcmin": [
+      57.98,
+      18.54
+    ],
+    "north_left_degrees": -123.5,
+    "source_page": "https://esahubble.org/images/heic1502a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic1502a.jpg",
+    "source_sha256": "303609ae6a414fdd3381bc5bb62ba06388782f9f28a82b77c0f9cd4ac72ab38a",
+    "credit": "NASA , ESA , J. Dalcanton (University of Washington, USA), B. F. Williams (University of Washington, USA), L. C. Johnson (University of Washington, USA), the PHAT team, and R. Gendler.",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.00390625,
+      0.4482421875,
+      0.2421875,
+      0.10319010416666667
+    ],
+    "distance_source": "https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-31/"
+  },
+  {
+    "id": "triangulum",
+    "name": "Triangulum Galaxy / M33",
+    "ra_degrees": 23.49191666666667,
+    "dec_degrees": 30.671683333333334,
+    "distance_ly": 3000000,
+    "field_arcmin": [
+      20.18,
+      11.36
+    ],
+    "north_left_degrees": -105.3,
+    "source_page": "https://esahubble.org/images/heic1901a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic1901a.jpg",
+    "source_sha256": "47a41bfbaef744043d745404b082ce23be9aeefaae2fb094e9de0db883fd89f1",
+    "credit": "NASA, ESA, and M. Durbin, J. Dalcanton, and B. F. Williams (University of Washington)",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.25390625,
+      0.4091796875,
+      0.2421875,
+      0.181640625
+    ],
+    "distance_source": "https://esahubble.org/images/heic1901a/"
+  },
+  {
+    "id": "rosette",
+    "name": "Rosette Nebula / NGC 2237",
+    "ra_degrees": 97.67833333333333,
+    "dec_degrees": 5.006222222222222,
+    "distance_ly": 4700,
+    "field_arcmin": [
+      7.44,
+      7.19
+    ],
+    "north_left_degrees": -90.0,
+    "source_page": "https://www.eso.org/public/images/potw1847a/",
+    "source_image": "https://cdn.eso.org/images/large/potw1847a.jpg",
+    "source_sha256": "b27c4e2376302a848c5ae4a548ce2cc0598b7e125d816cd73715d11f1b796ac0",
+    "credit": "ESO",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.50390625,
+      0.3440755208333333,
+      0.2421875,
+      0.3118489583333333
+    ],
+    "distance_source": "https://www.eso.org/public/images/b12/"
+  },
+  {
+    "id": "veil",
+    "name": "Veil Nebula / NGC 6960",
+    "ra_degrees": 311.42758333333336,
+    "dec_degrees": 30.964977777777776,
+    "distance_ly": 2100,
+    "field_arcmin": [
+      7.11,
+      4.74
+    ],
+    "north_left_degrees": 137.7,
+    "source_page": "https://esahubble.org/images/heic1520a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic1520a.jpg",
+    "source_sha256": "11888a2c67b1beb771f0ef193708d7e42903599419eecbb86f628c55f1087e27",
+    "credit": "NASA, ESA, Hubble Heritage Team",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.75390625,
+      0.3922526041666667,
+      0.2421875,
+      0.21516927083333334
+    ],
+    "distance_source": "https://esahubble.org/images/heic1520a/"
+  },
+  {
+    "id": "crab",
+    "name": "Crab Nebula / M1",
+    "ra_degrees": 83.63554166666667,
+    "dec_degrees": 22.015241666666668,
+    "distance_ly": 6500,
+    "field_arcmin": [
+      6.41,
+      6.41
+    ],
+    "north_left_degrees": 0.0,
+    "source_page": "https://esahubble.org/images/heic0515a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/large/heic0515a.jpg",
+    "source_sha256": "43b4ea82bbb50686697634e7cc212e06b0f501d26a9ce2ec5619504840ea4345",
+    "credit": "NASA , ESA and Allison Loll/Jeff Hester (Arizona State University). Acknowledgement: Davide De Martin ( ESA / Hubble )",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.00390625,
+      0.671875,
+      0.2421875,
+      0.3229166666666667
+    ],
+    "distance_source": "https://esahubble.org/images/heic0515a/"
+  },
+  {
+    "id": "helix",
+    "name": "Helix Nebula / NGC 7293",
+    "ra_degrees": 337.4159166666667,
+    "dec_degrees": -20.83883611111111,
+    "distance_ly": 650,
+    "field_arcmin": [
+      26.64,
+      26.64
+    ],
+    "north_left_degrees": 0.4,
+    "source_page": "https://esahubble.org/images/heic0307a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic0307a.jpg",
+    "source_sha256": "cf930cf572440f6bc390a62d4eca8ddf8579ce69e523ecb520fafb69968e26d5",
+    "credit": "NASA , NOAO, ESA , the Hubble Helix Nebula Team, M. Meixner ( STScI ), and T.A. Rector (NRAO).",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.25390625,
+      0.671875,
+      0.2421875,
+      0.3229166666666667
+    ],
+    "distance_source": "https://esahubble.org/images/heic0307a/",
+    "distance_note": "650 ly from source article text; its object metadata has a conflicting value."
+  },
+  {
+    "id": "horsehead",
+    "name": "Horsehead Nebula / Barnard 33",
+    "ra_degrees": 85.254125,
+    "dec_degrees": -2.453311111111111,
+    "distance_ly": 1300,
+    "field_arcmin": [
+      5.78,
+      6.04
+    ],
+    "north_left_degrees": 103.0,
+    "source_page": "https://esahubble.org/images/heic1307a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/large/heic1307a.jpg",
+    "source_sha256": "3dae8324d6dcb13f0af75cc59b5441262658f4d3e7228eca77bcb26f100cccc8",
+    "credit": "NASA, ESA, and the Hubble Heritage Team ( AURA / STScI )",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.509033203125,
+      0.671875,
+      0.231689453125,
+      0.3229166666666667
+    ],
+    "distance_source": "https://esahubble.org/images/heic1307a/"
+  },
+  {
+    "id": "bubble",
+    "name": "Bubble Nebula / NGC 7635",
+    "ra_degrees": 350.175375,
+    "dec_degrees": 61.19121944444444,
+    "distance_ly": 8000,
+    "field_arcmin": [
+      5.19,
+      4.93
+    ],
+    "north_left_degrees": 33.6,
+    "source_page": "https://esahubble.org/images/heic1608a/",
+    "source_image": "https://cdn.esahubble.org/archives/images/publicationjpg/heic1608a.jpg",
+    "source_sha256": "4d88a4ddee9e5578ee4a4540bbb6ba1422d3c5227bc79aab720885ac81a1cfc1",
+    "credit": "NASA, ESA, Hubble Heritage Team",
+    "license": "CC-BY-4.0",
+    "atlas_rect": [
+      0.75390625,
+      0.6800130208333334,
+      0.2421875,
+      0.306640625
+    ],
+    "distance_source": "https://esahubble.org/images/heic1608a/"
+  }
+]

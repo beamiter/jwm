@@ -56,6 +56,10 @@ pub(crate) fn resolve_sky_texture() -> Option<String> {
         .or_else(|| resolve_body_texture("", "milkyway-nasa-gaia.jpg"))
 }
 
+pub(crate) fn resolve_deep_sky_texture() -> Option<String> {
+    resolve_body_texture("", "deep-sky-atlas.jpg")
+}
+
 fn resolve_body_texture(configured: &str, asset: &str) -> Option<String> {
     use std::path::PathBuf;
     let data_home = std::env::var_os("XDG_DATA_HOME")

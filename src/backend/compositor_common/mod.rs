@@ -14,6 +14,8 @@ pub(crate) mod celestial_catalog;
 #[cfg(feature = "x11-backends")]
 pub(crate) mod celestial_layout;
 pub(crate) mod debug_hud;
+#[cfg(feature = "x11-backends")]
+pub(crate) mod deep_sky;
 pub(crate) mod dynamic_island;
 pub mod effects;
 pub mod event_coalescer;

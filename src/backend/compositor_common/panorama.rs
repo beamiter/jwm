@@ -21,6 +21,10 @@ pub(crate) fn cosmic_shader_source(source: &str) -> String {
             include_str!("../x11/compositor/shaders/cosmic_sky.glsl"),
         )
         .replace(
+            "// JWM_DEEP_SKY_CATALOG_INCLUDE",
+            include_str!("../x11/compositor/shaders/deep_sky_catalog.glsl"),
+        )
+        .replace(
             "// JWM_PLANET_SURFACE_INCLUDE",
             include_str!("../x11/compositor/shaders/planet_surface.glsl"),
         )
@@ -34,6 +38,7 @@ pub(crate) fn cosmic_shader_source(source: &str) -> String {
 pub(crate) struct PanoramaView {
     orientation: CelestialRotation,
     fov: f32,
+    min_fov: f32,
 }
 
 impl Default for PanoramaView {
@@ -41,6 +46,7 @@ impl Default for PanoramaView {
         Self {
             orientation: CelestialRotation::default(),
             fov: PANORAMA_DEFAULT_FOV,
+            min_fov: PANORAMA_MIN_FOV,
         }
     }
 }
@@ -65,8 +71,35 @@ impl PanoramaView {
     /// A bounded close-up lens used by deep-sky catalogue navigation.
     pub(crate) fn set_fov_degrees(&mut self, degrees: f32) {
         if degrees.is_finite() {
-            self.fov = degrees.clamp(PANORAMA_MIN_FOV, PANORAMA_MAX_FOV);
+            self.fov = degrees.clamp(self.min_fov, PANORAMA_MAX_FOV);
         }
+    }
+
+    /// Telescope fields can be only a few arcminutes wide. Keep their lens
+    /// limits local to the focused view so ordinary sky/body zoom is unchanged.
+    pub(crate) fn focus_field(&mut self, degrees: f32) {
+        if degrees.is_finite() && degrees > 0.0 {
+            self.min_fov = (degrees / 16.0).clamp(0.001, PANORAMA_MIN_FOV);
+            self.set_fov_degrees(degrees);
+        }
+    }
+
+    pub(crate) fn project(self, direction: [f64; 3], viewport: [f64; 2]) -> Option<[f64; 2]> {
+        self.begin_drag([0.0, 0.0], viewport)?;
+        let matrix = self.matrix().map(f64::from);
+        let camera: [f64; 3] = std::array::from_fn(|column| {
+            (0..3)
+                .map(|row| matrix[column * 3 + row] * direction[row])
+                .sum()
+        });
+        if camera.iter().any(|v| !v.is_finite()) || camera[2] <= 0.0 {
+            return None;
+        }
+        let scale = viewport[1] / (2.0 * (f64::from(self.fov).to_radians() * 0.5).tan());
+        Some([
+            viewport[0] * 0.5 + camera[0] / camera[2] * scale,
+            viewport[1] * 0.5 + camera[1] / camera[2] * scale,
+        ])
     }
 
     /// Positive wheel detents narrow the perspective lens. Bounded logarithmic
@@ -76,7 +109,7 @@ impl PanoramaView {
             return false;
         }
         let tangent = (f64::from(self.fov).to_radians() * 0.5).tan();
-        let low = (f64::from(PANORAMA_MIN_FOV).to_radians() * 0.5).tan();
+        let low = (f64::from(self.min_fov).to_radians() * 0.5).tan();
         let high = (f64::from(PANORAMA_MAX_FOV).to_radians() * 0.5).tan();
         let next = (tangent.ln() - steps.clamp(-64.0, 64.0) * 0.16)
             .clamp(low.ln(), high.ln())
@@ -85,7 +118,7 @@ impl PanoramaView {
         if (fov - self.fov).abs() < 0.00001 {
             return false;
         }
-        self.fov = fov.clamp(PANORAMA_MIN_FOV, PANORAMA_MAX_FOV);
+        self.fov = fov.clamp(self.min_fov, PANORAMA_MAX_FOV);
         true
     }
 
@@ -227,6 +260,35 @@ mod tests {
         assert_eq!(view.fov_degrees(), PANORAMA_MAX_FOV);
         assert!(!view.zoom(-1.0));
         assert!(!view.zoom(f64::NAN));
+    }
+
+    #[test]
+    fn telescope_lens_and_projection_preserve_small_fields_and_overview_limits() {
+        let mut view = PanoramaView::default();
+        let overview = view;
+        view.focus_field(0.06);
+        let before = view.fov_degrees();
+        assert!(view.zoom(3.0));
+        assert!(view.fov_degrees() < 0.06);
+        assert!(view.zoom(-3.0));
+        assert!((view.fov_degrees() - before).abs() < 1e-7);
+        let size = [1920.0, 1080.0];
+        for point in [[0.0, 0.0], [960.0, 540.0], [1920.0, 1080.0]] {
+            let ray = view.ray(point, size).unwrap();
+            let projected = view.project(ray, size).unwrap();
+            assert!(
+                point
+                    .iter()
+                    .zip(projected)
+                    .all(|(a, b)| (a - b).abs() < 1e-5)
+            );
+        }
+        assert!(view.project([0.0, 0.0, -1.0], size).is_none());
+        assert!(view.project([f64::NAN, 0.0, 1.0], size).is_none());
+        assert_eq!(overview.fov_degrees(), PANORAMA_DEFAULT_FOV);
+        let mut ordinary = overview;
+        ordinary.zoom(64.0);
+        assert_eq!(ordinary.fov_degrees(), PANORAMA_MIN_FOV);
     }
 
     #[test]

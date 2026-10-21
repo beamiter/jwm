@@ -4934,7 +4934,7 @@ impl Config {
             ("behavior", "wallpaper_astronomy_presentation") => Some(concat!(
                 "# \"scientific\" (default) or \"illustrative\" lighting/material presentation.\n",
                 "# Both modes compress solar-system distances and enlarge visible bodies; the display is not to scale.\n",
-                "# The native picker explains measured data versus illustrations in About this scene.\n",
+                "# See docs/astronomy-science.md for material provenance and limitations.\n",
             )),
             ("behavior", "wallpaper_solar_orbit_mode") => Some(concat!(
                 "# \"ephemeris\" (default) uses JPL approximate orbital positions; \"illustrative\" is a decorative tour.\n",

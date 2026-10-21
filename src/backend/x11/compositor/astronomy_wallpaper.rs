@@ -4,14 +4,15 @@ use crate::backend::compositor_common::animated_wallpaper::{
     AstronomyDraw, CelestialArcball, CelestialBody, CelestialRotation, CelestialView,
     POWER_QUERY_INTERVAL, WallpaperClock, astronomy_draw_plan, astronomy_frame_interval,
     celestial_assignments, lunar_phase_light, material_load_frame, presentation_offset,
-    resolve_cloud_texture, resolve_earth_texture, resolve_moon_detail_texture,
-    resolve_moon_texture, resolve_planet_texture, resolve_sky_texture, sky_rotation,
-    solar_direction, transform_direction, wall_clock_seconds,
+    resolve_cloud_texture, resolve_deep_sky_texture, resolve_earth_texture,
+    resolve_moon_detail_texture, resolve_moon_texture, resolve_planet_texture, resolve_sky_texture,
+    sky_rotation, solar_direction, transform_direction, wall_clock_seconds,
 };
 use crate::backend::compositor_common::celestial_layout::{
     CelestialCanvas, MAX_CELESTIAL_OCCLUSION_CLIPS, celestial_clip_fully_covered,
     resolve_celestial_canvases,
 };
+use crate::backend::compositor_common::deep_sky::{DEEP_SKY_TARGETS, galactic_to_world};
 use crate::backend::compositor_common::panorama::{PanoramaDrag, PanoramaView, panorama_rotation};
 use glow::HasContext;
 use std::time::{Duration, Instant, SystemTime};
@@ -25,28 +26,7 @@ const MIN_BODY_ZOOM: f64 = 0.35;
 const MAX_BODY_ZOOM: f64 = 8.0;
 const ZOOM_LOG_STEP: f64 = 0.15;
 
-// These fixed galactic unit vectors and artistic angular radii match
-// shaders/cosmic_sky.glsl. Distances are viewing aids, not 3D parallax.
-const GALAXY_TARGET_DIRECTIONS: [[f64; 3]; 12] = [
-    [-0.824943831, -0.331876518, -0.457521204],
-    [0.994392948, -0.020361000, 0.103769428],
-    [0.299894690, -0.010897463, -0.953910069],
-    [0.956448362, 0.013831226, 0.291573709],
-    [-0.481332547, -0.367637672, 0.795714472],
-    [-0.589171791, -0.519966434, 0.618475147],
-    [-0.895824129, -0.036120457, -0.442938419],
-    [0.272581208, -0.148499838, 0.950603641],
-    [-0.991766641, -0.100709012, -0.079098822],
-    [0.437945624, -0.840188215, 0.319824004],
-    [-0.891847080, -0.399069159, 0.212961479],
-    [0.094967342, 0.014311211, 0.995377513],
-];
-const GALAXY_TARGET_RADII: [f64; 12] = [
-    0.032, 0.026, 0.039, 0.025, 0.062, 0.048, 0.034, 0.036, 0.023, 0.033, 0.038, 0.037,
-];
-
-/// The shader maps camera-world vectors to galactic coordinates with its
-/// 22-degree reference roll. CPU picking uses the exact same transformation.
+/// CPU picking and the shader share one generated observed-image catalogue.
 fn galaxy_galactic_direction(world: [f64; 3]) -> [f64; 3] {
     [
         world[2],
@@ -55,19 +35,18 @@ fn galaxy_galactic_direction(world: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// Only real clicks inside the bounded rendered landmark caps may navigate.
 fn galaxy_pick_target(shown: PanoramaView, point: [f64; 2], size: [f64; 2]) -> Option<u8> {
-    let ray = shown.ray(point, size)?;
-    let q = galaxy_galactic_direction(ray);
+    let q = galaxy_galactic_direction(shown.ray(point, size)?);
     let mut nearest: Option<(u8, f64)> = None;
-    for (index, direction) in GALAXY_TARGET_DIRECTIONS.iter().enumerate() {
-        let distance2 = (q[0] - direction[0]).powi(2)
-            + (q[1] - direction[1]).powi(2)
-            + (q[2] - direction[2]).powi(2);
-        // Select the visible cloud, not an arbitrary patch of background sky.
-        let radius = GALAXY_TARGET_RADII[index] * 1.65;
-        if distance2 < radius * radius
-            && nearest.is_none_or(|(_, best_distance)| distance2 < best_distance)
+    for (index, target) in DEEP_SKY_TARGETS.iter().enumerate() {
+        let Some(centre) = shown.project(galactic_to_world(target.direction()), size) else {
+            continue;
+        };
+        let distance2 = (point[0] - centre[0]).powi(2) + (point[1] - centre[1]).powi(2);
+        let inside_image = target
+            .image_uv(q)
+            .is_some_and(|uv| uv.iter().all(|&v| (0.025..=0.975).contains(&v)));
+        if (inside_image || distance2 <= 100.0) && nearest.is_none_or(|(_, best)| distance2 < best)
         {
             nearest = Some((index as u8, distance2));
         }
@@ -75,31 +54,11 @@ fn galaxy_pick_target(shown: PanoramaView, point: [f64; 2], size: [f64; 2]) -> O
     nearest.map(|(index, _)| index)
 }
 
-/// Build a camera-to-world rotation which places the selected galactic
-/// direction exactly on the +Z camera axis. No longitude singularity or
-/// latitude clamp appears at the poles.
 fn galaxy_target_orientation(target: u8) -> Option<CelestialRotation> {
-    let q = *GALAXY_TARGET_DIRECTIONS.get(usize::from(target))?;
-    let world = [
-        -0.3746065934 * q[1] - 0.9271838546 * q[2],
-        0.9271838546 * q[1] - 0.3746065934 * q[2],
-        q[0],
-    ];
-    let magnitude = world[0].hypot(world[1]).hypot(world[2]);
-    if !magnitude.is_finite() || magnitude <= 0.0 {
-        return None;
-    }
-    let axis = [-world[1], world[0], 0.0];
-    let angle = (world[2] / magnitude).clamp(-1.0, 1.0).acos();
-    if axis[0].hypot(axis[1]) < 1e-9 {
-        if world[2] >= 0.0 {
-            Some(CelestialRotation::default())
-        } else {
-            CelestialRotation::axis_angle([0.0, 1.0, 0.0], std::f64::consts::PI)
-        }
-    } else {
-        CelestialRotation::axis_angle(axis, angle)
-    }
+    let target = DEEP_SKY_TARGETS.get(usize::from(target))?;
+    let axes = [target.right, target.up, target.direction()].map(galactic_to_world);
+    let matrix = std::array::from_fn(|i| axes[i / 3][i % 3] as f32);
+    Some(CelestialRotation::from_matrix(&matrix))
 }
 
 /// Logarithmic wheel motion is reversible and independent of event grouping.
@@ -329,6 +288,8 @@ struct AstronomyProgram {
     surface_mapped: Option<glow::UniformLocation>,
     cosmic_scientific: Option<glow::UniformLocation>,
     cosmic_focus_target: Option<glow::UniformLocation>,
+    deep_sky_map: Option<glow::UniformLocation>,
+    deep_sky_mapped: Option<glow::UniformLocation>,
 }
 
 impl AstronomyProgram {
@@ -356,6 +317,8 @@ impl AstronomyProgram {
                 surface_mapped: gl.get_uniform_location(program, "surface_mapped"),
                 cosmic_scientific: gl.get_uniform_location(program, "cosmic_scientific"),
                 cosmic_focus_target: gl.get_uniform_location(program, "cosmic_focus_target"),
+                deep_sky_map: gl.get_uniform_location(program, "deep_sky_map"),
+                deep_sky_mapped: gl.get_uniform_location(program, "deep_sky_mapped"),
             }
         }
     }
@@ -465,6 +428,7 @@ pub(super) struct AstronomyWallpaper {
     output_scenes: std::collections::BTreeMap<String, crate::config::AstronomyOutputConfig>,
     presentation: String,
     planet_maps: std::collections::BTreeMap<CelestialBody, PlanetMap>,
+    deep_sky_atlas: Option<PlanetMap>,
     // One session-only orientation per body, shared by its scene group.
     // None preserves the original no-interaction f32 matrix bit-for-bit.
     earth_offset: Option<CelestialRotation>,
@@ -1063,9 +1027,10 @@ impl AstronomyWallpaper {
         let Some(gesture) = presented.begin_drag(point, canvas.size.map(f64::from)) else {
             return false;
         };
-        let candidate = (self.canvas_body(index) == CelestialBody::Galaxy)
-            .then(|| galaxy_pick_target(presented, point, canvas.size.map(f64::from)))
-            .flatten();
+        let candidate = (self.canvas_body(index) == CelestialBody::Galaxy
+            && self.galaxy_focus.is_none())
+        .then(|| galaxy_pick_target(presented, point, canvas.size.map(f64::from)))
+        .flatten();
         self.sky_drag = Some(AstronomySkyDrag {
             group,
             canvas,
@@ -1158,9 +1123,15 @@ impl AstronomyWallpaper {
         }
         let mut closeup = presented;
         closeup.set_orientation(orientation);
-        closeup.set_fov_degrees(
-            (GALAXY_TARGET_RADII[usize::from(target)] * 210.0).clamp(8.0, 20.0) as f32,
-        );
+        let aspect = self
+            .draw_plan
+            .iter()
+            .enumerate()
+            .find(|(index, _)| self.canvas_group(*index) == self.active_navigation)
+            .map_or(16.0 / 9.0, |(_, canvas)| {
+                f64::from(canvas.size[0] / canvas.size[1].max(1.0))
+            });
+        closeup.focus_field(DEEP_SKY_TARGETS[usize::from(target)].closeup_fov(aspect));
         self.panorama = closeup;
         self.requested_panorama = None;
         self.sky_offset = panorama_rotation(unix, self.sky_period)
@@ -1503,7 +1474,15 @@ impl AstronomyWallpaper {
                     .drag
                     .as_ref()
                     .is_some_and(|d| d.group == group && d.body == body);
-                let moving_sky = !self.sky_drag.as_ref().is_some_and(|d| d.group == group);
+                let focused = if group == self.active_navigation {
+                    self.galaxy_focus.is_some()
+                } else {
+                    self.navigation_states
+                        .get(group)
+                        .is_some_and(|n| n.galaxy_focus.is_some())
+                };
+                let moving_sky =
+                    !focused && !self.sky_drag.as_ref().is_some_and(|d| d.group == group);
                 let period = if captured || body == CelestialBody::Galaxy {
                     None
                 } else if body == CelestialBody::Moon {
@@ -1536,6 +1515,11 @@ impl AstronomyWallpaper {
             return false;
         }
         self.sky_pending.is_some()
+            || (self.body_visible(CelestialBody::Galaxy)
+                && self
+                    .deep_sky_atlas
+                    .as_ref()
+                    .is_some_and(|map| map.pending.is_some()))
             || (self.body_visible(CelestialBody::Earth)
                 && (self.pending.is_some()
                     || self.cloud_pending.is_some()
@@ -1609,6 +1593,10 @@ impl AstronomyWallpaper {
         )
             .hash(&mut hash);
         (self.earth_detail.texture, self.moon_detail.texture).hash(&mut hash);
+        self.deep_sky_atlas
+            .as_ref()
+            .and_then(|map| map.texture)
+            .hash(&mut hash);
         (&self.default_scene, &self.presentation).hash(&mut hash);
         for scene in &self.scene_plan {
             (&scene.scene, &scene.group_key, &scene.connector).hash(&mut hash);
@@ -1769,6 +1757,24 @@ impl AstronomyWallpaper {
         if !self.enabled || self.failed || !self.powered {
             return;
         }
+        if !self.bodies.contains(&CelestialBody::Galaxy) {
+            if let Some(map) = self.deep_sky_atlas.take() {
+                self.retired.extend(map.texture);
+            }
+        } else if self.body_visible(CelestialBody::Galaxy) && self.max_texture_edge != 0 {
+            let edge = self.max_texture_edge.min(4096);
+            self.deep_sky_atlas.get_or_insert_with(|| PlanetMap {
+                pending: resolve_deep_sky_texture().map(|path| {
+                    crate::backend::compositor_common::wallpaper_decode::load_wallpaper(
+                        &path,
+                        edge,
+                        edge * 3 / 4,
+                        WallpaperMode::Fit,
+                    )
+                }),
+                texture: None,
+            });
+        }
         let visible: std::collections::BTreeSet<_> = self
             .bodies
             .iter()
@@ -1887,6 +1893,9 @@ impl AstronomyWallpaper {
         self.end_drag(self.sample_unix);
         self.clear_interaction_wake();
         self.clear_presented();
+        if let Some(map) = self.deep_sky_atlas.take() {
+            self.retired.extend(map.texture);
+        }
         for (_, mut map) in std::mem::take(&mut self.planet_maps) {
             map.pending = None;
             self.retired.extend(map.texture.take());
@@ -1930,6 +1939,9 @@ impl AstronomyWallpaper {
         self.sky_drag = None;
         self.clear_interaction_wake();
         self.clear_presented();
+        if let Some(map) = self.deep_sky_atlas.take() {
+            self.retired.extend(map.texture);
+        }
         for (_, mut map) in std::mem::take(&mut self.planet_maps) {
             map.pending = None;
             self.retired.extend(map.texture.take());
@@ -2208,6 +2220,9 @@ impl<C: CompositorConnection> Compositor<C> {
             a.cache.invalidate();
             a.enabled = enabled;
             if !enabled {
+                if let Some(map) = a.deep_sky_atlas.take() {
+                    a.retired.extend(map.texture);
+                }
                 for (_, map) in std::mem::take(&mut a.planet_maps) {
                     a.retired.extend(map.texture);
                 }
@@ -2359,7 +2374,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 || a.sky_pending.is_some()
                 || a.earth_detail.pending.is_some()
                 || a.moon_detail.pending.is_some()
-                || a.planet_maps.values().any(|map| map.pending.is_some()),
+                || a.planet_maps.values().any(|map| map.pending.is_some())
+                || a.deep_sky_atlas
+                    .as_ref()
+                    .is_some_and(|map| map.pending.is_some()),
             a.frame_changed,
         );
         if !may_draw {
@@ -2532,6 +2550,30 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         if poll_optional {
+            let galaxy_visible = a.body_visible(CelestialBody::Galaxy);
+            if let Some(map) = a.deep_sky_atlas.as_mut().filter(|_| galaxy_visible) {
+                if let Some(load) = map.pending.as_ref() {
+                    match load.try_recv() {
+                        Ok(data) => {
+                            map.pending = None;
+                            if data.width * 3 == data.height * 4 {
+                                map.texture =
+                                    Self::upload_wallpaper_texture(&self.gl, &data).map(|v| v.0);
+                                if let Some(texture) = map.texture {
+                                    unsafe {
+                                        procedural_wallpaper_cache::prepare_equirectangular_texture(
+                                            &self.gl, texture,
+                                        );
+                                    }
+                                    a.cache.invalidate();
+                                }
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => map.pending = None,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+            }
             let earth_changed = earth_visible
                 && Self::poll_astronomy_detail(&self.gl, &mut a.earth_detail, a.earth_width);
             let moon_changed = moon_visible
@@ -2648,6 +2690,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 program.cosmic_scientific.as_ref(),
                 i32::from(a.presentation == "scientific"),
             );
+            gl.uniform_1_i32(program.deep_sky_map.as_ref(), 3);
+            let deep_sky_texture = a.deep_sky_atlas.as_ref().and_then(|map| map.texture);
+            gl.uniform_1_i32(
+                program.deep_sky_mapped.as_ref(),
+                i32::from(deep_sky_texture.is_some()),
+            );
+            gl.active_texture(glow::TEXTURE3);
+            gl.bind_texture(glow::TEXTURE_2D, deep_sky_texture);
             gl.uniform_1_i32(program.sky_map.as_ref(), 2);
             gl.uniform_1_i32(
                 program.sky_enabled.as_ref(),
@@ -2785,7 +2835,8 @@ mod tests {
 
     #[test]
     fn galaxy_landmark_picking_matches_shader_galactic_coordinates() {
-        for (index, expected) in GALAXY_TARGET_DIRECTIONS.iter().enumerate() {
+        for (index, target) in DEEP_SKY_TARGETS.iter().enumerate() {
+            let expected = target.direction();
             let mut view = PanoramaView::default();
             view.set_orientation(galaxy_target_orientation(index as u8).unwrap());
             let ray = view.ray([960.0, 540.0], [1920.0, 1080.0]).unwrap();
@@ -2799,6 +2850,18 @@ mod tests {
             );
             assert!(galaxy_target_orientation(12).is_none());
         }
+    }
+
+    #[test]
+    fn galaxy_small_observed_fields_have_clickable_locators_without_enlarging_the_images() {
+        let mut view = PanoramaView::default();
+        view.set_orientation(galaxy_target_orientation(1).unwrap());
+        let size = [1920.0, 1080.0];
+        let point = [966.0, 540.0];
+        let ray = galaxy_galactic_direction(view.ray(point, size).unwrap());
+        assert!(DEEP_SKY_TARGETS[1].image_uv(ray).unwrap()[0] > 1.0);
+        assert_eq!(galaxy_pick_target(view, point, size), Some(1));
+        assert_eq!(galaxy_pick_target(view, [990.0, 540.0], size), None);
     }
 
     #[test]
@@ -2830,6 +2893,11 @@ mod tests {
         let zoomed = a.material_frames();
         assert!(zoomed[0].sky.fov_degrees() < focused[0].sky.fov_degrees());
         assert_eq!(zoomed[1].sky, before[1].sky);
+        a.record_presented(&zoomed);
+        assert!(a.begin_drag(left));
+        assert_eq!(a.sky_drag.as_ref().unwrap().candidate, None);
+        assert!(a.finish_drag(a.sample_unix, true));
+        assert_eq!(a.panorama.fov_degrees(), zoomed[0].sky.fov_degrees());
         assert!(a.reset_at(left));
         assert!(a.galaxy_focus.is_none());
         assert!(a.galaxy_overview.is_none());
@@ -3991,6 +4059,19 @@ mod tests {
     }
 
     #[test]
+    fn galaxy_closeup_stops_touring_only_its_own_scene_group() {
+        let mut a = cadence_pair(CelestialBody::Galaxy, CelestialBody::Galaxy);
+        a.sky_period = 1;
+        a.activate_navigation("group:0");
+        a.galaxy_focus = Some(0);
+        assert!(a.frame_interval().is_some());
+        a.update_visibility(&[(1920, 0, 1920, 1080)]);
+        assert_eq!(a.frame_interval(), None);
+        a.galaxy_focus = None;
+        assert!(a.frame_interval().is_some());
+    }
+
+    #[test]
     fn cadence_hidden_group_settles_input_without_losing_visible_pending_navigation() {
         let mut a = cadence_pair(CelestialBody::Galaxy, CelestialBody::Galaxy);
         let now = Instant::now();
@@ -4373,10 +4454,16 @@ mod tests {
                 moon_texture: m,
                 cloud_texture: c,
                 sky_texture: s,
+                deep_sky_atlas: Some(PlanetMap {
+                    pending: None,
+                    texture: Some(glow::NativeTexture(std::num::NonZeroU32::new(5).unwrap())),
+                }),
                 ..Default::default()
             };
             assert_eq!(a.take_failed_material(), [e, m, c, s, None, None]);
             assert_eq!(a.take_failed_material(), [None; 6]);
+            assert!(a.deep_sky_atlas.is_none());
+            assert_eq!(a.retired.len(), 1, "atlas must be retired exactly once");
             assert!(a.failed);
             assert_eq!(a.deadline(Instant::now()), None);
             assert!(

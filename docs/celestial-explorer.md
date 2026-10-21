@@ -16,7 +16,8 @@ Open the Wallpaper picker with `Alt+Ctrl+W`, choose **Apply to: All screens**
 or a connected display, then select a body, Solar System 3D or the Milky Way.
 **Span** joins the desktop, **Mirror** repeats one view, and **Independent**
 allows a theme per connector or a named shared group. The picker saves these
-choices. **About …** opens reference facts, material notes and source URLs.
+choices. Reference facts, material notes and source URLs are in
+[Astronomy science](astronomy-science.md).
 The common configuration uses `wallpaper_effect = "astronomy"` with
 `wallpaper_astronomy_scene`, `wallpaper_astronomy_layout` and optional
 `wallpaper_astronomy_outputs`. The earlier `wallpaper_effect = "solar-system"`
@@ -36,8 +37,9 @@ right button and the ordinary vertical wheel; no modifier is needed.
 | Body surface in a single-body Astronomy scene | Wheel up/down | That body's size increases/decreases from 0.35× to 8× |
 | Empty sky in any celestial effect | Hold left and drag | The viewing direction turns through 360°, including both poles |
 | Empty sky | Wheel up/down | The perspective lens narrows/widens |
-| Visible nebula, galaxy or star cluster in Milky Way | Left-click | Centre and magnify the deep-sky target |
-| Focused Milky Way target | Wheel or left-button drag | Explore the target with more zoom or orbit the sky |
+| Nebula/galaxy image or its blue locator ring in Milky Way | Left-click | Open the observed telescope field |
+| Focused Milky Way target | Wheel up/down | Magnify or reduce the observed image |
+| Focused Milky Way target | Hold left and drag | Pan around the target field |
 | Milky Way close-up | Right-click | Restore the original sky orientation and perspective lens |
 | Sun or planet in Solar System | Left-click | A close-up opens for the selected body |
 | Visible body in Solar System | Hold left and drag | The camera orbits the overview or current close-up target in all directions |
@@ -102,6 +104,11 @@ aspect-aware focal length; its exact vertical angle depends on the viewport.
 In a Solar close-up, scrolling on the focused body moves the camera instead,
 bounded to 1.12–40 body radii so it stays outside the sphere.
 
+Milky Way target close-ups fit the selected telescope field, including fields
+only a few arcminutes wide. Their own lens permits up to 16× further
+magnification, with a 0.001° floor. Right-click restores the exact overview
+orientation and lens. A stationary close-up pauses automatic sky touring.
+
 The renderer loads modest body images first, then requests larger maps when
 they can improve a close-up. This work uses the bounded background decoder;
 pointer motion does not perform file I/O or decode a new image each frame.
@@ -144,35 +151,45 @@ data, not transparency. Figures fade further when the lens narrows so they do
 not overwhelm close views of the star field.
 
 The prior `milkyway-nasa-gaia.jpg` remains available for compatibility and user
-overrides. If no sky image loads, a seamless procedural star and dust field
-still covers the full sphere. Twelve bounded deep-sky landmarks now provide
-clickable destinations, including spiral galaxies, nebulae, supernova remnants
-and a star cluster. The first four preserve their earlier catalogue directions.
-Their original position sources are:
+overrides. The Milky Way scene adds twelve observed telescope fields in both
+presentation modes. Each field uses its published J2000 right ascension,
+declination, angular width/height and north angle, plus an approximate distance,
+to form a heliocentric 3D image plane in light-years. Physical width is derived
+from distance and angular size. Images retain their observed extent in the sky;
+small blue rings make even subpixel fields clickable from the overview.
 
-| Landmark | Right ascension | Declination | Direction source |
-| --- | --- | --- | --- |
-| Orion Nebula / M42 | 05h 35m 17.0s | −05° 23′ 27.99″ | [NASA Hubble: Orion handout](https://science.nasa.gov/asset/hubble/the-orion-nebula-handout/) |
-| Lagoon Nebula / M8 | 18h 03m 37.0s | −24° 23′ 12.0″ | [NASA Hubble: Lagoon visible-light view](https://science.nasa.gov/asset/hubble/lagoon-nebula-visible-light-view/) |
-| Carina Nebula / NGC 3372 | 10h 44m 04.06s | −59° 36′ 44.37″ | [ESA/Hubble: Carina from the ground](https://esahubble.org/images/heic0707g/) |
-| Eagle Nebula / M16 | 18h 18m 48.17s | −13° 48′ 26.03″ | [NASA Hubble: Eagle and molecular cloud](https://science.nasa.gov/asset/hubble/eagle-nebula-with-a-representation-of-a-giant-molecular-cloud/) |
+| Observed field | Approximate distance (ly) | Image/coordinate source |
+| --- | ---: | --- |
+| Orion Nebula / M42 | 1,400 | [Source](https://esahubble.org/images/heic0601a/) |
+| Lagoon Nebula / M8 | 4,000 | [Source](https://esahubble.org/images/heic1808a/) |
+| Carina Nebula / NGC 3372 | 7,500 | [Source](https://esahubble.org/images/heic0707a/) |
+| Eagle Nebula / M16 | 7,000 | [Source](https://esahubble.org/images/heic1501a/) |
+| Andromeda Galaxy / M31 | 2,500,000 | [Source](https://esahubble.org/images/heic1502a/) |
+| Triangulum Galaxy / M33 | 3,000,000 | [Source](https://esahubble.org/images/heic1901a/) |
+| Rosette Nebula / NGC 2237 | 4,700 | [Source](https://www.eso.org/public/images/potw1847a/) |
+| Veil Nebula / NGC 6960 | 2,100 | [Source](https://esahubble.org/images/heic1520a/) |
+| Crab Nebula / M1 | 6,500 | [Source](https://esahubble.org/images/heic0515a/) |
+| Helix Nebula / NGC 7293 | 650 | [Source](https://esahubble.org/images/heic0307a/) |
+| Horsehead Nebula / Barnard 33 | 1,300 | [Source](https://esahubble.org/images/heic1307a/) |
+| Bubble Nebula / NGC 7635 | 8,000 | [Source](https://esahubble.org/images/heic1608a/) |
 
-These equatorial directions are converted to Galactic coordinates using the
-Hipparcos convention described in [SOFA's Galactic-coordinate notes](https://juliaastro.org/SOFA/stable/api/galactic/):
-Galactic north-pole right ascension 192.85948°, declination 27.12825°, and the
-ascending-node longitude 32.93192°. The conversion fixes directions only.
-Nebula colours, filament shapes, brightness and apparent extent are original
-artwork, with bounded, filtered detail. They are not reproductions of the linked
-telescope images, observational angular sizes or reconstructed 3D gas volumes.
+The complete coordinates, image orientations, distance references and source
+checksums are in [deep-sky-catalog.json](../assets/astronomy/deep-sky-catalog.json).
+The atlas and its CPU/GPU geometry are generated together by
+`scripts/prepare-astronomy-nebulae.py`; no network access occurs at runtime.
+Image credits remain attached to each field and are collected in the
+[asset attribution](../assets/astronomy/README.md#observed-deep-sky-fields).
+These are historical multi-filter observations, including infrared images and
+assigned-colour composites; their colours are not a naked-eye simulation.
 
-Eight more clickable catalogue locations are **Andromeda (M31)**,
-**Triangulum (M33)**, **Rosette (NGC 2237)**, **Veil (NGC 6960)**,
-**Crab (M1)**, **Helix (NGC 7293)**, **Pleiades (M45)** and
-**North America (NGC 7000)**. Their drawn appearance is an artistic guide,
-not scientific imagery. Click only a visible landmark to move into its
-bounded close-up; small unintentional mouse movements do not activate it.
-A right-click restores the exact prior sky perspective. Each monitor or
-explicitly shared monitor group retains its own focus and overview.
+Click an image or its locator to fit the telescope field, then use the wheel to
+zoom in/out and drag to pan. A right-click restores the exact prior perspective.
+Dragging past the click threshold never activates a target. Each monitor or
+explicitly shared monitor group retains its own focus, lens and overview. The
+observed fields replace the former procedural landmark sketches; Horsehead and
+Bubble now occupy the previous Pleiades and North America catalogue slots.
+Distances are approximate source estimates. This locates observed fields in 3D
+without claiming to reconstruct their internal gas volumes or stellar parallax.
 
 ## Time, space and rendering limits
 

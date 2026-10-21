@@ -9,7 +9,7 @@
 wallpaper_effect = "astronomy"
 # Native picker: Alt+Ctrl+W; Apply to chooses all screens or a connector/group.
 # Select a scene, layout or Share with row; celestial choices persist in the config.
-# About rows provide reference dimensions, material provenance and source URLs.
+# Reference dimensions, material provenance and source URLs: docs/astronomy-science.md.
 # Scene tokens: earth, moon, sun, mercury, venus, mars, jupiter, saturn, uranus,
 # neptune, solar-system, galaxy. This global scene is also the hotplug fallback.
 wallpaper_astronomy_scene = "earth"

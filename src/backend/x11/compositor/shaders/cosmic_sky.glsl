@@ -145,7 +145,7 @@ vec3 cosmic_nebulae(vec3 q, float footprint) {
 
 // Linear-light output. Each caller applies its own existing display transfer.
 // One catalogue lookup per visible background pixel; no per-star traversal.
-vec3 cosmic_sky(vec3 world, vec3 world_dx, vec3 world_dy, bool mapped) {
+vec3 cosmic_sky_background(vec3 world, vec3 world_dx, vec3 world_dy, bool mapped, bool observed) {
     vec3 q = cosmic_galactic(world);
     vec3 dx = cosmic_galactic(world_dx), dy = cosmic_galactic(world_dy);
     float footprint = max(length(dx),length(dy));
@@ -170,5 +170,53 @@ vec3 cosmic_sky(vec3 world, vec3 world_dx, vec3 world_dy, bool mapped) {
     } else {
         color = cosmic_scientific != 0 ? vec3(0.00035,0.00055,0.0010) : cosmic_fallback(q,footprint);
     }
-    return cosmic_scientific != 0 ? color : color + cosmic_nebulae(q,footprint);
+    return cosmic_scientific != 0 || observed ? color : color + cosmic_nebulae(q,footprint);
+}
+
+vec3 cosmic_sky(vec3 world, vec3 world_dx, vec3 world_dy, bool mapped) {
+    return cosmic_sky_background(world,world_dx,world_dy,mapped,false);
+}
+
+// JWM_DEEP_SKY_CATALOG_INCLUDE
+uniform sampler2D deep_sky_map;
+uniform bool deep_sky_mapped;
+
+// Telescope image planes use real heliocentric XYZ and physical field sizes.
+// The image's WCS fixes its north angle; selecting it changes only the camera.
+vec3 cosmic_deep_sky(vec3 world, vec3 world_dx, vec3 world_dy, vec3 background) {
+    vec3 q=cosmic_galactic(world), dx=cosmic_galactic(world_dx), dy=cosmic_galactic(world_dy);
+    float footprint=max(max(length(dx),length(dy)),1e-10);
+    vec3 color=cosmic_focus_target == 0 ? background : background*0.025;
+    for (int i=0; i<DEEP_SKY_COUNT; ++i) {
+        if (cosmic_focus_target != 0 && cosmic_focus_target != i+1) continue;
+        vec3 position=DEEP_SKY_POSITION_LY[i];
+        float distance_ly=length(position);
+        vec3 direction=position/distance_ly;
+        float depth=dot(q,direction);
+        if (depth <= 0.0) continue;
+        vec2 tangent=vec2(dot(q,DEEP_SKY_RIGHT[i]),-dot(q,DEEP_SKY_UP[i]));
+        vec2 extent=2.0*DEEP_SKY_HALF_SIZE_LY[i]/distance_ly;
+        vec2 uv=0.5+tangent/(extent*depth);
+        if (deep_sky_mapped && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)))) {
+            vec2 tx=vec2(dot(dx,DEEP_SKY_RIGHT[i]),-dot(dx,DEEP_SKY_UP[i]));
+            vec2 ty=vec2(dot(dy,DEEP_SKY_RIGHT[i]),-dot(dy,DEEP_SKY_UP[i]));
+            vec2 uv_dx=(tx*depth-tangent*dot(dx,direction))/(extent*depth*depth);
+            vec2 uv_dy=(ty*depth-tangent*dot(dy,direction))/(extent*depth*depth);
+            vec4 rect=DEEP_SKY_ATLAS_RECT[i];
+            vec3 e=textureGrad(deep_sky_map,rect.xy+uv*rect.zw,uv_dx*rect.zw,uv_dy*rect.zw).rgb;
+            vec3 linear=e*(e*(e*0.305306011+0.682171111)+0.012522878);
+            vec2 edge=min(uv,1.0-uv);
+            float coverage=smoothstep(0.0,0.025,min(edge.x,edge.y));
+            color=mix(color,linear,coverage);
+        }
+        // Observed fields can be subpixel in a wide view. A quiet screen-sized
+        // locator makes the real position discoverable without enlarging gas.
+        if (cosmic_focus_target == 0) {
+            float pixels=length(q-direction)/footprint;
+            float ring=1.0-smoothstep(0.65,1.65,abs(pixels-5.5));
+            float centre=1.0-smoothstep(0.6,1.4,pixels);
+            color+=vec3(0.025,0.12,0.18)*(ring*0.65+centre*0.4);
+        }
+    }
+    return color;
 }

@@ -16,25 +16,17 @@ pub(crate) const ASTRONOMY_CHOICE: &str = "jwm-effect:astronomy";
 pub(crate) const SOLAR_SYSTEM_CHOICE: &str = "jwm-effect:solar-system";
 pub(crate) const SCENE_CHOICES: [(&str, &str, &str); 12] = [
     (ASTRONOMY_CHOICE, "earth", "Astronomy Earth"),
-    (
-        SOLAR_SYSTEM_CHOICE,
-        "solar-system",
-        "Solar System 3D · drag to orbit",
-    ),
-    ("jwm-effect:moon", "moon", "Moon · lunar surface"),
-    ("jwm-effect:sun", "sun", "Sun · stellar surface"),
-    ("jwm-effect:mercury", "mercury", "Mercury · cratered world"),
-    ("jwm-effect:venus", "venus", "Venus · cloud-covered world"),
-    ("jwm-effect:mars", "mars", "Mars · red planet"),
-    ("jwm-effect:jupiter", "jupiter", "Jupiter · gas giant"),
-    ("jwm-effect:saturn", "saturn", "Saturn · rings"),
-    ("jwm-effect:uranus", "uranus", "Uranus · ice giant"),
-    ("jwm-effect:neptune", "neptune", "Neptune · ice giant"),
-    (
-        "jwm-effect:galaxy",
-        "galaxy",
-        "Milky Way panorama · 360° sky",
-    ),
+    (SOLAR_SYSTEM_CHOICE, "solar-system", "Solar System 3D"),
+    ("jwm-effect:moon", "moon", "Moon"),
+    ("jwm-effect:sun", "sun", "Sun"),
+    ("jwm-effect:mercury", "mercury", "Mercury"),
+    ("jwm-effect:venus", "venus", "Venus"),
+    ("jwm-effect:mars", "mars", "Mars"),
+    ("jwm-effect:jupiter", "jupiter", "Jupiter"),
+    ("jwm-effect:saturn", "saturn", "Saturn"),
+    ("jwm-effect:uranus", "uranus", "Uranus"),
+    ("jwm-effect:neptune", "neptune", "Neptune"),
+    ("jwm-effect:galaxy", "galaxy", "Milky Way panorama"),
 ];
 
 const CONTROL_PREFIX: &str = "jwm-wallpaper:";
@@ -176,14 +168,11 @@ pub(crate) fn astronomy_controls(
             format!("{name}{absent}")
         }
     };
-    let mut controls = vec![(
-        target.key(),
-        format!("\u{f108} Apply to: {target_label} · change"),
-    )];
+    let mut controls = vec![(target.key(), format!("\u{f108} Apply to: {target_label}"))];
     for (layout, label) in [
-        ("span", "Span · one scene across all screens"),
-        ("mirror", "Mirror · one shared view on every screen"),
-        ("independent", "Independent · a scene or group per screen"),
+        ("span", "Span"),
+        ("mirror", "Mirror"),
+        ("independent", "Independent"),
     ] {
         let marker = if behavior.wallpaper_astronomy_layout == layout {
             "\u{f00c}"
@@ -202,10 +191,7 @@ pub(crate) fn astronomy_controls(
         {
             controls.push((
                 format!("{CONTROL_PREFIX}detach"),
-                format!(
-                    "\u{f127} Leave group {} · make {name} independent",
-                    output.group
-                ),
+                format!("\u{f127} Leave group {}", output.group),
             ));
         }
         for other in connectors.iter().filter(|other| *other != name) {
@@ -226,7 +212,7 @@ pub(crate) fn astronomy_controls(
     };
     controls.push((
         format!("{CONTROL_PREFIX}presentation"),
-        format!("\u{f0eb} Global lighting: {mode} · change"),
+        format!("\u{f0eb} Global lighting: {mode}"),
     ));
     let orbit = if behavior.wallpaper_solar_orbit_mode == "ephemeris" {
         "JPL approximation"
@@ -235,7 +221,7 @@ pub(crate) fn astronomy_controls(
     };
     controls.push((
         format!("{CONTROL_PREFIX}orbit"),
-        format!("\u{f135} Global solar orbits: {orbit} · change"),
+        format!("\u{f135} Global solar orbits: {orbit}"),
     ));
     controls.push((
         format!("{CONTROL_PREFIX}detail:clock"),
@@ -264,103 +250,9 @@ pub(crate) fn astronomy_controls(
     }
     controls.push((
         format!("{CONTROL_PREFIX}detail:spin"),
-        format!(
-            "Solar spin: {:.3}× · independent of orbital date",
-            behavior.wallpaper_solar_spin_speed
-        ),
+        format!("Solar spin: {:.3}×", behavior.wallpaper_solar_spin_speed),
     ));
-    controls.push((
-        format!("{CONTROL_PREFIX}info"),
-        format!(
-            "\u{f05a} About {} · facts, materials and sources",
-            crate::config::astronomy::scene_label(target_scene(behavior, target, connectors)),
-        ),
-    ));
-    for (index, line) in scene_information(target_scene(behavior, target, connectors))
-        .into_iter()
-        .enumerate()
-    {
-        controls.push((format!("{CONTROL_PREFIX}detail:{index}"), line));
-    }
     controls
-}
-
-pub(crate) fn scene_information(scene: &str) -> Vec<String> {
-    use crate::backend::compositor_common::celestial_catalog::body_by_id;
-    let mut lines = Vec::new();
-    let mut wrap = |text: String| {
-        const WIDTH: usize = 60;
-        let mut line = String::new();
-        for mut word in text.split_whitespace() {
-            // Long source URLs also occupy bounded rows; the entire URL
-            // remains readable across consecutive lines instead of clipping.
-            while let Some((boundary, _)) = word.char_indices().nth(WIDTH) {
-                if !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                }
-                lines.push(word[..boundary].into());
-                word = &word[boundary..];
-            }
-            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > WIDTH {
-                lines.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        if !line.is_empty() {
-            lines.push(line);
-        }
-    };
-    if let Some(body) = body_by_id(scene) {
-        wrap(format!("{} · {}", body.name, body.name_zh));
-        wrap(format!(
-            "Mean radius: {:.1} km · axial obliquity: {:.3}°",
-            body.radius_km, body.obliquity_degrees
-        ));
-        wrap(format!(
-            "Sidereal rotation: {:.4} hours{}",
-            body.rotation_hours.abs(),
-            if body.rotation_hours < 0.0 {
-                " · retrograde"
-            } else {
-                ""
-            }
-        ));
-        if let Some(period) = body.orbital_period_days {
-            let parent = body
-                .orbit_parent
-                .and_then(body_by_id)
-                .map_or("its parent", |parent| parent.name);
-            wrap(format!("Sidereal orbit: {period:.4} days around {parent}"));
-        }
-        wrap(body.description.into());
-        wrap(format!("Material: {}", body.material_label));
-        wrap(body.material_note.into());
-        wrap(format!("NASA reference: {}", body.source_url));
-        if body.physical_source_url != body.source_url {
-            wrap(format!("Physical quantities: {}", body.physical_source_url));
-        }
-        if let Some(source) = body.texture_source_url {
-            wrap(format!("Texture provenance: {source}"));
-        }
-    } else if scene == "solar-system" {
-        wrap("Solar System · 太阳系 · Sun and eight planets".into());
-        wrap("Ephemeris mode: JPL approximate positions; valid only within its documented date range.".into());
-        wrap("Both presentation modes compress orbital distances and enlarge bodies. The view is not to scale.".into());
-        wrap(
-            "The solar orbital clock is separate from Earth/Moon's real UTC day/night cycle."
-                .into(),
-        );
-        wrap("Orbital date at 1× follows UTC; surface spin uses its own multiplier, default 718.035×. Set wallpaper_solar_spin_speed to 1 for real-time sidereal spin.".into());
-        wrap("Source: https://ssd.jpl.nasa.gov/planets/approx_pos.html".into());
-    } else {
-        wrap("Milky Way panorama · 银河全景".into());
-        wrap("A navigable 360° celestial environment. Decorative stars and nebulae are illustrative, not a complete astrometric catalogue.".into());
-    }
-    wrap("Controls: drag a body to rotate; drag the sky to look around; wheel to zoom. Solar-system bodies are selectable.".into());
-    lines
 }
 
 fn independent_output_snapshot(
@@ -1063,32 +955,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn celestial_facts_fit_picker_rows_without_losing_source_urls() {
-        use crate::backend::compositor_common::celestial_catalog::body_by_id;
-        for (scene, _) in crate::config::astronomy::ASTRONOMY_SCENES {
-            let lines = scene_information(scene);
-            assert!(!lines.is_empty(), "missing facts for {scene}");
-            assert!(
-                lines.iter().all(|line| line.chars().count() <= 60),
-                "facts would clip in the native picker for {scene}"
-            );
-            if let Some(body) = body_by_id(scene) {
-                let content = lines.concat();
-                for source in [
-                    Some(body.source_url),
-                    Some(body.physical_source_url),
-                    body.texture_source_url,
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    assert!(content.contains(source), "missing {scene} source {source}");
-                }
-            }
-        }
-    }
-
-    #[test]
     fn celestial_global_selection_migrates_legacy_layouts_to_mirror() {
         for layout in ["per-output", "earth-moon"] {
             let mut config = crate::config::Config::default();
@@ -1346,8 +1212,8 @@ mod tests {
         ));
         assert!(matches_query(
             SOLAR_SYSTEM_CHOICE,
-            "Solar System 3D · drag to orbit",
-            &["orbit", "solar"]
+            "Solar System 3D",
+            &["3d", "solar"]
         ));
         assert!(!matches_query(
             "/walls/Alps.png",

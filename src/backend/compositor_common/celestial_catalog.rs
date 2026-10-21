@@ -1,4 +1,4 @@
-//! Source-backed reference facts for the celestial wallpaper picker.
+//! Source-backed reference facts for celestial wallpapers.
 //!
 //! Values describe the astronomical bodies, not the deliberately enlarged
 //! spheres used to make the wallpaper navigable. In particular, `radius_km`
@@ -209,6 +209,7 @@ pub(crate) const BODIES: [CelestialBody; 10] = [
     },
 ];
 
+#[cfg(test)]
 pub(crate) fn body_by_id(id: &str) -> Option<&'static CelestialBody> {
     BODIES.iter().find(|body| body.id == id)
 }

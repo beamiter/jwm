@@ -18,7 +18,7 @@ for the shared controls, sky catalogue and Solar System close-ups.
 Open the configurator directly with `Alt+Ctrl+W`, or use **Shell Hub → Shell →
 Wallpaper** from a status bar's shell entry (`Alt+F10` opens the Shell Hub).
 The wallpaper panel is searchable: type a
-planet name, `share`, `clock`, or `about`, and use the pointer or Enter to activate
+planet name, `share`, or `clock`, and use the pointer or Enter to activate
 a row. Clear the query to return to the full list; Page Up/Page Down browse it.
 
 1. Use **Apply to: All screens** at the top to cycle between all screens and
@@ -32,16 +32,17 @@ a row. Clear the query to return to the full list; Page Up/Page Down browse it.
 4. To span one scene over a subset of the desk, target a display and choose
    **Share with DP-1**, substituting the desired reference display. Repeat for
    more members. **Leave group** makes only the selected display independent.
-5. Use **About …** for the selected scene's reference dimensions, sidereal
-   rotation and orbit, material provenance, and source URLs. Values use real
-   units even when the rendered view deliberately enlarges bodies.
+
+Reference dimensions, sidereal rotation and orbit, material provenance, and
+source URLs are documented in [Astronomy science](astronomy-science.md).
 
 Celestial selections and controls are saved to the existing JWM configuration.
 The panel stays open so several displays can be configured in succession; close
-it to use the wallpaper's mouse gestures. A save failure remains visible as
-“Applied for this session; not saved”. Static image choices retain their existing
-session/daily semantics described in [Wallpaper](wallpaper.md). Select **All
-screens** before choosing a static image: that action changes the global image
+it to use the wallpaper's mouse gestures. Successful saves show no status message;
+a save failure remains visible as “Applied for this session; not saved”. Static
+image choices retain their existing session/daily semantics described in
+[Wallpaper](wallpaper.md). Select **All screens** before choosing a static image:
+that action changes the global image
 fallback and disables the celestial effect, rather than configuring an
 individual celestial output.
 
@@ -236,17 +237,18 @@ shows the current spin multiplier separately from the date rate.
 `wallpaper_astronomy_presentation = "scientific"` is the default; use
 `"illustrative"` for the explicitly artistic presentation. **Scientific does
 not mean photogrammetric terrain, current planetary weather, a navigation-grade
-ephemeris, true display radiance, or a complete measured galaxy.** The About rows
-name each installed material and distinguish observation-based composites from
-approximations. An authoritative source for a body's dimensions does not turn a
-procedural surface into measured geography.
+ephemeris, true display radiance, or a complete measured galaxy.** The
+[science reference](astronomy-science.md) names each installed material and
+distinguishes observation-based composites from approximations. An authoritative
+source for a body's dimensions does not turn a procedural surface into measured
+geography.
 
 Both modes compress Solar System distances and enlarge bodies so they remain
 visible and selectable on a desktop. The source mean radii, sidereal periods
-and obliquities in About use real units. The default ephemeris retains orbital
-eccentricity and inclination within its model, but the displayed relative
-distances and sizes are not to scale. For source tables, textures, coordinate
-conventions and limitations, read [Astronomy science](astronomy-science.md).
+and obliquities in the reference tables use real units. The default ephemeris
+retains orbital eccentricity and inclination within its model, but the displayed
+relative distances and sizes are not to scale. For source tables, textures,
+coordinate conventions and limitations, read [Astronomy science](astronomy-science.md).
 
 ## Configuration
 

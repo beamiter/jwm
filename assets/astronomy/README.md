@@ -306,3 +306,50 @@ The repository bundles these images as data files. Source installs copy them wit
 this credit to /usr/local/share/jwm/astronomy/. Release archives keep the images and credit
 inside each version's share/jwm/astronomy/ so rollback restores matching assets.
 JWM never downloads these files at runtime and does not embed them in the binary.
+
+
+## Observed deep-sky fields
+
+`deep-sky-atlas.jpg` is a 4096 × 3072 RGB atlas with twelve independently framed
+observed fields. Each image keeps its aspect ratio, has a padded cell and an
+attached credit line. The display positions, image north angles, angular extents,
+approximate distances, download URLs and original-byte SHA-256 values are recorded
+in [deep-sky-catalog.json](deep-sky-catalog.json). This catalogue uses image-field
+centres, which can differ from whole-object catalogue centres. Downloaded source
+JPEGs are resized with Lanczos and packed without changing their image geometry.
+
+ESA/Hubble images are [CC BY 4.0](https://esahubble.org/copyright/); the ESO field
+uses [ESO's attribution terms](https://www.eso.org/public/outreach/copyright/).
+The full image credits follow, separately from JWM's software license:
+
+- [Orion Nebula / M42](https://esahubble.org/images/heic0601a/): NASA , ESA , M. Robberto ( Space Telescope Science Institute / ESA ) and the Hubble Space Telescope Orion Treasury Project Team
+- [Lagoon Nebula / M8](https://esahubble.org/images/heic1808a/): NASA, ESA, STScI
+- [Carina Nebula / NGC 3372](https://esahubble.org/images/heic0707a/): NASA , ESA , N. Smith (University of California, Berkeley), and The Hubble Heritage Team (STScI/AURA)
+- [Eagle Nebula / M16](https://esahubble.org/images/heic1501a/): NASA , ESA/Hubble and the Hubble Heritage Team
+- [Andromeda Galaxy / M31](https://esahubble.org/images/heic1502a/): NASA , ESA , J. Dalcanton (University of Washington, USA), B. F. Williams (University of Washington, USA), L. C. Johnson (University of Washington, USA), the PHAT team, and R. Gendler.
+- [Triangulum Galaxy / M33](https://esahubble.org/images/heic1901a/): NASA, ESA, and M. Durbin, J. Dalcanton, and B. F. Williams (University of Washington)
+- [Rosette Nebula / NGC 2237](https://www.eso.org/public/images/potw1847a/): ESO
+- [Veil Nebula / NGC 6960](https://esahubble.org/images/heic1520a/): NASA, ESA, Hubble Heritage Team
+- [Crab Nebula / M1](https://esahubble.org/images/heic0515a/): NASA , ESA and Allison Loll/Jeff Hester (Arizona State University). Acknowledgement: Davide De Martin ( ESA / Hubble )
+- [Helix Nebula / NGC 7293](https://esahubble.org/images/heic0307a/): NASA , NOAO, ESA , the Hubble Helix Nebula Team, M. Meixner ( STScI ), and T.A. Rector (NRAO).
+- [Horsehead Nebula / Barnard 33](https://esahubble.org/images/heic1307a/): NASA, ESA, and the Hubble Heritage Team ( AURA / STScI )
+- [Bubble Nebula / NGC 7635](https://esahubble.org/images/heic1608a/): NASA, ESA, Hubble Heritage Team
+
+Rebuild from separately downloaded `<id>.jpg` source files:
+
+```sh
+python3 scripts/prepare-astronomy-nebulae.py --source-dir /path/to/source-jpegs
+python3 scripts/prepare-astronomy-nebulae.py --check
+```
+
+The script verifies every source checksum and generates the atlas, Rust physical
+geometry and GLSL geometry from the same catalogue. The renderer decodes one
+bounded atlas on its shared wallpaper worker and uploads one optional texture,
+shared by all monitors. Camera/lens changes do not decode images again. Missing
+or failed optional imagery retains the sky and locators; it does not borrow
+another target's photograph. Distances represent approximate source estimates;
+the planes do not infer the depth or internal structure of the photographed gas.
+Andromeda uses [NASA's 2.5-million-ly reference](https://science.nasa.gov/mission/hubble/science/explore-the-night-sky/hubble-messier-catalog/messier-31/).
+Rosette uses the [ESO article estimate of 4,700 ly](https://www.eso.org/public/images/b12/).
+Helix uses 650 ly from its source article text, whose object-metadata table has a
+conflicting value. All derivation/source records were checked on 2026-10-21.

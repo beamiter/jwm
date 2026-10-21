@@ -2749,7 +2749,7 @@ impl SystemUiState {
             .unwrap_or_default()
     }
 
-    /// Targets, placement and encyclopedia rows live in the same immutable
+    /// Targets and placement controls live in the same immutable
     /// search source as image choices. Filtering cannot silently reset scope.
     pub(crate) fn set_wallpaper_astronomy_controls(
         &mut self,
@@ -2807,7 +2807,7 @@ impl SystemUiState {
         let mut next =
             Vec::with_capacity(controls.len() + images.len() + wallpaper::SCENE_CHOICES.len());
         // Scope/layout are visible before the twelve scene choices; advanced
-        // time controls and the encyclopedia follow, then static images.
+        // time controls follow, then static images.
         next.extend(controls.iter().take(4).cloned());
         for (key, _, label) in wallpaper::SCENE_CHOICES {
             let marker = if key == current { "\u{f00c}" } else { " " };
@@ -2826,34 +2826,6 @@ impl SystemUiState {
             .and_then(|key| rows.iter().position(|row| &row.key == key))
             .unwrap_or(0);
         self.refresh_matches();
-    }
-
-    pub(crate) fn wallpaper_show_details(&mut self) {
-        if let Self::ListPanel {
-            kind: ListKind::Wallpaper,
-            query,
-            ..
-        } = self
-        {
-            query.clear();
-        }
-        self.refresh_matches();
-        if let Self::ListPanel {
-            kind: ListKind::Wallpaper,
-            rows,
-            selected,
-            ..
-        } = self
-            && let Some(index) = rows
-                .iter()
-                .position(|row| row.key == "jwm-wallpaper:detail:0")
-        {
-            let last = rows
-                .iter()
-                .rposition(|row| row.key.starts_with("jwm-wallpaper:detail:"))
-                .unwrap_or(index);
-            *selected = (index + ListKind::Wallpaper.window().saturating_sub(1)).min(last);
-        }
     }
 
     /// Adopt an asynchronous scan without discarding a filter typed while the
@@ -7176,22 +7148,6 @@ mod tests {
             !rows
                 .iter()
                 .any(|row| row.key == "jwm-wallpaper:share:HDMI-1")
-        );
-        picker.wallpaper_show_details();
-        assert_eq!(picker.selected_wallpaper(), None);
-        assert!(
-            picker
-                .overlay_parts()
-                .items
-                .iter()
-                .any(|line| line.contains("Mean radius:"))
-        );
-        assert!(
-            picker
-                .overlay_parts()
-                .items
-                .iter()
-                .any(|line| line.contains("Sidereal rotation:"))
         );
     }
 
