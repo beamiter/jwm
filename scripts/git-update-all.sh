@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键更新目录下所有 git 仓库，并按各自的方式重新编译已知项目。
 # 默认只 fetch GitHub origin，再把当前分支 rebase 到该源；本地领先时自动 push；
-# 更新完成后，对本次真的有新提交（或产物缺失）的已知项目跑一次 release 构建。
+# 更新后对已变更或产物缺失的项目调用各自入口；可安装项目默认编译并安装。
 set -uo pipefail
 
 ROOT="."
@@ -12,6 +12,8 @@ STASH=0
 DRY_RUN=0
 QUIET=0
 PUSH=1          # 默认把 rebase 后仍领先 upstream 的提交推送上去
+INSTALL=1        # 默认编译并安装；-C 仅编译
+LOCAL_SOURCES=0  # -L: 四终端使用同级共享库源码联编
 BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
@@ -26,13 +28,14 @@ MAX_PARALLEL_JOBS=64
 # 名字必须与扫描到的仓库 basename 一致。LifeAI 是给命令行使用的便捷别名，
 # 规范名仍是实际目录 LifeAI.jl。
 KNOWN_TARGETS="jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl"
-INSTALL_TARGETS="anvil ember forge frost jwm"
+INSTALL_TARGETS="jsh anvil ember forge frost jwm"
 
 is_known_target() {
     case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
 is_install_target() {
+    [ "$INSTALL" -eq 1 ] || return 1
     case " $INSTALL_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
@@ -121,6 +124,7 @@ sanitize_text() {
 # 传给各仓库安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
 # 或 ANVIL_INSTALL_ARGS='--backend cargo --no-desktop'
 JWM_INSTALL_ARGS="${JWM_INSTALL_ARGS:-}"
+JSH_INSTALL_ARGS="${JSH_INSTALL_ARGS:-}"
 ANVIL_INSTALL_ARGS="${ANVIL_INSTALL_ARGS:-}"
 EMBER_INSTALL_ARGS="${EMBER_INSTALL_ARGS:-}"
 FORGE_INSTALL_ARGS="${FORGE_INSTALL_ARGS:-}"
@@ -156,7 +160,11 @@ usage() {
 
 构建选项 (只作用于已知项目: jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl):
   -B            全部重新构建，不管本次有没有拉到新提交
-  -N            不构建，只更新仓库
+  -N            不构建、不安装，只更新仓库
+  -C            仅编译，不调用安装器
+  -I            编译并安装（默认；安装器负责构建）
+  -L            四终端用同级 jterm_core/jagent 源码联编，再安装产物
+                使用临时 manifest/lock，不改各仓库发布依赖版本
   -T 列表       只更新和构建这些项目，逗号分隔，如 -T jagent,jwm,LifeAI
   -J N          同时构建几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
@@ -167,24 +175,22 @@ usage() {
 
 各项目的构建方式并不相同，脚本里按名字分派:
   anvil,forge       scripts/install.sh —— 后端 (nix / cargo) 由 --backend auto 挑；
-                    anvil 默认装到 ~/.local/bin，forge 默认装到 ~/.cargo/bin。
+                    四个终端默认都装到 ~/.local/bin。
   ember,frost       scripts/install.sh —— 默认用 cargo 构建，也可用 --binary 安装
                     预构建产物；默认装到 ~/.local/bin。这四个目标都不需要 sudo。
-  jwm              scripts/install_jwm_scripts.sh —— jwm 没有只编不装的中间态：
+  jwm              scripts/install_jwm_scripts.sh —— 默认安装完整组件：
                    裸 cargo build 只出根 package 的四个二进制，不编 bar 和
                    jwm-bridge，也不同步到 /usr/local/bin，更新完跑的还是旧的
                    那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
-  jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
+  jsh              scripts/install-jsh.sh --force（本地源码构建并安装静态 musl）
   jagent,jterm_core cargo build --release --locked（库 crate）
   cplus            bash build.sh（仓库自己的 CMake 构建入口）
   LifeAI.jl        锁定项目环境下 instantiate/precompile 并加载 LifeAI
 
-上述 jsh/jagent/jterm_core/cplus/LifeAI.jl 路径只构建或预编译、不安装；
-要装 jsh 请运行其仓库的 scripts/install-jsh.sh。
+jagent/jterm_core/cplus/LifeAI.jl 只构建或预编译。-C 可让应用也只编译不安装。
 产物检测看的是各项目真正落地的位置: jwm 看 /usr/local/bin/jwm，四个终端看
-安装脚本的目标目录（anvil/ember/frost 默认 ~/.local/bin，forge 默认
-~/.cargo/bin；都跟随 --prefix/--bin-dir/DESTDIR），
-jsh/jagent/jterm_core 看 Cargo target 下的 release 产物，cplus 看 build/m；
+安装脚本的目标目录（四终端默认 ~/.local/bin，跟随 --prefix/--bin-dir/DESTDIR），
+jsh 看其安装目录；仅编译模式和 jagent/jterm_core 看 Cargo release 产物，cplus 看 build/m；
 LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在更新或 -B 时执行。
 
 环境变量:
@@ -193,11 +199,12 @@ LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在
   FORGE_INSTALL_ARGS 追加给 forge/scripts/install.sh，如 '--backend nix'
   FROST_INSTALL_ARGS 追加给 frost/scripts/install.sh，如 '--binary /path/to/frost'
   JWM_INSTALL_ARGS   追加给 install_jwm_scripts.sh 的参数，如 '-b xcb_bar'
+  JSH_INSTALL_ARGS   追加给 jsh/scripts/install-jsh.sh，如 '--bin-dir /path/bin'
   JSH_INSTALL_TARGET 覆盖 jsh 的 target 三元组，例如 x86_64-unknown-linux-gnu
                      (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
   CARGO_TARGET_DIR   若设置，产物检测也跟着走这个目录
 
-退出码: 0 全部成功；1 有仓库更新失败或编译失败。
+退出码: 0 全部成功；1 有仓库更新失败、编译失败或安装失败。
 EOF
 }
 
@@ -231,7 +238,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- "${args[@]}"
-while getopts ":j:J:T:H:R:O:grfmsnPuqBNhpU" opt; do
+while getopts ":j:J:T:H:R:O:grfmsnPuqBCLNIhpU" opt; do
     case "$opt" in
         j) JOBS="$OPTARG" ;;
         r) MODE="rebase" ;;
@@ -250,6 +257,9 @@ while getopts ":j:J:T:H:R:O:grfmsnPuqBNhpU" opt; do
         q) QUIET=1 ;;
         B) BUILD_ALL=1; BUILD=1 ;;
         N) BUILD=0 ;;
+        C) INSTALL=0; BUILD=1 ;;
+        I) INSTALL=1; BUILD=1 ;;
+        L) LOCAL_SOURCES=1 ;;
         T) ONLY="$OPTARG" ;;
         J) BUILD_JOBS="$OPTARG" ;;
         h) usage; exit 0 ;;
@@ -614,8 +624,7 @@ install_args_for() {
 }
 
 # 复刻 anvil/ember/forge/frost install.sh 里 BIN_DIR 的解析：显式 --bin-dir 优先，
-# 其次 --prefix/bin；anvil/ember/frost 默认 ~/.local/bin，forge 默认
-# ~/.cargo/bin。DESTDIR 作为打包用的暂存前缀。
+# 其次 --prefix/bin；四终端默认 ~/.local/bin。DESTDIR 是打包暂存前缀。
 install_bin_dir() {
     local name="$1" prefix="" bindir=""
     shift
@@ -632,8 +641,14 @@ install_bin_dir() {
         printf '%s%s\n' "${DESTDIR:-}" "$bindir"
     elif [ -n "$prefix" ]; then
         printf '%s%s/bin\n' "${DESTDIR:-}" "$prefix"
-    elif [ "$name" = "forge" ]; then
-        printf '%s%s/.cargo/bin\n' "${DESTDIR:-}" "$HOME"
+    elif [ "$name" = "jsh" ]; then
+        local installed
+        installed="$(command -v jsh || true)"
+        if [[ "$installed" = /* ]] && [ -x "$installed" ] && [ -w "${installed%/*}" ]; then
+            printf '%s\n' "${installed%/*}"
+        else
+            printf '%s/.local/bin\n' "$HOME"
+        fi
     else
         printf '%s%s/.local/bin\n' "${DESTDIR:-}" "$HOME"
     fi
@@ -690,7 +705,7 @@ jsh_preflight() {
 artifact_path() {
     local name="$1" repo="$2" target_dir raw_args
     local -a install_args=()
-    if [ "$name" = "jwm" ]; then
+    if [ "$name" = "jwm" ] && is_install_target "$name"; then
         printf '/usr/local/bin/jwm\n'
         return
     fi
@@ -740,15 +755,51 @@ artifact_is_ready() {
     esac
 }
 
+# 本地联编的产物保留在原仓库的 target 缓存中，供 --binary 精确安装。
+built_binary_path() {
+    local name="$1" repo target_dir
+    repo="$(cd "$2" && pwd)"
+    target_dir="${CARGO_TARGET_DIR:-$repo/target}"
+    case "$target_dir" in /*) ;; *) target_dir="$repo/$target_dir" ;; esac
+    printf '%s/release/%s\n' "$target_dir" "$name"
+}
+
+is_local_family_target() {
+    [ "$LOCAL_SOURCES" -eq 1 ] || return 1
+    case "$1" in anvil|ember|forge|frost) return 0 ;; *) return 1 ;; esac
+}
+
+local_build_cmd() {
+    local name="$1" repo="$2" runner
+    runner="$(cd "$repo/.." && pwd)/jterm_core/scripts/family-cargo.py"
+    if { [ "$name" = anvil ] || [ "$name" = forge ]; } && command -v nix >/dev/null 2>&1; then
+        printf '%s\n' nix develop --command python3 "$runner" "$name" build --release
+    else
+        printf '%s\n' python3 "$runner" "$name" build --release
+    fi
+}
+
 # 构建命令，一行一个参数（build_one 用 mapfile 读回数组）。
 build_cmd() {
     local name="$1" raw_args
     local -a extra_args=()
+    if [ "$INSTALL" -eq 0 ]; then
+        case "$name" in
+            anvil|forge)
+                if command -v nix >/dev/null 2>&1; then
+                    printf '%s\n' nix develop --command cargo build --release --locked
+                else
+                    printf '%s\n' cargo build --release --locked
+                fi
+                return ;;
+            ember|frost|jwm) printf '%s\n' cargo build --release --locked; return ;;
+        esac
+    fi
     case "$name" in
         # 四个终端各自带 scripts/install.sh，构建加安装一步到位。anvil/forge
         # 自己选择 nix/cargo 后端，ember/frost 选择 cargo 或显式 --binary；脚本
         # 还负责 desktop/AppStream/图标和 PATH 遮挡检查。目标在用户 HOME 下
-        #（forge 默认 ~/.cargo/bin，其余默认 ~/.local/bin），不需要 sudo。
+        #（四终端默认 ~/.local/bin），不需要 sudo。
         anvil|ember|forge|frost)
             raw_args="$(install_args_for "$name")"
             [ -z "$raw_args" ] || read -r -a extra_args <<<"$raw_args"
@@ -764,8 +815,13 @@ build_cmd() {
             printf '%s\n' ./scripts/install_jwm_scripts.sh
             [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
             ;;
-        # jsh 只编不装：安装形态是静态 musl 二进制，装到哪由 install-jsh.sh 决定。
         jsh)
+            if is_install_target "$name"; then
+                [ -z "$JSH_INSTALL_ARGS" ] || read -r -a extra_args <<<"$JSH_INSTALL_ARGS"
+                printf '%s\n' sh ./scripts/install-jsh.sh --force
+                [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
+                return
+            fi
             if [ -n "$JSH_TRIPLE" ]; then
                 printf '%s\n' cargo build --release --locked --target "$JSH_TRIPLE"
             else
@@ -788,9 +844,33 @@ build_cmd() {
 # 单个项目的构建。结果写 $WORKDIR/b<idx>.status，日志写 $WORKDIR/b<idx>.log。
 build_one() {
     local idx="$1" repo="$2" name="$3" reason="$4" live="$5"
-    local log="$WORKDIR/b$idx.log" cmd=() rc=0 start elapsed verb="编译" done_verb="已编译"
+    local log="$WORKDIR/b$idx.log" cmd=() install_after=() extra_args=() rc=0 start elapsed verb="编译" done_verb="已编译"
 
-    mapfile -t cmd < <(build_cmd "$name")
+    if is_local_family_target "$name"; then
+        if [ ! -f "$repo/../jterm_core/scripts/family-cargo.py" ] || ! command -v python3 >/dev/null 2>&1; then
+            printf 'FAIL|%s|-L 需要同级 jterm_core/scripts/family-cargo.py 和 python3\n' "$name" >"$WORKDIR/b$idx.status"
+            return
+        fi
+        mapfile -t cmd < <(local_build_cmd "$name" "$repo")
+        if is_install_target "$name"; then
+            local raw_args argument operand=0
+            raw_args="$(install_args_for "$name")"
+            [ -z "$raw_args" ] || read -r -a extra_args <<<"$raw_args"
+            install_after=(./scripts/install.sh --binary "$(built_binary_path "$name" "$repo")")
+            for argument in "${extra_args[@]}"; do
+                if [ "$operand" -eq 1 ]; then operand=0; continue; fi
+                case "$argument" in
+                    --backend) operand=1 ;;
+                    --backend=*) ;;
+                    --binary|--binary=*)
+                        printf 'FAIL|%s|-L 不能与显式 --binary 合用\n' "$name" >"$WORKDIR/b$idx.status"; return ;;
+                    *) install_after+=("$argument") ;;
+                esac
+            done
+        fi
+    else
+        mapfile -t cmd < <(build_cmd "$name")
+    fi
     # 跑的是安装脚本的项目，别在日志里谎称只是“编译”
     if is_install_target "$name"; then
         verb="安装"; done_verb="已安装"
@@ -805,13 +885,21 @@ build_one() {
         printf '  %s\n' "${C_DIM}\$ ${cmd[*]}${C_RST}"
     } >"$log"
 
+    run_command() {
+        ( cd "$repo" && "${cmd[@]}" ) || return $?
+        if [ "${#install_after[@]}" -gt 0 ]; then
+            printf '  $ %s\n' "${install_after[*]}"
+            ( cd "$repo" && "${install_after[@]}" )
+        fi
+    }
+
     start=$SECONDS
     if [ "$live" -eq 1 ]; then
         cat "$log"
-        ( cd "$repo" && "${cmd[@]}" ) 2>&1 | tee -a "$log" | sed 's/^/  /'
+        run_command 2>&1 | tee -a "$log" | sed 's/^/  /'
         rc=${PIPESTATUS[0]}
     else
-        ( cd "$repo" && "${cmd[@]}" ) >>"$log" 2>&1
+        run_command >>"$log" 2>&1
         rc=$?
     fi
     elapsed=$((SECONDS - start))
@@ -922,6 +1010,7 @@ if [ "$BUILD" -eq 1 ]; then
     # jsh 的 musl 工具链检查放在开跑之前：缺东西就只把 jsh 摘掉，别的照编。
     for i in "${run_idx[@]}"; do
         [ "$(basename "${repos[$i]}")" = "jsh" ] || continue
+        is_install_target jsh && continue
         if ! jsh_preflight "$JSH_TRIPLE"; then
             printf 'FAIL|jsh|%s 工具链不全，未编译\n' "$JSH_TRIPLE" >"$WORKDIR/b$i.status"
             keep=()
@@ -938,7 +1027,16 @@ if [ "$BUILD" -eq 1 ]; then
     for i in "${run_idx[@]}"; do
         name="$(basename "${repos[$i]}")"
         case "$name" in
-            anvil|ember|forge|frost) required_tool="bash" ;;
+            anvil|ember|forge|frost)
+                if is_local_family_target "$name"; then
+                    required_tool="python3"
+                elif [ "$INSTALL" -eq 0 ]; then
+                    required_tool="cargo"
+                    if { [ "$name" = anvil ] || [ "$name" = forge ]; } && command -v nix >/dev/null 2>&1; then required_tool="nix"; fi
+                else
+                    required_tool="bash"
+                fi ;;
+            jsh) if is_install_target "$name"; then required_tool="sh"; else required_tool="cargo"; fi ;;
             cplus)      required_tool="bash" ;;
             LifeAI.jl)  required_tool="julia" ;;
             *)          required_tool="cargo" ;;
@@ -956,6 +1054,7 @@ if [ "$BUILD" -eq 1 ]; then
     # 所以开跑前先把凭据取到手，非交互环境只提醒不阻塞。
     for i in "${run_idx[@]}"; do
         [ "$(basename "${repos[$i]}")" = "jwm" ] || continue
+        is_install_target jwm || continue
         if command -v sudo >/dev/null 2>&1 && ! sudo -n true 2>/dev/null; then
             if [ -t 0 ]; then
                 printf '\n%s\n' "${C_DIM}jwm 安装需要 sudo，先验证一次密码${C_RST}"
@@ -1002,7 +1101,7 @@ if [ "$BUILD" -eq 1 ]; then
     done
 
     if [ "${#bsummary[@]}" -gt 0 ]; then
-        printf '\n%s\n' "${C_BLD}—— 构建汇总 ——${C_RST}"
+        printf '\n%s\n' "${C_BLD}—— 构建/安装汇总 ——${C_RST}"
         for line in "${bsummary[@]}"; do
             st="${line%%|*}"; rest="${line#*|}"; nm="${rest%%|*}"; msg="${rest#*|}"
             case "$st" in

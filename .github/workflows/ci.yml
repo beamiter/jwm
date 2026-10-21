@@ -48,7 +48,9 @@ jobs:
         run: bash scripts/lint-shell.sh
 
       - name: Exercise offline updater contracts
-        run: bash scripts/test-git-update-all.sh
+        run: |
+          bash scripts/test-git-update-all.sh
+          python3 scripts/test-git-update-all-install.py
 
       - name: Exercise release install lifecycle
         run: bash scripts/test-install-lifecycle.sh

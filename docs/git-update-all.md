@@ -3,7 +3,10 @@
 `scripts/git-update-all.sh` scans the directory itself and its immediate child
 repositories. The `projects/git-update-all.sh` symlink points to this script.
 It fetches one selected source per repository, rebases by default, and builds
-known projects only when they changed or their artifacts are missing.
+known projects only when they changed or their artifacts are missing. Apps use
+their own installers by default, so successful builds are installed too.
+This includes jsh; `--force` rebuilds source changes even when its version
+number has not changed. Libraries, cplus and LifeAI keep their build-only paths.
 
 ```sh
 # GitHub origin only; other configured remotes are never contacted.
@@ -49,3 +52,31 @@ The offline contract gate is `bash scripts/test-git-update-all.sh`. It uses loca
 bare repositories and Git URL rewrites to exercise SSH source selection without
 network access, including unavailable unrelated remotes, dry runs, source-specific
 pushes and unchanged upstream configuration.
+
+`-B` forces rebuilding and installing the selected projects. `-C` compiles
+without installing, and `-N` only updates repositories. `-I` explicitly selects
+the default build-and-install mode. Installation failures are included in the
+summary and produce a nonzero exit status.
+
+```sh
+# Build and install the current published terminal dependency revisions.
+./git-update-all.sh -B -T anvil,ember,frost,forge ~/projects
+
+# Before publishing a coordinated core change, use sibling source checkouts.
+./git-update-all.sh -B -L -T anvil,ember,frost,forge ~/projects
+
+# Compile only; keep the installed apps unchanged.
+./git-update-all.sh -B -C -T anvil,ember,frost,forge ~/projects
+```
+
+`-L` uses `jterm_core/scripts/family-cargo.py`, builds against sibling
+`jterm_core` and `jagent` sources with temporary manifests and lockfiles, then
+passes the exact compiled binary to each terminal's `scripts/install.sh`.
+It does not rewrite release dependency pins. All four terminal installers
+default to `~/.local/bin`; explicit installer arguments retain their target
+directory settings. Existing source-selection, dirty-tree and dry-run rules
+still apply.
+
+The install-routing regression suite is
+`python3 scripts/test-git-update-all-install.py`; it uses local repositories
+and stub builders/installers and does not install anything on the host.

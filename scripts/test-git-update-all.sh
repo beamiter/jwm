@@ -150,12 +150,10 @@ mkdir -p "$FAKE_HOME/.local/bin" "$FAKE_HOME/.cargo/bin"
 for name in anvil ember frost forge; do
     init_repo "$ARTIFACT_ROOT/$name"
 done
-for name in anvil ember frost; do
+for name in anvil ember frost forge; do
     printf '#!/bin/sh\n' >"$FAKE_HOME/.local/bin/$name"
     chmod +x "$FAKE_HOME/.local/bin/$name"
 done
-printf '#!/bin/sh\n' >"$FAKE_HOME/.cargo/bin/forge"
-chmod +x "$FAKE_HOME/.cargo/bin/forge"
 : >"$TEST_ROOT/artifacts.log"
 HOME="$FAKE_HOME" run_with_stubs "$TEST_ROOT/artifacts.log" \
     -T anvil,ember,frost,forge "$ARTIFACT_ROOT" >"$TEST_ROOT/artifacts.out"
