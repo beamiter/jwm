@@ -196,6 +196,7 @@ pub struct FeatureStates {
     pub wallpaper_theme: Option<connectivity::BackgroundJob<Option<wallpaper_colors::Palette>>>,
     /// The wallpaper the last extraction was started for, so a config apply
     /// that changed something else does not decode the same picture again.
+    /// Explicit refresh/file reload invalidates it without touching the last palette.
     pub themed_wallpaper: String,
     /// Last observed local date and the enabled daily rotation check deadline.
     pub wallpaper_rotation: wallpaper_rotation::WallpaperRotationState,
@@ -231,6 +232,9 @@ pub struct FeatureStates {
     /// can take seconds to read, so the picker opens scanning and the frame
     /// tick fills it in; a picker closed meanwhile drops the answer.
     pub wallpaper_listing: Option<connectivity::BackgroundJob<wallpaper::WallpaperListing>>,
+    /// An explicit F5 joins the pending scan and refreshes image contents once
+    /// its rows are adopted. Ordinary picker opening only scans the library.
+    pub wallpaper_refresh_pending: bool,
     /// Cancels obsolete scans when the picker closes or is replaced.
     pub wallpaper_scan_cancellation: Option<wallpaper::ScanCancellation>,
     /// Compositor-off root wallpaper decode, if one is in flight.
@@ -238,6 +242,8 @@ pub struct FeatureStates {
     /// Fingerprint of the native root picture last requested, so a still
     /// desktop does not decode the same file every tick.
     pub native_root_key: String,
+    /// Throttled worker-side file checks and serialized native-root decoding.
+    pub native_root_schedule: native_root::NativeRootSchedule,
     /// A page opened from the Shell Hub returns there on Escape. Directly
     /// opened panels still close normally.
     pub system_ui_return_to_hub: bool,

@@ -3145,6 +3145,10 @@ pub trait BackendDiagnostics: Send {
 
 /// Runtime controls for compositor-wide visual state.
 pub trait CompositorControl: Send {
+    /// Requeue current wallpaper and preview images after an explicit refresh.
+    /// Preserve visible textures while asynchronous replacement loads run.
+    fn compositor_refresh_wallpapers(&mut self) {}
+
     /// Begin a gesture on a rendered, powered Earth/Moon or its sky panorama.
     /// The compositor captures the displayed target; the WM owns the grab and
     /// routes ordered pointer events without re-targeting during the gesture.

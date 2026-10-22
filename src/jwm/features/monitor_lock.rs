@@ -629,6 +629,10 @@ pub(in crate::jwm) mod test_support {
         pub(crate) expose_modes: Vec<bool>,
         /// Every lock-shade payload pushed, newest last.
         pub(crate) shade_pushes: Vec<Vec<MonitorShade>>,
+        pub(crate) wallpaper_refreshes: usize,
+        pub(crate) native_root_install_failures: usize,
+        pub(crate) native_root_install_calls: usize,
+        pub(crate) native_root_uploads: Vec<Vec<u8>>,
     }
 
     impl LockSpyBackend {
@@ -645,13 +649,21 @@ pub(in crate::jwm) mod test_support {
                 overview_modes: Vec::new(),
                 expose_modes: Vec::new(),
                 shade_pushes: Vec::new(),
+                wallpaper_refreshes: 0,
+                native_root_install_failures: 0,
+                native_root_install_calls: 0,
+                native_root_uploads: Vec::new(),
             }
         }
     }
 
     impl CompositorBenchmark for LockSpyBackend {}
     impl BackendDiagnostics for LockSpyBackend {}
-    impl CompositorControl for LockSpyBackend {}
+    impl CompositorControl for LockSpyBackend {
+        fn compositor_refresh_wallpapers(&mut self) {
+            self.wallpaper_refreshes += 1;
+        }
+    }
     impl CompositorMedia for LockSpyBackend {}
     impl CompositorWorkspaceEffects for LockSpyBackend {
         fn compositor_set_overview_mode(
@@ -678,6 +690,22 @@ pub(in crate::jwm) mod test_support {
     impl CompositorAnnotation for LockSpyBackend {}
     impl DisplayControl for LockSpyBackend {}
     impl RenderScheduler for LockSpyBackend {
+        fn install_root_wallpaper(
+            &mut self,
+            _width: u32,
+            _height: u32,
+            rgba: &[u8],
+        ) -> Result<(), BackendError> {
+            self.native_root_install_calls += 1;
+            if self.native_root_install_failures > 0 {
+                self.native_root_install_failures -= 1;
+                return Err(BackendError::Message(
+                    "injected native root upload failure".into(),
+                ));
+            }
+            self.native_root_uploads.push(rgba.to_vec());
+            Ok(())
+        }
         fn has_compositor(&self) -> bool {
             self.compositor_enabled
         }

@@ -949,6 +949,7 @@ impl Jwm {
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);
             self.ensure_native_root_wallpaper(backend);
+            self.refresh_wallpaper_theme();
         }
 
         self.broadcast_ipc_event(
@@ -1022,6 +1023,7 @@ impl Jwm {
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);
             self.ensure_native_root_wallpaper(backend);
+            self.refresh_wallpaper_theme();
         }
 
         Ok(())
@@ -1257,6 +1259,53 @@ mod tests {
         // slide out is the scrim and the card. It lands at once instead.
         assert_eq!(tag_switch_motion(true, true, true, true), Instant);
         assert_eq!(tag_switch_motion(false, false, true, false), Instant);
+    }
+
+    #[test]
+    fn view_and_toggleview_reconcile_the_primary_wallpaper_palette_source() {
+        use crate::jwm::features::connectivity::BackgroundJob;
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+        use crate::jwm::features::wallpaper_colors::Palette;
+        use crate::jwm::types::WMArgEnum;
+        for toggle in [false, true] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            let primary = jwm.state.monitor_order[0];
+            jwm.state.sel_mon = Some(primary);
+            let before = jwm.state.monitors[primary].get_active_tags();
+            let target = (0..CONFIG.load().tags_length())
+                .map(|tag| 1_u32 << tag)
+                .find(|bit| before & bit == 0)
+                .expect("another configured tag");
+            let (job, finish) = BackgroundJob::controlled_for_test();
+            jwm.features.themed_wallpaper = "jwm:obsolete-palette-source".into();
+            jwm.features.wallpaper_theme = Some(job);
+
+            if toggle {
+                jwm.toggleview(&mut backend, &WMArgEnum::UInt(target))
+                    .unwrap();
+            } else {
+                jwm.view(&mut backend, &WMArgEnum::UInt(target)).unwrap();
+            }
+
+            assert_ne!(jwm.state.monitors[primary].get_active_tags(), before);
+            let status = jwm.wallpaper_theme_json();
+            let expected = if CONFIG.load().behavior().wallpaper_colors {
+                status["source_wallpaper"].as_str().unwrap()
+            } else {
+                ""
+            };
+            assert_eq!(jwm.features.themed_wallpaper, expected);
+            // Publishing the obsolete result afterwards has no ownership in
+            // the current theme slot and cannot retint the changed workspace.
+            finish(Some(Palette {
+                accent: [0.8, 0.3, 0.2],
+                secondary: [0.8, 0.6, 0.2],
+            }));
+            assert_eq!(jwm.features.themed_wallpaper, expected);
+        }
     }
 
     /// A mask with no configured tag in it names nothing to show. Before

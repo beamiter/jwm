@@ -1328,7 +1328,13 @@ impl Jwm {
         match crate::config::reload_global() {
             Ok(()) => {
                 self.record_config_reload_result(true, None);
+                // A reload also accepts files replaced at an unchanged path.
+                // Invalidate before normal apply so extraction starts only once.
+                self.invalidate_wallpaper_theme();
+                self.features.native_root_key.clear();
                 self.apply_config_changes(backend);
+                backend.compositor_refresh_wallpapers();
+                backend.request_render();
                 // Under the notification DND rule: a quiet screen stays quiet
                 // for a reload that worked (the `config/reload` event below
                 // still tells the bars), while a failure is critical and shows.
@@ -1659,7 +1665,8 @@ impl Jwm {
         // them. The decode runs on a worker; the frame tick adopts the result.
         self.reset_wallpaper_rotation(Instant::now());
         self.refresh_wallpaper_theme();
-        self.features.native_root_key.clear();
+        // The native fingerprint detects image/layout/base changes. Ordinary
+        // colour or window-setting applies must not force another full decode.
         self.ensure_native_root_wallpaper(backend);
 
         // 9. Config application/recreation may resend configured brightness;
@@ -3172,8 +3179,14 @@ mod normal_exit_transaction_tests {
         }
         backend.monitor_pushes.clear();
         backend.desktop_pushes.clear();
+        jwm.features.native_root_key = "installed-native-wallpaper".into();
 
         jwm.apply_config_changes(&mut backend);
+
+        assert_eq!(
+            jwm.features.native_root_key, "installed-native-wallpaper",
+            "ordinary config application keeps native decode ownership"
+        );
 
         assert_eq!(jwm.state.monitors[monitor_key].get_active_tags(), 1);
         assert_eq!(

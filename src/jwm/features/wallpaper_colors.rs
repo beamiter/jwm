@@ -158,33 +158,35 @@ pub fn palette_from_rgba(rgba: &[u8]) -> Option<Palette> {
         }
     }
 
-    // Sort only the occupied bins. Key ordering makes ties deterministic.
-    let mut ranked: Vec<(u16, Bucket)> = buckets
-        .into_iter()
-        .enumerate()
-        .filter(|(_, bucket)| bucket.weight > 0.0)
-        .map(|(key, bucket)| (key as u16, bucket))
-        .collect();
-    ranked.sort_unstable_by(|(left_key, left), (right_key, right)| {
-        right
-            .weight
-            .partial_cmp(&left.weight)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(left_key.cmp(right_key))
-    });
-    let (_, dominant) = ranked.first()?;
+    // Only two winners are needed. Ascending-key scans with strict weight
+    // comparisons retain the old sort's deterministic lower-key tie break,
+    // without allocating or sorting every occupied bucket.
+    let mut dominant = None;
+    for (key, bucket) in buckets.iter().enumerate() {
+        if bucket.weight > 0.0
+            && dominant.is_none_or(|(_, best): (usize, &Bucket)| bucket.weight > best.weight)
+        {
+            dominant = Some((key, bucket));
+        }
+    }
+    let (dominant_key, dominant) = dominant?;
     let accent = normalize(dominant.mean());
-
     let accent_hue = rgb_to_hsl(accent)[0];
-    let secondary = ranked
-        .iter()
-        .skip(1)
-        .map(|(_, bucket)| bucket.mean())
-        .find(|rgb| {
-            let [hue, saturation, _] = rgb_to_hsl(*rgb);
-            saturation >= NEUTRAL_SATURATION && hue_distance(hue, accent_hue) >= SECONDARY_HUE_GAP
-        })
-        .map_or_else(|| shifted(accent), normalize);
+    let mut secondary = None;
+    for (key, bucket) in buckets.iter().enumerate() {
+        if key == dominant_key
+            || bucket.weight <= 0.0
+            || secondary.is_some_and(|(best, _): (f64, [f32; 3])| bucket.weight <= best)
+        {
+            continue;
+        }
+        let rgb = bucket.mean();
+        let [hue, saturation, _] = rgb_to_hsl(rgb);
+        if saturation >= NEUTRAL_SATURATION && hue_distance(hue, accent_hue) >= SECONDARY_HUE_GAP {
+            secondary = Some((bucket.weight, rgb));
+        }
+    }
+    let secondary = secondary.map_or_else(|| shifted(accent), |(_, rgb)| normalize(rgb));
 
     Some(Palette { accent, secondary })
 }
@@ -195,7 +197,7 @@ pub fn palette_from_rgba(rgba: &[u8]) -> Option<Palette> {
 /// event loop.
 #[must_use]
 pub fn palette_from_file(path: &Path) -> Option<Palette> {
-    let image = match image::open(path) {
+    let image = match crate::backend::compositor_common::image_source::open_regular_image(path) {
         Ok(image) => image,
         Err(error) => {
             log::warn!("wallpaper colors: {}: {error}", path.display());
@@ -213,16 +215,11 @@ fn thumbnail_for_palette(image: image::DynamicImage, edge: u32) -> image::RgbaIm
     if !image.color().has_alpha() {
         return image.thumbnail(edge, edge).into_rgba8();
     }
-    let mut rgba = image.into_rgba8();
-    for pixel in rgba.pixels_mut() {
-        let alpha = u16::from(pixel[3]);
-        for channel in &mut pixel.0[..3] {
-            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
-        }
-    }
-    let mut sample = image::DynamicImage::ImageRgba8(rgba)
-        .thumbnail(edge, edge)
-        .into_rgba8();
+    let mut sample = match image {
+        image::DynamicImage::ImageRgba8(rgba) => premultiplied_thumbnail(&rgba, edge),
+        image::DynamicImage::ImageLumaA8(luma) => premultiplied_thumbnail(&luma, edge),
+        other => premultiplied_thumbnail(&other.into_rgba8(), edge),
+    };
     for pixel in sample.pixels_mut() {
         let alpha = u16::from(pixel[3]);
         if alpha == 0 {
@@ -233,6 +230,45 @@ fn thumbnail_for_palette(image: image::DynamicImage, edge: u32) -> image::RgbaIm
         }
     }
     sample
+}
+
+/// Supply premultiplied pixels as the thumbnail reads them, avoiding a separate
+/// full-image write pass and a full RGBA conversion for grayscale-alpha images.
+struct PremultipliedView<'a, I>(&'a I);
+
+impl<I> image::GenericImageView for PremultipliedView<'_, I>
+where
+    I: image::GenericImageView,
+    I::Pixel: image::Pixel<Subpixel = u8>,
+{
+    type Pixel = image::Rgba<u8>;
+
+    fn dimensions(&self) -> (u32, u32) {
+        self.0.dimensions()
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+        use image::Pixel;
+        let mut pixel = self.0.get_pixel(x, y).to_rgba();
+        let alpha = u16::from(pixel[3]);
+        for channel in &mut pixel.0[..3] {
+            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+        }
+        pixel
+    }
+}
+
+fn premultiplied_thumbnail<I>(image: &I, edge: u32) -> image::RgbaImage
+where
+    I: image::GenericImageView,
+    I::Pixel: image::Pixel<Subpixel = u8>,
+{
+    let (width, height) = image.dimensions();
+    // Match DynamicImage::thumbnail's aspect-preserving rounded dimensions.
+    let ratio = (f64::from(edge) / f64::from(width)).min(f64::from(edge) / f64::from(height));
+    let target_w = ((f64::from(width) * ratio).round() as u32).max(1);
+    let target_h = ((f64::from(height) * ratio).round() as u32).max(1);
+    image::imageops::thumbnail(&PremultipliedView(image), target_w, target_h)
 }
 
 /// Start an extraction on a worker thread.
@@ -418,49 +454,122 @@ pub fn hex(rgb: [f32; 3]) -> String {
     )
 }
 
-fn theme_wallpaper_path(behavior: &crate::config::BehaviorConfig, day: i32) -> &str {
-    if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
-        crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at(
-            behavior, 0, 0, day,
-        )
-        .0
-    } else {
-        &behavior.wallpaper
-    }
+fn theme_wallpaper_path(
+    behavior: &crate::config::BehaviorConfig,
+    day: i32,
+    primary: Option<(usize, u32)>,
+) -> &str {
+    let (idx, tags) = primary.unwrap_or((0, 0));
+    crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at(
+        behavior,
+        if behavior.wallpaper_rotation == "daily" && !behavior.wallpaper_rotation_paths.is_empty() {
+            0
+        } else {
+            idx as u32
+        },
+        tags,
+        day,
+    )
+    .0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeReconcile {
+    Unchanged,
+    Started,
+    Cancelled,
+    Cleared,
 }
 
 impl crate::jwm::Jwm {
+    fn primary_wallpaper_monitor(&self) -> Option<(usize, u32)> {
+        self.state
+            .monitor_order
+            .iter()
+            .enumerate()
+            .find_map(|(idx, key)| {
+                self.state
+                    .monitors
+                    .get(*key)
+                    .map(|monitor| (idx, monitor.get_active_tags()))
+            })
+    }
+
+    fn current_wallpaper_theme_source(&self) -> (bool, String) {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+        let day = if behavior.wallpaper_rotation == "daily" {
+            self.features
+                .wallpaper_rotation
+                .observed_day()
+                .unwrap_or_else(super::wallpaper_rotation::local_day)
+        } else {
+            0
+        };
+        (
+            behavior.wallpaper_colors,
+            theme_wallpaper_path(behavior, day, self.primary_wallpaper_monitor()).to_string(),
+        )
+    }
+
     /// Start extracting colours when the wallpaper has changed and the
     /// feature is on. Called after every config apply, which is also where a
     /// wallpaper change lands.
     pub(crate) fn refresh_wallpaper_theme(&mut self) {
-        let (enabled, wallpaper) = {
-            let cfg = crate::config::CONFIG.load();
-            let behavior = cfg.behavior();
-            let day = if behavior.wallpaper_rotation == "daily" {
-                self.features
-                    .wallpaper_rotation
-                    .observed_day()
-                    .unwrap_or_else(super::wallpaper_rotation::local_day)
-            } else {
-                0
-            };
-            let wallpaper = theme_wallpaper_path(behavior, day).to_string();
-            (behavior.wallpaper_colors, wallpaper)
-        };
-        self.refresh_wallpaper_theme_for(enabled, wallpaper);
+        let (enabled, wallpaper) = self.current_wallpaper_theme_source();
+        let outcome = self.refresh_wallpaper_theme_for(enabled, wallpaper);
+        self.publish_wallpaper_reconcile(outcome);
+    }
+
+    fn publish_wallpaper_reconcile(&mut self, outcome: ThemeReconcile) {
+        if outcome != ThemeReconcile::Unchanged {
+            let payload = self.wallpaper_theme_json();
+            self.broadcast_ipc_event("theme/colors", payload);
+        }
+    }
+
+    /// Re-read the current image after an explicit library refresh or file reload.
+    /// Invalidating the request identity is cheap: all file access and decoding
+    /// remain on the extraction worker. Unrelated config applies keep their cache.
+    pub(crate) fn force_refresh_wallpaper_theme(&mut self) {
+        self.invalidate_wallpaper_theme();
+        self.refresh_wallpaper_theme();
+    }
+
+    pub(crate) fn invalidate_wallpaper_theme(&mut self) {
+        let outcome = self.invalidate_wallpaper_theme_request();
+        self.publish_wallpaper_reconcile(outcome);
+    }
+
+    fn invalidate_wallpaper_theme_request(&mut self) -> ThemeReconcile {
+        // Drop the old receiver before replacing the request so late results
+        // cannot overwrite the refreshed image's palette. Keep applied colours.
+        let was_pending = self.features.wallpaper_theme.take().is_some();
+        self.features.themed_wallpaper.clear();
+        if was_pending {
+            ThemeReconcile::Cancelled
+        } else {
+            ThemeReconcile::Unchanged
+        }
     }
 
     /// Reconcile the pending extraction with the current wallpaper choice.
-    fn refresh_wallpaper_theme_for(&mut self, enabled: bool, wallpaper: String) {
+    fn refresh_wallpaper_theme_for(&mut self, enabled: bool, wallpaper: String) -> ThemeReconcile {
+        let had_request =
+            self.features.wallpaper_theme.is_some() || !self.features.themed_wallpaper.is_empty();
         if !enabled {
+            let changed = had_request || self.features.wallpaper_palette.is_some();
             // Nothing is put back: the colours in memory stay until a reload
             // reads the file again. Undoing a retheme would mean remembering
             // what the user had, which the config file already does.
             self.features.wallpaper_theme = None;
             self.features.themed_wallpaper.clear();
             self.features.wallpaper_palette = None;
-            return;
+            return if changed {
+                ThemeReconcile::Cleared
+            } else {
+                ThemeReconcile::Unchanged
+            };
         }
         if wallpaper.trim().is_empty() {
             // Clearing the wallpaper is also a change of source. The old
@@ -469,14 +578,25 @@ impl crate::jwm::Jwm {
             // an image with no usable colour, without adopting late work.
             self.features.wallpaper_theme = None;
             self.features.themed_wallpaper.clear();
-            return;
+            return if had_request {
+                ThemeReconcile::Cancelled
+            } else {
+                ThemeReconcile::Unchanged
+            };
         }
         if self.features.themed_wallpaper == wallpaper {
-            return;
+            return ThemeReconcile::Unchanged;
         }
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         let path = super::wallpaper::expand_home(&wallpaper, &home);
         self.adopt_extraction(wallpaper, start_extraction(path));
+        if self.features.wallpaper_theme.is_some() {
+            ThemeReconcile::Started
+        } else if had_request {
+            ThemeReconcile::Cancelled
+        } else {
+            ThemeReconcile::Unchanged
+        }
     }
 
     /// Put an extraction just started for `wallpaper` into the theme slot.
@@ -495,6 +615,26 @@ impl crate::jwm::Jwm {
 
     /// Adopt a finished extraction. Called from the frame tick.
     pub(crate) fn poll_wallpaper_theme(&mut self, backend: &mut dyn crate::backend::api::Backend) {
+        if self.features.wallpaper_theme.is_none() {
+            return;
+        }
+        let (enabled, wallpaper) = self.current_wallpaper_theme_source();
+        self.poll_wallpaper_theme_for(backend, enabled, wallpaper);
+    }
+
+    fn poll_wallpaper_theme_for(
+        &mut self,
+        backend: &mut dyn crate::backend::api::Backend,
+        enabled: bool,
+        wallpaper: String,
+    ) {
+        // Output/tag changes can land before their refresh hook or while a
+        // codec is finishing. Never adopt colours for a superseded source.
+        if !enabled || self.features.themed_wallpaper != wallpaper {
+            let outcome = self.refresh_wallpaper_theme_for(enabled, wallpaper);
+            self.publish_wallpaper_reconcile(outcome);
+            return;
+        }
         let Some(result) = self
             .features
             .wallpaper_theme
@@ -513,6 +653,8 @@ impl crate::jwm::Jwm {
             // eligible for the next config apply; no apply is triggered here,
             // so a missing file cannot create an extraction/retheme loop.
             self.features.themed_wallpaper.clear();
+            let payload = self.wallpaper_theme_json();
+            self.broadcast_ipc_event("theme/colors", payload);
             return;
         };
         let adopted = (self.features.themed_wallpaper.clone(), palette);
@@ -536,16 +678,76 @@ impl crate::jwm::Jwm {
                 hex(palette.accent),
                 hex(palette.secondary)
             );
-            let payload = self.wallpaper_theme_json();
-            self.broadcast_ipc_event("theme/colors", payload);
         }
+        // An explicit refresh may return the same colours. Subscribers still
+        // need completion to retire pending rather than wait for a change.
+        let payload = self.wallpaper_theme_json();
+        self.broadcast_ipc_event("theme/colors", payload);
     }
 
     /// The palette in use, for `get_wallpaper_colors`.
     pub(crate) fn wallpaper_theme_json(&self) -> serde_json::Value {
+        let cfg = crate::config::CONFIG.load();
+        self.wallpaper_theme_json_for(cfg.behavior(), super::wallpaper_rotation::local_day())
+    }
+
+    fn wallpaper_theme_json_for(
+        &self,
+        behavior: &crate::config::BehaviorConfig,
+        day: i32,
+    ) -> serde_json::Value {
         let taken = self.features.wallpaper_palette.as_ref();
+        // These are resolved image requests, not proof that a backend decoded
+        // them successfully. Keep the historical palette source separate.
+        let current_wallpapers: Vec<_> = self
+            .state
+            .monitor_order
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, key)| self.state.monitors.get(*key).map(|monitor| (idx, monitor)))
+            .enumerate()
+            .map(|(slot, (idx, monitor))| {
+                let (path, mode) =
+                    crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at(
+                        behavior,
+                        if behavior.wallpaper_rotation == "daily" {
+                            slot as u32
+                        } else {
+                            idx as u32
+                        },
+                        monitor.get_active_tags(),
+                        day,
+                    );
+                serde_json::json!({"monitor": idx, "path": path, "mode": mode})
+            })
+            .collect();
+        let fallback = crate::backend::compositor_common::wallpaper::resolve_wallpaper_for_tag_at(
+            behavior, 0, 0, day,
+        )
+        .0;
+        let current_wallpaper = current_wallpapers
+            .first()
+            .and_then(|entry| entry["path"].as_str())
+            .unwrap_or(fallback);
+        let image_enabled = if current_wallpapers.is_empty() {
+            !fallback.trim().is_empty()
+        } else {
+            current_wallpapers.iter().any(|entry| {
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|path| !path.trim().is_empty())
+            })
+        };
         serde_json::json!({
-            "enabled": crate::config::CONFIG.load().behavior().wallpaper_colors,
+            // Legacy enabled means accent extraction, including for get_wallpaper.
+            "enabled": behavior.wallpaper_colors,
+            "colors_enabled": behavior.wallpaper_colors,
+            "image_enabled": image_enabled,
+            "rotation": behavior.wallpaper_rotation,
+            "current_wallpaper": current_wallpaper,
+            "current_wallpapers": current_wallpapers,
+            "source_wallpaper": theme_wallpaper_path(behavior, day, self.primary_wallpaper_monitor()),
+            "source_monitor": self.primary_wallpaper_monitor().map(|(idx, _)| idx),
             // The wallpaper these colours came from, which is not always the
             // one on screen: one with no colour to take leaves them alone.
             "wallpaper": taken.map(|(wallpaper, _)| wallpaper.clone()),
@@ -574,6 +776,239 @@ mod tests {
     use crate::jwm::features::connectivity::BackgroundJob;
     use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
 
+    fn sorted_reference_palette(rgba: &[u8]) -> Option<Palette> {
+        // A fixed 12-bit histogram avoids per-pixel hashing and heap allocations.
+        let mut buckets = [Bucket::default(); 4096];
+        for pixel in rgba.chunks_exact(4) {
+            // Low-coverage corners and soft edges are not representative. The
+            // retained pixels contribute in proportion to their visible coverage.
+            if pixel[3] < 128 {
+                continue;
+            }
+            let rgb = [
+                f32::from(pixel[0]) / 255.0,
+                f32::from(pixel[1]) / 255.0,
+                f32::from(pixel[2]) / 255.0,
+            ];
+            let [_, saturation, lightness] = rgb_to_hsl(rgb);
+            let weight = pixel_weight(saturation, lightness) * (f32::from(pixel[3]) / 255.0);
+            if weight <= 0.0 {
+                continue;
+            }
+            // Four bits per channel: fine enough to keep a sunset apart from the
+            // sand under it, coarse enough that a gradient sky counts as one
+            // colour instead of ten thousand.
+            let key = (u16::from(pixel[0] >> 4) << 8)
+                | (u16::from(pixel[1] >> 4) << 4)
+                | u16::from(pixel[2] >> 4);
+            let bucket = &mut buckets[usize::from(key)];
+            bucket.weight += f64::from(weight);
+            for (sum, channel) in bucket.sums.iter_mut().zip(rgb) {
+                *sum += f64::from(channel) * f64::from(weight);
+            }
+        }
+
+        // Sort only the occupied bins. Key ordering makes ties deterministic.
+        let mut ranked: Vec<(u16, Bucket)> = buckets
+            .into_iter()
+            .enumerate()
+            .filter(|(_, bucket)| bucket.weight > 0.0)
+            .map(|(key, bucket)| (key as u16, bucket))
+            .collect();
+        ranked.sort_unstable_by(|(left_key, left), (right_key, right)| {
+            right
+                .weight
+                .partial_cmp(&left.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(left_key.cmp(right_key))
+        });
+        let (_, dominant) = ranked.first()?;
+        let accent = normalize(dominant.mean());
+
+        let accent_hue = rgb_to_hsl(accent)[0];
+        let secondary = ranked
+            .iter()
+            .skip(1)
+            .map(|(_, bucket)| bucket.mean())
+            .find(|rgb| {
+                let [hue, saturation, _] = rgb_to_hsl(*rgb);
+                saturation >= NEUTRAL_SATURATION
+                    && hue_distance(hue, accent_hue) >= SECONDARY_HUE_GAP
+            })
+            .map_or_else(|| shifted(accent), normalize);
+
+        Some(Palette { accent, secondary })
+    }
+
+    fn buffered_reference_thumbnail(image: image::DynamicImage, edge: u32) -> image::RgbaImage {
+        if !image.color().has_alpha() {
+            return image.thumbnail(edge, edge).into_rgba8();
+        }
+        let mut rgba = image.into_rgba8();
+        for pixel in rgba.pixels_mut() {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel.0[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+        let mut sample = image::DynamicImage::ImageRgba8(rgba)
+            .thumbnail(edge, edge)
+            .into_rgba8();
+        for pixel in sample.pixels_mut() {
+            let alpha = u16::from(pixel[3]);
+            if alpha == 0 {
+                continue;
+            }
+            for channel in &mut pixel.0[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+        sample
+    }
+
+    #[test]
+    fn linear_palette_selection_exactly_matches_sorted_reference() {
+        let mut seed = 42_u32;
+        for size in [0, 1, 4, 64, 1024, 160 * 160] {
+            for variation in 0..12 {
+                let mut rgba = Vec::with_capacity(size * 4);
+                for _ in 0..size {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let mut pixel = seed.to_le_bytes();
+                    if variation % 3 == 0 {
+                        pixel[3] = 255;
+                    }
+                    if variation % 3 == 1 {
+                        pixel[1] = pixel[0];
+                        pixel[2] = pixel[0];
+                    }
+                    rgba.extend_from_slice(&pixel);
+                }
+                assert_eq!(
+                    palette_from_rgba(&rgba),
+                    sorted_reference_palette(&rgba),
+                    "size {size}, variation {variation}"
+                );
+            }
+        }
+        // Equal weights must keep lower histogram keys as the winner.
+        let tied = pixels(&[
+            (500, [200, 40, 40]),
+            (500, [40, 200, 40]),
+            (500, [40, 40, 200]),
+        ]);
+        assert_eq!(palette_from_rgba(&tied), sorted_reference_palette(&tied));
+    }
+
+    #[test]
+    fn fused_alpha_thumbnail_exactly_matches_buffered_reference() {
+        for (width, height) in [(1, 1), (17, 13), (257, 193), (19, 1), (1, 19)] {
+            let rgba = image::RgbaImage::from_fn(width, height, |x, y| {
+                image::Rgba([
+                    (x * 37 + y * 13) as u8,
+                    (x * 19 + y * 41) as u8,
+                    (x * 23 + y * 17) as u8,
+                    (x * 31 + y * 43) as u8,
+                ])
+            });
+            let luma = image::ImageBuffer::from_fn(width, height, |x, y| {
+                image::LumaA([(x * 37 + y * 13) as u8, (x * 31 + y * 43) as u8])
+            });
+            for image in [
+                image::DynamicImage::ImageRgba8(rgba),
+                image::DynamicImage::ImageLumaA8(luma),
+            ] {
+                for edge in [0, 1, 7, 160] {
+                    assert_eq!(
+                        thumbnail_for_palette(image.clone(), edge),
+                        buffered_reference_thumbnail(image.clone(), edge),
+                        "{}x{} edge {edge}",
+                        width,
+                        height
+                    );
+                }
+            }
+        }
+        let rgba16 = image::ImageBuffer::from_fn(23, 17, |x, y| {
+            image::Rgba([
+                (x * 1237) as u16,
+                (y * 2543) as u16,
+                (x * 3137) as u16,
+                (y * 4337) as u16,
+            ])
+        });
+        let image = image::DynamicImage::ImageRgba16(rgba16);
+        assert_eq!(
+            thumbnail_for_palette(image.clone(), 7),
+            buffered_reference_thumbnail(image, 7)
+        );
+    }
+    /// Run explicitly with --release --ignored --nocapture so both image and
+    /// production code use the same optimized profile. Excludes file decoding
+    /// and clones inputs before timing the consuming thumbnail operations.
+    #[test]
+    #[ignore = "performance comparison; run explicitly in release mode"]
+    fn wallpaper_colors_performance_comparison() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let mut seed = 42_u32;
+        let rgba: Vec<u8> = (0..SAMPLE_EDGE * SAMPLE_EDGE)
+            .flat_map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                [
+                    (seed >> 24) as u8,
+                    (seed >> 16) as u8,
+                    (seed >> 8) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        assert_eq!(palette_from_rgba(&rgba), sorted_reference_palette(&rgba));
+        for optimized in [false, true, true, false] {
+            let start = Instant::now();
+            for _ in 0..500 {
+                black_box(if optimized {
+                    palette_from_rgba(black_box(&rgba))
+                } else {
+                    sorted_reference_palette(black_box(&rgba))
+                });
+            }
+            eprintln!(
+                "histogram optimized={optimized}: {:.1} us/sample",
+                start.elapsed().as_secs_f64() * 1e6 / 500.0
+            );
+        }
+        for image in [
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(3840, 2160, |x, y| {
+                image::Rgba([x as u8, y as u8, (x + y) as u8, (x * 13 + y * 7) as u8])
+            })),
+            image::DynamicImage::ImageLumaA8(image::ImageBuffer::from_fn(3840, 2160, |x, y| {
+                image::LumaA([x as u8, (x * 13 + y * 7) as u8])
+            })),
+        ] {
+            assert_eq!(
+                thumbnail_for_palette(image.clone(), SAMPLE_EDGE),
+                buffered_reference_thumbnail(image.clone(), SAMPLE_EDGE)
+            );
+            for optimized in [false, true, true, false] {
+                let inputs: Vec<_> = (0..4).map(|_| image.clone()).collect();
+                let start = Instant::now();
+                for input in inputs {
+                    black_box(if optimized {
+                        thumbnail_for_palette(input, SAMPLE_EDGE)
+                    } else {
+                        buffered_reference_thumbnail(input, SAMPLE_EDGE)
+                    });
+                }
+                eprintln!(
+                    "thumbnail {:?} optimized={optimized}: {:.2} ms/image",
+                    image.color(),
+                    start.elapsed().as_secs_f64() * 1000.0 / 4.0
+                );
+            }
+        }
+    }
+
     /// Build an RGBA buffer from (count, [r, g, b]) runs.
     fn pixels(runs: &[(usize, [u8; 3])]) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -591,11 +1026,11 @@ mod tests {
         behavior.wallpaper = "static.png".to_string();
         behavior.wallpaper_rotation = "daily".to_string();
         behavior.wallpaper_rotation_paths = vec!["a.png".to_string(), "b.png".to_string()];
-        assert_eq!(theme_wallpaper_path(&behavior, 100), "a.png");
-        assert_eq!(theme_wallpaper_path(&behavior, 101), "b.png");
-        assert_eq!(theme_wallpaper_path(&behavior, 99), "b.png");
+        assert_eq!(theme_wallpaper_path(&behavior, 100, None), "a.png");
+        assert_eq!(theme_wallpaper_path(&behavior, 101, None), "b.png");
+        assert_eq!(theme_wallpaper_path(&behavior, 99, None), "b.png");
         behavior.wallpaper_rotation = "off".to_string();
-        assert_eq!(theme_wallpaper_path(&behavior, 101), "static.png");
+        assert_eq!(theme_wallpaper_path(&behavior, 101, None), "static.png");
     }
 
     #[test]
@@ -894,13 +1329,419 @@ mod tests {
             BackgroundJob::completed_for_test(None),
         );
 
-        jwm.poll_wallpaper_theme(&mut backend);
+        jwm.poll_wallpaper_theme_for(&mut backend, true, "repairable.png".into());
 
         // The same-path guard must allow a later config apply to retry, while
         // failure itself keeps the existing colours and starts no new work.
         assert!(jwm.features.themed_wallpaper.is_empty());
         assert!(jwm.features.wallpaper_theme.is_none());
+        assert_eq!(jwm.features.wallpaper_palette, Some(previous.clone()));
+        let behavior = crate::config::Config::default().behavior().clone();
+        let status = jwm.wallpaper_theme_json_for(&behavior, 100);
+        assert_eq!(status["pending"], false);
+        assert_eq!(status["wallpaper"], previous.0);
+        assert_eq!(status["accent"], hex(previous.1.accent));
+    }
+
+    #[test]
+    fn unrelated_apply_keeps_same_path_worker_and_explicit_invalidation_discards_it() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let previous = (
+            "same.png".to_string(),
+            Palette {
+                accent: [0.8, 0.3, 0.2],
+                secondary: [0.8, 0.6, 0.2],
+            },
+        );
+        jwm.features.wallpaper_palette = Some(previous.clone());
+        let (job, finish) = BackgroundJob::controlled_for_test();
+        jwm.adopt_extraction("same.png".into(), job);
+        jwm.refresh_wallpaper_theme_for(true, "same.png".into());
+        finish(Some(previous.1));
+        // If the ordinary apply replaced the worker, this controlled result
+        // would not be available in the theme slot.
+        assert_eq!(
+            jwm.features.wallpaper_theme.as_ref().unwrap().take(),
+            Some(Some(previous.1))
+        );
+
+        let (old, finish_old) = BackgroundJob::controlled_for_test();
+        jwm.adopt_extraction("same.png".into(), old);
+        jwm.invalidate_wallpaper_theme();
+        finish_old(Some(Palette {
+            accent: [0.2, 0.4, 0.8],
+            secondary: [0.6, 0.3, 0.8],
+        }));
+        jwm.poll_wallpaper_theme(&mut backend);
+        assert!(jwm.features.wallpaper_theme.is_none());
+        assert!(jwm.features.themed_wallpaper.is_empty());
         assert_eq!(jwm.features.wallpaper_palette, Some(previous));
+    }
+
+    #[test]
+    fn explicit_invalidation_reextracts_replaced_content_at_the_same_path() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("jwm-theme-{}-{id}.png", std::process::id()));
+        let wallpaper = path.to_string_lossy().into_owned();
+        let take_palette = |jwm: &crate::jwm::Jwm| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(result) = jwm.features.wallpaper_theme.as_ref().unwrap().take() {
+                    break result.expect("image palette");
+                }
+                assert!(std::time::Instant::now() < deadline, "extraction timed out");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]))
+            .save(&path)
+            .expect("red image");
+        jwm.refresh_wallpaper_theme_for(true, wallpaper.clone());
+        let red = take_palette(&jwm);
+        jwm.features.wallpaper_theme = None;
+        jwm.features.wallpaper_palette = Some((wallpaper.clone(), red));
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([40, 40, 200, 255]))
+            .save(&path)
+            .expect("blue replacement");
+        jwm.refresh_wallpaper_theme_for(true, wallpaper.clone());
+        assert!(
+            jwm.features.wallpaper_theme.is_none(),
+            "unrelated apply must not decode again"
+        );
+        jwm.invalidate_wallpaper_theme();
+        jwm.refresh_wallpaper_theme_for(true, wallpaper.clone());
+        let blue = take_palette(&jwm);
+        std::fs::remove_file(&path).expect("remove image");
+        assert!(hue_distance(rgb_to_hsl(red.accent)[0], 0.0) < 1.0);
+        assert!(hue_distance(rgb_to_hsl(blue.accent)[0], 240.0) < 1.0);
+        assert_eq!(
+            jwm.features.wallpaper_palette,
+            Some((wallpaper, red)),
+            "refresh keeps applied palette until a new result is adopted"
+        );
+    }
+
+    #[test]
+    fn wallpaper_status_keeps_legacy_palette_fields_separate_from_image_requests() {
+        let mut backend = LockSpyBackend::new();
+        let jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mut behavior = crate::config::Config::default().behavior().clone();
+        behavior.wallpaper_colors = false;
+        behavior.wallpaper = "static.png".into();
+        behavior.wallpaper_rotation = "off".into();
+        let status = jwm.wallpaper_theme_json_for(&behavior, 100);
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["colors_enabled"], false);
+        assert_eq!(status["image_enabled"], true);
+        assert_eq!(status["current_wallpaper"], "static.png");
+        assert_eq!(status["rotation"], "off");
+        assert!(status["wallpaper"].is_null());
+        assert!(status["accent"].is_null());
+
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths = vec!["a.png".into(), "b.png".into()];
+        let daily = jwm.wallpaper_theme_json_for(&behavior, 101);
+        assert_eq!(daily["rotation"], "daily");
+        assert_eq!(daily["current_wallpaper"], "b.png");
+        assert_eq!(daily["enabled"], false);
+        assert_eq!(daily["image_enabled"], true);
+    }
+
+    #[test]
+    fn palette_file_rejects_oversized_regular_sources_and_fifo_without_waiting() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("jwm-palette-source-{}-{id}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let regular = dir.join("large.png");
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([40, 180, 60, 255]))
+            .save(&regular)
+            .unwrap();
+        assert!(palette_from_file(&regular).is_some());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&regular)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(
+            palette_from_file(&regular).is_none(),
+            "valid image with excessive trailing bytes is rejected before decoding"
+        );
+        let fifo = dir.join("fifo.png");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let worker_path = fifo.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = sent.send(palette_from_file(&worker_path).is_none());
+        });
+        let timely = received.recv_timeout(std::time::Duration::from_millis(250));
+        if matches!(timely, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+            // Release a regressed blocking open without making cleanup itself
+            // depend on a reader being present at this exact instant.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !worker.is_finished() && std::time::Instant::now() < deadline {
+                if let Ok(writer) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&fifo)
+                {
+                    drop(writer);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("FIFO palette worker did not finish after cleanup");
+        }
+        worker.join().expect("palette worker panicked");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            matches!(timely, Ok(true)),
+            "FIFO palette source was not rejected promptly: {timely:?}"
+        );
+    }
+
+    #[test]
+    fn primary_theme_source_resolves_tags_monitors_daily_picks_and_empty_outputs() {
+        use crate::config::{WallpaperMonitorConfig, WallpaperTagConfig};
+        use crate::core::models::WMMonitor;
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state.monitor_order.clear();
+        let stale = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitors.remove(stale);
+        jwm.state.monitor_order.push(stale);
+        let mut first = WMMonitor::new();
+        first.sel_tags = 0;
+        first.tag_set[0] = 2;
+        let first = jwm.state.monitors.insert(first);
+        let second = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitor_order.extend([first, second]);
+        jwm.state.sel_mon = Some(second);
+        let mut behavior = crate::config::Config::default().behavior().clone();
+        behavior.wallpaper = "global.png".into();
+        behavior.wallpaper_rotation = "off".into();
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 1,
+            path: "first.png".into(),
+            mode: String::new(),
+        }];
+        behavior.wallpaper_tags = vec![WallpaperTagConfig {
+            monitor: 1,
+            tag: 1,
+            path: "tag.png".into(),
+            mode: String::new(),
+        }];
+        let primary = jwm.primary_wallpaper_monitor();
+        assert_eq!(primary, Some((1, 2)));
+        assert_eq!(theme_wallpaper_path(&behavior, 100, primary), "tag.png");
+        jwm.state.monitors.get_mut(first).unwrap().tag_set[0] = 1;
+        assert_eq!(
+            theme_wallpaper_path(&behavior, 100, jwm.primary_wallpaper_monitor()),
+            "first.png"
+        );
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths = vec!["a.png".into(), "b.png".into(), "c.png".into()];
+        assert_eq!(
+            theme_wallpaper_path(&behavior, 100, primary),
+            "b.png",
+            "first valid output uses dense rotation slot zero"
+        );
+        behavior.wallpaper_daily_pick = Some((100, "manual.png".into()));
+        // Daily consumers resolve manual overrides against the dense output
+        // slot too; the stale leading entry does not consume slot zero.
+        behavior.wallpaper_tags[0].monitor = 0;
+        assert_eq!(
+            theme_wallpaper_path(&behavior, 100, primary),
+            "tag.png",
+            "daily manual pick preserves tag overrides"
+        );
+        behavior.wallpaper_tags.clear();
+        behavior.wallpaper_monitors.clear();
+        assert_eq!(theme_wallpaper_path(&behavior, 100, primary), "manual.png");
+        jwm.state.monitor_order.clear();
+        assert_eq!(jwm.primary_wallpaper_monitor(), None);
+        assert_eq!(theme_wallpaper_path(&behavior, 100, None), "manual.png");
+        behavior.wallpaper_rotation = "off".into();
+        assert_eq!(theme_wallpaper_path(&behavior, 100, None), "global.png");
+    }
+
+    #[test]
+    fn reconciliation_reports_start_cancel_clear_and_suppresses_same_path_events() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let previous = (
+            "previous.png".to_string(),
+            Palette {
+                accent: [0.2, 0.4, 0.8],
+                secondary: [0.6, 0.3, 0.8],
+            },
+        );
+        jwm.features.wallpaper_palette = Some(previous.clone());
+        jwm.adopt_extraction("same.png".into(), BackgroundJob::controlled_for_test().0);
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(true, "same.png".into()),
+            ThemeReconcile::Unchanged
+        );
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(true, String::new()),
+            ThemeReconcile::Cancelled
+        );
+        let mut behavior = crate::config::Config::default().behavior().clone();
+        behavior.wallpaper_colors = true;
+        let cancelled = jwm.wallpaper_theme_json_for(&behavior, 100);
+        assert_eq!(cancelled["pending"], false);
+        assert_eq!(cancelled["wallpaper"], "previous.png");
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(true, String::new()),
+            ThemeReconcile::Unchanged
+        );
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(false, String::new()),
+            ThemeReconcile::Cleared
+        );
+        assert!(jwm.features.wallpaper_palette.is_none());
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(false, String::new()),
+            ThemeReconcile::Unchanged
+        );
+
+        jwm.features.wallpaper_palette = Some(previous.clone());
+        jwm.adopt_extraction("same.png".into(), BackgroundJob::controlled_for_test().0);
+        assert_eq!(
+            jwm.invalidate_wallpaper_theme_request(),
+            ThemeReconcile::Cancelled
+        );
+        assert_eq!(jwm.features.wallpaper_palette, Some(previous));
+        assert_eq!(
+            jwm.invalidate_wallpaper_theme_request(),
+            ThemeReconcile::Unchanged
+        );
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(true, "new.png".into()),
+            ThemeReconcile::Started
+        );
+        assert!(jwm.features.wallpaper_theme.is_some());
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(true, "new.png".into()),
+            ThemeReconcile::Unchanged
+        );
+        assert_eq!(
+            jwm.refresh_wallpaper_theme_for(false, "new.png".into()),
+            ThemeReconcile::Cleared
+        );
+        behavior.wallpaper_colors = false;
+        let disabled = jwm.wallpaper_theme_json_for(&behavior, 100);
+        assert_eq!(disabled["pending"], false);
+        assert_eq!(disabled["enabled"], false);
+        assert!(disabled["wallpaper"].is_null());
+    }
+
+    #[test]
+    fn completed_old_source_is_discarded_and_new_source_is_requested_before_adoption() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let previous = (
+            "previous.png".to_string(),
+            Palette {
+                accent: [0.2, 0.4, 0.8],
+                secondary: [0.6, 0.3, 0.8],
+            },
+        );
+        let obsolete = Palette {
+            accent: [0.8, 0.3, 0.2],
+            secondary: [0.8, 0.6, 0.2],
+        };
+        jwm.features.wallpaper_palette = Some(previous.clone());
+        let before = current_colors();
+        jwm.adopt_extraction(
+            "old.png".into(),
+            BackgroundJob::completed_for_test(Some(obsolete)),
+        );
+        jwm.poll_wallpaper_theme_for(&mut backend, true, "new-primary.png".into());
+        assert_eq!(jwm.features.themed_wallpaper, "new-primary.png");
+        assert!(jwm.features.wallpaper_theme.is_some());
+        assert_eq!(jwm.features.wallpaper_palette, Some(previous.clone()));
+        assert_eq!(
+            current_colors(),
+            before,
+            "obsolete palette never reaches config"
+        );
+        jwm.poll_wallpaper_theme_for(&mut backend, true, String::new());
+        assert!(jwm.features.wallpaper_theme.is_none());
+        assert!(jwm.features.themed_wallpaper.is_empty());
+        assert_eq!(jwm.features.wallpaper_palette, Some(previous));
+    }
+
+    #[test]
+    fn wallpaper_status_resolves_output_overrides_and_dense_daily_slots() {
+        use crate::config::{WallpaperMonitorConfig, WallpaperTagConfig};
+        use crate::core::models::WMMonitor;
+        let mut backend = LockSpyBackend::new();
+        let mut jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        jwm.state.monitor_order.clear();
+        let stale = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitors.remove(stale);
+        jwm.state.monitor_order.push(stale);
+        for tags in [1, 2] {
+            let mut monitor = WMMonitor::new();
+            monitor.sel_tags = 0;
+            monitor.tag_set[0] = tags;
+            let key = jwm.state.monitors.insert(monitor);
+            jwm.state.monitor_order.push(key);
+        }
+        let mut behavior = crate::config::Config::default().behavior().clone();
+        behavior.wallpaper = "global.png".into();
+        behavior.wallpaper_rotation = "off".into();
+        behavior.wallpaper_monitors = vec![WallpaperMonitorConfig {
+            monitor: 1,
+            path: "monitor.png".into(),
+            mode: "fit".into(),
+        }];
+        behavior.wallpaper_tags = vec![WallpaperTagConfig {
+            monitor: 2,
+            tag: 1,
+            path: "tag.png".into(),
+            mode: "center".into(),
+        }];
+        let status = jwm.wallpaper_theme_json_for(&behavior, 100);
+        assert_eq!(
+            status["current_wallpapers"],
+            serde_json::json!([
+                {"monitor": 1, "path": "monitor.png", "mode": "fit"},
+                {"monitor": 2, "path": "tag.png", "mode": "center"},
+            ])
+        );
+        assert_eq!(status["current_wallpaper"], "monitor.png");
+        behavior.wallpaper_rotation = "daily".into();
+        behavior.wallpaper_rotation_paths = vec!["a.png".into(), "b.png".into(), "c.png".into()];
+        behavior.wallpaper_mode = "fill".into();
+        let daily = jwm.wallpaper_theme_json_for(&behavior, 100);
+        assert_eq!(
+            daily["current_wallpapers"],
+            serde_json::json!([
+                {"monitor": 1, "path": "b.png", "mode": "fill"},
+                {"monitor": 2, "path": "c.png", "mode": "fill"},
+            ])
+        );
     }
 
     fn current() -> CurrentColors {

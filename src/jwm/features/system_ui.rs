@@ -2692,13 +2692,11 @@ impl SystemUiState {
 
     /// Build the wallpaper picker from a directory listing.
     pub fn wallpaper_picker(paths: &[std::path::PathBuf], current: &str, directory: &str) -> Self {
-        let mut rows: Vec<ListRow> = paths
-            .iter()
-            // Config paths are UTF-8: never apply a lossy replacement name.
-            .filter(|path| path.to_str().is_some())
-            .map(|path| ListRow {
-                key: path.to_string_lossy().into_owned(),
-                text: crate::jwm::features::wallpaper::picker_row(path, current),
+        let mut rows: Vec<ListRow> = crate::jwm::features::wallpaper::picker_rows(paths, current)
+            .into_iter()
+            .map(|(key, text)| ListRow {
+                key,
+                text,
                 data: RowData::Wallpaper,
             })
             .collect();

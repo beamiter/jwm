@@ -4745,6 +4745,21 @@ mod tests {
                 .any(|line| line.starts_with("bluetooth:"))
         );
 
+        let mut separate_wallpaper = with_compact_wallpaper.clone();
+        separate_wallpaper["wallpaper"] = serde_json::json!({
+            "enabled": false,
+            "colors_enabled": false,
+            "image_enabled": true,
+            "rotation": "daily",
+            "pending": false
+        });
+        assert!(
+            health_output_lines(&separate_wallpaper)
+                .iter()
+                .any(|line| line
+                    == "wallpaper: images=true colors=false rotation=daily pending=false")
+        );
+
         let with_compact_bluetooth = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
             "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
@@ -6829,11 +6844,25 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".into())
         };
-        lines.push(format!(
-            "wallpaper: enabled={} pending={}",
-            flag("enabled"),
-            flag("pending")
-        ));
+        if wallpaper.contains_key("colors_enabled") {
+            let rotation = wallpaper
+                .get("rotation")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            lines.push(format!(
+                "wallpaper: images={} colors={} rotation={} pending={}",
+                flag("image_enabled"),
+                flag("colors_enabled"),
+                rotation,
+                flag("pending")
+            ));
+        } else {
+            lines.push(format!(
+                "wallpaper: enabled={} pending={}",
+                flag("enabled"),
+                flag("pending")
+            ));
+        }
     }
 
     if let Some(bluetooth) = status

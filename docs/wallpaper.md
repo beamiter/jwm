@@ -18,6 +18,8 @@ text; `Enter` or a click applies. `Backspace` edits the query, while `Home`/`End
 `PageUp`/`PageDown`, arrows and scrolling navigate the filtered results. The title
 shows the current row and match count. A directory scan completing while you
 type preserves your query and a still-matching selection.
+When different directories contain the same filename, those rows include their
+parent paths so you can distinguish your image from a bundled namesake.
 
 Press `F5` or choose **Refresh image library · F5** to rescan without closing
 the panel. Refresh keeps the query, a still-present selection and the selected
@@ -25,6 +27,13 @@ display target. The current rows remain visible and searchable while the scan
 runs; image application waits for the result. Repeated refresh requests share
 the pending scan. This also retries a scan whose worker
 could not start.
+When that scan completes, an explicit refresh also re-reads the current static desktop
+images, the highlighted preview and the wallpaper accent source. Replacing an
+image at the same path therefore no longer requires switching to another image
+first. Working textures and layouts remain visible until replacement loading
+succeeds. Closing the picker cancels the pending refresh; merely opening it
+does not force image reloads. Reapplying the current image or successfully
+reloading the configuration also re-reads its contents.
 
 The highlighted candidate is also shown: a thumbnail card sits to the right
 of the list, vertically centered on it, and tracks both arrow-key and
@@ -165,9 +174,29 @@ cannot be read still falls back to that pixmap. Monitor layout changes
 recompose the picture; turning the compositor off restores native borders
 and the themed root cursor instead of leaving overlay leftovers. Per-tag
 pictures follow `view` / `toggleview` on the native root as well; a file
-that changes on disk is picked up by its mtime, and translucent PNG pixels
+that changes on disk is picked up by its source identity, and translucent PNG pixels
 blend over the theme letterbox. Setup and output layout changes install that
 picture as soon as the monitors exist.
+
+Native-root loading applies embedded image orientation and the shared source
+limits (64 MiB file, 16,384 pixels per dimension, 256 MiB decoded/RGBA output).
+It retains content-based format detection, including extensionless pictures.
+File identity and nanosecond modification/change times detect same-size edits
+within a second, atomic replacements and symlink retargeting. Sources decode
+on first use and are released after their last output, preserving output draw
+order without retaining every distinct source throughout composition.
+File checks and canvas fills run in the background. Existing maintenance ticks
+probe at most once per second; unchanged files skip decoding and composition.
+Output/tag changes and explicit refreshes bypass that interval and merge into
+the newest pending request. A running codec finishes its current call before
+obsolete conversion/resizing is skipped.
+If any source or output placement fails, the installed root picture stays in
+place. Temporary decode, resize and pixmap-upload failures retry with a delay
+starting at one second and doubling up to 30 seconds. Slow failed work starts
+its delay when it finishes. File or wallpaper/layout changes, configuration
+file reload and F5 reset the delay. A source is remembered as installed only
+after the X11 upload succeeds, so one failed upload cannot permanently suppress
+recovery.
 
 A manual daily choice applies to all outputs using the global fallback;
 explicit monitor/tag wallpapers retain their own pictures and modes. The
@@ -276,7 +305,16 @@ for each screen. It describes selection, rather than decoder completion.
 Changing the wallpaper also retints what JWM draws in the accent colour: the
 focused window border, both ends of the gradient border, and the client glow —
 which are the same colours the launcher ring, the toasts, and the OSD progress
-bars read, so the whole shell follows the picture. This is on by default:
+bars read, so the whole shell follows the picture.
+
+The source is the first valid display in JWM's monitor order, using that
+display's current tags, monitor override and daily/manual selection. Switching
+its tags or changing the output layout re-resolves the source; moving focus to
+another display does not retint the shell. With no displays, slot zero supplies
+the fallback. Results from an extraction whose source was superseded are
+discarded before they can update colours.
+
+Wallpaper-derived colours are enabled by default. To disable them:
 
 ```toml
 [behavior]
@@ -339,11 +377,17 @@ Decoding is the expensive part: roughly 90 ms for a 2560×1920 JPEG. It runs on
 a worker thread and the result is adopted on a later frame, exactly like the
 Wi-Fi scan, so the wallpaper appears immediately and the colours follow a
 moment later. A successfully extracted wallpaper is remembered, so an unrelated
-config apply does not decode the same picture again. If the worker cannot
+config apply does not decode the same picture again. F5, reapplying the current
+image and configuration-file reload explicitly invalidate that memory and
+extract the current file contents, including when its path has not changed.
+If the worker cannot
 start, decoding fails, or the image has no usable colour, the request is cleared
 and the next config apply can retry the same path. Failure itself starts no
 retry loop and keeps the existing palette. Clearing the wallpaper also discards
 its pending extraction, so a late result cannot retint an empty selection.
+Colour extraction uses the same regular-file, source-byte, dimension and
+decoded-output limits as wallpaper loading, including orientation handling.
+FIFO inputs are rejected without waiting for a writer.
 
 ### Over IPC
 
@@ -357,9 +401,27 @@ jwm-tool msg get_wallpaper_colors
 on screen: switching to a wallpaper with no colour to take leaves both the
 colours and this field on the last one that had some.
 
+`enabled` retains its historical meaning of wallpaper-derived accent extraction;
+`colors_enabled` makes that meaning explicit. `image_enabled` separately reports
+whether any output requests a static image, even when accent extraction is off.
+`rotation` reports `off` or `daily`. `current_wallpaper` is the first output's
+resolved image path; `current_wallpapers` lists each output's `monitor`, `path`
+and `mode`, including tag overrides and daily offsets. With no outputs, the
+singular path falls back to the slot-zero selection. These are resolved requests,
+not confirmation of successful decoding or of visibility beneath a 3D scene.
+The same fields appear in `get_status.wallpaper`.
+`source_wallpaper` and `source_monitor` identify the currently resolved colour
+source and its configured monitor index (`null` when no display exists). They
+remain separate from `wallpaper`, which describes the last adopted palette.
+
 A `theme/colors` event carrying the same payload is broadcast on the `theme`
-topic whenever the palette changes, so a status bar can match the shell without
-polling.
+topic when extraction starts, completes, fails or is cancelled. Failure ends
+`pending` while preserving the previous palette, so subscribers can finish
+their loading state without polling.
+Successful re-extraction also emits the completion event when its colours are
+unchanged.
+Unrelated configuration applications that keep the same source do not emit
+duplicate extraction-state events.
 
 The four colours are settable directly too, as `[r, g, b, a]` in the 0..1
 range, which is also how you put your own back without a reload:
@@ -368,4 +430,6 @@ range, which is also how you put your own back without a reload:
 jwm-tool msg set_config --args '{"key": "behavior.border_gradient_color_a", "value": [0.24, 0.65, 1.0, 1.0]}'
 ```
 
-`jwm-tool health` prints compact `wallpaper` for wallpaper operators.
+`jwm-tool health` prints separate `images`, `colors`, `rotation` and `pending`
+values in its compact `wallpaper` line, and remains compatible with older JWM
+responses.

@@ -518,6 +518,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_refresh_wallpapers(&mut self) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.refresh_wallpaper_images();
+                }
+            }
+
             fn compositor_apply_config(&mut self) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.apply_config();

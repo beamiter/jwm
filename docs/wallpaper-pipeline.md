@@ -13,6 +13,15 @@ four concurrent decodes, or fewer on a small CPU). Queued requests do not create
 waiting threads. Dropping a replaced/closed request cancels queued work; running
 codecs finish their current call, then skip obsolete resize/upload work. Separate
 outputs keep independent slots. Preview closure uses the same cancellation path.
+Configured `~` and `~/...` paths resolve against the session home directory
+inside the worker. Decoding and cache identity use that same resolved path;
+the compositor retains the original configuration spelling. Relative paths,
+`~user` and environment-variable syntax retain their literal meaning.
+Jobs, including cache identity checks, reuse a lazily started pool of at most
+four threads. Its four-slot nonblocking queue is covered by the same gate:
+queued plus running decode jobs cannot exceed the permit count. Initialization
+contention leaves the request queued, failed initialization can be retried, and
+a codec job panic releases its permit without killing the pool worker.
 
 Regular files and symlinks to regular files are accepted. FIFO and directory
 inputs are rejected without waiting for a FIFO writer. Extension-based format
@@ -23,6 +32,35 @@ Sky textures retain their stricter caller-provided source/dimension limits and
 64 MiB allocation budget. Reads use a bounded snapshot even if the file grows.
 The codec allocation budget is best-effort: codec-internal overhead, and some
 allocations before decoder limits take effect, are not a strict process RSS cap.
+
+Compositor-off X11 uses the same bounded regular-file decoder and orientation
+handling, while retaining its existing content-based format detection. Its
+native-root compositor validates the canvas before loading sources, decodes
+each source on first output use, and releases it after its last output. This
+preserves monitor draw order and shared-source reuse while shortening source
+buffer lifetimes. It does not impose an aggregate process memory cap.
+The event thread compares borrowed output/configuration values without file
+access or per-frame request strings. Existing maintenance ticks admit at most
+one background file probe per second while images are configured, without
+arming a separate polling timer. Each unique path is checked once, and an unchanged source
+signature skips both decoding and canvas allocation. Solid-colour canvas fills
+also run off-thread. Output/tag/F5 changes coalesce into the newest generation;
+obsolete work skips conversion/resizing after its current codec call, and a
+compositor handoff retains that one receiver until it completes.
+Native-root source signatures are committed only after an atomic installation
+acknowledgement. A failed source, placement or pixmap upload keeps the previous
+canvas and retries the same version with a 1/2/4/8/16/30-second capped delay.
+Failed codecs begin their delay after they finish; failed thread starts are
+also backed off. Metadata probes still detect a changed file version promptly,
+and a new input generation or F5 resets backoff. One failing output does not
+replace the working root with a partially composed image.
+Codec/resize panics use the same failure path. An unexpected native worker
+panic also publishes completion, so its retained receiver cannot permanently
+block later refreshes.
+Ordinary configuration applications preserve native decode ownership; the
+fingerprint detects relevant image/layout/base changes. Explicit file reload,
+F5 and reapplying the current image still invalidate it. Applying extracted
+border colours therefore does not decode the same native wallpaper again.
 
 Lanczos3 downsampling is mode-aware: Fill retains enough pixels to cover both
 axes; Fit fits inside the target; Stretch reduces axes independently; Center
@@ -73,11 +111,16 @@ identity share one decode and resize, including cold loads requested by several
 monitors. The output slots remain independent; only their source work and
 resulting pixel buffer are shared.
 
-Workers join the matching in-flight request after releasing the cache lock, so
-unrelated images can continue decoding. A cancelled waiter does not cancel the
+Workers that find a busy matching in-flight request return its handle and
+release their decode permit immediately. Waiting slots poll only an in-memory
+lock, creating no waiting thread and doing no filesystem work until the
+producer releases it. Their next bounded worker rechecks the source identity
+before reusing the result, so unrelated images can continue decoding even when
+several outputs request the same source. A cancelled waiter does not cancel the
 other outputs. If the producer fails or is cancelled, a live waiter can retry.
 Weak references track active shared work without retaining a second pixel cache
-after its users leave, including for results too large for the LRU.
+after its users leave, including for results too large for the LRU. Waiting and
+requeued slots retain their shared result until the retry worker has checked it.
 
 Canonical path, decoder format, device/inode, file length, modification/change
 timestamps, layout and target dimensions identify each entry. All filesystem
@@ -100,12 +143,25 @@ premultiplies alpha before thumbnailing, then restores source RGB and weights
 the retained pixels by alpha. This prevents invisible RGB from creating a
 false hue while preserving source colours independently of the desktop base.
 Compositor-off X11 retains its existing native-root compositing policy.
+Opaque RGBA pixels bypass the RGB premultiplication arithmetic, while fully
+transparent pixels are cleared directly; partially transparent pixels retain
+the same rounded integer formula. Palette selection uses two linear histogram
+scans instead of allocating and sorting occupied buckets. RGBA8 and LumaA8
+palette thumbnails premultiply as pixels are sampled, preserving the former
+pixel rounding without a separate full-image write pass; LumaA8 also avoids a
+full-size RGBA conversion. Unchanged daily collections retain their path
+buffers across unrelated config applies.
 
 Palette extraction keeps the last applied palette when decoding fails or no
 usable colour remains. It releases the failed request so a later config apply
 can retry the same path, without scheduling retries from the failure itself.
 Clearing the configured wallpaper drops pending extraction ownership, preventing
 late results from changing the theme.
+Palette extraction resolves the first valid display's actual monitor/tag image
+or daily/manual selection. Tag switches and output changes refresh that source;
+changing the focused monitor does not. Before adoption it rechecks the source
+and extraction switch, preventing a late palette from retinting a new selection.
+Its decoder shares the regular-file and resource limits of wallpaper loading.
 
 ## Procedural cache
 
@@ -191,6 +247,9 @@ collections. Bundled identities reserve their slots before the primary list is
 truncated, preserving a primary alias even near its cutoff. Scan-limit status
 is recorded before directory summaries are merged, so two complete scans do
 not incorrectly report a partial scan from their combined entry count.
+Rows with duplicate filenames include their full parent paths; unique names
+keep their compact labels. Path keys, search and current-image markers are
+unchanged.
 
 Typing filters the retained catalog by case-insensitive filename, path, effect
 or control words, including Unicode text and spaces. Enter or a click applies the selected
@@ -200,6 +259,13 @@ selected position and match count. A scan completing while the user types keeps
 the query and a still-matching highlight. `F5` and **Refresh image library**
 reuse the same asynchronous path while preserving the query, retained selection
 and display target. An active scan absorbs repeated refresh requests.
+An explicit refresh is consumed once when its scan completes: both compositors
+requeue global images, output overrides and the current side preview, while
+native-root composition and accent extraction also refresh. The image cache
+still checks file identity on its workers. Current textures and their layouts
+survive failed reloads. Closing or replacing the picker discards its deferred
+refresh; ordinary opening does not force reloads. Reapplying the current image
+or successfully reloading the configuration also refreshes same-path content.
 
 Sizing, crossfade, accent colours and daily-library rotation controls apply
 through validated live-config transactions and leave the panel open. Their
@@ -225,6 +291,9 @@ cargo check --locked --all-targets --no-default-features --features backend-x11r
 cargo check --locked --all-targets --no-default-features --features backend-wayland-udev
 cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 scripts/test.sh --lib --bins --tests
+EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 JWM_REQUIRE_HEADLESS_GL=1 \
+  scripts/test.sh --lib --no-default-features --features backend-wayland-udev \
+  -- wayland_wallpaper_explicit_refresh
 JWM_REQUIRE_HEADLESS_GL=1 bash scripts/test-procedural-wallpaper-cache.sh
 python3 scripts/test-astronomy-shader.py
 python3 scripts/test-solar-system-shader.py
@@ -248,6 +317,41 @@ scene comparisons plus seam/pole probes; Astronomy adds high-frequency
 checkerboard controls against the expected area average. Those synthetic
 controls measure alias suppression, not visual sharpness of every photograph.
 
+Deferred-load tests additionally hold a producer busy while several same-source
+waiters and an unrelated request compete for a small gate, verify non-LRU pixel
+sharing across requeueing, and cover cancellation, failed starts and source
+replacement during the wait. Refresh tests cover scan coalescing/cancellation,
+same-path palette replacement, and real Wayland GL texture/layout preservation
+after failed loading followed by successful same-path image and preview retry.
+
 Real GPU occupancy/power, physical display HDR, multi-output hotplug, and desktop
 visual inspection remain hardware acceptance work. Passing the cache harness is
 not evidence that those hardware scenarios have been tested.
+
+## CPU microbenchmarks
+
+```sh
+python3 scripts/bench-wallpaper-rotation.py
+python3 scripts/bench-wallpaper-decode.py
+scripts/test.sh --release --lib --no-default-features \
+  wallpaper_colors_performance_comparison -- --ignored --nocapture
+```
+
+The scripts compile with `rustc -O` and use current production code for the
+optimized path. The ignored colour test uses the same Cargo release profile
+for both paths, checks equal pixels/palettes and excludes source decoding.
+The rotation comparison measures 10,000 unchanged applications of 200 paths:
+the former clone made 2,010,000 allocations totalling 104 MB, while retaining
+the collection made zero. A local optimized run measured about 4.6–4.7 µs
+versus 0.32–0.33 µs per application. Timing varies with scheduling and hardware.
+
+For 160×160 palette samples, the local sorted histogram took about 463 µs
+versus 292 µs with linear selection. At 3840×2160, RGBA8 alpha thumbnailing
+took about 15.3–15.4 ms versus 14.9 ms; LumaA8 took about 66.5–67.2 ms versus
+11.0 ms. These are CPU-stage comparisons, not end-to-end wallpaper latency,
+GPU, desktop FPS or power measurements.
+The reproducible dispatch/pixel script measured a local median of about
+41.4 ms versus 9.0 ms for 2,000 dispatch round trips. For twelve 4K RGBA buffers,
+opaque processing took about 114.8 ms versus 41.6 ms and transparent processing
+119.0 ms versus 40.1 ms; partially transparent and mixed-alpha inputs were
+approximately unchanged. The dispatch comparison excludes pool startup.

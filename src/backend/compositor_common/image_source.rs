@@ -30,6 +30,24 @@ pub(crate) fn open_regular_image(
     )
 }
 
+/// Preserve native-root content detection, falling back to the extension when
+/// the signature is unknown. Detection runs on the same bounded file snapshot
+/// as decoding; all source, output, allocation and orientation limits apply.
+pub(crate) fn open_regular_image_detected(
+    path: impl AsRef<Path>,
+) -> image::ImageResult<image::DynamicImage> {
+    open_image_source_with_format_policy(
+        path.as_ref(),
+        WALLPAPER_MAX_DIMENSION,
+        WALLPAPER_MAX_DIMENSION,
+        WALLPAPER_MAX_BYTES,
+        WALLPAPER_MAX_OUTPUT,
+        WALLPAPER_MAX_ALLOC,
+        true,
+    )
+    .map(|(image, _)| image)
+}
+
 /// Also return the identity of the descriptor whose bytes were decoded. A
 /// cache must bind its pixels to this source, not only to pathname metadata
 /// that can change while a symlink or directory entry is being replaced.
@@ -105,6 +123,20 @@ fn open_image_source_with_limits(
     max_output: u64,
     max_alloc: u64,
 ) -> image::ImageResult<(image::DynamicImage, std::fs::Metadata)> {
+    open_image_source_with_format_policy(
+        path, max_width, max_height, max_bytes, max_output, max_alloc, false,
+    )
+}
+
+fn open_image_source_with_format_policy(
+    path: &Path,
+    max_width: u32,
+    max_height: u32,
+    max_bytes: u64,
+    max_output: u64,
+    max_alloc: u64,
+    detect_format: bool,
+) -> image::ImageResult<(image::DynamicImage, std::fs::Metadata)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -113,9 +145,19 @@ fn open_image_source_with_limits(
     if !metadata.is_file() || metadata.len() > max_bytes {
         return Err(invalid_source("image source is not a bounded regular file"));
     }
-    let format = image::ImageFormat::from_path(path)?;
+    let format = if detect_format {
+        image::ImageFormat::from_path(path).ok()
+    } else {
+        Some(image::ImageFormat::from_path(path)?)
+    };
     let bytes = read_bounded(file, max_bytes)?;
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    if let Some(format) = format {
+        reader.set_format(format);
+    }
+    if detect_format {
+        reader = reader.with_guessed_format()?;
+    }
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(max_width);
     limits.max_image_height = Some(max_height);
@@ -206,6 +248,7 @@ mod tests {
             std::fs::write(&path, encoded).unwrap();
             for decoded in [
                 open_regular_image(&path).unwrap(),
+                open_regular_image_detected(&path).unwrap(),
                 open_regular_image_bounded(&path, 3, 3, 4096).unwrap(),
             ] {
                 let dimensions = if value >= 5 { (3, 2) } else { (2, 3) };
@@ -305,6 +348,34 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn detected_images_accept_missing_and_wrong_extensions_without_changing_standard_policy() {
+        let dir = temp_dir();
+        let original = dir.join("original.png");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 128]))
+            .save(&original)
+            .unwrap();
+        for name in ["wallpaper", "wallpaper.jpg", "wallpaper.unknown"] {
+            let path = dir.join(name);
+            std::fs::copy(&original, &path).unwrap();
+            let image = open_regular_image_detected(&path).unwrap().into_rgba8();
+            assert_eq!(image.dimensions(), (2, 1));
+            assert_eq!(image.get_pixel(0, 0).0, [10, 20, 30, 128]);
+            assert!(open_regular_image(&path).is_err());
+        }
+        // TGA has no recognized magic signature, so detection must retain
+        // the extension-selected decoder instead of rejecting the source.
+        let tga = dir.join("fallback.tga");
+        image::RgbImage::from_pixel(2, 1, image::Rgb([10, 20, 30]))
+            .save(&tga)
+            .unwrap();
+        assert!(image::guess_format(&std::fs::read(&tga).unwrap()).is_err());
+        let image = open_regular_image_detected(&tga).unwrap().into_rgb8();
+        assert_eq!(image.get_pixel(0, 0).0, [10, 20, 30]);
+        assert!(open_regular_image_detected(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn fifo_is_rejected_without_a_writer_and_directory_is_rejected() {
         use std::os::unix::ffi::OsStrExt as _;

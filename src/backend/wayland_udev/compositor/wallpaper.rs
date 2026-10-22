@@ -107,6 +107,46 @@ fn wallpaper_mode_on_request(
 pub(super) use crate::backend::compositor_common::wallpaper_decode::DeferredWallpaperLoad;
 
 impl WaylandCompositor {
+    /// Explicitly reload existing image requests without disturbing visible textures.
+    /// Workers do all file access; superseded receivers are dropped here so a
+    /// late result cannot replace the refreshed request.
+    pub(crate) fn refresh_wallpaper_images(&mut self) {
+        self.wallpaper_load_failed = false;
+        self.pending_wallpaper = if self.wallpaper_path.is_empty() {
+            None
+        } else {
+            Some(Self::load_wallpaper_async(
+                &self.wallpaper_path,
+                self.screen_w,
+                self.screen_h,
+                self.wallpaper_requested_mode,
+            ))
+        };
+        self.pending_monitor_wallpapers.clear();
+        for (slot, wallpaper) in self.monitor_wallpapers.iter_mut().enumerate() {
+            wallpaper.load_failed = false;
+            if !wallpaper.current_path.is_empty() {
+                self.pending_monitor_wallpapers.push((
+                    slot,
+                    Self::load_wallpaper_async(
+                        &wallpaper.current_path,
+                        wallpaper.mon_w,
+                        wallpaper.mon_h,
+                        wallpaper.requested_mode,
+                    ),
+                ));
+            }
+        }
+        self.pending_system_ui_preview = if self.system_ui_preview_path.is_empty() {
+            None
+        } else {
+            Some(Self::load_system_ui_preview_async(
+                &self.system_ui_preview_path,
+            ))
+        };
+        self.needs_render = true;
+    }
+
     // =========================================================================
     // 1. Asynchronous wallpaper loading (background thread)
     // =========================================================================

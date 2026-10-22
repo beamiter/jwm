@@ -25,10 +25,21 @@ impl WallpaperRotationState {
         now: Instant,
     ) -> bool {
         let enabled = mode == "daily" && !paths.is_empty();
-        let changed = self.day.is_some() != enabled
-            || (enabled && (self.paths != paths || self.day != Some(day)));
+        let paths_changed = enabled && self.paths != paths;
+        let changed =
+            self.day.is_some() != enabled || (enabled && (paths_changed || self.day != Some(day)));
         self.initialized = true;
-        self.paths = if enabled { paths.to_vec() } else { Vec::new() };
+        // Most config applies only change colours or window settings. Keep
+        // the retained collection (and its strings) instead of cloning up to
+        // 200 paths merely to observe the same daily schedule again.
+        if enabled {
+            if paths_changed {
+                self.paths.resize_with(paths.len(), String::new);
+                self.paths.clone_from_slice(paths);
+            }
+        } else {
+            self.paths.clear();
+        }
         self.day = enabled.then_some(day);
         self.next_check = enabled.then_some(now + CHECK_INTERVAL);
         changed
@@ -187,6 +198,42 @@ mod tests {
         assert_eq!(state.next_wakeup(now), None);
         assert!(!state.due(now + CHECK_INTERVAL));
         assert!(!state.configure("daily", &[], 100, now));
+        assert_eq!(state.next_wakeup(now), None);
+    }
+
+    #[test]
+    fn unchanged_rotation_reuses_the_collection_and_path_buffers() {
+        let now = Instant::now();
+        let paths: Vec<_> = (0..200)
+            .map(|index| format!("/pictures/wallpapers/{index:03}.png"))
+            .collect();
+        let mut state = WallpaperRotationState::default();
+        assert!(state.configure("daily", &paths, 100, now));
+        let collection = state.paths.as_ptr();
+        let strings: Vec<_> = state.paths.iter().map(|path| path.as_ptr()).collect();
+        for _ in 0..100 {
+            assert!(!state.configure("daily", &paths, 100, now));
+            assert_eq!(state.paths.as_ptr(), collection);
+            assert!(
+                state
+                    .paths
+                    .iter()
+                    .zip(&strings)
+                    .all(|(path, &p)| path.as_ptr() == p)
+            );
+        }
+        // Advancing the date changes the picture, not the collection buffers.
+        assert!(state.configure("daily", &paths, 101, now));
+        assert_eq!(state.paths.as_ptr(), collection);
+        assert!(
+            state
+                .paths
+                .iter()
+                .zip(&strings)
+                .all(|(path, &p)| path.as_ptr() == p)
+        );
+        assert!(state.configure("off", &paths, 101, now));
+        assert!(state.paths.is_empty());
         assert_eq!(state.next_wakeup(now), None);
     }
 }

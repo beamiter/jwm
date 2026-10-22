@@ -1067,6 +1067,31 @@ fn sort_key(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Format a library together so equal filenames from different directories
+/// remain distinguishable. Keep full parent paths for those rows: even the
+/// immediate directory names can be identical in separate collections.
+pub(crate) fn picker_rows(paths: &[PathBuf], current: &str) -> Vec<(String, String)> {
+    let mut names = std::collections::HashMap::new();
+    for path in paths.iter().filter(|path| path.to_str().is_some()) {
+        *names.entry(path.file_name()).or_insert(0usize) += 1;
+    }
+    paths
+        .iter()
+        .filter_map(|path| {
+            let key = path.to_str()?.to_owned();
+            let mut label = picker_row(path, current);
+            if names.get(&path.file_name()).copied().unwrap_or(0) > 1 {
+                let parent = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty());
+                label.push_str(" · ");
+                label.push_str(parent.and_then(Path::to_str).unwrap_or("."));
+            }
+            Some((key, label))
+        })
+        .collect()
+}
+
 /// One picker row: the file name, marked when it is the current wallpaper.
 #[must_use]
 pub fn picker_row(path: &Path, current: &str) -> String {
@@ -1085,6 +1110,40 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_rows_disambiguate_only_duplicate_names_without_changing_identity() {
+        let paths: Vec<PathBuf> = [
+            "/home/user/Pictures/自然/山.png",
+            "/opt/jwm/自然/山.png",
+            "/home/user/Pictures/beach.jpg",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        let current = paths[1].to_str().unwrap();
+        let rows = picker_rows(&paths, current);
+        assert_eq!(rows.len(), paths.len());
+        for ((key, _), path) in rows.iter().zip(&paths) {
+            assert_eq!(key, path.to_str().unwrap());
+        }
+        assert!(rows[0].1.ends_with("山.png · /home/user/Pictures/自然"));
+        assert!(rows[1].1.ends_with("山.png · /opt/jwm/自然"));
+        assert_ne!(rows[0].1, rows[1].1);
+        assert!(!rows[0].1.contains('\u{f00c}'));
+        assert!(rows[1].1.contains('\u{f00c}'));
+        assert_eq!(rows[2].1, picker_row(&paths[2], current));
+        assert!(matches_query(&rows[0].0, &rows[0].1, &["pictures", "山"]));
+        assert!(!matches_query(&rows[1].0, &rows[1].1, &["pictures", "山"]));
+    }
+
+    #[test]
+    fn duplicate_relative_names_show_the_current_directory() {
+        let paths = vec![PathBuf::from("a.png"), PathBuf::from("other/a.png")];
+        let rows = picker_rows(&paths, "");
+        assert!(rows[0].1.ends_with("a.png · ."));
+        assert!(rows[1].1.ends_with("a.png · other"));
+    }
 
     #[test]
     fn celestial_scene_status_uses_connected_outputs_and_respects_legacy_solar() {

@@ -5630,6 +5630,13 @@ impl Jwm {
             "enabled": full.get("enabled").cloned().unwrap_or(serde_json::json!(false)),
             "wallpaper": full.get("wallpaper").cloned().unwrap_or(serde_json::Value::Null),
             "pending": full.get("pending").cloned().unwrap_or(serde_json::json!(false)),
+            "colors_enabled": full["colors_enabled"],
+            "image_enabled": full["image_enabled"],
+            "rotation": full["rotation"],
+            "current_wallpaper": full["current_wallpaper"],
+            "current_wallpapers": full["current_wallpapers"],
+            "source_wallpaper": full["source_wallpaper"],
+            "source_monitor": full["source_monitor"],
         })
     }
 

@@ -9956,6 +9956,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_wallpaper_work_uses_readiness_and_releases_the_idle_poll_after_completion() {
+        use crate::jwm::features::connectivity::BackgroundJob;
+        let mut jwm = empty_jwm();
+        let (job, _finish) = BackgroundJob::controlled_for_test();
+        jwm.features.native_root_job = Some(job);
+        assert!(
+            !jwm.background_job_readiness_is_complete(),
+            "an untracked native fill or decode must retain the polling fallback"
+        );
+        jwm.async_update_notifier =
+            Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
+        let job = jwm.features.native_root_job.take().unwrap();
+        jwm.features.native_root_job = Some(jwm.track_background_job(job));
+        assert!(jwm.background_job_readiness_is_complete());
+        jwm.features.native_root_job = None;
+        assert!(jwm.background_job_readiness_is_complete());
+    }
+
     /// A key-stopped microphone recording finishes its file on a worker that
     /// cannot wake the loop; the maintenance tick is what adopts its outcome,
     /// so the loop keeps waking at frame rate until the worker returns.
@@ -15483,6 +15502,11 @@ impl Jwm {
             && self
                 .features
                 .wallpaper_listing
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .native_root_job
                 .as_ref()
                 .is_none_or(BackgroundJob::readiness_is_covered)
             && self

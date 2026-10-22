@@ -1240,7 +1240,9 @@ impl Jwm {
         if !self.features.system_ui.is_wallpaper_picker() {
             return;
         }
-        self.poll_wallpaper_listing_job();
+        if self.poll_wallpaper_listing_job() {
+            self.refresh_wallpaper_images(backend);
+        }
         if self.features.wallpaper_listing.is_none() {
             let started = self.start_wallpaper_listing();
             set_wallpaper_picker_message(
@@ -1252,7 +1254,19 @@ impl Jwm {
                 },
             );
         }
+        self.features.wallpaper_refresh_pending = self.features.wallpaper_listing.is_some();
         self.sync_system_ui(backend);
+    }
+
+    /// Explicit refresh re-reads file contents without changing the saved
+    /// image, output rules or picker state. Each backend keeps its working
+    /// textures while the new requests decode.
+    pub(crate) fn refresh_wallpaper_images(&mut self, backend: &mut dyn Backend) {
+        backend.compositor_refresh_wallpapers();
+        self.features.native_root_key.clear();
+        self.ensure_native_root_wallpaper(backend);
+        self.force_refresh_wallpaper_theme();
+        backend.request_render();
     }
 
     /// Adopt a finished wallpaper listing into the picker that asked for it.
@@ -1261,24 +1275,26 @@ impl Jwm {
     /// drops the answer. A handle whose thread the OS refused never fills, so
     /// it is dropped here with the reason on the panel rather than leaving
     /// the picker "Scanning…" for good.
-    pub(crate) fn poll_wallpaper_listing_job(&mut self) {
+    pub(crate) fn poll_wallpaper_listing_job(&mut self) -> bool {
         if !self.features.system_ui.is_wallpaper_picker() {
             self.features.wallpaper_listing = None;
             self.features.wallpaper_scan_cancellation = None;
-            return;
+            self.features.wallpaper_refresh_pending = false;
+            return false;
         }
         let Some(job) = self.features.wallpaper_listing.as_ref() else {
-            return;
+            return false;
         };
         if !job.started() {
             self.features.wallpaper_listing = None;
             self.features.wallpaper_scan_cancellation = None;
+            self.features.wallpaper_refresh_pending = false;
             set_wallpaper_picker_message(&mut self.features.system_ui, WALLPAPER_SCAN_REFUSED);
             self.mark_system_ui_dirty();
-            return;
+            return false;
         }
         let Some(listing) = job.take() else {
-            return;
+            return false;
         };
         self.features.wallpaper_listing = None;
         self.features.wallpaper_scan_cancellation = None;
@@ -1298,6 +1314,7 @@ impl Jwm {
             status,
         );
         self.mark_system_ui_dirty();
+        std::mem::take(&mut self.features.wallpaper_refresh_pending)
     }
 
     fn theme_picker_state() -> crate::jwm::features::SystemUiState {
@@ -1914,6 +1931,7 @@ impl Jwm {
             self.mark_system_ui_dirty();
             return;
         }
+        let refresh_current_image = self.current_picker_wallpaper() == path;
         let updated = match CONFIG
             .load()
             .with_picker_wallpaper(&path, crate::jwm::features::wallpaper_rotation::local_day())
@@ -1925,7 +1943,15 @@ impl Jwm {
             }
         };
         CONFIG.store(std::sync::Arc::new(updated));
+        if refresh_current_image {
+            self.invalidate_wallpaper_theme();
+            self.features.native_root_key.clear();
+        }
         self.apply_config_changes(backend);
+        if refresh_current_image {
+            backend.compositor_refresh_wallpapers();
+            backend.request_render();
+        }
         info!("Wallpaper: {path}");
         self.broadcast_ipc_event(
             "config/changed",
@@ -3093,6 +3119,7 @@ impl Jwm {
         self.cancel_bluetooth_pairing();
         self.features.wallpaper_listing = None;
         self.features.wallpaper_scan_cancellation = None;
+        self.features.wallpaper_refresh_pending = false;
         self.features.system_ui.cancel();
         backend.compositor_set_system_ui(None);
         let _ = backend.key_ops().ungrab_keyboard();
@@ -3163,6 +3190,7 @@ impl Jwm {
         // the string is dropped.
         self.features.wallpaper_listing = None;
         self.features.wallpaper_scan_cancellation = None;
+        self.features.wallpaper_refresh_pending = false;
         self.features.system_ui.cancel();
         // Work started for the outgoing panel has nowhere to land, and a job
         // that finished a frame later would otherwise be adopted by whatever
@@ -7139,6 +7167,8 @@ mod modal_grab_tests {
         jwm.features.wallpaper_scan_cancellation = Some(cancellation);
         jwm.refresh_wallpaper_library(&mut backend);
         jwm.refresh_wallpaper_library(&mut backend);
+        assert!(jwm.features.wallpaper_refresh_pending);
+        assert_eq!(backend.wallpaper_refreshes, 0, "wait for the scan");
         assert!(
             !cancelled(),
             "refresh joins the existing worker instead of restarting it"
@@ -7161,13 +7191,52 @@ mod modal_grab_tests {
             )
                 .into(),
         );
-        jwm.poll_wallpaper_listing_job();
+        assert!(jwm.poll_wallpaper_listing_job());
+        jwm.refresh_wallpaper_images(&mut backend);
+        assert_eq!(backend.wallpaper_refreshes, 1);
+        assert!(!jwm.features.wallpaper_refresh_pending);
+        assert!(
+            !jwm.poll_wallpaper_listing_job(),
+            "refresh is consumed once"
+        );
         assert!(jwm.features.wallpaper_listing.is_none());
         assert_eq!(
             jwm.features.system_ui.selected_wallpaper(),
             Some("/walls/beach.png")
         );
         assert_eq!(jwm.features.system_ui.wallpaper_image_paths().len(), 2);
+    }
+
+    #[test]
+    fn wallpaper_refresh_is_cancelled_with_its_picker() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui = scanning_wallpaper_picker();
+        let (job, finish) = BackgroundJob::controlled_for_test();
+        jwm.features.wallpaper_listing = Some(job);
+        jwm.refresh_wallpaper_library(&mut backend);
+        assert!(jwm.features.wallpaper_refresh_pending);
+        jwm.close_system_ui(&mut backend);
+        finish((PathBuf::from("/walls"), vec![PathBuf::from("/walls/a.png")]).into());
+        assert!(!jwm.features.wallpaper_refresh_pending);
+        assert!(!jwm.poll_wallpaper_listing_job());
+        assert_eq!(backend.wallpaper_refreshes, 0);
+    }
+
+    #[test]
+    fn opening_the_wallpaper_picker_only_adopts_rows_without_forcing_image_reload() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui = scanning_wallpaper_picker();
+        jwm.features.wallpaper_listing = Some(BackgroundJob::completed_for_test(
+            (PathBuf::from("/walls"), vec![PathBuf::from("/walls/a.png")]).into(),
+        ));
+        assert!(!jwm.poll_wallpaper_listing_job());
+        assert_eq!(
+            jwm.features.system_ui.wallpaper_image_paths(),
+            ["/walls/a.png"]
+        );
+        assert_eq!(backend.wallpaper_refreshes, 0);
     }
 
     #[test]
@@ -7394,10 +7463,12 @@ mod modal_grab_tests {
         let mut jwm = jwm_on_two_monitors(&mut backend);
         jwm.features.system_ui = scanning_wallpaper_picker();
         jwm.features.wallpaper_listing = Some(BackgroundJob::refused());
+        jwm.features.wallpaper_refresh_pending = true;
 
-        jwm.poll_wallpaper_listing_job();
+        assert!(!jwm.poll_wallpaper_listing_job());
 
         assert!(jwm.features.wallpaper_listing.is_none());
+        assert!(!jwm.features.wallpaper_refresh_pending);
         assert_eq!(
             wallpaper_picker_message(&jwm.features.system_ui),
             Some(WALLPAPER_SCAN_REFUSED)

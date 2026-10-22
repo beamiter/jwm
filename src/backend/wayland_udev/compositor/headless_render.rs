@@ -10612,3 +10612,126 @@ fn wayland_wallpaper_output_fade_is_independent_and_respects_damage_scissors() {
         );
     }
 }
+
+#[test]
+fn wayland_wallpaper_explicit_refresh_preserves_images_and_retries_same_path() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    use crate::backend::compositor_common::wallpaper::WallpaperMode;
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    let id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("jwm-refresh-{}-{id}.png", std::process::id()));
+    let requested = path.to_string_lossy().into_owned();
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false).unwrap();
+        compositor.wallpaper_crossfade = false;
+        let global = create_element_texture(&gl, 1, 1, &[255, 0, 0, 255]);
+        let monitor = create_element_texture(&gl, 1, 1, &[0, 0, 255, 255]);
+        let preview = create_element_texture(&gl, 1, 1, &[255, 255, 0, 255]);
+        compositor.wallpaper_texture = Some(global);
+        compositor.wallpaper_img_w = 1;
+        compositor.wallpaper_img_h = 1;
+        compositor.wallpaper_mode = WallpaperMode::Center;
+        compositor.wallpaper_requested_mode = WallpaperMode::Fit;
+        compositor.wallpaper_path = requested.clone();
+        compositor.wallpaper_load_failed = true;
+        compositor.monitor_wallpapers = vec![super::MonitorWallpaper {
+            identity: Some(1),
+            mon_x: 0,
+            mon_y: 0,
+            mon_w: 32,
+            mon_h: 48,
+            texture: Some(monitor),
+            previous: None,
+            mode: WallpaperMode::Fit,
+            requested_mode: WallpaperMode::Stretch,
+            img_w: 1,
+            img_h: 1,
+            current_path: requested.clone(),
+            load_failed: true,
+        }];
+        compositor.system_ui_preview_path = requested.clone();
+        compositor.system_ui_preview = Some((requested.clone(), preview, 1, 1));
+        compositor.pending_wallpaper = None;
+        compositor.pending_monitor_wallpapers.clear();
+        compositor.pending_system_ui_preview = None;
+        compositor.needs_render = false;
+
+        let poll_until_complete = |compositor: &mut super::WaylandCompositor| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while compositor.pending_wallpaper.is_some()
+                || !compositor.pending_monitor_wallpapers.is_empty()
+                || compositor.pending_system_ui_preview.is_some()
+            {
+                compositor.poll_pending_wallpapers(&gl);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "wallpaper refresh timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+
+        compositor.refresh_wallpaper_images();
+        assert!(compositor.pending_wallpaper.is_some());
+        assert_eq!(compositor.pending_monitor_wallpapers.len(), 1);
+        assert!(compositor.pending_system_ui_preview.is_some());
+        assert!(compositor.needs_render);
+        assert!(!compositor.wallpaper_load_failed);
+        assert!(!compositor.monitor_wallpapers[0].load_failed);
+        assert_eq!(compositor.wallpaper_texture, Some(global));
+        assert_eq!(compositor.wallpaper_mode, WallpaperMode::Center);
+        assert_eq!(compositor.monitor_wallpapers[0].texture, Some(monitor));
+        assert_eq!(compositor.monitor_wallpapers[0].mode, WallpaperMode::Fit);
+        assert_eq!(compositor.system_ui_preview.as_ref().unwrap().1, preview);
+
+        // An unreadable replacement finishes all requests while retaining
+        // every previously displayed image and its original layout.
+        poll_until_complete(&mut compositor);
+        assert!(compositor.wallpaper_load_failed);
+        assert!(compositor.monitor_wallpapers[0].load_failed);
+        assert_eq!(compositor.wallpaper_texture, Some(global));
+        assert_eq!(compositor.wallpaper_mode, WallpaperMode::Center);
+        assert_eq!(compositor.monitor_wallpapers[0].texture, Some(monitor));
+        assert_eq!(compositor.monitor_wallpapers[0].mode, WallpaperMode::Fit);
+        assert_eq!(compositor.system_ui_preview.as_ref().unwrap().1, preview);
+        for texture in [global, monitor, preview] {
+            assert_eq!(gl.IsTexture(texture), ffi::TRUE as u8);
+        }
+
+        // Repair the same path. Explicit refresh must requeue the failed
+        // preview even though the picker highlight never moved away.
+        image::RgbaImage::from_pixel(2, 3, image::Rgba([0, 200, 40, 255]))
+            .save(&path)
+            .unwrap();
+        compositor.refresh_wallpaper_images();
+        assert!(compositor.pending_system_ui_preview.is_some());
+        assert_eq!(compositor.system_ui_preview.as_ref().unwrap().1, preview);
+        poll_until_complete(&mut compositor);
+        assert!(!compositor.wallpaper_load_failed);
+        assert!(!compositor.monitor_wallpapers[0].load_failed);
+        assert_ne!(compositor.wallpaper_texture, Some(global));
+        assert_eq!(compositor.wallpaper_mode, WallpaperMode::Fit);
+        assert_ne!(compositor.monitor_wallpapers[0].texture, Some(monitor));
+        assert_eq!(
+            compositor.monitor_wallpapers[0].mode,
+            WallpaperMode::Stretch
+        );
+        let (preview_path, preview_texture, width, height) =
+            compositor.system_ui_preview.as_ref().unwrap();
+        assert_eq!(preview_path, &requested);
+        assert_ne!(*preview_texture, preview);
+        assert_eq!((*width, *height), (2, 3));
+        assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}

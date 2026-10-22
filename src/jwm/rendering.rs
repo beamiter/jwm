@@ -325,7 +325,7 @@ impl Jwm {
         }
         self.features.compositor_transition.succeed();
         if enabled {
-            self.features.native_root_job = None;
+            self.cancel_native_root_wallpaper_work();
         } else {
             self.refresh_native_presentation(backend);
             self.features.native_root_key.clear();
@@ -468,7 +468,9 @@ impl Jwm {
 
         // The wallpaper picker lists its directory on a worker; fill an open
         // picker in the same way.
-        self.poll_wallpaper_listing_job();
+        if self.poll_wallpaper_listing_job() {
+            self.refresh_wallpaper_images(backend);
+        }
 
         // The Shell Hub's slow controls are sampled off-thread. Always adopt
         // a completed value so a panel closed mid-read still warms the next
