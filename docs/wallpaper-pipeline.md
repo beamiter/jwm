@@ -68,8 +68,16 @@ A process-wide LRU retains up to **64 MiB of resized RGBA pixels and 24 entries*
 Completed repeat requests with the same source, layout and sampling size reuse
 the pixel buffer through `Arc`; Center requests can reuse it across output
 sizes because Center keeps native pixels. This benefits repeated tag switching
-and revisiting picker previews. Simultaneous first loads still have independent
-decode slots; this is completed-result reuse, not single-flight decoding.
+and revisiting picker previews. Simultaneous first loads with the same cache
+identity share one decode and resize, including cold loads requested by several
+monitors. The output slots remain independent; only their source work and
+resulting pixel buffer are shared.
+
+Workers join the matching in-flight request after releasing the cache lock, so
+unrelated images can continue decoding. A cancelled waiter does not cancel the
+other outputs. If the producer fails or is cancelled, a live waiter can retry.
+Weak references track active shared work without retaining a second pixel cache
+after its users leave, including for results too large for the LRU.
 
 Canonical path, decoder format, device/inode, file length, modification/change
 timestamps, layout and target dimensions identify each entry. All filesystem
@@ -88,8 +96,16 @@ between decode, transparency conversion, resampling and publication.
 Composited wallpapers and previews flatten transparent source pixels over black
 before resampling. Hidden RGB can therefore neither appear as an opaque image
 nor create bright fringes through filtering. The independent palette extractor
-continues to ignore transparent color; compositor-off X11 retains its existing
-native-root compositing policy.
+premultiplies alpha before thumbnailing, then restores source RGB and weights
+the retained pixels by alpha. This prevents invisible RGB from creating a
+false hue while preserving source colours independently of the desktop base.
+Compositor-off X11 retains its existing native-root compositing policy.
+
+Palette extraction keeps the last applied palette when decoding fails or no
+usable colour remains. It releases the failed request so a later config apply
+can retry the same path, without scheduling retries from the failure itself.
+Clearing the configured wallpaper drops pending extraction ownership, preventing
+late results from changing the theme.
 
 ## Procedural cache
 
@@ -163,26 +179,40 @@ linear filtering and an explicitly limited base level.
 ## Picker
 
 Directory scanning retains at most 200 sorted image rows and visits at most
-100,000 raw directory entries, including sidecars and errors. Beyond that bound,
+100,000 raw entries per directory, including sidecars and errors. Beyond that bound,
 sorting applies to the visited prefix. Close/reopen cancels obsolete scans
 cooperatively; a blocked filesystem syscall cannot be interrupted. Worker-side
 canonical matching recognizes tilde/symlink aliases without changing row paths,
 retains the current image in the row cap, and ignores stale selection metadata
 if configuration changed during scanning.
 
-Typing filters the retained catalog by case-insensitive filename/path/effect
-words, including Unicode text and spaces. Enter or a click applies the selected
+Retained aliases are deduplicated within and between the primary and bundled
+collections. Bundled identities reserve their slots before the primary list is
+truncated, preserving a primary alias even near its cutoff. Scan-limit status
+is recorded before directory summaries are merged, so two complete scans do
+not incorrectly report a partial scan from their combined entry count.
+
+Typing filters the retained catalog by case-insensitive filename, path, effect
+or control words, including Unicode text and spaces. Enter or a click applies the selected
 row; Space is search text. Arrow/Tab, Home/End, PageUp/PageDown, mouse selection,
 scrolling and preview all address the same filtered rows. The title shows the
 selected position and match count. A scan completing while the user types keeps
-the query and a still-matching highlight.
+the query and a still-matching highlight. `F5` and **Refresh image library**
+reuse the same asynchronous path while preserving the query, retained selection
+and display target. An active scan absorbs repeated refresh requests.
+
+Sizing, crossfade, accent colours and daily-library rotation controls apply
+through validated live-config transactions and leave the panel open. Their
+changes are session-only. Rotation takes a snapshot of every image row in the
+retained source catalog, including bundled and current images within the
+200-image cap; filtering never changes that input. Stopping rotation restores
+the static rules. Celestial view/spin controls retain the existing saved
+configuration path, as documented in [Astronomy](astronomy-wallpaper.md).
 
 Directory errors, empty folders, unreadable entries, unrepresentable names and
 scan/catalog caps have distinct status text. Searching a capped catalog covers
 only its retained images, as stated in the status; it is not a recursive or
 unbounded filesystem search.
-
-The already-merged 4096-bucket palette extractor is unchanged by this update.
 
 ## Reproducible validation
 
@@ -208,9 +238,10 @@ resize invalidation, rejected-size fallback, and idempotent cleanup. It needs lo
 `glow` sources (fetched by Cargo), Rust, and an EGL runtime; unavailable support is
 an explicit skip unless `JWM_REQUIRE_HEADLESS_GL=1`, which makes it fail.
 
-The Rust suite also checks LRU budgets and shared pixel ownership, source
-replacement and symlink identity, sampling-mode isolation, transparency,
-search/input/scan lifecycle, and actual GLES crossfade pixels, output isolation,
+The Rust suite also checks LRU budgets and shared pixel ownership, overlapping
+cold decodes and cancellation, source replacement and symlink identity,
+sampling-mode isolation, transparent palette sampling, search/input/scan
+lifecycle, and actual GLES crossfade pixels, output isolation,
 damage scissors, overlap, floating-point target alpha and texture retirement. The source-material harness
 checks actual mipmap pixels and fallback. The shader suites render GL/GLES
 scene comparisons plus seam/pole probes; Astronomy adds high-frequency

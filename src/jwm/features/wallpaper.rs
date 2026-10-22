@@ -141,15 +141,28 @@ fn output_scene<'a>(
     }
 }
 
-pub(crate) fn target_scene<'a>(
+/// A scene marker describes connected canvases, not dormant assignments left
+/// behind by a disconnected monitor. All screens has a marker only when its
+/// visible outputs agree; static wallpapers do not select a celestial scene.
+pub(crate) fn current_target_scene<'a>(
     behavior: &'a crate::config::BehaviorConfig,
     target: &WallpaperTarget,
     connectors: &[String],
-) -> &'a str {
-    match target {
-        WallpaperTarget::All => global_scene(behavior),
-        WallpaperTarget::Output(name) => output_scene(behavior, name, connectors),
+) -> Option<&'a str> {
+    if behavior.wallpaper_effect == "off" || !target.is_connected(connectors) {
+        return None;
     }
+    if behavior.wallpaper_effect == "solar-system" {
+        return Some("solar-system");
+    }
+    if let WallpaperTarget::Output(name) = target {
+        return Some(output_scene(behavior, name, connectors));
+    }
+    let mut scenes = connectors
+        .iter()
+        .map(|name| output_scene(behavior, name, connectors));
+    let first = scenes.next().unwrap_or_else(|| global_scene(behavior));
+    scenes.all(|scene| scene == first).then_some(first)
 }
 
 pub(crate) fn astronomy_controls(
@@ -169,6 +182,20 @@ pub(crate) fn astronomy_controls(
         }
     };
     let mut controls = vec![(target.key(), format!("\u{f108} Apply to: {target_label}"))];
+    let scene = if !target.is_connected(connectors) {
+        "Disconnected display"
+    } else if behavior.wallpaper_effect == "off" {
+        "Static images"
+    } else {
+        current_target_scene(behavior, target, connectors).map_or(
+            "Multiple scenes across connected screens",
+            crate::config::astronomy::scene_label,
+        )
+    };
+    controls.push((
+        format!("{CONTROL_PREFIX}detail:scene"),
+        format!("Current scene: {scene}"),
+    ));
     for (layout, label) in [
         ("span", "Span"),
         ("mirror", "Mirror"),
@@ -214,6 +241,20 @@ pub(crate) fn astronomy_controls(
         format!("{CONTROL_PREFIX}presentation"),
         format!("\u{f0eb} Global lighting: {mode}"),
     ));
+    for (body, label, view) in [
+        ("earth", "Earth / planets", &behavior.wallpaper_earth_view),
+        ("moon", "Moon", &behavior.wallpaper_moon_view),
+    ] {
+        let view = if view == "rotating" {
+            "Rotating → fixed"
+        } else {
+            "Fixed → rotating"
+        };
+        controls.push((
+            format!("{CONTROL_PREFIX}view:{body}"),
+            format!("\u{f021} Global {label} view: {view}"),
+        ));
+    }
     let orbit = if behavior.wallpaper_solar_orbit_mode == "ephemeris" {
         "JPL approximation"
     } else {
@@ -250,8 +291,25 @@ pub(crate) fn astronomy_controls(
     }
     controls.push((
         format!("{CONTROL_PREFIX}detail:spin"),
-        format!("Solar spin: {:.3}×", behavior.wallpaper_solar_spin_speed),
+        if behavior.wallpaper_solar_spin_speed == 0.0 {
+            "Global solar spin: Paused".into()
+        } else {
+            format!(
+                "Global solar spin: {:.3}×",
+                behavior.wallpaper_solar_spin_speed
+            )
+        },
     ));
+    for (action, label) in [
+        ("pause", "Pause"),
+        ("realtime", "Real time (1×)"),
+        ("default", "Restore default tour"),
+    ] {
+        controls.push((
+            format!("{CONTROL_PREFIX}spin:{action}"),
+            format!("\u{f021} Global solar spin: {label}"),
+        ));
+    }
     controls
 }
 
@@ -373,6 +431,36 @@ pub(crate) fn astronomy_changes(
         set("wallpaper_effect", serde_json::json!("astronomy"));
     } else {
         match choice {
+            "jwm-wallpaper:view:earth" => set(
+                "wallpaper_earth_view",
+                serde_json::json!(if behavior.wallpaper_earth_view == "rotating" {
+                    "fixed"
+                } else {
+                    "rotating"
+                }),
+            ),
+            "jwm-wallpaper:view:moon" => set(
+                "wallpaper_moon_view",
+                serde_json::json!(if behavior.wallpaper_moon_view == "rotating" {
+                    "fixed"
+                } else {
+                    "rotating"
+                }),
+            ),
+            "jwm-wallpaper:spin:pause" => {
+                set("wallpaper_solar_spin_speed", serde_json::json!(0.0));
+            }
+            "jwm-wallpaper:spin:realtime" => {
+                set("wallpaper_solar_spin_speed", serde_json::json!(1.0));
+            }
+            "jwm-wallpaper:spin:default" => set(
+                "wallpaper_solar_spin_speed",
+                serde_json::json!(
+                    crate::config::Config::default()
+                        .behavior()
+                        .wallpaper_solar_spin_speed
+                ),
+            ),
             "jwm-wallpaper:detach" => {
                 let WallpaperTarget::Output(name) = target else {
                     return Err("Choose a display to detach".into());
@@ -538,6 +626,9 @@ impl From<(PathBuf, Vec<PathBuf>)> for WallpaperListing {
 pub struct ScanSummary {
     pub images: usize,
     pub visited: usize,
+    /// Per-directory limit, recorded before listings are merged. The sum of
+    /// two complete scans can exceed the budget without either being partial.
+    pub scan_limit_reached: bool,
     pub unreadable: usize,
     pub unsupported_names: usize,
     pub error: Option<std::io::ErrorKind>,
@@ -560,10 +651,10 @@ impl ScanSummary {
         } else if listed_images == 0 {
             notes.push(format!("No images in {}", directory.display()));
         }
-        if self.visited >= MAX_SCAN_ENTRIES {
+        if self.scan_limit_reached {
             notes.push(format!("Scan limit reached ({MAX_SCAN_ENTRIES} entries)"));
         }
-        if self.images > MAX_ENTRIES {
+        if self.images > listed_images {
             notes.push(format!(
                 "{} images found; search covers {listed_images} listed images",
                 self.images
@@ -794,6 +885,7 @@ pub fn scan_wallpapers_cancellable(
         });
     let (paths, images) = select_wallpapers_counted(candidates, Path::is_file);
     summary.images = images;
+    summary.scan_limit_reached = summary.visited >= MAX_SCAN_ENTRIES;
     (paths, summary)
 }
 
@@ -807,42 +899,82 @@ pub fn scan_wallpapers_with_bundled(
     bundled: &Path,
     cancelled: impl Fn() -> bool,
 ) -> (Vec<PathBuf>, ScanSummary) {
-    let (mut paths, mut summary) = scan_wallpapers_cancellable(primary, &cancelled);
-    if cancelled() || !bundled.is_dir() || primary == bundled {
+    let (paths, mut summary) = scan_wallpapers_cancellable(primary, &cancelled);
+    if cancelled() {
         return (paths, summary);
+    }
+    let mut primary_paths = unique_wallpapers(paths, &mut summary, &cancelled);
+    let paths = || primary_paths.iter().map(|(_, path)| path.clone()).collect();
+    if cancelled() || !bundled.is_dir() || primary == bundled {
+        return (paths(), summary);
     }
     if let (Ok(first), Ok(second)) = (
         std::fs::canonicalize(primary),
         std::fs::canonicalize(bundled),
     ) && first == second
     {
-        return (paths, summary);
+        return (paths(), summary);
     }
-    let (mut extras, additional) = scan_wallpapers_cancellable(bundled, &cancelled);
+    let (extras, mut additional) = scan_wallpapers_cancellable(bundled, &cancelled);
     if cancelled() || additional.error.is_some() {
-        return (paths, summary);
+        return (paths(), summary);
     }
-    // Canonicalization is bounded to <=400 retained candidates and never runs
-    // on the compositor event loop. It avoids duplicate rows for symlinked
-    // collections without following symlinked directories recursively.
-    let mut seen: std::collections::HashSet<PathBuf> = paths
-        .iter()
-        .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+    let mut extras = unique_wallpapers(extras, &mut additional, &cancelled);
+    // Reserve bundled identities before truncating the primary list. If an
+    // alias lived near the end of that list, deduplicating then truncating
+    // would otherwise remove both rows for the picture. Prefer its primary
+    // spelling while keeping it in the reserved bundled collection.
+    for (identity, path) in &mut extras {
+        if cancelled() {
+            return (paths(), summary);
+        }
+        if let Some((_, original)) = primary_paths.iter().find(|(key, _)| key == &*identity) {
+            *path = original.clone();
+            additional.images = additional.images.saturating_sub(1);
+        }
+    }
+    let bundled_identities: std::collections::HashSet<_> =
+        extras.iter().map(|(identity, _)| identity).collect();
+    primary_paths.retain(|(identity, _)| !bundled_identities.contains(identity));
+    primary_paths.truncate(MAX_ENTRIES.saturating_sub(extras.len()));
+    let mut paths: Vec<_> = primary_paths
+        .into_iter()
+        .chain(extras)
+        .map(|(_, path)| path)
         .collect();
-    extras.retain(|path| {
-        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        seen.insert(target)
-    });
-    paths.truncate(MAX_ENTRIES.saturating_sub(extras.len()));
-    paths.extend(extras);
     paths.sort_unstable_by(|a, b| sort_key(a).cmp(&sort_key(b)).then_with(|| a.cmp(b)));
     summary.images = summary.images.saturating_add(additional.images);
     summary.visited = summary.visited.saturating_add(additional.visited);
+    summary.scan_limit_reached |= additional.scan_limit_reached;
     summary.unreadable = summary.unreadable.saturating_add(additional.unreadable);
     summary.unsupported_names = summary
         .unsupported_names
         .saturating_add(additional.unsupported_names);
     (paths, summary)
+}
+
+/// Only retained rows are resolved, bounding filesystem work to at most 400
+/// pictures per merged listing. Keep the first, stably sorted spelling of
+/// each picture and check cancellation before every potentially slow stat.
+fn unique_wallpapers(
+    paths: Vec<PathBuf>,
+    summary: &mut ScanSummary,
+    cancelled: impl Fn() -> bool,
+) -> Vec<(PathBuf, PathBuf)> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .take_while(|_| !cancelled())
+        .filter_map(|path| {
+            let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if seen.insert(identity.clone()) {
+                Some((identity, path))
+            } else {
+                summary.images = summary.images.saturating_sub(1);
+                None
+            }
+        })
+        .collect()
 }
 
 fn bounded_scan<T>(
@@ -953,6 +1085,220 @@ pub fn picker_row(path: &Path, current: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn celestial_scene_status_uses_connected_outputs_and_respects_legacy_solar() {
+        let mut config = crate::config::Config::default();
+        let connectors = vec!["DP-1".into(), "HDMI-1".into()];
+        assert_eq!(
+            current_target_scene(config.behavior(), &WallpaperTarget::All, &connectors),
+            None
+        );
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_effect".into(),
+                    serde_json::json!("astronomy"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!("independent"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_outputs".into(),
+                    serde_json::json!({
+                        "DP-1": {"scene": "moon"},
+                        "HDMI-1": {"scene": "moon"},
+                        "disconnected": {"scene": "mars"}
+                    }),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            current_target_scene(config.behavior(), &WallpaperTarget::All, &connectors),
+            Some("moon")
+        );
+        assert_eq!(
+            current_target_scene(
+                config.behavior(),
+                &WallpaperTarget::Output("disconnected".into()),
+                &connectors,
+            ),
+            None
+        );
+        let changes = astronomy_changes(
+            config.behavior(),
+            &WallpaperTarget::Output("HDMI-1".into()),
+            &connectors,
+            "jwm-effect:venus",
+        )
+        .unwrap();
+        config.set_values(&changes).unwrap();
+        assert_eq!(
+            current_target_scene(config.behavior(), &WallpaperTarget::All, &connectors),
+            None
+        );
+        assert_eq!(
+            current_target_scene(
+                config.behavior(),
+                &WallpaperTarget::Output("HDMI-1".into()),
+                &connectors,
+            ),
+            Some("venus")
+        );
+        config
+            .set_value(
+                "behavior.wallpaper_effect",
+                &serde_json::json!("solar-system"),
+            )
+            .unwrap();
+        assert_eq!(
+            current_target_scene(config.behavior(), &WallpaperTarget::All, &connectors),
+            Some("solar-system")
+        );
+    }
+
+    #[test]
+    fn celestial_scene_status_detects_legacy_earth_moon_layout() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_effect".into(),
+                    serde_json::json!("astronomy"),
+                ),
+                (
+                    "behavior.wallpaper_astronomy_layout".into(),
+                    serde_json::json!("earth-moon"),
+                ),
+            ])
+            .unwrap();
+        let connectors = vec!["HDMI-1".into(), "DP-1".into()];
+        assert_eq!(
+            current_target_scene(config.behavior(), &WallpaperTarget::All, &connectors),
+            None
+        );
+        assert_eq!(
+            current_target_scene(
+                config.behavior(),
+                &WallpaperTarget::Output("HDMI-1".into()),
+                &connectors,
+            ),
+            Some("moon")
+        );
+        assert_eq!(
+            current_target_scene(config.behavior(), &WallpaperTarget::All, &["DP-1".into()]),
+            Some("earth")
+        );
+    }
+
+    #[test]
+    fn celestial_view_toggles_preserve_orientation_periods_and_physical_clocks() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_earth_longitude".into(),
+                    serde_json::json!(42.0),
+                ),
+                (
+                    "behavior.wallpaper_moon_roll".into(),
+                    serde_json::json!(27.0),
+                ),
+                (
+                    "behavior.wallpaper_earth_rotation_minutes".into(),
+                    serde_json::json!(20),
+                ),
+                (
+                    "behavior.wallpaper_moon_rotation_minutes".into(),
+                    serde_json::json!(30),
+                ),
+                (
+                    "behavior.wallpaper_solar_time_scale".into(),
+                    serde_json::json!(86400.0),
+                ),
+                (
+                    "behavior.wallpaper_solar_time_offset_days".into(),
+                    serde_json::json!(4.0),
+                ),
+            ])
+            .unwrap();
+        let original = serde_json::to_value(config.behavior()).unwrap();
+        for (body, value) in [("earth", "rotating"), ("moon", "fixed")] {
+            let action = format!("jwm-wallpaper:view:{body}");
+            let field = format!("wallpaper_{body}_view");
+            let changes =
+                astronomy_changes(config.behavior(), &WallpaperTarget::All, &[], &action).unwrap();
+            config.set_values(&changes).unwrap();
+            let mut expected = original.clone();
+            expected[&field] = serde_json::json!(value);
+            assert_eq!(serde_json::to_value(config.behavior()).unwrap(), expected);
+            let changes =
+                astronomy_changes(config.behavior(), &WallpaperTarget::All, &[], &action).unwrap();
+            config.set_values(&changes).unwrap();
+            assert_eq!(serde_json::to_value(config.behavior()).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn celestial_spin_presets_change_only_solar_self_rotation() {
+        let mut config = crate::config::Config::default();
+        config
+            .set_values(&[
+                (
+                    "behavior.wallpaper_solar_orbit_mode".into(),
+                    serde_json::json!("illustrative"),
+                ),
+                (
+                    "behavior.wallpaper_solar_time_scale".into(),
+                    serde_json::json!(86400.0),
+                ),
+                (
+                    "behavior.wallpaper_solar_time_offset_days".into(),
+                    serde_json::json!(42.0),
+                ),
+            ])
+            .unwrap();
+        let original = serde_json::to_value(config.behavior()).unwrap();
+        let default = config.behavior().wallpaper_solar_spin_speed;
+        for (action, speed) in [("pause", 0.0), ("realtime", 1.0), ("default", default)] {
+            let changes = astronomy_changes(
+                config.behavior(),
+                &WallpaperTarget::All,
+                &[],
+                &format!("jwm-wallpaper:spin:{action}"),
+            )
+            .unwrap();
+            config.set_values(&changes).unwrap();
+            let mut expected = original.clone();
+            expected["wallpaper_solar_spin_speed"] = serde_json::json!(speed);
+            assert_eq!(serde_json::to_value(config.behavior()).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn celestial_controls_label_view_scope_and_current_scene() {
+        let config = crate::config::Config::default();
+        let controls = astronomy_controls(config.behavior(), &WallpaperTarget::All, &[]);
+        let label = |key: &str| {
+            controls
+                .iter()
+                .find(|(id, _)| id == key)
+                .unwrap()
+                .1
+                .as_str()
+        };
+        assert_eq!(
+            label("jwm-wallpaper:detail:scene"),
+            "Current scene: Static images"
+        );
+        assert!(label("jwm-wallpaper:view:earth").contains("Global Earth / planets"));
+        assert!(label("jwm-wallpaper:view:earth").contains("Fixed → rotating"));
+        assert!(label("jwm-wallpaper:view:moon").contains("Rotating → fixed"));
+        for action in ["pause", "realtime", "default"] {
+            assert!(label(&format!("jwm-wallpaper:spin:{action}")).contains("Global solar spin"));
+        }
+    }
 
     #[test]
     fn celestial_global_selection_migrates_legacy_layouts_to_mirror() {
@@ -1280,6 +1626,7 @@ mod tests {
         let summary = ScanSummary {
             images: MAX_ENTRIES + 1,
             visited: MAX_SCAN_ENTRIES,
+            scan_limit_reached: true,
             unreadable: 2,
             ..Default::default()
         };
@@ -1288,6 +1635,36 @@ mod tests {
         assert!(message.contains("201 images found"));
         assert!(message.contains("search covers 200 listed images"));
         assert!(message.contains("2 unreadable entries skipped"));
+    }
+
+    #[test]
+    fn combined_complete_scans_do_not_claim_a_directory_limit() {
+        let summary = ScanSummary {
+            images: 2,
+            visited: MAX_SCAN_ENTRIES + 10,
+            ..Default::default()
+        };
+        assert_eq!(summary.message(Path::new("/walls"), 2), "");
+        let limited = ScanSummary {
+            scan_limit_reached: true,
+            ..summary
+        };
+        assert!(
+            limited
+                .message(Path::new("/walls"), 2)
+                .contains("Scan limit reached")
+        );
+    }
+
+    #[test]
+    fn deduplicated_partial_catalog_still_explains_unlisted_images() {
+        let summary = ScanSummary {
+            images: MAX_ENTRIES,
+            ..Default::default()
+        };
+        let message = summary.message(Path::new("/walls"), MAX_ENTRIES - 1);
+        assert!(message.contains("200 images found"));
+        assert!(message.contains("search covers 199 listed images"));
     }
 
     #[test]
@@ -1478,7 +1855,6 @@ mod tests {
                 .subscription_topics
                 .contains(&"config")
         );
-        assert_eq!(source.matches("self.current_picker_wallpaper()").count(), 2);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -1602,6 +1978,68 @@ mod tests {
         assert_eq!(paths, [primary.join("alias.png")]);
         std::fs::remove_dir_all(primary).unwrap();
         std::fs::remove_dir_all(bundled).unwrap();
+    }
+
+    #[test]
+    fn aliases_inside_the_primary_collection_are_deduplicated() {
+        let primary = temp_dir("primary-internal-alias");
+        let picture = primary.join("image.png");
+        std::fs::write(&picture, b"x").unwrap();
+        std::fs::write(primary.join("separate.jpg"), b"y").unwrap();
+        std::os::unix::fs::symlink(&picture, primary.join("alias.png")).unwrap();
+        // The first sorted spelling wins consistently, including when the
+        // primary collection is also the bundled collection.
+        for bundled in [&primary, &primary.join("missing")] {
+            let (paths, summary) = scan_wallpapers_with_bundled(&primary, bundled, || false);
+            assert_eq!(
+                paths,
+                [primary.join("alias.png"), primary.join("separate.jpg")]
+            );
+            assert_eq!(summary.images, 2);
+        }
+        std::fs::remove_dir_all(primary).unwrap();
+    }
+
+    #[test]
+    fn bundled_reservation_keeps_a_primary_alias_beyond_the_truncation_point() {
+        let primary = temp_dir("primary-reserved-alias");
+        let bundled = temp_dir("bundled-reserved-alias");
+        for index in 0..MAX_ENTRIES - 1 {
+            std::fs::write(primary.join(format!("{index:04}.png")), b"x").unwrap();
+        }
+        for name in ["image.png", "second.png", "third.png"] {
+            std::fs::write(bundled.join(name), b"x").unwrap();
+        }
+        let alias = primary.join("zz-alias.png");
+        std::os::unix::fs::symlink(bundled.join("image.png"), &alias).unwrap();
+        let (paths, summary) = scan_wallpapers_with_bundled(&primary, &bundled, || false);
+        assert_eq!(paths.len(), MAX_ENTRIES);
+        assert_eq!(summary.images, MAX_ENTRIES + 2);
+        assert!(paths.contains(&alias));
+        assert!(!paths.contains(&bundled.join("image.png")));
+        assert!(paths.contains(&bundled.join("second.png")));
+        assert!(paths.contains(&bundled.join("third.png")));
+        std::fs::remove_dir_all(primary).unwrap();
+        std::fs::remove_dir_all(bundled).unwrap();
+    }
+
+    #[test]
+    fn alias_resolution_checks_cancellation_before_each_candidate() {
+        let checks = std::cell::Cell::new(0);
+        let mut summary = ScanSummary::default();
+        let paths = unique_wallpapers(
+            vec![
+                PathBuf::from("/missing/a.png"),
+                PathBuf::from("/missing/b.png"),
+            ],
+            &mut summary,
+            || {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            },
+        );
+        assert_eq!(paths.len(), 1);
+        assert_eq!(checks.get(), 2);
     }
 
     #[test]

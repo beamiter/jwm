@@ -130,8 +130,8 @@ pub fn palette_from_rgba(rgba: &[u8]) -> Option<Palette> {
     // A fixed 12-bit histogram avoids per-pixel hashing and heap allocations.
     let mut buckets = [Bucket::default(); 4096];
     for pixel in rgba.chunks_exact(4) {
-        // Anything see-through is a corner or a soft edge, not a colour the
-        // wallpaper actually shows.
+        // Low-coverage corners and soft edges are not representative. The
+        // retained pixels contribute in proportion to their visible coverage.
         if pixel[3] < 128 {
             continue;
         }
@@ -141,7 +141,7 @@ pub fn palette_from_rgba(rgba: &[u8]) -> Option<Palette> {
             f32::from(pixel[2]) / 255.0,
         ];
         let [_, saturation, lightness] = rgb_to_hsl(rgb);
-        let weight = pixel_weight(saturation, lightness);
+        let weight = pixel_weight(saturation, lightness) * (f32::from(pixel[3]) / 255.0);
         if weight <= 0.0 {
             continue;
         }
@@ -202,8 +202,37 @@ pub fn palette_from_file(path: &Path) -> Option<Palette> {
             return None;
         }
     };
-    let sample = image.thumbnail(SAMPLE_EDGE, SAMPLE_EDGE).to_rgba8();
+    let sample = thumbnail_for_palette(image, SAMPLE_EDGE);
     palette_from_rgba(sample.as_raw())
+}
+
+/// Average visible colour contributions without mixing in hidden RGB from
+/// transparent pixels. Straight-alpha thumbnailing averages those hidden
+/// channels too, inventing hues even when all visible pixels share one hue.
+fn thumbnail_for_palette(image: image::DynamicImage, edge: u32) -> image::RgbaImage {
+    if !image.color().has_alpha() {
+        return image.thumbnail(edge, edge).into_rgba8();
+    }
+    let mut rgba = image.into_rgba8();
+    for pixel in rgba.pixels_mut() {
+        let alpha = u16::from(pixel[3]);
+        for channel in &mut pixel.0[..3] {
+            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+        }
+    }
+    let mut sample = image::DynamicImage::ImageRgba8(rgba)
+        .thumbnail(edge, edge)
+        .into_rgba8();
+    for pixel in sample.pixels_mut() {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 {
+            continue;
+        }
+        for channel in &mut pixel.0[..3] {
+            *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+        }
+    }
+    sample
 }
 
 /// Start an extraction on a worker thread.
@@ -419,6 +448,11 @@ impl crate::jwm::Jwm {
             let wallpaper = theme_wallpaper_path(behavior, day).to_string();
             (behavior.wallpaper_colors, wallpaper)
         };
+        self.refresh_wallpaper_theme_for(enabled, wallpaper);
+    }
+
+    /// Reconcile the pending extraction with the current wallpaper choice.
+    fn refresh_wallpaper_theme_for(&mut self, enabled: bool, wallpaper: String) {
         if !enabled {
             // Nothing is put back: the colours in memory stay until a reload
             // reads the file again. Undoing a retheme would mean remembering
@@ -428,7 +462,16 @@ impl crate::jwm::Jwm {
             self.features.wallpaper_palette = None;
             return;
         }
-        if wallpaper.trim().is_empty() || self.features.themed_wallpaper == wallpaper {
+        if wallpaper.trim().is_empty() {
+            // Clearing the wallpaper is also a change of source. The old
+            // worker may still finish, but its colours no longer belong to
+            // the current choice. Keep the last applied palette just as for
+            // an image with no usable colour, without adopting late work.
+            self.features.wallpaper_theme = None;
+            self.features.themed_wallpaper.clear();
+            return;
+        }
+        if self.features.themed_wallpaper == wallpaper {
             return;
         }
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
@@ -466,6 +509,10 @@ impl crate::jwm::Jwm {
                 "wallpaper colors: {} has no colour to take; keeping the configured palette",
                 self.features.themed_wallpaper
             );
+            // A file can appear or be repaired at the same path. Leave it
+            // eligible for the next config apply; no apply is triggered here,
+            // so a missing file cannot create an extraction/retheme loop.
+            self.features.themed_wallpaper.clear();
             return;
         };
         let adopted = (self.features.themed_wallpaper.clone(), palette);
@@ -648,6 +695,70 @@ mod tests {
     }
 
     #[test]
+    fn transparent_hidden_colours_cannot_tint_the_thumbnail_palette() {
+        let visible = [40, 180, 60, 255];
+        let sample = |hidden| {
+            let image = image::RgbaImage::from_fn(4, 2, |x, _| {
+                image::Rgba(if x % 2 == 0 { visible } else { hidden })
+            });
+            thumbnail_for_palette(image::DynamicImage::ImageRgba8(image), 2)
+        };
+        // Both pictures display the same green stripes. Only invisible RGB
+        // differs; the old straight-alpha resize produced yellow vs cyan.
+        let red_hidden = sample([240, 20, 20, 0]);
+        let blue_hidden = sample([20, 20, 240, 0]);
+        assert_eq!(red_hidden.dimensions(), (2, 1));
+        assert_eq!(red_hidden, blue_hidden);
+        let actual = palette_from_rgba(red_hidden.as_raw()).expect("visible green");
+        let reference = palette_from_rgba(&visible).expect("opaque green");
+        for (actual, reference) in actual.accent.into_iter().zip(reference.accent) {
+            assert!((actual - reference).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn a_fully_transparent_thumbnail_has_no_palette() {
+        let image = image::RgbaImage::from_fn(4, 2, |x, _| {
+            image::Rgba(if x % 2 == 0 {
+                [240, 20, 20, 0]
+            } else {
+                [20, 20, 240, 0]
+            })
+        });
+        let sample = thumbnail_for_palette(image::DynamicImage::ImageRgba8(image), 2);
+        assert!(palette_from_rgba(sample.as_raw()).is_none());
+    }
+
+    #[test]
+    fn opaque_thumbnail_colours_remain_unchanged() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(4, 2, |x, _| {
+            image::Rgba(if x % 2 == 0 {
+                [40, 180, 60, 255]
+            } else {
+                [180, 40, 60, 255]
+            })
+        }));
+        let expected = image.thumbnail(2, 2).into_rgba8();
+        assert_eq!(thumbnail_for_palette(image, 2), expected);
+    }
+
+    #[test]
+    fn translucent_colours_count_by_visible_coverage() {
+        // The hues have equal saturation and lightness. Two opaque blue
+        // pixels cover more than three half-transparent red pixels.
+        let buffer = [
+            [200, 40, 40, 128],
+            [200, 40, 40, 128],
+            [200, 40, 40, 128],
+            [40, 40, 200, 255],
+            [40, 40, 200, 255],
+        ]
+        .concat();
+        let palette = palette_from_rgba(&buffer).expect("palette");
+        assert!(hue_distance(rgb_to_hsl(palette.accent)[0], 240.0) < 1.0);
+    }
+
+    #[test]
     fn the_same_pixels_always_theme_the_same_way() {
         let buffer = pixels(&[
             (500, [200, 40, 40]),
@@ -733,6 +844,63 @@ mod tests {
 
         assert_eq!(jwm.features.themed_wallpaper, "~/a.png");
         assert!(jwm.features.wallpaper_theme.is_some());
+    }
+
+    #[test]
+    fn clearing_the_wallpaper_discards_a_late_extraction() {
+        for empty in ["", " \t\n"] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm =
+                crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+            let previous = (
+                "previous.png".to_string(),
+                Palette {
+                    accent: [0.2, 0.4, 0.8],
+                    secondary: [0.6, 0.3, 0.8],
+                },
+            );
+            jwm.features.wallpaper_palette = Some(previous.clone());
+            let (job, finish) = BackgroundJob::controlled_for_test();
+            jwm.adopt_extraction("pending.png".to_string(), job);
+
+            jwm.refresh_wallpaper_theme_for(true, empty.to_string());
+            finish(Some(Palette {
+                accent: [0.8, 0.3, 0.2],
+                secondary: [0.8, 0.6, 0.2],
+            }));
+            jwm.poll_wallpaper_theme(&mut backend);
+
+            assert!(jwm.features.wallpaper_theme.is_none());
+            assert!(jwm.features.themed_wallpaper.is_empty());
+            assert_eq!(jwm.features.wallpaper_palette, Some(previous));
+        }
+    }
+
+    #[test]
+    fn an_unsuccessful_extraction_can_be_retried_at_the_same_path() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let previous = (
+            "previous.png".to_string(),
+            Palette {
+                accent: [0.2, 0.4, 0.8],
+                secondary: [0.6, 0.3, 0.8],
+            },
+        );
+        jwm.features.wallpaper_palette = Some(previous.clone());
+        jwm.adopt_extraction(
+            "repairable.png".to_string(),
+            BackgroundJob::completed_for_test(None),
+        );
+
+        jwm.poll_wallpaper_theme(&mut backend);
+
+        // The same-path guard must allow a later config apply to retry, while
+        // failure itself keeps the existing colours and starts no new work.
+        assert!(jwm.features.themed_wallpaper.is_empty());
+        assert!(jwm.features.wallpaper_theme.is_none());
+        assert_eq!(jwm.features.wallpaper_palette, Some(previous));
     }
 
     fn current() -> CurrentColors {

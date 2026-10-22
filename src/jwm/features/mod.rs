@@ -46,6 +46,7 @@ pub mod tags_overview;
 pub mod toggles;
 pub mod wallpaper;
 pub mod wallpaper_colors;
+pub(crate) mod wallpaper_controls;
 pub mod wallpaper_rotation;
 
 pub use audio_recording::AudioRecordingState;

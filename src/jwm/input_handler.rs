@@ -2880,7 +2880,13 @@ impl Jwm {
                 // Space belongs to the search, so filenames with several
                 // words are searchable. Only Enter or a click commits.
                 if keysym == keys::KEY_Return {
-                    self.apply_selected_wallpaper(backend);
+                    if !repeat {
+                        self.apply_selected_wallpaper(backend);
+                    }
+                } else if keysym == keys::KEY_F5 {
+                    if !repeat {
+                        self.refresh_wallpaper_library(backend);
+                    }
                 } else {
                     if keysym == keys::KEY_BackSpace {
                         self.consume_system_ui_query_replace();
@@ -5387,6 +5393,59 @@ mod tests {
         backend.key_ops = Box::new(input.clone());
         backend.toast_log.lock().unwrap().clear();
         (jwm, backend, input)
+    }
+
+    #[test]
+    fn wallpaper_control_key_repeats_do_not_toggle_or_start_scan_workers() {
+        use crate::backend::common_define::keys;
+        use crate::jwm::features::{SystemUiState, wallpaper::WallpaperTarget};
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        jwm.features.system_ui = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        jwm.features.system_ui.set_wallpaper_astronomy_controls(
+            crate::config::CONFIG.load().behavior(),
+            &[],
+            &WallpaperTarget::All,
+        );
+        for ch in "accent colors".chars() {
+            jwm.features.system_ui.push_char(ch);
+        }
+        assert_eq!(
+            jwm.features.system_ui.selected_wallpaper_choice(),
+            Some("jwm-wallpaper:image:colors")
+        );
+        let before = crate::config::CONFIG.load_full();
+        for key in [keys::KEY_Return, keys::KEY_F5] {
+            input.select(key);
+            jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+                .unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                &before,
+                &crate::config::CONFIG.load_full()
+            ));
+            assert!(jwm.features.wallpaper_listing.is_none());
+        }
+        let (job, finish) =
+            crate::jwm::features::connectivity::BackgroundJob::controlled_for_test();
+        jwm.features.wallpaper_listing = Some(job);
+        input.select(keys::KEY_F5);
+        jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, false)
+            .unwrap();
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().query.as_deref(),
+            Some("accent colors")
+        );
+        finish(
+            (
+                std::path::PathBuf::from("/walls"),
+                vec![std::path::PathBuf::from("/walls/new.png")],
+            )
+                .into(),
+        );
+        jwm.poll_wallpaper_listing_job();
+        assert_eq!(
+            jwm.features.system_ui.wallpaper_image_paths(),
+            ["/walls/new.png"]
+        );
     }
 
     #[test]

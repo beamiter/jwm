@@ -150,7 +150,7 @@ pub(crate) fn join_output_scene(
 
 /// The celestial picker owns this closed set of configuration keys. Image
 /// choices retain the existing session/daily semantics.
-pub(super) const PERSISTED_KEYS: [&str; 8] = [
+pub(super) const PERSISTED_KEYS: [&str; 11] = [
     "wallpaper_effect",
     "wallpaper_astronomy_scene",
     "wallpaper_astronomy_layout",
@@ -159,6 +159,9 @@ pub(super) const PERSISTED_KEYS: [&str; 8] = [
     "wallpaper_solar_orbit_mode",
     "wallpaper_solar_time_scale",
     "wallpaper_solar_time_offset_days",
+    "wallpaper_earth_view",
+    "wallpaper_moon_view",
+    "wallpaper_solar_spin_speed",
 ];
 
 fn inline_value(value: &serde_json::Value) -> Result<String, String> {
@@ -446,6 +449,91 @@ mod tests {
         );
         let ambiguous = "[behavior]\nsuspend_command = '''\n[behavior]\nwallpaper_astronomy_scene = 'moon'\n'''\n";
         assert!(edit_values(ambiguous, &changes).is_err());
+    }
+
+    #[test]
+    fn celestial_view_and_spin_controls_persist_and_reload_without_changing_other_settings() {
+        use crate::config::Config;
+        use crate::jwm::features::wallpaper::{WallpaperTarget, astronomy_changes};
+        use serde_json::json;
+
+        let directory = std::env::temp_dir().join(format!(
+            "jwm-celestial-controls-save-{}-{}",
+            std::process::id(),
+            super::super::CONFIG_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        let mut selected = Config::default();
+        selected
+            .set_values(&[
+                ("behavior.wallpaper".into(), json!("/pictures/static.png")),
+                ("behavior.wallpaper_mode".into(), json!("fit")),
+                ("appearance.ui_theme".into(), json!("nord")),
+                ("behavior.wallpaper_earth_view".into(), json!("fixed")),
+                ("behavior.wallpaper_moon_view".into(), json!("rotating")),
+                ("behavior.wallpaper_solar_spin_speed".into(), json!(42.0)),
+                (
+                    "behavior.wallpaper_astronomy_outputs".into(),
+                    json!({"DP-1": {"scene": "moon"}, "HDMI-1": {"scene": "saturn"}}),
+                ),
+            ])
+            .unwrap();
+        selected.save_to_file(&path).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("# Keep my other settings\n{original}")).unwrap();
+        let default_spin = Config::default().behavior().wallpaper_solar_spin_speed;
+        for (choice, field, expected) in [
+            ("view:earth", "wallpaper_earth_view", json!("rotating")),
+            ("view:moon", "wallpaper_moon_view", json!("fixed")),
+            ("spin:pause", "wallpaper_solar_spin_speed", json!(0.0)),
+            ("spin:realtime", "wallpaper_solar_spin_speed", json!(1.0)),
+            (
+                "spin:default",
+                "wallpaper_solar_spin_speed",
+                json!(default_spin),
+            ),
+            ("view:earth", "wallpaper_earth_view", json!("fixed")),
+            ("view:moon", "wallpaper_moon_view", json!("rotating")),
+        ] {
+            let before = std::fs::read_to_string(&path).unwrap();
+            let mut expected_file: toml::Table = toml::from_str(&before).unwrap();
+            expected_file
+                .get_mut("behavior")
+                .unwrap()
+                .as_table_mut()
+                .unwrap()
+                .insert(field.into(), toml::Value::try_from(&expected).unwrap());
+            let previous_outputs = selected.behavior().wallpaper_astronomy_outputs.clone();
+            let changes = astronomy_changes(
+                selected.behavior(),
+                &WallpaperTarget::All,
+                &["DP-1".into(), "HDMI-1".into()],
+                &format!("jwm-wallpaper:{choice}"),
+            )
+            .unwrap();
+            selected.set_values(&changes).unwrap();
+            selected
+                .persist_wallpaper_changes_to(&path, &changes, &previous_outputs)
+                .unwrap();
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(saved.starts_with("# Keep my other settings\n"));
+            assert_eq!(
+                toml::from_str::<toml::Table>(&saved).unwrap(),
+                expected_file
+            );
+            let reloaded = Config::load_from_file(&path).unwrap();
+            assert_eq!(
+                serde_json::to_value(reloaded.behavior()).unwrap()[field],
+                expected,
+                "{choice} did not survive reload"
+            );
+            assert_eq!(
+                reloaded.behavior().wallpaper_astronomy_outputs,
+                previous_outputs
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

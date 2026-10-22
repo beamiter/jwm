@@ -5558,6 +5558,14 @@ impl Config {
                     self.inner.behavior.wallpaper_moon_texture = path;
                 }
             }
+            "behavior.wallpaper_crossfade" => self.inner.behavior.wallpaper_crossfade = as_bool()?,
+            "behavior.wallpaper_crossfade_duration_ms" => {
+                let duration = as_u32()?;
+                if duration > 30_000 {
+                    return Err(format!("{key} must be an integer in 0..=30000"));
+                }
+                self.inner.behavior.wallpaper_crossfade_duration_ms = u64::from(duration);
+            }
             "behavior.wallpaper_mode" => {
                 let mode = as_string()?;
                 if !["fill", "fit", "stretch", "center"].contains(&mode.as_str()) {

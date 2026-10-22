@@ -5,6 +5,29 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Wallpaper library and scene controls
+
+- Add `F5` / **Refresh image library** to the native wallpaper picker, preserving
+  search, retained selection and display target while an asynchronous scan runs.
+  Keep image controls and the library ahead of the longer celestial controls.
+- Expose global Fill/Fit/Stretch/Center sizing, image-transition and accent-colour
+  toggles, and daily rotation of the full retained library. Rotation includes
+  bundled and current images within the 200-image cap regardless of search;
+  stopping restores static wallpaper rules. These image controls are session-only.
+- Show the current scene for connected target displays, add independent global
+  Earth/planet and Moon Fixed/Rotating controls, and offer solar surface-spin
+  Pause, Real time and Restore default tour actions. Celestial actions retain
+  their existing saved-configuration behavior and keep the orbital clock separate.
+- Share simultaneous cold decode/resize work for the same file version, mode
+  and sample size across outputs, retaining independent output transitions and
+  cancellation. Keep reuse within the existing bounded decode/cache lifecycle.
+- Deduplicate retained library aliases within and across primary/bundled scans,
+  preserve bundled reservations at the primary cutoff, and track each directory's
+  scan limit separately for accurate status messages.
+- Prevent hidden RGB in transparent images from tinting wallpaper-derived
+  accents. Allow failed or colourless extraction to retry on a later config
+  apply, and discard pending extraction when the wallpaper is cleared.
+
 ### Window placement defaults
 
 - Disable `behavior.remember_closed_placement` by default, including when the

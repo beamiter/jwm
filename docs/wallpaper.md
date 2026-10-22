@@ -2,16 +2,24 @@
 
 `Alt+Ctrl+W` (`wallpaper_picker`) lists the images in the wallpaper directory
 and applies the one you pick. `Up`/`Down` select; `Enter` / left-click /
-middle click applies and closes; `Esc` — or `Alt+Ctrl+W` again — closes
-without changing anything. The wallpaper already in use is marked and starts
+middle click applies an image and closes; `Esc` — or `Alt+Ctrl+W` again — closes
+without applying the highlighted row. Controls apply immediately and remain in
+effect when the panel closes. The wallpaper already in use is marked and starts
 selected, so reopening the panel does not lose your place.
 
-Type to search by filename, path or effect name. Matching ignores case, supports
-Unicode, and requires every space-separated word to match. `Space` enters search
+Type to search by filename, path, effect or control name. Matching ignores case,
+supports Unicode, and requires every space-separated word to match. `Space` enters search
 text; `Enter` or a click applies. `Backspace` edits the query, while `Home`/`End`,
 `PageUp`/`PageDown`, arrows and scrolling navigate the filtered results. The title
 shows the current row and match count. A directory scan completing while you
 type preserves your query and a still-matching selection.
+
+Press `F5` or choose **Refresh image library · F5** to rescan without closing
+the panel. Refresh keeps the query, a still-present selection and the selected
+display target. The current rows remain visible and searchable while the scan
+runs; image application waits for the result. Repeated refresh requests share
+the pending scan. This also retries a scan whose worker
+could not start.
 
 The highlighted candidate is also shown: a thumbnail card sits to the right
 of the list, vertically centered on it, and tracks both arrow-key and
@@ -25,6 +33,29 @@ There is no placeholder or spinner: until the thumbnail lands — or if
 the file cannot be decoded — the picker looks unchanged. A left-click or
 middle click on the preview applies the highlighted wallpaper — the pointer
 twin of `Enter` — and closes the picker the same way a list-row click does.
+
+## Controls in the picker
+
+Image controls stay open after applying and show
+`Applied for this session · configuration file unchanged`. They use the live
+configuration; reload or restart restores the values in your TOML file.
+
+| Control | Result |
+| --- | --- |
+| **Global image sizing: Fill** | Cover the screen, cropping the image where needed. |
+| **Global image sizing: Fit** | Show the whole image with margins as needed. |
+| **Global image sizing: Stretch** | Match the screen dimensions, allowing distortion. |
+| **Global image sizing: Center** | Keep native pixels and clip anything outside the screen. |
+| **Global image transitions** | Toggle the configured image crossfade. Re-enabling a zero-duration transition restores 500 ms. |
+| **Wallpaper accent colors** | Toggle future wallpaper-derived theme updates; disabling keeps the colours already applied. |
+| **Rotate this image library daily · all screens** | Start daily rotation from the complete retained image list. |
+| **Stop daily rotation · restore static wallpapers** | Return to the static image, monitor and tag settings. |
+
+Global sizing supplies the default image mode; explicit monitor/tag modes keep
+their own values. These image controls remain global when **Apply to** targets
+one display. Choose **All screens** to apply an individual static image. Celestial
+scene selection and its saved controls are described in
+[Celestial 3D wallpapers](astronomy-wallpaper.md).
 
 ## Which directory
 
@@ -47,12 +78,16 @@ in memory while reading the directory, retaining the first 200 names in
 global order even when better names arrive at the end of the scan, within the
 100,000 raw-entry scan limit per directory. Bundled JWM images reserve up to
 their own count of those 200 slots if the preferred directory is different.
-Symlink aliases of already listed pictures do not create duplicate entries.
+Symlink aliases are deduplicated within each retained collection and across the
+two collections. A bundled picture keeps its reserved slot even when its
+preferred-directory alias would otherwise fall beyond the retained cutoff.
 The current wallpaper is kept even if it falls outside those names or lives in
 another directory; when necessary it replaces the last retained item without
 exceeding the 200-image cap.
 The status distinguishes an empty folder from a
-read error, reports skipped entries and warns when a cap is reached. Search
+read error, reports skipped entries and warns when a cap is reached. The raw
+scan limit is tracked per directory, so two complete scans do not produce a
+false warning simply because their combined entry count exceeds 100,000. Search
 covers the retained image list (up to 200 images), plus the built-in effects;
 it does not search beyond that cap or recurse into subdirectories.
 Both directories are read on one worker thread:
@@ -62,7 +97,7 @@ mount never stalls the frame that opened the panel. Choosing the directory
 checks the candidates above on disk, so it runs on the same worker. If no
 worker thread can be started, the status line reads
 `Could not start the wallpaper scan` instead of staying on `Scanning…` for
-good; reopening the panel tries again. A panel closed before its listing
+good; `F5` or reopening the panel tries again. A panel closed before its listing
 lands drops the answer, and each opening starts its own scan, so only the
 newest one fills the rows. Only an image whose type the directory entry
 cannot settle (a symlink, a filesystem without entry types) costs a `stat`;
@@ -99,11 +134,12 @@ To switch an old persistent `wallpaper` or `wallpaper_rotation_paths` entry
 to the new collection, change the paths in your own config.
 
 Bundled static images are **not** enabled as daily rotation automatically.
-The picker can apply a picture immediately, or you can persist a single image
-in `behavior.wallpaper` with `wallpaper_rotation = "off"`. To rotate this collection
-daily, explicitly set `wallpaper_rotation = "daily"` and supply its 14 installed
-paths in `wallpaper_rotation_paths`. The same ordered collection is used on
-both X11 and Wayland; connected displays receive consecutive offsets.
+The picker can apply a picture immediately, or start session-only rotation with
+**Rotate this image library daily · all screens**. To persist a single image,
+set `behavior.wallpaper` with `wallpaper_rotation = "off"`. To persist rotation
+of the bundled collection, set `wallpaper_rotation = "daily"` and supply its
+14 installed paths in `wallpaper_rotation_paths`. The same ordered collection
+is used on both X11 and Wayland; connected displays receive consecutive offsets.
 
 ## How it applies
 
@@ -143,8 +179,9 @@ That also means the change is **in memory only**, like every other
 and `behavior.wallpaper_rotation = "off"` in the file. Daily choices leave
 the saved rotation schedule untouched.
 
-`behavior.wallpaper`, `behavior.wallpaper_mode`, and `behavior.wallpaper_dir`
-are now settable over IPC too:
+`behavior.wallpaper`, `behavior.wallpaper_mode`, `behavior.wallpaper_dir`,
+`behavior.wallpaper_crossfade` and `behavior.wallpaper_crossfade_duration_ms`
+are settable over IPC too:
 
 ```sh
 jwm-tool msg set_config --args '{"key": "behavior.wallpaper", "value": "/srv/walls/alps.jpg"}'
@@ -152,13 +189,18 @@ jwm-tool msg set_config --args '{"key": "behavior.wallpaper_mode", "value": "fit
 ```
 
 `wallpaper_mode` accepts `fill`, `fit`, `stretch`, or `center`, and rejects
-anything else rather than silently falling back.
+anything else rather than silently falling back. The crossfade duration accepts
+integer milliseconds from 0 through 30,000; zero is valid only when crossfade
+is disabled.
 
 ### Image quality and transitions
 
 The composited X11 and Wayland paths reuse recently decoded images in a bounded
-64 MiB / 24-entry cache. Repeat requests share the resized pixels; changing the
-source file, mode or required sampling size obtains the appropriate new image.
+64 MiB / 24-entry cache. Repeat requests share the resized pixels. Simultaneous
+first loads of the same file version, mode and sampling size also share one
+decode and resize, including when several outputs request that image together.
+Changing the source file, mode or required sampling size obtains the appropriate
+new image. Each output retains its own selection and transition.
 Transparent PNG/WebP pixels are composited over black before filtering, avoiding
 hidden-color fringes. These settings control successful image replacements,
 including independent monitor/tag wallpapers:
@@ -176,6 +218,16 @@ margins. Failed decodes retain the working image. See
 source identity, resource lifetime and reproducible rendering checks.
 
 ## Daily rotation and different screens
+
+Choose **Rotate this image library daily · all screens** after the library scan
+finishes to start rotation immediately. It uses the full retained library,
+including bundled images and the retained current image, up to 200 entries;
+the search query does not narrow the collection. Starting it disables a
+celestial effect and clears today's manual daily choice. Refreshing the library
+later does not change the rotation collection until you choose the action
+again. **Stop daily rotation · restore static wallpapers** restores the static
+selection while keeping the collection available in the live configuration.
+Both actions are session-only. For a persistent schedule, edit TOML:
 
 ```toml
 [behavior]
@@ -196,8 +248,8 @@ output order, so connecting or removing a screen may shift its image.
 Selection is applied on startup, configuration changes, and output changes.
 The existing maintenance tick notices midnight or a clock/date correction
 within about a second; no external timer or daemon is needed. Image loading
-remains asynchronous on X11, Wayland, and compositor-off X11. Theme colors
-follow the first output's selected image.
+remains asynchronous on X11, Wayland, and compositor-off X11. During automatic
+daily rotation, theme colors follow the first output's scheduled image.
 
 Daily selection takes precedence over static `wallpaper`, `wallpaper_monitors`
 and `wallpaper_tags`, leaving those values intact for when rotation is off.
@@ -243,6 +295,12 @@ are counted into 4096 buckets (four bits per channel — fine enough to keep a
 sunset apart from the sand under it, coarse enough that a gradient sky counts
 as one colour rather than ten thousand).
 
+For images with transparency, RGB is multiplied by alpha before shrinking and
+recovered afterwards. Invisible RGB therefore cannot tint the sample. Pixels
+below half coverage are skipped; the remaining pixels are weighted by their
+alpha as well as saturation. This extracts the visible source hue without
+assuming a fixed desktop background colour.
+
 Buckets are ranked by area **weighted heavily towards saturation**. This is the
 part that matters: the largest area in a photograph is usually sky, snow, or
 asphalt, and almost never the colour anyone would name the picture by. In the
@@ -275,11 +333,12 @@ with something arbitrary.
 Decoding is the expensive part: roughly 90 ms for a 2560×1920 JPEG. It runs on
 a worker thread and the result is adopted on a later frame, exactly like the
 Wi-Fi scan, so the wallpaper appears immediately and the colours follow a
-moment later. The extraction is started once per wallpaper — a config apply
-that changed something else does not decode the same picture again. If the
-worker thread cannot be started at all, the wallpaper is not marked as
-extracted: `get_wallpaper_colors` does not report `pending` forever, and the
-next config apply tries again.
+moment later. A successfully extracted wallpaper is remembered, so an unrelated
+config apply does not decode the same picture again. If the worker cannot
+start, decoding fails, or the image has no usable colour, the request is cleared
+and the next config apply can retry the same path. Failure itself starts no
+retry loop and keeps the existing palette. Clearing the wallpaper also discards
+its pending extraction, so a late result cannot retint an empty selection.
 
 ### Over IPC
 

@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 /// Counting gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
 /// full-image allocation); rapid wallpaper changes or per-monitor setup would
@@ -204,7 +204,13 @@ impl WallpaperCacheKey {
 struct WallpaperDecodeCache {
     entries: VecDeque<(WallpaperCacheKey, WallpaperImageData)>,
     bytes: usize,
+    // Workers requesting the same source version and sampling parameters
+    // share one decode. Weak references keep completed flights from becoming
+    // an unbounded second cache, including images too large for the LRU.
+    in_flight: Vec<(WallpaperCacheKey, Weak<WallpaperDecodeFlight>)>,
 }
+
+type WallpaperDecodeFlight = Mutex<Option<WallpaperImageData>>;
 
 impl WallpaperDecodeCache {
     fn get(&mut self, key: &WallpaperCacheKey) -> Option<WallpaperImageData> {
@@ -213,6 +219,21 @@ impl WallpaperDecodeCache {
         let image = entry.1.clone();
         self.entries.push_back(entry);
         Some(image)
+    }
+
+    fn flight(&mut self, key: &WallpaperCacheKey) -> Arc<WallpaperDecodeFlight> {
+        self.in_flight
+            .retain(|(_, flight)| flight.strong_count() > 0);
+        if let Some(flight) = self
+            .in_flight
+            .iter()
+            .find_map(|(entry, flight)| (entry == key).then(|| flight.upgrade()).flatten())
+        {
+            return flight;
+        }
+        let flight = Arc::new(Mutex::new(None));
+        self.in_flight.push((key.clone(), Arc::downgrade(&flight)));
+        flight
     }
 
     fn insert(&mut self, key: WallpaperCacheKey, image: WallpaperImageData) {
@@ -290,16 +311,47 @@ fn decode_wallpaper_cached(
     cancelled: &AtomicBool,
     cache: &Mutex<WallpaperDecodeCache>,
 ) -> Option<WallpaperImageData> {
+    decode_wallpaper_cached_with(path, max_w, max_h, mode, cancelled, cache, |path| {
+        super::image_source::open_regular_image_with_metadata(path)
+    })
+}
+
+fn decode_wallpaper_cached_with(
+    path: &str,
+    max_w: u32,
+    max_h: u32,
+    mode: WallpaperMode,
+    cancelled: &AtomicBool,
+    cache: &Mutex<WallpaperDecodeCache>,
+    decode_source: impl FnOnce(&str) -> image::ImageResult<(image::DynamicImage, std::fs::Metadata)>,
+) -> Option<WallpaperImageData> {
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
     let key = WallpaperCacheKey::for_path(Path::new(path), max_w, max_h, mode);
-    if let Some(key) = &key
-        && let Some(image) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(key)
-    {
-        return Some(image);
+    let flight = if let Some(key) = &key {
+        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(image) = cache.get(key) {
+            return Some(image);
+        }
+        Some(cache.flight(key))
+    } else {
+        None
+    };
+    // This lock is taken only by already-bounded background workers, never
+    // by the compositor. Release the cache lock before waiting, so unrelated
+    // images and completed uploads continue making progress. A failed or
+    // cancelled producer leaves None, letting the next live waiter retry.
+    let mut shared = flight
+        .as_ref()
+        .map(|flight| flight.lock().unwrap_or_else(|e| e.into_inner()));
+    if cancelled.load(Ordering::Acquire) {
+        return None;
     }
-    let (image, source_metadata) = super::image_source::open_regular_image_with_metadata(path)
+    if let Some(Some(image)) = shared.as_deref() {
+        return Some(image.clone());
+    }
+    let (image, source_metadata) = decode_source(path)
         .map_err(|error| log::warn!("wallpaper: failed to decode '{path}': {error}"))
         .ok()?;
     if cancelled.load(Ordering::Acquire) {
@@ -331,6 +383,9 @@ fn decode_wallpaper_cached(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, image.clone());
+        if let Some(shared) = &mut shared {
+            **shared = Some(image.clone());
+        }
     }
     Some(image)
 }
@@ -391,6 +446,164 @@ mod cache_tests {
             &AtomicBool::new(false),
             cache,
         )
+    }
+
+    fn overlapping_decodes(
+        cancel_producer: bool,
+        cancel_waiter: bool,
+    ) -> (
+        Option<WallpaperImageData>,
+        Option<WallpaperImageData>,
+        usize,
+    ) {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::{Duration, Instant};
+
+        let fixture = Fixture::new();
+        let path = fixture.image("wall.png", [10, 20, 30, 255]);
+        let path = path.to_str().unwrap();
+        let cache = Mutex::new(WallpaperDecodeCache::default());
+        let decoded = AtomicUsize::new(0);
+        let producer_cancelled = AtomicBool::new(false);
+        let waiter_cancelled = AtomicBool::new(false);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (producer, waiter) = std::thread::scope(|scope| {
+            let cache_ref = &cache;
+            let decoded_ref = &decoded;
+            let cancelled = &producer_cancelled;
+            let producer = scope.spawn(move || {
+                decode_wallpaper_cached_with(
+                    path,
+                    4,
+                    2,
+                    WallpaperMode::Fit,
+                    cancelled,
+                    cache_ref,
+                    |path| {
+                        decoded_ref.fetch_add(1, Ordering::Relaxed);
+                        let source =
+                            super::super::image_source::open_regular_image_with_metadata(path);
+                        started_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        source
+                    },
+                )
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let waiter = scope.spawn(|| {
+                decode_wallpaper_cached_with(
+                    path,
+                    4,
+                    2,
+                    WallpaperMode::Fit,
+                    &waiter_cancelled,
+                    &cache,
+                    |path| {
+                        decoded.fetch_add(1, Ordering::Relaxed);
+                        super::super::image_source::open_regular_image_with_metadata(path)
+                    },
+                )
+            });
+            // Confirm both workers hold the same flight before releasing the
+            // producer. This tests a real overlapping cache miss deterministically.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if cache.lock().unwrap().in_flight[0].1.strong_count() == 2 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "waiter did not join the decode");
+                std::thread::yield_now();
+            }
+            producer_cancelled.store(cancel_producer, Ordering::Release);
+            waiter_cancelled.store(cancel_waiter, Ordering::Release);
+            resume_tx.send(()).unwrap();
+            (producer.join().unwrap(), waiter.join().unwrap())
+        });
+        (producer, waiter, decoded.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn simultaneous_monitors_decode_and_resize_the_same_source_only_once() {
+        let (first, second, decoded) = overlapping_decodes(false, false);
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(decoded, 1);
+        assert!(Arc::ptr_eq(&first.rgba, &second.rgba));
+        assert_eq!((second.width, second.height), (4, 2));
+        assert_eq!(&second.rgba[..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn cancelling_a_shared_decode_waiter_keeps_the_other_monitor_alive() {
+        let (producer, waiter, decoded) = overlapping_decodes(false, true);
+        assert!(producer.is_some());
+        assert!(waiter.is_none());
+        assert_eq!(decoded, 1);
+    }
+
+    #[test]
+    fn cancelling_a_shared_decode_producer_allows_a_live_monitor_to_retry() {
+        let (producer, waiter, decoded) = overlapping_decodes(true, false);
+        assert!(producer.is_none());
+        assert!(waiter.is_some());
+        assert_eq!(decoded, 2);
+    }
+
+    #[test]
+    fn shared_results_can_outlive_lru_admission_without_becoming_a_second_cache() {
+        let fixture = Fixture::new();
+        let path = fixture.image("wall.png", [10, 20, 30, 255]);
+        let key = WallpaperCacheKey::for_path(&path, 4, 2, WallpaperMode::Fit).unwrap();
+        let cache = Mutex::new(WallpaperDecodeCache::default());
+        let image = decode(&path, (4, 2), WallpaperMode::Fit, &cache).unwrap();
+        let flight = {
+            let mut cache = cache.lock().unwrap();
+            // Simulate an image exceeding the LRU budget without a huge fixture.
+            cache.insert_with_limits(key.clone(), image.clone(), 1, CACHE_MAX_ENTRIES);
+            assert!(cache.entries.is_empty());
+            assert_eq!(cache.bytes, 0);
+            cache.flight(&key)
+        };
+        *flight.lock().unwrap() = Some(image.clone());
+        let reused = decode_wallpaper_cached_with(
+            path.to_str().unwrap(),
+            4,
+            2,
+            WallpaperMode::Fit,
+            &AtomicBool::new(false),
+            &cache,
+            |_| panic!("an active shared result needs no second decode"),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&image.rgba, &reused.rgba));
+        let weak = Arc::downgrade(&flight);
+        drop(flight);
+        assert!(weak.upgrade().is_none());
+        assert!(cache.lock().unwrap().entries.is_empty());
+        let fresh = decode(&path, (4, 2), WallpaperMode::Fit, &cache).unwrap();
+        assert!(!Arc::ptr_eq(&image.rgba, &fresh.rgba));
+        assert_eq!(cache.lock().unwrap().in_flight.len(), 1);
+    }
+
+    #[test]
+    fn in_flight_identity_separates_replaced_files_and_sampling_parameters() {
+        let fixture = Fixture::new();
+        let path = fixture.image("wall.png", [255, 0, 0, 255]);
+        let mut cache = WallpaperDecodeCache::default();
+        let key = WallpaperCacheKey::for_path(&path, 4, 2, WallpaperMode::Fit).unwrap();
+        let old = cache.flight(&key);
+        let different_mode =
+            cache.flight(&WallpaperCacheKey::for_path(&path, 4, 2, WallpaperMode::Fill).unwrap());
+        let different_size =
+            cache.flight(&WallpaperCacheKey::for_path(&path, 8, 4, WallpaperMode::Fit).unwrap());
+        let replacement = fixture.image("new.png", [0, 0, 255, 255]);
+        std::fs::rename(replacement, &path).unwrap();
+        let replaced =
+            cache.flight(&WallpaperCacheKey::for_path(&path, 4, 2, WallpaperMode::Fit).unwrap());
+        for flight in [different_mode, different_size, replaced] {
+            assert!(!Arc::ptr_eq(&old, &flight));
+        }
+        assert!(Arc::ptr_eq(&old, &cache.flight(&key)));
     }
 
     #[test]

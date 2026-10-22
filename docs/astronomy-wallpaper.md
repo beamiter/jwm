@@ -20,6 +20,10 @@ Wallpaper** from a status bar's shell entry (`Alt+F10` opens the Shell Hub).
 The wallpaper panel is searchable: type a
 planet name, `share`, or `clock`, and use the pointer or Enter to activate
 a row. Clear the query to return to the full list; Page Up/Page Down browse it.
+`F5` refreshes the image library while preserving the query, a retained selection
+and the display target. Static image controls and the library appear before the
+longer celestial scene/control list; searching a planet or control name reaches
+those rows directly.
 
 1. Use **Apply to: All screens** at the top to cycle between all screens and
    each connected display. The target uses connector names such as `DP-1` and
@@ -32,6 +36,12 @@ a row. Clear the query to return to the full list; Page Up/Page Down browse it.
 4. To span one scene over a subset of the desk, target a display and choose
    **Share with DP-1**, substituting the desired reference display. Repeat for
    more members. **Leave group** makes only the selected display independent.
+
+**Current scene** describes the target's connected displays. With **All
+screens**, it names the scene when they agree or shows **Multiple scenes across
+connected screens** when they differ. Static images and a disconnected target
+have explicit status labels; assignments saved for unplugged displays do not
+make the connected scene status appear mixed.
 
 Reference dimensions, sidereal rotation and orbit, material provenance, and
 source URLs are documented in [Astronomy science](astronomy-science.md).
@@ -54,11 +64,19 @@ scans preserve the selected target. If that target is unplugged while the panel
 is open, a write is refused until another target is chosen; JWM never silently
 redirects it to a different display.
 
-Layout, lighting/presentation, solar orbit mode, orbital clock and surface-spin
-settings are global. **Apply to** scopes scene selection and group membership;
+Layout, lighting/presentation, Earth/planet and Moon view modes, solar orbit mode,
+orbital clock and surface-spin settings are global. **Apply to** scopes scene
+selection and group membership;
 the clock controls update every Solar System scene together. Their rows are
 labelled **Global** so selecting one output does not imply a separate date or
 lighting model for it.
+
+**Global Earth / planets view** and **Global Moon view** toggle Fixed and
+Rotating independently. They change the corresponding configured view mode;
+the configured coordinates, axis/period settings and current-UTC illumination
+remain in force. Fixed mode uses that configured view rather than saving the
+current dragged pose. These actions use the same persistent configuration path
+as celestial scene selection.
 
 ## Available scenes
 
@@ -230,7 +248,10 @@ The default surface-spin multiplier is **718.035×**, making Earth's sidereal
 rotation take 120 seconds in a Solar System scene. Thus the orbital clock's
 `1×` is not real-time surface rotation. Set `wallpaper_solar_spin_speed = 1.0`
 as well for real-time sidereal spin, or `0.0` to stop surface spin. The picker
-shows the current spin multiplier separately from the date rate.
+shows the current spin multiplier separately from the date rate and offers
+**Global solar spin: Pause**, **Real time (1×)** and **Restore default tour**.
+These saved actions change only the surface-spin multiplier; the orbital mode,
+date clock and camera keep their existing settings.
 
 ## Scientific and illustrative presentation
 
