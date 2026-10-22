@@ -6,7 +6,8 @@
 
 # Live effect: "off" (default) = static; "astronomy" = configurable celestial scenes.
 # Legacy "solar-system" remains supported; use scene = "solar-system" in new layouts.
-wallpaper_effect = "astronomy"
+# Keep the default 2D wallpaper; set to "astronomy" to opt into the 3D scenes below.
+wallpaper_effect = "off"
 # Native picker: Alt+Ctrl+W; Apply to chooses all screens or a connector/group.
 # Select a scene, layout or Share with row; celestial choices persist in the config.
 # Reference dimensions, material provenance and source URLs: docs/astronomy-science.md.

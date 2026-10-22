@@ -1,5 +1,10 @@
 # Wallpaper picker
 
+JWM uses a static 2D wallpaper by default (`behavior.wallpaper_effect = "off"`).
+Celestial 3D wallpapers require selecting a scene in the picker or explicitly
+setting `wallpaper_effect = "astronomy"` in `[behavior]`. To restore the 2D
+wallpaper after enabling a 3D scene, set `wallpaper_effect = "off"`.
+
 `Alt+Ctrl+W` (`wallpaper_picker`) lists the images in the wallpaper directory
 and applies the one you pick. `Up`/`Down` select; `Enter` / left-click /
 middle click applies an image and closes; `Esc` — or `Alt+Ctrl+W` again — closes
