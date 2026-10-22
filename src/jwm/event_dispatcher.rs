@@ -5352,6 +5352,7 @@ mod tests {
 
     #[test]
     fn middle_click_on_the_network_row_selects_and_toggles_like_left() {
+        use crate::jwm::features::connectivity::test_commands;
         use crate::jwm::features::{ControlCenterInputs, ControlKind, LinkKind, SystemUiState};
 
         let mut jwm = empty_jwm();
@@ -5396,6 +5397,41 @@ mod tests {
         assert!(
             jwm.features.system_ui.is_control_center(),
             "radio toggle keeps the Hub open"
+        );
+        assert!(
+            !jwm.features
+                .connectivity
+                .network
+                .as_ref()
+                .unwrap()
+                .wifi_enabled,
+            "the click immediately requests Wi-Fi off"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while jwm.features.connectivity_poll.is_some() && std::time::Instant::now() < deadline {
+            jwm.poll_connectivity_job();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            jwm.features.connectivity_poll.is_none(),
+            "radio worker finished"
+        );
+        assert!(
+            !jwm.features
+                .connectivity
+                .network
+                .as_ref()
+                .unwrap()
+                .wifi_enabled,
+            "the fake radio confirms the requested state after the worker completes"
+        );
+        assert_eq!(
+            test_commands::calls()
+                .iter()
+                .filter(|(cmd, args)| cmd == "nmcli" && args == &["radio", "wifi", "off"])
+                .count(),
+            1,
+            "the real click path sends exactly one off request to the fake executor"
         );
     }
 

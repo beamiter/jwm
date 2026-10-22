@@ -14,12 +14,21 @@ const CONNECTIVITY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTIVITY_ACTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONNECTIVITY_OUTPUT_BYTES: usize = 1024 * 1024;
 
+#[cfg(test)]
+pub(crate) mod test_commands;
+
 fn connectivity_output(
     cmd: &str,
     args: &[&str],
     timeout: Duration,
     output_limit: usize,
 ) -> std::io::Result<std::process::Output> {
+    // Unit tests must never control the developer's network. Only explicit
+    // shell fixtures exercise the real bounded-process implementation.
+    #[cfg(test)]
+    if !test_commands::is_shell_fixture(cmd, args) {
+        return test_commands::output(cmd, args);
+    }
     super::external_command::output_with_limits(cmd, args, timeout, output_limit)
 }
 
@@ -544,6 +553,8 @@ struct BackgroundJobState<T> {
 
 impl<T: Send + 'static> BackgroundJob<T> {
     pub fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
+        #[cfg(test)]
+        let test_commands = test_commands::capture();
         let slot = std::sync::Arc::new(std::sync::Mutex::new(BackgroundJobState {
             result: None,
             notifier: None,
@@ -558,6 +569,8 @@ impl<T: Send + 'static> BackgroundJob<T> {
         let spawned = std::thread::Builder::new()
             .name("jwm-background-job".into())
             .spawn(move || {
+                #[cfg(test)]
+                test_commands::install(test_commands);
                 let value = work();
                 let notifier = {
                     let mut guard = handle
@@ -1854,6 +1867,12 @@ fn output_with_secret_line(
     args: &[&str],
     secret: &str,
 ) -> std::io::Result<std::process::Output> {
+    // Password-based joins bypass connectivity_output, but must use the same
+    // test boundary before creating a pipe or spawning a real nmcli.
+    #[cfg(test)]
+    if !test_commands::is_shell_fixture(cmd, args) {
+        return test_commands::output(cmd, args);
+    }
     use std::io::Write as _;
     let (reader, mut writer) = std::io::pipe()?;
     writer.write_all(secret.as_bytes())?;
@@ -2098,6 +2117,60 @@ impl crate::jwm::Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radio_workers_share_fake_state_without_affecting_other_tests() {
+        let job = BackgroundJob::spawn(|| {
+            assert!(set_wifi(false));
+            assert!(set_bluetooth(false));
+            read_state()
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let state = loop {
+            if let Some(state) = job.take() {
+                break state;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "radio worker finished"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(!state.network.unwrap().wifi_enabled);
+        assert!(!state.bluetooth.powered);
+        // A worker updates its owning test's radios, while an independent
+        // thread (like another parallel test) starts with its own radios.
+        assert!(!read_state().network.unwrap().wifi_enabled);
+        let other = std::thread::spawn(read_state).join().unwrap();
+        assert!(other.network.unwrap().wifi_enabled);
+        assert!(other.bluetooth.powered);
+        assert!(set_wifi(true));
+        assert!(read_state().network.unwrap().wifi_enabled);
+    }
+
+    #[test]
+    fn unmocked_network_mutations_never_fall_through_to_host_commands() {
+        for (cmd, args) in [
+            ("rfkill", vec!["block", "wifi"]),
+            ("env", vec!["LC_ALL=C", "rfkill", "block", "wifi"]),
+            ("/usr/bin/nmcli", vec!["radio", "wifi", "off"]),
+            ("nmcli", vec!["connection", "delete", "id", "Test"]),
+            ("bluetoothctl", vec!["disconnect", "00:00:00:00:00:00"]),
+        ] {
+            let error = connectivity_output(cmd, &args, CONNECTIVITY_ACTION_TIMEOUT, 1024)
+                .expect_err("unmocked commands must fail closed");
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+        for plan in [
+            ConnectPlan::Open,
+            ConnectPlan::UseSaved,
+            ConnectPlan::WithPassphrase,
+        ] {
+            let error = join_network(NMCLI, "Test", &plan, "test-password")
+                .expect_err("both ordinary and stdin-based joins must stay isolated");
+            assert!(error.contains("disabled in unit tests"));
+        }
+    }
 
     #[test]
     fn legal_ssid_whitespace_is_preserved_as_identity() {

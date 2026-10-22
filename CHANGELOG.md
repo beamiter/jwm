@@ -5,6 +5,12 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Connectivity test isolation
+
+- Keep Wi-Fi and Bluetooth commands in an in-memory executor during unit tests,
+  including background workers and password-based joins. Prevent the control
+  center's network-click regression test from disabling the host's Wi-Fi.
+
 ### Wallpaper library and scene controls
 
 - Add `F5` / **Refresh image library** to the native wallpaper picker, preserving
