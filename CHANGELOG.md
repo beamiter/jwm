@@ -5,6 +5,12 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Shortcut fallback reliability
+
+- Keep restore-preview and shortcut-passthrough fallback keys available when
+  malformed bindings are discarded. Detect CapsLock-normalized key conflicts
+  and retain the restore fallback when a chord leader cannot be triggered.
+
 ### Layout reliability
 
 - Give the final weighted tile its remaining pixels, avoiding one-pixel holes

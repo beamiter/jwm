@@ -3672,15 +3672,19 @@ impl Config {
         let modifiers = self.parse_modifiers(&fallback.modifier);
         let key_sym = self.parse_keysym(&fallback.key)?;
         let occupied = self.key_configs().iter().any(|key| {
-            (key.function == "restore_preview" && self.convert_key_config(key).is_some())
-                || (self.parse_modifiers(&key.modifier) == modifiers
-                    && self.parse_keysym(&key.key) == Some(key_sym))
+            self.convert_key_config(key).is_some()
+                && (key.function == "restore_preview"
+                    || ((self.parse_modifiers(&key.modifier) & !Mods::CAPS) == modifiers
+                        && self.parse_keysym(&key.key) == Some(key_sym)))
         });
         let chord = self.chord_config();
         // Disabled/invalid leaders and invalid second keys are not reachable.
         // Keep the legacy fallback available when a stored chord is inactive.
-        let chord_enabled =
-            !chord.leader_key.is_empty() && self.parse_keysym(&chord.leader_key).is_some();
+        let chord_enabled = !chord.leader_key.is_empty()
+            && self.parse_keysym(&chord.leader_key).is_some()
+            && !self
+                .parse_modifiers(&chord.leader_modifier)
+                .contains(Mods::CAPS);
         let restore_in_chord = chord_enabled
             && chord.bindings.iter().any(|key| {
                 key.function == "restore_preview" && self.convert_key_config(key).is_some()
@@ -3697,9 +3701,10 @@ impl Config {
         let modifiers = self.parse_modifiers(&fallback.modifier);
         let keysym = self.parse_keysym(&fallback.key)?;
         let occupied = self.key_configs().iter().any(|key| {
-            (key.function == fallback.function && self.convert_key_config(key).is_some())
-                || (self.parse_modifiers(&key.modifier) == modifiers
-                    && self.parse_keysym(&key.key) == Some(keysym))
+            self.convert_key_config(key).is_some()
+                && (key.function == fallback.function
+                    || ((self.parse_modifiers(&key.modifier) & !Mods::CAPS) == modifiers
+                        && self.parse_keysym(&key.key) == Some(keysym)))
         });
         let chord = self.chord_config();
         let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
@@ -9562,6 +9567,62 @@ border_px = 3
         cfg.inner.keybindings.chord.leader_key = "F9".into();
         cfg.inner.keybindings.chord.bindings[0].key = "not-a-keysym".into();
         assert!(cfg.restore_preview_fallback_key().is_some());
+    }
+
+    #[test]
+    fn safety_fallbacks_ignore_invalid_bindings_but_preserve_lock_normalized_occupants() {
+        for fallback in [
+            Config::default_restore_preview_key(),
+            Config::default_shortcut_passthrough_key(),
+        ] {
+            let mut cfg = Config::default();
+            cfg.inner.keybindings.keys.clear();
+            let available = |cfg: &Config| {
+                if fallback.function == "restore_preview" {
+                    cfg.restore_preview_fallback_key().is_some()
+                } else {
+                    cfg.shortcut_passthrough_fallback_key().is_some()
+                }
+            };
+            for (function, argument) in [
+                ("misspelled_function", ArgumentConfig::Int(0)),
+                ("setmfact", ArgumentConfig::Int(1)),
+                ("spawn", ArgumentConfig::StringVec(vec![])),
+            ] {
+                let mut invalid = fallback.clone();
+                invalid.function = function.into();
+                invalid.argument = argument;
+                cfg.inner.keybindings.keys = vec![invalid];
+                assert!(
+                    available(&cfg),
+                    "invalid {function} must not reserve the fallback"
+                );
+                assert!(cfg.get_keys().iter().any(|key| {
+                    key.key_sym == cfg.parse_keysym(&fallback.key).unwrap()
+                        && key.mask == cfg.parse_modifiers(&fallback.modifier)
+                }));
+            }
+
+            let mut occupant = fallback.clone();
+            occupant.function = "minimize".into();
+            occupant.modifier.push("CapsLock".into());
+            cfg.inner.keybindings.keys = vec![occupant];
+            assert!(!available(&cfg), "lock state is ignored by normal dispatch");
+        }
+    }
+
+    #[test]
+    fn restore_preview_fallback_survives_unreachable_lock_modified_chord() {
+        let mut cfg = Config::default();
+        cfg.inner.keybindings.keys.clear();
+        cfg.inner.keybindings.chord.leader_key = "F9".into();
+        cfg.inner.keybindings.chord.leader_modifier = vec!["Alt".into(), "CapsLock".into()];
+        cfg.inner.keybindings.chord.bindings = vec![Config::default_restore_preview_key()];
+        assert!(cfg.compile_chord().is_some());
+        // Leaders are matched directly against lock-free events, unlike normal keys.
+        assert!(cfg.restore_preview_fallback_key().is_some());
+        cfg.inner.keybindings.chord.leader_modifier.pop();
+        assert!(cfg.restore_preview_fallback_key().is_none());
     }
 
     #[test]
