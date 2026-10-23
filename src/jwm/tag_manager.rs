@@ -1015,6 +1015,46 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_monitor_round_trip_preserves_restore_offset_with_either_bar_preference() {
+        for source_bar in [false, true] {
+            for target_bar in [false, true] {
+                let mut backend = DockSpyBackend::new();
+                let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                let source = jwm.state.monitor_order[0];
+                let target = add_right_monitor(&mut jwm, source);
+                for (mon, show_bar) in [(source, source_bar), (target, target_bar)] {
+                    let monitor = &mut jwm.state.monitors[mon];
+                    let pertag = monitor.pertag.as_mut().unwrap();
+                    pertag.show_bars[pertag.cur_tag] = show_bar;
+                    // Include a desktop translated into negative coordinates.
+                    monitor.geometry.m_x -= 2400;
+                    monitor.geometry.w_x -= 2400;
+                    monitor.geometry.m_y -= 200;
+                    monitor.geometry.w_y -= 200;
+                }
+                let (_, source_work) = jwm.monitor_migration_areas(source).unwrap();
+                let (_, target_work) = jwm.monitor_migration_areas(target).unwrap();
+                let original = Rect::new(source_work.x + 60, source_work.y + 40, 400, 250);
+                let key = floating_client(&mut jwm, source, 0x423, original);
+                for _ in 0..3 {
+                    jwm.setfullscreen(&mut backend, key, true).unwrap();
+                    jwm.sendmon(&mut backend, Some(key), Some(target));
+                    jwm.setfullscreen(&mut backend, key, false).unwrap();
+                    assert_eq!(
+                        live_rect(&jwm.state.clients[key]),
+                        Rect::new(target_work.x + 60, target_work.y + 40, 400, 250),
+                        "source bar={source_bar}, target bar={target_bar}"
+                    );
+                    jwm.setfullscreen(&mut backend, key, true).unwrap();
+                    jwm.sendmon(&mut backend, Some(key), Some(source));
+                    jwm.setfullscreen(&mut backend, key, false).unwrap();
+                    assert_eq!(live_rect(&jwm.state.clients[key]), original);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_layout_change_leaves_fullscreen_windows_on_other_tags_alone() {
         use crate::core::layout::LayoutEnum;
         use crate::jwm::WMArgEnum;
