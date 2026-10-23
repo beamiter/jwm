@@ -72,7 +72,9 @@ jobs:
         run: PYTHONPATH=video-demo python3 -m unittest discover -s video-demo/tests -v
 
       - name: Exercise offline metrics-tool contracts
-        run: bash scripts/test-metrics-tools.sh
+        run: |
+          bash scripts/test-metrics-tools.sh
+          python3 scripts/test-compositor-effect-matrix.py
 
       - name: Exercise test-wrapper process boundaries
         run: bash scripts/test-test-wrapper.sh
