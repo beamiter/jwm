@@ -9023,6 +9023,41 @@ mod tests {
     }
 
     #[test]
+    fn transition_capture_preserves_all_four_workarea_edges_at_mixed_resolutions() {
+        for scale in [1, 2] {
+            for origin_x in [0, 1920] {
+                // The policy already intersects outgoing/incoming workareas;
+                // every mode must capture that cropped rectangle verbatim.
+                for (x, y, w, h) in [
+                    (0, 52, 1920, 1028),
+                    (0, 0, 1920, 1028),
+                    (52, 0, 1868, 1080),
+                    (0, 0, 1868, 1080),
+                    (0, 0, 1920, 1080),
+                ] {
+                    let x = (origin_x + x) * scale;
+                    let y = y * scale;
+                    let w = w * scale as u32;
+                    let h = h * scale as u32;
+                    let root_h = 2160 * scale as u32;
+                    let plan = transition_capture_plan(3840 * scale as u32, root_h, x, y, w, h, 0)
+                        .expect("cropped workspace fits the root");
+                    assert_eq!(
+                        plan.src,
+                        (
+                            x,
+                            root_h as i32 - y - h as i32,
+                            x + w as i32,
+                            root_h as i32 - y
+                        )
+                    );
+                    assert_eq!(plan.dst, (0, 0, w as i32, h as i32));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn fullscreen_occlusion_requires_an_opaque_untransformed_draw() {
         assert!(is_opaque_occluder(false, 1.0, 0.0, false, 1.0, 1.0, false,));
 
