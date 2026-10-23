@@ -262,16 +262,25 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         draws_linear: bool,
     ) {
+        self.render_transition_at(gl, projection, draws_linear, std::time::Instant::now());
+    }
+
+    /// One clock sample per frame; also permits exact frame boundaries in
+    /// the headless renderer tests without sleeping or racing the scheduler.
+    pub(super) fn render_transition_at(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        draws_linear: bool,
+        now: std::time::Instant,
+    ) {
         self.transition_draws_linear = draws_linear;
         let Some(start) = self.transition_start else {
             self.finish_transition();
             return;
         };
-        let Some(progress) = normalized_transition_progress(
-            start,
-            std::time::Instant::now(),
-            self.transition_duration,
-        ) else {
+        let Some(progress) = normalized_transition_progress(start, now, self.transition_duration)
+        else {
             self.finish_transition();
             return;
         };

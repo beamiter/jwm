@@ -15,6 +15,9 @@
 use glow::HasContext as _;
 use std::os::raw::c_void;
 
+#[path = "transition_contract_tests.rs"]
+mod transition_contract_tests;
+
 /// Which client API / profile the headless context exposes.
 #[derive(Clone, Copy, Debug)]
 enum GlApi {
