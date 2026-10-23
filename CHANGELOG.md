@@ -5,6 +5,11 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Layout reliability
+
+- Give the final weighted tile its remaining pixels, avoiding one-pixel holes
+  in fractional-weight rows, columns, Fibonacci and scrolling layouts.
+
 ### Connectivity test isolation
 
 - Keep Wi-Fi and Bluetooth commands in an in-memory executor during unit tests,

@@ -113,6 +113,12 @@ fn distribute_length(
     let available = total.saturating_sub(inner_gaps).max(1);
     let remaining = available.saturating_sub(used).max(1);
     let later_count = count.saturating_sub(index).saturating_sub(1).max(0);
+    // The final client owns the remainder. Repeated subtraction of fractional
+    // factors can leave remaining_factor slightly above its actual factor;
+    // another proportional truncation would then leave a visible pixel hole.
+    if later_count == 0 {
+        return remaining;
+    }
     let maximum = remaining.saturating_sub(later_count).max(1);
     let proportional = if remaining_factor > 0.001 {
         (remaining as f32 * (factor.max(0.0) / remaining_factor)) as i32
@@ -2745,6 +2751,63 @@ mod tests {
                 Rect::new(-100, -1, 100, 21),
             ]
         );
+    }
+
+    #[test]
+    fn fractional_factors_fill_rows_and_columns_without_rounding_holes() {
+        let clients: Vec<_> = [0.25, 0.25, 0.7]
+            .into_iter()
+            .enumerate()
+            .map(|(key, factor)| LayoutClient {
+                key,
+                factor,
+                border_w: 0,
+            })
+            .collect();
+        let mut row = Vec::new();
+        let mut column = Vec::new();
+        push_factor_row(&mut row, &clients, -100, -80, 100, 100, 0);
+        push_factor_column(&mut column, &clients, -100, -80, 100, 100, 0);
+        assert_eq!(
+            row.iter().map(|r| r.rect.w).collect::<Vec<_>>(),
+            [20, 21, 59]
+        );
+        assert_eq!(
+            column.iter().map(|r| r.rect.h).collect::<Vec<_>>(),
+            [20, 21, 59]
+        );
+        assert_eq!(row.last().unwrap().rect.x + row.last().unwrap().rect.w, 0);
+        assert_eq!(
+            column.last().unwrap().rect.y + column.last().unwrap().rect.h,
+            20
+        );
+    }
+
+    #[test]
+    fn fractional_factors_fill_the_scrolling_column() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(-100, -80, 100, 100),
+            column_width_ratio: 0.5,
+            column_width_factors: Vec::new(),
+            gap: 0,
+            viewport_x: 0.0,
+        };
+        let clients = [0.25, 0.25, 0.7]
+            .into_iter()
+            .enumerate()
+            .map(|(key, factor)| LayoutClient {
+                key,
+                factor,
+                border_w: 0,
+            })
+            .collect();
+        let (results, _) = calculate_scrolling(&p, &[clients], 0);
+        assert_eq!(
+            results.iter().map(|r| r.rect.h).collect::<Vec<_>>(),
+            [20, 21, 59]
+        );
+        let last = results.last().unwrap().rect;
+        assert_eq!(last.y + last.h, p.screen_area.y + p.screen_area.h);
     }
 
     #[test]
