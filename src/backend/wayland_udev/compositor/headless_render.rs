@@ -10735,3 +10735,6 @@ fn wayland_wallpaper_explicit_refresh_preserves_images_and_retries_same_path() {
         );
     }
 }
+
+#[path = "window_glow_contract_tests.rs"]
+mod window_glow_contract_tests;
