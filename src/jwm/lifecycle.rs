@@ -1494,6 +1494,11 @@ impl Jwm {
         self.key_bindings = cfg.get_keys();
         self.cancel_chord(backend);
         self.chord_compiled = cfg.compile_chord();
+        // A reload may remove/reassign the exit key. Restore local bindings
+        // instead of leaving a remote window with no keyboard escape.
+        if self.shortcut_passthrough_controls().is_empty() {
+            self.shortcut_passthrough_owner = None;
+        }
         if let Err(e) = self.grabkeys(backend) {
             warn!("[config] failed to re-grab keys: {e}");
         }

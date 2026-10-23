@@ -583,6 +583,9 @@ struct SharedState {
     /// Exact config allocation those bindings came from. Arc identity makes
     /// the common keyboard-event check allocation-free.
     binding_config: Option<Arc<Config>>,
+    /// Policy's actual grabs, including temporary remote passthrough and the
+    /// chord leader. None until policy has installed its first binding set.
+    active_key_grabs: Option<Vec<(Mods, KeySym)>>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
     keysym_table: Vec<crate::backend::common_define::KeySym>,
     /// xkb keycodes that were intercepted on press and should be intercepted on release.
@@ -633,6 +636,7 @@ impl Default for SharedState {
             cursor_dirty: false,
             key_bindings: Vec::new(),
             binding_config: None,
+            active_key_grabs: None,
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
 
@@ -669,6 +673,40 @@ fn shortcut_bindings_from_config(config: &Config) -> Vec<ShortcutBinding> {
         .collect()
 }
 
+impl SharedState {
+    fn refresh_key_bindings(&mut self, config: Arc<Config>) {
+        let configured = shortcut_bindings_from_config(&config);
+        self.key_bindings = if let Some(grabs) = &self.active_key_grabs {
+            grabs
+                .iter()
+                .map(|&(mods, keysym)| {
+                    let mods = mods & allowed_shortcut_mods();
+                    let repeatable = configured
+                        .iter()
+                        .find(|binding| binding.mods == mods && binding.keysym == keysym)
+                        .is_some_and(|binding| binding.repeatable);
+                    ShortcutBinding {
+                        mods,
+                        keysym,
+                        repeatable,
+                    }
+                })
+                .collect()
+        } else {
+            configured
+        };
+        self.binding_config = Some(config);
+    }
+
+    fn replace_key_grabs(&mut self, grabs: &[(Mods, KeySym)]) {
+        self.active_key_grabs = Some(grabs.to_vec());
+        self.refresh_key_bindings(CONFIG.load_full());
+        // The existing timer will drop on its next callback. Suppressed
+        // releases retain ownership until the corresponding physical keyup.
+        self.repeat = None;
+    }
+}
+
 fn refresh_shortcut_snapshot(
     shared: &mut SharedState,
 ) -> (bool, Option<smithay::reexports::calloop::RegistrationToken>) {
@@ -680,8 +718,7 @@ fn refresh_shortcut_snapshot(
     {
         return (false, None);
     }
-    shared.key_bindings = shortcut_bindings_from_config(&config);
-    shared.binding_config = Some(config);
+    shared.refresh_key_bindings(config);
     // Keep suppressed_keycodes until their physical releases, but stop a
     // repeat whose action/repeatability may have changed under it.
     (
@@ -4066,6 +4103,12 @@ impl UdevBackend {
             }
         }
 
+        let key_ops =
+            crate::backend::wayland_key_ops::BindingAwareKeyOps::new(Box::new(key_ops_impl), {
+                let shared = shared.clone();
+                move |bindings| shared.lock_safe().replace_key_grabs(bindings)
+            });
+
         Ok(Self {
             child_environment,
             display_handle,
@@ -4094,7 +4137,7 @@ impl UdevBackend {
                 flush_pending: flush_pending.clone(),
             }),
             output_ops,
-            key_ops: Box::new(key_ops_impl),
+            key_ops: Box::new(key_ops),
             cursor_provider: Box::new(DummyCursorProvider),
             color_allocator: Box::new(DummyColorAllocator),
 
@@ -8091,6 +8134,44 @@ mod udev_backend_selection_tests {
             function: "scrolling_focus_column".to_string(),
             argument: ArgumentConfig::Int(1),
         }
+    }
+
+    #[test]
+    fn shortcut_passthrough_grabs_survive_config_refresh_without_repeating() {
+        let mut shared = SharedState::default();
+        let exit = (
+            Mods::SUPER | Mods::CONTROL,
+            crate::backend::common_define::keys::KEY_F12,
+        );
+        shared.suppressed_keycodes.insert(30);
+        shared.repeat = repeat(1, Mods::ALT, 100, Instant::now());
+        shared.replace_key_grabs(&[exit]);
+        assert!(shared.repeat.is_none());
+        assert!(shared.suppressed_keycodes.contains(&30));
+        assert_eq!(shared.key_bindings.len(), 1);
+        assert_eq!(
+            (shared.key_bindings[0].mods, shared.key_bindings[0].keysym),
+            exit
+        );
+        assert!(!shared.key_bindings[0].repeatable);
+        // A new config allocation must not restore all WM bindings while
+        // policy still owns a passthrough window.
+        shared.refresh_key_bindings(Arc::new(Config::default()));
+        assert_eq!(shared.key_bindings.len(), 1);
+        assert_eq!(
+            (shared.key_bindings[0].mods, shared.key_bindings[0].keysym),
+            exit
+        );
+        let normal: Vec<_> = CONFIG
+            .load()
+            .get_keys()
+            .iter()
+            .map(|key| (key.mask, key.key_sym))
+            .collect();
+        shared.replace_key_grabs(&normal);
+        assert!(shared.key_bindings.iter().any(|binding| binding.repeatable));
+        shared.replace_key_grabs(&[]);
+        assert!(shared.key_bindings.is_empty());
     }
 
     fn repeat(

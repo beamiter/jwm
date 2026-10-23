@@ -1,5 +1,42 @@
 # JWM-to-JWM remote control (X11 LAN MVP)
 
+## Third-party remote desktop shortcuts
+
+When Sunlogin / 向日葵, RustDesk, a VM viewer, or another remote client does
+not grab the keyboard itself, local JWM bindings win before the client sees
+them. On the **local** machine, focus the remote session window and press
+**Ctrl+Super+F12** (Super is the Win key) to enable keyboard shortcut passthrough. JWM releases its
+keyboard shortcut grabs except for the toggle, letting the client receive
+combinations such as Alt+J, Alt+1, Alt+Shift+Return and chord leaders.
+
+Press the same key again to restore local shortcuts. Focusing another window
+or the desktop, closing the owner window, or restarting JWM also ends the
+mode. Returning to the remote window does not re-enable it automatically.
+The toggle is reserved locally during passthrough. Built-in lock and modal
+shell surfaces retain their input ownership. Mouse shortcuts are unchanged.
+
+This works through the shared policy for X11rb, XCB and the Wayland backends.
+The remote application still needs to forward the keys it receives; this
+mode cannot enable an application's own disabled keyboard-forwarding option.
+
+Older configs get Ctrl+Super+F12 in memory if that key and chord leader are free
+and no valid direct toggle is configured. To choose another key:
+
+```toml
+[[keybindings.keys]]
+modifier = ["Mod4", "Shift"]
+key = "F12"
+function = "toggle_shortcut_passthrough"
+```
+
+A directly reachable toggle binding is required to enter passthrough, even
+when invoking `jwm-tool msg toggle_shortcut_passthrough`. A chord-only toggle
+cannot release the mode because its leader is forwarded. A config reload
+keeps passthrough with the updated exit key, or restores local shortcuts if
+no exit remains.
+
+## Built-in JWM remote control
+
 `jwm-remote` shares one JWM X11 desktop with another JWM X11 session. It is
 implemented once for the X Composite surface used by both the `x11rb` and
 `xcb` backends. Windows/macOS, Wayland sessions, and other Linux window

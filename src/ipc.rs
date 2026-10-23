@@ -324,6 +324,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_pip",
         "toggle_recording",
         "toggle_scratchpad",
+        "toggle_shortcut_passthrough",
         "toggle_sticky",
         "toggle_tag",
         "toggle_tags_overview",
@@ -1514,6 +1515,10 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         }
         "app_launcher" | "launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
         "restore_preview" => Ok((Jwm::restore_preview as WMFuncType, WMArgEnum::Int(0))),
+        "toggle_shortcut_passthrough" => Ok((
+            Jwm::toggle_shortcut_passthrough as WMFuncType,
+            WMArgEnum::Int(0),
+        )),
         "control_center" | "hub" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
         "notification_center" | "notif_center" => {
             Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0)))

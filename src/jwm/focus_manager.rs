@@ -1264,6 +1264,7 @@ mod scratchpad_reveal_tests {
             animations: AnimationManager::new(),
             hidden_client_park_retries: crate::jwm::monitor::HiddenClientParkRetries::default(),
             key_bindings: Vec::new(),
+            shortcut_passthrough_owner: None,
             chord_compiled: None,
             chord_armed_until: None,
             do_not_disturb: false,

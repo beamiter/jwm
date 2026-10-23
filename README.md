@@ -350,6 +350,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Shift+R | Restart JWM; X11 preserves live windows’ tags, output placement, and [per-tag layouts](docs/restart-state.md) |
 | Alt+Control+Escape | Lock screen |
 | Alt+Control+O | Display layout |
+| Ctrl+Super+F12 | Toggle keyboard shortcut passthrough for the focused remote desktop window |
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |
 | Alt+Control+R | Interactively choose a source and start/stop screen recording |
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
@@ -370,6 +371,16 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 Older key lists gain `Alt+Control+N` in memory when `restore_preview` has no
 configured key or chord binding and that shortcut is unused as a key or chord
 leader. See [restoring minimized windows](docs/minimized-dock.md#restoring-a-window).
+
+For Sunlogin / 向日葵 and other remote desktop clients, focus the remote
+session window and press **Ctrl+Super+F12** (Super is the Win key) to pass JWM keyboard shortcuts to
+that window. Press the same key again, or focus another window, to restore
+local shortcuts. Returning to the remote window requires enabling it again.
+The toggle itself stays local; other keyboard bindings, including the chord
+leader, go to the client. Mouse bindings are unchanged. Existing key lists gain
+this binding in memory if it is free. A custom direct
+`toggle_shortcut_passthrough` binding replaces the default; a chord alone
+cannot serve as the exit. See [remote shortcut passthrough](docs/remote-control.md#third-party-remote-desktop-shortcuts).
 
 Master resizing also works with a single client, in every layout. Alt+right-drag
 keeps a master tiled; larger masters reallocate neighbouring space. See

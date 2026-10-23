@@ -120,6 +120,7 @@ impl Jwm {
             self.grabbuttons(backend, client_key, false);
             if setfocus {
                 backend.on_focused_client_changed(None)?;
+                self.sync_shortcut_passthrough_focus(backend, None)?;
             }
         }
         Ok(())
@@ -132,6 +133,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.state.clients.get(client_key) {
             backend.on_focused_client_changed(Some(client.win))?;
+            self.sync_shortcut_passthrough_focus(backend, Some(client_key))?;
         }
         Ok(())
     }
@@ -141,7 +143,8 @@ impl Jwm {
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
         backend.window_ops().set_input_focus_root()?;
-        Ok(backend.on_focused_client_changed(None)?)
+        backend.on_focused_client_changed(None)?;
+        self.sync_shortcut_passthrough_focus(backend, None)
     }
 
     pub(crate) fn update_ewmh_desktop(

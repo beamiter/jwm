@@ -23,6 +23,7 @@ pub mod rules;
 pub(crate) mod scratchpad_handoff;
 pub(crate) mod scratchpad_pending;
 pub mod session;
+pub(crate) mod shortcut_passthrough;
 pub mod stacking;
 pub mod statusbar;
 pub mod strut_manager;
@@ -231,6 +232,10 @@ pub struct Jwm {
     pub(crate) hidden_client_park_retries: monitor::HiddenClientParkRetries,
 
     key_bindings: Vec<WMKey>,
+
+    /// Temporary owner of keyboard shortcut passthrough. Focus leaving this
+    /// client ends the mode; slotmap identity prevents recycled-window reuse.
+    pub(crate) shortcut_passthrough_owner: Option<ClientKey>,
 
     /// Compiled chord (leader + second-key bindings). `None` when disabled.
     pub(crate) chord_compiled: Option<crate::config::CompiledChord>,
@@ -1029,6 +1034,8 @@ impl Jwm {
             "lock_monitor"
         } else if eq!(Jwm::unlock_monitor) {
             "unlock_monitor"
+        } else if eq!(Jwm::toggle_shortcut_passthrough) {
+            "toggle_shortcut_passthrough"
         } else if eq!(Jwm::snap_window) {
             "snap_window"
         } else if eq!(Jwm::focusstack) {
@@ -1365,6 +1372,7 @@ impl Jwm {
             animations: AnimationManager::new(),
             hidden_client_park_retries: monitor::HiddenClientParkRetries::default(),
             key_bindings: CONFIG.load().get_keys(),
+            shortcut_passthrough_owner: None,
             chord_compiled: CONFIG.load().compile_chord(),
             chord_armed_until: None,
             do_not_disturb: CONFIG.load().behavior().do_not_disturb,
@@ -1998,6 +2006,22 @@ impl Jwm {
     fn grabkeys(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
         let root_window = backend.root_window().expect("no root window");
         backend.key_ops().clear_key_grabs(root_window)?;
+        let bindings = self.effective_key_grabs();
+        if std::env::var_os("JWM_DEBUG_KEYS").is_some() {
+            info!(
+                "[input] installing {} shortcut grabs, remote={}",
+                bindings.len(),
+                self.shortcut_passthrough_owner.is_some()
+            );
+        }
+        backend.key_ops().grab_keys(root_window, &bindings)?;
+        Ok(())
+    }
+
+    pub(crate) fn effective_key_grabs(&self) -> Vec<(Mods, KeySym)> {
+        if self.shortcut_passthrough_owner.is_some() {
+            return self.shortcut_passthrough_controls();
+        }
         let mut bindings: Vec<(Mods, KeySym)> = self
             .key_bindings
             .iter()
@@ -2011,8 +2035,7 @@ impl Jwm {
                 bindings.push(chord.leader);
             }
         }
-        backend.key_ops().grab_keys(root_window, &bindings)?;
-        Ok(())
+        bindings
     }
 
     fn enter_notify(
@@ -2478,6 +2501,9 @@ impl Jwm {
         if let Some(fallback) = cfg.restore_preview_fallback_key() {
             key_configs.push(fallback);
         }
+        if let Some(fallback) = cfg.shortcut_passthrough_fallback_key() {
+            key_configs.push(fallback);
+        }
         let lines = keybinding_viewer_lines(
             &key_configs,
             cfg.tags_length(),
@@ -2840,6 +2866,7 @@ fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConf
         },
         "lastlayout" => "previous layout".to_string(),
         "restore_preview" => "restore minimized window".to_string(),
+        "toggle_shortcut_passthrough" => "toggle remote window shortcuts".to_string(),
         "focusstack" => match argument {
             crate::config::ArgumentConfig::Int(i) => {
                 if *i > 0 {

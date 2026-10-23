@@ -2622,6 +2622,17 @@ impl Config {
         }
     }
 
+    fn default_shortcut_passthrough_key() -> KeyConfig {
+        KeyConfig {
+            // Ctrl+Alt+Fn belongs to X11 VT switching; use Super so the WM
+            // actually receives its escape even when the X server owns VTs.
+            modifier: vec!["Mod4".into(), "Control".into()],
+            key: "F12".into(),
+            function: "toggle_shortcut_passthrough".into(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
     fn get_default_keys() -> Vec<KeyConfig> {
         vec![
             KeyConfig {
@@ -3026,6 +3037,7 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             Self::default_restore_preview_key(),
+            Self::default_shortcut_passthrough_key(),
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "t".to_string(),
@@ -3678,6 +3690,23 @@ impl Config {
         (!occupied && !restore_in_chord && !leader_occupied).then_some(fallback)
     }
 
+    /// A direct binding must remain reachable while the chord leader and all
+    /// other WM shortcuts are released to the remote client.
+    pub fn shortcut_passthrough_fallback_key(&self) -> Option<KeyConfig> {
+        let fallback = Self::default_shortcut_passthrough_key();
+        let modifiers = self.parse_modifiers(&fallback.modifier);
+        let keysym = self.parse_keysym(&fallback.key)?;
+        let occupied = self.key_configs().iter().any(|key| {
+            (key.function == fallback.function && self.convert_key_config(key).is_some())
+                || (self.parse_modifiers(&key.modifier) == modifiers
+                    && self.parse_keysym(&key.key) == Some(keysym))
+        });
+        let chord = self.chord_config();
+        let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
+            && self.parse_keysym(&chord.leader_key) == Some(keysym);
+        (!occupied && !leader_occupied).then_some(fallback)
+    }
+
     pub fn get_keys(&self) -> Vec<WMKey> {
         let mut keys = Vec::new();
 
@@ -3873,6 +3902,11 @@ impl Config {
             log::info!("[config] legacy key list detected; enabling restore preview on Alt+Ctrl+N");
             keys.push(binding);
         }
+        if let Some(fallback) = self.shortcut_passthrough_fallback_key()
+            && let Some(binding) = self.convert_key_config(&fallback)
+        {
+            keys.push(binding);
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -4007,6 +4041,7 @@ impl Config {
             "killclient" => Some(Jwm::killclient),
             "minimize" => Some(Jwm::minimize),
             "restore_preview" => Some(Jwm::restore_preview),
+            "toggle_shortcut_passthrough" => Some(Jwm::toggle_shortcut_passthrough),
             "zoom" => Some(Jwm::zoom),
             "snap_window" => Some(Jwm::snap_window),
 
@@ -9431,6 +9466,50 @@ border_px = 3
         assert!(!key_function_is_repeatable("spawn"));
         assert!(!key_function_is_repeatable("killclient"));
         assert!(!key_function_is_repeatable("take_screenshot"));
+    }
+
+    #[test]
+    fn shortcut_passthrough_fallback_preserves_custom_keys_and_chord_leaders() {
+        let mut cfg = Config::default();
+        let default = Config::default_shortcut_passthrough_key();
+        assert!(cfg.shortcut_passthrough_fallback_key().is_none());
+        let toggle_keys = |cfg: &Config| {
+            cfg.get_keys()
+                .into_iter()
+                .filter(|key| {
+                    key.func_opt
+                        .is_some_and(crate::jwm::Jwm::is_shortcut_passthrough_control)
+                })
+                .count()
+        };
+        assert_eq!(toggle_keys(&cfg), 1);
+        assert!(!cfg.convert_key_config(&default).unwrap().repeatable);
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != default.function);
+        assert!(cfg.shortcut_passthrough_fallback_key().is_some());
+        assert_eq!(toggle_keys(&cfg), 1);
+
+        let mut custom = default.clone();
+        custom.modifier.reverse();
+        custom.function = "minimize".into();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.shortcut_passthrough_fallback_key().is_none());
+        assert_eq!(toggle_keys(&cfg), 0);
+        cfg.inner.keybindings.keys.pop();
+        cfg.inner.keybindings.chord.leader_modifier = default.modifier.clone();
+        cfg.inner.keybindings.chord.leader_key = default.key.clone();
+        assert!(cfg.shortcut_passthrough_fallback_key().is_none());
+        cfg.inner.keybindings.chord.leader_key = "F9".into();
+        cfg.inner.keybindings.chord.bindings = vec![default.clone()];
+        // A chord binding alone is not usable as the passthrough exit.
+        assert!(cfg.shortcut_passthrough_fallback_key().is_some());
+        let mut custom = default;
+        custom.key = "F8".into();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.shortcut_passthrough_fallback_key().is_none());
+        assert_eq!(toggle_keys(&cfg), 1);
     }
 
     #[test]

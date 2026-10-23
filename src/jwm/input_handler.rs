@@ -2430,6 +2430,22 @@ impl Jwm {
             | Mods::MOD3
             | Mods::MOD5;
 
+        // Wayland also reports forwarded presses to policy. Dropping a WM
+        // action here alone would lose the key on X11, so grabkeys() releases
+        // the actual grabs too. Modal shell input (especially the lock) keeps
+        // its own routing and must never be bypassed by this mode.
+        if self.shortcut_passthrough_owner.is_some() && self.grab_holding_mode_on_screen().is_none()
+        {
+            if !repeat
+                && self
+                    .shortcut_passthrough_controls()
+                    .contains(&(clean_state, keysym))
+            {
+                self.toggle_shortcut_passthrough(backend, &WMArgEnum::Int(0))?;
+            }
+            return Ok(());
+        }
+
         // The Alt+Tab switcher is the most modal surface of all: its modifier
         // is still held, and any binding that shares it (Alt+C would kill the
         // focused window) must not fire underneath the panel. Every key is
@@ -4424,7 +4440,9 @@ mod tests {
         CompositorWindowEffects, CompositorWorkspaceEffects, DisplayControl, EventHandler,
         Geometry, HitTarget, RenderScheduler, WindowAttributes, WindowChanges, WindowOps,
     };
-    use crate::backend::common_define::{ConfigWindowBits, MouseButton, Pixel, WindowId};
+    use crate::backend::common_define::{
+        ConfigWindowBits, Mods, MouseButton, Pixel, WindowId, keys,
+    };
     use crate::backend::error::BackendError;
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
@@ -4432,6 +4450,7 @@ mod tests {
     };
     use crate::core::models::WMClient;
     use crate::core::types::Rect;
+    use crate::jwm::WMArgEnum;
     use std::any::Any;
     use std::sync::Mutex;
 
@@ -5340,6 +5359,7 @@ mod tests {
     struct RepeatDispatchKeys {
         keysym: std::sync::Arc<std::sync::atomic::AtomicU32>,
         grabs: std::sync::Arc<Mutex<Vec<bool>>>,
+        key_grabs: std::sync::Arc<Mutex<Vec<Vec<(Mods, u32)>>>>,
     }
 
     impl RepeatDispatchKeys {
@@ -5353,8 +5373,9 @@ mod tests {
         fn grab_keys(
             &self,
             _root: WindowId,
-            _bindings: &[(crate::backend::common_define::Mods, u32)],
+            bindings: &[(crate::backend::common_define::Mods, u32)],
         ) -> Result<(), BackendError> {
+            self.key_grabs.lock().unwrap().push(bindings.to_vec());
             Ok(())
         }
 
@@ -5393,6 +5414,156 @@ mod tests {
         backend.key_ops = Box::new(input.clone());
         backend.toast_log.lock().unwrap().clear();
         (jwm, backend, input)
+    }
+
+    fn shortcut_passthrough_fixture() -> (
+        Jwm,
+        ConfigureReplyBackend,
+        RepeatDispatchKeys,
+        crate::core::models::ClientKey,
+    ) {
+        let (mut jwm, backend, input) = repeat_dispatch_fixture();
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = crate::core::models::WMClient::new(WindowId::from_raw(0x999));
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        jwm.update_monitor_selection_by_key(Some(key));
+        jwm.key_bindings = vec![
+            crate::jwm::WMKey::new(
+                Mods::SUPER | Mods::CONTROL,
+                keys::KEY_F12,
+                Some(Jwm::toggle_shortcut_passthrough),
+                WMArgEnum::Int(0),
+            ),
+            crate::jwm::WMKey::new(
+                Mods::ALT,
+                keys::KEY_r,
+                Some(count_repeat_dispatch),
+                WMArgEnum::Int(0),
+            )
+            .with_repeatable(true),
+        ];
+        jwm.chord_compiled = Some(crate::config::CompiledChord {
+            leader: (Mods::ALT, keys::KEY_space),
+            timeout: std::time::Duration::from_secs(1),
+            bindings: vec![],
+        });
+        (jwm, backend, input, key)
+    }
+
+    #[test]
+    fn shortcut_passthrough_releases_grabs_and_blocks_local_actions_and_chords() {
+        let (mut jwm, mut backend, input, key) = shortcut_passthrough_fixture();
+        input.select(keys::KEY_F12);
+        let control = Mods::SUPER | Mods::CONTROL;
+        jwm.on_key_press_internal(&mut backend, 1, control.bits())
+            .unwrap();
+        assert_eq!(jwm.shortcut_passthrough_owner, Some(key));
+        assert_eq!(
+            input.key_grabs.lock().unwrap().last().unwrap(),
+            &vec![(control, keys::KEY_F12)]
+        );
+        backend.toast_log.lock().unwrap().clear();
+        for sym in [keys::KEY_r, keys::KEY_space] {
+            input.select(sym);
+            for repeat in [false, true] {
+                jwm.on_key_press_internal_with_repeat(&mut backend, 1, Mods::ALT.bits(), repeat)
+                    .unwrap();
+            }
+        }
+        assert!(jwm.chord_armed_until.is_none());
+        assert!(backend.toast_log.lock().unwrap().is_empty());
+        input.select(keys::KEY_F12);
+        jwm.on_key_press_internal_with_repeat(&mut backend, 1, control.bits(), true)
+            .unwrap();
+        assert_eq!(jwm.shortcut_passthrough_owner, Some(key));
+        jwm.on_key_press_internal(&mut backend, 1, control.bits())
+            .unwrap();
+        assert_eq!(jwm.shortcut_passthrough_owner, None);
+        let log = input.key_grabs.lock().unwrap();
+        let restored = log.last().unwrap();
+        assert!(restored.contains(&(Mods::ALT, keys::KEY_r)));
+        assert!(restored.contains(&(Mods::ALT, keys::KEY_space)));
+    }
+
+    #[test]
+    fn shortcut_passthrough_ends_on_client_or_root_focus_and_does_not_reenable() {
+        for root in [false, true] {
+            let (mut jwm, mut backend, input, key) = shortcut_passthrough_fixture();
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .unwrap();
+            // A redundant focus update must not end remote control.
+            jwm.setfocus(&mut backend, key).unwrap();
+            assert_eq!(jwm.shortcut_passthrough_owner, Some(key));
+            if root {
+                jwm.set_root_focus(&mut backend).unwrap();
+            } else {
+                let other = jwm.insert_client(crate::core::models::WMClient::new(
+                    WindowId::from_raw(0x998),
+                ));
+                jwm.setfocus(&mut backend, other).unwrap();
+            }
+            assert_eq!(jwm.shortcut_passthrough_owner, None);
+            assert!(
+                input
+                    .key_grabs
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .contains(&(Mods::ALT, keys::KEY_r))
+            );
+            jwm.setfocus(&mut backend, key).unwrap();
+            assert_eq!(jwm.shortcut_passthrough_owner, None);
+        }
+    }
+
+    #[test]
+    fn shortcut_passthrough_requires_reachable_exit_and_never_bypasses_lock() {
+        let (mut jwm, mut backend, input, key) = shortcut_passthrough_fixture();
+        jwm.key_bindings.remove(0);
+        assert!(
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        assert_eq!(jwm.shortcut_passthrough_owner, None);
+
+        let control = crate::jwm::WMKey::new(
+            Mods::SUPER | Mods::CONTROL,
+            keys::KEY_F12,
+            Some(Jwm::toggle_shortcut_passthrough),
+            WMArgEnum::Int(0),
+        );
+        jwm.key_bindings.insert(0, control.clone());
+        // A preceding binding on the same key makes the exit unreachable.
+        let mut occupied = control.clone();
+        occupied.func_opt = Some(count_repeat_dispatch);
+        jwm.key_bindings.insert(0, occupied);
+        assert!(
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        jwm.key_bindings.remove(0);
+        jwm.chord_compiled.as_mut().unwrap().leader = (control.mask, control.key_sym);
+        assert!(
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        jwm.chord_compiled = None;
+        jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        input.select(keys::KEY_F12);
+        jwm.on_key_press_internal(&mut backend, 1, control.mask.bits())
+            .unwrap();
+        assert!(jwm.features.system_ui.is_locked());
+        assert_eq!(jwm.shortcut_passthrough_owner, Some(key));
+        assert!(
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
     }
 
     #[test]
