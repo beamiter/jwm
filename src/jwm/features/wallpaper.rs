@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub use crate::backend::compositor_common::wallpaper::expand_home;
+
 /// Picker-only identity. Never pass it to an image decoder or store it as a path.
 pub(crate) const ASTRONOMY_CHOICE: &str = "jwm-effect:astronomy";
 pub(crate) const SOLAR_SYSTEM_CHOICE: &str = "jwm-effect:solar-system";
@@ -814,16 +816,6 @@ pub fn resolve_picker_directory(
         return bundled.to_path_buf();
     }
     resolve_directory(configured_dir, current_wallpaper, home)
-}
-
-/// Expand a leading `~` against `home`; other paths are taken as given.
-#[must_use]
-pub fn expand_home(path: &str, home: &Path) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(rest) => home.join(rest),
-        None if path == "~" => home.to_path_buf(),
-        None => PathBuf::from(path),
-    }
 }
 
 /// Image files in `dir`, sorted by name, capped at [`MAX_ENTRIES`].

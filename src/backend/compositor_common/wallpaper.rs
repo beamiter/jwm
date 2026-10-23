@@ -2,6 +2,16 @@
 
 use crate::config::{BehaviorConfig, WallpaperTagConfig};
 
+/// Expand a leading `~` against `home`; other paths are taken as given.
+#[must_use]
+pub fn expand_home(path: &str, home: &std::path::Path) -> std::path::PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None if path == "~" => home.to_path_buf(),
+        None => std::path::PathBuf::from(path),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WallpaperMode {
     Fill,

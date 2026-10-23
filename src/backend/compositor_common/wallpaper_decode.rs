@@ -527,7 +527,7 @@ fn decode_wallpaper_for_home(
     cancelled: &AtomicBool,
     home: &Path,
 ) -> Result<Option<WallpaperImageData>, Arc<WallpaperDecodeFlight>> {
-    let resolved = crate::jwm::features::wallpaper::expand_home(path, home);
+    let resolved = super::wallpaper::expand_home(path, home);
     let Some(path) = resolved.to_str() else {
         log::warn!("wallpaper: resolved path is not UTF-8: {resolved:?}");
         return Ok(None);
@@ -704,7 +704,7 @@ mod cache_tests {
 
     #[test]
     fn shared_home_resolver_preserves_relative_absolute_and_named_user_paths() {
-        use crate::jwm::features::wallpaper::expand_home;
+        use super::super::wallpaper::expand_home;
         let home = Path::new("/fake/home");
         for (configured, expected) in [
             ("~", "/fake/home"),
