@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### IPC data integrity
+
+- Reject invalid UTF-8 IPC frames instead of replacing bytes in commands,
+  arguments, replies or subscription events. Validate unknown extension fields
+  too, while preserving valid Unicode and the order of errors and subsequent
+  valid requests.
+
 ### Shortcut passthrough and lock state
 
 - Normalize ordinary shortcut grabs and passthrough escape controls like

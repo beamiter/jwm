@@ -151,7 +151,9 @@ It also prints a compact `version_info` line from `get_status.version_info`.
 It also prints a compact `metrics` line from `get_status.metrics`.
 It also prints a compact `ipc_caps` line from `get_status.capabilities`.
 
-IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
+IPC 使用 UTF-8 编码、换行分隔的 JSON。服务端拒绝包含非法 UTF-8 的请求，
+工具也拒绝此类响应或订阅事件，避免替换损坏字节后改变原始内容。
+工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
 完整到达；订阅可以长期空闲，但一条事件从收到首批字节起也须在 5 秒内
 收齐。超长、超时或缺少结尾换行的消息会结束读取并报告错误。

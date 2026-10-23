@@ -5400,6 +5400,38 @@ mod tests {
     }
 
     #[test]
+    fn ipc_line_reader_rejects_invalid_utf8_in_responses_and_events() {
+        for subscription in [false, true] {
+            let (reader_stream, writer) = UnixStream::pair().unwrap();
+            write_pair(&writer, b"{\"data\":\"\xff\"}\n");
+            let mut reader = IpcLineReader::new(reader_stream);
+            let result = if subscription {
+                reader.read_subscription_line(Duration::from_secs(1))
+            } else {
+                reader.read_line_until(Instant::now() + Duration::from_secs(1))
+            };
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn ipc_line_reader_preserves_unicode_across_reads() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        let expected = "{\"data\":\"窗口 🦀\"}";
+        // Place a multi-byte character across the reader's chunk boundary.
+        let prefix = " ".repeat(8191 - "{\"data\":\"".len());
+        let payload = format!("{prefix}{expected}\n");
+        write_pair(&writer, payload.as_bytes());
+        let mut reader = IpcLineReader::new(reader_stream);
+        assert_eq!(
+            reader
+                .read_line_until(Instant::now() + Duration::from_secs(1))
+                .unwrap(),
+            format!("{prefix}{expected}")
+        );
+    }
+
+    #[test]
     fn ipc_line_reader_rejects_an_unbounded_frame() {
         let (reader_stream, writer) = UnixStream::pair().unwrap();
         let writer_thread = std::thread::spawn(move || {
@@ -8579,7 +8611,8 @@ impl IpcLineReader {
                 }
                 // Keep the existing CLI contract: consume the delimiter but
                 // omit it from the response returned to single-shot --raw.
-                let line = String::from_utf8_lossy(&self.buf[self.start..end]).into_owned();
+                let line = String::from_utf8(self.buf[self.start..end].to_vec())
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                 self.start = end + 1;
                 self.scan = self.start;
                 self.compact();

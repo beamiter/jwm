@@ -4200,7 +4200,14 @@ xwininfo: Window id: 0x20000c "fixture"
         let guard = try_lock_display_guard(&guard_path).expect("acquire first reservation");
         assert!(try_lock_display_guard(&guard_path).is_none());
         drop(guard);
-        assert!(try_lock_display_guard(&guard_path).is_some());
+        // Parallel process-spawning tests can briefly inherit the descriptor
+        // between fork and exec, even with O_CLOEXEC. Keep the exclusivity
+        // assertion above immediate, but allow that inherited copy to close.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while try_lock_display_guard(&guard_path).is_none() {
+            assert!(Instant::now() < deadline, "reservation was not released");
+            std::thread::sleep(Duration::from_millis(1));
+        }
 
         assert!(artifacts_are_absent(&lock, &socket));
         std::os::unix::fs::symlink(dir.join("missing"), &lock).unwrap();

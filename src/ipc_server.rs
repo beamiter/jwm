@@ -311,7 +311,7 @@ impl IpcClient {
     /// Extract up to `limit` complete frames without shifting the buffer.
     /// `scan_pos` resumes at the first uninspected byte, so fragmented frames
     /// and complete overflow frames are each scanned only once.
-    fn take_complete_messages(&mut self, limit: usize) -> Vec<String> {
+    fn take_complete_messages(&mut self, limit: usize) -> Vec<Vec<u8>> {
         if limit == 0 || self.buf_start == self.buf.len() {
             return Vec::new();
         }
@@ -330,7 +330,9 @@ impl IpcClient {
             line_start = scan_pos + 1;
             scan_pos = line_start;
             if !line.is_empty() {
-                messages.push(String::from_utf8_lossy(line).into_owned());
+                // Keep wire bytes intact: lossy UTF-8 decoding could turn an
+                // invalid command or argument into a different valid string.
+                messages.push(line.to_vec());
                 if messages.len() == limit {
                     break;
                 }
@@ -370,7 +372,7 @@ impl IpcClient {
         &mut self,
         message_budget: usize,
         read_byte_budget: usize,
-    ) -> (io::Result<Vec<String>>, usize) {
+    ) -> (io::Result<Vec<Vec<u8>>>, usize) {
         let message_limit = message_budget.min(MAX_MESSAGES_PER_POLL);
         let read_byte_limit = read_byte_budget.min(MAX_READ_BYTES_PER_POLL);
         if message_limit == 0 {
@@ -448,7 +450,7 @@ impl IpcClient {
     /// completed, so they are the peer's last frame, like the final line of a
     /// file without a trailing newline. Delivering it gets the peer a reply
     /// (a parse error if it was truncated) instead of dropping it silently.
-    fn take_unterminated_final_frame(&mut self, limit: usize, messages: &mut Vec<String>) {
+    fn take_unterminated_final_frame(&mut self, limit: usize, messages: &mut Vec<Vec<u8>>) {
         if !self.read_closed || messages.len() >= limit || self.buf_start == self.buf.len() {
             return;
         }
@@ -457,7 +459,7 @@ impl IpcClient {
         // budget left every complete frame has already been consumed.
         debug_assert!(!tail.contains(&b'\n'));
         if !tail.trim_ascii().is_empty() {
-            messages.push(String::from_utf8_lossy(tail).into_owned());
+            messages.push(tail.to_vec());
         }
         self.buf_start = self.buf.len();
         self.scan_pos = self.buf.len();
@@ -1021,7 +1023,17 @@ impl IpcServer {
                     messages_seen += lines.len();
                     debug_assert!(messages_seen <= MAX_TOTAL_MESSAGES_PER_POLL);
                     for line in lines {
-                        let message = match serde_json::from_str::<IpcMessage>(&line) {
+                        // Validate the entire frame, including extension fields
+                        // skipped by serde's IgnoredAny visitor.
+                        let parsed = std::str::from_utf8(&line)
+                            .map_err(|error| {
+                                serde_json::Error::io(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    error,
+                                ))
+                            })
+                            .and_then(serde_json::from_str::<IpcMessage>);
+                        let message = match parsed {
                             Ok(IpcMessage::Command(cmd)) => IncomingIpc::Command {
                                 client_id: id,
                                 name: cmd.command,
@@ -1649,17 +1661,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(first.len(), MAX_MESSAGES_PER_POLL);
-        assert_eq!(first.first().unwrap(), "message-0");
+        assert_eq!(first.first().unwrap(), b"message-0");
         assert_eq!(
             first.last().unwrap(),
-            &format!("message-{}", MAX_MESSAGES_PER_POLL - 1)
+            format!("message-{}", MAX_MESSAGES_PER_POLL - 1).as_bytes()
         );
         assert_eq!(second.len(), 7);
         assert_eq!(
             second.first().unwrap(),
-            &format!("message-{MAX_MESSAGES_PER_POLL}")
+            format!("message-{MAX_MESSAGES_PER_POLL}").as_bytes()
         );
-        assert_eq!(second.last().unwrap(), &format!("message-{}", total - 1));
+        assert_eq!(
+            second.last().unwrap(),
+            format!("message-{}", total - 1).as_bytes()
+        );
     }
 
     #[test]
@@ -1691,7 +1706,7 @@ mod tests {
 
         let (final_frame, bytes_read) =
             client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
-        assert_eq!(final_frame.unwrap(), ["final-message"]);
+        assert_eq!(final_frame.unwrap(), [b"final-message".to_vec()]);
         assert_eq!(bytes_read, b"final-message\n".len());
         // The writer end is closed, but a sibling test that forked between
         // `UnixStream::pair` and that close leaves its child holding a copy of
@@ -1963,6 +1978,72 @@ mod tests {
         let response = std::str::from_utf8(&response[..read]).unwrap();
         assert!(response.contains("\"success\":false"), "{response}");
         assert!(response.contains("exactly one"), "{response}");
+    }
+
+    #[test]
+    fn invalid_utf8_frames_are_rejected_in_order_without_losing_valid_frames() {
+        use std::io::BufRead;
+
+        for invalid in [
+            b"{\"command\":\"quit\xff\"}".as_slice(),
+            b"{\"command\":\"spawn\",\"args\":{\"cmd\":[\"app\",\"\xff\"]}}".as_slice(),
+            b"{\"subscribe\":[\"window/\xff\"]}".as_slice(),
+            b"{\"command\":\"quit\",\"extension\":\"\xff\"}".as_slice(),
+        ] {
+            let mut server = make_test_server();
+            let mut peer = attach_test_client(&mut server, 7);
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let mut payload = b"{\"query\":\"first\"}\n".to_vec();
+            payload.extend_from_slice(invalid);
+            payload.extend_from_slice(b"\n{\"query\":\"last\"}\n");
+            peer.write_all(&payload).unwrap();
+
+            let incoming = server.poll_clients();
+            assert_eq!(incoming.len(), 2, "invalid UTF-8 must never be dispatched");
+            for (message, expected) in incoming.iter().zip(["first", "last"]) {
+                let IncomingIpc::Query {
+                    client_id, name, ..
+                } = message
+                else {
+                    panic!("expected only valid queries");
+                };
+                assert_eq!(name, expected);
+                server.respond(*client_id, &IpcResponse::ok(Some(expected.into())));
+            }
+
+            let mut reader = io::BufReader::new(peer);
+            for (success, expected_data) in [(true, "first"), (false, ""), (true, "last")] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["success"], success);
+                if success {
+                    assert_eq!(response["data"], expected_data);
+                } else {
+                    assert!(response["error"].as_str().unwrap().contains("parse error"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_in_unterminated_final_frame_is_rejected() {
+        use std::io::BufRead;
+
+        let mut server = make_test_server();
+        let mut peer = attach_test_client(&mut server, 7);
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        peer.write_all(b"{\"command\":\"spawn\",\"args\":{\"cmd\":[\"app\",\"\xff\"]}}")
+            .unwrap();
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+
+        assert!(server.poll_clients().is_empty());
+        let mut line = String::new();
+        io::BufReader::new(peer).read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["success"], false);
     }
 
     #[test]
