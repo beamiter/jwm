@@ -317,6 +317,31 @@ impl Jwm {
     /// placing a window wants the tabbed area, or it will put the window
     /// underneath the strip.
     pub(crate) fn monitor_work_area_untabbed(&self, mon_key: MonitorKey) -> Option<Rect> {
+        self.monitor_work_area_untabbed_with_bar(mon_key, self.monitor_shows_status_bar(mon_key))
+    }
+
+    /// Saved window rectangles use the user's bar preference, even while a
+    /// fullscreen client temporarily hides that bar. Otherwise each monitor
+    /// transfer adds the hidden bar's reservation to the restore position.
+    pub(crate) fn monitor_restore_work_area(&self, mon_key: MonitorKey) -> Option<Rect> {
+        let monitor = self.state.monitors.get(mon_key)?;
+        let wants_bar = monitor
+            .pertag
+            .as_ref()
+            .and_then(|pertag| pertag.show_bars.get(pertag.cur_tag).copied())
+            .unwrap_or(true);
+        let area = self.monitor_work_area_untabbed_with_bar(mon_key, wants_bar)?;
+        Some(crate::jwm::window_tabs::without_tab_bar(
+            area,
+            self.tab_bar_reserved(mon_key),
+        ))
+    }
+
+    fn monitor_work_area_untabbed_with_bar(
+        &self,
+        mon_key: MonitorKey,
+        show_bar: bool,
+    ) -> Option<Rect> {
         let monitor = self.state.monitors.get(mon_key)?;
 
         let debug_workarea = workarea_debug_enabled();
@@ -326,7 +351,6 @@ impl Jwm {
         let ww = monitor.geometry.w_w;
         let wh = monitor.geometry.w_h;
 
-        let show_bar = self.monitor_shows_status_bar(mon_key);
         let configured = CONFIG.load();
         let bar = crate::jwm::bar_geometry::BarGeometry::for_monitor(monitor, &configured);
         let managed_bar = self

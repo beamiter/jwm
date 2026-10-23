@@ -960,7 +960,7 @@ impl Jwm {
         let monitor_ref = self.state.monitors.get(monitor)?;
         let output = monitor_rect(monitor_ref);
         let work = self
-            .monitor_work_area(monitor)
+            .monitor_restore_work_area(monitor)
             .and_then(valid_rect)
             .unwrap_or_else(|| monitor_work_rect(monitor_ref));
         Some((output, work))
