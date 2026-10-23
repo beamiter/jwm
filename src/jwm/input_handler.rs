@@ -5489,6 +5489,83 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_passthrough_lock_modified_control_can_enter_and_exit() {
+        let (mut jwm, mut backend, input, key) = shortcut_passthrough_fixture();
+        let control = Mods::SUPER | Mods::CONTROL;
+        jwm.key_bindings[0].mask |= Mods::CAPS | Mods::NUMLOCK;
+        // Check the normal-mode grab before injecting input: a direct spy
+        // dispatch alone cannot prove X11 will deliver the unlocked press.
+        jwm.grabkeys(&mut backend).unwrap();
+        assert!(
+            input
+                .key_grabs
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .contains(&(control, keys::KEY_F12))
+        );
+        input.select(keys::KEY_F12);
+        jwm.on_key_press_internal(&mut backend, 1, control.bits())
+            .unwrap();
+        assert_eq!(jwm.shortcut_passthrough_owner, Some(key));
+        assert_eq!(
+            input.key_grabs.lock().unwrap().last().unwrap(),
+            &vec![(control, keys::KEY_F12)]
+        );
+        jwm.on_key_press_internal(&mut backend, 1, control.bits())
+            .unwrap();
+        assert_eq!(jwm.shortcut_passthrough_owner, None);
+    }
+
+    #[test]
+    fn normal_key_grabs_ignore_binding_locks_but_preserve_raw_chord_leader() {
+        for lock in [Mods::CAPS, Mods::NUMLOCK, Mods::CAPS | Mods::NUMLOCK] {
+            let (mut jwm, mut backend, input, _) = shortcut_passthrough_fixture();
+            for binding in &mut jwm.key_bindings {
+                binding.mask |= lock;
+            }
+            let leader = (Mods::ALT | lock, keys::KEY_space);
+            jwm.chord_compiled.as_mut().unwrap().leader = leader;
+            jwm.grabkeys(&mut backend).unwrap();
+            assert_eq!(
+                input.key_grabs.lock().unwrap().last().unwrap(),
+                &vec![
+                    (Mods::SUPER | Mods::CONTROL, keys::KEY_F12),
+                    (Mods::ALT, keys::KEY_r),
+                    leader,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn shortcut_passthrough_first_match_and_leader_use_lock_free_control_identity() {
+        let (mut jwm, mut backend, _, _) = shortcut_passthrough_fixture();
+        let control = jwm.key_bindings[0].clone();
+        let mut occupied = control.clone();
+        occupied.mask |= Mods::CAPS;
+        occupied.func_opt = Some(count_repeat_dispatch);
+        jwm.key_bindings.insert(0, occupied);
+        assert!(jwm.shortcut_passthrough_controls().is_empty());
+        assert!(
+            jwm.toggle_shortcut_passthrough(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        jwm.key_bindings.remove(0);
+        jwm.key_bindings[0].mask |= Mods::CAPS;
+        jwm.chord_compiled.as_mut().unwrap().leader = (control.mask, control.key_sym);
+        assert!(jwm.shortcut_passthrough_controls().is_empty());
+        // A lock-modified leader itself is unreachable: it is compared directly
+        // with cleaned input, so it must not hide an otherwise usable control.
+        jwm.chord_compiled.as_mut().unwrap().leader.0 |= Mods::CAPS;
+        assert_eq!(
+            jwm.shortcut_passthrough_controls(),
+            vec![(control.mask, control.key_sym)]
+        );
+    }
+
+    #[test]
     fn shortcut_passthrough_ends_on_client_or_root_focus_and_does_not_reenable() {
         for root in [false, true] {
             let (mut jwm, mut backend, input, key) = shortcut_passthrough_fixture();

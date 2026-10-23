@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Shortcut passthrough and lock state
+
+- Normalize ordinary shortcut grabs and passthrough escape controls like
+  normal key dispatch, so CapsLock/NumLock modifiers cannot prevent entering
+  or leaving passthrough. Respect first-match and chord-leader conflicts when
+  selecting escape controls.
+
 ### Shortcut fallback reliability
 
 - Keep restore-preview and shortcut-passthrough fallback keys available when

@@ -8,6 +8,7 @@ xev and stdbuf. Does not connect to the user's display or IPC socket.
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import socket
@@ -161,6 +162,33 @@ def main():
             wait_for(lambda: focused(local))  # returning did not re-enable
             assert received(remote_log, "j") == before
 
+            # A lock-modified binding has the same runtime identity as its
+            # ordinary shortcut. Verify the real escape grab after reload,
+            # rather than only checking the policy's computed control list.
+            blocks = text.split("[[keybindings.keys]]")
+            changed = 0
+            for index, block in enumerate(blocks[1:], 1):
+                if 'function = "toggle_shortcut_passthrough"' not in block:
+                    continue
+                blocks[index], count = re.subn(
+                    r"(?ms)^modifier = \[(.*?)\]",
+                    lambda match: 'modifier = [' + match[1].strip().rstrip(',') + ', "CapsLock"]',
+                    block, count=1,
+                )
+                changed += count
+            assert changed == 1, "expected one direct passthrough control"
+            config.write_text("[[keybindings.keys]]".join(blocks))
+            msg("reload_config")
+            focus(remote)
+            key("ctrl+super+F12")
+            before = received(remote_log, "j")
+            key("alt+j")
+            wait_for(lambda: received(remote_log, "j") > before)
+            assert focused(remote)
+            key("ctrl+super+F12")
+            key("alt+j")
+            wait_for(lambda: focused(local))
+
             focus(remote)
             key("ctrl+super+F12")
             remote_process.terminate()
@@ -168,7 +196,7 @@ def main():
             wait_for(lambda: focused(local))
             key("alt+n")
             wait_for(lambda: next(w for w in msg("get_windows") if w["id"] == local)["is_minimized"])
-            print(f"PASS ({BACKEND}): actual press/release forwarding, chord, reload, held toggle, focus, close")
+            print(f"PASS ({BACKEND}): actual press/release forwarding, chord, reload, held toggle, lock-modified escape, focus, close")
         except BaseException:
             for output in logs:
                 output.flush()

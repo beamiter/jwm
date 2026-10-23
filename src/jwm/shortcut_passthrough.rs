@@ -14,16 +14,21 @@ impl Jwm {
         let mut seen = std::collections::HashSet::new();
         self.key_bindings
             .iter()
-            .filter(|key| seen.insert((key.mask.bits(), key.key_sym)))
-            .filter(|key| {
+            // Normal shortcut dispatch masks lock state out of each binding.
+            // Preserve that identity for both first-match shadowing and the
+            // escape grabs; otherwise a CapsLock binding can enter this mode
+            // but never match its lock-free exit event.
+            .map(|key| (key, key.mask & !(Mods::CAPS | Mods::NUMLOCK)))
+            .filter(|(key, mask)| seen.insert((mask.bits(), key.key_sym)))
+            .filter(|(key, mask)| {
                 key.func_opt
                     .is_some_and(Self::is_shortcut_passthrough_control)
                     && self
                         .chord_compiled
                         .as_ref()
-                        .is_none_or(|chord| chord.leader != (key.mask, key.key_sym))
+                        .is_none_or(|chord| chord.leader != (*mask, key.key_sym))
             })
-            .map(|key| (key.mask, key.key_sym))
+            .map(|(key, mask)| (mask, key.key_sym))
             .collect()
     }
 

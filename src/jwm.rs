@@ -2025,7 +2025,10 @@ impl Jwm {
         let mut bindings: Vec<(Mods, KeySym)> = self
             .key_bindings
             .iter()
-            .map(|k| (k.mask, k.key_sym))
+            // Normal dispatch ignores lock state in binding masks. Start
+            // passive grabs from that same mask so X11 can add all four lock
+            // combinations, including the entirely unlocked keypress.
+            .map(|k| (k.mask & !(Mods::CAPS | Mods::NUMLOCK), k.key_sym))
             .collect();
         // Also grab the chord leader so the WM (not the focused client) sees it.
         // Second-key bindings inside the chord are handled via grab_keyboard
