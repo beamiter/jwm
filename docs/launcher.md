@@ -71,6 +71,10 @@ The history lives in `$XDG_DATA_HOME/jwm/launcher-usage` (usually
 `~/.local/share/jwm/launcher-usage`), one `count last_used name` per line. It is
 written on each launch rather than on exit, so an abrupt end to the session does
 not lose it, and it is capped at 500 entries — the least useful go first.
+An unset, empty, or relative `XDG_DATA_HOME` uses `~/.local/share` instead.
+If neither an absolute data directory nor an absolute home directory is
+available, history stays in memory for the session; it is never saved in the
+working directory or a shared `/tmp/jwm` directory.
 Deleting the file resets the ranking; a corrupt line costs that line and nothing
 else.
 Application identifiers containing control characters are not recorded, so an
@@ -79,8 +83,8 @@ embedded newline cannot inject additional entries into the history format.
 Usage saves atomically replace the history with a private file. An occupied
 temporary name is skipped without removing another writer's file; after 128
 occupied candidates, the save fails and leaves the previous history intact.
-Bare relative history paths are supported; a directory-sync error after the
-replacement does not clean up a temporary name another writer could have reused.
+A directory-sync error after replacement does not clean up a temporary name
+another writer could have reused.
 
 ## Arithmetic
 

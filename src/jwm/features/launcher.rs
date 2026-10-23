@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::compositor_common::row_icons::WINDOW_ROW_GLYPH;
@@ -269,7 +269,10 @@ impl UsageStore {
     /// history, not an error: the launcher works without a ranking.
     #[must_use]
     pub fn load() -> Self {
-        Self::load_from_path(&usage_path())
+        usage_path()
+            .as_deref()
+            .map(Self::load_from_path)
+            .unwrap_or_default()
     }
 
     fn load_from_path(path: &Path) -> Self {
@@ -281,7 +284,10 @@ impl UsageStore {
     /// Write the store back. Failures are logged and dropped — losing a
     /// ranking update is not worth interrupting a launch over.
     pub fn save(&self, now: u64) {
-        let path = usage_path();
+        let Some(path) = usage_path() else {
+            log::debug!("launcher: no absolute user data directory; history stays in memory");
+            return;
+        };
         let serialized = self.serialize(now);
         if let Err(error) = atomic_write_usage(&path, serialized.as_bytes()) {
             log::debug!("launcher: {}: {error}", path.display());
@@ -307,12 +313,23 @@ fn score(usage: &Usage, now: u64) -> u32 {
     usage.count.min(COUNT_CAP) * weight
 }
 
-fn usage_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    base.join("jwm").join(USAGE_FILE)
+fn usage_path() -> Option<PathBuf> {
+    let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    let home = dirs::home_dir();
+    usage_path_from_dirs(xdg_data_home.as_deref(), home.as_deref())
+}
+
+fn usage_path_from_dirs(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    // XDG base directories must be absolute. An empty or relative value is
+    // ignored, rather than resolving launch history against the WM's cwd.
+    let base = xdg_data_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/share"))
+        })?;
+    Some(base.join("jwm").join(USAGE_FILE))
 }
 
 /// Seconds since the Unix epoch, for callers that only need "now".
@@ -1043,6 +1060,39 @@ mod tests {
         assert!(store.score("good", NOW) > 0);
         assert!(store.score("also good", NOW) > 0);
         assert_eq!(store.score("bad", NOW), 0);
+    }
+
+    #[test]
+    fn usage_path_prefers_an_absolute_xdg_directory_without_requiring_home() {
+        let expected = PathBuf::from("/data/user/jwm/launcher-usage");
+        for home in [None, Some(Path::new("/home/user"))] {
+            assert_eq!(
+                usage_path_from_dirs(Some(Path::new("/data/user")), home),
+                Some(expected.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn usage_path_ignores_empty_and_relative_xdg_directories() {
+        for xdg in [None, Some(""), Some("data"), Some("../data")] {
+            assert_eq!(
+                usage_path_from_dirs(xdg.map(Path::new), Some(Path::new("/home/user"))),
+                Some(PathBuf::from("/home/user/.local/share/jwm/launcher-usage"))
+            );
+        }
+    }
+
+    #[test]
+    fn usage_path_is_unavailable_without_an_absolute_user_directory() {
+        for xdg in [None, Some(""), Some("data")] {
+            for home in [None, Some(""), Some("home/user")] {
+                assert_eq!(
+                    usage_path_from_dirs(xdg.map(Path::new), home.map(Path::new)),
+                    None
+                );
+            }
+        }
     }
 
     #[test]

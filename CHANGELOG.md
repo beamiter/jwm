@@ -5,6 +5,13 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Launcher history paths
+
+- Ignore empty or relative `XDG_DATA_HOME` values when locating launcher
+  history, falling back to the user's absolute home data directory. If no
+  absolute user directory is available, keep ranking in memory instead of
+  writing it into the working directory or shared `/tmp/jwm` storage.
+
 ### IPC data integrity
 
 - Reject invalid UTF-8 IPC frames instead of replacing bytes in commands,
