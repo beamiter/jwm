@@ -234,6 +234,10 @@ jobs:
           cargo check --locked --all-targets --no-default-features
           ${{ matrix.profile.features != '' && format('--features {0}', matrix.profile.features) || '' }}
 
+      - name: Repeat compositor policy baseline
+        if: contains(fromJSON('["x11rb", "xcb", "all-backends-no-media"]'), matrix.profile.name)
+        run: bash scripts/test-compositor-baseline.sh '${{ matrix.profile.features }}'
+
   portal:
     name: Portal (xdg-desktop-portal ScreenCast backend)
     runs-on: ubuntu-latest
