@@ -24,6 +24,35 @@ use crate::backend::api::{BackendEvent, EwmhSourceIndication, MaximizeAxes, NetW
 use crate::backend::common_define::WindowId;
 use crate::backend::wayland::state::JwmWaylandState;
 
+/// Longest title or app_id sent to a taskbar, in bytes.
+///
+/// libwayland frames every event in a 4096-byte buffer; a longer message makes
+/// it disconnect the receiving client. Native xdg strings arrive through that
+/// same limit, but XWayland reads `_NET_WM_NAME` and `WM_CLASS` from X11
+/// properties of up to 8 KiB (more after Windows-1252 decoding).
+const MAX_PROTOCOL_TEXT_BYTES: usize = 2048;
+
+/// A window string that is safe to send as a Wayland protocol string.
+///
+/// Wayland strings are NUL-terminated, and the generated event senders panic
+/// on an interior NUL. X11 properties may legitimately contain NUL bytes
+/// (WM_CLASS separates its fields with them), so an X11 client could otherwise
+/// crash the compositor through any bound taskbar. NUL bytes are dropped and
+/// the result is cut at a character boundary within the protocol budget.
+pub(crate) fn protocol_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\0') && text.len() <= MAX_PROTOCOL_TEXT_BYTES {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut cleaned = String::with_capacity(text.len().min(MAX_PROTOCOL_TEXT_BYTES));
+    for ch in text.chars().filter(|ch| *ch != '\0') {
+        if cleaned.len() + ch.len_utf8() > MAX_PROTOCOL_TEXT_BYTES {
+            break;
+        }
+        cleaned.push(ch);
+    }
+    std::borrow::Cow::Owned(cleaned)
+}
+
 // --- Types ---
 
 pub struct ForeignToplevelManagerData;
@@ -264,6 +293,7 @@ impl ForeignToplevelMgmtState {
         let mut inner = self.inner.lock_safe();
         if let Some(handles) = inner.handles.get_mut(&win) {
             handles.retain(Resource::is_alive);
+            let title = protocol_text(title);
             for h in handles {
                 h.title(title.to_string());
                 h.done();
@@ -275,6 +305,7 @@ impl ForeignToplevelMgmtState {
         let mut inner = self.inner.lock_safe();
         if let Some(handles) = inner.handles.get_mut(&win) {
             handles.retain(Resource::is_alive);
+            let app_id = protocol_text(app_id);
             for h in handles {
                 h.app_id(app_id.to_string());
                 h.done();
@@ -485,8 +516,8 @@ pub fn announce_new_toplevel(
         };
 
         mgr.toplevel(&handle);
-        handle.title(title.to_string());
-        handle.app_id(app_id.to_string());
+        handle.title(protocol_text(title).into_owned());
+        handle.app_id(protocol_text(app_id).into_owned());
         handle.state(state_bytes.clone());
         handle.done();
 
@@ -533,8 +564,8 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData> fo
             };
 
             mgr.toplevel(&handle);
-            handle.title(title);
-            handle.app_id(app_id);
+            handle.title(protocol_text(&title).into_owned());
+            handle.app_id(protocol_text(&app_id).into_owned());
             let state_bytes = state
                 .foreign_toplevel_mgmt
                 .as_ref()
@@ -563,9 +594,9 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData> fo
 #[cfg(test)]
 mod tests {
     use super::{
-        ForeignToplevelMgmtState, OutputMembershipPlan, PublishedToplevelState, StateFlag,
-        ToplevelState, announce_new_toplevel, encode_states, output_membership_unchanged,
-        plan_output_membership,
+        ForeignToplevelMgmtState, MAX_PROTOCOL_TEXT_BYTES, OutputMembershipPlan,
+        PublishedToplevelState, StateFlag, ToplevelState, announce_new_toplevel, encode_states,
+        output_membership_unchanged, plan_output_membership, protocol_text,
     };
     use crate::backend::api::{BackendEvent, Geometry};
     use crate::backend::common_define::WindowId;
@@ -848,6 +879,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn protocol_text_drops_nul_and_stays_within_the_wire_budget() {
+        assert!(matches!(
+            protocol_text("Terminal"),
+            std::borrow::Cow::Borrowed("Terminal")
+        ));
+        assert_eq!(protocol_text("a\0b"), "ab");
+        assert_eq!(protocol_text("instance\0Class\0"), "instanceClass");
+        let long = "€".repeat(4000);
+        let cut = protocol_text(&long);
+        assert!(cut.len() <= MAX_PROTOCOL_TEXT_BYTES);
+        assert!(cut.len() > MAX_PROTOCOL_TEXT_BYTES - '€'.len_utf8());
+        assert!(
+            cut.chars().all(|ch| ch == '€'),
+            "cut at a character boundary"
+        );
+    }
+
+    /// zwlr_foreign_toplevel_handle_v1.title / app_id
+    const HANDLE_TITLE: u16 = 0;
+    const HANDLE_APP_ID: u16 = 1;
+
+    fn wire_string_arg(payload: &[u8]) -> Vec<u8> {
+        let len = read_u32(payload, 0) as usize;
+        payload[4..4 + len].to_vec()
+    }
+
+    #[test]
+    fn x11_strings_with_nul_or_oversize_reach_taskbars_sanitized() {
+        let mut client = WireClient::new();
+        let display = client.handle();
+        client.state.outputs = vec![test_output(&display, "TEST-L", (0, 0))];
+        let registry = client.new_id();
+        let frames = client.roundtrip(&wire_message(1, 1, &registry.to_ne_bytes()));
+        let globals = registry_globals(&frames, registry);
+        let (manager_global, manager_version) = globals
+            .iter()
+            .find(|(_, interface, _)| interface == "zwlr_foreign_toplevel_manager_v1")
+            .map(|(name, _, version)| (*name, *version))
+            .expect("foreign toplevel manager global");
+        let manager = client.new_id();
+        client.roundtrip(&wire_bind(
+            registry,
+            manager_global,
+            manager,
+            "zwlr_foreign_toplevel_manager_v1",
+            manager_version.min(3),
+        ));
+
+        let window = WindowId::from_raw(9);
+        let ftm = client
+            .state
+            .foreign_toplevel_mgmt
+            .clone()
+            .expect("foreign toplevel management is enabled by default");
+        // Before the fix each of these panicked inside the generated sender.
+        announce_new_toplevel(&display, &ftm, window, "a\0b", "instance\0Class\0");
+        ftm.update_title(window, &"€".repeat(4000));
+        ftm.update_app_id(window, "x\0y");
+        let frames = client.roundtrip(&[]);
+        assert!(
+            !frames
+                .iter()
+                .any(|(sender, opcode, _)| *sender == 1 && *opcode == 0),
+            "the taskbar must not be disconnected"
+        );
+        let handle = frames
+            .iter()
+            .find(|(sender, opcode, _)| *sender == manager && *opcode == MANAGER_TOPLEVEL)
+            .map(|(_, _, payload)| read_u32(payload, 0))
+            .expect("manager announces the toplevel");
+        let strings = |opcode: u16| -> Vec<Vec<u8>> {
+            frames
+                .iter()
+                .filter(|(sender, op, _)| *sender == handle && *op == opcode)
+                .map(|(_, _, payload)| wire_string_arg(payload))
+                .collect()
+        };
+        let titles = strings(HANDLE_TITLE);
+        let app_ids = strings(HANDLE_APP_ID);
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles[0], b"ab\0");
+        assert!(titles[1].len() <= MAX_PROTOCOL_TEXT_BYTES + 1);
+        assert_eq!(app_ids, [b"instanceClass\0".to_vec(), b"xy\0".to_vec()]);
     }
 
     #[test]

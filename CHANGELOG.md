@@ -5,6 +5,29 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Wayland input isolation and client-driven hardening
+
+- Keep a locked monitor's shade opaque to input on Wayland. Presses, scrolling
+  and touch over the shade no longer reach the hidden window, and a click
+  there no longer moves the keyboard to it; hover focus leaves a client the
+  moment its output is shaded.
+- Stop an X11 application from crashing the Wayland compositor through a
+  taskbar: NUL bytes in `_NET_WM_NAME` or `WM_CLASS` are dropped before they
+  reach wlr-foreign-toplevel clients, and titles are capped below the
+  protocol's message limit so a long title cannot disconnect the taskbar.
+- Ask for attention instead of moving focus when a Wayland client activates a
+  window with an xdg-activation token that no recent key press or click on
+  this seat vouches for. Launchers, links opened from the focused app and
+  clicked notifications still activate as before; tokens JWM mints itself are
+  unaffected.
+- Serve IPC requests on the DRM/KMS backend as soon as they arrive instead of
+  on the next unrelated event or the one-second maintenance tick, so bar
+  buttons and portal queries with short timeouts no longer time out on an
+  idle session.
+- Wayland output power control (swayidle DPMS) for a monitor that was
+  unplugged now fails as the protocol requires instead of blanking a different
+  monitor.
+
 ### Smithay bug-fix backports
 
 - Carry 19 verbatim upstream Smithay fixes on the pinned snapshot (listed in

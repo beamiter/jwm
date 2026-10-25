@@ -20,9 +20,12 @@ behind an opaque shade; the rest of the desktop carries on exactly as it was.
   there does not take the keyboard. Locking the monitor you are on moves the
   selection to an unlocked one first.
 - **No clicks.** Button presses over the shade are swallowed instead of being
-  delivered to whatever is invisible underneath. The pointer itself still
-  moves over it — that is how the lock key finds the shade to unlock (see
-  below).
+  delivered to whatever is invisible underneath. On Wayland the shade also
+  takes the hidden windows out of hit testing, so scrolling and touch stop at
+  it too, a click there cannot move the keyboard, and a window under the
+  pointer loses hover focus the moment its output is shaded. The pointer
+  itself still moves over it — that is how the lock key finds the shade to
+  unlock (see below).
 - **No rows anywhere else.** Its windows leave the `Alt+Tab` switcher, the
   launcher's window search (`/`) and the expose grid while the shade is up, so
   nothing reprints their titles — or a thumbnail of them — on a screen that is

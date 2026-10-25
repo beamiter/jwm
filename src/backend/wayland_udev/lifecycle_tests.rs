@@ -1600,3 +1600,102 @@ fn status_bar_layer_receives_pointer_on_offset_outputs() {
         );
     }
 }
+
+#[test]
+fn monitor_lock_shades_hide_clients_from_input_routing() {
+    use crate::backend::api::MonitorShade;
+    use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{Server, test_output};
+    use std::os::fd::AsRawFd;
+
+    let mut server = Server::new();
+    server.state.outputs.push(test_output("shaded"));
+    server.state.pointer_location = (1.0, 1.0).into();
+    let mut client = server.connect();
+    let compositor = client.bind("wl_compositor", 4);
+    let shell = client.bind("zwlr_layer_shell_v1", 1);
+    let shm = client.bind("wl_shm", 1);
+    let surface = client.new_id();
+    client.request(compositor, 0, &[surface]);
+    let layer = client.new_id();
+    // get_layer_surface(surface, output=null, layer=top, namespace="bar")
+    client.request(
+        shell,
+        0,
+        &[layer, surface, 0, 2, 4, u32::from_ne_bytes(*b"bar\0")],
+    );
+    client.request(layer, 0, &[20, 8]); // set_size
+    client.request(layer, 1, &[5]); // anchor top + left
+    client.request(surface, 6, &[]); // initial commit
+    server.roundtrip();
+    let serial = client
+        .events()
+        .into_iter()
+        .find(|event| event.sender == layer && event.opcode == 0)
+        .expect("layer configure")
+        .args[0];
+    client.request(layer, 6, &[serial]); // ack_configure
+    let fd = nix::sys::memfd::memfd_create(c"shade-hit-test", nix::sys::memfd::MFdFlags::empty())
+        .unwrap();
+    nix::unistd::ftruncate(&fd, 20 * 8 * 4).unwrap();
+    let pool = client.new_id();
+    client.request_with_fd_args(shm, 0, &[pool, 20 * 8 * 4], fd.as_raw_fd());
+    let buffer = client.new_id();
+    client.request(pool, 0, &[buffer, 0, 20, 8, 20 * 4, 0]);
+    client.request(surface, 1, &[buffer, 0, 0]); // attach
+    client.request(surface, 6, &[]);
+    server.roundtrip();
+    server.roundtrip();
+
+    let bar_surface = server
+        .state
+        .layer_surfaces
+        .values()
+        .next()
+        .expect("mapped bar")
+        .clone();
+    let point = (5.0, 4.0).into();
+    let hit = |server: &Server| server.state.surface_under(point).map(|(_, hit, _)| hit);
+    assert_eq!(hit(&server).as_ref(), Some(&bar_surface));
+
+    // Give the client hover focus, then shade its output under the resting
+    // pointer: the hidden client must lose the pointer at once, because a
+    // wheel event does not move the pointer and would otherwise scroll it.
+    let pointer = server.state.seat.get_pointer().expect("seat pointer");
+    let focus = server
+        .state
+        .surface_under(point)
+        .map(|(_, hit, origin)| (hit, origin));
+    pointer.motion(
+        &mut server.state,
+        focus,
+        &smithay::input::pointer::MotionEvent {
+            location: point,
+            serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+            time: smithay::backend::input::InputTime::from_millis(0),
+        },
+    );
+    pointer.frame(&mut server.state);
+    server.state.pointer_location = point;
+    assert_eq!(pointer.current_focus().as_ref(), Some(&bar_surface));
+
+    let shade = MonitorShade::new(1, 0, 0, 64, 48).unwrap();
+    server.state.set_monitor_shades(&[shade]);
+    assert_eq!(hit(&server), None, "nothing under a shade receives presses");
+    assert!(server.state.popup_surface_under(point).is_none());
+    assert!(server.state.hit_test(point).is_none());
+    assert_eq!(
+        pointer.current_focus(),
+        None,
+        "hover focus left the hidden client"
+    );
+
+    // A shade elsewhere leaves this output's clients reachable, and lifting
+    // the shade restores them.
+    let elsewhere = MonitorShade::new(2, 64, 0, 64, 48).unwrap();
+    server.state.set_monitor_shades(&[elsewhere]);
+    assert_eq!(hit(&server).as_ref(), Some(&bar_surface));
+    server.state.set_monitor_shades(&[shade]);
+    assert_eq!(hit(&server), None);
+    server.state.set_monitor_shades(&[]);
+    assert_eq!(hit(&server).as_ref(), Some(&bar_surface));
+}

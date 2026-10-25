@@ -33,7 +33,12 @@ Native xdg fullscreen and minimize requests use the shared window policy, as do
 XWayland fullscreen, minimize and activation requests. Fullscreen uses the
 window's current monitor; the optional xdg output hint is not applied. Activation
 can reveal another tag or restore a minimized window, and xdg activation keeps
-the existing ten-second token freshness check.
+the existing ten-second token freshness check. A token a client mints must
+carry an input serial on JWM's seat that is no older than the latest keyboard
+focus change (a key press or click in the focused app, or a click on a
+notification since focus last moved); activating with any other token marks
+the window as demanding attention instead of focusing it. Tokens JWM creates
+itself are not subject to this check.
 
 Maximize requests from native X11, xdg-shell, XWayland and wlr-foreign-toplevel
 use the same shared policy. A maximized window fills its monitor's work area —

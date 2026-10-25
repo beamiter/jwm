@@ -436,6 +436,13 @@ pub struct JwmWaylandState {
     /// Monotonic lock generation. A repeat armed before a fast lock/unlock
     /// cycle must not resume after the lock disappears.
     pub session_lock_epoch: u64,
+    /// Outputs covered by a per-monitor lock shade, in desktop-global logical
+    /// coordinates. A shade hides its output from input as well as from the
+    /// eye: hit testing finds no client, layer surface or popup inside it, so
+    /// presses, scrolling and touch cannot reach whatever is invisible
+    /// underneath and a click cannot move the keyboard there. The session
+    /// lock, which owns every output, still takes precedence.
+    monitor_shades: Vec<Rectangle<i32, Logical>>,
     /// Per-output session lock surfaces. Key: Smithay output name.
     /// Populated on `SessionLockHandler::new_surface`, drained on unlock or
     /// destruction. Used to know whether the lock client has a presence on a
@@ -2183,16 +2190,60 @@ impl KdeDecorationHandler for JwmWaylandState {
 // ---------------------------------------------------------------------------
 // XDG Activation Handler – allows clients to request surface activation
 // ---------------------------------------------------------------------------
+/// Marks a client-minted activation token that no recent input event on this
+/// seat vouches for.
+struct UnverifiedActivationToken;
+
+/// Whether a client-minted activation token carries evidence of user input.
+///
+/// The token must name an input serial on this seat that is no older than the
+/// latest keyboard focus change: a key press or click in the focused client
+/// (a launcher, a link in a terminal) or a click on a surface since focus last
+/// moved (a notification). With no keyboard focus established yet there is
+/// nothing to steal, so any serial on this seat is accepted.
+fn activation_token_is_user_initiated(
+    serial: Option<Serial>,
+    seat_matches: bool,
+    last_keyboard_enter: Option<Serial>,
+) -> bool {
+    let Some(serial) = serial else {
+        return false;
+    };
+    seat_matches && last_keyboard_enter.is_none_or(|enter| serial.is_no_older_than(&enter))
+}
+
 impl XdgActivationHandler for JwmWaylandState {
     fn activation_state(&mut self) -> &mut XdgActivationState {
         &mut self.xdg_activation_state
     }
 
-    fn token_created(&mut self, _token: XdgActivationToken, _data: XdgActivationTokenData) -> bool {
+    fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
         // Smithay keeps every token until the compositor removes it. Tokens
         // that were never used expire here, bounding the pool without a timer.
         self.xdg_activation_state
             .retain_tokens(|_, data| data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_LIFETIME);
+        // A client may mint a token without any user interaction behind it.
+        // Such a token still answers with `done` — the client cannot tell —
+        // but activating with it only asks for attention, so a background
+        // app cannot move the keyboard away from what the user is typing in.
+        // Tokens JWM mints itself (`create_external_token`) never pass here.
+        let seat_matches = data
+            .serial
+            .as_ref()
+            .and_then(|(_, wl_seat)| Seat::<Self>::from_resource(wl_seat))
+            .is_some_and(|seat| seat == self.seat);
+        let last_enter = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.last_enter());
+        if !activation_token_is_user_initiated(
+            data.serial.as_ref().map(|(serial, _)| *serial),
+            seat_matches,
+            last_enter,
+        ) {
+            data.user_data
+                .insert_if_missing(|| UnverifiedActivationToken);
+        }
         true
     }
 
@@ -2215,6 +2266,16 @@ impl XdgActivationHandler for JwmWaylandState {
                 if let Some(app_id) = token_data.app_id.as_deref() {
                     self.window_activation_app_id
                         .insert(win_id, app_id.to_string());
+                }
+                if token_data
+                    .user_data
+                    .get::<UnverifiedActivationToken>()
+                    .is_some()
+                {
+                    // No input event vouches for this request: flag the
+                    // window (urgency, Dock badge) instead of focusing it.
+                    self.request_window_state(win_id, NetWmState::DemandsAttention, true);
+                    return;
                 }
                 // Activation is a policy request: revealing another tag,
                 // restoring a minimized window, focus and stacking must take
@@ -3280,6 +3341,7 @@ impl JwmWaylandState {
                 session_lock_supported: true,
                 session_locked: false,
                 session_lock_epoch: 0,
+                monitor_shades: Vec::new(),
                 lock_surfaces: HashMap::new(),
                 pending_session_lock: None,
                 active_session_lock: None,
@@ -3505,6 +3567,48 @@ impl JwmWaylandState {
             .unwrap_or(1.0)
     }
 
+    /// Replace the monitor-lock shades that input routing honours.
+    ///
+    /// Called with the same list the compositor draws. A client that held
+    /// hover focus when its output was shaded would otherwise keep it until
+    /// the pointer next moves, and scrolling does not move the pointer, so
+    /// that focus is dropped at once.
+    pub(crate) fn set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+        self.monitor_shades = shades
+            .iter()
+            .filter(|shade| shade.width > 0 && shade.height > 0)
+            .map(|shade| {
+                Rectangle::new(
+                    (shade.x, shade.y).into(),
+                    (shade.width, shade.height).into(),
+                )
+            })
+            .collect();
+        if self.session_locked || !self.point_in_monitor_shade(self.pointer_location) {
+            return;
+        }
+        if let Some(pointer) = self.seat.get_pointer() {
+            let location = self.pointer_location;
+            pointer.motion(
+                self,
+                None,
+                &smithay::input::pointer::MotionEvent {
+                    location,
+                    serial: SCOUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::from_millis(0),
+                },
+            );
+            pointer.frame(self);
+        }
+    }
+
+    /// Whether `location` lies on an output hidden by a monitor-lock shade.
+    pub(crate) fn point_in_monitor_shade(&self, location: Point<f64, Logical>) -> bool {
+        self.monitor_shades
+            .iter()
+            .any(|shade| shade.to_f64().contains(location))
+    }
+
     pub fn surface_under(
         &self,
         location: Point<f64, Logical>,
@@ -3548,6 +3652,12 @@ impl JwmWaylandState {
                 }
             }
 
+            return None;
+        }
+
+        // Nothing under a monitor-lock shade may receive input; see
+        // `monitor_shades`.
+        if self.point_in_monitor_shade(location) {
             return None;
         }
 
@@ -3641,7 +3751,7 @@ impl JwmWaylandState {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WindowId, WlSurface, Point<f64, Logical>)> {
-        if self.session_locked {
+        if self.session_locked || self.point_in_monitor_shade(location) {
             return None;
         }
         // Popups are always above their parent toplevel. Prefer them for hit-testing.
@@ -6574,13 +6684,13 @@ mod protocol_hardening_tests {
         XwaylandConfigureRoute, order_clipboard_captures, output_logical_size,
         route_xwayland_configure_request,
     };
-    use crate::backend::api::{BackendEvent, Geometry};
+    use crate::backend::api::{BackendEvent, Geometry, NetWmAction, NetWmState};
     use crate::backend::clipboard_offer::CapturedClipboard;
     use crate::backend::common_define::{ConfigWindowBits, WindowId};
     use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{Server, test_output};
     use smithay::reexports::wayland_server::Resource;
     use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-    use smithay::utils::{Rectangle, Transform};
+    use smithay::utils::{Rectangle, Serial, Transform};
     use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
     use smithay::wayland::security_context::SecurityContext;
     use smithay::wayland::selection::SelectionTarget;
@@ -7312,6 +7422,62 @@ mod protocol_hardening_tests {
             "unused tokens expire"
         );
         assert!(state.data_for_token(&fresh).is_some());
+    }
+
+    #[test]
+    fn activation_tokens_need_a_recent_input_serial_on_this_seat() {
+        use super::activation_token_is_user_initiated as verified;
+        let enter = Serial::from(10);
+        assert!(
+            !verified(None, true, Some(enter)),
+            "no serial, no user input"
+        );
+        assert!(!verified(None, true, None));
+        assert!(
+            !verified(Some(Serial::from(12)), false, Some(enter)),
+            "another seat"
+        );
+        assert!(
+            !verified(Some(Serial::from(9)), true, Some(enter)),
+            "older than focus"
+        );
+        assert!(verified(Some(Serial::from(10)), true, Some(enter)));
+        assert!(verified(Some(Serial::from(11)), true, Some(enter)));
+        assert!(
+            verified(Some(Serial::from(3)), true, None),
+            "nothing focused yet"
+        );
+    }
+
+    #[test]
+    fn serialless_client_tokens_ask_for_attention_instead_of_focus() {
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let (surface, _, window) = create_toplevel(&mut server, &mut client);
+        let surface = client.surface(&server, surface);
+        drain_events(&server);
+
+        // What Smithay hands the handler for get_activation_token + commit
+        // without set_serial.
+        let token = XdgActivationToken::from("client-minted".to_owned());
+        let data = XdgActivationTokenData::default();
+        assert!(server.state.token_created(token.clone(), data.clone()));
+        server.state.request_activation(token, data, surface);
+        let events = drain_events(&server);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, BackendEvent::ActiveWindowMessage { .. })),
+            "an unverified token must not take focus"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            BackendEvent::WindowStateRequest {
+                window: w,
+                action: NetWmAction::Add,
+                state: NetWmState::DemandsAttention,
+            } if *w == window
+        )));
     }
 
     #[test]

@@ -313,6 +313,33 @@ fn should_run_handler_update(
     can_present && (handled_any || handler_needs_tick || state_needs_redraw || compositor_pending)
 }
 
+/// What to do with the handler's level-triggered update-readiness source
+/// (IPC listener and clients, worker completions) after this loop turn.
+///
+/// The fd stays readable until `update` drains the work behind it, and
+/// `update` only runs while a frame can be presented. Parking the source while
+/// presentation is unavailable keeps a readable fd from turning every
+/// dispatch into a non-blocking poll; it resumes as soon as presentation does,
+/// and being level-triggered it fires again for whatever is still waiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadinessSourceAction {
+    Keep,
+    Park,
+    Resume,
+}
+
+fn readiness_source_action(
+    can_present: bool,
+    update_requested: bool,
+    parked: bool,
+) -> ReadinessSourceAction {
+    match (can_present, parked) {
+        (true, true) => ReadinessSourceAction::Resume,
+        (false, false) if update_requested => ReadinessSourceAction::Park,
+        _ => ReadinessSourceAction::Keep,
+    }
+}
+
 fn render_work_is_pending(
     session_active: bool,
     handler_needs_tick: bool,
@@ -5050,6 +5077,10 @@ impl CompositorWorkspaceEffects for UdevBackend {
     }
 
     fn compositor_set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+        // Input routing follows what is drawn: the shade swallows pointer,
+        // scroll and touch input instead of letting the backend deliver it to
+        // the hidden client before policy sees the press.
+        self.state.set_monitor_shades(shades);
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_monitor_shades(shades);
         }
@@ -7072,6 +7103,32 @@ impl Backend for UdevBackend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+        // IPC requests and worker completions become readable on the
+        // handler's readiness hub. Without this source nothing woke the loop
+        // for them: a request waited for the next unrelated event or the
+        // roughly one-second maintenance deadline, long enough for bar
+        // buttons and portal queries with sub-second timeouts to give up.
+        let update_readiness = Arc::new(AtomicBool::new(false));
+        let readiness_source = handler.duplicate_update_readiness_fd().and_then(|fd| {
+            let requested = Arc::clone(&update_readiness);
+            match self.event_loop.handle().insert_source(
+                Generic::new(fd, Interest::READ, Mode::Level),
+                move |_, _, _| {
+                    requested.store(true, Ordering::Release);
+                    Ok(PostAction::Continue)
+                },
+            ) {
+                Ok(token) => Some(token),
+                Err(error) => {
+                    log::warn!(
+                        "[run] update readiness source unavailable ({error}); IPC falls back to maintenance polling"
+                    );
+                    None
+                }
+            }
+        });
+        let mut readiness_parked = false;
+
         // Initialize compositor from config if KMS is ready and compositor not yet created.
         if self.kms.is_some() && self.compositor.is_none() {
             let wanted = crate::config::CONFIG.load().compositor_enabled();
@@ -7522,14 +7579,30 @@ impl Backend for UdevBackend {
                 .compositor
                 .as_ref()
                 .is_some_and(|compositor| compositor.needs_render());
+            let update_requested = update_readiness.swap(false, Ordering::AcqRel);
             if should_run_handler_update(
                 can_present,
-                handled_any,
+                handled_any || update_requested,
                 handler_needs_tick,
                 needs_redraw,
                 compositor_pending,
             ) {
                 handler.update(self)?;
+            }
+            if let Some(token) = readiness_source.as_ref() {
+                match readiness_source_action(can_present, update_requested, readiness_parked) {
+                    ReadinessSourceAction::Park => match self.event_loop.handle().disable(token) {
+                        Ok(()) => readiness_parked = true,
+                        Err(error) => log::warn!("[run] could not park readiness source: {error}"),
+                    },
+                    ReadinessSourceAction::Resume => match self.event_loop.handle().enable(token) {
+                        Ok(()) => readiness_parked = false,
+                        Err(error) => {
+                            log::warn!("[run] could not resume readiness source: {error}")
+                        }
+                    },
+                    ReadinessSourceAction::Keep => {}
+                }
             }
 
             if let Some(kms) = &self.kms {
@@ -8755,6 +8828,33 @@ mod udev_backend_selection_tests {
     fn compositor_only_animation_runs_update_when_presentation_is_available() {
         assert!(should_run_handler_update(true, false, false, false, true));
         assert!(!should_run_handler_update(false, false, false, false, true));
+    }
+
+    #[test]
+    fn ipc_readiness_runs_update_and_parks_only_while_presentation_is_unavailable() {
+        // A readable readiness hub alone is a reason to run the handler.
+        assert!(should_run_handler_update(true, true, false, false, false));
+        use ReadinessSourceAction::{Keep, Park, Resume};
+        assert_eq!(readiness_source_action(true, true, false), Keep);
+        assert_eq!(readiness_source_action(true, false, false), Keep);
+        // Frame pending or session inactive: update cannot drain it, so a
+        // level-triggered source would make every dispatch return at once.
+        assert_eq!(readiness_source_action(false, true, false), Park);
+        assert_eq!(readiness_source_action(false, false, false), Keep);
+        assert_eq!(readiness_source_action(false, true, true), Keep);
+        assert_eq!(readiness_source_action(true, false, true), Resume);
+    }
+
+    #[test]
+    fn udev_run_loop_wakes_for_handler_readiness() {
+        let source = include_str!("backend.rs");
+        let run = source
+            .split_once("fn run(&mut self, handler: &mut dyn EventHandler)")
+            .expect("Backend::run")
+            .1;
+        let run = run.split_once("\n    fn ").map_or(run, |(body, _)| body);
+        assert!(run.contains("handler.duplicate_update_readiness_fd()"));
+        assert!(run.contains("handled_any || update_requested"));
     }
 
     #[test]

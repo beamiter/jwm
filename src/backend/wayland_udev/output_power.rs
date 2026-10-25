@@ -18,7 +18,8 @@ pub struct OutputPowerManagerData;
 unsafe impl Send for OutputPowerManagerData {}
 
 pub struct OutputPowerData {
-    pub output_name: String,
+    /// `None` for an inert control: its output was gone when it was created.
+    pub output_name: Option<String>,
 }
 unsafe impl Send for OutputPowerData {}
 
@@ -64,21 +65,23 @@ impl Dispatch<ZwlrOutputPowerManagerV1, OutputPowerManagerData> for JwmWaylandSt
     ) {
         match request {
             zwlr_output_power_manager_v1::Request::GetOutputPower { id, output } => {
-                // Honor the requested wl_output; only fall back to the primary
-                // output when the resource can't be resolved (e.g. stale object).
+                // Only the requested, still-connected output. A stale wl_output
+                // (its monitor was unplugged) used to fall back to the first
+                // output, so a client blanking the gone display turned off a
+                // different one; the protocol answers `failed` instead.
                 let output_name = smithay::output::Output::from_resource(&output)
-                    .or_else(|| state.outputs.first().cloned())
-                    .map(|o| o.name())
-                    .unwrap_or_else(|| "unknown".to_string());
-
+                    .filter(|output| state.outputs.contains(output))
+                    .map(|output| output.name());
                 let power = data_init.init(
                     id,
                     OutputPowerData {
                         output_name: output_name.clone(),
                     },
                 );
-                // Send current mode (On)
-                power.mode(zwlr_output_power_v1::Mode::On);
+                match output_name {
+                    Some(_) => power.mode(zwlr_output_power_v1::Mode::On),
+                    None => power.failed(),
+                }
             }
             zwlr_output_power_manager_v1::Request::Destroy => {}
             _ => {}
@@ -98,23 +101,27 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        // An inert control was already told `failed`; it never acts.
+        let Some(output_name) = data.output_name.as_ref() else {
+            return;
+        };
         match request {
             zwlr_output_power_v1::Request::SetMode { mode } => match mode.into_result() {
                 Ok(zwlr_output_power_v1::Mode::Off) => {
-                    info!("[udev/wayland] DPMS off requested for {}", data.output_name);
+                    info!("[udev/wayland] DPMS off requested for {output_name}");
                     state.pending_events.lock_safe().push_back(
                         crate::backend::api::BackendEvent::OutputPowerSet {
-                            output_name: data.output_name.clone(),
+                            output_name: output_name.clone(),
                             on: false,
                         },
                     );
                     resource.mode(zwlr_output_power_v1::Mode::Off);
                 }
                 Ok(zwlr_output_power_v1::Mode::On) => {
-                    info!("[udev/wayland] DPMS on requested for {}", data.output_name);
+                    info!("[udev/wayland] DPMS on requested for {output_name}");
                     state.pending_events.lock_safe().push_back(
                         crate::backend::api::BackendEvent::OutputPowerSet {
-                            output_name: data.output_name.clone(),
+                            output_name: output_name.clone(),
                             on: true,
                         },
                     );
@@ -126,5 +133,93 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
             zwlr_output_power_v1::Request::Destroy => {}
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::init_output_power_management;
+    use crate::backend::api::BackendEvent;
+    use crate::backend::wayland::state::JwmWaylandState;
+    use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{Server, test_output};
+
+    /// zwlr_output_power_manager_v1.get_output_power
+    const GET_OUTPUT_POWER: u16 = 0;
+    /// zwlr_output_power_v1.set_mode
+    const SET_MODE: u16 = 0;
+    /// zwlr_output_power_v1 events
+    const MODE_EVENT: u16 = 0;
+    const FAILED_EVENT: u16 = 1;
+
+    fn power_sets(server: &Server) -> Vec<(String, bool)> {
+        server
+            .backend_events
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|event| match event {
+                BackendEvent::OutputPowerSet { output_name, on } => Some((output_name, on)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn power_control_for_a_gone_output_fails_without_touching_another() {
+        let mut server = Server::new();
+        let display = server.display.handle();
+        init_output_power_management(&display);
+        let unplugged = test_output("UNPLUGGED-1");
+        let global = unplugged.create_global::<JwmWaylandState>(&display);
+        let mut client = server.connect();
+        let manager = client.bind("zwlr_output_power_manager_v1", 1);
+        let output = client.bind("wl_output", 4);
+        server.roundtrip();
+        client.events();
+        display.remove_global::<JwmWaylandState>(global);
+        drop(unplugged);
+
+        // Another monitor is still connected: it must not be substituted.
+        server.state.outputs.push(test_output("OTHER-1"));
+        let control = client.new_id();
+        client.request(manager, GET_OUTPUT_POWER, &[control, output]);
+        client.request(control, SET_MODE, &[0]);
+        server.roundtrip();
+        let events: Vec<u16> = client
+            .events()
+            .into_iter()
+            .filter(|event| event.sender == control)
+            .map(|event| event.opcode)
+            .collect();
+        assert_eq!(events, [FAILED_EVENT]);
+        assert_eq!(power_sets(&server), []);
+    }
+
+    #[test]
+    fn power_control_for_a_live_output_reaches_that_output() {
+        let mut server = Server::new();
+        let display = server.display.handle();
+        init_output_power_management(&display);
+        let live = test_output("LIVE-1");
+        let _global = live.create_global::<JwmWaylandState>(&display);
+        server.state.outputs.push(test_output("OTHER-1"));
+        server.state.outputs.push(live);
+        let mut client = server.connect();
+        let manager = client.bind("zwlr_output_power_manager_v1", 1);
+        let output = client.bind("wl_output", 4);
+        server.roundtrip();
+        client.events();
+        let control = client.new_id();
+        client.request(manager, GET_OUTPUT_POWER, &[control, output]);
+        client.request(control, SET_MODE, &[0]);
+        server.roundtrip();
+        let events: Vec<u16> = client
+            .events()
+            .into_iter()
+            .filter(|event| event.sender == control)
+            .map(|event| event.opcode)
+            .collect();
+        assert_eq!(events, [MODE_EVENT, MODE_EVENT]);
+        assert_eq!(power_sets(&server), [("LIVE-1".to_string(), false)]);
     }
 }
