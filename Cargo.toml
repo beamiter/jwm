@@ -153,7 +153,7 @@ required-features = ["remote-x11"]
 [dependencies]
 jwm_ipc_transport = { path = "crates/jwm_ipc_transport" }
 clap = { version = "4.6.2", features = ["derive", "env"] }
-dirs = "6.0.0"
+dirs = "7.0.0"
 glob = "0.3.3"
 signal-hook = "0.4.4"
 slotmap = { version = "1.1.1", features = ["serde"] }
@@ -178,7 +178,7 @@ arc-swap = "1"
 alsa = { version = "0.12", optional = true }
 ab_glyph = "0.2.32"
 rand = "0.10.2"
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
 xkbcommon = "0.9.0"
 bitflags = "2.13.1"
 smithay = { git = "https://github.com/Smithay/smithay.git", rev = "d33a9c98fbd4d0ddd85315f93d436747bf3393a6", default-features = false, optional = true, features = [
@@ -207,7 +207,7 @@ egl = { version = "0.2.7", optional = true }
 xcb = { version = "1.7.1", features = ["composite", "shape", "randr", "damage", "present", "xfixes", "screensaver"], optional = true }
 # ChaCha20-Poly1305 for the remote transport record layer. Pure Rust and
 # no_std-capable: it adds no C toolchain or system dependency to the helper.
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"

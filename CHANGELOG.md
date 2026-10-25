@@ -5,6 +5,25 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Dependency refresh
+
+- Refresh the workspace lock to the newest semver-compatible releases (about
+  150 crates, including Tokio 1.54, serde_json, clap, toml, glib/cairo/pango
+  0.22.9, zbus 5.19 and PipeWire 0.10.1) while keeping the Rust 1.89 MSRV
+  check green. The lock no longer carries a Tokio release flagged by
+  RUSTSEC-2026-0386; neither JWM nor its D-Bus/PipeWire stacks call the
+  affected `AsyncFd` constructors.
+- Move the remote-control transport to the current RustCrypto generation
+  (`chacha20poly1305` 0.11 / `aead` 0.6 and `sha2` 0.11). The wire format is
+  unchanged; the RFC 4231 vectors and record-layer tests still pass. This
+  removes duplicate `chacha20`, `cpufeatures` and `generic-array` versions.
+- Update `dirs` to 7 (its only change is a Windows path) and align the portal
+  with the root's `nix` 0.31 and `rand` 0.10, dropping duplicate versions.
+- `zbus` 6 is deferred: it removes the blocking API used by the bar's D-Bus
+  providers and changed its API again in 6.1. The remaining audit notices are
+  informational "unmaintained" crates (`paste`, `ttf-parser` and the zvariant
+  family that zbus 6 absorbs).
+
 ### Keyboard ergonomics and script-driven WaterLily
 
 - Keep Alt and the established navigation/resize letters. Add keyboard

@@ -40,7 +40,7 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
-use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce, Tag};
 use sha2::{Digest, Sha256};
 
@@ -388,11 +388,11 @@ impl<R: Read> SessionReader<R> {
             let mut tag = [0_u8; TAG_LEN];
             self.inner.read_exact(&mut tag)?;
             cipher(&self.key)
-                .decrypt_in_place_detached(
+                .decrypt_inout_detached(
                     &record_nonce(received_sequence),
                     &header,
-                    payload,
-                    Tag::from_slice(&tag),
+                    payload.as_mut_slice().into(),
+                    &Tag::from(tag),
                 )
                 .map_err(|_| ProtocolError::AuthenticationFailed)?;
             strip_padding(payload)?;
@@ -510,10 +510,10 @@ impl<W: Write> SessionWriter<W> {
         self.record.resize(RECORD_HEADER_LEN + sealed_len, 0);
 
         let tag = cipher(&self.key)
-            .encrypt_in_place_detached(
+            .encrypt_inout_detached(
                 &record_nonce(self.next_sequence),
                 &header,
-                &mut self.record[RECORD_HEADER_LEN..],
+                (&mut self.record[RECORD_HEADER_LEN..]).into(),
             )
             .map_err(|_| ProtocolError::AuthenticationFailed)?;
         self.record.extend_from_slice(&tag);
@@ -684,7 +684,7 @@ fn derive_session_key(psk: &[u8], direction: Direction, transcript: &Transcript)
 }
 
 fn cipher(key: &[u8; MAC_LEN]) -> ChaCha20Poly1305 {
-    ChaCha20Poly1305::new(Key::from_slice(key))
+    ChaCha20Poly1305::new(&Key::from(*key))
 }
 
 /// Nonce for one record: four zero bytes then the big-endian sequence.
@@ -695,7 +695,7 @@ fn cipher(key: &[u8; MAC_LEN]) -> ChaCha20Poly1305 {
 fn record_nonce(sequence: u64) -> Nonce {
     let mut nonce = [0_u8; 12];
     nonce[4..].copy_from_slice(&sequence.to_be_bytes());
-    *Nonce::from_slice(&nonce)
+    Nonce::from(nonce)
 }
 
 /// Sealed plaintext length for a payload: `payload || marker`, bucketed.
@@ -1264,7 +1264,7 @@ mod tests {
         let mut sealed = vec![0_u8; sealed_len];
         sealed[0] = PADDING_MARKER;
         let tag = cipher(&key)
-            .encrypt_in_place_detached(&record_nonce(0), &header, &mut sealed)
+            .encrypt_inout_detached(&record_nonce(0), &header, sealed.as_mut_slice().into())
             .unwrap();
         let mut record = header.to_vec();
         record.extend_from_slice(&sealed);

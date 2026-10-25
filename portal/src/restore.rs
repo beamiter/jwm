@@ -214,9 +214,7 @@ pub fn touch(token: &str, selection: &SourceSelection, persist_mode: u32) {
 }
 
 fn new_token() -> String {
-    use rand::RngCore;
-    let mut buf = [0u8; 16];
-    rand::rng().fill_bytes(&mut buf);
+    let buf: [u8; 16] = rand::random();
     let mut s = String::with_capacity(32);
     for b in buf {
         use std::fmt::Write as _;

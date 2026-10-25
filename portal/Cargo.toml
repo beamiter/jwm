@@ -39,7 +39,7 @@ drm = { version = "0.14", default-features = false }
 drm-fourcc = "2.2"
 
 # Shared between portal and jwm for IPC matchers / output identity.
-nix = { version = "0.30", features = ["fs", "mman"] }
+nix = { version = "0.31", features = ["fs", "mman"] }
 libc = "0.2"
 log = "0.4"
 env_logger = "0.11"
@@ -47,4 +47,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 once_cell = "1"
-rand = "0.9"
+rand = "0.10"
