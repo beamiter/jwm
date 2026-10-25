@@ -1559,8 +1559,12 @@ impl Jwm {
         let tags_length = cfg.tags_length();
         let tagmask = cfg.tagmask();
         let mon_keys: Vec<MonitorKey> = self.state.monitor_order.clone();
+        // A changed `m_fact`, `n_master` or `gap_px` reaches every tag still
+        // on the old default before the slot sync seeds any new tags.
+        let layout_defaults = super::monitor_management::configured_layout_defaults(&cfg);
         for mk in &mon_keys {
             if let Some(monitor) = self.state.monitors.get_mut(*mk) {
+                monitor.retune_layout_defaults(layout_defaults);
                 monitor.sync_tag_slots(tags_length, tagmask);
             }
         }
@@ -3145,6 +3149,48 @@ mod normal_exit_transaction_tests {
         assert_eq!(
             backend.monitor_pushes.len(),
             backend.monitor_identity_pushes.len()
+        );
+    }
+
+    #[test]
+    fn a_config_reload_retunes_tags_still_on_the_old_layout_defaults() {
+        use crate::core::models::LayoutDefaults;
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let configured = {
+            let cfg = CONFIG.load();
+            // The wallpaper-theme refresh skips a wallpaper it already
+            // themed from; otherwise it would decode the host's wallpaper.
+            jwm.features.themed_wallpaper = cfg.behavior().wallpaper.clone();
+            super::super::monitor_management::configured_layout_defaults(&cfg)
+        };
+        // The defaults an earlier configuration seeded.
+        let stale = LayoutDefaults {
+            m_fact: configured.m_fact - 0.1,
+            n_master: configured.n_master + 1,
+            gap: configured.gap + 7,
+        };
+        let monitor_key = jwm.state.monitor_order[0];
+        let monitor = &mut jwm.state.monitors[monitor_key];
+        monitor.layout_defaults = stale;
+        let pertag = monitor.pertag.as_mut().expect("pertag");
+        pertag.m_facts.fill(stale.m_fact);
+        pertag.n_masters.fill(stale.n_master);
+        pertag.gaps.fill(stale.gap);
+        pertag.gaps[2] = stale.gap + 30;
+
+        jwm.apply_config_changes(&mut backend);
+
+        let monitor = &jwm.state.monitors[monitor_key];
+        let pertag = monitor.pertag.as_ref().expect("pertag");
+        assert_eq!(monitor.layout_defaults, configured);
+        assert_eq!(pertag.gaps[1], configured.gap);
+        assert_eq!(pertag.m_facts[1], configured.m_fact);
+        assert_eq!(pertag.n_masters[1], configured.n_master);
+        assert_eq!(
+            pertag.gaps[2],
+            stale.gap + 30,
+            "a tag tuned with setgaps keeps its gap"
         );
     }
 

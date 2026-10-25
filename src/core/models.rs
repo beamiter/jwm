@@ -506,6 +506,9 @@ pub struct WMMonitor {
     pub num: i32,
     pub lt_symbol: String,
     pub layout: MonitorLayout,
+    /// The defaults this monitor's tags were seeded from or last retuned to;
+    /// see [`WMMonitor::retune_layout_defaults`].
+    pub layout_defaults: LayoutDefaults,
     pub geometry: MonitorGeometry,
     pub sel_tags: usize,
     pub tag_set: [u32; 2],
@@ -520,6 +523,15 @@ pub struct WMMonitor {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorLayout {
+    pub m_fact: f32,
+    pub n_master: u32,
+    pub gap: i32,
+}
+
+/// The configured tiling defaults (`m_fact`, `n_master`, `appearance.gap_px`)
+/// a monitor's tags were seeded from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutDefaults {
     pub m_fact: f32,
     pub n_master: u32,
     pub gap: i32,
@@ -658,6 +670,11 @@ impl WMMonitor {
             num: 0,
             lt_symbol: String::new(),
             layout: MonitorLayout {
+                m_fact: 0.55,
+                n_master: 1,
+                gap: 0,
+            },
+            layout_defaults: LayoutDefaults {
                 m_fact: 0.55,
                 n_master: 1,
                 gap: 0,
@@ -823,18 +840,56 @@ impl WMMonitor {
         self.sel = client;
     }
 
+    /// Move every tag still on the previous configured defaults to
+    /// `defaults`, so a reload that changes `m_fact`, `n_master` or
+    /// `appearance.gap_px` reaches existing monitors and not only ones
+    /// plugged in later. Tags with their own value — adjusted with
+    /// `setmfact`, `incnmaster` or `setgaps`, or restored from a saved
+    /// layout — keep it.
+    pub fn retune_layout_defaults(&mut self, defaults: LayoutDefaults) {
+        fn retune<T: Copy + PartialEq>(value: &mut T, from: T, to: T) {
+            if *value == from {
+                *value = to;
+            }
+        }
+        let previous = std::mem::replace(&mut self.layout_defaults, defaults);
+        if previous == defaults {
+            return;
+        }
+        if let Some(pertag) = self.pertag.as_mut() {
+            for m_fact in &mut pertag.m_facts {
+                retune(m_fact, previous.m_fact, defaults.m_fact);
+            }
+            for n_master in &mut pertag.n_masters {
+                retune(n_master, previous.n_master, defaults.n_master);
+            }
+            for gap in &mut pertag.gaps {
+                retune(gap, previous.gap, defaults.gap);
+            }
+        }
+        // The live values mirror the current tag's slot.
+        retune(&mut self.layout.m_fact, previous.m_fact, defaults.m_fact);
+        retune(
+            &mut self.layout.n_master,
+            previous.n_master,
+            defaults.n_master,
+        );
+        retune(&mut self.layout.gap, previous.gap, defaults.gap);
+    }
+
     /// Keep this monitor's Pertag and tag_set aligned with a live
-    /// `layout.tags_length` change. New slots copy the current layout;
-    /// retired high tags are masked out so the selection cannot point at a
-    /// tag the config no longer has.
+    /// `layout.tags_length` change. New slots take the current layout and
+    /// the configured `m_fact`, `n_master` and gap, not whatever the current
+    /// tag was tuned to; retired high tags are masked out so the selection
+    /// cannot point at a tag the config no longer has.
     pub fn sync_tag_slots(&mut self, tags_length: usize, tagmask: u32) {
         if let Some(ref mut pertag) = self.pertag {
             let show_bar = pertag.show_bars.first().copied().unwrap_or(true);
             pertag.resize_for_tags(
                 tags_length,
-                self.layout.n_master,
-                self.layout.m_fact,
-                self.layout.gap,
+                self.layout_defaults.n_master,
+                self.layout_defaults.m_fact,
+                self.layout_defaults.gap,
                 self.lt.clone(),
                 self.prev_lt.clone(),
                 show_bar,
@@ -1254,6 +1309,60 @@ mod tests {
         assert_eq!(p.sel.len(), 10);
         assert_eq!(p.cur_tag, 9);
         assert_eq!(p.prev_tag, 9);
+    }
+
+    #[test]
+    fn a_new_layout_default_reaches_only_tags_still_on_the_old_one() {
+        let old = LayoutDefaults {
+            m_fact: 0.55,
+            n_master: 1,
+            gap: 10,
+        };
+        let new = LayoutDefaults {
+            m_fact: 0.6,
+            n_master: 2,
+            gap: 4,
+        };
+        let mut m = WMMonitor::new();
+        m.layout_defaults = old;
+        m.layout = MonitorLayout {
+            m_fact: old.m_fact,
+            n_master: old.n_master,
+            gap: old.gap,
+        };
+        let mut pertag = Pertag::new(true, 9);
+        pertag.m_facts.fill(old.m_fact);
+        pertag.n_masters.fill(old.n_master);
+        pertag.gaps.fill(old.gap);
+        // Tuned at runtime with setgaps / setmfact / incnmaster.
+        pertag.gaps[3] = 24;
+        pertag.m_facts[2] = 0.7;
+        pertag.n_masters[4] = 3;
+        m.pertag = Some(pertag);
+
+        m.retune_layout_defaults(new);
+
+        let pertag = m.pertag.as_ref().expect("pertag");
+        assert_eq!((pertag.gaps[1], pertag.gaps[3]), (4, 24));
+        assert_eq!((pertag.m_facts[1], pertag.m_facts[2]), (0.6, 0.7));
+        assert_eq!((pertag.n_masters[1], pertag.n_masters[4]), (2, 3));
+        assert_eq!(
+            m.layout,
+            MonitorLayout {
+                m_fact: 0.6,
+                n_master: 2,
+                gap: 4,
+            }
+        );
+        assert_eq!(m.layout_defaults, new);
+
+        // Tags a larger tag count adds start from the defaults, not from the
+        // current tag's tuning.
+        m.layout.gap = 30;
+        m.sync_tag_slots(12, (1 << 12) - 1);
+        let pertag = m.pertag.as_ref().expect("pertag");
+        assert_eq!(pertag.gaps[12], 4);
+        assert_eq!(pertag.n_masters[12], 2);
     }
 
     #[test]

@@ -5,6 +5,22 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Layout defaults follow the configuration
+
+- Changing `appearance.gap_px`, `m_fact` or `n_master` (editing the file and
+  reloading, or `set_config`) now reaches the monitors that are already
+  running. Every tag still on the old default moves to the new one; tags
+  tuned with `setgaps`, `setmfact` or `incnmaster` keep their own value.
+  Before, the new value reached only monitors plugged in later.
+- Saved per-tag layouts (`[[layout.tags]]`) leave out a tag's `gap`, `m_fact`
+  and `n_master` when they equal the configured default, which the file
+  already reads as "use the global setting". A later change to those
+  settings therefore still reaches untouched tags after a restart, instead of
+  every tag pinning the default it had when first saved. Entries written by
+  earlier versions keep the values they recorded.
+- Tags added by a larger `layout.tags_length` start from the configured
+  defaults instead of copying the current tag's tuning.
+
 ### Focus and monitor-move policy
 
 - `movestack` keeps the focus history: moving a tile no longer changes which

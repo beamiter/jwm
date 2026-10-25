@@ -355,7 +355,12 @@ beside `monitor`, seeds by connector when the output identity is known
 (including X11 `updategeom` / `createmon`, same key as Wayland
 `add_monitor`), and falls back to the numeric index (with `monitor = -1`
 still meaning any monitor). Older config files without `connector` keep
-working. Session
+working. A tag's `gap`, `m_fact` and `n_master` are written only when they
+differ from the configured defaults, so a later change to `gap_px`,
+`m_fact` or `n_master` still reaches tags that were never tuned; a config
+reload also moves every tag still on the old default to the new one, while
+tags tuned with `setgaps`, `setmfact` or `incnmaster` keep their value.
+Entries saved by earlier versions keep the values they recorded. Session
 snapshots (v4+) also store maximize axes, the pre-maximize rectangle and
 whether the window was promoted. `restore_session` unmaximizes every matched
 window, applies the saved resting placement and tile order, then re-applies

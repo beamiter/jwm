@@ -1,7 +1,7 @@
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
-use crate::core::models::{MonitorKey, Pertag, WMMonitor};
+use crate::core::models::{LayoutDefaults, MonitorKey, Pertag, WMMonitor};
 use log::{error, info, warn};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -28,6 +28,15 @@ const BAR_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Names include this compositor's PID so a nested or test JWM that inherits
 /// the host session's `XDG_RUNTIME_DIR` does not fight the host over
 /// `/dev/shm/jwm_bar_mon_{monitor}` and enter the 30s retry loop.
+/// The tiling defaults new tags start from, as configured.
+pub(crate) fn configured_layout_defaults(cfg: &crate::config::Config) -> LayoutDefaults {
+    LayoutDefaults {
+        m_fact: cfg.m_fact(),
+        n_master: cfg.n_master(),
+        gap: cfg.layout_gap(),
+    }
+}
+
 pub(crate) fn secondary_bar_shared_memory_path(monitor_id: i32) -> String {
     format!("/dev/shm/jwm_bar_p{}_mon_{monitor_id}", std::process::id())
 }
@@ -289,9 +298,10 @@ impl Jwm {
         let mut m: WMMonitor = WMMonitor::new();
         m.tag_set[0] = 1;
         m.tag_set[1] = 1;
-        m.layout.m_fact = cfg.m_fact();
-        m.layout.n_master = cfg.n_master();
-        m.layout.gap = cfg.layout_gap();
+        m.layout_defaults = configured_layout_defaults(&cfg);
+        m.layout.m_fact = m.layout_defaults.m_fact;
+        m.layout.n_master = m.layout_defaults.n_master;
+        m.layout.gap = m.layout_defaults.gap;
         m.lt = Rc::new(LayoutEnum::FIBONACCI);
         m.prev_lt = Rc::new(LayoutEnum::TILE);
         m.lt_symbol = m.lt.symbol().to_string();

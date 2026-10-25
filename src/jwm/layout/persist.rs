@@ -380,7 +380,13 @@ impl Jwm {
         &self,
         backend: &dyn crate::backend::api::Backend,
     ) -> Vec<LayoutTagConfig> {
-        let tags_length = CONFIG.load().tags_length();
+        let config = CONFIG.load();
+        let tags_length = config.tags_length();
+        // A value equal to the configured default is left out, which the
+        // file reads as "the global setting": a later `gap_px`, `m_fact` or
+        // `n_master` change then still reaches the tag after a restart,
+        // instead of every tag pinning the default it had when first saved.
+        let defaults = crate::jwm::monitor_management::configured_layout_defaults(&config);
         let mut entries = Vec::with_capacity(self.state.monitor_order.len() * (tags_length + 1));
 
         for &mon_key in &self.state.monitor_order {
@@ -407,9 +413,21 @@ impl Jwm {
                         .get(tag)
                         .map(|prev| prev.0.to_owned())
                         .unwrap_or_default(),
-                    n_master: pertag.n_masters.get(tag).copied(),
-                    m_fact: pertag.m_facts.get(tag).copied(),
-                    gap: pertag.gaps.get(tag).copied(),
+                    n_master: pertag
+                        .n_masters
+                        .get(tag)
+                        .copied()
+                        .filter(|value| *value != defaults.n_master),
+                    m_fact: pertag
+                        .m_facts
+                        .get(tag)
+                        .copied()
+                        .filter(|value| *value != defaults.m_fact),
+                    gap: pertag
+                        .gaps
+                        .get(tag)
+                        .copied()
+                        .filter(|value| *value != defaults.gap),
                     show_bar: pertag.show_bars.get(tag).copied(),
                 });
             }
@@ -810,6 +828,45 @@ mod tests {
             pending_layout_persist_wakeup(Some(changed_at), true, changed_at + PERSIST_DEBOUNCE,),
             None,
             "the config tracker owns the next wake while a user edit is pending"
+        );
+    }
+
+    #[test]
+    fn saved_layouts_leave_out_values_equal_to_the_configured_defaults() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let defaults = crate::jwm::monitor_management::configured_layout_defaults(&CONFIG.load());
+        let monitor_key = jwm.state.monitor_order[0];
+        let pertag = jwm.state.monitors[monitor_key]
+            .pertag
+            .as_mut()
+            .expect("pertag");
+        pertag.m_facts.fill(defaults.m_fact);
+        pertag.n_masters.fill(defaults.n_master);
+        pertag.gaps.fill(defaults.gap);
+        pertag.gaps[3] = defaults.gap + 5;
+        pertag.n_masters[3] = defaults.n_master + 1;
+
+        let entries = jwm.layout_tag_entries(&backend);
+        let entry = |tag| {
+            entries
+                .iter()
+                .find(|entry| entry.tag == tag)
+                .expect("an entry per tag")
+        };
+        // Absent reads back as the global setting, so a later config change
+        // still reaches tag 1 after a restart.
+        assert_eq!(
+            (entry(1).gap, entry(1).m_fact, entry(1).n_master),
+            (None, None, None)
+        );
+        assert_eq!(entry(3).gap, Some(defaults.gap + 5));
+        assert_eq!(entry(3).n_master, Some(defaults.n_master + 1));
+        assert_eq!(entry(3).m_fact, None);
+        assert!(
+            entry(1).show_bar.is_some(),
+            "the bar is still saved per tag"
         );
     }
 
