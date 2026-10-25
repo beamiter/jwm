@@ -238,6 +238,7 @@ inherits = "release"
 debug = true
 strip = "none"
 
-# Fixed upstream revision with the local touch cancellation correctness patch.
+# Fixed upstream base revision plus verbatim upstream bug-fix backports and the
+# local touch cancellation correctness patch; see vendor/smithay/JWM_BACKPORT.md.
 [patch."https://github.com/Smithay/smithay.git"]
 smithay = { path = "vendor/smithay" }

@@ -5,6 +5,22 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Smithay bug-fix backports
+
+- Carry 19 verbatim upstream Smithay fixes on the pinned snapshot (listed in
+  `vendor/smithay/JWM_BACKPORT.md`). Among them: a client sending a negative
+  `wl_region` or `xdg_toplevel` min/max size can no longer abort debug builds
+  or store inverted rectangles; the foreign-toplevel list no longer drops a
+  live window after a lazily removed one, so docks and taskbars binding later
+  see every window; a second input method on a seat is refused instead of
+  displacing the working one, and keymap changes reach input-method keyboard
+  grabs; XWayland `_NET_ACTIVE_WINDOW` tracking follows the X server; idle
+  GPUs are not woken to clean texture caches; `wl_keyboard.modifiers`
+  follows its `key` event again.
+- The virtual-keyboard input-device rework is deliberately not taken yet:
+  IMEs such as fcitx5 forward keys through a virtual keyboard, so it needs its
+  own validated change. The local touch-cancellation fix is unchanged.
+
 ### Dependency refresh
 
 - Refresh the workspace lock to the newest semver-compatible releases (about

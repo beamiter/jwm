@@ -195,9 +195,6 @@ where
     /// Buffers can always just be safely discarded by dropping them, but not
     /// calling this function before may affect performance characteristics
     /// (e.g. by not tracking the buffer age).
-    // JWM vendoring compatibility: keep the pinned Atomic behavior and upstream
-    // Rust 1.87 MSRV (JWM: 1.89); try_update is newer. Revisit on upstream update.
-    #[allow(deprecated)]
     pub fn submitted(&mut self, slot: &Slot<A::Buffer>) {
         // don't mess up the state, if the user submitted and old buffer, after e.g. a resize
         if !self.slots.iter().any(|other| Arc::ptr_eq(&slot.0, other)) {
@@ -207,6 +204,7 @@ where
         slot.0.age.store(1, Ordering::SeqCst);
         for other_slot in &mut self.slots {
             if !Arc::ptr_eq(other_slot, &slot.0) && other_slot.buffer.is_some() {
+                #[allow(deprecated, reason = "our MSRV is 1.87 but try_update() was added in 1.95")]
                 let res = other_slot
                     .age
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |age| {

@@ -1,18 +1,378 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3d941182..ba878c99 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -237,6 +237,24 @@ additionally drops the buffers cached for copying between a render and a target
+ 
+ ### Bugfixes
+ 
++`ForeignToplevelListState::remove_toplevel` no longer removes a different toplevel from the list when
++a handle in front of it was dropped without being removed (the lazy cleanup that the documentation
++allows). Previously the removed entry was picked by its position among the live handles, so a live
++toplevel could be dropped from the list and was then not announced to clients binding the global later.
++
++`input_method_v2`: a second input method binding a seat that already has one is now the object told
++it is `unavailable`, per the protocol, leaving the existing instance in place. Previously the event
++went to the existing instance and the newcomer was dropped untracked. Destroying such an inert
++newcomer no longer clears the active instance, and its requests no longer drive the seat.
++
++`DrmSurface::use_vrr(false)` now succeeds as a no-op when using legacy DRM. Attempts to enable VRR
++on legacy DRM still return `UnknownProperty`.
++
++The `xdg_toplevel` request handler now posts an `invalid_size` error when a client performs a `set_max_size` or `set_min_size` request with a negative width or height.
++
++`DrmDeviceFd::new` no longer tries to become DRM master on a render node, which the kernel always
++refuses, so it no longer warns about it.
++
+ `SimpleCrtcMapper` (in `smithay-drm-extras`) now releases the CRTC reservation of any connector that
+ is no longer connected, including connectors that have disappeared from the resource list entirely
+ rather than being reported as disconnected. Previously such connectors (for example DP-MST sink
+@@ -262,6 +280,14 @@ logged and the first error returned.
+ `send_frames_surface_tree` (and `Window::send_frame`, `LayerSurface::send_frame`) no longer sends frame
+ callbacks to surfaces whose renderer state has no buffer, or to their subsurfaces.
+ 
++`GlesRenderer::cleanup_texture_cache` and `GlesRenderer::invalidate_caches` now only make their EGL
++context current when resources are queued for destruction. This avoids waking idle GPUs and
++blocking the compositor while they resume.
++
++`ext_image_copy_capture_session_v1` now raises the `duplicate_frame` protocol error when a client
++calls `create_frame` while the session still has an active frame, as the protocol requires. Previously
++the request was accepted and the extra frame was silently added to the session.
++
+ ## 0.7.0
+ 
+ ### Breaking changes
+diff --git a/Cargo.toml b/Cargo.toml
+index 072c78e9..270051a5 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -30,7 +30,7 @@ members = [
+ appendlist = "1.4"
+ ash = { version = "0.38.0", optional = true }
+ bitflags = "2.2.1"
+-calloop = "0.14.0"
++calloop = "0.14.5"
+ cursor-icon = "1.2.0"
+ downcast-rs = "1.2.0"
+ drm-fourcc = "^2.2.0"
+diff --git a/src/backend/allocator/swapchain.rs b/src/backend/allocator/swapchain.rs
+index c1ffc8d1..5dfb277c 100644
 --- a/src/backend/allocator/swapchain.rs
 +++ b/src/backend/allocator/swapchain.rs
-@@ -195,6 +195,9 @@
-     /// Buffers can always just be safely discarded by dropping them, but not
-     /// calling this function before may affect performance characteristics
-     /// (e.g. by not tracking the buffer age).
-+    // JWM vendoring compatibility: keep the pinned Atomic behavior and upstream
-+    // Rust 1.87 MSRV (JWM: 1.89); try_update is newer. Revisit on upstream update.
-+    #[allow(deprecated)]
-     pub fn submitted(&mut self, slot: &Slot<A::Buffer>) {
-         // don't mess up the state, if the user submitted and old buffer, after e.g. a resize
-         if !self.slots.iter().any(|other| Arc::ptr_eq(&slot.0, other)) {
+@@ -204,6 +204,7 @@ where
+         slot.0.age.store(1, Ordering::SeqCst);
+         for other_slot in &mut self.slots {
+             if !Arc::ptr_eq(other_slot, &slot.0) && other_slot.buffer.is_some() {
++                #[allow(deprecated, reason = "our MSRV is 1.87 but try_update() was added in 1.95")]
+                 let res = other_slot
+                     .age
+                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |age| {
+diff --git a/src/backend/drm/device/fd.rs b/src/backend/drm/device/fd.rs
+index d0b02e6e..4e3632e8 100644
+--- a/src/backend/drm/device/fd.rs
++++ b/src/backend/drm/device/fd.rs
+@@ -5,6 +5,7 @@ use std::{
+ };
+ use tracing::{error, info, warn};
+ 
++use crate::backend::drm::{DrmNode, NodeType};
+ use crate::utils::{DevPath, DeviceFd};
+ 
+ #[derive(Debug)]
+@@ -71,13 +72,18 @@ impl DrmDeviceFd {
+             privileged: false,
+         };
+ 
++        // Render nodes have no master; the kernel refuses SET_MASTER on them.
++        let render_node = DrmNode::from_file(&dev.fd).is_ok_and(|node| node.ty() == NodeType::Render);
++
+         // We want to modeset, so we better be the master, if we run via a tty session.
+         // This is only needed on older kernels. Newer kernels grant this permission,
+         // if no other process is already the *master*. So we skip over this error.
+-        if dev.acquire_master_lock().is_err() {
+-            warn!("Unable to become drm master, assuming unprivileged mode");
+-        } else {
+-            dev.privileged = true;
++        if !render_node {
++            if dev.acquire_master_lock().is_err() {
++                warn!("Unable to become drm master, assuming unprivileged mode");
++            } else {
++                dev.privileged = true;
++            }
+         }
+ 
+         DrmDeviceFd(Arc::new(dev))
+diff --git a/src/backend/drm/surface/mod.rs b/src/backend/drm/surface/mod.rs
+index 70c1f737..677fa132 100644
+--- a/src/backend/drm/surface/mod.rs
++++ b/src/backend/drm/surface/mod.rs
+@@ -333,13 +333,21 @@ impl DrmSurface {
+     /// Doing so might cause [`DrmSurface::commit_pending`] to return `true`.
+     /// Check [`DrmSurface::vrr_supported`], which indicates if VRR can be
+     /// used without a modeset on the attached connectors.
++    ///
++    /// Disabling VRR on legacy DRM is a no-op. Enabling VRR returns [`Error::UnknownProperty`].
+     pub fn use_vrr(&self, vrr: bool) -> Result<(), Error> {
+         match &*self.internal {
+             DrmSurfaceInternal::Atomic(surf) => surf.use_vrr(vrr),
+-            DrmSurfaceInternal::Legacy(_) => Err(Error::UnknownProperty {
+-                handle: self.crtc.into(),
+-                name: "VRR_ENABLED",
+-            }),
++            DrmSurfaceInternal::Legacy(_) => {
++                if vrr {
++                    Err(Error::UnknownProperty {
++                        handle: self.crtc.into(),
++                        name: "VRR_ENABLED",
++                    })
++                } else {
++                    Ok(())
++                }
++            }
+         }
+     }
+ 
+diff --git a/src/backend/renderer/gles/mod.rs b/src/backend/renderer/gles/mod.rs
+index 28b44588..7518d196 100644
+--- a/src/backend/renderer/gles/mod.rs
++++ b/src/backend/renderer/gles/mod.rs
+@@ -324,7 +324,7 @@ impl Default for GlesCleanup {
+ }
+ 
+ impl GlesCleanup {
+-    fn cleanup(&self, egl: &EGLContext, gl: &ffi::Gles2) {
++    fn cleanup(&self, egl: &EGLContext, gl: &ffi::Gles2) -> Result<(), MakeCurrentError> {
+         let receiver = match self.receiver.try_lock() {
+             Ok(receiver) => receiver,
+             Err(TryLockError::Poisoned(err)) => {
+@@ -333,10 +333,21 @@ impl GlesCleanup {
+             }
+             Err(TryLockError::WouldBlock) => {
+                 // Another thread is running `cleanup`, so just return
+-                return;
++                return Ok(());
+             }
+         };
+-        for resource in receiver.try_iter() {
++        let Ok(first) = receiver.try_recv() else {
++            return Ok(());
++        };
++        // Only activate the context once there is something to destroy: activating an idle
++        // GPU's context wakes it from runtime suspend.
++        if !egl.is_current() {
++            if let Err(err) = unsafe { egl.make_current() } {
++                let _ = self.sender.send(first);
++                return Err(err);
++            }
++        }
++        for resource in std::iter::once(first).chain(receiver.try_iter()) {
+             match resource {
+                 CleanupResource::Texture(texture) => unsafe {
+                     gl.DeleteTextures(1, &texture);
+@@ -366,6 +377,7 @@ impl GlesCleanup {
+                 },
+             }
+         }
++        Ok(())
+     }
+ }
+ 
+@@ -816,7 +828,7 @@ impl GlesRenderer {
+             self.egl.make_current()?;
+         }
+         unsafe { self.gl.BindFramebuffer(ffi::FRAMEBUFFER, 0) };
+-        self.cleanup();
++        self.cleanup()?;
+         self.egl.unbind()?;
+         Ok(())
+     }
+@@ -826,10 +838,11 @@ impl GlesRenderer {
+     }
+ 
+     #[profiling::function]
+-    fn cleanup(&mut self) {
++    fn cleanup(&mut self) -> Result<(), GlesError> {
+         self.dmabuf_cache.retain(|entry, _tex| !entry.is_gone());
+         self.buffers.retain(|buffer| !buffer.0.dmabuf.is_gone());
+-        self.gles_cleanup().cleanup(&self.egl, &self.gl);
++        self.gles_cleanup().cleanup(&self.egl, &self.gl)?;
++        Ok(())
+     }
+ 
+     /// Returns the supported [`Capabilities`](Capability) of this renderer.
+@@ -2353,22 +2366,14 @@ impl Renderer for GlesRenderer {
+ 
+     #[profiling::function]
+     fn cleanup_texture_cache(&mut self) -> Result<(), Self::Error> {
+-        unsafe {
+-            self.egl.make_current()?;
+-        }
+-        self.cleanup();
+-        Ok(())
++        self.cleanup()
+     }
+ 
+     #[profiling::function]
+     fn invalidate_caches(&mut self) -> Result<(), Self::Error> {
+-        unsafe {
+-            self.egl.make_current()?;
+-        }
+         self.dmabuf_cache.clear();
+         self.buffers.clear();
+-        self.cleanup();
+-        Ok(())
++        self.cleanup()
+     }
+ }
+ 
+@@ -2570,7 +2575,7 @@ impl GlesFrame<'_, '_> {
+                 .renderer
+                 .profiler
+                 .enter(gpu_span_location!("cleanup"), &self.renderer.gl);
+-            self.renderer.cleanup();
++            self.renderer.cleanup()?;
+             self.renderer.profiler.exit(&self.renderer.gl, scope);
+         }
+ 
+@@ -3611,3 +3616,59 @@ mod tests {
+         assert_eq!(tex_mat * bottom_left, Vec3::new(0f32, 1f32, 1f32));
+     }
+ }
++
++#[cfg(test)]
++mod context_activation_tests {
++    use super::*;
++    use crate::backend::egl::EGLDisplay;
++
++    // Prefer software rendering so the tests can run without a GPU: Mesa offers a software
++    // device even on a machine with no DRM node.
++    fn test_renderer() -> GlesRenderer {
++        let mut devices = EGLDevice::enumerate()
++            .expect("EGL device enumeration failed; Mesa provides the software device these tests need")
++            .collect::<Vec<_>>();
++        devices.sort_by_key(|device| !device.is_software());
++        devices
++            .into_iter()
++            .find_map(|device| {
++                let display = unsafe { EGLDisplay::new(device) }.ok()?;
++                let context = EGLContext::new(&display).ok()?;
++                unsafe { GlesRenderer::new(context) }.ok()
++            })
++            .expect("no usable EGL device; Mesa provides the software device these tests need")
++    }
++
++    fn drain_and_unbind(renderer: &mut GlesRenderer) {
++        renderer.cleanup_texture_cache().unwrap();
++        renderer.egl_context().unbind().unwrap();
++        assert!(!renderer.egl_context().is_current());
++    }
++
++    #[test]
++    fn cleanup_texture_cache_leaves_an_idle_context_unbound() {
++        let mut renderer = test_renderer();
++        drain_and_unbind(&mut renderer);
++
++        renderer.cleanup_texture_cache().unwrap();
++
++        assert!(!renderer.egl_context().is_current());
++    }
++
++    #[test]
++    fn cleanup_texture_cache_frees_a_dropped_texture_from_an_unbound_context() {
++        let mut renderer = test_renderer();
++        let texture = renderer
++            .import_memory(&[0u8; 4], Fourcc::Argb8888, Size::from((1, 1)), false)
++            .unwrap();
++        let texture_id = texture.tex_id();
++        assert_eq!(unsafe { renderer.gl.IsTexture(texture_id) }, ffi::TRUE);
++        drain_and_unbind(&mut renderer);
++        drop(texture);
++
++        renderer.cleanup_texture_cache().unwrap();
++
++        unsafe { renderer.egl_context().make_current().unwrap() };
++        assert_eq!(unsafe { renderer.gl.IsTexture(texture_id) }, ffi::FALSE);
++    }
++}
+diff --git a/src/input/keyboard/mod.rs b/src/input/keyboard/mod.rs
+index 530bddf4..c491ccf3 100644
+--- a/src/input/keyboard/mod.rs
++++ b/src/input/keyboard/mod.rs
+@@ -1523,6 +1523,15 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
+         self.inner.focus.as_ref().map(|f| &f.0)
+     }
+ 
++    /// Access the keymap file currently used by this keyboard.
++    #[cfg(feature = "wayland_frontend")]
++    pub(crate) fn with_keymap_file<R>(&self, f: impl FnOnce(&KeymapFile) -> R) -> R {
++        // Only the keyboard's internal state is locked by this handle, not its keymap file.
++        let keyboard = self.seat.get_keyboard().unwrap();
++        let keymap_file = keyboard.arc.keymap.lock().unwrap();
++        f(&keymap_file)
++    }
++
+     /// Convert a given keycode as a [`KeysymHandle`] modified by this keyboards state
+     pub fn keysym_handle(&self, keycode: Keycode) -> KeysymHandle<'_> {
+         KeysymHandle {
+@@ -1563,12 +1572,10 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
+             keycode,
+         };
+ 
+-        // Modifiers must be sent before the key event so the client resolves the key against the
+-        // updated modifier state.
++        focus.key(self.seat, data, key, key_state, serial, time);
+         if let Some(mods) = modifiers {
+             focus.modifiers(self.seat, data, mods, serial);
+         }
+-        focus.key(self.seat, data, key, key_state, serial, time);
+     }
+ 
+     /// Iterate over the currently pressed keys.
+diff --git a/src/input/tablet/tool/mod.rs b/src/input/tablet/tool/mod.rs
+index 9b83121f..b9315303 100644
+--- a/src/input/tablet/tool/mod.rs
++++ b/src/input/tablet/tool/mod.rs
+@@ -914,6 +914,17 @@ impl<D: TabletSeatHandler + 'static> TabletToolInternal<D> {
+             }
+ 
+             if self.tip_down {
++                // Compat with other compositors, more on this in https://github.com/Smithay/smithay/pull/1851
++                // tldr: Spec-wise there is no reason to send this, but some clients depend on this
++                focused.axis(
++                    seat,
++                    data,
++                    descriptor,
++                    AxisFrame {
++                        pressure: Some(0.0),
++                        ..Default::default()
++                    },
++                );
+                 focused.up(
+                     seat,
+                     data,
+@@ -1013,6 +1024,17 @@ impl<D: TabletSeatHandler + 'static> TabletToolInternal<D> {
+     fn up(&mut self, data: &mut D, seat: &Seat<D>, descriptor: &TabletToolDescriptor, event: &UpEvent) {
+         if self.tip_down {
+             if let Some((focused, _)) = self.focus.as_mut() {
++                // Compat with other compositors, more on this in https://github.com/Smithay/smithay/pull/1851
++                // tldr: Spec-wise there is no reason to send this, but some clients depend on this
++                focused.axis(
++                    seat,
++                    data,
++                    descriptor,
++                    AxisFrame {
++                        pressure: Some(0.0),
++                        ..Default::default()
++                    },
++                );
+                 focused.up(seat, data, descriptor, event);
+             }
+         }
+diff --git a/src/input/touch/mod.rs b/src/input/touch/mod.rs
+index 199aa33a..db36948b 100644
 --- a/src/input/touch/mod.rs
 +++ b/src/input/touch/mod.rs
-@@ -671,19 +671,21 @@
+@@ -671,19 +671,21 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
      }
  
      fn cancel(&mut self, data: &mut D, seat: &Seat<D>) {
@@ -47,3 +407,651 @@
                  if focus.last_frame(seat, data) != Some(marker) {
                      focus.cancel(seat, data, marker);
                  }
+diff --git a/src/wayland/compositor/handlers.rs b/src/wayland/compositor/handlers.rs
+index c18aef34..84c326cc 100644
+--- a/src/wayland/compositor/handlers.rs
++++ b/src/wayland/compositor/handlers.rs
+@@ -390,20 +390,28 @@ where
+         let client_scale = state.client_compositor_state(client).client_scale();
+ 
+         match request {
+-            wl_region::Request::Add { x, y, width, height } => guard.rects.push((
+-                RectangleKind::Add,
+-                Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
+-                    .to_f64()
+-                    .to_logical(client_scale)
+-                    .to_i32_round(),
+-            )),
+-            wl_region::Request::Subtract { x, y, width, height } => guard.rects.push((
+-                RectangleKind::Subtract,
+-                Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
+-                    .to_f64()
+-                    .to_logical(client_scale)
+-                    .to_i32_round(),
+-            )),
++            wl_region::Request::Add { x, y, width, height } => {
++                if width > 0 && height > 0 {
++                    guard.rects.push((
++                        RectangleKind::Add,
++                        Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
++                            .to_f64()
++                            .to_logical(client_scale)
++                            .to_i32_round(),
++                    ));
++                }
++            }
++            wl_region::Request::Subtract { x, y, width, height } => {
++                if width > 0 && height > 0 {
++                    guard.rects.push((
++                        RectangleKind::Subtract,
++                        Rectangle::<i32, Client>::new((x, y).into(), (width, height).into())
++                            .to_f64()
++                            .to_logical(client_scale)
++                            .to_i32_round(),
++                    ));
++                }
++            }
+             wl_region::Request::Destroy => {
+                 // all is handled by our destructor
+             }
+diff --git a/src/wayland/foreign_toplevel_list/mod.rs b/src/wayland/foreign_toplevel_list/mod.rs
+index 90d17392..eaac316f 100644
+--- a/src/wayland/foreign_toplevel_list/mod.rs
++++ b/src/wayland/foreign_toplevel_list/mod.rs
+@@ -408,14 +408,10 @@ impl ForeignToplevelListState {
+     pub fn remove_toplevel(&mut self, handle: &ForeignToplevelHandle) {
+         handle.send_closed();
+ 
+-        if let Some(pos) = self
+-            .toplevels
+-            .iter()
+-            .filter_map(|h| h.upgrade())
+-            .position(|h| Arc::ptr_eq(&h.inner, &handle.inner))
+-        {
+-            self.toplevels.remove(pos);
+-        }
++        // Compare on the unfiltered list: the index of a filtered iterator would point at a
++        // different entry if a handle in front of this one was already dropped.
++        self.toplevels
++            .retain(|h| h.upgrade().is_some_and(|h| !Arc::ptr_eq(&h.inner, &handle.inner)));
+     }
+ 
+     /// Auto cleanup closed handles
+@@ -540,3 +536,50 @@ impl<D: ForeignToplevelListHandler> Dispatch2<ExtForeignToplevelHandleV1, D> for
+         self.remove_instance(resource);
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    struct State {
++        list: ForeignToplevelListState,
++    }
++
++    impl ForeignToplevelListHandler for State {
++        fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
++            &mut self.list
++        }
++    }
++
++    crate::delegate_dispatch2!(State);
++
++    fn titles(list: &ForeignToplevelListState) -> Vec<String> {
++        list.toplevels
++            .iter()
++            .filter_map(|h| h.upgrade())
++            .map(|h| h.title())
++            .collect()
++    }
++
++    #[test]
++    fn remove_toplevel_after_a_dropped_handle_keeps_the_others() {
++        let display = wayland_server::Display::<State>::new().unwrap();
++        let mut state = State {
++            list: ForeignToplevelListState::new::<State>(&display.handle()),
++        };
++        let a = state.list.new_toplevel::<State>("a", "a");
++        let b = state.list.new_toplevel::<State>("b", "b");
++        let c = state.list.new_toplevel::<State>("c", "c");
++
++        // Closed and dropped without remove_toplevel, to be cleaned up lazily.
++        a.send_closed();
++        drop(a);
++        state.list.remove_toplevel(&c);
++        assert!(c.is_closed());
++        assert_eq!(titles(&state.list), ["b"]);
++
++        state.list.cleanup_closed_handles();
++        assert_eq!(titles(&state.list), ["b"]);
++        assert!(!b.is_closed());
++    }
++}
+diff --git a/src/wayland/image_copy_capture/mod.rs b/src/wayland/image_copy_capture/mod.rs
+index 66dfe8d6..b1e2d085 100644
+--- a/src/wayland/image_copy_capture/mod.rs
++++ b/src/wayland/image_copy_capture/mod.rs
+@@ -212,7 +212,7 @@ struct SessionInner {
+     constraints: Option<BufferConstraints>,
+     draw_cursors: bool,
+     source: ImageCaptureSource,
+-    active_frames: Vec<FrameRef>,
++    active_frame: Option<FrameRef>,
+ }
+ 
+ impl SessionInner {
+@@ -222,7 +222,7 @@ impl SessionInner {
+             constraints: None,
+             draw_cursors,
+             source,
+-            active_frames: Vec::new(),
++            active_frame: None,
+         }
+     }
+ }
+@@ -343,8 +343,8 @@ impl Drop for Session {
+             return;
+         }
+ 
+-        // Fail all active frames
+-        for frame in inner.active_frames.drain(..) {
++        // Fail the active frame
++        if let Some(frame) = inner.active_frame.take() {
+             frame
+                 .inner
+                 .lock()
+@@ -385,7 +385,7 @@ struct CursorSessionInner {
+     source: ImageCaptureSource,
+     position: Option<crate::utils::Point<i32, BufferCoords>>,
+     hotspot: crate::utils::Point<i32, BufferCoords>,
+-    active_frames: Vec<FrameRef>,
++    active_frame: Option<FrameRef>,
+     pointer: WlPointer,
+ }
+ 
+@@ -398,7 +398,7 @@ impl CursorSessionInner {
+             source,
+             position: None,
+             hotspot: crate::utils::Point::from((0, 0)),
+-            active_frames: Vec::new(),
++            active_frame: None,
+             pointer,
+         }
+     }
+@@ -566,7 +566,7 @@ impl Drop for CursorSession {
+         }
+         inner.constraints.take();
+ 
+-        for frame in inner.active_frames.drain(..) {
++        if let Some(frame) = inner.active_frame.take() {
+             frame
+                 .inner
+                 .lock()
+@@ -635,7 +635,7 @@ impl FrameInner {
+ 
+ /// A cloneable reference to a capture frame.
+ ///
+-/// Used for tracking active frames within a session.
++/// Used for tracking the active frame within a session.
+ #[derive(Clone, Debug)]
+ pub struct FrameRef {
+     obj: ExtImageCopyCaptureFrameV1,
+@@ -1000,7 +1000,7 @@ where
+                         constraints: None,
+                         draw_cursors: false,
+                         source: ImageCaptureSource::new(),
+-                        active_frames: Vec::new(),
++                        active_frame: None,
+                     }));
+                     let user_data = Arc::new(UserDataMap::new());
+                     let obj = data_init.init(
+@@ -1122,14 +1122,17 @@ where
+     ) {
+         match request {
+             ext_image_copy_capture_session_v1::Request::CreateFrame { frame } => {
++                if self.inner.lock().unwrap().active_frame.is_some() {
++                    resource.post_error(
++                        ext_image_copy_capture_session_v1::Error::DuplicateFrame,
++                        "create_frame sent before the previous frame was destroyed",
++                    );
++                    return;
++                }
+                 let constraints = self.inner.lock().unwrap().constraints.clone();
+                 let inner = Arc::new(Mutex::new(FrameInner::new(resource.clone(), constraints)));
+                 let obj = data_init.init(frame, FrameData { inner: inner.clone() });
+-                self.inner
+-                    .lock()
+-                    .unwrap()
+-                    .active_frames
+-                    .push(FrameRef { obj, inner });
++                self.inner.lock().unwrap().active_frame = Some(FrameRef { obj, inner });
+             }
+             ext_image_copy_capture_session_v1::Request::Destroy => {}
+             _ => unreachable!(),
+@@ -1167,14 +1170,17 @@ where
+     ) {
+         match request {
+             ext_image_copy_capture_session_v1::Request::CreateFrame { frame } => {
++                if self.inner.lock().unwrap().active_frame.is_some() {
++                    resource.post_error(
++                        ext_image_copy_capture_session_v1::Error::DuplicateFrame,
++                        "create_frame sent before the previous frame was destroyed",
++                    );
++                    return;
++                }
+                 let constraints = self.inner.lock().unwrap().constraints.clone();
+                 let inner = Arc::new(Mutex::new(FrameInner::new(resource.clone(), constraints)));
+                 let obj = data_init.init(frame, FrameData { inner: inner.clone() });
+-                self.inner
+-                    .lock()
+-                    .unwrap()
+-                    .active_frames
+-                    .push(FrameRef { obj, inner });
++                self.inner.lock().unwrap().active_frame = Some(FrameRef { obj, inner });
+             }
+             ext_image_copy_capture_session_v1::Request::Destroy => {}
+             _ => unreachable!(),
+@@ -1334,7 +1340,7 @@ where
+                 // Try regular sessions first
+                 for session in &copy_capture_state.sessions {
+                     let session_inner = session.inner.lock().unwrap();
+-                    if session_inner.active_frames.iter().any(|f| f == &frame_ref) {
++                    if session_inner.active_frame.as_ref() == Some(&frame_ref) {
+                         drop(session_inner);
+                         let session_ref = session.clone();
+                         let frame = Frame {
+@@ -1349,7 +1355,7 @@ where
+                 // Try cursor sessions
+                 for session in &copy_capture_state.cursor_sessions {
+                     let session_inner = session.inner.lock().unwrap();
+-                    if session_inner.active_frames.iter().any(|f| f == &frame_ref) {
++                    if session_inner.active_frame.as_ref() == Some(&frame_ref) {
+                         drop(session_inner);
+                         let session_ref = session.clone();
+                         let frame = Frame {
+@@ -1380,22 +1386,22 @@ where
+             inner: self.inner.clone(),
+         };
+ 
+-        // Remove from active frames in sessions
++        // Remove the frame from whichever session holds it
+         for session in &state.image_copy_capture_state().sessions {
+             session
+                 .inner
+                 .lock()
+                 .unwrap()
+-                .active_frames
+-                .retain(|f| f != &frame_ref);
++                .active_frame
++                .take_if(|f| f == &frame_ref);
+         }
+         for session in &state.image_copy_capture_state().cursor_sessions {
+             session
+                 .inner
+                 .lock()
+                 .unwrap()
+-                .active_frames
+-                .retain(|f| f != &frame_ref);
++                .active_frame
++                .take_if(|f| f == &frame_ref);
+         }
+ 
+         state.frame_aborted(frame_ref);
+diff --git a/src/wayland/input_method/input_method_handle.rs b/src/wayland/input_method/input_method_handle.rs
+index fc73a979..2512b279 100644
+--- a/src/wayland/input_method/input_method_handle.rs
++++ b/src/wayland/input_method/input_method_handle.rs
+@@ -57,9 +57,9 @@ pub struct InputMethodHandle {
+ impl InputMethodHandle {
+     pub(super) fn add_instance(&self, instance: &ZwpInputMethodV2) {
+         let mut inner = self.inner.lock().unwrap();
+-        if let Some(instance) = inner.instance.as_mut() {
+-            instance.serial = 0;
+-            instance.object.unavailable();
++        if inner.instance.is_some() {
++            // Only one input method per seat: a newcomer is made unavailable and inert.
++            instance.unavailable();
+         } else {
+             inner.instance = Some(Instance {
+                 object: instance.clone(),
+@@ -73,6 +73,16 @@ impl InputMethodHandle {
+         self.inner.lock().unwrap().instance.is_some()
+     }
+ 
++    /// Whether `object` is the seat's active input method instance.
++    pub(super) fn is_active_instance(&self, object: &ZwpInputMethodV2) -> bool {
++        self.inner
++            .lock()
++            .unwrap()
++            .instance
++            .as_ref()
++            .is_some_and(|i| i.object.id() == object.id())
++    }
++
+     /// Callback function to access the input method object
+     pub(crate) fn with_instance<F>(&self, f: F)
+     where
+@@ -203,6 +213,31 @@ where
+         _dh: &DisplayHandle,
+         data_init: &mut DataInit<'_, D>,
+     ) {
++        // An inert newcomer drives nothing, but new-id requests must still init a child.
++        if !self.handle.is_active_instance(seat) {
++            match request {
++                zwp_input_method_v2::Request::GetInputPopupSurface { id, .. } => {
++                    data_init.init(
++                        id,
++                        InputMethodPopupSurfaceUserData {
++                            alive_tracker: AliveTracker::default(),
++                        },
++                    );
++                }
++                zwp_input_method_v2::Request::GrabKeyboard { keyboard } => {
++                    let keyboard_grab = self.handle.inner.lock().unwrap().keyboard_grab.clone();
++                    data_init.init(
++                        keyboard,
++                        InputMethodKeyboardUserData {
++                            handle: keyboard_grab,
++                            keyboard_handle: self.keyboard_handle.clone(),
++                        },
++                    );
++                }
++                _ => {}
++            }
++            return;
++        }
+         match request {
+             zwp_input_method_v2::Request::CommitString { text } => {
+                 self.text_input_handle.with_active_text_input(|ti, _surface| {
+@@ -300,6 +335,8 @@ where
+                 if let Err(err) = res {
+                     warn!(err = ?err, "Failed to send keymap to client");
+                 } else {
++                    keyboard.keymap_id = Some(keymap_file.id());
++
+                     // Modifiers can be latched when taking the grab, thus we must send them to keep
+                     // them in sync.
+                     let mods = guard.mods_state.serialized;
+@@ -319,8 +356,11 @@ where
+         }
+     }
+ 
+-    fn destroyed(&self, _state: &mut D, _client: ClientId, _input_method: &ZwpInputMethodV2) {
+-        self.handle.inner.lock().unwrap().instance = None;
+-        self.text_input_handle.leave();
++    fn destroyed(&self, _state: &mut D, _client: ClientId, input_method: &ZwpInputMethodV2) {
++        // Only the active instance leaving frees the seat.
++        if self.handle.is_active_instance(input_method) {
++            self.handle.inner.lock().unwrap().instance = None;
++            self.text_input_handle.leave();
++        }
+     }
+ }
+diff --git a/src/wayland/input_method/input_method_keyboard_grab.rs b/src/wayland/input_method/input_method_keyboard_grab.rs
+index bf806763..75074416 100644
+--- a/src/wayland/input_method/input_method_keyboard_grab.rs
++++ b/src/wayland/input_method/input_method_keyboard_grab.rs
+@@ -3,16 +3,17 @@ use std::{
+     sync::{Arc, Mutex},
+ };
+ 
++use tracing::warn;
+ use wayland_protocols_misc::zwp_input_method_v2::server::zwp_input_method_keyboard_grab_v2::{
+     self, ZwpInputMethodKeyboardGrabV2,
+ };
+-use wayland_server::backend::ClientId;
++use wayland_server::{backend::ClientId, protocol::wl_keyboard::KeymapFormat};
+ 
+ use crate::input::{
+     SeatHandler,
+     keyboard::{
+         GrabStartData as KeyboardGrabStartData, KeyboardGrab, KeyboardHandle, KeyboardInnerHandle,
+-        ModifiersState,
++        KeymapFileId, ModifiersState, SerializedMods,
+     },
+ };
+ use crate::wayland::text_input::TextInputHandle;
+@@ -26,6 +27,7 @@ use crate::{
+ pub(crate) struct InputMethodKeyboard {
+     pub grab: Option<ZwpInputMethodKeyboardGrabV2>,
+     pub text_input_handle: TextInputHandle,
++    pub keymap_id: Option<KeymapFileId>,
+ }
+ 
+ /// Handle to an input method instance
+@@ -41,27 +43,64 @@ where
+     fn input(
+         &mut self,
+         _data: &mut D,
+-        _handle: &mut KeyboardInnerHandle<'_, D>,
++        handle: &mut KeyboardInnerHandle<'_, D>,
+         keycode: Keycode,
+         key_state: KeyState,
+         modifiers: Option<ModifiersState>,
+         serial: Serial,
+         time: InputTime,
+     ) {
+-        let inner = self.inner.lock().unwrap();
++        let mut inner = self.inner.lock().unwrap();
++
++        // The keyboard's keymap can change while the grab is active (e.g. when a virtual keyboard
++        // with its own keymap is in use, e.g., wtype's synthetic keymap), and the keycodes must be
++        // interpreted using it, so keep the grab in sync like wlroots does. The id is a hash of the
++        // content, so an input method sending the same keymap back through its own virtual keyboard
++        // will not result in a loop of keymap updates.
++        let keymap_changed = handle.with_keymap_file(|keymap_file| {
++            let id = keymap_file.id();
++            if inner.keymap_id == Some(id) {
++                return false;
++            }
++            let keyboard = inner.grab.as_ref().unwrap();
++            let res = keymap_file.with_fd(false, |fd, size| {
++                keyboard.keymap(KeymapFormat::XkbV1, fd, size as u32);
++            });
++            if let Err(err) = res {
++                warn!(err = ?err, "Failed to send keymap to client");
++                return false;
++            }
++            inner.keymap_id = Some(id);
++            true
++        });
++
++        // The client resets its state when it receives a new keymap, so send the full modifier
++        // state before the key in that case. Otherwise, only send the modifiers if they changed.
++        let (mods_before_key, mods_after_key) = if keymap_changed {
++            (Some(handle.modifier_state().serialized), None)
++        } else {
++            (None, modifiers.map(|m| m.serialized))
++        };
++
+         let keyboard = inner.grab.as_ref().unwrap();
++        let send_modifiers = |serial, serialized: SerializedMods| {
++            keyboard.modifiers(
++                serial,
++                serialized.depressed,
++                serialized.latched,
++                serialized.locked,
++                serialized.layout_effective,
++            )
++        };
+         inner
+             .text_input_handle
+             .active_text_input_serial_or_default(serial.0, |serial| {
++                if let Some(serialized) = mods_before_key {
++                    send_modifiers(serial, serialized);
++                }
+                 keyboard.key(serial, time.millis(), keycode.raw() - 8, key_state.into());
+-                if let Some(serialized) = modifiers.map(|m| m.serialized) {
+-                    keyboard.modifiers(
+-                        serial,
+-                        serialized.depressed,
+-                        serialized.latched,
+-                        serialized.locked,
+-                        serialized.layout_effective,
+-                    )
++                if let Some(serialized) = mods_after_key {
++                    send_modifiers(serial, serialized);
+                 }
+             });
+     }
+@@ -100,7 +139,10 @@ impl<D: SeatHandler> fmt::Debug for InputMethodKeyboardUserData<D> {
+ 
+ impl<D: SeatHandler + 'static> Dispatch2<ZwpInputMethodKeyboardGrabV2, D> for InputMethodKeyboardUserData<D> {
+     fn destroyed(&self, state: &mut D, _client: ClientId, _object: &ZwpInputMethodKeyboardGrabV2) {
+-        self.handle.inner.lock().unwrap().grab = None;
++        let mut inner = self.handle.inner.lock().unwrap();
++        inner.grab = None;
++        inner.keymap_id = None;
++        drop(inner);
+         self.keyboard_handle.unset_grab(state);
+     }
+ 
+diff --git a/src/wayland/seat/mod.rs b/src/wayland/seat/mod.rs
+index 3740623c..2aec3f7e 100644
+--- a/src/wayland/seat/mod.rs
++++ b/src/wayland/seat/mod.rs
+@@ -280,6 +280,12 @@ where
+                     h.new_kbd(keyboard);
+                 } else {
+                     // same as pointer, should error but cannot
++
++                    // Protocol spec says this should be sent immediately on creation, so send
++                    // for inert object.
++                    if keyboard.version() >= 4 {
++                        keyboard.repeat_info(0, 0);
++                    }
+                 }
+             }
+             wl_seat::Request::GetTouch { id } => {
+diff --git a/src/wayland/shell/xdg/decoration.rs b/src/wayland/shell/xdg/decoration.rs
+index 941a075a..bbe55acd 100644
+--- a/src/wayland/shell/xdg/decoration.rs
++++ b/src/wayland/shell/xdg/decoration.rs
+@@ -271,17 +271,19 @@ where
+         &self,
+         state: &mut D,
+         _: &Client,
+-        _: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
++        resource: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+         request: zxdg_toplevel_decoration_v1::Request,
+         _dh: &DisplayHandle,
+         _: &mut DataInit<'_, D>,
+     ) {
+-        use self::zxdg_toplevel_decoration_v1::Request;
++        use self::zxdg_toplevel_decoration_v1::{Error, Request};
+ 
+         match request {
+             Request::SetMode { mode } => {
+                 if let WEnum::Value(mode) = mode {
+                     state.request_mode(self.clone(), mode);
++                } else {
++                    resource.post_error(Error::InvalidMode, "invalid decoration mode");
+                 }
+             }
+ 
+diff --git a/src/wayland/shell/xdg/handlers/surface/toplevel.rs b/src/wayland/shell/xdg/handlers/surface/toplevel.rs
+index 41576b11..cf2a0070 100644
+--- a/src/wayland/shell/xdg/handlers/surface/toplevel.rs
++++ b/src/wayland/shell/xdg/handlers/surface/toplevel.rs
+@@ -128,11 +128,25 @@ where
+                 }
+             }
+             xdg_toplevel::Request::SetMaxSize { width, height } => {
++                if width < 0 || height < 0 {
++                    toplevel.post_error(
++                        xdg_toplevel::Error::InvalidSize,
++                        "The max size cannot be negative",
++                    );
++                    return;
++                }
+                 with_toplevel_pending_state(self, |toplevel_data| {
+                     toplevel_data.max_size = (width, height).into();
+                 });
+             }
+             xdg_toplevel::Request::SetMinSize { width, height } => {
++                if width < 0 || height < 0 {
++                    toplevel.post_error(
++                        xdg_toplevel::Error::InvalidSize,
++                        "The min size cannot be negative",
++                    );
++                    return;
++                }
+                 with_toplevel_pending_state(self, |toplevel_data| {
+                     toplevel_data.min_size = (width, height).into();
+                 });
+diff --git a/src/xwayland/xwm/mod.rs b/src/xwayland/xwm/mod.rs
+index 29e2f570..e7446699 100644
+--- a/src/xwayland/xwm/mod.rs
++++ b/src/xwayland/xwm/mod.rs
+@@ -181,8 +181,8 @@ use x11rb::{
+             AtomEnum, CONFIGURE_NOTIFY_EVENT, ChangeWindowAttributesAux, Colormap, ColormapAlloc,
+             ConfigWindow, ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt, CreateGCAux,
+             CreateWindowAux, CursorWrapper, EventMask, FontWrapper, GcontextWrapper, ImageFormat, InputFocus,
+-            NotifyDetail, PixmapWrapper, PropMode, Property, QueryExtensionReply, Screen, StackMode,
+-            Visualid, WindowClass,
++            NotifyDetail, NotifyMode, PixmapWrapper, PropMode, Property, QueryExtensionReply, Screen,
++            StackMode, Visualid, WindowClass,
+         },
+     },
+     rust_connection::{ConnectionError, DefaultStream, RustConnection},
+@@ -1048,12 +1048,14 @@ impl X11Wm {
+             span,
+         };
+ 
+-        let event_handle = handle.clone();
++        let event_handle = handle.downgrade();
+         let dh = dh.clone();
+         handle.insert_source(source, move |event, _, data| match event {
+             calloop::channel::Event::Msg(event) => {
+-                if let Err(err) = handle_event(&event_handle, &dh, data, id, event) {
+-                    warn!(id = id.0, err = ?err, "Failed to handle X11 event");
++                if let Some(event_handle) = event_handle.upgrade() {
++                    if let Err(err) = handle_event(&event_handle, &dh, data, id, event) {
++                        warn!(id = id.0, err = ?err, "Failed to handle X11 event");
++                    }
+                 }
+             }
+             calloop::channel::Event::Closed => {
+@@ -2400,25 +2402,29 @@ where
+                 }
+             }
+         }
+-        Event::FocusIn(n) => {
+-            if xwm.windows.iter().any(|x| x.window_id() == n.event) {
+-                conn.change_property32(
+-                    PropMode::REPLACE,
+-                    xwm.screen.root,
+-                    xwm.atoms._NET_ACTIVE_WINDOW,
+-                    AtomEnum::WINDOW,
+-                    &[n.event],
+-                )?;
+-            }
++        Event::FocusIn(n)
++            if n.event == xwm.screen.root
++                && matches!(n.detail, NotifyDetail::NONE | NotifyDetail::POINTER_ROOT) =>
++        {
++            conn.change_property32(
++                PropMode::REPLACE,
++                xwm.screen.root,
++                xwm.atoms._NET_ACTIVE_WINDOW,
++                AtomEnum::WINDOW,
++                &[x11rb::NONE],
++            )?;
+         }
+-        Event::FocusOut(n) if n.detail == NotifyDetail::NONE => {
++        Event::FocusIn(n)
++            if n.detail != NotifyDetail::POINTER
++                && !matches!(n.mode, NotifyMode::GRAB | NotifyMode::UNGRAB) =>
++        {
+             if xwm.windows.iter().any(|x| x.window_id() == n.event) {
+                 conn.change_property32(
+                     PropMode::REPLACE,
+                     xwm.screen.root,
+                     xwm.atoms._NET_ACTIVE_WINDOW,
+                     AtomEnum::WINDOW,
+-                    &[x11rb::NONE],
++                    &[n.event],
+                 )?;
+             }
+         }
