@@ -206,7 +206,8 @@ continue in the background after the REC indicator disappears.
 
 - `Alt+Ctrl+R`: select a region and press Enter to start recording; pressing it
   again while recording stops.
-- `Alt+Ctrl+Shift+R`: enter region adjustment mode while recording.
+- `Ctrl+Print`: the dedicated capture-key alternative for starting/stopping.
+- `Ctrl+Shift+Print`: enter region adjustment mode while recording.
 - In adjustment mode, drag inside the region to move it, or drag an edge or a
   handle to resize it; Enter confirms, and Escape restores the region from
   before the adjustment.

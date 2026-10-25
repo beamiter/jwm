@@ -2660,12 +2660,14 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
-                modifier: vec![
-                    "Mod1".to_string(),
-                    "Control".to_string(),
-                    "Shift".to_string(),
-                ],
-                key: "r".to_string(),
+                modifier: vec!["Control".to_string()],
+                key: "Print".to_string(),
+                function: "toggle_recording".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Control".to_string(), "Shift".to_string()],
+                key: "Print".to_string(),
                 function: "adjust_recording_region".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
@@ -2763,12 +2765,10 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
-                modifier: vec![
-                    "Mod1".to_string(),
-                    "Control".to_string(),
-                    "Shift".to_string(),
-                ],
-                key: "b".to_string(),
+                // Shift extends the control-center key to its device picker.
+                // Ctrl+Alt+Fn is reserved for VT switching on X11.
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "F10".to_string(),
                 function: "bluetooth_picker".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
@@ -2855,24 +2855,6 @@ impl Config {
                 key: "F12".to_string(),
                 function: "toggle_debug_hud".to_string(),
                 argument: ArgumentConfig::Int(0),
-            },
-            KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
-                key: "F11".to_string(),
-                function: "toggle_waterlily".to_string(),
-                argument: ArgumentConfig::Int(0),
-            },
-            KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
-                key: "F10".to_string(),
-                function: "waterlily_case".to_string(),
-                argument: ArgumentConfig::StringVec(vec!["next".to_string()]),
-            },
-            KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
-                key: "F9".to_string(),
-                function: "waterlily_palette".to_string(),
-                argument: ArgumentConfig::StringVec(vec!["next".to_string()]),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
@@ -2992,6 +2974,20 @@ impl Config {
                 modifier: vec!["Mod1".to_string()],
                 key: "Return".to_string(),
                 function: "zoom".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            // The unmodified family still promotes a tile / launches a
+            // terminal. Control supplies the missing keyboard window states.
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Return".to_string(),
+                function: "togglemaximize".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "space".to_string(),
+                function: "togglefloating".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -3158,6 +3154,20 @@ impl Config {
                 function: "take_screenshot".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
+            // Dedicated capture keys group screenshots and recording on one
+            // physical key. The letter aliases remain useful on laptops.
+            KeyConfig {
+                modifier: vec![],
+                key: "Print".to_string(),
+                function: "take_screenshot".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Shift".to_string()],
+                key: "Print".to_string(),
+                function: "take_screenshot_fullscreen".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "s".to_string(),
@@ -3267,7 +3277,7 @@ impl Config {
             // dragged window on a monitor edge (left/right halves, maximize).
             // Up is a real maximize: it fills the work area, publishes the
             // maximized state, and pressing it again restores the previous
-            // rect. Tiled windows use the bindable `togglemaximize` instead.
+            // rect. Alt+Ctrl+Return also maximizes tiled windows.
             // The corner quarters (top-left, top-right, bottom-left,
             // bottom-right) are bindable but deliberately ship without
             // defaults: corners do not map honestly onto arrow keys.
@@ -3289,12 +3299,8 @@ impl Config {
                 function: "snap_window".to_string(),
                 argument: ArgumentConfig::String("maximize".to_string()),
             },
-            KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
-                key: "q".to_string(),
-                function: "quit".to_string(),
-                argument: ArgumentConfig::Int(0),
-            },
+            // End the session through Alt+Shift+Escape's confirmed menu;
+            // direct `quit` remains an explicit user binding / IPC command.
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "r".to_string(),
@@ -4215,6 +4221,7 @@ impl Config {
             "Delete" => k::KEY_Delete,
             "Home" => k::KEY_Home,
             "End" => k::KEY_End,
+            "Print" => k::KEY_Print,
 
             // Media keys (dedicated laptop/keyboard function row).
             "XF86AudioRaiseVolume" => k::KEY_XF86AudioRaiseVolume,
@@ -7573,28 +7580,157 @@ mod tests {
     }
 
     #[test]
-    fn waterlily_binding_and_migration_alias_resolve_to_the_canonical_action() {
+    fn waterlily_has_no_default_shortcuts_but_actions_remain_bindable() {
         let config = Config::default();
-        assert!(
-            config
-                .inner
-                .keybindings
-                .keys
-                .iter()
-                .any(|key| key.function == "toggle_waterlily")
-        );
-        assert!(
-            !config
-                .inner
-                .keybindings
-                .keys
-                .iter()
-                .any(|key| key.function == "toggle_slime")
-        );
+        for function in [
+            "toggle_waterlily",
+            "waterlily_case",
+            "waterlily_palette",
+            "toggle_slime",
+        ] {
+            assert!(config.parse_function(function).is_some(), "{function}");
+            assert!(
+                !config
+                    .key_configs()
+                    .iter()
+                    .any(|key| key.function == function),
+                "{function} should be an explicit opt-in binding"
+            );
+        }
 
         let canonical = config.parse_function("toggle_waterlily").unwrap();
         let deprecated = config.parse_function("toggle_slime").unwrap();
         assert!(std::ptr::fn_addr_eq(canonical, deprecated));
+    }
+
+    #[test]
+    fn ergonomic_defaults_compile_capture_and_window_state_families() {
+        use crate::jwm::{Jwm, WMFuncType};
+
+        let config = Config::default();
+        let bindings = config.get_keys();
+        for (name, modifiers, function) in [
+            ("Print", Mods::NONE, Jwm::take_screenshot as WMFuncType),
+            ("Print", Mods::SHIFT, Jwm::take_screenshot_fullscreen),
+            ("Print", Mods::CONTROL, Jwm::toggle_recording),
+            (
+                "Print",
+                Mods::CONTROL | Mods::SHIFT,
+                Jwm::adjust_recording_region,
+            ),
+            ("space", Mods::ALT | Mods::CONTROL, Jwm::togglefloating),
+            ("Return", Mods::ALT | Mods::CONTROL, Jwm::togglemaximize),
+            ("F10", Mods::ALT | Mods::SHIFT, Jwm::bluetooth_picker),
+        ] {
+            let keysym = config.parse_keysym(name).expect("supported default keysym");
+            let matches: Vec<_> = bindings
+                .iter()
+                .filter(|binding| binding.mask == modifiers && binding.key_sym == keysym)
+                .collect();
+            assert_eq!(matches.len(), 1, "{modifiers:?}+{name}");
+            assert!(
+                matches[0]
+                    .func_opt
+                    .is_some_and(|f| std::ptr::fn_addr_eq(f, function))
+            );
+            assert!(
+                !matches[0].repeatable,
+                "toggles must require physical presses"
+            );
+        }
+    }
+
+    #[test]
+    fn ergonomic_defaults_are_unique_and_reserve_session_exit_for_the_menu() {
+        let config = Config::default();
+        let mut shortcuts = std::collections::HashSet::new();
+        for binding in config.get_keys() {
+            assert!(
+                shortcuts.insert((binding.mask.bits(), binding.key_sym)),
+                "duplicate runtime shortcut: {:?}+{}",
+                binding.mask,
+                binding.key_sym
+            );
+            assert!(
+                !(binding.mask.contains(Mods::ALT | Mods::CONTROL)
+                    && (super::k::KEY_F1..=super::k::KEY_F12).contains(&binding.key_sym)),
+                "Ctrl+Alt+Fn belongs to X11 VT switching"
+            );
+        }
+        assert!(
+            !config
+                .key_configs()
+                .iter()
+                .any(|key| key.function == "quit")
+        );
+        assert!(
+            config
+                .key_configs()
+                .iter()
+                .any(|key| key.function == "session_menu"
+                    && key.key == "Escape"
+                    && config.parse_modifiers(&key.modifier) == (Mods::ALT | Mods::SHIFT))
+        );
+        let diagnostics = config.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+        assert!(
+            !diagnostics
+                .issues()
+                .iter()
+                .any(|issue| issue.message.contains("unreachable")),
+            "{diagnostics}"
+        );
+    }
+
+    #[test]
+    fn existing_explicit_shortcuts_survive_the_ergonomic_default_update() {
+        let path = temporary_config_path("explicit-ergonomic-bindings");
+        let mut config = Config::default();
+        let legacy_keys: Vec<_> = [
+            ("F11", vec!["Mod1", "Shift"], "toggle_waterlily"),
+            ("F10", vec!["Mod1", "Shift"], "waterlily_case"),
+            ("F9", vec!["Mod1", "Shift"], "waterlily_palette"),
+            ("b", vec!["Mod1", "Control", "Shift"], "bluetooth_picker"),
+            (
+                "r",
+                vec!["Mod1", "Control", "Shift"],
+                "adjust_recording_region",
+            ),
+            ("q", vec!["Mod1", "Shift"], "quit"),
+        ]
+        .into_iter()
+        .map(|(key, modifier, function)| KeyConfig {
+            key: key.into(),
+            modifier: modifier.into_iter().map(str::to_string).collect(),
+            function: function.into(),
+            argument: if matches!(function, "waterlily_case" | "waterlily_palette") {
+                ArgumentConfig::StringVec(vec!["next".into()])
+            } else {
+                ArgumentConfig::Int(0)
+            },
+        })
+        .collect();
+        config.inner.keybindings.keys = legacy_keys.clone();
+        config.save_to_file(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let loaded = Config::load_from_file(&path).unwrap();
+        let bindings = loaded.get_keys();
+        for key in legacy_keys {
+            let expected = config.convert_key_config(&key).unwrap();
+            let actual = bindings
+                .iter()
+                .find(|binding| {
+                    binding.mask == expected.mask && binding.key_sym == expected.key_sym
+                })
+                .expect("explicit shortcut retained");
+            assert!(std::ptr::fn_addr_eq(
+                actual.func_opt.unwrap(),
+                expected.func_opt.unwrap()
+            ));
+            assert_eq!(actual.arg, expected.arg);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

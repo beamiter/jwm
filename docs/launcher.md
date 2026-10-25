@@ -22,6 +22,12 @@ Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 named. Entries marked `Hidden=true` or `NoDisplay=true` are left out, because
 their author asked for that.
 
+Data directories must be absolute. An unset, empty or relative `XDG_DATA_HOME`
+falls back to an absolute home directory's `.local/share`; without one, only
+system directories are scanned. An unset or empty `XDG_DATA_DIRS` uses
+`/usr/local/share:/usr/share`. Relative entries are ignored, and duplicate roots
+are scanned once so they cannot spend the catalog's budget repeatedly.
+
 Higher-priority directories override lower-priority entries by desktop file
 ID, including deletion stubs with only `Hidden=true`. Renaming an override's
 display name does not bring the old system entry back. IDs use the path
@@ -34,6 +40,11 @@ the entry's icon. Inserted values stay within their argument and are expanded
 once. File/URL fields are removed when launching without files or URLs;
 unknown fields and embedded multi-argument fields are rejected, following the
 [Exec field rules](https://specifications.freedesktop.org/desktop-entry/latest/exec-variables.html).
+
+An invalid command or empty executable name is omitted without suppressing a
+different desktop entry with the same display name. It still overrides a
+lower-priority entry with the same desktop file ID. Explicit empty arguments
+after a valid executable are preserved.
 
 Rows show the application's icon beside its name: icons come from the
 entry's `Icon=` key, resolved through the icon theme by the same cached

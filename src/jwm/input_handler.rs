@@ -3347,6 +3347,28 @@ impl Jwm {
             self.expire_chord(backend, std::time::Instant::now());
 
             if self.chord_armed_until.is_some() {
+                // Let the user prepare the second key's modifiers without
+                // consuming the sequence. The original deadline still applies;
+                // neither modifier presses nor releases extend it.
+                if (keys::KEY_Shift_L..=keys::KEY_Hyper_R).contains(&keysym)
+                    || matches!(
+                        keysym,
+                        keys::KEY_Mode_switch
+                            | keys::KEY_Num_Lock
+                            | keys::KEY_ISO_Lock
+                            | keys::KEY_ISO_Group_Latch
+                            | keys::KEY_ISO_Group_Lock
+                            | keys::KEY_ISO_Level2_Latch
+                            | keys::KEY_ISO_Level3_Shift
+                            | keys::KEY_ISO_Level3_Latch
+                            | keys::KEY_ISO_Level3_Lock
+                            | keys::KEY_ISO_Level5_Shift
+                            | keys::KEY_ISO_Level5_Latch
+                            | keys::KEY_ISO_Level5_Lock
+                    )
+                {
+                    return Ok(());
+                }
                 // Find a matching second-key binding.
                 let mut hit = None;
                 for b in &chord.bindings {
@@ -6091,6 +6113,79 @@ mod tests {
             jwm.features.system_ui,
             SystemUiState::Info { offset: 2, .. }
         ));
+    }
+
+    #[test]
+    fn chord_modifiers_preserve_deadline_and_require_exact_second_key_state() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::config::CompiledChord;
+        use crate::jwm::types::{WMArgEnum, WMKey};
+        use std::time::Duration;
+
+        // Releasing the leader modifier is allowed, but it is not implicitly
+        // removed from the second key's required modifier mask.
+        for held in [Mods::CONTROL, Mods::ALT | Mods::CONTROL] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            jwm.chord_compiled = Some(CompiledChord {
+                leader: (Mods::ALT, keys::KEY_space),
+                timeout: Duration::from_secs(60),
+                bindings: vec![WMKey::new(
+                    Mods::CONTROL,
+                    keys::KEY_r,
+                    Some(count_repeat_dispatch),
+                    WMArgEnum::Int(0),
+                )],
+            });
+            input.select(keys::KEY_space);
+            jwm.on_key_press_internal(&mut backend, 1, Mods::ALT.bits())
+                .unwrap();
+            let deadline = jwm.chord_armed_until;
+            assert!(deadline.is_some());
+            for keysym in (keys::KEY_Shift_L..=keys::KEY_Hyper_R).chain([
+                keys::KEY_Mode_switch,
+                keys::KEY_Num_Lock,
+                keys::KEY_ISO_Lock,
+                keys::KEY_ISO_Group_Latch,
+                keys::KEY_ISO_Group_Lock,
+                keys::KEY_ISO_Level2_Latch,
+                keys::KEY_ISO_Level3_Shift,
+                keys::KEY_ISO_Level3_Latch,
+                keys::KEY_ISO_Level3_Lock,
+                keys::KEY_ISO_Level5_Shift,
+                keys::KEY_ISO_Level5_Latch,
+                keys::KEY_ISO_Level5_Lock,
+            ]) {
+                input.select(keysym);
+                jwm.on_key_press_internal(&mut backend, 1, held.bits())
+                    .unwrap();
+                assert_eq!(jwm.chord_armed_until, deadline);
+                assert_eq!(*input.grabs.lock().unwrap(), vec![true]);
+            }
+            input.select(keys::KEY_r);
+            jwm.on_key_press_internal(&mut backend, 1, held.bits())
+                .unwrap();
+            assert!(jwm.chord_armed_until.is_none());
+            assert_eq!(*input.grabs.lock().unwrap(), vec![true, false]);
+            assert_eq!(
+                backend.toast_log.lock().unwrap().len(),
+                usize::from(held == Mods::CONTROL)
+            );
+
+            for second in [keys::KEY_Escape, keys::KEY_z, keys::KEY_Shift_L] {
+                input.select(keys::KEY_space);
+                jwm.on_key_press_internal(&mut backend, 1, Mods::ALT.bits())
+                    .unwrap();
+                if second == keys::KEY_Shift_L {
+                    // Even a modifier press cannot keep an expired sequence
+                    // alive; expiry runs before the modifier exception.
+                    jwm.chord_armed_until =
+                        Some(std::time::Instant::now() - Duration::from_millis(1));
+                }
+                input.select(second);
+                jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+                assert!(jwm.chord_armed_until.is_none());
+            }
+        }
     }
 
     #[test]

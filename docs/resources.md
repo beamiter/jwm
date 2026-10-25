@@ -98,4 +98,9 @@ jwm-tool msg get_resources
 
 Parts the machine could not answer are `null`, never zero.
 
+Malformed CPU counters and overflowing totals are rejected. If any counted
+network interface has invalid byte counters, the entire network sample is
+discarded so a partial total cannot create a false spike on the next update.
+The next valid sample establishes a fresh baseline before rates resume.
+
 `jwm-tool health` prints compact `resources` for resources operators.

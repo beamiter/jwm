@@ -410,14 +410,14 @@ mistyped passphrase can be retried without rescanning.
 
 ## Bluetooth picker
 
-`Ctrl+Alt+Shift+B` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
+`Alt+Shift+F10` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
 the devices the controller knows: connected first, then paired, then — among
 devices in the same state — strongest signal first, then by name. `Enter`
 connects the selected device, or disconnects it if it is already connected;
 on a device that was never bonded, `Enter` starts pairing (below). `s` runs a
 bounded discovery scan and merges what it hears into the list; `r` re-reads
 the list; `d` or a middle click removes a bonded device (below); `Esc` — or
-`Ctrl+Alt+Shift+B` again — closes. Leaning on `s` does not
+`Alt+Shift+F10` again — closes. Leaning on `s` does not
 stack scans: while one is running the key just says `Scanning…` again.
 
 ### Where the list comes from

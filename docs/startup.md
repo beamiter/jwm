@@ -79,6 +79,55 @@ the calculator scratchpad and sticky-window actions move to Alt+Control+C/S when
 those target chords are free. The diagnostic remains visible until the file is
 updated, so the compatibility migration never hides on-disk ambiguity.
 
+## Keyboard defaults and upgrades
+
+Alt remains the primary modifier. J/K focus, H/L resizing, tag numbers,
+Alt+Tab, terminal launch, and close-window bindings retain their existing
+meaning. The physical-arrow resize family is the consistent width/height
+control; the existing Shift+H/L signs remain compatible with previous files.
+
+| Action | Generated default | Previous default |
+| --- | --- | --- |
+| Screenshot selection / full desktop | Print / Shift+Print; Alt+S / Alt+Shift+S still available | Alt+S / Alt+Shift+S |
+| Start/stop recording | Ctrl+Print; Alt+Ctrl+R still available | Alt+Ctrl+R |
+| Adjust active recording source | Ctrl+Shift+Print | Alt+Ctrl+Shift+R |
+| Bluetooth picker | Alt+Shift+F10, beside Alt+F10 control center | Alt+Ctrl+Shift+B |
+| Toggle tiled/floating | Alt+Ctrl+Space | Alt+middle-click only |
+| Toggle maximize, tiled or floating | Alt+Ctrl+Return | Custom binding or floating-only Alt+Shift+Up |
+| Log out | Alt+Shift+Escape, select Log Out, then confirm | Immediate Alt+Shift+Q |
+| WaterLily layer, case and palette | `scripts/waterlily.sh` | Alt+Shift+F11/F10/F9 |
+
+Print groups capture controls on one key and removes a three-modifier stretch
+from recording adjustment. Bluetooth uses a two-modifier control-center
+variant. Ctrl+Alt+function keys are reserved for X11 virtual-terminal switching
+and are deliberately not used. Direct `quit` remains bindable and scriptable;
+the generated key table uses the session menu's existing confirmation.
+
+An existing `[[keybindings.keys]]` list remains authoritative. Upgrading does
+not rewrite it or remove explicit WaterLily/custom bindings. To adopt these
+defaults, edit the selected backend's file reported by `--print-config-path`:
+
+1. Remove the entries whose functions are `toggle_waterlily`, `waterlily_case`
+   and `waterlily_palette`, and remove the direct `quit` entry if adopting
+   confirmed logout. Keep `session_menu` on Alt+Shift+Escape.
+2. Replace the Bluetooth and recording-adjustment entries with the keys in the
+   table. Add Print, Shift+Print, Ctrl+Print and the two window-state bindings
+   only if those chords are free. In TOML use `key = "Print"`, `"space"` or
+   `"Return"`, with `modifier = ["Control", "Shift"]` for Ctrl+Shift, for
+   example. Their functions are `take_screenshot`, `take_screenshot_fullscreen`,
+   `toggle_recording`, `adjust_recording_region`, `togglefloating` and
+   `togglemaximize`; their argument is `0`.
+3. Run `jwm --backend <backend> --check-config`, then let the normal live
+   reload apply the edit. Replace old entries rather than appending duplicate
+   shortcuts. On a keyboard without Print, keep a custom recording-adjustment
+   key and the existing Alt letter capture keys.
+
+The optional chord prefix remains opt-in. Its second key uses an exact
+modifier match: release the leader's modifier if the second binding omits it,
+then press the modifiers the second binding declares. Preparing Ctrl/Shift
+does not cancel the sequence or extend its timeout. Alt+Shift+/ shows these
+modifiers and only the tag numbers that actually have generated bindings.
+
 ## Run the startup doctor
 
 The doctor is read-only: it does not generate configuration, open a display,

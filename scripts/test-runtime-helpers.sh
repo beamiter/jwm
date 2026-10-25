@@ -78,4 +78,6 @@ for expected in 0 19; do
     fi
 done
 [[ $(cat "$TEST_ROOT/debug-sentinel") == 'preserve debug' ]] || fail 'debug followed a predictable log symlink'
+# Keep foreground simulation controls under this existing offline CI gate.
+python3 "$ROOT/scripts/test-waterlily-helper.py"
 printf 'test-runtime-helpers: PASS\n'

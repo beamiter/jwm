@@ -5,6 +5,42 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Keyboard ergonomics and script-driven WaterLily
+
+- Keep Alt and the established navigation/resize letters. Add keyboard
+  floating/maximize on Alt+Ctrl+Space/Return and a dedicated Print capture
+  family; move recording-source adjustment to Ctrl+Shift+Print and Bluetooth
+  to Alt+Shift+F10. Keep the existing letter screenshot/recording aliases.
+- Remove immediate Alt+Shift+Q logout from generated defaults; use the existing
+  confirmed session menu on Alt+Shift+Escape. Existing explicit key lists keep
+  their bindings, with adoption steps in the startup guide.
+- Remove all three default WaterLily shortcuts. Add `scripts/waterlily.sh` for
+  foreground startup, status, case/palette controls and idempotent layer hiding,
+  with offline lifecycle/argument tests in the existing CI gate.
+- Keep an armed chord alive while preparing its second key's modifiers without
+  extending the deadline. Show those modifiers in shortcut help and report only
+  generated tag-number keys, preserving explicit all-tag bindings once.
+
+### Launcher discovery and resource reliability
+
+- Resolve application catalogs from absolute XDG data directories, falling back
+  to the user's home data directory and the default system paths for unset or
+  empty values. Deduplicate roots before spending the shared scan budget and
+  preserve non-UTF-8 directory names.
+- Keep malformed desktop commands and empty executable names out of the
+  launcher without hiding valid entries that share their display name; retain
+  desktop-file ID precedence and valid empty command arguments.
+- Reject malformed or overflowing CPU/network samples instead of shifting
+  fields, wrapping totals or publishing a partial network baseline. Compute
+  CPU and memory percentages safely across the full counter range, and avoid
+  allocating a numeric vector for every network interface.
+
+### Scrolling command isolation
+
+- Keep column move, resize, consume and expel commands from modifying cached
+  scrolling columns while another layout is active. A zero direction is a
+  no-op for column and within-column navigation commands.
+
 ### Launcher history paths
 
 - Ignore empty or relative `XDG_DATA_HOME` values when locating launcher

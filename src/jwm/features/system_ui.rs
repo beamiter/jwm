@@ -5376,19 +5376,10 @@ pub(crate) fn start_application_discovery() -> BackgroundJob<Arc<[LaunchEntry]>>
 fn discover_applications() -> Vec<LaunchEntry> {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::data_dir())
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let mut roots = vec![data_home.join("applications")];
-    let data_dirs =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
-    roots.extend(
-        data_dirs
-            .split(':')
-            .take(MAX_APPLICATION_ROOTS.saturating_sub(roots.len()))
-            .map(|p| Path::new(p).join("applications")),
-    );
+    let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    let home = dirs::home_dir();
+    let data_dirs = std::env::var_os("XDG_DATA_DIRS");
+    let roots = application_data_roots(data_home.as_deref(), home.as_deref(), data_dirs.as_deref());
     let mut scan_budget = ApplicationScanBudget::default();
     for root in roots {
         scan_desktop_dir(&root, &mut entries, &mut seen, &mut scan_budget);
@@ -5402,6 +5393,41 @@ fn discover_applications() -> Vec<LaunchEntry> {
     }
     entries.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
     entries
+}
+
+/// Resolve the catalog's data directories without letting an empty or relative
+/// XDG value make application discovery depend on the compositor's cwd.
+fn application_data_roots(
+    data_home: Option<&Path>,
+    home: Option<&Path>,
+    data_dirs: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(base) = data_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/share"))
+        })
+    {
+        roots.push(base.join("applications"));
+    }
+    let data_dirs = data_dirs
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsStr::new("/usr/local/share:/usr/share"));
+    for base in std::env::split_paths(data_dirs).filter(|path| path.is_absolute()) {
+        if roots.len() >= MAX_APPLICATION_ROOTS {
+            break;
+        }
+        let root = base.join("applications");
+        // Repeated roots otherwise spend the shared scan budget rereading the
+        // same files and can hide applications in later directories.
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 fn scan_path_applications(
@@ -5557,13 +5583,16 @@ fn scan_desktop_dir(
             let (Some(name), Some(exec)) = (name, exec) else {
                 continue;
             };
-            if hidden || !seen.insert(name.clone()) {
+            if hidden || seen.contains(&name) {
                 continue;
             }
             let command = expand_desktop_exec(&exec, &name, icon.as_deref(), Some(&path));
-            if command.is_empty() {
+            if command.first().is_none_or(|program| program.is_empty()) {
                 continue;
             }
+            // A malformed Exec still claims its desktop-file ID, but must not
+            // hide a different, launchable entry with the same display name.
+            seen.insert(name.clone());
             let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
             entries.push(LaunchEntry::new(name, command, terminal, icon, search));
         }
@@ -8665,6 +8694,123 @@ mod tests {
         assert_eq!(entries[2].command, ["user-command"]);
         assert_eq!(budget.desktop_ids.len(), 6);
         assert_eq!(budget.desktop_files, 11);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn application_roots_use_absolute_user_fallback_and_default_system_paths() {
+        let home = Path::new("/home/launcher-user");
+        let defaults = [
+            home.join(".local/share/applications"),
+            PathBuf::from("/usr/local/share/applications"),
+            PathBuf::from("/usr/share/applications"),
+        ];
+        for data_home in [None, Some(Path::new("")), Some(Path::new("relative/data"))] {
+            for data_dirs in [None, Some(OsStr::new(""))] {
+                assert_eq!(
+                    application_data_roots(data_home, Some(home), data_dirs),
+                    defaults
+                );
+            }
+        }
+        for home in [None, Some(Path::new("")), Some(Path::new("relative/home"))] {
+            assert_eq!(
+                application_data_roots(Some(Path::new("relative/data")), home, None),
+                defaults[1..],
+            );
+        }
+        assert_eq!(
+            application_data_roots(
+                Some(Path::new("/custom/data")),
+                Some(home),
+                Some(OsStr::new(
+                    "relative::/system/data:/custom/data:/system/data:/last"
+                )),
+            ),
+            [
+                PathBuf::from("/custom/data/applications"),
+                PathBuf::from("/system/data/applications"),
+                PathBuf::from("/last/applications"),
+            ],
+        );
+    }
+
+    #[test]
+    fn application_roots_keep_native_paths_and_bound_unique_directories() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let native = OsStr::from_bytes(b"/native/\xff:/other");
+        assert_eq!(
+            application_data_roots(None, None, Some(native)),
+            [
+                PathBuf::from(OsStr::from_bytes(b"/native/\xff/applications")),
+                PathBuf::from("/other/applications"),
+            ],
+        );
+        let mut directories = vec!["relative".to_string(); MAX_APPLICATION_ROOTS];
+        directories.extend(vec!["/repeated".to_string(); MAX_APPLICATION_ROOTS]);
+        directories.extend((0..MAX_APPLICATION_ROOTS).map(|index| format!("/data/{index}")));
+        let directories = directories.join(":");
+        let roots = application_data_roots(None, None, Some(OsStr::new(&directories)));
+        assert_eq!(roots.len(), MAX_APPLICATION_ROOTS);
+        assert_eq!(roots[0], Path::new("/repeated/applications"));
+        assert_eq!(
+            roots.last().unwrap(),
+            &PathBuf::from(format!("/data/{}/applications", MAX_APPLICATION_ROOTS - 2)),
+        );
+    }
+
+    #[test]
+    fn invalid_desktop_commands_do_not_claim_display_names() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-invalid-exec-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let user = root.join("user");
+        let system = root.join("system");
+        fs::create_dir_all(&user).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        for (index, exec) in ["broken %z", "\"\" --flag", "%f", "   "].iter().enumerate() {
+            fs::write(
+                user.join(format!("broken-{index}.desktop")),
+                format!("[Desktop Entry]\nName=App {index}\nExec={exec}\n"),
+            )
+            .unwrap();
+            // The higher-priority file still owns its ID, including when its
+            // command is invalid. Only a distinct ID may reuse the name.
+            fs::write(
+                system.join(format!("broken-{index}.desktop")),
+                format!("[Desktop Entry]\nName=Old app {index}\nExec=old-app\n"),
+            )
+            .unwrap();
+            fs::write(
+                system.join(format!("valid-{index}.desktop")),
+                format!("[Desktop Entry]\nName=App {index}\nExec=valid-app \"\"\n"),
+            )
+            .unwrap();
+        }
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        let mut budget = ApplicationScanBudget::default();
+        scan_desktop_dir(&user, &mut entries, &mut seen, &mut budget);
+        assert!(entries.is_empty());
+        assert!(seen.is_empty());
+        scan_desktop_dir(&system, &mut entries, &mut seen, &mut budget);
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["App 0", "App 1", "App 2", "App 3"],
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.command == ["valid-app", ""])
+        );
+        assert_eq!(budget.desktop_ids.len(), 8);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -349,19 +349,25 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+R | Application launcher (type `/` for open windows) |
 | Alt+Shift+R | Restart JWM; X11 preserves live windows’ tags, output placement, and [per-tag layouts](docs/restart-state.md) |
 | Alt+Control+Escape | Lock screen |
+| Alt+Shift+Escape | Session menu; logging out requires confirmation |
 | Alt+Control+O | Display layout |
+| Alt+F10 / Alt+Shift+F10 | Control center / Bluetooth picker |
 | Ctrl+Super+F12 | Toggle keyboard shortcut passthrough for the focused remote desktop window |
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |
 | Alt+Control+R | Interactively choose a source and start/stop screen recording |
-| Alt+Control+Shift+R | Move, resize, or replace the active recording source |
+| Print / Shift+Print | Interactive / immediate desktop screenshot |
+| Control+Print | Start/stop screen recording |
+| Control+Shift+Print | Move, resize, or replace the active recording source |
 | XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
 | Alt+N | Minimize focused client |
 | Alt+Control+N | Choose a minimized window to restore; Enter or click restores it, Escape cancels |
-| Alt+Control+Left / Right | Shrink / grow master width (2.5%); works with stack focus too |
+| Alt+Control+Return | Toggle maximize for the focused tiled or floating window |
+| Alt+Control+Space | Toggle the focused window between tiled and floating |
+| Alt+Control+Left / Right | Shrink / grow focused window width (2.5%) |
 | Alt+Control+Up / Down | Shrink / grow it vertically (2.5%) |
 | Alt+Control+Home | Reset layout-local resized dimensions |
-| Alt+H / L | Shrink / grow master width (2.5%); works with stack focus too |
+| Alt+H / L | Shrink / grow focused window width (2.5%) |
 | Alt+Shift+H / L | Grow / shrink height (2.5%; preserves the former factor-key signs) |
 | Alt+J / K | Next / previous window; within-column focus in scrolling |
 | Alt+Left / Right | Focus the left / right column in scrolling (no-op in other layouts) |
@@ -382,7 +388,7 @@ this binding in memory if it is free. A custom direct
 `toggle_shortcut_passthrough` binding replaces the default; a chord alone
 cannot serve as the exit. See [remote shortcut passthrough](docs/remote-control.md#third-party-remote-desktop-shortcuts).
 
-Master resizing also works with a single client, in every layout. Alt+right-drag
+Focused-window resizing also works with a single client, in every layout. Alt+right-drag
 keeps a master tiled; larger masters reallocate neighbouring space. See
 [layout resizing](docs/layout-resizing.md) for singleton centering, custom
 bindings, size-hint limits and the explicit floating-resize compatibility action.
@@ -395,8 +401,8 @@ dropping it at the top edge performs the same real maximize as `Alt+Shift+Up`,
 and dropping it into a corner quarters it there.
 The quarters have no default bindings, but `snap_window top-left` /
 `top-right` / `bottom-left` / `bottom-right` are bindable and scriptable over
-IPC like the three defaults. The bindable `togglemaximize` command (no default
-key) toggles the focused window's maximize as well, and also takes a tiled
+IPC like the three defaults. `Alt+Control+Return` (`togglemaximize`)
+toggles the focused window's maximize as well, and also takes a tiled
 window out of the layout while it is maximized; toggling again puts it back.
 See [window placement](docs/window-placement.md#maximize).
 
@@ -404,10 +410,12 @@ See [window placement](docs/window-placement.md#maximize).
 | --- | --- |
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |
-| Alt+Shift+F11 | Toggle the WaterLily simulation |
-| Alt+Shift+F10 | Cycle the WaterLily simulation case |
-| Alt+Shift+F9 | Cycle the WaterLily render palette |
 | Alt+Shift+/ | Show all key and touchpad-gesture bindings (click outside to close) |
+
+These are generated defaults; existing key lists retain their configured keys.
+See [keyboard upgrades](docs/startup.md#keyboard-defaults-and-upgrades) for the
+binding changes and adoption steps. WaterLily is launched and controlled with
+[`scripts/waterlily.sh`](scripts/waterlily.sh) instead of default shortcuts.
 
 During interactive screenshot or recording selection, hover highlights the
 window under the pointer with an outside-dim veil (same blue language as the

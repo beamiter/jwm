@@ -68,7 +68,7 @@ impl MemoryUsage {
         if self.total_kib == 0 {
             return 0;
         }
-        let percent = self.used_kib.saturating_mul(100) / self.total_kib;
+        let percent = u128::from(self.used_kib) * 100 / u128::from(self.total_kib);
         percent.min(100) as u8
     }
 }
@@ -121,8 +121,10 @@ pub fn parse_cpu_times(stat: &str) -> Option<CpuTimes> {
     let buckets: Vec<u64> = line
         .split_whitespace()
         .skip(1)
-        .filter_map(|field| field.parse().ok())
-        .collect();
+        .take(8)
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
     // user nice system idle iowait irq softirq steal …; anything shorter than
     // idle+iowait cannot answer the question.
     if buckets.len() < 5 {
@@ -134,8 +136,10 @@ pub fn parse_cpu_times(stat: &str) -> Option<CpuTimes> {
         // subset of the first two; summing all ten inflates both the total
         // and the busy share on any machine running virtual machines. `top`
         // subtracts guest for the same reason.
-        total: buckets.iter().take(8).sum(),
-        idle: buckets[3] + buckets[4],
+        total: buckets
+            .iter()
+            .try_fold(0_u64, |sum, value| sum.checked_add(*value))?,
+        idle: buckets[3].checked_add(buckets[4])?,
     })
 }
 
@@ -152,6 +156,8 @@ pub fn cpu_busy_percent(previous: CpuTimes, current: CpuTimes) -> Option<u8> {
     let busy = total - idle;
     // Rounded, then clamped: a machine at 99.7% must read 100, and nothing
     // must ever read 101.
+    let busy = u128::from(busy);
+    let total = u128::from(total);
     Some((((busy * 200 + total) / (total * 2)).min(100)) as u8)
 }
 
@@ -173,7 +179,11 @@ pub fn parse_meminfo(meminfo: &str) -> Option<MemoryUsage> {
     let available = field("MemAvailable").or_else(|| {
         // Kernels before 3.14, and some containers, do not offer it. The
         // classic approximation is closer than MemFree alone.
-        Some(field("MemFree")? + field("Buffers").unwrap_or(0) + field("Cached").unwrap_or(0))
+        Some(
+            field("MemFree")?
+                .saturating_add(field("Buffers").unwrap_or(0))
+                .saturating_add(field("Cached").unwrap_or(0)),
+        )
     })?;
     Some(MemoryUsage {
         total_kib,
@@ -226,17 +236,19 @@ pub fn parse_net_dev(dev: &str) -> Option<NetCounters> {
         if !counts_toward_throughput(name) {
             continue;
         }
-        let fields: Vec<u64> = rest
-            .split_whitespace()
-            .map(|field| field.parse().unwrap_or(0))
-            .collect();
+        let mut fields = rest.split_whitespace();
+        let rx = fields.next().and_then(|field| field.parse::<u64>().ok());
+        let tx = fields.nth(7).and_then(|field| field.parse::<u64>().ok());
         // receive: bytes packets errs drop fifo frame compressed multicast,
-        // then transmit bytes. Anything shorter is not a counter line.
-        let (Some(rx), Some(tx)) = (fields.first(), fields.get(8)) else {
-            continue;
-        };
-        counters.rx_bytes += rx;
-        counters.tx_bytes += tx;
+        // then transmit bytes. Reject the snapshot if a counted link is
+        // malformed: dropping only that link would make the aggregate shrink
+        // and its later return look like a sudden traffic spike.
+        let (rx, tx) = (rx?, tx?);
+        // A sum that no longer fits cannot be differenced honestly. Seed
+        // again on the next valid sample instead of wrapping or fabricating
+        // a rate from a saturated counter.
+        counters.rx_bytes = counters.rx_bytes.checked_add(rx)?;
+        counters.tx_bytes = counters.tx_bytes.checked_add(tx)?;
         counted = true;
     }
     counted.then_some(counters)
@@ -637,6 +649,55 @@ docker0:       0       0    0    0    0     0          0         0        0     
     }
 
     #[test]
+    fn invalid_cpu_buckets_do_not_shift_idle_columns_or_overflow() {
+        assert_eq!(parse_cpu_times("cpu 1 bad 2 3 4 5 6 7 8"), None);
+        assert_eq!(parse_cpu_times(&format!("cpu {} 1 0 0 0", u64::MAX)), None);
+        // Guest columns are deliberately ignored, even when unavailable.
+        assert_eq!(
+            parse_cpu_times("cpu 1 2 3 4 5 6 7 8 ignored"),
+            Some(CpuTimes { total: 36, idle: 9 })
+        );
+    }
+
+    #[test]
+    fn resource_percentages_handle_the_full_counter_range() {
+        assert_eq!(
+            cpu_busy_percent(
+                CpuTimes::default(),
+                CpuTimes {
+                    total: u64::MAX,
+                    idle: 0
+                }
+            ),
+            Some(100)
+        );
+        assert_eq!(
+            cpu_busy_percent(
+                CpuTimes::default(),
+                CpuTimes {
+                    total: u64::MAX,
+                    idle: u64::MAX / 2
+                }
+            ),
+            Some(50)
+        );
+        assert_eq!(
+            MemoryUsage {
+                total_kib: u64::MAX,
+                used_kib: u64::MAX
+            }
+            .percent(),
+            100
+        );
+        let memory = parse_meminfo(&format!(
+            "MemTotal: 1000 kB\nMemFree: {} kB\nBuffers: 2 kB\nCached: 3 kB\n",
+            u64::MAX
+        ))
+        .expect("bounded available memory");
+        assert_eq!(memory.used_kib, 0);
+    }
+
+    #[test]
     fn cpu_load_needs_two_samples_that_moved_forwards() {
         let first = CpuTimes {
             total: 1_000,
@@ -764,6 +825,32 @@ enp2s0.100: 1000000 100 0 0 0 0 0 0 500000 50 0 0 0 0 0 0
         assert_eq!(parse_net_dev(""), None);
         // A truncated counter line is skipped rather than half-read.
         assert_eq!(parse_net_dev("eth0: 1 2 3\n"), None);
+    }
+
+    #[test]
+    fn invalid_network_counters_do_not_become_zero_or_wrap_totals() {
+        for line in ["eth0: bad 0 0 0 0 0 0 0 10", "eth0: 10 0 0 0 0 0 0 0 bad"] {
+            assert_eq!(parse_net_dev(line), None);
+        }
+        assert_eq!(
+            parse_net_dev("eth0: 10 0 0 0 0 0 0 0 20\neth1: bad 0 0 0 0 0 0 0 30"),
+            None,
+            "a partially parsed aggregate must not become a throughput baseline"
+        );
+        assert_eq!(
+            parse_net_dev(&format!(
+                "eth0: {} 0 0 0 0 0 0 0 10\neth1: 1 0 0 0 0 0 0 0 20",
+                u64::MAX
+            )),
+            None
+        );
+        assert_eq!(
+            parse_net_dev(&format!(
+                "eth0: 10 0 0 0 0 0 0 0 {}\neth1: 20 0 0 0 0 0 0 0 1",
+                u64::MAX
+            )),
+            None
+        );
     }
 
     #[test]

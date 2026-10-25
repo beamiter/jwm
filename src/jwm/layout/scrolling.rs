@@ -47,7 +47,7 @@ impl Jwm {
             return Ok(());
         }
         let direction = match *arg {
-            WMArgEnum::Int(i) => i,
+            WMArgEnum::Int(i) if i != 0 => i,
             _ => return Ok(()),
         };
 
@@ -106,8 +106,11 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.is_scrolling_layout() {
+            return Ok(());
+        }
         let direction = match *arg {
-            WMArgEnum::Int(i) => i,
+            WMArgEnum::Int(i) if i != 0 => i,
             _ => return Ok(()),
         };
 
@@ -158,6 +161,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.is_scrolling_layout() {
+            return Ok(());
+        }
         let delta = match *arg {
             WMArgEnum::Float(f) => f,
             _ => return Ok(()),
@@ -237,8 +243,11 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.is_scrolling_layout() {
+            return Ok(());
+        }
         let direction = match *arg {
-            WMArgEnum::Int(i) => i,
+            WMArgEnum::Int(i) if i != 0 => i,
             _ => return Ok(()),
         };
 
@@ -300,8 +309,11 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.is_scrolling_layout() {
+            return Ok(());
+        }
         let direction = match *arg {
-            WMArgEnum::Int(i) => i,
+            WMArgEnum::Int(i) if i != 0 => i,
             _ => return Ok(()),
         };
 
@@ -366,7 +378,7 @@ impl Jwm {
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let direction = match *arg {
-            WMArgEnum::Int(i) => i,
+            WMArgEnum::Int(i) if i != 0 => i,
             _ => return Ok(()),
         };
 
@@ -447,6 +459,168 @@ pub(crate) fn scrolling_column_width_rule_for_window(
 #[cfg(test)]
 mod tests {
     use super::scrolling_column_width_rule_for_window;
+    use crate::backend::common_define::WindowId;
+    use crate::core::layout::LayoutEnum;
+    use crate::core::models::{MonitorKey, ScrollingState, WMClient};
+    use crate::jwm::Jwm;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+    use crate::jwm::types::{WMArgEnum, WMFuncType};
+    use std::rc::Rc;
+
+    fn scrolling_command_fixture() -> (Jwm, DisplaySpyBackend, MonitorKey) {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test JWM");
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::SCROLLING);
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let [a, b, c] = [0x5f10, 0x5f11, 0x5f12].map(|id| {
+            let mut client = WMClient::new(WindowId::from_raw(id));
+            client.mon = Some(monitor);
+            client.state.tags = tags;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            key
+        });
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(c));
+        let mut state = ScrollingState::new();
+        state.columns = vec![vec![a], vec![b, c]];
+        state.column_width_factors = vec![0.75, 1.25];
+        state.focused_clients = vec![Some(a), Some(c)];
+        state.focused_column = Some(1);
+        state.viewport_x = 123.0;
+        jwm.scrolling_states.insert((monitor, tags), state);
+        (jwm, backend, monitor)
+    }
+
+    fn assert_scrolling_command_is_noop(
+        command: WMFuncType,
+        argument: WMArgEnum,
+        layout: LayoutEnum,
+    ) {
+        let (mut jwm, mut backend, monitor) = scrolling_command_fixture();
+        jwm.state.monitors[monitor].lt = Rc::new(layout);
+        let selected = jwm.get_selected_client_key();
+        let before = jwm.scrolling_state_for_monitor(monitor).unwrap().clone();
+        let client_rects: Vec<_> = jwm
+            .state
+            .clients
+            .iter()
+            .map(|(key, c)| (key, c.geometry.clone()))
+            .collect();
+        command(&mut jwm, &mut backend, &argument).expect("command");
+        let after = jwm.scrolling_state_for_monitor(monitor).unwrap();
+        assert_eq!(after.columns, before.columns);
+        assert_eq!(after.column_width_factors, before.column_width_factors);
+        assert_eq!(after.focused_clients, before.focused_clients);
+        assert_eq!(after.focused_column, before.focused_column);
+        assert_eq!(after.viewport_x, before.viewport_x);
+        assert_eq!(jwm.get_selected_client_key(), selected);
+        for (key, geometry) in client_rects {
+            assert_eq!(jwm.state.clients[key].geometry, geometry);
+        }
+    }
+
+    #[test]
+    fn scrolling_commands_preserve_cached_columns_in_other_layouts() {
+        for layout in [LayoutEnum::TILE, LayoutEnum::MONOCLE, LayoutEnum::FLOAT] {
+            for command in [
+                Jwm::scrolling_focus_column as WMFuncType,
+                Jwm::scrolling_move_column,
+                Jwm::scrolling_consume,
+                Jwm::scrolling_expel,
+                Jwm::scrolling_focus_window,
+            ] {
+                assert_scrolling_command_is_noop(command, WMArgEnum::Int(-1), layout.clone());
+            }
+            assert_scrolling_command_is_noop(
+                Jwm::scrolling_set_column_width,
+                WMArgEnum::Float(0.25),
+                layout,
+            );
+        }
+    }
+
+    #[test]
+    fn scrolling_direction_commands_treat_zero_as_noop() {
+        for command in [
+            Jwm::scrolling_focus_column as WMFuncType,
+            Jwm::scrolling_move_column,
+            Jwm::scrolling_consume,
+            Jwm::scrolling_expel,
+            Jwm::scrolling_focus_window,
+        ] {
+            assert_scrolling_command_is_noop(command, WMArgEnum::Int(0), LayoutEnum::SCROLLING);
+        }
+    }
+
+    #[test]
+    fn scrolling_commands_move_and_resize_the_active_column() {
+        let (mut jwm, mut backend, monitor) = scrolling_command_fixture();
+        let before = jwm.scrolling_state_for_monitor(monitor).unwrap().clone();
+        let selected = jwm.get_selected_client_key();
+
+        jwm.scrolling_move_column(&mut backend, &WMArgEnum::Int(-1))
+            .expect("move left");
+        let moved = jwm.scrolling_state_for_monitor(monitor).unwrap();
+        assert_eq!(
+            moved.columns,
+            vec![before.columns[1].clone(), before.columns[0].clone()]
+        );
+        assert_eq!(moved.column_width_factors, vec![1.25, 0.75]);
+        assert_eq!(moved.focused_column, Some(0));
+        assert_eq!(moved.focused_clients[0], selected);
+
+        jwm.scrolling_move_column(&mut backend, &WMArgEnum::Int(1))
+            .expect("move right");
+        let restored = jwm.scrolling_state_for_monitor(monitor).unwrap();
+        assert_eq!(restored.columns, before.columns);
+        assert_eq!(restored.column_width_factors, before.column_width_factors);
+        assert_eq!(restored.focused_column, Some(1));
+
+        jwm.scrolling_set_column_width(&mut backend, &WMArgEnum::Float(0.25))
+            .expect("widen focused column");
+        assert_eq!(
+            jwm.scrolling_state_for_monitor(monitor)
+                .unwrap()
+                .column_width_factors,
+            vec![0.75, 1.5]
+        );
+        jwm.scrolling_set_column_width(&mut backend, &WMArgEnum::Float(0.0))
+            .expect("reset focused column width");
+        assert_eq!(
+            jwm.scrolling_state_for_monitor(monitor)
+                .unwrap()
+                .column_width_factors,
+            vec![0.75, 1.0]
+        );
+        assert_eq!(jwm.get_selected_client_key(), selected);
+    }
+
+    #[test]
+    fn scrolling_commands_consume_and_expel_in_the_active_layout() {
+        let (mut jwm, mut backend, monitor) = scrolling_command_fixture();
+        let before = jwm.scrolling_state_for_monitor(monitor).unwrap().clone();
+        let a = before.columns[0][0];
+        let b = before.columns[1][0];
+        let c = before.columns[1][1];
+
+        jwm.scrolling_consume(&mut backend, &WMArgEnum::Int(-1))
+            .expect("merge selected window into left column");
+        let merged = jwm.scrolling_state_for_monitor(monitor).unwrap();
+        assert_eq!(merged.columns, vec![vec![a, c], vec![b]]);
+        assert_eq!(merged.column_width_factors, vec![0.75, 1.25]);
+        assert_eq!(merged.focused_column, Some(0));
+        assert_eq!(merged.focused_clients[0], Some(c));
+
+        jwm.scrolling_expel(&mut backend, &WMArgEnum::Int(1))
+            .expect("split selected window into a new right column");
+        let split = jwm.scrolling_state_for_monitor(monitor).unwrap();
+        assert_eq!(split.columns, vec![vec![a], vec![c], vec![b]]);
+        assert_eq!(split.column_width_factors, vec![0.75, 0.75, 1.25]);
+        assert_eq!(split.focused_column, Some(1));
+        assert_eq!(split.focused_clients[1], Some(c));
+        assert_eq!(jwm.get_selected_client_key(), Some(c));
+    }
 
     #[test]
     fn scrolling_column_width_rule_matches_class_name_or_instance() {

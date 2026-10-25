@@ -327,23 +327,33 @@ Build and start JWM with either supported X11 backend:
 ```bash
 cargo build
 
-JWM_BACKEND=x11rb \
-JWM_WATERLILY_ENABLED=1 \
-target/debug/jwm
+JWM_BACKEND=x11rb target/debug/jwm
 ```
 
-In a second terminal, start the worker:
+In a second terminal, enable the layer and start the foreground worker:
 
 ```bash
-julia --project=waterlily --threads=auto waterlily/runner.jl \
-  --case wander \
-  --device auto \
-  --fps 30
+scripts/waterlily.sh start --case wander --fps 30
 ```
 
 Swap `--case wander` for any other registered case to select the starting
-effect; `--help` prints the current registry. A running worker can also be
+effect. The helper selects `--device auto` and preserves explicit runner options;
+`scripts/waterlily.sh --help` lists them. The worker's own
+`julia --project=waterlily waterlily/runner.jl --help` prints the current registry.
+A running worker can also be
 switched live — see "Hot-switching cases" below.
+
+Without runner options, `scripts/waterlily.sh` also reuses an already connected
+worker and enables its layer only if needed. With a worker connected, use the
+runtime controls below rather than passing new launch options. Ctrl+C stops a
+worker launched in this terminal. `scripts/waterlily.sh stop` hides the layer;
+it leaves the simulation process to be stopped in its own terminal.
+Stopping or failing to launch the worker does not change the layer's enabled
+state; use `stop` to hide it after the worker exits. A second `start` reuses a
+connected worker; wait for a cold worker to connect before starting it again.
+`JWM_TOOL`, `JULIA` and `JWM_WATERLILY_PROJECT` select alternate executable and
+Julia project paths. The recording showcase remains available separately as
+`scripts/record_waterlily_showcase.sh`.
 
 Use `JWM_BACKEND=xcb` to exercise the other X11 frontend. The compositor code
 and the frame protocol are shared by both.
@@ -420,8 +430,18 @@ Then replace `--project=waterlily` with
 
 ## Runtime controls
 
-The default `Alt+Shift+F11` binding invokes the canonical action
-`toggle_waterlily`. It can also be sent over IPC:
+WaterLily has no default keyboard shortcuts. Start it through the helper and
+control it from another terminal:
+
+```bash
+scripts/waterlily.sh status
+scripts/waterlily.sh case dance
+scripts/waterlily.sh palette fluent
+scripts/waterlily.sh stop
+```
+
+The canonical actions remain available for scripts and opt-in user bindings.
+The raw layer toggle is also exposed over IPC:
 
 ```bash
 jwm-tool msg toggle_waterlily
@@ -432,9 +452,9 @@ jwm-tool msg toggle_waterlily
 The wake socket is bidirectional: the compositor writes newline-terminated
 control commands (`case <name>` or `case next`) back to the connected worker,
 which rebuilds the requested simulation at the current resolution without
-restarting or touching the frame file. The default `Alt+Shift+F10` binding
-invokes the `waterlily_case` action with the `next` argument, cycling the
-worker's sorted registry. Over IPC:
+restarting or touching the frame file. `scripts/waterlily.sh case` sends the
+`waterlily_case` action with the `next` argument, cycling the worker's sorted
+registry; `scripts/waterlily.sh palette` cycles palettes. Over IPC:
 
 ```bash
 # Cycle to the next registered case
