@@ -285,6 +285,19 @@ pub struct SessionSnapshot {
     /// v3 新增：每个显示器按平铺顺序记录的窗口身份。v1/v2 迁移而来时为空，
     /// 恢复行为与旧版本一致（不重排）。
     pub monitor_orders: Vec<SessionMonitorOrder>,
+    /// Version the file was written with, before migration.
+    ///
+    /// Migration fills every field a version never recorded with a neutral
+    /// value (`false`, `1.0`, `None`). Restore must not apply those as if the
+    /// user had saved them, so it keeps the live value of each group the
+    /// recording version did not know about. Never serialized: a snapshot is
+    /// always written as the current version.
+    #[serde(skip, default = "current_session_version")]
+    pub recorded_version: u32,
+}
+
+fn current_session_version() -> u32 {
+    SESSION_VERSION
 }
 
 /// 版本探测：只读取 `version` 字段，用来选择迁移入口。
@@ -637,6 +650,8 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         }
     };
 
+    let mut snapshot = snapshot;
+    snapshot.recorded_version = probe.version;
     snapshot.validate()?;
     Ok(snapshot)
 }
@@ -828,6 +843,7 @@ fn migrate_snapshot_v16(v16: SessionSnapshotV16) -> SessionSnapshot {
         version: SESSION_VERSION,
         clients: v16.clients,
         monitor_orders: v16.monitor_orders,
+        recorded_version: 16,
     }
 }
 
@@ -870,6 +886,55 @@ struct DetailedRestorePlan {
     minimized_order: Option<u64>,
     hidden_restore: Option<(i32, i32, i32, i32)>,
     old_geometry: Option<(i32, i32, i32, i32)>,
+}
+
+impl DetailedRestorePlan {
+    /// Keep the live value of every state group `recorded_version` never
+    /// wrote.
+    ///
+    /// A version-4 file knows tags, floating geometry and maximize, but not
+    /// sticky, Above/Below, minimized, fullscreen/PiP, the tile share or the
+    /// chrome flags; migration gave those neutral defaults. Applying them
+    /// would unmaximize, unstick, unminimize and re-border every matched
+    /// window. The restore sequence still leaves and re-enters each mode, so
+    /// carrying the live value keeps the window as it was.
+    fn preserve_unrecorded(&mut self, recorded_version: u32, live: &WMClient) {
+        if recorded_version < 4 {
+            self.maximize = SessionMaximize::from_client(live);
+        }
+        if recorded_version < 6 {
+            self.is_sticky = live.state.is_sticky;
+        }
+        if recorded_version < 7 {
+            self.is_above = live.state.is_above;
+            self.is_below = live.state.is_below;
+        }
+        if recorded_version < 8 {
+            self.is_minimized = live.state.is_hidden;
+        }
+        if recorded_version < 9 {
+            self.is_fullscreen = live.state.is_fullscreen;
+            self.is_pip = live.state.is_pip;
+        }
+        if recorded_version < 10 {
+            self.client_fact = live.state.client_fact;
+            self.is_drag_floating = live.state.is_drag_floating;
+            self.no_decorations = live.state.no_decorations;
+        }
+        if recorded_version < 11 {
+            self.is_urgent = live.state.is_urgent;
+            self.demands_attention = live.state.demands_attention;
+            self.skip_taskbar = live.state.skip_taskbar;
+            self.skip_pager = live.state.skip_pager;
+            self.is_fixed = live.state.is_fixed;
+        }
+        if recorded_version < 12 {
+            self.never_focus = live.state.never_focus;
+            self.old_state = live.state.old_state;
+            self.pip_restore_sticky = live.state.pip_restore_sticky;
+            self.remembers_closed_placement = live.state.remembers_closed_placement;
+        }
+    }
 }
 
 impl SessionSnapshot {
@@ -1435,6 +1500,7 @@ pub fn capture_snapshot_excluding(
         version: SESSION_VERSION,
         clients,
         monitor_orders,
+        recorded_version: SESSION_VERSION,
     }
 }
 
@@ -1692,10 +1758,18 @@ impl Jwm {
             })
             .collect();
 
-        let plans = plan_restore_detailed(
+        let plans: Vec<(ClientKey, DetailedRestorePlan)> = plan_restore_detailed(
             snapshot,
             current.iter().map(|(k, c, i)| (*k, c.as_str(), i.as_str())),
-        );
+        )
+        .into_iter()
+        .map(|(key, mut plan)| {
+            if let Some(live) = self.state.clients.get(key) {
+                plan.preserve_unrecorded(snapshot.recorded_version, live);
+            }
+            (key, plan)
+        })
+        .collect();
 
         for (key, plan) in &plans {
             let monitor_num = self.resolve_session_monitor_num(
@@ -1930,8 +2004,13 @@ impl Jwm {
         }
 
         // Minimized last: park after placement / maximize / stacking / FS·PiP
-        // so the Dock sees the resting state the snapshot intended.
-        for (key, plan) in &plans {
+        // so the Dock sees the resting state the snapshot intended. Windows
+        // are parked in their saved Dock order, so the fresh unique orders
+        // minimizing allocates keep that relative order without reusing a
+        // saved number a live Dock item may already hold.
+        let mut minimize_sequence: Vec<&(ClientKey, DetailedRestorePlan)> = plans.iter().collect();
+        minimize_sequence.sort_by_key(|(_, plan)| plan.minimized_order.unwrap_or(u64::MAX));
+        for (key, plan) in minimize_sequence {
             if let Err(error) = self.set_client_minimized(backend, *key, plan.is_minimized) {
                 log::warn!(
                     "session restore could not re-apply minimized for a matched client: {error}"
@@ -1959,12 +2038,6 @@ impl Jwm {
                             .and_then(|monitor_key| self.monitor_work_area(monitor_key));
                         area.map_or(restore, |area| clamp_floating_rect(restore, area))
                     });
-                if let Some(order) = plan.minimized_order.filter(|&o| o > 0) {
-                    if let Some(c) = self.state.clients.get_mut(*key) {
-                        c.state.minimized_order = order;
-                    }
-                    let _ = super::window_state::observe_minimized_order(order);
-                }
                 if let Some((x, y, w, h)) = hidden_restore {
                     if let Some(c) = self.state.clients.get_mut(*key) {
                         c.geometry.hidden_restore_rect =
@@ -2012,6 +2085,19 @@ impl Jwm {
                     c.geometry.old_h = h;
                 }
             }
+        }
+
+        // Restore can move the selected window to another tag, unstick it or
+        // minimize it. Like every other tag mover, hand focus on when the
+        // selection left the view, so the keyboard never stays on a window
+        // nobody can see. A selection that is still visible keeps focus
+        // untouched: refocusing it would clear the urgency just restored.
+        if let Some(selected) = self.get_selected_client_key()
+            && !(self.is_application_focus_eligible(selected)
+                && self.is_client_visible_by_key(selected))
+            && let Err(error) = self.focus(backend, None)
+        {
+            log::warn!("session restore could not move focus off a hidden window: {error}");
         }
 
         plans.len()
@@ -2190,6 +2276,7 @@ mod tests {
     fn snapshot_with_clients(clients: Vec<SessionEntry>) -> SessionSnapshot {
         SessionSnapshot {
             version: SESSION_VERSION,
+            recorded_version: SESSION_VERSION,
             clients,
             monitor_orders: Vec::new(),
         }
@@ -2241,6 +2328,7 @@ mod tests {
     fn json_round_trip_is_lossless() {
         let snap = SessionSnapshot {
             version: SESSION_VERSION,
+            recorded_version: SESSION_VERSION,
             clients: vec![
                 SessionEntry {
                     class: "Firefox".into(),
@@ -2310,6 +2398,7 @@ mod tests {
     fn validation_accepts_v1_and_rejects_unknown_or_invalid_snapshots() {
         let mut snapshot = SessionSnapshot {
             version: 1,
+            recorded_version: SESSION_VERSION,
             clients: vec![entry("Term", "kitty", 1)],
             monitor_orders: Vec::new(),
         };
@@ -3701,6 +3790,7 @@ mod tests {
         parked.floating = Some((400, 200, 900, 500));
         let snapshot = SessionSnapshot {
             version: SESSION_VERSION,
+            recorded_version: SESSION_VERSION,
             clients: vec![parked, entry("Alacritty", "Alacritty", 1 << 3)],
             monitor_orders: vec![SessionMonitorOrder {
                 monitor_num: 0,
@@ -3829,6 +3919,7 @@ mod tests {
         parked.connector = None;
         let snapshot = SessionSnapshot {
             version: SESSION_VERSION,
+            recorded_version: SESSION_VERSION,
             clients: vec![parked],
             monitor_orders: vec![SessionMonitorOrder {
                 monitor_num: 1,
@@ -3876,6 +3967,7 @@ mod tests {
         });
         let snapshot = SessionSnapshot {
             version: SESSION_VERSION,
+            recorded_version: SESSION_VERSION,
             clients: vec![entry],
             monitor_orders: vec![],
         };
@@ -4037,6 +4129,141 @@ mod tests {
         assert!(hidden_restore.x >= work.x && hidden_restore.y >= work.y);
         assert!(hidden_restore.x + hidden_restore.w <= work.x + work.w);
         assert!(hidden_restore.y + hidden_restore.h <= work.y + work.h);
+    }
+
+    fn insert_session_client(
+        jwm: &mut Jwm,
+        monitor: crate::jwm::MonitorKey,
+        raw: u64,
+        class: &str,
+        instance: &str,
+        tags: u32,
+    ) -> ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.class = class.into();
+        client.instance = instance.into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.geometry.x = 100;
+        client.geometry.y = 80;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        client.geometry.border_w = 2;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        key
+    }
+
+    #[test]
+    fn restore_does_not_leave_focus_on_a_client_moved_off_view() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        assert_ne!(tags & 0b10, 0b10, "tag 2 is not in view");
+        let term = insert_session_client(&mut jwm, monitor, 0xa1, "Term", "term", tags);
+        let editor = insert_session_client(&mut jwm, monitor, 0xa2, "Editor", "editor", tags);
+        jwm.state.sel_mon = Some(monitor);
+        jwm.state.monitors[monitor].sel = Some(term);
+
+        let snapshot = snapshot_with_clients(vec![
+            entry("Term", "term", 0b10),
+            entry("Editor", "editor", tags),
+        ]);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 2);
+
+        assert_eq!(jwm.state.clients[term].state.tags, 0b10);
+        let selected = jwm.get_selected_client_key();
+        assert_ne!(
+            selected,
+            Some(term),
+            "focus must leave the window restore hid"
+        );
+        assert_eq!(selected, Some(editor));
+        assert!(jwm.is_client_visible_by_key(editor));
+    }
+
+    #[test]
+    fn restoring_an_old_snapshot_preserves_live_client_state() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let key = insert_session_client(&mut jwm, monitor, 0xb1, "Alacritty", "alacritty", 1);
+        jwm.set_client_sticky(&mut backend, key, true);
+        {
+            let client = &mut jwm.state.clients[key];
+            client.state.no_decorations = true;
+            client.state.skip_taskbar = true;
+            client.state.remembers_closed_placement = true;
+            client.state.client_fact = 1.5;
+        }
+
+        // Version 4 knows tags, floating geometry and maximize only.
+        let snapshot = migrate_session_json(SESSION_V4_FIXTURE).expect("v4 fixture");
+        assert_eq!(snapshot.recorded_version, 4);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+
+        let state = &jwm.state.clients[key].state;
+        assert!(state.is_sticky, "v4 never recorded sticky");
+        assert!(state.no_decorations, "v4 never recorded decorations");
+        assert!(state.skip_taskbar, "v4 never recorded skip_taskbar");
+        assert!(state.remembers_closed_placement);
+        assert!((state.client_fact - 1.5).abs() < f32::EPSILON);
+
+        // The current version's own neutral values are still applied.
+        let mut current = capture_snapshot(&jwm.state, "status-bar");
+        current.clients[0].is_sticky = false;
+        current.clients[0].skip_taskbar = false;
+        assert_eq!(current.recorded_version, SESSION_VERSION);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &current), 1);
+        let state = &jwm.state.clients[key].state;
+        assert!(!state.is_sticky);
+        assert!(!state.skip_taskbar);
+    }
+
+    #[test]
+    fn restored_minimized_order_is_unique_and_keeps_relative_order() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let live = insert_session_client(&mut jwm, monitor, 0xc1, "Live", "live", tags);
+        let first = insert_session_client(&mut jwm, monitor, 0xc2, "First", "first", tags);
+        let second = insert_session_client(&mut jwm, monitor, 0xc3, "Second", "second", tags);
+        jwm.set_client_minimized(&mut backend, live, true)
+            .expect("minimize");
+        let live_order = jwm.state.clients[live].state.minimized_order;
+        assert!(live_order > 0);
+
+        let minimized = |class: &str, order: u64| SessionEntry {
+            is_minimized: true,
+            minimized_order: Some(order),
+            ..entry(class, &class.to_ascii_lowercase(), tags)
+        };
+        // "Second" was saved ahead of "First", and "First" with the very
+        // order the live window holds now (or an absurd one).
+        let snapshot = snapshot_with_clients(vec![
+            minimized("Live", live_order),
+            minimized("First", u64::MAX),
+            minimized("Second", live_order),
+        ]);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 3);
+
+        let order = |key: ClientKey| jwm.state.clients[key].state.minimized_order;
+        assert!(jwm.state.clients[first].state.is_hidden);
+        assert!(jwm.state.clients[second].state.is_hidden);
+        assert_eq!(
+            order(live),
+            live_order,
+            "an already parked window keeps its order"
+        );
+        assert_ne!(order(first), live_order);
+        assert_ne!(order(second), live_order);
+        assert_ne!(order(first), u64::MAX);
+        assert!(
+            order(second) < order(first),
+            "saved relative order survives"
+        );
     }
 
     #[test]

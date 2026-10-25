@@ -462,7 +462,7 @@ impl Jwm {
             .monitors
             .get(mon_key)
             .map(|m| m.layout.gap)
-            .unwrap_or_else(|| cfg.gap_px() as i32);
+            .unwrap_or_else(|| cfg.layout_gap());
         let params = LayoutParams {
             screen_area,
             n_master,

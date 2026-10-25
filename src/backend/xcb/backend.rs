@@ -3470,6 +3470,12 @@ impl WindowOps for XcbWindowOps {
     }
 
     fn grab_button(&self, win: WindowId, btn: u8, mask: u32, mods: Mods) -> XcbResult<()> {
+        let Some(button) = button_index(btn) else {
+            log::warn!(
+                "[xcb] mouse button {btn} cannot be grabbed by the XCB backend; binding skipped"
+            );
+            return Ok(());
+        };
         let window = self.win(win)?;
         let base = mods_to_xcb(mods);
         let numlock = self.numlock_mask();
@@ -3484,7 +3490,7 @@ impl WindowOps for XcbWindowOps {
                     keyboard_mode: x::GrabMode::Async,
                     confine_to: x::WINDOW_NONE,
                     cursor: x::CURSOR_NONE,
-                    button: button_index(btn),
+                    button,
                     modifiers,
                 })
                 .map_err(xcb_err)?;
@@ -5875,14 +5881,20 @@ fn mods_from_bits_with_numlock(bits: u16, numlock_mask: x::ModMask) -> Mods {
     mods
 }
 
-fn button_index(btn: u8) -> x::ButtonIndex {
+/// The XCB button index for a configured button, or `None` when the XCB
+/// protocol bindings cannot name it.
+///
+/// rust-xcb only models buttons 1-5. Mapping anything else to `Any` turned a
+/// binding for the mouse's back button into a grab of every button, so plain
+/// clicks went to the window manager instead of the client.
+fn button_index(btn: u8) -> Option<x::ButtonIndex> {
     match btn {
-        1 => x::ButtonIndex::N1,
-        2 => x::ButtonIndex::N2,
-        3 => x::ButtonIndex::N3,
-        4 => x::ButtonIndex::N4,
-        5 => x::ButtonIndex::N5,
-        _ => x::ButtonIndex::Any,
+        1 => Some(x::ButtonIndex::N1),
+        2 => Some(x::ButtonIndex::N2),
+        3 => Some(x::ButtonIndex::N3),
+        4 => Some(x::ButtonIndex::N4),
+        5 => Some(x::ButtonIndex::N5),
+        _ => None,
     }
 }
 
@@ -9024,5 +9036,20 @@ mod edid_format_tests {
         assert!(xcb_edid_bytes(&reply(8, 4)).is_none());
         assert!(xcb_edid_bytes(&reply(16, 0)).is_none());
         assert!(xcb_edid_bytes(&reply(32, 0)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod button_grab_tests {
+    use super::button_index;
+    use xcb::x;
+
+    #[test]
+    fn button_index_never_widens_a_binding_to_every_button() {
+        assert!(matches!(button_index(1), Some(x::ButtonIndex::N1)));
+        assert!(matches!(button_index(5), Some(x::ButtonIndex::N5)));
+        assert!(button_index(0).is_none());
+        assert!(button_index(8).is_none());
+        assert!(button_index(9).is_none());
     }
 }

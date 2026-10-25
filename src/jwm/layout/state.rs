@@ -17,7 +17,9 @@ fn adjusted_n_master(current: u32, delta: i32) -> u32 {
 }
 
 fn adjusted_gap(current: i32, delta: i32) -> i32 {
-    current.saturating_add(delta).clamp(0, 100)
+    current
+        .saturating_add(delta)
+        .clamp(0, crate::config::MAX_LAYOUT_GAP_PX)
 }
 
 impl Jwm {

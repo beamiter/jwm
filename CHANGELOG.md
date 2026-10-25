@@ -5,6 +5,38 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Session restore, restart, bindings and layout fixes
+
+- `restore_session` moves focus off a selected window it sent to another tag,
+  and snapshots written by older JWM versions no longer reset state they never
+  recorded: live fullscreen, maximize, sticky, Above/Below, minimized, tile
+  share, decoration and taskbar flags are kept. Restored Dock items keep
+  their saved relative order without reusing an order another item holds.
+- Restart re-executes the path JWM was started through when it is the same
+  binary, so a restart after a managed upgrade or rollback runs the newly
+  selected release instead of the old versioned binary.
+- Launched applications' stderr logs are emptied once they exceed 4 MiB,
+  refuse hard links and are kept at mode 0600. On the DRM/KMS backend,
+  user-set `GSK_RENDERER`, `GDK_DISABLE` and `GDK_GL` values are kept for
+  launched applications; JWM's software-rendering values remain the defaults.
+- Accept plain TOML integers for `view`, `tag`, `toggleview` and `toggletag`
+  bindings (`argument = 512`, or `-1` for every tag) and `setcfact = 0`;
+  they previously loaded silently and did nothing. Bindings with the wrong
+  argument type now get the "will be ignored" warning.
+- Never grab every mouse button for a binding the backend cannot express:
+  button 0 is refused, and buttons above 5 are skipped on XCB instead of
+  becoming an any-button grab that swallowed ordinary clicks.
+- Expand `~` in `behavior.recording_output_dir` and
+  `behavior.audio_recording_output_dir`; a relative directory is now an error
+  instead of a literal `./~/…` directory created in the working directory.
+- Scrolling columns keep the configured spacing regardless of the output's
+  position in the desktop. Bottom-stack, centered-master and three-column
+  layouts fit their inner gaps on small outputs and with very large gaps
+  instead of placing windows outside the output.
+- `appearance.gap_px` above the 100 px layout ceiling is clamped once at
+  startup (with a configuration warning) instead of dropping to 100 on the
+  first `setgaps +N` or after a restart.
+
 ### Wayland input isolation and client-driven hardening
 
 - Keep a locked monitor's shade opaque to input on Wayland. Presses, scrolling

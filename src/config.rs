@@ -31,6 +31,9 @@ pub use validation::{ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDiagnostics}
 
 pub const LOAD_LOCAL_CONFIG: bool = true;
 pub(crate) const MAX_CURSOR_SIZE: u32 = 512;
+/// Largest layout gap, in pixels: the ceiling for `setgaps`, saved per-tag
+/// gaps and the configured `appearance.gap_px`.
+pub const MAX_LAYOUT_GAP_PX: i32 = 100;
 /// Interactive `incnmaster` / `set_config layout.n_master` cap. Persist restore
 /// uses the same ceiling so a hand-edited file cannot outrun the keybindings.
 pub(crate) const MAX_N_MASTER: u32 = 32;
@@ -3411,6 +3414,13 @@ impl Config {
         self.inner.appearance.gap_px
     }
 
+    /// The gap layouts start from: `gap_px` within the same ceiling that
+    /// `setgaps` and saved per-tag layouts use, so a larger configured value
+    /// no longer drops to that ceiling on the first `setgaps +N` or restart.
+    pub fn layout_gap(&self) -> i32 {
+        self.gap_px().min(MAX_LAYOUT_GAP_PX.cast_unsigned()) as i32
+    }
+
     pub fn snap(&self) -> u32 {
         self.inner.appearance.snap
     }
@@ -4009,6 +4019,10 @@ impl Config {
     }
 
     fn convert_button_config(&self, btn_config: &ButtonConfig) -> Option<WMButton> {
+        // X11 button 0 is AnyButton: grabbing it would take every click.
+        if btn_config.button == 0 {
+            return None;
+        }
         let click_type = self.parse_click_type(&btn_config.click_type)?;
         let modifiers = self.parse_modifiers(&btn_config.modifier);
         let button = MouseButton::from_u8(btn_config.button as u8);
@@ -4282,7 +4296,22 @@ impl Config {
             "setmfact" | "resize_horizontal" | "resize_vertical" => {
                 matches!(argument, ArgumentConfig::Float(_))
             }
+            "view" | "tag" | "toggleview" | "toggletag" => {
+                matches!(argument, ArgumentConfig::Int(_) | ArgumentConfig::UInt(_))
+            }
+            "setcfact" => matches!(argument, ArgumentConfig::Int(_) | ArgumentConfig::Float(_)),
             _ => true,
+        }
+    }
+
+    /// What `binding_argument_type_is_valid` expects, for its diagnostic:
+    /// the argument kind and an example value.
+    pub(crate) fn binding_argument_expectation(function: &str) -> (&'static str, &'static str) {
+        match function {
+            "setmfact" | "resize_horizontal" | "resize_vertical" => ("floating-point", "0.05"),
+            "view" | "tag" | "toggleview" | "toggletag" => ("tag-mask integer", "1"),
+            "setcfact" => ("numeric", "0.25"),
+            _ => ("signed integer", "1"),
         }
     }
 
@@ -4307,7 +4336,18 @@ impl Config {
             }
             jwm::WMArgEnum::StringVec(command)
         } else {
-            self.convert_argument(argument)
+            match (function_name, argument) {
+                // TOML integers decode as `Int` first, and every real tag mask
+                // fits in an i32 (at most 31 tags), so `argument = 512` would
+                // otherwise reach the mask handlers as a value they ignore. The
+                // bit pattern is the mask: -1 selects every tag, like dwm's ~0.
+                ("view" | "tag" | "toggleview" | "toggletag", ArgumentConfig::Int(mask)) => {
+                    jwm::WMArgEnum::UInt(mask.cast_unsigned())
+                }
+                // `setcfact argument = 0` means the same as `0.0`.
+                ("setcfact", ArgumentConfig::Int(delta)) => jwm::WMArgEnum::Float(*delta as f32),
+                _ => self.convert_argument(argument),
+            }
         };
 
         Some(migrate_legacy_terminal_argument(function_name, argument))
@@ -10030,6 +10070,65 @@ border_px = 3
             "true".into(),
             String::new()
         ]));
+    }
+
+    #[test]
+    fn mouse_button_zero_never_reaches_grabs() {
+        let cfg = Config::default();
+        let mut button = ButtonConfig {
+            click_type: "ClkClientWin".into(),
+            modifier: vec!["Mod1".into()],
+            button: 0,
+            function: "killclient".into(),
+            argument: ArgumentConfig::Int(0),
+        };
+        assert!(cfg.convert_button_config(&button).is_none());
+        button.button = 8;
+        assert!(
+            cfg.convert_button_config(&button).is_some(),
+            "side buttons work on x11rb and Wayland"
+        );
+    }
+
+    #[test]
+    fn tag_mask_and_factor_bindings_accept_toml_integers() {
+        let cfg = Config::default();
+        for function in ["view", "tag", "toggleview", "toggletag"] {
+            let binding: KeyConfig = toml::from_str(&format!(
+                "modifier = [\"Mod1\"]\nkey = \"F10\"\nfunction = \"{function}\"\nargument = 512"
+            ))
+            .unwrap();
+            assert!(matches!(binding.argument, ArgumentConfig::Int(512)));
+            let compiled = cfg.convert_key_config(&binding).expect(function);
+            assert!(
+                matches!(compiled.arg, crate::jwm::WMArgEnum::UInt(512)),
+                "{function} must receive its mask"
+            );
+            let mut all = binding.clone();
+            all.argument = ArgumentConfig::Int(-1);
+            let compiled = cfg.convert_key_config(&all).expect(function);
+            assert!(matches!(
+                compiled.arg,
+                crate::jwm::WMArgEnum::UInt(u32::MAX)
+            ));
+            let mut text = binding.clone();
+            text.argument = ArgumentConfig::String("2".into());
+            assert!(cfg.convert_key_config(&text).is_none());
+        }
+        let binding: KeyConfig = toml::from_str(
+            "modifier = [\"Mod1\"]\nkey = \"o\"\nfunction = \"setcfact\"\nargument = 0",
+        )
+        .unwrap();
+        let compiled = cfg.convert_key_config(&binding).expect("setcfact");
+        assert!(matches!(compiled.arg, crate::jwm::WMArgEnum::Float(f) if f == 0.0));
+        assert_eq!(
+            Config::binding_argument_expectation("view"),
+            ("tag-mask integer", "1")
+        );
+        assert_eq!(
+            Config::binding_argument_expectation("resize_vertical").0,
+            "floating-point"
+        );
     }
 
     #[test]

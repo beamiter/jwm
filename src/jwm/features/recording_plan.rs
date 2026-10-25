@@ -83,16 +83,58 @@ pub fn resolve_output_directory(
     system_video_dir: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> Result<PathBuf, String> {
-    if !configured.is_empty() {
-        return Ok(PathBuf::from(configured));
+    if let Some(directory) =
+        configured_directory(configured, "behavior.recording_output_dir", home.as_deref())?
+    {
+        return Ok(directory);
     }
+    // XDG base directories must be absolute; a relative value is ignored.
     xdg_videos
-        .filter(|path| !path.as_os_str().is_empty())
+        .filter(|path| path.is_absolute())
         .or(system_video_dir)
-        .or_else(|| home.map(|home| home.join("Videos")))
+        .or_else(|| {
+            home.filter(|home| home.is_absolute())
+                .map(|home| home.join("Videos"))
+        })
         .ok_or_else(|| {
             "cannot resolve the Videos directory; set behavior.recording_output_dir".to_string()
         })
+}
+
+/// A configured output directory, with `~` and `~/…` naming the home
+/// directory as the configuration documentation shows (`"~/Videos"`).
+///
+/// Returns `Ok(None)` when nothing is configured. Anything that is not
+/// absolute after expansion is an error: used as-is it was created relative to
+/// the compositor's working directory — a literal `./~/Videos` under `$HOME` —
+/// before the recorder then refused the relative output path.
+///
+/// # Errors
+///
+/// The configured value is relative, or starts with `~` while no absolute
+/// home directory is known.
+pub fn configured_directory(
+    configured: &str,
+    setting: &str,
+    home: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    if configured.is_empty() {
+        return Ok(None);
+    }
+    let path = if configured == "~" || configured.starts_with("~/") {
+        let home = home
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| format!("{setting} starts with ~ but no absolute HOME is known"))?;
+        crate::backend::compositor_common::wallpaper::expand_home(configured, home)
+    } else {
+        PathBuf::from(configured)
+    };
+    if !path.is_absolute() {
+        return Err(format!(
+            "{setting} must be an absolute path or start with ~/ (got {configured:?})"
+        ));
+    }
+    Ok(Some(path))
 }
 
 /// 输出文件名（时间戳由调用方生成，便于测试）。
@@ -181,6 +223,35 @@ mod tests {
             validate_output_path(Path::new("/tmp/out.mkv"))
                 .unwrap_err()
                 .contains(".mp4")
+        );
+    }
+
+    #[test]
+    fn configured_output_directory_expands_home_and_rejects_relative() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            resolve_output_directory("~/Videos/Rec", None, None, home.clone()),
+            Ok(PathBuf::from("/home/u/Videos/Rec"))
+        );
+        assert_eq!(
+            resolve_output_directory("~", None, None, home.clone()),
+            Ok(PathBuf::from("/home/u"))
+        );
+        assert!(
+            resolve_output_directory("Videos/Rec", None, None, home.clone())
+                .unwrap_err()
+                .contains("absolute")
+        );
+        assert!(resolve_output_directory("~/Videos", None, None, None).is_err());
+        assert!(resolve_output_directory("~other/Videos", None, None, home.clone()).is_err());
+        assert_eq!(
+            resolve_output_directory("", Some(PathBuf::from("videos")), None, home),
+            Ok(PathBuf::from("/home/u/Videos")),
+            "a relative XDG directory is ignored"
+        );
+        assert_eq!(
+            configured_directory("", "behavior.audio_recording_output_dir", None),
+            Ok(None)
         );
     }
 

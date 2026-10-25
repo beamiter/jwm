@@ -466,13 +466,17 @@ impl Jwm {
             // master status.  Disable vulkan+dmabuf to prevent feedback hangs.
             // NOTE: GTK4 apps here run with GDK paths for Vulkan/DMABuf disabled
             // while `GSK_RENDERER=cairo` forces the fallback Cairo+wl_shm path.
-            command.env("GSK_RENDERER", "cairo");
-            command.env("GDK_DISABLE", "vulkan,dmabuf");
             // GTK3 apps (e.g. terminator/VTE) may use GL via wl_egl_window which
             // also produces DMA-buf buffers with zero pixels in unprivileged mode.
             // GDK_GL=disable turns off the GL renderer in GTK3 so it falls back
             // to Cairo wl_shm, which always has correct pixel content.
-            command.env("GDK_GL", "disable");
+            //
+            // These are defaults, not policy: a value the user set (for
+            // example `GSK_RENDERER=ngl` to get GPU rendering back) is kept,
+            // as the bar's launcher already does.
+            for (name, value) in udev_gtk_render_defaults(|name| environment.var_os(name)) {
+                command.env(name, value);
+            }
         }
     }
 
@@ -570,8 +574,14 @@ impl Jwm {
 /// park the compositor thread in `open(2)` until a reader appeared, and a
 /// symlink would append the child's stderr wherever it pointed. Anything
 /// untrusted means the child inherits JWM's stderr instead.
+///
+/// The log is also kept private and bounded: a second hard link (planted
+/// while `protected_hardlinks` is off) is refused, an existing file is put
+/// back to 0600, and one that grew past `MAX_CHILD_STDERR_LOG_BYTES` — a
+/// browser's GPU chatter can write megabytes, and on a tmpfs `/tmp` that is
+/// RAM held for the whole uptime — is emptied before the next launch appends.
 fn open_child_stderr_log(path: &std::path::Path) -> Option<std::fs::File> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -581,8 +591,25 @@ fn open_child_stderr_log(path: &std::path::Path) -> Option<std::fs::File> {
         .open(path)
         .ok()?;
     let metadata = file.metadata().ok()?;
-    (metadata.is_file() && metadata.uid() == unsafe { libc::geteuid() }).then_some(file)
+    if !(metadata.is_file()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.nlink() == 1)
+    {
+        return None;
+    }
+    if metadata.mode() & 0o7777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .ok()?;
+    }
+    if metadata.len() > MAX_CHILD_STDERR_LOG_BYTES {
+        file.set_len(0).ok()?;
+    }
+    Some(file)
 }
+
+/// Size at which a launched application's stderr log is emptied on the next
+/// launch.
+const MAX_CHILD_STDERR_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
 impl Jwm {
     /// Capture every still-owned transient PID before dropping this `Jwm` for
@@ -627,8 +654,43 @@ impl Jwm {
     }
 }
 
+/// The GTK rendering defaults a wayland-udev child gets, leaving out every
+/// variable the child environment already sets.
+fn udev_gtk_render_defaults(
+    existing: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(&'static str, &'static str)> {
+    [
+        ("GSK_RENDERER", "cairo"),
+        ("GDK_DISABLE", "vulkan,dmabuf"),
+        ("GDK_GL", "disable"),
+    ]
+    .into_iter()
+    .filter(|(name, _)| existing(name).is_none())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn udev_gtk_overrides_respect_user_choice() {
+        let none = super::udev_gtk_render_defaults(|_| None);
+        assert_eq!(
+            none,
+            [
+                ("GSK_RENDERER", "cairo"),
+                ("GDK_DISABLE", "vulkan,dmabuf"),
+                ("GDK_GL", "disable")
+            ]
+        );
+        let user = super::udev_gtk_render_defaults(|name| {
+            (name == "GSK_RENDERER").then(|| std::ffi::OsString::from("ngl"))
+        });
+        assert_eq!(
+            user,
+            [("GDK_DISABLE", "vulkan,dmabuf"), ("GDK_GL", "disable")]
+        );
+    }
+
     use super::*;
     use crate::external_command::test_support::{
         SigchldBlockedOnThisThread, status_blocks_sigchld,
@@ -688,6 +750,42 @@ mod tests {
             .and_then(|field| field.parse().ok())
             .expect("a session field");
         assert_eq!(child_session, unsafe { libc::getsid(0) });
+    }
+
+    #[test]
+    fn child_stderr_log_is_private_bounded_and_refuses_hard_links() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "jwm-child-stderr-bound-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let grown = root.join("grown.log");
+        let file = std::fs::File::create(&grown).unwrap();
+        file.set_len(MAX_CHILD_STDERR_LOG_BYTES + 1).unwrap();
+        drop(file);
+        std::fs::set_permissions(&grown, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(open_child_stderr_log(&grown).is_some());
+        let metadata = std::fs::metadata(&grown).unwrap();
+        assert_eq!(metadata.len(), 0, "an oversized log is emptied");
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+
+        let small = root.join("small.log");
+        std::fs::write(&small, "kept").unwrap();
+        assert!(open_child_stderr_log(&small).is_some());
+        assert_eq!(std::fs::read_to_string(&small).unwrap(), "kept");
+
+        let victim = root.join("victim.log");
+        std::fs::write(&victim, "unchanged").unwrap();
+        let link = root.join("hardlink.log");
+        std::fs::hard_link(&victim, &link).unwrap();
+        assert!(open_child_stderr_log(&link).is_none());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "unchanged");
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

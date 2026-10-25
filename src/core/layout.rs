@@ -765,13 +765,17 @@ fn centered_columns<K: Copy>(
     } else {
         (2.0 / n_stack as f32).max(0.7)
     };
-    let mw = ((ww - 2 * gap) as f32 * mfact * master_bias).max(1.0) as i32;
-    let side_w_total = (ww - mw - 2 * gap).max(1);
+    // Two column separators share the width with three columns of at least
+    // one pixel each; raw gaps pushed the right column off a small output.
+    let column_gap = fitting_inner_gap(ww, 3, gap);
+    let content_w = ww.saturating_sub(column_gap.saturating_mul(2)).max(3);
+    let mw = ((content_w as f32 * mfact * master_bias) as i32).clamp(1, content_w - 2);
+    let side_w_total = (content_w - mw).max(2);
     let left_w = (side_w_total / 2).max(1);
     let right_w = (side_w_total - left_w).max(1);
 
-    let master_x = wx + left_w + gap;
-    let right_x = master_x + mw + gap;
+    let master_x = wx + left_w + column_gap;
+    let right_x = master_x + mw + column_gap;
 
     // Stack 交替分到左右两列
     let stack = &clients[master_end..];
@@ -826,20 +830,30 @@ pub fn calculate_bstack<K: Copy>(
     }
 
     let has_stack = n_stack > 0 && n_master_count > 0;
+    let stack_rows: i32 = if n_stack > 4 { 2 } else { 1 };
+    // The master row and every stack row keep at least one pixel between
+    // separators that fit the height; raw gaps put stack rows below the
+    // output on a short area or with a very large gap.
+    let row_gap = if has_stack {
+        fitting_inner_gap(wh, 1 + stack_rows as usize, gap)
+    } else {
+        0
+    };
     let mh = if has_stack {
-        ((wh - gap) as f32 * params.m_fact) as i32
+        let stack_minimum = stack_rows.saturating_mul(row_gap.saturating_add(1));
+        (((wh - row_gap) as f32 * params.m_fact) as i32).clamp(1, (wh - stack_minimum).max(1))
     } else {
         wh
     };
 
-    let stack_rows = if n_stack > 4 { 2 } else { 1 };
     let stack_cols = if n_stack > 0 {
         (n_stack + stack_rows - 1) / stack_rows
     } else {
         0
     };
-    let stack_total_h = (wh - mh - gap).max(1);
-    let stack_cell_h = ((stack_total_h - (stack_rows - 1).max(0) * gap) / stack_rows.max(1)).max(1);
+    let stack_total_h = (wh - mh - row_gap).max(1);
+    let stack_cell_h =
+        ((stack_total_h - (stack_rows - 1).max(0) * row_gap) / stack_rows.max(1)).max(1);
 
     let master_end = (n_master as usize).min(clients.len());
     push_factor_row(&mut results, &clients[..master_end], wx, wy, ww, mh, gap);
@@ -858,7 +872,7 @@ pub fn calculate_bstack<K: Copy>(
         let row_end = (row_start + row_len).min(stack_clients.len());
         // 末行吸收整除余数，与工作区底边齐平
         let row_h = if row == stack_rows - 1 {
-            (stack_total_h - row * (stack_cell_h + gap)).max(1)
+            (stack_total_h - row * (stack_cell_h + row_gap)).max(1)
         } else {
             stack_cell_h
         };
@@ -866,7 +880,7 @@ pub fn calculate_bstack<K: Copy>(
             &mut results,
             &stack_clients[row_start..row_end],
             wx,
-            wy + mh + gap + row * (stack_cell_h + gap),
+            wy + mh + row_gap + row * (stack_cell_h + row_gap),
             ww,
             row_h,
             gap,
@@ -1320,6 +1334,13 @@ pub fn calculate_scrolling<K: Copy>(
     let focus_col_center = col_positions[focus_col] as f32 + col_widths[focus_col] as f32 / 2.0;
     let new_viewport_x = focus_col_center - screen.w as f32 / 2.0;
 
+    // One integer shift for every column: strip positions are integers, so
+    // shifting them all by the same amount keeps the configured spacing.
+    // Rounding each column on its own (`.round()` is half away from zero)
+    // made the gap one pixel wider wherever the fractional half straddled
+    // x = 0, so the spacing depended on the output's absolute position.
+    let viewport_shift = (f64::from(screen.x) - f64::from(new_viewport_x)).floor();
+
     // Layout each column
     for (col_idx, col) in columns.iter().enumerate() {
         if col.is_empty() {
@@ -1328,9 +1349,8 @@ pub fn calculate_scrolling<K: Copy>(
         let strip_x = col_positions[col_idx];
         let col_w = col_widths[col_idx];
         // Screen x = strip_x - viewport_x + screen.x
-        // round 而不是向零截断：向零截断会让视口左侧的列（负坐标）相对
-        // 右侧的列偏移 1px。
-        let screen_x = (strip_x as f32 - new_viewport_x + screen.x as f32).round();
+        let screen_x = (f64::from(strip_x) + viewport_shift)
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
 
         let column_gap = fitting_inner_gap(avail_h, col.len(), gap);
         let count = i32::try_from(col.len()).unwrap_or(i32::MAX);
@@ -1359,7 +1379,7 @@ pub fn calculate_scrolling<K: Copy>(
 
             results.push(LayoutResult {
                 key: client.key,
-                rect: client_rect(screen_x as i32, win_y, col_w, h, client.border_w),
+                rect: client_rect(screen_x, win_y, col_w, h, client.border_w),
             });
 
             y_cursor = y_cursor.saturating_add(h);
@@ -2892,6 +2912,56 @@ mod tests {
                 Rect::new(152, 64, 40, 48),
             ]
         );
+    }
+
+    #[test]
+    fn scrolling_column_spacing_is_independent_of_output_origin() {
+        for origin in [-3000, -200, 0, 2000] {
+            let p = ScrollingParams {
+                screen_area: Rect::new(origin, 0, 1001, 600),
+                column_width_ratio: 0.5,
+                column_width_factors: Vec::new(),
+                gap: 10,
+                viewport_x: 0.0,
+            };
+            let columns = vec![vec![client(1, 1.0)], vec![client(2, 1.0)]];
+            let (results, _) = calculate_scrolling(&p, &columns, 1);
+            assert_eq!(
+                results[1].rect.x - results[0].rect.x,
+                510,
+                "column spacing at origin {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn bstack_and_centered_columns_stay_inside_tiny_areas() {
+        for (width, height, gap) in [(100, 100, 30), (32, 24, 8), (32, 24, 10), (1920, 1080, 400)] {
+            let screen = Rect::new(0, 0, width, height);
+            for count in 3..=7 {
+                let p = LayoutParams {
+                    gap,
+                    ..params(width, height)
+                };
+                let clients = borderless_clients(count);
+                let area = usable_area(screen, bounded_gap(screen, gap));
+                for (name, results) in [
+                    ("bstack", calculate_bstack(&p, &clients)),
+                    ("centeredmaster", calculate_centered_master(&p, &clients)),
+                    ("threecol", calculate_three_col(&p, &clients)),
+                ] {
+                    assert_eq!(results.len(), count as usize, "{name}");
+                    for result in &results {
+                        assert!(
+                            result.rect.w > 0 && result.rect.h > 0,
+                            "{name} {:?}",
+                            result.rect
+                        );
+                        assert_inside(result.rect, area);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

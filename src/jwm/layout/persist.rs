@@ -41,7 +41,7 @@ const PERSIST_DEBOUNCE: Duration = Duration::from_secs(2);
 /// into a state the keybindings could not have produced.
 const MIN_M_FACT: f32 = 0.05;
 const MAX_M_FACT: f32 = 0.95;
-const MAX_GAP: i32 = 100;
+const MAX_GAP: i32 = crate::config::MAX_LAYOUT_GAP_PX;
 
 fn settle_layout_persist_dirty(dirty: &mut Option<Instant>, retry_at: Instant, succeeded: bool) {
     *dirty = if succeeded { None } else { Some(retry_at) };

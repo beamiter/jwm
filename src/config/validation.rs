@@ -494,12 +494,7 @@ fn validate_binding_argument_type(
     if Config::binding_argument_type_is_valid(function, argument) {
         return true;
     }
-    let expected = if function == "setmfact" {
-        "floating-point"
-    } else {
-        "signed integer"
-    };
-    let example = if function == "setmfact" { "0.05" } else { "1" };
+    let (expected, example) = Config::binding_argument_expectation(function);
     diagnostics.warning(
         path,
         format!("{function} requires a {expected} argument; this binding will be ignored"),
@@ -684,14 +679,18 @@ impl Config {
                 "value cannot be represented by the signed geometry pipeline",
                 Some(format!("use at most {}", i32::MAX)),
             );
-        } else if self.inner.appearance.gap_px > 512 {
+        } else if self.inner.appearance.gap_px > super::MAX_LAYOUT_GAP_PX.cast_unsigned() {
             diagnostics.warning(
                 "appearance.gap_px",
                 format!(
-                    "{}px is unusually large and may leave no usable workspace",
-                    self.inner.appearance.gap_px
+                    "{}px exceeds the {}px layout gap limit and will be clamped to it",
+                    self.inner.appearance.gap_px,
+                    super::MAX_LAYOUT_GAP_PX
                 ),
-                None,
+                Some(format!(
+                    "use a value from 0 to {}",
+                    super::MAX_LAYOUT_GAP_PX
+                )),
             );
         }
         if self.inner.appearance.cursor_size > super::MAX_CURSOR_SIZE {
@@ -1705,11 +1704,20 @@ impl Config {
                     None,
                 );
             }
-            if !(1..=5).contains(&button.button) {
+            if button.button == 0 {
                 diagnostics.warning(
                     format!("{path}.button"),
-                    format!("unsupported mouse button {}", button.button),
-                    Some("use a button number from 1 through 5".into()),
+                    "mouse button 0 is not a button; this binding will be ignored".to_string(),
+                    Some("use a button number from 1 through 5, or 8/9 for side buttons".into()),
+                );
+            } else if button.button > 5 {
+                diagnostics.warning(
+                    format!("{path}.button"),
+                    format!(
+                        "mouse button {} works on the x11rb and Wayland backends only; XCB skips it",
+                        button.button
+                    ),
+                    Some("buttons 1 through 5 work on every backend".into()),
                 );
             }
             if self.parse_function(&button.function).is_none() {
@@ -1966,6 +1974,31 @@ mod tests {
                 "idle_dim_level={dim_level} idle_lock_secs={lock_secs} should be quiet"
             );
         }
+    }
+
+    #[test]
+    fn layout_gap_above_the_runtime_ceiling_is_reported_and_clamped() {
+        let mut config = Config::default();
+        config.inner.appearance.gap_px = 150;
+        assert_eq!(config.layout_gap(), crate::config::MAX_LAYOUT_GAP_PX);
+        let diagnostics = config.diagnostics();
+        let gap = diagnostics
+            .issues()
+            .iter()
+            .find(|issue| issue.path == "appearance.gap_px")
+            .expect("a gap the layouts clamp must be reported");
+        assert_eq!(gap.level, ConfigDiagnosticLevel::Warning);
+        assert!(gap.message.contains("100px"));
+
+        config.inner.appearance.gap_px = 100;
+        assert_eq!(config.layout_gap(), 100);
+        assert!(
+            !config
+                .diagnostics()
+                .issues()
+                .iter()
+                .any(|issue| issue.path == "appearance.gap_px")
+        );
     }
 
     #[test]

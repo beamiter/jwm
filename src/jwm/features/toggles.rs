@@ -4607,8 +4607,24 @@ impl Jwm {
             }
         } else {
             let behavior = CONFIG.load().behavior().clone();
-            let output_dir = if !behavior.audio_recording_output_dir.is_empty() {
-                std::path::PathBuf::from(&behavior.audio_recording_output_dir)
+            let home = std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(std::path::PathBuf::from);
+            // `~/Music` names the home directory; a value that stays relative
+            // is passed on and refused by the recorder's absolute-path check,
+            // with the usual unavailable toast.
+            let configured = crate::jwm::features::recording_plan::configured_directory(
+                &behavior.audio_recording_output_dir,
+                "behavior.audio_recording_output_dir",
+                home.as_deref(),
+            )
+            .unwrap_or_else(|_| {
+                Some(std::path::PathBuf::from(
+                    &behavior.audio_recording_output_dir,
+                ))
+            });
+            let output_dir = if let Some(configured) = configured {
+                configured
             } else {
                 std::env::var("XDG_MUSIC_DIR")
                     .map(std::path::PathBuf::from)

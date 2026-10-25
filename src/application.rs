@@ -645,6 +645,49 @@ fn run_restart_bootstrap_with_retry<T>(
     })
 }
 
+/// The program a restart executes.
+///
+/// `current_exe` is the fully resolved binary, which under the managed
+/// installer is `versions/<version>/bin/jwm` behind the `/usr/local/bin/jwm`
+/// symlink chain. Re-executing that path kept a restart after an upgrade or
+/// rollback on the old release. The path JWM was invoked through follows the
+/// installer's `current` link instead, so it is preferred — but only when, at
+/// startup, it resolves to this very binary: argv[0] is chosen by the caller,
+/// and a restart must never start a different program than the one running.
+/// A bare name is looked up the way the shell found it, through `PATH`.
+fn restart_executable(
+    invoked_as: &OsStr,
+    current_exe: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+    path_var: Option<&OsStr>,
+    same_file: impl Fn(&std::path::Path, &std::path::Path) -> bool,
+) -> OsString {
+    let fallback = || current_exe.map_or_else(|| invoked_as.to_os_string(), |exe| exe.into());
+    let Some(exe) = current_exe else {
+        return fallback();
+    };
+    let invoked = std::path::Path::new(invoked_as);
+    let candidate = if invoked.as_os_str().as_encoded_bytes().contains(&b'/') {
+        if invoked.is_absolute() {
+            Some(invoked.to_path_buf())
+        } else {
+            cwd.filter(|cwd| cwd.is_absolute())
+                .map(|cwd| cwd.join(invoked))
+        }
+        .filter(|candidate| same_file(candidate, exe))
+    } else if invoked.as_os_str().is_empty() {
+        None
+    } else {
+        path_var.and_then(|path_var| {
+            env::split_paths(path_var)
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join(invoked))
+                .find(|candidate| same_file(candidate, exe))
+        })
+    };
+    candidate.map_or_else(fallback, PathBuf::into_os_string)
+}
+
 #[derive(Debug)]
 struct RestartCommand {
     executable: OsString,
@@ -655,7 +698,16 @@ impl RestartCommand {
     fn current() -> Self {
         let mut arguments = env::args_os();
         let invoked_as = arguments.next().unwrap_or_else(|| OsString::from("jwm"));
-        let executable = env::current_exe().map_or(invoked_as, |path| path.into_os_string());
+        let current_exe = env::current_exe().ok();
+        let executable = restart_executable(
+            &invoked_as,
+            current_exe.as_deref(),
+            env::current_dir().ok().as_deref(),
+            env::var_os("PATH").as_deref(),
+            |candidate, exe| {
+                std::fs::canonicalize(candidate).ok() == std::fs::canonicalize(exe).ok()
+            },
+        );
         Self {
             executable,
             arguments: arguments.collect(),
@@ -1098,6 +1150,56 @@ fn configure_benchmark<B: CompositorBenchmark + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restart_reexecutes_the_invoked_path_not_the_resolved_release() {
+        use std::path::Path;
+        let release = Path::new("/usr/local/lib/jwm/versions/0.2.0/bin/jwm");
+        // Every name that resolves to the running binary counts as the same.
+        let resolves = |candidate: &Path, exe: &Path| {
+            exe == release
+                && matches!(
+                    candidate.to_str(),
+                    Some(
+                        "/usr/local/bin/jwm"
+                            | "/opt/dev/bin/jwm"
+                            | "/usr/local/lib/jwm/versions/0.2.0/bin/jwm"
+                    )
+                )
+        };
+        let path = std::ffi::OsString::from("/usr/bin:relative:/usr/local/bin");
+        let run = |invoked: &str, cwd: Option<&str>| {
+            super::restart_executable(
+                std::ffi::OsStr::new(invoked),
+                Some(release),
+                cwd.map(Path::new),
+                Some(&path),
+                resolves,
+            )
+        };
+        assert_eq!(run("/usr/local/bin/jwm", None), "/usr/local/bin/jwm");
+        assert_eq!(run("jwm", None), "/usr/local/bin/jwm", "found through PATH");
+        assert_eq!(run("bin/jwm", Some("/opt/dev")), "/opt/dev/bin/jwm");
+        // argv[0] naming some other program is never trusted.
+        assert_eq!(run("/usr/bin/other", None), release.as_os_str());
+        assert_eq!(
+            run("bin/jwm", None),
+            release.as_os_str(),
+            "no cwd to resolve against"
+        );
+        assert_eq!(run("", None), release.as_os_str());
+        assert_eq!(
+            super::restart_executable(
+                std::ffi::OsStr::new("jwm"),
+                None,
+                None,
+                Some(&path),
+                resolves
+            ),
+            "jwm",
+            "without a resolved binary the invoked name is all there is"
+        );
+    }
+
     use super::{
         ApplicationOptions, BackendChoice, BenchmarkRequest, DAEMON_PID_ENV, DAEMON_QUIT_TIMEOUT,
         RESTART_BOOTSTRAP_BACKOFFS, RESTART_MARKER_ENV, RestartCommand, RestartPreparationStage,

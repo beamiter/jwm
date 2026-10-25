@@ -157,7 +157,8 @@ final concatenation.
 
 Once recording starts, the encoder writes directly to
 `Videos/recording-YYYYMMDD-HHMMSS.mp4` (or the directory `recording_output_dir`
-names) without an intermediate MP4 in `/tmp`. When the target directory cannot
+names; `~/...` means the home directory and any other value must be absolute)
+without an intermediate MP4 in `/tmp`. When the target directory cannot
 be resolved or created, that is an explicit error; it never silently falls
 back to a temporary directory.
 

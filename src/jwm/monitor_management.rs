@@ -291,7 +291,7 @@ impl Jwm {
         m.tag_set[1] = 1;
         m.layout.m_fact = cfg.m_fact();
         m.layout.n_master = cfg.n_master();
-        m.layout.gap = cfg.gap_px() as i32;
+        m.layout.gap = cfg.layout_gap();
         m.lt = Rc::new(LayoutEnum::FIBONACCI);
         m.prev_lt = Rc::new(LayoutEnum::TILE);
         m.lt_symbol = m.lt.symbol().to_string();
