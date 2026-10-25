@@ -34,6 +34,11 @@ display name does not bring the old system entry back. IDs use the path
 relative to `applications`, with `/` replaced by `-`, following the
 [desktop entry specification](https://specifications.freedesktop.org/desktop-entry/latest/file-naming.html).
 
+`Exec` is decoded the way the specification layers it: string escapes
+(`\s`, `\n`, `\t`, `\r`, `\\`) first, then quoting, so Wine shortcuts written as
+`C:\\\\windows` and `Start\\ Menu` launch. Inside double quotes only `\"`,
+`` \` ``, `\$` and `\\` are escapes; single quotes are literal.
+
 `Exec` expands `%%` to a literal percent sign, `%c` to the selected application
 name, `%k` to the desktop file path, and a standalone `%i` to `--icon` plus
 the entry's icon. Inserted values stay within their argument and are expanded

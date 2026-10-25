@@ -5,6 +5,31 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Shell, IPC and remote-control correctness
+
+- Desktop-entry `Exec=` lines decode the specification's string escapes before
+  quoting, so Wine shortcuts such as `C:\\\\windows\\\\…` and `Start\\ Menu`
+  launch.
+- Media player titles, artists and identities are flattened to one line, so a
+  web page's media title cannot shift the control center's rows and make
+  clicks land on the wrong control.
+- The notification history is kept only under an absolute XDG data directory;
+  an empty or relative `XDG_DATA_HOME` falls back to `~/.local/share`, and
+  without an absolute home the history stays in memory instead of `/tmp`.
+- The subscribe acknowledgement reports `bar/...` topics, which never match,
+  as unknown; only a bare `bar` is an alias. `jwm-tool msg --subscribe` exits
+  non-zero when the event stream breaks (corrupt, oversized or truncated
+  event); a clean close still exits 0.
+- The remote host authenticates every connection on its own thread and claims
+  the viewer slot only after a peer completes the handshake and sends its
+  `Hello`. An idle or unauthenticated connection can no longer make the host
+  report "busy" to the real viewer, stall later connections, or reveal through
+  timing whether a session is running. `--once` ends with the first
+  authenticated session.
+- Remote pointer input is clamped to the shared monitor or region, and the
+  viewer escapes control characters in a host's refusal reason, caps it, and
+  accepts at most 1 KiB before the session is acknowledged.
+
 ### Session restore, restart, bindings and layout fixes
 
 - `restore_session` moves focus off a selected window it sent to another tag,

@@ -62,6 +62,10 @@ jwm-tool health --json
 jwm-tool msg '' --subscribe 'window,tag,layout,bar' --raw
 ```
 
+A subscription exits 0 when the compositor closes the stream between events
+(quit or restart) and non-zero when the stream breaks: an event that is not
+valid UTF-8, larger than the 1 MiB frame limit, or cut off part-way.
+
 `get_show_bar` occupancy JSON includes `tag`, `prev_tag`, `layout`, `gap`,
 `mfact`, `nmaster`, and `selected_id`.
 It also includes `sel_tags`, `previous_tags`, and `active_tags`.

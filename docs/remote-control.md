@@ -653,8 +653,15 @@ address, a firewall, or a host that had died. It is now authenticated, told
 milliseconds.
 
 Authentication comes first deliberately: only a peer holding the key learns
-that a session is in progress. The active session runs on its own thread, so
-refusing a second peer never interrupts the first.
+that a session is in progress. Every connection is authenticated on its own
+thread under the five-second handshake deadline, and the single viewer slot is
+claimed only after a peer has completed the handshake and sent its `Hello`.
+A connection that says nothing therefore cannot make the host look busy to the
+real viewer, cannot stall the connections behind it, and cannot learn from
+the timing of its greeting whether a session is running. At most eight
+unauthenticated handshakes run at once; further connections are closed
+immediately. The active session runs on its own thread, so refusing a second
+peer never interrupts the first.
 
 ### Session resilience
 
@@ -665,8 +672,9 @@ retried rather than ending the host; only a genuinely broken listener stops it.
 The peer address comes from `accept` itself, because asking the accepted socket
 for it is a liveness question that a reset peer answers with an error.
 
-`--once` returns the session's own result, so a scripted run that failed is
-distinguishable from a clean one by exit code.
+`--once` returns the first authenticated session's own result, so a scripted
+run that failed is distinguishable from a clean one by exit code. Port scans
+and peers without the key do not count as that session.
 
 While the controller holds any key or button, the host requires it to stay
 audible: 600 ms of silence releases everything held, without ending the

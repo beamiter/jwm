@@ -2003,7 +2003,10 @@ fn unknown_subscription_topics(topics: &[String]) -> Vec<String> {
     for topic in topics {
         let topic = topic.trim();
         let family = topic.split('/').next().unwrap_or(topic);
-        let known = topic == "*" || (family != "*" && families.contains(&family));
+        // `bar` is an alias the server rewrites to `monitor/bar` only when it
+        // stands alone; `bar/...` is stored as written and matches nothing.
+        let alias_only = family == "bar" && topic != "bar";
+        let known = topic == "*" || (family != "*" && !alias_only && families.contains(&family));
         if topic.is_empty() || known || unknown.iter().any(|seen| seen == topic) {
             continue;
         }
@@ -10283,6 +10286,11 @@ mod tests {
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>()
         };
+        assert_eq!(
+            unknown_subscription_topics(&topics(&["bar", "bar/occupancy"])),
+            vec!["bar/occupancy".to_string()],
+            "only a bare `bar` is rewritten to an event family"
+        );
 
         assert_eq!(
             unknown_subscription_topics(&topics(&[

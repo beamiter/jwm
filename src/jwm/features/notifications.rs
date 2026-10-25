@@ -554,8 +554,11 @@ impl NotificationCenter {
     /// Do-Not-Disturb seed is kept in both builds.
     #[must_use]
     pub fn load() -> Self {
+        // Without an absolute data directory the center stays in memory
+        // rather than writing previews into the working directory or /tmp.
         #[cfg(not(test))]
-        let mut center = Self::load_from_path(&history_path());
+        let mut center =
+            history_path().map_or_else(Self::default, |path| Self::load_from_path(&path));
         #[cfg(test)]
         let mut center = Self::default();
         let config = crate::config::CONFIG.load();
@@ -1126,12 +1129,30 @@ fn write_history_now(path: &Path, snapshot: &HistorySnapshot) -> bool {
 
 // Test builds never resolve the real history file; see `NotificationCenter::load`.
 #[cfg(not(test))]
-fn history_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::data_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    base.join("jwm").join(HISTORY_FILE)
+fn history_path() -> Option<std::path::PathBuf> {
+    let xdg = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from);
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    history_path_from_dirs(xdg.as_deref(), home.as_deref())
+}
+
+/// Where the notification history lives, from the XDG data home and home
+/// directory.
+///
+/// Notification previews can hold one-time codes and private messages. XDG
+/// base directories must be absolute: an empty or relative `XDG_DATA_HOME`
+/// (environment.d does not expand `~`) is ignored instead of resolving
+/// against the compositor's working directory, and there is no shared `/tmp`
+/// fallback another local user could pre-create. `None` keeps the history in
+/// memory for the session, as the launcher does with its ranking.
+fn history_path_from_dirs(xdg_data_home: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    let base = xdg_data_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/share"))
+        })?;
+    Some(base.join("jwm").join(HISTORY_FILE))
 }
 
 impl crate::jwm::Jwm {
@@ -1374,6 +1395,28 @@ impl crate::jwm::Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_path_ignores_empty_and_relative_xdg_and_never_uses_tmp() {
+        let home = Path::new("/home/u");
+        let expected = PathBuf::from("/home/u/.local/share/jwm").join(HISTORY_FILE);
+        for xdg in [None, Some(""), Some("data"), Some("~/.local/share")] {
+            assert_eq!(
+                history_path_from_dirs(xdg.map(Path::new), Some(home)),
+                Some(expected.clone()),
+                "{xdg:?}"
+            );
+        }
+        assert_eq!(
+            history_path_from_dirs(Some(Path::new("/x")), Some(home)),
+            Some(PathBuf::from("/x/jwm").join(HISTORY_FILE))
+        );
+        assert_eq!(history_path_from_dirs(Some(Path::new("data")), None), None);
+        assert_eq!(
+            history_path_from_dirs(None, Some(Path::new("relative"))),
+            None
+        );
+    }
 
     fn request(summary: &str) -> NotificationRequest {
         NotificationRequest {

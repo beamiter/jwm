@@ -33,6 +33,22 @@ fn bounded_text(value: &str, max_bytes: usize) -> String {
     value[..end].to_string()
 }
 
+/// Bounded text for one row of UI: control characters become spaces.
+///
+/// Titles, artists and identities come from any MPRIS player — a web page
+/// sets them for a browser media session. The control center draws all its
+/// rows as one newline-joined texture and derives the row height from the
+/// line count, so an embedded newline shifted the highlight and the click
+/// targets onto the wrong rows. Notifications and launcher titles are already
+/// flattened the same way.
+fn single_line_text(value: &str, max_bytes: usize) -> String {
+    let flat: String = bounded_text(value, max_bytes)
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    flat.trim().to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaybackStatus {
     Playing,
@@ -781,7 +797,7 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
             .get(key)
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        bounded_text(value, MAX_METADATA_BYTES)
+        single_line_text(value, MAX_METADATA_BYTES)
     };
     let flag = |key: &str| {
         args.get(key)
@@ -835,7 +851,7 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
                     );
                     Some(PlayerDetail {
                         player: bounded_text(player, MAX_PLAYER_BYTES),
-                        identity: bounded_text(identity, MAX_METADATA_BYTES),
+                        identity: single_line_text(identity, MAX_METADATA_BYTES),
                         status,
                     })
                 })
@@ -866,6 +882,32 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_metadata_cannot_break_a_row_onto_a_second_line() {
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "p",
+            "status": "Playing",
+            "title": "Song\nLock\n\n",
+            "artist": "A\r\nB",
+            "identity": "C\nD\t",
+            "player_details": [{"player": "x", "identity": "E\nF"}],
+        }))
+        .expect("state");
+        for text in [
+            &parsed.title,
+            &parsed.artist,
+            &parsed.identity,
+            &parsed.player_details[0].identity,
+        ] {
+            assert!(!text.chars().any(char::is_control), "{text:?}");
+        }
+        assert_eq!(parsed.title, "Song Lock");
+        assert_eq!(parsed.artist, "A  B");
+        assert_eq!(control_row(&parsed).lines().count(), 1);
+        assert_eq!(lock_row(&parsed).lines().count(), 1);
+        assert_eq!(parsed.osd_label().lines().count(), 1);
+    }
 
     fn state(title: &str, artist: &str) -> MediaState {
         MediaState {

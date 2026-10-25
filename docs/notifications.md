@@ -107,8 +107,10 @@ The history holds 64 records; the oldest is evicted beyond that, and its
 sender is told (see [closes](#the-d-bus-bridge)) because nothing else would
 ever close it. The history survives a restart: every change (post, replace,
 dismiss, clear) is queued to `$XDG_DATA_HOME/jwm/notification-history` —
-`~/.local/share/jwm/` when `XDG_DATA_HOME` is unset — and read back on
-startup. A writer thread owns the file: changes falling inside a one-second
+`~/.local/share/jwm/` when `XDG_DATA_HOME` is unset, empty or relative — and
+read back on startup. Without an absolute home directory the history stays in
+memory for the session; it is never written to the working directory or a
+shared `/tmp` path. A writer thread owns the file: changes falling inside a one-second
 window share one write, so a progress notification updating ten times a
 second costs one rename-and-fsync rather than ten and the compositor thread
 never waits on an fsync. Shutdown and restart flush the pending snapshot

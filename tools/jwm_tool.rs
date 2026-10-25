@@ -3166,6 +3166,43 @@ fn ensure_ipc_response_succeeded(response: &str) -> io::Result<()> {
     validate_ipc_response(response)
 }
 
+/// Print subscription events until the compositor closes the stream.
+///
+/// Only a close at a frame boundary is a normal end. A corrupt, oversized or
+/// truncated event, or a stalled partial frame, is returned as an error so the
+/// exit status tells a supervising script that the stream broke.
+fn pump_subscription(
+    reader: &mut IpcLineReader,
+    out: &mut impl Write,
+    raw: bool,
+) -> io::Result<()> {
+    loop {
+        match reader.read_subscription_line(IPC_RESPONSE_TIMEOUT) {
+            Ok(line) => {
+                if raw {
+                    writeln!(out, "{}", line.trim())?;
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(line.trim()) {
+                        Ok(value) => writeln!(
+                            out,
+                            "{}",
+                            serde_json::to_string_pretty(&value).unwrap_or(line)
+                        )?,
+                        Err(_) => writeln!(out, "{}", line.trim())?,
+                    }
+                }
+                out.flush()?;
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::UnexpectedEof && reader.at_frame_boundary() =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -> io::Result<()> {
     // Validate --args before touching the socket. Subscription requests do not
     // consume the value, but malformed input is still a CLI usage error.
@@ -3209,26 +3246,8 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
             eprintln!("Subscribed: {}", resp.trim());
         }
 
-        loop {
-            match reader.read_subscription_line(IPC_RESPONSE_TIMEOUT) {
-                Ok(line) => {
-                    if raw {
-                        println!("{}", line.trim());
-                    } else {
-                        match serde_json::from_str::<serde_json::Value>(line.trim()) {
-                            Ok(value) => {
-                                println!("{}", serde_json::to_string_pretty(&value).unwrap_or(line))
-                            }
-                            Err(_) => println!("{}", line.trim()),
-                        }
-                    }
-                }
-                Err(error) => {
-                    eprintln!("Connection closed: {error}");
-                    break;
-                }
-            }
-        }
+        pump_subscription(&mut reader, &mut io::stdout().lock(), raw)?;
+        eprintln!("Connection closed");
         return Ok(());
     }
 
@@ -3327,12 +3346,12 @@ mod tests {
         legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id, parse_daemon_pidfile,
         parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity, parse_msg_args,
         parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
-        process_identity_matches, read_bounded_regular_file, read_bounded_text_file,
-        read_legacy_response_lock_owner, response_data, response_flock_path, response_lock_path,
-        rotated_log_path, should_attempt_wayland_status_fallback, smoke_artifacts_json,
-        smoke_ci_profile_json, smoke_manual_kms_checklist_json, smoke_target_json, split_path_list,
-        successful_query_data, validate_daemon_response, validate_ipc_response,
-        write_fifo_nonblock,
+        process_identity_matches, pump_subscription, read_bounded_regular_file,
+        read_bounded_text_file, read_legacy_response_lock_owner, response_data,
+        response_flock_path, response_lock_path, rotated_log_path,
+        should_attempt_wayland_status_fallback, smoke_artifacts_json, smoke_ci_profile_json,
+        smoke_manual_kms_checklist_json, smoke_target_json, split_path_list, successful_query_data,
+        validate_daemon_response, validate_ipc_response, write_fifo_nonblock,
     };
     use clap::Parser;
     use std::collections::HashSet;
@@ -5377,6 +5396,39 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
 
         std::fs::remove_file(fifo).unwrap();
+    }
+
+    #[test]
+    fn a_broken_subscription_stream_is_an_error_and_a_clean_close_is_not() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        write_pair(&writer, b"{\"event\":\"window/new\"}\n");
+        drop(writer);
+        let mut reader = IpcLineReader::new(reader_stream);
+        let mut out = Vec::new();
+        pump_subscription(&mut reader, &mut out, true).expect("close at a frame boundary");
+        assert_eq!(out, b"{\"event\":\"window/new\"}\n");
+
+        for broken in [
+            &b"{\"event\":\"\xff\"}\n"[..],
+            &b"{\"event\":\"window/n"[..],
+        ] {
+            let (reader_stream, writer) = UnixStream::pair().unwrap();
+            write_pair(&writer, b"{\"event\":\"tag/view\"}\n");
+            write_pair(&writer, broken);
+            drop(writer);
+            let mut reader = IpcLineReader::new(reader_stream);
+            let mut out = Vec::new();
+            let error = pump_subscription(&mut reader, &mut out, true)
+                .expect_err("a corrupt or truncated event must not exit 0");
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+            ));
+            assert_eq!(
+                out, b"{\"event\":\"tag/view\"}\n",
+                "earlier events still print"
+            );
+        }
     }
 
     #[test]
@@ -8591,6 +8643,11 @@ impl IpcLineReader {
     /// frame once its first byte has arrived.
     fn read_subscription_line(&mut self, frame_timeout: Duration) -> io::Result<String> {
         self.read_line(None, Some(frame_timeout))
+    }
+
+    /// No partial frame is buffered: an end of stream here split nothing.
+    fn at_frame_boundary(&self) -> bool {
+        self.start == self.buf.len()
     }
 
     fn read_line(

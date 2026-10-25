@@ -18,7 +18,7 @@ use super::x11_capture::{
     CaptureArea, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture,
     validate_capture_area,
 };
-use super::x11_input::InputInjector;
+use super::x11_input::{InputArea, InputInjector};
 use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -65,6 +65,13 @@ const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Reason sent to a second viewer while one is already connected.
 const BUSY_REASON: &str = "another viewer is already connected to this host";
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Unauthenticated handshakes allowed to run at once.
+///
+/// Each runs on its own thread under `HANDSHAKE_TIMEOUT`, so a peer that
+/// connects and says nothing can neither claim the viewer slot nor stall the
+/// accept loop for the next connection. Connections beyond the cap are closed
+/// at once; the cap only bounds the threads an unauthenticated flood can pin.
+const MAX_PENDING_HANDSHAKES: usize = 8;
 /// Longest single sleep while rate limited, so shutdown stays responsive.
 const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
 
@@ -1388,17 +1395,96 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         eprintln!("jwm-remote: input control is disabled (view-only host)");
     }
 
-    // The session runs on its own thread so the listener stays responsive.
-    // Serving inline meant a second viewer's connect completed into the
-    // backlog and then heard nothing at all: it waited out its handshake
-    // timeout and reported a bare end-of-file, indistinguishable from a wrong
-    // address, a firewall, or a host that had died.
     let key = Arc::new(key);
     let options = Arc::new(options);
-    let session_active = Arc::new(AtomicBool::new(false));
-    let mut session: Option<thread::JoinHandle<RemoteResult<()>>> = None;
+    let once = options.once;
+    let session_shutdown = Arc::clone(&shutdown);
+    accept_connections(&listener, key, &shutdown, once, move |peer| {
+        serve_authenticated(peer, &options, &session_shutdown)
+    })
+}
 
-    while !shutdown.load(Ordering::Acquire) {
+/// Releases the single viewer slot when the session that claimed it ends,
+/// including by panic.
+struct ViewerSlot(Arc<AtomicBool>);
+
+impl ViewerSlot {
+    /// Claim the slot, or `None` while another authenticated viewer holds it.
+    fn claim(active: &Arc<AtomicBool>) -> Option<Self> {
+        active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then(|| Self(Arc::clone(active)))
+    }
+}
+
+impl Drop for ViewerSlot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Counts one in-flight connection thread against `MAX_PENDING_HANDSHAKES`
+/// until authentication finishes or fails.
+struct PendingHandshake(Arc<std::sync::atomic::AtomicUsize>);
+
+impl PendingHandshake {
+    fn admit(pending: &Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
+        pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_PENDING_HANDSHAKES).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(pending)))
+    }
+}
+
+impl Drop for PendingHandshake {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Accept connections until shutdown, authenticating each on its own thread.
+///
+/// The viewer slot is claimed only by a peer that completed the handshake and
+/// sent its `Hello`: an idle or unauthenticated connection used to hold it for
+/// the whole handshake timeout, so a real viewer arriving meanwhile was told
+/// the host was busy, and the "busy" handshake ran inline on this thread,
+/// stalling every later connection. Authenticating in parallel also means a
+/// peer without the key cannot time the greeting to learn whether a session
+/// is running. An authenticated peer that finds the slot taken is told so
+/// and disconnected.
+///
+/// With `once`, the host returns the first authenticated session's own result;
+/// failed or unauthenticated connections do not count.
+fn accept_connections<S>(
+    listener: &TcpListener,
+    key: Arc<Vec<u8>>,
+    shutdown: &Arc<AtomicBool>,
+    once: bool,
+    serve: S,
+) -> RemoteResult<()>
+where
+    S: Fn(AuthenticatedPeer) -> RemoteResult<()> + Send + Sync + 'static,
+{
+    let serve = Arc::new(serve);
+    let session_active = Arc::new(AtomicBool::new(false));
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel::<RemoteResult<()>>();
+    let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();
+
+    let result = loop {
+        if shutdown.load(Ordering::Acquire) {
+            break Ok(());
+        }
+        if once && let Ok(outcome) = finished_rx.try_recv() {
+            // `--once` is documented for tests and scripts, so a failed
+            // session has to be distinguishable from a clean one by exit code.
+            break outcome;
+        }
+        workers.retain(|worker| !worker.is_finished());
+
         // Take the address `accept` already resolved. Calling `peer_addr` on
         // the accepted socket instead is a liveness question, not a naming
         // one: a peer that sends RST before we get here makes it fail with
@@ -1420,94 +1506,75 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
                 }
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => break Err(error.into()),
         };
         eprintln!("jwm-remote: connection from {peer}");
-        if session_active.load(Ordering::Acquire) {
-            // Rejecting inline is safe now that the session has its own
-            // thread, and it is bounded by the handshake timeout. The peer is
-            // authenticated first: only someone holding the key learns that a
-            // session is in progress.
-            if let Err(error) = reject_busy_peer(stream, &key) {
-                eprintln!("jwm-remote: refused {peer}: {error}");
-            } else {
-                eprintln!("jwm-remote: refused {peer}: a viewer is already connected");
-            }
+        // Accepted sockets inherit the listener's non-blocking mode on some
+        // platforms; every handshake below relies on blocking reads.
+        if let Err(error) = stream.set_nonblocking(false) {
+            eprintln!("jwm-remote: dropped {peer}: {error}");
             continue;
         }
-
-        // Reap the previous session before starting another, so its result is
-        // reported and its thread is never left dangling.
-        if let Some(finished) = session.take() {
-            report_session_result(finished.join());
-        }
-
-        session_active.store(true, Ordering::Release);
-        let session_key = Arc::clone(&key);
-        let session_options = Arc::clone(&options);
-        let session_shutdown = Arc::clone(&shutdown);
-        let finished = Arc::clone(&session_active);
-        let handle = thread::Builder::new()
+        let Some(admission) = PendingHandshake::admit(&pending) else {
+            eprintln!("jwm-remote: dropped {peer}: too many unauthenticated connections");
+            continue;
+        };
+        let worker_key = Arc::clone(&key);
+        let worker_serve = Arc::clone(&serve);
+        let worker_slot = Arc::clone(&session_active);
+        let worker_finished = finished_tx.clone();
+        let spawned = thread::Builder::new()
             .name("jwm-remote-session".into())
             .spawn(move || {
-                let outcome =
-                    serve_client(stream, &session_key, &session_options, &session_shutdown);
+                let authenticated = authenticate_peer(stream, &worker_key);
+                drop(admission);
+                let mut peer_session = match authenticated {
+                    Ok(peer_session) => peer_session,
+                    Err(error) => {
+                        eprintln!("jwm-remote: {peer} did not authenticate: {error}");
+                        return;
+                    }
+                };
+                let Some(slot) = ViewerSlot::claim(&worker_slot) else {
+                    let refused = peer_session
+                        .writer
+                        .write_message(MessageKind::Close, BUSY_REASON.as_bytes())
+                        .and_then(|()| peer_session.writer.flush());
+                    match refused {
+                        Ok(()) => {
+                            eprintln!("jwm-remote: refused {peer}: a viewer is already connected")
+                        }
+                        Err(error) => eprintln!("jwm-remote: refused {peer}: {error}"),
+                    }
+                    return;
+                };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker_serve(peer_session)
+                }))
+                .unwrap_or_else(|_| Err(io::Error::other("remote session thread panicked").into()));
+                drop(slot);
                 if let Err(error) = &outcome {
                     eprintln!("jwm-remote: session with {peer} ended: {error}");
                 }
-                finished.store(false, Ordering::Release);
-                outcome
-            })?;
-        if options.once {
-            // `--once` is documented for tests and scripts, so a failed
-            // session has to be distinguishable from a clean one by exit code.
-            return join_session(handle);
+                let _ = worker_finished.send(outcome);
+            });
+        match spawned {
+            Ok(worker) => workers.push(worker),
+            Err(error) => eprintln!("jwm-remote: dropped {peer}: {error}"),
         }
-        session = Some(handle);
-    }
+    };
     // A signal during a session still waits for it to unwind: the session owns
     // releasing any input it injected. Its result is reported but not
     // propagated -- the operator asked the host to stop, so stopping is a
     // success, and a long-running host must not start exiting nonzero just
     // because whatever session happened to be open was cut short.
-    if let Some(running) = session {
-        report_session_result(running.join());
+    // Unauthenticated handshakes end within their own timeout.
+    for worker in workers {
+        if worker.join().is_err() {
+            eprintln!("jwm-remote: connection thread panicked");
+        }
     }
-    Ok(())
-}
-
-fn join_session(handle: thread::JoinHandle<RemoteResult<()>>) -> RemoteResult<()> {
-    match handle.join() {
-        Ok(outcome) => outcome,
-        Err(_) => Err(io::Error::other("remote session thread panicked").into()),
-    }
-}
-
-fn report_session_result(joined: thread::Result<RemoteResult<()>>) {
-    match joined {
-        Ok(Err(error)) => eprintln!("jwm-remote: session ended: {error}"),
-        Ok(Ok(())) => {}
-        Err(_) => eprintln!("jwm-remote: session thread panicked"),
-    }
-}
-
-/// Tell an authenticated peer that the host already has a viewer.
-///
-/// Authentication comes first so an unauthenticated scanner learns nothing,
-/// and the reason travels in the `Close` payload so the viewer can print
-/// something better than a timeout.
-fn reject_busy_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<()> {
-    stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let mut deadline = TcpStreamDeadline::arm(&stream, HANDSHAKE_TIMEOUT)?;
-    let session_keys = server_handshake(&mut stream, key, rand::random())?;
-    let (_, send_key) = session_keys.into_server();
-    let mut writer = SessionWriter::new(stream, send_key);
-    writer.write_message(MessageKind::Close, BUSY_REASON.as_bytes())?;
-    writer.flush()?;
-    deadline.cancel();
-    Ok(())
+    result
 }
 
 /// Accept errors that concern one connection rather than the listener.
@@ -1529,12 +1596,16 @@ fn accept_error_needs_backoff(error: &io::Error) -> bool {
     )
 }
 
-fn serve_client(
-    mut stream: TcpStream,
-    key: &[u8],
-    options: &HostOptions,
-    shutdown: &Arc<AtomicBool>,
-) -> RemoteResult<()> {
+/// A peer that proved it holds the key and sent a well-formed `Hello`.
+struct AuthenticatedPeer {
+    reader: SessionReader<TcpStream>,
+    writer: SessionWriter<DeadlineWriter<TcpStream>>,
+    hello: ClientHello,
+}
+
+/// Run the handshake and read the peer's `Hello`, all under one absolute
+/// `HANDSHAKE_TIMEOUT` so a peer that drips bytes cannot extend it.
+fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<AuthenticatedPeer> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
@@ -1545,7 +1616,7 @@ fn serve_client(
     let (receive_key, send_key) = session_keys.into_server();
     let mut reader = SessionReader::new(reader_stream, receive_key);
     reader.set_max_payload_len(MAX_INBOUND_PAYLOAD_LEN);
-    let mut writer = SessionWriter::new(DeadlineWriter::new(stream, WRITE_TIMEOUT), send_key);
+    let writer = SessionWriter::new(DeadlineWriter::new(stream, WRITE_TIMEOUT), send_key);
 
     let (kind, hello_payload) = reader.read_message()?;
     if kind != MessageKind::Hello {
@@ -1555,6 +1626,23 @@ fn serve_client(
     }
     let hello = ClientHello::decode(&hello_payload)?;
     handshake_deadline.cancel();
+    Ok(AuthenticatedPeer {
+        reader,
+        writer,
+        hello,
+    })
+}
+
+fn serve_authenticated(
+    peer: AuthenticatedPeer,
+    options: &HostOptions,
+    shutdown: &Arc<AtomicBool>,
+) -> RemoteResult<()> {
+    let AuthenticatedPeer {
+        mut reader,
+        mut writer,
+        hello,
+    } = peer;
     // Both sides must have opted in: the host's flag is policy, the client's
     // request is consent. Sending clipboard records to a peer that asked for
     // none would be a protocol violation on arrival.
@@ -1567,7 +1655,7 @@ fn serve_client(
     )?;
     // Injected pointer coordinates arrive in shared-area space; XTEST wants
     // root coordinates. Resolved once here rather than per event.
-    let input_origin = capture.origin();
+    let input_area = capture.input_area();
     let mut keyboard_enabled = false;
     let mut verified_keymap = None;
     let injector = if options.allow_input && hello.request_input {
@@ -1680,7 +1768,7 @@ fn serve_client(
             receive_input(
                 reader,
                 injector,
-                input_origin,
+                input_area,
                 keyboard_enabled,
                 verified_keymap,
                 INITIAL_ACTIVITY_TIMEOUT,
@@ -2359,7 +2447,7 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
 fn receive_input(
     mut reader: SessionReader<TcpStream>,
     mut injector: Option<InputInjector>,
-    input_origin: (i16, i16),
+    input_area: InputArea,
     keyboard_enabled: bool,
     verified_keymap: Option<[u8; 32]>,
     initial_activity_timeout: Duration,
@@ -2429,7 +2517,7 @@ fn receive_input(
                     } else {
                         let _ = injector.take_keymap_change()?;
                     }
-                    injector.inject_batch(&events, input_origin)?;
+                    injector.inject_batch(&events, input_area)?;
                 }
                 MessageKind::Pointer
                 | MessageKind::Key
@@ -3296,6 +3384,159 @@ mod tests {
         let connector = thread::spawn(move || TcpStream::connect(address).unwrap());
         let (accepted, _) = listener.accept().unwrap();
         (connector.join().unwrap(), accepted)
+    }
+
+    mod accept_loop {
+        use super::*;
+        use crate::remote::protocol::{NONCE_LEN, PSK_LEN, client_handshake};
+        use std::io::Read;
+        use std::net::SocketAddr;
+
+        const KEY: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+        fn spawn_loop<S>(
+            once: bool,
+            serve: S,
+        ) -> (
+            SocketAddr,
+            Arc<AtomicBool>,
+            thread::JoinHandle<RemoteResult<()>>,
+        )
+        where
+            S: Fn(AuthenticatedPeer) -> RemoteResult<()> + Send + Sync + 'static,
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let loop_shutdown = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                accept_connections(
+                    &listener,
+                    Arc::new(KEY.to_vec()),
+                    &loop_shutdown,
+                    once,
+                    serve,
+                )
+            });
+            (address, shutdown, handle)
+        }
+
+        fn acknowledge(mut peer: AuthenticatedPeer) -> RemoteResult<()> {
+            let hello = ServerHello {
+                pointer_enabled: false,
+                keyboard_enabled: false,
+                clipboard_enabled: false,
+            };
+            peer.writer
+                .write_message(MessageKind::HelloAck, &hello.encode())?;
+            peer.writer.flush()?;
+            Ok(())
+        }
+
+        /// Authenticate, send `Hello`, and return the host's first record
+        /// with the stream that carried it.
+        fn negotiate(address: SocketAddr) -> (MessageKind, Vec<u8>, TcpStream) {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let keys = client_handshake(&mut stream, &KEY, [0x11; NONCE_LEN]).unwrap();
+            let (receive, send) = keys.into_client();
+            let mut reader = SessionReader::new(stream.try_clone().unwrap(), receive);
+            let mut writer = SessionWriter::new(stream.try_clone().unwrap(), send);
+            let hello = ClientHello {
+                request_input: false,
+                request_clipboard: false,
+                keymap_fingerprint: [0; 32],
+            };
+            writer
+                .write_message(MessageKind::Hello, &hello.encode())
+                .unwrap();
+            writer.flush().unwrap();
+            let (kind, payload) = reader.read_message().unwrap();
+            (kind, payload, stream)
+        }
+
+        #[test]
+        fn an_idle_unauthenticated_peer_cannot_make_the_real_viewer_busy() {
+            let (address, shutdown, handle) = spawn_loop(false, acknowledge);
+            let mut idle = TcpStream::connect(address).unwrap();
+            idle.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut greeting = [0_u8; 64];
+            assert!(
+                idle.read(&mut greeting).unwrap() > 0,
+                "the idle peer is being served"
+            );
+
+            let (kind, _, _) = negotiate(address);
+            assert_eq!(kind, MessageKind::HelloAck);
+
+            drop(idle);
+            shutdown.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+        }
+
+        #[test]
+        fn a_second_authenticated_viewer_is_told_the_host_is_busy() {
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let release_rx = Mutex::new(release_rx);
+            let (address, shutdown, handle) = spawn_loop(false, move |peer| {
+                acknowledge(peer)?;
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            });
+            let (first, _, _first_stream) = negotiate(address);
+            assert_eq!(first, MessageKind::HelloAck);
+            let (second, reason, _) = negotiate(address);
+            assert_eq!(second, MessageKind::Close);
+            assert_eq!(reason, BUSY_REASON.as_bytes());
+
+            release_tx.send(()).unwrap();
+            shutdown.store(true, Ordering::Release);
+            handle.join().unwrap().unwrap();
+        }
+
+        #[test]
+        fn once_counts_only_authenticated_sessions() {
+            let (address, _shutdown, handle) = spawn_loop(true, acknowledge);
+            // A port scanner, and a peer that does not hold the key.
+            drop(TcpStream::connect(address).unwrap());
+            let mut garbage = TcpStream::connect(address).unwrap();
+            garbage.write_all(&[0xff; 96]).unwrap();
+            drop(garbage);
+
+            let (kind, _, _) = negotiate(address);
+            assert_eq!(kind, MessageKind::HelloAck);
+            handle
+                .join()
+                .unwrap()
+                .expect("the authenticated session's own result");
+
+            let (address, _shutdown, handle) =
+                spawn_loop(true, |_| Err(io::Error::other("session failed").into()));
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let keys = client_handshake(&mut stream, &KEY, [0x22; NONCE_LEN]).unwrap();
+            let (_, send) = keys.into_client();
+            let mut writer = SessionWriter::new(stream.try_clone().unwrap(), send);
+            let hello = ClientHello {
+                request_input: false,
+                request_clipboard: false,
+                keymap_fingerprint: [0; 32],
+            };
+            writer
+                .write_message(MessageKind::Hello, &hello.encode())
+                .unwrap();
+            writer.flush().unwrap();
+            assert!(
+                handle.join().unwrap().is_err(),
+                "a failed session exits nonzero"
+            );
+        }
     }
 
     #[test]
@@ -4669,7 +4910,7 @@ mod tests {
             receive_input(
                 reader,
                 None,
-                (0, 0),
+                (0, 0).into(),
                 false,
                 None,
                 Duration::from_millis(600),

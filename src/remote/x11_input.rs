@@ -177,7 +177,7 @@ impl InputInjector {
     /// Validate a complete batch, queue its XTEST requests in order, then
     /// flush the connection once. No request is queued until every keycode,
     /// coordinate, button mapping, and `ReleaseAll` expansion is valid.
-    /// `origin` is where the shared area starts in root coordinates.
+    /// `area` is where the shared area lies in root coordinates.
     ///
     /// The viewer maps its window onto the shared area, so the coordinates it
     /// sends are relative to that area, while XTEST warps in root
@@ -186,8 +186,9 @@ impl InputInjector {
     pub fn inject_batch(
         &mut self,
         events: &[InputEvent],
-        origin: (i16, i16),
+        area: impl Into<InputArea>,
     ) -> Result<(), InputError> {
+        let area = area.into();
         if events.is_empty() {
             return Ok(());
         }
@@ -206,7 +207,7 @@ impl InputInjector {
             self.min_keycode,
             self.max_keycode,
             &pointer_mapping,
-            origin,
+            area,
         )?;
         let conn = &self.conn;
         let root = self.root;
@@ -312,8 +313,33 @@ fn coordinate(axis: char, value: u16) -> Result<i16, InputError> {
     i16::try_from(value).map_err(|_| InputError::CoordinateOutOfRange { axis, value })
 }
 
+/// Where injected pointer coordinates land.
+///
+/// `origin` is the shared area's position in the root window. `size` is set
+/// when only part of the root is shared (`--monitor`, `--region`): the peer's
+/// coordinates are clamped into it, the way the viewer itself clamps to the
+/// picture's last pixel, so a modified viewer cannot move or click on the
+/// screen the operator chose not to share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputArea {
+    pub origin: (i16, i16),
+    pub size: Option<(u16, u16)>,
+}
+
+impl From<(i16, i16)> for InputArea {
+    fn from(origin: (i16, i16)) -> Self {
+        Self { origin, size: None }
+    }
+}
+
 /// Translate a shared-area coordinate into a root coordinate.
-fn root_coordinate(axis: char, value: u16, origin: i16) -> Result<i16, InputError> {
+fn root_coordinate(
+    axis: char,
+    value: u16,
+    origin: i16,
+    extent: Option<u16>,
+) -> Result<i16, InputError> {
+    let value = extent.map_or(value, |extent| value.min(extent.saturating_sub(1)));
     let translated = i32::from(coordinate(axis, value)?) + i32::from(origin);
     i16::try_from(translated).map_err(|_| InputError::CoordinateOutOfRange { axis, value })
 }
@@ -339,8 +365,9 @@ fn prepare_batch(
     min_keycode: u8,
     max_keycode: u8,
     pointer_mapping: &[u8],
-    origin: (i16, i16),
+    area: impl Into<InputArea>,
 ) -> Result<(Vec<PreparedInput>, PressedState, PressedState), InputError> {
+    let area = area.into();
     let mut next_pressed = pressed.clone();
     // Until the one final flush succeeds, any prefix of the queued requests
     // may have reached the X server. Retain every key/button that any such
@@ -374,7 +401,7 @@ fn prepare_batch(
             }
             Some(request)
         } else {
-            prepare_input(event, min_keycode, max_keycode, pointer_mapping, origin)?
+            prepare_input(event, min_keycode, max_keycode, pointer_mapping, area)?
         };
         let Some(request) = request else {
             continue;
@@ -413,14 +440,14 @@ fn prepare_input(
     min_keycode: u8,
     max_keycode: u8,
     pointer_mapping: &[u8],
-    origin: (i16, i16),
+    area: InputArea,
 ) -> Result<Option<PreparedInput>, InputError> {
     let (type_, detail, root_x, root_y) = match event {
         InputEvent::Pointer { x, y } => (
             MOTION_NOTIFY_EVENT,
             ABSOLUTE_MOTION,
-            root_coordinate('x', x, origin.0)?,
-            root_coordinate('y', y, origin.1)?,
+            root_coordinate('x', x, area.origin.0, area.size.map(|size| size.0))?,
+            root_coordinate('y', y, area.origin.1, area.size.map(|size| size.1))?,
         ),
         InputEvent::Key { keycode, pressed } => {
             if !(min_keycode..=max_keycode).contains(&keycode) {
@@ -651,9 +678,9 @@ fn release_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, HeldInput, InputEvent, KEY_PRESS_EVENT,
-        KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, PressedState, coordinate, execute_prepared_batch,
-        physical_button, prepare_batch, supports_required_xtest,
+        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, HeldInput, InputArea, InputEvent,
+        KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, PressedState, coordinate,
+        execute_prepared_batch, physical_button, prepare_batch, supports_required_xtest,
     };
 
     #[test]
@@ -752,6 +779,28 @@ mod tests {
         assert!(supports_required_xtest(3, 0));
         assert_eq!(coordinate('x', i16::MAX as u16).unwrap(), i16::MAX);
         assert!(coordinate('y', i16::MAX as u16 + 1).is_err());
+    }
+
+    #[test]
+    fn pointer_input_cannot_leave_the_shared_area() {
+        // Only the right-hand monitor of a dual 1920x1080 root is shared. A
+        // modified viewer must not reach the monitor the operator kept back.
+        let pressed = PressedState::default();
+        let area = InputArea {
+            origin: (1920, 0),
+            size: Some((1920, 1080)),
+        };
+        let events = [InputEvent::Pointer { x: 1920, y: 5000 }];
+        let (prepared, _, _) = prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3], area).unwrap();
+        assert_eq!((prepared[0].root_x, prepared[0].root_y), (3839, 1079));
+        let events = [InputEvent::Pointer { x: 0, y: 0 }];
+        let (prepared, _, _) = prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3], area).unwrap();
+        assert_eq!((prepared[0].root_x, prepared[0].root_y), (1920, 0));
+        // A whole-root share is not clamped by the host.
+        let events = [InputEvent::Pointer { x: 1920, y: 0 }];
+        let (prepared, _, _) =
+            prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3], (0, 0)).unwrap();
+        assert_eq!(prepared[0].root_x, 1920);
     }
 
     #[test]

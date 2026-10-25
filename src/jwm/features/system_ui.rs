@@ -5695,9 +5695,41 @@ fn expand_exec_fields(
     Some(expanded)
 }
 
+/// Undo the desktop-entry *string* escapes (`\s \n \t \r \\`).
+///
+/// The specification applies these to every string value first, and only
+/// then the Exec quoting rules. Wine writes `C:\\\\windows` and
+/// `Start\\ Menu`, which mean `C:\\windows` and `Start\ Menu` after this
+/// layer and `C:\windows` / `Start Menu` after quoting. An unknown escape is
+/// kept as written for the quoting layer to interpret.
+fn decode_desktop_string_escapes(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => decoded.push(' '),
+            Some('n') => decoded.push('\n'),
+            Some('t') => decoded.push('\t'),
+            Some('r') => decoded.push('\r'),
+            Some('\\') => decoded.push('\\'),
+            Some(other) => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+            None => decoded.push('\\'),
+        }
+    }
+    decoded
+}
+
 fn split_exec(exec: &str) -> Vec<String> {
     // Desktop Exec quoting is deliberately small but handles the common quoted
     // argv form. Field expansion follows this step and never re-tokenizes values.
+    let exec = decode_desktop_string_escapes(exec);
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote = None;
@@ -5706,11 +5738,17 @@ fn split_exec(exec: &str) -> Vec<String> {
     for ch in exec.chars() {
         if escaped {
             argument_started = true;
+            // Inside double quotes only `"`, `` ` ``, `$` and `\` are escapes;
+            // any other backslash is literal (`"a\b"` is `a\b`).
+            if quote == Some('"') && !matches!(ch, '"' | '`' | '$' | '\\') {
+                current.push('\\');
+            }
             current.push(ch);
             escaped = false;
             continue;
         }
-        if ch == '\\' {
+        // Single quotes are literal: no escapes inside them.
+        if ch == '\\' && quote != Some('\'') {
             escaped = true;
             continue;
         }
@@ -8614,6 +8652,27 @@ mod tests {
             parse_exec(r#"foo two\ words \"quoted\" "a\\b" %f %U --safe"#),
             ["foo", "two words", "\"quoted\"", "a\\b", "--safe"]
         );
+    }
+
+    #[test]
+    fn desktop_exec_decodes_string_escapes_before_quoting() {
+        assert_eq!(
+            parse_exec(r"wine C:\\\\windows\\\\start.exe /Unix /w/c:/Start\\ Menu/Foo.lnk"),
+            [
+                "wine",
+                r"C:\windows\start.exe",
+                "/Unix",
+                "/w/c:/Start Menu/Foo.lnk"
+            ]
+        );
+        assert_eq!(
+            parse_exec(r#"sh -c "echo \\\\ \\$HOME""#),
+            ["sh", "-c", r"echo \ $HOME"]
+        );
+        assert_eq!(parse_exec(r#"foo "a\sb""#), ["foo", "a b"]);
+        // Unquoted, the decoded space separates arguments, as in GLib.
+        assert_eq!(parse_exec(r"foo a\sb"), ["foo", "a", "b"]);
+        assert_eq!(parse_exec(r"foo 'it\\s'"), ["foo", r"it\s"]);
     }
 
     #[test]

@@ -8,7 +8,8 @@ use super::messages::{
     encode_frame_ack, encode_input_batch_into, encode_viewport,
 };
 use super::protocol::{
-    MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
+    MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, SessionReader, SessionWriter,
+    client_handshake,
 };
 use super::tile::TileDecoder;
 use super::usability::{ClientStage, failure_hint, session_mode};
@@ -306,6 +307,8 @@ fn negotiate_session(
     let reader_stream = stream.try_clone()?;
     let (receive_key, send_key) = session_keys.into_client();
     let mut reader = SessionReader::new(reader_stream, receive_key);
+    // The acknowledgement and a refusal are both tiny; frames come later.
+    reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
     let mut writer = SessionWriter::new(stream, send_key);
     writer.write_message(
         MessageKind::Hello,
@@ -322,11 +325,11 @@ fn negotiate_session(
         // The host declined the session and said why. Surfacing its reason is
         // the difference between "another viewer is already connected" and a
         // bare timeout that looks like a wrong address or a firewall.
-        let reason = String::from_utf8_lossy(&payload);
+        let reason = refusal_reason_for_display(&payload);
         let reason = if reason.trim().is_empty() {
             "host declined the session without a reason".to_string()
         } else {
-            reason.into_owned()
+            reason
         };
         return Err(io::Error::new(io::ErrorKind::ConnectionRefused, reason).into());
     }
@@ -336,11 +339,41 @@ fn negotiate_session(
     let hello = ServerHello::decode(&payload)?;
     validate_server_capabilities(&hello, request_input, request_clipboard)?;
     negotiation_deadline.cancel();
+    reader.set_max_payload_len(MAX_PAYLOAD_LEN);
     reader
         .get_ref()
         .set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
     writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
     Ok((reader, writer, hello))
+}
+
+/// Largest record accepted before the host acknowledges the session.
+const MAX_NEGOTIATION_PAYLOAD_LEN: usize = 1024;
+/// Longest refusal reason shown to the user, in bytes.
+const MAX_REFUSAL_REASON_BYTES: usize = 256;
+
+/// The host's refusal reason as it may reach the terminal.
+///
+/// Any key holder can send any text here. Printed raw it could clear the
+/// screen, forge `jwm-remote:` diagnostic lines, or drive terminal escape
+/// sequences (OSC 52 clipboard writes, hyperlinks). Control characters are
+/// shown escaped, like every other diagnostic value, and the text is capped.
+fn refusal_reason_for_display(payload: &[u8]) -> String {
+    let text = String::from_utf8_lossy(payload);
+    let mut shown = String::new();
+    for ch in text.chars() {
+        let piece: String = if ch.is_control() {
+            ch.escape_default().collect()
+        } else {
+            ch.to_string()
+        };
+        if shown.len() + piece.len() > MAX_REFUSAL_REASON_BYTES {
+            shown.push('…');
+            break;
+        }
+        shown.push_str(&piece);
+    }
+    shown
 }
 
 /// A peer can grant only capabilities the local user requested.
@@ -2474,6 +2507,55 @@ mod tests {
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn refusal_reasons_are_escaped_and_bounded_for_the_terminal() {
+        assert_eq!(
+            refusal_reason_for_display(b"another viewer is already connected to this host"),
+            "another viewer is already connected to this host"
+        );
+        let shown = refusal_reason_for_display(b"\x1b[2Jjwm-remote: connected\n\x1b]52;c;aGk=\x07");
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(shown.contains("\\u{1b}[2J"));
+        assert!(shown.contains("\\n"));
+        let long = refusal_reason_for_display(&[b'x'; 64 * 1024]);
+        assert!(long.len() <= MAX_REFUSAL_REASON_BYTES + '…'.len_utf8());
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn an_oversized_refusal_is_rejected_before_it_is_buffered() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let keys = server_handshake(&mut stream, &TEST_PSK, [0x3a; 32]).unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let (receive_key, send_key) = keys.into_server();
+            let mut reader = SessionReader::new(reader_stream, receive_key);
+            let mut writer = SessionWriter::new(stream, send_key);
+            let (kind, _) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Hello);
+            // The client may hang up as soon as it reads the length.
+            let _ = writer.write_message(MessageKind::Close, &vec![b'x'; 64 * 1024]);
+            let _ = writer.flush();
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        let result = negotiate_session(
+            stream,
+            &TEST_PSK,
+            false,
+            false,
+            [0; 32],
+            Duration::from_secs(5),
+        );
+        server.join().unwrap();
+        let error = result.err().expect("a 64 KiB refusal must not be accepted");
+        assert!(
+            error.to_string().contains("too large") || error.to_string().contains("payload"),
+            "{error}"
+        );
     }
 
     #[test]

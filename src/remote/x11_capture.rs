@@ -1711,6 +1711,16 @@ impl X11Capture {
         self.region.map_or((0, 0), |region| (region.x, region.y))
     }
 
+    /// Where injected pointer input may land: the shared area's origin and,
+    /// when only part of the root is shared, its size.
+    #[must_use]
+    pub fn input_area(&self) -> super::x11_input::InputArea {
+        super::x11_input::InputArea {
+            origin: self.origin(),
+            size: self.region.map(|region| (region.width, region.height)),
+        }
+    }
+
     /// Borrow the capture connection's file descriptor.
     #[must_use]
     pub fn connection_fd(&self) -> BorrowedFd<'_> {
