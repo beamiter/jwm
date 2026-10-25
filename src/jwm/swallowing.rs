@@ -323,8 +323,19 @@ impl Jwm {
             }
         }
         self.reconcile_minimized_dock_eligibility(backend, parent_key, was_dock_eligible);
+        // `manage` laid the monitor out while the terminal still held a
+        // tile; without another pass the child kept half the screen next to
+        // an empty slot until something unrelated re-arranged. A terminal
+        // that still holds the keyboard (a child that does not take focus)
+        // hands it on rather than keep it while unmapped.
+        let parent_monitor = self.state.clients.get(parent_key).and_then(|c| c.mon);
+        let parent_was_selected = self.get_selected_client_key() == Some(parent_key);
+        self.arrange(backend, parent_monitor);
+        if parent_was_selected && let Err(error) = self.focus(backend, None) {
+            log::warn!("[swallow] could not move focus off the swallowed terminal: {error}");
+        }
         self.broadcast_window_state_ipc(backend, parent_key);
-        if let Some(mon_key) = self.state.clients.get(parent_key).and_then(|c| c.mon) {
+        if let Some(mon_key) = parent_monitor {
             self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
         log::info!(
@@ -656,6 +667,28 @@ mod tests {
         assert!(clients[parent_key].state.is_swallowed);
         assert_eq!(window_ops.unmap_attempts(), vec![parent_window]);
         assert!(window_ops.viewable.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn swallowing_re_arranges_and_moves_focus_off_the_terminal() {
+        let source = include_str!("swallowing.rs");
+        let try_swallow = source
+            .split_once("pub(crate) fn try_swallow(")
+            .expect("try_swallow")
+            .1
+            .split_once("pub(crate) fn try_unswallow(")
+            .expect("try_unswallow")
+            .0;
+        let unmap = try_swallow
+            .find(".unmap_managed_window(")
+            .expect("the terminal is unmapped");
+        let arrange = try_swallow
+            .find(&format!("self.{}(backend, parent_monitor)", "arrange"))
+            .expect("the terminal's monitor is laid out again");
+        let refocus = try_swallow
+            .find(&format!("self.{}(backend, None)", "focus"))
+            .expect("a swallowed terminal hands the selection on");
+        assert!(unmap < arrange && arrange < refocus);
     }
 
     #[test]

@@ -382,6 +382,19 @@ impl Jwm {
         };
 
         let selected_client_key = self.get_selected_client_key().ok_or("No client selected")?;
+        // A floating window has no tile slot to move. Swapping it with the
+        // tiled neighbour the search wraps to reordered the tiles instead —
+        // the master dropped to the bottom from a key pressed on a float —
+        // and broke the tiled-first ordering new windows are inserted by.
+        // `zoom` declines floating windows the same way.
+        if self
+            .state
+            .clients
+            .get(selected_client_key)
+            .is_none_or(|client| client.state.is_floating)
+        {
+            return Ok(());
+        }
 
         let target_client_key = if direction > 0 {
             self.find_next_tiled_client(selected_client_key)?
@@ -496,15 +509,10 @@ impl Jwm {
 
             client_list.swap(pos1, pos2);
         }
-
-        if let Some(stack_list) = self.state.monitor_stack.get_mut(sel_mon_key) {
-            if let (Some(pos1), Some(pos2)) = (
-                stack_list.iter().position(|&k| k == client1_key),
-                stack_list.iter().position(|&k| k == client2_key),
-            ) {
-                stack_list.swap(pos1, pos2);
-            }
-        }
+        // `monitor_stack` is the focus history, not the tile order: moving a
+        // window must not make its swap partner the most recently focused
+        // one, or Alt+Tab, closing a window and every `focus(None)` would go
+        // to a window the user never chose.
 
         info!(
             "[swap_clients_in_monitor] Swapped clients {:?} and {:?}",
@@ -769,6 +777,12 @@ impl Jwm {
             if let Some(mon_key) = self.state.sel_mon {
                 self.broadcast_monitor_bar_ipc(backend, mon_key);
             }
+            // Restoring and restacking re-tile under a pointer that did not
+            // move; the crossing events that queues must not hand focus to
+            // whatever window now sits under it and undo the choice. The
+            // same window `reveal_and_focus` and the keyboard paths use.
+            self.suppress_mouse_focus_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
         }
         Ok(())
     }
@@ -1490,5 +1504,77 @@ mod tests {
         // Empty group.
         assert_eq!(Jwm::next_in_group(&[], k[0]), None);
         assert_eq!(Jwm::prev_in_group(&[], k[0]), None);
+    }
+}
+
+#[cfg(test)]
+mod movestack_tests {
+    use crate::Jwm;
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::{ClientKey, WMClient};
+    use crate::jwm::MonitorKey;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+    use crate::jwm::types::WMArgEnum;
+
+    fn add(jwm: &mut Jwm, monitor: MonitorKey, raw: u64, floating: bool) -> ClientKey {
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.class = format!("App{raw}");
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.state.is_floating = floating;
+        client.geometry.w = 400;
+        client.geometry.h = 300;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        key
+    }
+
+    fn setup() -> (DisplaySpyBackend, Jwm, MonitorKey) {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        (backend, jwm, monitor)
+    }
+
+    #[test]
+    fn moving_a_tile_keeps_the_focus_history() {
+        let (mut backend, mut jwm, monitor) = setup();
+        let a = add(&mut jwm, monitor, 0x101, false);
+        let b = add(&mut jwm, monitor, 0x102, false);
+        let c = add(&mut jwm, monitor, 0x103, false);
+        jwm.state.sel_mon = Some(monitor);
+        jwm.state.monitors[monitor].sel = Some(a);
+        jwm.state.monitor_stack[monitor] = vec![a, c, b];
+        let order_before: Vec<_> = jwm.state.monitor_clients[monitor].clone();
+
+        jwm.movestack(&mut backend, &WMArgEnum::Int(1)).unwrap();
+
+        assert_ne!(
+            jwm.state.monitor_clients[monitor], order_before,
+            "the tiles moved"
+        );
+        assert_eq!(
+            jwm.state.monitor_stack[monitor],
+            vec![a, c, b],
+            "the swap partner did not become the most recent focus"
+        );
+    }
+
+    #[test]
+    fn movestack_on_a_floating_window_leaves_the_tiles_alone() {
+        let (mut backend, mut jwm, monitor) = setup();
+        let _t1 = add(&mut jwm, monitor, 0x201, false);
+        let _t2 = add(&mut jwm, monitor, 0x202, false);
+        let floating = add(&mut jwm, monitor, 0x203, true);
+        jwm.state.sel_mon = Some(monitor);
+        jwm.state.monitors[monitor].sel = Some(floating);
+        let order_before: Vec<_> = jwm.state.monitor_clients[monitor].clone();
+
+        for direction in [1, -1] {
+            jwm.movestack(&mut backend, &WMArgEnum::Int(direction))
+                .unwrap();
+            assert_eq!(jwm.state.monitor_clients[monitor], order_before);
+        }
     }
 }

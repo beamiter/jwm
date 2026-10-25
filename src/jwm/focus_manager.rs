@@ -94,19 +94,10 @@ impl Jwm {
                 if Some(target_mon_key) == self.state.sel_mon {
                     return Ok(());
                 }
+                // The switch focuses the target monitor and publishes
+                // `monitor/focus`, `monitor/bar` and the window states once;
+                // repeating them here sent every event twice.
                 self.switch_to_monitor(backend, target_mon_key)?;
-                self.focus(backend, None)?;
-
-                let mon_num = self.state.monitors.get(target_mon_key).map(|m| m.num);
-                if let Some(num) = mon_num {
-                    self.broadcast_ipc_event(
-                        "monitor/focus",
-                        serde_json::json!({
-                            "monitor": num,
-                        }),
-                    );
-                    self.broadcast_monitor_bar_ipc(backend, target_mon_key);
-                }
             }
         }
         Ok(())

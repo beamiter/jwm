@@ -3914,9 +3914,38 @@ impl Jwm {
                 return IpcResponse::err(format!("monitor {target_num} not found"));
             }
         };
+        if let Some(error) = self.move_window_to_monitor_refusal(client_key, target_mon_key) {
+            return IpcResponse::err(error);
+        }
 
         self.sendmon(backend, Some(client_key), Some(target_mon_key));
         IpcResponse::ok(None)
+    }
+
+    /// Why a window may not be moved between monitors over IPC, if anything.
+    ///
+    /// Drag drops, `dirtomon` and activation already respect monitor locks.
+    /// Moving a window off a locked monitor would reprint what its shade
+    /// hides on an unlocked one, and moving one onto it would put it behind
+    /// the shade. Docks and the desktop window belong to their own output.
+    fn move_window_to_monitor_refusal(
+        &self,
+        client_key: ClientKey,
+        target: MonitorKey,
+    ) -> Option<String> {
+        let client = self.state.clients.get(client_key)?;
+        if client.state.is_dock || client.state.is_desktop {
+            return Some(
+                "move_window_to_monitor: docks and the desktop window stay on their output".into(),
+            );
+        }
+        if self.client_is_on_locked_monitor(client_key) {
+            return Some("move_window_to_monitor: the window is on a locked monitor".into());
+        }
+        if self.monitor_key_is_locked(target) {
+            return Some("move_window_to_monitor: the target monitor is locked".into());
+        }
+        None
     }
 
     fn handle_benchmark_command(
@@ -12102,10 +12131,20 @@ mod tests {
 
     #[test]
     fn evolve8h_wave_27_focusmon_broadcasts_monitor_bar() {
+        // `focusmon` goes through the shared monitor switch, which publishes
+        // `monitor/focus` and the bar snapshot (pinned by wave 28); a second
+        // copy here sent every event twice.
         const FOCUS: &str = include_str!("focus_manager.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(FOCUS.contains("\"monitor/focus\""));
-        assert!(FOCUS.contains("broadcast_monitor_bar_ipc(backend, target_mon_key)"));
+        let focusmon = FOCUS
+            .split_once("pub fn focusmon(")
+            .expect("focusmon")
+            .1
+            .split_once("\n    pub")
+            .map_or(FOCUS, |(body, _)| body);
+        assert!(focusmon.contains("self.switch_to_monitor(backend, target_mon_key)?"));
+        assert!(!focusmon.contains("\"monitor/focus\""));
+        assert!(!focusmon.contains("broadcast_monitor_bar_ipc"));
         assert!(DOCS.contains("`focusmon`"));
     }
 
@@ -23974,5 +24013,57 @@ mod recording_region_input_tests {
                 assert!(parse_initial_recording_region(&region, screen()).is_err());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod move_window_to_monitor_tests {
+    use crate::Jwm;
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::WMClient;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+    #[test]
+    fn ipc_monitor_moves_respect_monitor_locks_and_docks() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let (left, right) = (jwm.state.monitor_order[0], jwm.state.monitor_order[1]);
+        let mut client = WMClient::new(WindowId::from_raw(0x7e11));
+        client.mon = Some(left);
+        client.state.tags = jwm.state.monitors[left].get_active_tags();
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, left);
+        let (left_num, right_num) = (jwm.state.monitors[left].num, jwm.state.monitors[right].num);
+        let request = |monitor: i32| serde_json::json!({"window": 0x7e11, "monitor": monitor});
+
+        assert!(
+            jwm.features
+                .monitor_lock
+                .lock(right_num, (1920, 0, 1920, 1080))
+        );
+        let refused = jwm.handle_move_window_to_monitor(&mut backend, &request(right_num));
+        assert!(!refused.success, "a locked monitor is not a target");
+        assert_eq!(jwm.state.clients[key].mon, Some(left));
+
+        jwm.features.monitor_lock = Default::default();
+        assert!(jwm.features.monitor_lock.lock(left_num, (0, 0, 1920, 1080)));
+        let refused = jwm.handle_move_window_to_monitor(&mut backend, &request(right_num));
+        assert!(!refused.success, "nothing leaves a locked monitor");
+        assert_eq!(jwm.state.clients[key].mon, Some(left));
+
+        jwm.features.monitor_lock = Default::default();
+        jwm.state.clients[key].state.is_dock = true;
+        assert!(
+            !jwm.handle_move_window_to_monitor(&mut backend, &request(right_num))
+                .success
+        );
+        jwm.state.clients[key].state.is_dock = false;
+
+        let moved = jwm.handle_move_window_to_monitor(&mut backend, &request(right_num));
+        assert!(moved.success, "{:?}", moved.error);
+        assert_eq!(jwm.state.clients[key].mon, Some(right));
     }
 }
