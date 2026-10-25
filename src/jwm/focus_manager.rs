@@ -2027,6 +2027,144 @@ mod scratchpad_reveal_tests {
         );
     }
 
+    /// Two monitors, the left one selected. The right monitor's last-focused
+    /// window (0x722) has turned urgent since; the pointer is about to reach
+    /// the other window there (0x723).
+    fn crossing_fixture() -> (Jwm, crate::core::models::MonitorKey, ClientKey, ClientKey) {
+        let mut jwm = empty_jwm();
+        jwm.add_monitor(output(1, 0));
+        jwm.add_monitor(output(2, 1200));
+        let left = jwm.state.monitor_order[0];
+        let right = jwm.state.monitor_order[1];
+        let mut add = |raw: u64, monitor, x: i32| {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            client.geometry.x = x;
+            client.geometry.y = 0;
+            client.geometry.w = 600;
+            client.geometry.h = 900;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            key
+        };
+        let here = add(0x721, left, 0);
+        let last = add(0x722, right, 1200);
+        let entered = add(0x723, right, 1800);
+        jwm.state.monitors[left].set_selected_client_for_current_tag(Some(here));
+        jwm.state.monitors[right].set_selected_client_for_current_tag(Some(last));
+        // Last focused means first in the monitor's focus stack, which is
+        // what focusing the monitor without a target picks.
+        jwm.state.monitor_stack[right].retain(|&key| key != last);
+        jwm.state.monitor_stack[right].insert(0, last);
+        jwm.state.sel_mon = Some(left);
+        jwm.state.motion_mon = Some(left);
+        jwm.state.clients[last].state.is_urgent = true;
+        (jwm, right, last, entered)
+    }
+
+    fn assert_focused_directly(
+        jwm: &Jwm,
+        backend: &ScratchpadBackend,
+        right: crate::core::models::MonitorKey,
+        last: ClientKey,
+        entered: ClientKey,
+    ) {
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(jwm.get_selected_client_key(), Some(entered));
+        assert!(
+            jwm.state.clients[last].state.is_urgent,
+            "the right monitor's last window never had the user's attention"
+        );
+        assert!(
+            !backend.focused.contains(&Some(WindowId::from_raw(0x722))),
+            "the last window must not take the keyboard on the way: {:?}",
+            backend.focused
+        );
+    }
+
+    #[test]
+    fn crossing_onto_another_monitor_focuses_the_entered_window_directly() {
+        let (mut jwm, right, last, entered) = crossing_fixture();
+        let mut backend = ScratchpadBackend::new();
+        jwm.handle_regular_enter_generic(&mut backend, WindowId::from_raw(0x723))
+            .unwrap();
+        assert_focused_directly(&jwm, &backend, right, last, entered);
+    }
+
+    /// The motion path picks the monitor from the backend's outputs, so it
+    /// runs on the display spy. Focusing a window clears its urgent flag, so
+    /// a flag that survives proves the last window never had focus.
+    fn motion_crossing_fixture() -> (
+        Jwm,
+        crate::jwm::monitor::test_support::DisplaySpyBackend,
+        crate::core::models::MonitorKey,
+        ClientKey,
+        ClientKey,
+    ) {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output as spy_output};
+        let mut backend = DisplaySpyBackend::new(vec![
+            spy_output(1, 0, 0, 1920, 1080),
+            spy_output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        jwm.suppress_mouse_focus_until = None;
+        let left = jwm.state.monitor_order[0];
+        let right = jwm.state.monitor_order[1];
+        let mut add = |raw: u64, monitor, x: i32| {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+            client.geometry.x = x;
+            client.geometry.y = 0;
+            client.geometry.w = 900;
+            client.geometry.h = 1080;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            key
+        };
+        let here = add(0x731, left, 0);
+        let last = add(0x732, right, 1920);
+        let entered = add(0x733, right, 2880);
+        jwm.state.monitors[left].set_selected_client_for_current_tag(Some(here));
+        jwm.state.monitors[right].set_selected_client_for_current_tag(Some(last));
+        jwm.state.monitor_stack[right].retain(|&key| key != last);
+        jwm.state.monitor_stack[right].insert(0, last);
+        jwm.state.sel_mon = Some(left);
+        jwm.state.motion_mon = Some(left);
+        jwm.state.clients[last].state.is_urgent = true;
+        (jwm, backend, right, last, entered)
+    }
+
+    #[test]
+    fn motion_onto_a_window_of_another_monitor_focuses_it_directly() {
+        // On Wayland, and on X11 when the window does not take motion itself,
+        // the motion reaches JWM before the enter does.
+        let (mut jwm, mut backend, right, last, entered) = motion_crossing_fixture();
+        jwm.on_motion_notify_internal(&mut backend, Some(WindowId::from_raw(0x733)), 3000, 100, 0)
+            .unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(jwm.get_selected_client_key(), Some(entered));
+        assert!(
+            jwm.state.clients[last].state.is_urgent,
+            "the right monitor's last window never had focus"
+        );
+        // The enter that follows changes nothing.
+        jwm.handle_regular_enter_generic(&mut backend, WindowId::from_raw(0x733))
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(entered));
+        assert!(jwm.state.clients[last].state.is_urgent);
+    }
+
+    #[test]
+    fn motion_onto_empty_space_of_another_monitor_selects_its_last_window() {
+        let (mut jwm, mut backend, right, last, _) = motion_crossing_fixture();
+        jwm.on_motion_notify_internal(&mut backend, None, 3000, 100, 0)
+            .unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(jwm.get_selected_client_key(), Some(last));
+    }
+
     #[test]
     fn explicit_restore_focus_ignores_stale_peer_enter_then_reenables_pointer_focus() {
         let mut jwm = empty_jwm();

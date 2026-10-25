@@ -1666,6 +1666,21 @@ impl Jwm {
         backend: &mut dyn Backend,
         new_monitor_key: Option<MonitorKey>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.switch_monitor_focusing(backend, new_monitor_key, None)
+    }
+
+    /// Switch the selected monitor and focus `target` there, or the
+    /// monitor's last-focused window when `target` is `None`.
+    ///
+    /// A pointer crossing onto a window of another monitor names the window
+    /// to focus. Focusing the monitor's last window first would hand it the
+    /// keyboard for an instant and clear an urgent flag the user never saw.
+    pub(crate) fn switch_monitor_focusing(
+        &mut self,
+        backend: &mut dyn Backend,
+        new_monitor_key: Option<MonitorKey>,
+        target: Option<ClientKey>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // The one door into the monitor selection — the direction keys, a
         // pointer crossing, an IPC focus. A locked monitor is behind a shade
         // and has no visible window to select, so the selection stays where
@@ -1684,7 +1699,7 @@ impl Jwm {
 
         self.state.sel_mon = new_monitor_key;
 
-        self.focus(backend, None)?;
+        self.focus(backend, target)?;
 
         if let Some(monitor_key) = new_monitor_key {
             if let Some(num) = self
@@ -8985,7 +9000,7 @@ mod monitor_focus_notification_tests {
             .0;
         let capture = body.find("let previous_target =").unwrap();
         let switch = body.find("self.state.sel_mon = new_monitor_key").unwrap();
-        let focus = body.find("self.focus(backend, None)?").unwrap();
+        let focus = body.find("self.focus(backend, target)?").unwrap();
         let bar = body
             .find("self.broadcast_monitor_bar_ipc(backend, monitor_key)")
             .unwrap();

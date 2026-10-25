@@ -157,6 +157,71 @@ fn read_number(dir: &Path, name: &str) -> Option<u64> {
     read_field(dir, name)?.parse().ok()
 }
 
+/// A battery's level, capacity and rate as sysfs reports them, before one
+/// unit system is chosen for the estimate.
+#[derive(Debug, Default, Clone, Copy)]
+struct BatteryReadings {
+    energy_now: Option<u64>,
+    energy_full: Option<u64>,
+    power_now: Option<u64>,
+    charge_now: Option<u64>,
+    charge_full: Option<u64>,
+    current_now: Option<u64>,
+    voltage_now: Option<u64>,
+}
+
+impl BatteryReadings {
+    fn read(dir: &Path) -> Self {
+        Self {
+            energy_now: read_number(dir, "energy_now"),
+            energy_full: read_number(dir, "energy_full"),
+            power_now: read_number(dir, "power_now"),
+            charge_now: read_number(dir, "charge_now"),
+            charge_full: read_number(dir, "charge_full"),
+            current_now: read_number(dir, "current_now"),
+            voltage_now: read_number(dir, "voltage_now"),
+        }
+    }
+
+    /// `(now, full, rate)` in one unit system: energy (µWh, µW) when the
+    /// battery reports its level as energy, else charge (µAh, µA).
+    ///
+    /// Some drivers pair an energy level with only a current, or a charge
+    /// level with only a power. Dividing µWh by µA puts the estimate off by
+    /// the battery's voltage — about twelve times on a laptop — so a value
+    /// from the other system is converted through `voltage_now`, and left
+    /// out when the voltage is unknown.
+    fn consistent(self) -> (Option<u64>, Option<u64>, Option<u64>) {
+        let voltage = self.voltage_now.filter(|voltage| *voltage > 0);
+        // µAh × µV / 10⁶ = µWh, and µA × µV / 10⁶ = µW.
+        let to_energy = |charge: u64| voltage.map(|v| charge.saturating_mul(v) / 1_000_000);
+        let to_charge = |energy: u64| voltage.map(|v| energy.saturating_mul(1_000_000) / v);
+        if let Some(now) = self.energy_now {
+            let full = self
+                .energy_full
+                .or_else(|| self.charge_full.and_then(to_energy));
+            let rate = self
+                .power_now
+                .filter(|power| *power > 0)
+                .or_else(|| self.current_now.and_then(to_energy))
+                .or(self.power_now);
+            return (Some(now), full, rate);
+        }
+        if let Some(now) = self.charge_now {
+            let full = self
+                .charge_full
+                .or_else(|| self.energy_full.and_then(to_charge));
+            let rate = self
+                .current_now
+                .filter(|current| *current > 0)
+                .or_else(|| self.power_now.and_then(to_charge))
+                .or(self.current_now);
+            return (Some(now), full, rate);
+        }
+        (None, None, None)
+    }
+}
+
 /// Read one `/sys/class/power_supply/*` directory as a battery.
 ///
 /// Only the machine's own battery counts. A wireless mouse, keyboard or
@@ -183,11 +248,7 @@ pub fn read_battery_in(dir: &Path) -> Option<BatteryState> {
     let status = read_field(dir, "status")
         .map(|value| ChargeStatus::parse(&value))
         .unwrap_or_default();
-    // Energy-reporting batteries expose energy_*/power_now; charge-reporting
-    // ones expose charge_*/current_now. Either pair works.
-    let now = read_number(dir, "energy_now").or_else(|| read_number(dir, "charge_now"));
-    let full = read_number(dir, "energy_full").or_else(|| read_number(dir, "charge_full"));
-    let rate = read_number(dir, "power_now").or_else(|| read_number(dir, "current_now"));
+    let (now, full, rate) = BatteryReadings::read(dir).consistent();
     Some(BatteryState {
         percent,
         status,
@@ -771,6 +832,80 @@ mod tests {
         assert_eq!(state.time_remaining_mins, Some(120));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mixed_energy_and_charge_readings_use_one_unit_system() {
+        let laptop = BatteryReadings {
+            energy_now: Some(28_500_000),
+            energy_full: Some(57_000_000),
+            // 1 A at 11.4 V: 11.4 W.
+            current_now: Some(1_000_000),
+            voltage_now: Some(11_400_000),
+            ..BatteryReadings::default()
+        };
+        let (now, full, rate) = laptop.consistent();
+        assert_eq!(
+            (now, full, rate),
+            (Some(28_500_000), Some(57_000_000), Some(11_400_000))
+        );
+        assert_eq!(
+            estimate_minutes(now, full, rate, ChargeStatus::Discharging),
+            Some(150),
+            "28.5 Wh at 11.4 W is two and a half hours"
+        );
+
+        // Without a voltage the current cannot be used: no estimate rather
+        // than one off by the battery's voltage (it read 28 h 30 min).
+        let unknown_voltage = BatteryReadings {
+            voltage_now: None,
+            ..laptop
+        };
+        assert_eq!(unknown_voltage.consistent().2, None);
+
+        // A charge level with only a power: µW converted to µA.
+        let charge_level = BatteryReadings {
+            charge_now: Some(2_000_000),
+            charge_full: Some(4_000_000),
+            power_now: Some(8_000_000),
+            voltage_now: Some(8_000_000),
+            ..BatteryReadings::default()
+        };
+        let (now, full, rate) = charge_level.consistent();
+        assert_eq!(rate, Some(1_000_000));
+        assert_eq!(
+            estimate_minutes(now, full, rate, ChargeStatus::Charging),
+            Some(120)
+        );
+
+        // A charge-only capacity beside an energy level is converted too.
+        let energy_level = BatteryReadings {
+            energy_now: Some(10_000_000),
+            charge_full: Some(5_000_000),
+            power_now: Some(5_000_000),
+            voltage_now: Some(4_000_000),
+            ..BatteryReadings::default()
+        };
+        assert_eq!(energy_level.consistent().1, Some(20_000_000));
+    }
+
+    #[test]
+    fn an_idle_power_reading_falls_back_to_the_current() {
+        let readings = BatteryReadings {
+            energy_now: Some(30_000_000),
+            power_now: Some(0),
+            current_now: Some(500_000),
+            voltage_now: Some(12_000_000),
+            ..BatteryReadings::default()
+        };
+        assert_eq!(readings.consistent().2, Some(6_000_000));
+        // With nothing better a zero stays zero, which estimates nothing.
+        let idle = BatteryReadings {
+            energy_now: Some(30_000_000),
+            power_now: Some(0),
+            ..BatteryReadings::default()
+        };
+        assert_eq!(idle.consistent().2, Some(0));
     }
 
     #[test]

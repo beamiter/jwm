@@ -2084,7 +2084,13 @@ impl Jwm {
         };
         let is_on_selected_monitor = Some(current_event_monitor_key) == self.state.sel_mon;
         if !is_on_selected_monitor {
-            self.switch_to_monitor(backend, current_event_monitor_key)?;
+            // Focus the entered window as part of the switch, never the
+            // monitor's last window on the way: that would take its urgent
+            // flag for an instant of focus the user never saw.
+            self.switch_monitor_focusing(backend, Some(current_event_monitor_key), client_key_opt)?;
+            if self.state.sel_mon == Some(current_event_monitor_key) {
+                return Ok(());
+            }
         }
         if self.should_focus_client(client_key_opt, is_on_selected_monitor) {
             self.focus(backend, client_key_opt)?;

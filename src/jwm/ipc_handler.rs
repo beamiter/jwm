@@ -97,6 +97,13 @@ fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> u
     })
 }
 
+/// Whether `set_audio_device` refuses an id before queueing the switch:
+/// only when a fresh read of the sound server's devices lacks it. A missing
+/// or older list cannot vouch against a device plugged in since.
+fn audio_device_id_refused(listed: Option<bool>, fresh: bool) -> bool {
+    fresh && listed == Some(false)
+}
+
 fn active_tag_count(active_tags: u32, tag_count: usize) -> u32 {
     let tag_mask = if tag_count >= u32::BITS as usize {
         u32::MAX
@@ -2488,21 +2495,31 @@ impl Jwm {
             let Some(id) = args.get("id").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_audio_device: expected string field 'id'");
             };
-            // Prefer the cached inventory bars already poll; fall back to one
-            // sync peek only when nothing has been read yet so a bad id is
-            // rejected before a worker round-trip.
-            let inventory = self
-                .features
-                .control_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.audio_inventory.clone())
-                .unwrap_or_else(system_controls::audio_inventory);
-            let devices = inventory.devices(direction);
-            if !devices.iter().any(|device| device.id == id) {
+            // Reject an unknown id up front only from a fresh device list.
+            // An older one can predate a device plugged in since, and reading
+            // the sound server here would be blocking spawns on the event
+            // thread; otherwise the worker's set and re-read decide, as for
+            // every switch.
+            let now = std::time::Instant::now();
+            let fresh = !system_controls::control_center_snapshot_is_stale(
+                self.features.control_snapshot_refreshed_at,
+                now,
+            );
+            let listed = self.features.control_snapshot.as_ref().map(|snapshot| {
+                snapshot
+                    .audio_inventory
+                    .devices(direction)
+                    .iter()
+                    .any(|device| device.id == id)
+            });
+            if audio_device_id_refused(listed, fresh) {
                 return IpcResponse::err(format!(
                     "set_audio_device: no {} device with id {id:?}",
                     direction.label()
                 ));
+            }
+            if !fresh {
+                self.ensure_control_snapshot_refresh(now);
             }
             if system_controls::queue_control_request(
                 system_controls::ControlRequest::AudioSetDefault {
@@ -9607,6 +9624,9 @@ mod tests {
         );
         for needle in [
             "system_controls::set_audio_device(",
+            // Reading the device list forks wpctl/pactl; the arm answers
+            // from the cached snapshot and leaves the rest to the worker.
+            "system_controls::audio_inventory",
             "compositor_show_osd",
             "OsdKind::AudioDevice",
             "did not keep",
@@ -9620,6 +9640,20 @@ mod tests {
             arm.contains("no working audio control"),
             "set_audio_device must mirror the no-tool answer when the worker is absent"
         );
+    }
+
+    #[test]
+    fn set_audio_device_refuses_ids_only_from_a_fresh_device_list() {
+        use super::audio_device_id_refused as refused;
+        assert!(refused(Some(false), true), "a fresh list without the id");
+        assert!(!refused(Some(true), true));
+        assert!(
+            !refused(Some(false), false),
+            "an older list can predate a device plugged in since"
+        );
+        assert!(!refused(Some(true), false));
+        assert!(!refused(None, true), "nothing read yet");
+        assert!(!refused(None, false));
     }
 
     /// `get_mic_mute` answers the cached flag — never invents unmuted — and

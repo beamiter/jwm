@@ -3890,7 +3890,7 @@ impl Jwm {
     pub(crate) fn on_motion_notify_internal(
         &mut self,
         backend: &mut dyn Backend,
-        _window: Option<WindowId>,
+        window: Option<WindowId>,
         root_x: i32,
         root_y: i32,
         _time: u32,
@@ -3923,7 +3923,16 @@ impl Jwm {
         // 3. 更新当前鼠标所在的显示器状态
         let new_monitor_key = self.recttomon(backend, root_x as i32, root_y as i32);
         if new_monitor_key != self.state.motion_mon {
-            self.handle_monitor_switch_by_key(backend, new_monitor_key)?;
+            // Motion that crosses onto a window of the new monitor focuses
+            // that window as part of the switch, as its enter would. Going
+            // through the monitor's last window first handed it the keyboard
+            // for an instant and cleared its urgent flag.
+            let target = window
+                .and_then(|window| self.wintoclient(window))
+                .filter(|&key| {
+                    self.state.clients.get(key).and_then(|client| client.mon) == new_monitor_key
+                });
+            self.switch_monitor_focusing(backend, new_monitor_key, target)?;
         }
         self.state.motion_mon = new_monitor_key;
 

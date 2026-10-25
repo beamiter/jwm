@@ -643,7 +643,11 @@ not keep the device.
 
 The battery is read from `/sys/class/power_supply`, polled every 30 seconds on
 the compositor's frame tick. Both flavors of reporting are handled:
-`energy_now`/`power_now` (µWh/µW) and `charge_now`/`current_now` (µAh/µA). The
+`energy_now`/`power_now` (µWh/µW) and `charge_now`/`current_now` (µAh/µA).
+A battery that mixes them — an energy level with only a current, or a charge
+level with only a power — is converted through `voltage_now`; without a
+voltage the estimate is left out rather than shown off by the battery's
+voltage. The
 row shows the level, a level-matched icon (a bolt while charging), and the
 estimated time to empty or full — omitted when the hardware reports no usable
 rate, and dropped rather than shown when the arithmetic produces something
@@ -703,7 +707,11 @@ on a real change.
 
 `get_audio_devices` lists both ends with the device in use marked; the `id` it
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio
-node name, depending on which tool the session uses. A successful
+node name, depending on which tool the session uses. `set_audio_device`
+refuses an id only when a device list read in the last two seconds lacks
+it; an older or unread list cannot vouch against a device plugged in since,
+so the switch is queued and the worker's re-read decides, and the sound
+server is never read on the compositor thread. A successful
 `set_audio_device` raises the same labeled audio-device OSD the picker shows
 after a confirmed adopt — queued like `set_mic_mute`, not confirmed on the
 IPC reply. The `audio` subscription topic carries `audio/devices` after a

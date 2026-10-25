@@ -5,6 +5,23 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Pointer crossings, battery estimates and audio switching
+
+- Moving the pointer onto a window on another monitor focuses that window
+  directly. The monitor's last-focused window no longer takes the keyboard
+  for an instant on the way, which cleared its urgent flag before anyone saw
+  it.
+- Battery time estimates use one unit system. A battery that reports its
+  level as energy but only a current (or a charge with only a power) is
+  converted through `voltage_now` instead of showing an estimate off by the
+  battery's voltage (28 h instead of 2.5 h); without a voltage no estimate is
+  shown.
+- `set_audio_device` no longer reads the sound server on the compositor
+  thread when no device list has been read yet, and no longer rejects a
+  device plugged in after the last read. An id is refused only when a list
+  read in the last two seconds lacks it; otherwise the switch is queued and
+  the controls worker's re-read decides, as for every switch.
+
 ### Layout defaults follow the configuration
 
 - Changing `appearance.gap_px`, `m_fact` or `n_master` (editing the file and
