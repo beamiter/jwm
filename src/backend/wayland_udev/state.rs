@@ -3674,6 +3674,9 @@ impl JwmWaylandState {
     /// hover focus when its output was shaded would otherwise keep it until
     /// the pointer next moves, and scrolling does not move the pointer, so
     /// that focus is dropped at once.
+    // Only the DRM/KMS backend pushes monitor-lock shades; the nested build
+    // compiles this module through `backend::wayland::state` without a caller.
+    #[allow(dead_code)]
     pub(crate) fn set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
         self.monitor_shades = shades
             .iter()

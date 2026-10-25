@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-10-25：全面升级进化（依赖 / Smithay 回补 / 审计修复 10 批）
+
+分支 `claude/jwm-upgrade-evolution`（基于 `711438b`），未开 PR。先升级依赖与
+Smithay，再按子系统审计（Wayland 协议、会话/配置、shell/IPC/远程、焦点与
+标签、布局），只修有复现路径的问题，每条都有回归测试。
+
+| 批次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 1 `221139a` | lockfile 刷新约 150 个 crate（MSRV 1.89 仍绿，去掉 RUSTSEC-2026-0386 的 Tokio）；remote 加密迁到 chacha20poly1305 0.11 / aead 0.6 / sha2 0.11，线上格式不变；portal 对齐 nix 0.31 / rand 0.10 | remote 加解密往返、portal 77 测试 |
+| 2 `db6eff9` | Smithay 固定快照回补 19 个上游修复（负尺寸 region/toplevel 中止、foreign-toplevel-list 删错项、IME 新实例、XWM `_NET_ACTIVE_WINDOW`、duplicate_frame 等）；`JWM_BACKPORT.md` 逐条列出，`JWM_BACKPORT.patch` 是相对基线的完整 diff | 全套 + `tests/smithay_touch_cancel.rs` |
+| 3 `1dc493d` | Wayland：锁屏遮罩对输入不透明（按键/滚轮/触摸/hover）；无用户输入佐证的 xdg-activation token 只请求注意；DRM/KMS 上 IPC 就绪即处理；foreign-toplevel 标题去 NUL 并限长；拔掉的输出 output-power 报 failed | `monitor_lock_shades_hide_clients_from_input_routing`、activation/foreign-toplevel/output-power 线协议测试 |
+| 4 `9b1a91e` | 会话恢复不重置旧快照没记录的状态、只在选中窗被藏起时换焦点、Dock 顺序；重启走启动路径；子进程 stderr 日志 4 MiB/0600/拒硬链；整数参数绑定、按钮 0/>5；录制目录 `~`；gap 上限与 scrolling/bstack/centered 间距 | session/config/layout 单测 |
+| 5 `51571d4` | desktop `Exec=` 转义、媒体标题单行、通知历史路径、订阅 ack、`jwm-tool --subscribe` 退出码；remote host 每连接独立握手、指针夹在共享区域、viewer 转义拒绝原因 | accept_loop、input clamp、jwm-tool 测试 |
+| 6 `f060b73` | movestack 保留焦点历史/浮动窗不动平铺；focusmon 事件不重复；Alt+Tab 提交后短暂抑制指针焦点；swallow 后重排并移走焦点；IPC `move_window_to_monitor` 尊重显示器锁与 dock | movestack/IPC 行为测试、swallow 顺序 pin |
+| 7 `0d08708` | `wp_pointer_warp_v1` 只接受指针焦点客户端 + 最新 enter serial + 窗口内且不在遮罩下；idle 抑制器只在窗口可见时生效（隐藏 tag/最小化/遮罩下不再阻止息屏），ext-idle-notify 同步 | 双客户端 warp 线协议测试、idle 可见性转换测试 |
+| 8 `d66d492` | 重载配置后 `gap_px`/`m_fact`/`n_master` 作用到已有显示器上仍为旧默认值的 tag；`[[layout.tags]]` 等于默认值时不再写入（读回即全局设置）；新增 tag 用配置默认值 | retune 规则、`apply_config_changes` 路径、保存条目测试 |
+| 9 `c850fd0` | 指针跨屏（enter 与 motion 两条路径）直接聚焦进入的窗口，不再先聚焦该屏上次窗口而清掉其 urgent；电池估时统一单位（能量/电荷混报时用 `voltage_now` 换算）；`set_audio_device` 不在合成线程读声音服务器，只用 2 秒内的新鲜列表拒绝 id | 跨屏焦点测试（去掉修复后两条都失败）、混合单位测试、拒绝规则测试 |
+| 10 `8b39a69` | ext-image-copy-capture 每个 session 同时只允许一个 frame（`duplicate_frame`），单个客户端不能无限排队；锁屏/Wi-Fi/蓝牙输入的密码缓冲预留容量并手动扩容、退格覆写、清空连同 spare capacity 一起擦除，交给 PAM 的 CString 用完即擦 | 双 frame 线协议测试、缓冲区无残留字节测试 |
+
+**兼容边界**：zbus 6 推迟（去掉了 bar D-Bus provider 用的阻塞 API，6.1 又破坏
+API）。Smithay 的 virtual-keyboard 重构没回补：它把按键投递移进合成器输入
+管线，fcitx5 等 IME 经 virtual keyboard 转发按键，需要单独做并上真机验证；
+`wl_seat` missing_capability 也推迟（会断开请求未声明设备的客户端）。L1 吸附
+边框约定两种写法都有测试钉住，未改。已保存的 `[[layout.tags]]` 旧条目保留它们
+写下的值（无法区分用户意图），只对之后写入生效。
+
+**仍未处理的审计项**：非焦点显示器在 unmanage/最小化后的 sel（未找到可见
+后果）；半关闭订阅者在 ack 后被回收（与 i3/sway 行为一致，暂不改）；
+image-copy `capture` 无 buffer 仍回 `failed` 而非 `no_buffer` 协议错误（避免
+断开宽松客户端）；lock-only modkey 只告警；`mouse_bindings.buttons = []`
+恢复默认（意图不明）；aspect 忽略 base size。
+
+**最终验证**：`EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1 scripts/test.sh`
+共 10 个测试组 **7236 passed / 0 failed / 1 ignored**（库 7020，工具与集成 216；
+本次开始时为 7184，新增回归 52 个），`cargo clippy --locked --lib --bins --tests
+--no-deps -- -D warnings` 与 `cargo fmt --check` 通过。CI 特性矩阵 7 个 profile 的
+`cargo check --locked --all-targets --no-default-features [--features …]` 全部 0 警告
+（nested profile 曾报 `set_monitor_shades` 未使用，已按同文件惯例加 `allow(dead_code)`），
+`cargo +1.89.0 check --locked --all-targets`（MSRV）通过；bridge fmt / clippy
+`-D warnings` / `JWM_REQUIRE_DBUS_DAEMON=1` 测试 94 个通过。
+portal check + 77 测试在依赖批次后通过，之后 portal 未改动。真实 DRM/KMS
+硬件与 X11 实机未测；本沙箱为省磁盘在 `~/.cargo/config.toml` 关了 debuginfo
+与增量编译，不影响仓库。
+
+---
+
 ## 2026-10-05：compositor UI/UX 第三十五批（overlay geometry 35–54）
 
 不是 100 个独立可验证全栈轮次。本批把 compositor overlay 的剩余高杠杆缺口
