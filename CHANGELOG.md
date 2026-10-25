@@ -5,6 +5,33 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Focus and monitor-move policy
+
+- `movestack` keeps the focus history: moving a tile no longer changes which
+  window takes focus when the current one closes, and on a floating window it
+  no longer shuffles the tiles behind it.
+- `focusmon` publishes `monitor/focus`, `monitor/bar` and window state once
+  instead of twice.
+- Committing the Alt+Tab switcher no longer hands focus to whatever window
+  ends up under the resting pointer after the re-tile.
+- Swallowing lays the monitor out again at once: the child takes the
+  terminal's tile instead of keeping half the screen beside an empty slot,
+  and a terminal that still held the keyboard hands it on.
+- `move_window_to_monitor` over IPC refuses docks, the desktop window, windows
+  on a locked monitor and locked target monitors, as keyboard and drag moves
+  already do.
+
+### Wayland pointer warps and idle inhibitors
+
+- `wp_pointer_warp_v1` warps are honoured only for the client under the
+  pointer, with the serial of its latest enter event, to a point inside its
+  window and outside any locked monitor's shade, as the protocol asks. A
+  background client can no longer pull the pointer away.
+- A client's idle inhibitor (a video player) keeps the session awake only
+  while its window is shown. A player on a hidden tag, minimized, or behind a
+  locked monitor's shade no longer blocks dimming, locking or DPMS, and
+  swayidle and other ext-idle-notify clients see the same.
+
 ### Shell, IPC and remote-control correctness
 
 - Desktop-entry `Exec=` lines decode the specification's string escapes before

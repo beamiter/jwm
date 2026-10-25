@@ -425,7 +425,7 @@ pub struct JwmWaylandState {
     /// on one surface must not clear each other. Smithay reports only an
     /// explicit inhibitor destroy, so `CompositorHandler::destroyed` drops a
     /// dead surface's entry (client crash or surface destroyed first).
-    pub idle_inhibiting_surfaces: HashMap<ObjectId, usize>,
+    pub idle_inhibiting_surfaces: HashMap<ObjectId, IdleInhibitor>,
     /// When input last arrived, for the session idle policy. Kept beside the
     /// idle notifier because both are fed from the same libinput callback.
     pub last_input: std::time::Instant,
@@ -650,6 +650,28 @@ pub struct ImPopupAnchor {
     pub area_top: i32,
     pub area_right: i32,
     pub area_bottom: i32,
+}
+
+/// The live idle inhibitors of one surface, with the surface itself so the
+/// visibility check can find the window it belongs to.
+#[derive(Debug)]
+pub struct IdleInhibitor {
+    surface: WlSurface,
+    count: usize,
+}
+
+/// Whether any part of a window is on an output and not behind a locked
+/// monitor's shade. Windows on hidden tags and minimized ones sit off every
+/// output.
+fn window_shows_on_an_output(
+    window: Rectangle<i32, Logical>,
+    outputs: &[Rectangle<i32, Logical>],
+    shades: &[Rectangle<i32, Logical>],
+) -> bool {
+    outputs
+        .iter()
+        .filter_map(|output| output.intersection(window))
+        .any(|shown| !shades.iter().any(|shade| shade.contains_rect(shown)))
 }
 
 // This file is also compiled through a compatibility module; only the shared
@@ -1895,19 +1917,19 @@ impl JwmWaylandState {
 impl IdleInhibitHandler for JwmWaylandState {
     fn inhibit(&mut self, surface: WlSurface) {
         debug!("[udev/wayland] idle inhibit activated");
-        *self
-            .idle_inhibiting_surfaces
+        self.idle_inhibiting_surfaces
             .entry(surface.id())
-            .or_default() += 1;
-        self.idle_notifier_state.set_is_inhibited(true);
+            .or_insert_with(|| IdleInhibitor { surface, count: 0 })
+            .count += 1;
+        self.sync_idle_inhibited();
     }
 
     fn uninhibit(&mut self, surface: WlSurface) {
         debug!("[udev/wayland] idle inhibit released");
         let id = surface.id();
-        if let Some(count) = self.idle_inhibiting_surfaces.get_mut(&id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
+        if let Some(inhibitor) = self.idle_inhibiting_surfaces.get_mut(&id) {
+            inhibitor.count = inhibitor.count.saturating_sub(1);
+            if inhibitor.count == 0 {
                 self.idle_inhibiting_surfaces.remove(&id);
             }
         }
@@ -1925,9 +1947,46 @@ impl JwmWaylandState {
         }
     }
 
-    fn sync_idle_inhibited(&mut self) {
+    /// Tell ext-idle-notify clients (swayidle) whether a client inhibitor
+    /// is honoured. Re-run after every event dispatch: tag switches,
+    /// minimizing and monitor locks change what is visible without touching
+    /// any inhibitor. A no-op while nothing changed.
+    pub(crate) fn sync_idle_inhibited(&mut self) {
         self.idle_notifier_state
-            .set_is_inhibited(!self.idle_inhibiting_surfaces.is_empty());
+            .set_is_inhibited(self.idle_inhibited_by_visible_surface());
+    }
+
+    /// Whether a client's idle inhibitor is honoured right now.
+    ///
+    /// idle-inhibit-unstable-v1 inhibits only while the surface is visible,
+    /// so a player on a hidden tag, a minimized window or one behind a
+    /// locked monitor's shade no longer keeps the screen awake. Inhibitors
+    /// JWM cannot tie to a window (layer surfaces, popups) are honoured as
+    /// before.
+    pub(crate) fn idle_inhibited_by_visible_surface(&self) -> bool {
+        self.idle_inhibiting_surfaces
+            .values()
+            .any(|inhibitor| self.idle_inhibitor_is_visible(&inhibitor.surface))
+    }
+
+    fn idle_inhibitor_is_visible(&self, surface: &WlSurface) -> bool {
+        if !surface.is_alive() {
+            return false;
+        }
+        let Some(win) = self.committed_surface_window(surface) else {
+            return true;
+        };
+        if !self.mapped_windows.contains(&win) {
+            return false;
+        }
+        let Some(geometry) = self.window_geometry.get(&win) else {
+            return false;
+        };
+        let window = Rectangle::new(
+            (geometry.x, geometry.y).into(),
+            (geometry.w as i32, geometry.h as i32).into(),
+        );
+        window_shows_on_an_output(window, &self.output_rects, &self.monitor_shades)
     }
 }
 
@@ -2117,21 +2176,47 @@ impl PointerWarpHandler for JwmWaylandState {
         surface: WlSurface,
         _pointer: smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer,
         pos: Point<f64, Logical>,
-        _serial: Serial,
+        serial: Serial,
     ) {
         if self.session_locked {
             return;
         }
-        if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
-            let origin = self
-                .toplevel_buffer_origin(win)
-                .or_else(|| self.window_geometry.get(&win).map(|g| (g.x, g.y).into()));
-            if let Some(origin) = origin {
-                self.pointer_location = (origin.x as f64 + pos.x, origin.y as f64 + pos.y).into();
-                self.pending_pointer_warp = Some(self.pointer_location);
-                self.needs_redraw = true;
-            }
+        let Some(win) = self.surface_to_window.get(&surface.id()).copied() else {
+            return;
+        };
+        let Some(geometry) = self.window_geometry.get(&win).copied() else {
+            return;
+        };
+        let origin = self
+            .toplevel_buffer_origin(win)
+            .unwrap_or_else(|| (geometry.x, geometry.y).into());
+        let target: Point<f64, Logical> =
+            (f64::from(origin.x) + pos.x, f64::from(origin.y) + pos.y).into();
+        let window = Rectangle::new(
+            (geometry.x, geometry.y).into(),
+            (geometry.w as i32, geometry.h as i32).into(),
+        );
+        let pointer = self.seat.get_pointer();
+        let focus_is_requesting_client = pointer
+            .as_ref()
+            .and_then(PointerHandle::current_focus)
+            .and_then(|focus| focus.client())
+            .is_some_and(|client| surface.client().as_ref() == Some(&client));
+        let last_enter = pointer.as_ref().and_then(PointerHandle::last_enter);
+        if !pointer_warp_permitted(
+            focus_is_requesting_client,
+            last_enter,
+            serial,
+            target,
+            window,
+        ) || self.point_in_monitor_shade(target)
+        {
+            debug!("[udev/wayland] pointer warp to {target:?} refused");
+            return;
         }
+        self.pointer_location = target;
+        self.pending_pointer_warp = Some(target);
+        self.needs_redraw = true;
     }
 }
 
@@ -2210,6 +2295,22 @@ fn activation_token_is_user_initiated(
         return false;
     };
     seat_matches && last_keyboard_enter.is_none_or(|enter| serial.is_no_older_than(&enter))
+}
+
+/// Whether a `wp_pointer_warp_v1.warp_pointer` request may move the pointer.
+///
+/// The protocol leaves warps to the compositor but asks it to honour one only
+/// from the client holding pointer focus, with the serial of the latest enter
+/// event, to a point on the surface. Anything else would let a background
+/// client pull the pointer away from where the user is working.
+fn pointer_warp_permitted(
+    focus_is_requesting_client: bool,
+    last_enter: Option<Serial>,
+    serial: Serial,
+    target: Point<f64, Logical>,
+    window: Rectangle<i32, Logical>,
+) -> bool {
+    focus_is_requesting_client && last_enter == Some(serial) && window.to_f64().contains(target)
 }
 
 impl XdgActivationHandler for JwmWaylandState {
@@ -7447,6 +7548,225 @@ mod protocol_hardening_tests {
             verified(Some(Serial::from(3)), true, None),
             "nothing focused yet"
         );
+    }
+
+    #[test]
+    fn pointer_warps_need_pointer_focus_the_latest_enter_and_a_point_on_the_window() {
+        use super::pointer_warp_permitted as permitted;
+        let window = Rectangle::new((100, 100).into(), (800, 600).into());
+        let inside = (150.0, 150.0).into();
+        let enter = Serial::from(7);
+        assert!(permitted(true, Some(enter), enter, inside, window));
+        assert!(
+            !permitted(false, Some(enter), enter, inside, window),
+            "a client the pointer is not over"
+        );
+        assert!(
+            !permitted(true, Some(enter), Serial::from(6), inside, window),
+            "a stale enter serial"
+        );
+        assert!(
+            !permitted(true, None, enter, inside, window),
+            "the pointer has left"
+        );
+        assert!(
+            !permitted(true, Some(enter), enter, (50.0, 150.0).into(), window),
+            "left of the window"
+        );
+        assert!(
+            !permitted(true, Some(enter), enter, (900.0, 150.0).into(), window),
+            "past the right edge"
+        );
+    }
+
+    #[test]
+    fn pointer_warps_move_the_pointer_only_for_the_client_under_it() {
+        fn warp(
+            client: &mut RawClient,
+            server: &mut Server,
+            ids: (u32, u32, u32),
+            at: (u32, u32),
+            serial: u32,
+        ) {
+            let (manager, surface, pointer) = ids;
+            client.request(
+                manager,
+                1,
+                &[surface, pointer, at.0 * 256, at.1 * 256, serial],
+            );
+            server.roundtrip();
+        }
+        fn pointer_for(client: &mut RawClient, server: &mut Server) -> (u32, u32) {
+            let seat = client.bind("wl_seat", 7);
+            let pointer = client.new_id();
+            client.request(seat, 0, &[pointer]);
+            let manager = client.bind("wp_pointer_warp_v1", 1);
+            server.roundtrip();
+            (manager, pointer)
+        }
+
+        let mut server = Server::new();
+        let mut focused = RawClient::connect(&mut server, JwmClientState::default());
+        let (surface_id, _, window) = create_toplevel(&mut server, &mut focused);
+        let (manager, pointer_id) = pointer_for(&mut focused, &mut server);
+        let mut background = RawClient::connect(&mut server, JwmClientState::default());
+        let (other_surface, _, other_window) = create_toplevel(&mut server, &mut background);
+        let (other_manager, other_pointer) = pointer_for(&mut background, &mut server);
+        let geometry = |x| Geometry {
+            x,
+            y: 0,
+            w: 800,
+            h: 600,
+            border: 0,
+        };
+        server.state.window_geometry.insert(window, geometry(0));
+        server
+            .state
+            .window_geometry
+            .insert(other_window, geometry(1000));
+
+        warp(
+            &mut focused,
+            &mut server,
+            (manager, surface_id, pointer_id),
+            (40, 30),
+            0,
+        );
+        assert_eq!(
+            server.state.pending_pointer_warp, None,
+            "no warp before the pointer ever entered"
+        );
+
+        let surface = focused.surface(&server, surface_id);
+        let pointer = server.state.seat.get_pointer().expect("seat pointer");
+        let enter = smithay::utils::SERIAL_COUNTER.next_serial();
+        pointer.motion(
+            &mut server.state,
+            Some((surface, (0.0, 0.0).into())),
+            &smithay::input::pointer::MotionEvent {
+                location: (5.0, 5.0).into(),
+                serial: enter,
+                time: smithay::backend::input::InputTime::from_millis(0),
+            },
+        );
+        pointer.frame(&mut server.state);
+        server.roundtrip();
+        let enter = u32::from(enter);
+
+        warp(
+            &mut background,
+            &mut server,
+            (other_manager, other_surface, other_pointer),
+            (40, 30),
+            enter,
+        );
+        assert_eq!(
+            server.state.pending_pointer_warp, None,
+            "a client the pointer is not over cannot pull it away"
+        );
+        warp(
+            &mut focused,
+            &mut server,
+            (manager, surface_id, pointer_id),
+            (40, 30),
+            enter.wrapping_sub(1),
+        );
+        assert_eq!(server.state.pending_pointer_warp, None, "a stale serial");
+        warp(
+            &mut focused,
+            &mut server,
+            (manager, surface_id, pointer_id),
+            (900, 30),
+            enter,
+        );
+        assert_eq!(
+            server.state.pending_pointer_warp, None,
+            "outside the window"
+        );
+
+        warp(
+            &mut focused,
+            &mut server,
+            (manager, surface_id, pointer_id),
+            (40, 30),
+            enter,
+        );
+        assert_eq!(server.state.pending_pointer_warp, Some((40.0, 30.0).into()));
+    }
+
+    #[test]
+    fn windows_off_every_output_or_behind_a_shade_are_not_shown() {
+        use super::window_shows_on_an_output as shown;
+        let left = Rectangle::new((0, 0).into(), (1920, 1080).into());
+        let right = Rectangle::new((1920, 0).into(), (1920, 1080).into());
+        let outputs = [left, right];
+        let window = |x| Rectangle::new((x, 100).into(), (800, 600).into());
+        assert!(shown(window(100), &outputs, &[]));
+        assert!(
+            !shown(window(-3840), &outputs, &[]),
+            "parked off-screen for another tag"
+        );
+        assert!(
+            !shown(window(100), &outputs, &[left]),
+            "behind the left monitor's shade"
+        );
+        assert!(
+            shown(window(1600), &outputs, &[left]),
+            "partly on the unlocked monitor"
+        );
+        assert!(!shown(window(100), &[], &[]), "no outputs");
+    }
+
+    #[test]
+    fn idle_inhibitors_count_only_while_their_window_is_shown() {
+        use crate::backend::api::MonitorShade;
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let (surface, _, window) = create_toplevel(&mut server, &mut client);
+        let manager = client.bind("zwp_idle_inhibit_manager_v1", 1);
+        let inhibitor = client.new_id();
+        client.request(manager, 1, &[inhibitor, surface]);
+        server.roundtrip();
+
+        let state = &mut server.state;
+        state.output_rects = vec![Rectangle::new((0, 0).into(), (1920, 1080).into())];
+        state.window_geometry.insert(
+            window,
+            Geometry {
+                x: 100,
+                y: 100,
+                w: 800,
+                h: 600,
+                border: 0,
+            },
+        );
+        state.set_manager_window_mapped(window, true);
+        state.sync_idle_inhibited();
+        assert!(state.idle_inhibited_by_visible_surface());
+        assert!(state.idle_notifier_state.is_inhibited());
+
+        // Another tag: JWM parks the window off every output.
+        state.window_geometry.get_mut(&window).expect("geometry").x = -3840;
+        state.sync_idle_inhibited();
+        assert!(!state.idle_inhibited_by_visible_surface());
+        assert!(!state.idle_notifier_state.is_inhibited());
+
+        state.window_geometry.get_mut(&window).expect("geometry").x = 100;
+        state.sync_idle_inhibited();
+        assert!(state.idle_notifier_state.is_inhibited());
+
+        let shade = MonitorShade::new(1, 0, 0, 1920, 1080).expect("shade");
+        state.set_monitor_shades(&[shade]);
+        state.sync_idle_inhibited();
+        assert!(
+            !state.idle_notifier_state.is_inhibited(),
+            "behind a locked monitor's shade"
+        );
+        state.set_monitor_shades(&[]);
+
+        state.set_manager_window_mapped(window, false);
+        state.sync_idle_inhibited();
+        assert!(!state.idle_notifier_state.is_inhibited(), "unmapped");
     }
 
     #[test]

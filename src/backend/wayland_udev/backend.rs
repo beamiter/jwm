@@ -5647,7 +5647,7 @@ impl Backend for UdevBackend {
     }
 
     fn idle_inhibited_by_client(&self) -> bool {
-        !self.state.idle_inhibiting_surfaces.is_empty()
+        self.state.idle_inhibited_by_visible_surface()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -7727,6 +7727,10 @@ impl Backend for UdevBackend {
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
+
+            // Tag switches, minimizing and monitor locks move windows on and
+            // off the outputs without touching their idle inhibitors.
+            self.state.sync_idle_inhibited();
 
             if let Some(location) = self.state.pending_pointer_warp.take() {
                 let location = {

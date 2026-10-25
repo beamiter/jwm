@@ -166,7 +166,9 @@ the only confirmation the flip happened.
 
 Three other things hold the session awake without being asked:
 
-- a client's idle inhibitor (a video player, on the Wayland backend);
+- a client's idle inhibitor (a video player, on the Wayland backend) while its
+  window is shown — not on a hidden tag, minimized, or behind a locked
+  monitor's shade, as the idle-inhibit protocol asks;
 - a screen recording in progress — recording an unattended screen is exactly
   when the machine looks idle and must not be treated as such;
 - an audio recording in progress, for the same reason.

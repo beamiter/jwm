@@ -38,7 +38,10 @@ behind an opaque shade; the rest of the desktop carries on exactly as it was.
   being locked. An overview of another monitor stays up.
 
 The windows themselves keep running: a video behind the shade keeps playing,
-and everything is where you left it when the shade comes off.
+and everything is where you left it when the shade comes off. On Wayland a
+player behind the shade no longer holds the session awake, since nobody can
+see it. Windows also stay put: `move_window_to_monitor` refuses to move a
+window off a locked monitor or onto one.
 
 ## Unlocking
 
