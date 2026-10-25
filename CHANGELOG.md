@@ -5,6 +5,19 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Capture frames and lock-screen secrets
+
+- An `ext-image-copy-capture` session allows one frame at a time, as the
+  protocol requires: `create_frame` before the previous frame is destroyed
+  is the `duplicate_frame` error, so one client cannot queue captures
+  without bound. JWM's portal and wlroots-compatible clients already work
+  this way.
+- The lock screen's password and the Wi-Fi and Bluetooth prompts no longer
+  leave copies of what was typed in freed memory: the buffer reserves room up
+  front and grows by hand, backspace overwrites the erased bytes, clearing
+  wipes the whole allocation, and the copy handed to PAM is wiped once
+  authentication returns.
+
 ### Pointer crossings, battery estimates and audio switching
 
 - Moving the pointer onto a window on another monitor focuses that window

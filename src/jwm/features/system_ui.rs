@@ -376,8 +376,7 @@ impl PromptKind {
     /// prompt does not leave the secret sitting in a freed allocation.
     fn wipe(&mut self) {
         if let Some(typed) = self.secret() {
-            // Keep the optimizer from eliding the overwrite before dropping.
-            unsafe { typed.as_bytes_mut().fill(0) };
+            wipe_secret(typed);
         }
     }
 
@@ -1368,7 +1367,7 @@ impl SystemUiState {
 
     pub fn cancel(&mut self) {
         match self {
-            Self::Locked { password, .. } => unsafe { password.as_bytes_mut().fill(0) },
+            Self::Locked { password, .. } => wipe_secret(password),
             Self::ListPanel {
                 prompt: Some(prompt),
                 ..
@@ -3701,7 +3700,7 @@ impl SystemUiState {
                 ..
             } => {
                 if let Some(typed) = prompt.secret() {
-                    typed.push(ch);
+                    push_secret(typed, ch);
                     message.clear();
                 }
                 return;
@@ -3709,7 +3708,7 @@ impl SystemUiState {
             Self::Locked {
                 password, message, ..
             } => {
-                password.push(ch);
+                push_secret(password, ch);
                 message.clear();
             }
             Self::Inactive
@@ -3745,7 +3744,7 @@ impl SystemUiState {
                 ..
             } => {
                 if let Some(typed) = prompt.secret() {
-                    typed.pop();
+                    pop_secret(typed);
                     message.clear();
                 }
                 return;
@@ -3753,7 +3752,7 @@ impl SystemUiState {
             Self::Locked {
                 password, message, ..
             } => {
-                password.pop();
+                pop_secret(password);
                 message.clear();
             }
             Self::Inactive
@@ -4340,8 +4339,7 @@ impl SystemUiState {
         else {
             return false;
         };
-        unsafe { password.as_bytes_mut().fill(0) };
-        password.clear();
+        wipe_secret(password);
         message.clear();
         true
     }
@@ -4364,8 +4362,7 @@ impl SystemUiState {
             password, message, ..
         } = self
         {
-            unsafe { password.as_bytes_mut().fill(0) };
-            password.clear();
+            wipe_secret(password);
             *message = "Authentication failed".into();
         }
     }
@@ -5871,8 +5868,56 @@ impl ZeroizingPassword {
 
 impl Drop for ZeroizingPassword {
     fn drop(&mut self) {
-        unsafe { self.0.as_bytes_mut().fill(0) };
+        wipe_secret(&mut self.0);
     }
+}
+
+/// How much a secret buffer reserves up front, so a typed password does not
+/// reallocate (and leave a copy behind) on every few keys.
+const SECRET_INITIAL_CAPACITY: usize = 128;
+
+/// Append to a secret without leaving a copy behind. A `String` that grows
+/// reallocates and frees its old buffer as it was, so grow by hand and wipe
+/// the old allocation first.
+fn push_secret(secret: &mut String, ch: char) {
+    if secret.capacity() - secret.len() < ch.len_utf8() {
+        let capacity = secret
+            .capacity()
+            .saturating_mul(2)
+            .max(SECRET_INITIAL_CAPACITY)
+            .max(secret.len() + ch.len_utf8());
+        let mut grown = String::with_capacity(capacity);
+        grown.push_str(secret);
+        wipe_secret(secret);
+        *secret = grown;
+    }
+    secret.push(ch);
+}
+
+/// Remove a secret's last character and overwrite the bytes it left in the
+/// spare capacity.
+fn pop_secret(secret: &mut String) -> Option<char> {
+    let ch = secret.pop()?;
+    // SAFETY: only the spare capacity past `len` is written.
+    let bytes = unsafe { secret.as_mut_vec() };
+    for byte in bytes.spare_capacity_mut().iter_mut().take(ch.len_utf8()) {
+        byte.write(0);
+    }
+    std::hint::black_box(&*bytes);
+    Some(ch)
+}
+
+/// Overwrite every byte a secret buffer owns, spare capacity included, and
+/// empty it. Bytes a backspace left past the end are covered too.
+fn wipe_secret(secret: &mut String) {
+    // SAFETY: zero bytes are valid UTF-8, and the length ends at 0.
+    let bytes = unsafe { secret.as_mut_vec() };
+    bytes.fill(0);
+    for byte in bytes.spare_capacity_mut() {
+        byte.write(0);
+    }
+    std::hint::black_box(&*bytes);
+    bytes.clear();
 }
 
 /// Run PAM off the compositor thread: the password moves into the worker
@@ -5982,7 +6027,10 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
         return Err(());
     }
     let user = CStr::from_ptr((*pw).pw_name);
-    let password = CString::new(password).map_err(|_| ())?;
+    let Ok(password) = CString::new(password) else {
+        libc::dlclose(lib);
+        return Err(());
+    };
     let conv = PamConv {
         conv: Some(pam_conversation),
         appdata_ptr: (&password as *const CString).cast_mut().cast(),
@@ -5996,6 +6044,11 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
         end(handle, result);
     }
     libc::dlclose(lib);
+    // `CString` only clears its first byte on drop; this copy of the
+    // password is wiped whole.
+    let mut bytes = password.into_bytes_with_nul();
+    bytes.fill(0);
+    std::hint::black_box(&bytes);
     Ok(result == 0)
 }
 
@@ -6003,6 +6056,71 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
 mod tests {
     use super::*;
     use crate::jwm::features::system_controls::{AudioDevice, AudioDirection};
+
+    /// Every byte a secret buffer owns, spare capacity included.
+    fn owned_bytes(secret: &mut String) -> Vec<u8> {
+        // SAFETY: the helpers under test keep every byte up to the capacity
+        // initialized (typed text or written zeros).
+        let bytes = unsafe { secret.as_mut_vec() };
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.capacity()) }.to_vec()
+    }
+
+    #[test]
+    fn secret_buffers_leave_no_typed_bytes_behind() {
+        let mut secret = String::new();
+        for ch in "hunter2".chars() {
+            push_secret(&mut secret, ch);
+        }
+        assert_eq!(secret, "hunter2");
+        assert!(
+            secret.capacity() >= SECRET_INITIAL_CAPACITY,
+            "one allocation holds a typed password"
+        );
+        // A backspace takes the character out of the spare capacity too.
+        assert_eq!(pop_secret(&mut secret), Some('2'));
+        assert_eq!(secret, "hunter");
+        assert_eq!(owned_bytes(&mut secret)[secret.len()], 0);
+
+        // Growing past the reserve copies into a new buffer.
+        let long: String = std::iter::repeat_n('x', SECRET_INITIAL_CAPACITY + 10).collect();
+        for ch in long.chars() {
+            push_secret(&mut secret, ch);
+        }
+        assert_eq!(secret, format!("hunter{long}"));
+
+        wipe_secret(&mut secret);
+        assert!(secret.is_empty());
+        assert!(owned_bytes(&mut secret).iter().all(|byte| *byte == 0));
+        assert_eq!(pop_secret(&mut secret), None);
+    }
+
+    #[test]
+    fn the_lock_card_wipes_what_backspace_and_clear_leave() {
+        let mut state = SystemUiState::Locked {
+            scope: LockScope::Session,
+            password: String::new(),
+            message: String::new(),
+            clock: String::new(),
+            date: String::new(),
+            caps_lock: false,
+            now_playing: None,
+            auth: Default::default(),
+        };
+        for ch in "secret".chars() {
+            state.push_char(ch);
+        }
+        state.backspace();
+        let SystemUiState::Locked { password, .. } = &mut state else {
+            unreachable!("still locked");
+        };
+        assert_eq!(password, "secre");
+        assert_eq!(owned_bytes(password)[5], 0, "the erased 't' is gone");
+        assert!(state.clear_lock_password());
+        let SystemUiState::Locked { password, .. } = &mut state else {
+            unreachable!("still locked");
+        };
+        assert!(owned_bytes(password).iter().all(|byte| *byte == 0));
+    }
 
     #[test]
     fn native_bar_controls_keep_scope_clear_and_support_keyboard_and_wheel() {

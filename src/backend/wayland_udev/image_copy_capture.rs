@@ -140,6 +140,11 @@ pub struct CaptureSessionData {
     /// Set once `stopped` was sent. The event ends the session, so it goes
     /// out at most once, and every frame created afterwards fails.
     pub stopped: AtomicBool,
+    /// Whether a frame of this session is alive. The protocol allows one at
+    /// a time: `create_frame` before the previous frame is destroyed is the
+    /// `duplicate_frame` error, which also keeps one session from queueing
+    /// captures without bound.
+    pub frame_alive: AtomicBool,
 }
 unsafe impl Send for CaptureSessionData {}
 
@@ -149,6 +154,7 @@ impl CaptureSessionData {
             source,
             paint_cursors,
             stopped: AtomicBool::new(false),
+            frame_alive: AtomicBool::new(false),
         }
     }
 }
@@ -688,6 +694,13 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
     ) {
         match request {
             ext_image_copy_capture_session_v1::Request::CreateFrame { frame } => {
+                if data.frame_alive.swap(true, Ordering::Relaxed) {
+                    resource.post_error(
+                        ext_image_copy_capture_session_v1::Error::DuplicateFrame,
+                        "create_frame sent before the previous frame was destroyed",
+                    );
+                    return;
+                }
                 let pending_queue = state
                     .image_capture_pending
                     .clone()
@@ -845,6 +858,12 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
         _resource: &ExtImageCopyCaptureFrameV1,
         data: &CaptureFrameData,
     ) {
+        // The session may create its next frame now.
+        if let Ok(session) = data.session.upgrade()
+            && let Some(session) = session.data::<CaptureSessionData>()
+        {
+            session.frame_alive.store(false, Ordering::Relaxed);
+        }
         // The renderer fails a queued frame of a removed output or closed
         // window with `failed(stopped)`, and the client then destroys it.
         // The session gets its matching `stopped` here at the latest.
@@ -1340,6 +1359,40 @@ mod tests {
     }
 
     #[test]
+    fn a_session_allows_one_frame_at_a_time() {
+        use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_session_v1::Error;
+        let mut server = capture_server();
+        let output = test_output("CAPTURE-ONE-FRAME");
+        let (mut client, session) = output_session(&mut server, &output);
+
+        // Destroying a frame frees the session for the next one.
+        let first = client.new_id();
+        client.request(session, SESSION_CREATE_FRAME, &[first]);
+        client.request(first, FRAME_DESTROY, &[]);
+        let second = client.new_id();
+        client.request(session, SESSION_CREATE_FRAME, &[second]);
+        server.roundtrip();
+        assert!(
+            !client
+                .events()
+                .iter()
+                .any(|event| event.sender == 1 && event.opcode == 0),
+            "a frame after the previous one was destroyed is legal"
+        );
+
+        let third = client.new_id();
+        client.request(session, SESSION_CREATE_FRAME, &[third]);
+        server.roundtrip();
+        let error = client
+            .events()
+            .into_iter()
+            .find(|event| event.sender == 1 && event.opcode == 0)
+            .expect("a second live frame is a protocol error");
+        assert_eq!(error.args[0], session);
+        assert_eq!(error.args[1], Error::DuplicateFrame as u32);
+    }
+
+    #[test]
     fn a_removed_outputs_session_stops_once_and_its_later_frames_fail() {
         let mut server = capture_server();
         let output = test_output("CAPTURE-1");
@@ -1361,6 +1414,7 @@ mod tests {
 
         // `stopped` ends the session: it is not sent again, and every later
         // frame fails the same way.
+        client.request(frame, FRAME_DESTROY, &[]);
         let frame = client.new_id();
         client.request(session, SESSION_CREATE_FRAME, &[frame]);
         client.request(frame, FRAME_CAPTURE, &[]);
