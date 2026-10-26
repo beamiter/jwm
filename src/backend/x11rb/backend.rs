@@ -5026,7 +5026,9 @@ mod key_ops {
                 .conn
                 .get_keyboard_mapping(min, (max - min) + 1)?
                 .reply()?;
-            let per = mapping.keysyms_per_keycode as usize;
+            // A server can report zero keysyms per keycode (an empty
+            // keymap); `chunks(0)` would panic.
+            let per = usize::from(mapping.keysyms_per_keycode).max(1);
 
             use x11rb::protocol::xproto::{KeyButMask as KBM, ModMask};
             let numlock_mask_obj = KBM::from(numlock_local);
@@ -5810,7 +5812,15 @@ mod property_ops {
             let w = self.ids.x11(win).ok()?;
             let reply = self
                 .conn
-                .get_property(false, w, atom, AtomEnum::ANY, 0, MAX_TEXT_PROPERTY_BYTES)
+                // GetProperty lengths count 32-bit units, not bytes.
+                .get_property(
+                    false,
+                    w,
+                    atom,
+                    AtomEnum::ANY,
+                    0,
+                    MAX_TEXT_PROPERTY_BYTES / 4,
+                )
                 .ok()?
                 .reply()
                 .ok()?;

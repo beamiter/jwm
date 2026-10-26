@@ -3150,7 +3150,8 @@ impl XcbWindowOps {
         let Ok(mapping) = self.conn.wait_for_reply(cookie) else {
             return self.store_numlock_mask(x::ModMask::empty());
         };
-        let keysyms_per_keycode = mapping.keysyms_per_keycode() as usize;
+        // Zero (an empty keymap) would make `chunks` panic.
+        let keysyms_per_keycode = usize::from(mapping.keysyms_per_keycode()).max(1);
         let min_keycode = self.conn.get_setup().min_keycode();
         let mut numlock_keycodes = [false; 256];
         let mut has_numlock_keycode = false;
@@ -3169,7 +3170,7 @@ impl XcbWindowOps {
         let Ok(reply) = self.conn.wait_for_reply(cookie) else {
             return self.store_numlock_mask(x::ModMask::empty());
         };
-        let keycodes_per_modifier = reply.keycodes_per_modifier() as usize;
+        let keycodes_per_modifier = usize::from(reply.keycodes_per_modifier()).max(1);
         let mask = reply
             .keycodes()
             .chunks(keycodes_per_modifier)
@@ -3793,7 +3794,8 @@ impl XcbPropertyOps {
             property,
             r#type: x::ATOM_ANY,
             long_offset: 0,
-            long_length: MAX_TEXT_PROPERTY_BYTES,
+            // GetProperty lengths count 32-bit units, not bytes.
+            long_length: MAX_TEXT_PROPERTY_BYTES / 4,
         });
         self.conn.wait_for_reply(cookie).ok().and_then(|r| {
             if r.format() != 8 {
@@ -5043,7 +5045,8 @@ impl XcbKeyOps {
             count,
         });
         let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
-        let per = reply.keysyms_per_keycode() as usize;
+        // Zero (an empty keymap) would make `chunks` panic.
+        let per = usize::from(reply.keysyms_per_keycode()).max(1);
         let mut primary_keysym_to_keycodes: HashMap<KeySym, Vec<u8>> = HashMap::new();
         let mut keysym_to_keycodes: HashMap<KeySym, Vec<u8>> = HashMap::new();
         let mut keycode_to_keysym: HashMap<u8, KeySym> = HashMap::new();
@@ -5089,7 +5092,7 @@ impl XcbKeyOps {
 
         let cookie = self.conn.send_request(&x::GetModifierMapping {});
         let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
-        let per = reply.keycodes_per_modifier() as usize;
+        let per = usize::from(reply.keycodes_per_modifier()).max(1);
         for (idx, chunk) in reply.keycodes().chunks(per).enumerate() {
             if chunk
                 .iter()
@@ -6370,6 +6373,27 @@ mod parity_tests {
     const X11_COMPOSITOR_GLX_SRC: &str = include_str!("../x11/compositor/platform/glx.rs");
     const X11_COMPOSITOR_EXPOSE_SRC: &str = include_str!("../x11/compositor/expose.rs");
     const X11_COMPOSITOR_POSTPROCESS_SRC: &str = include_str!("../x11/compositor/postprocess.rs");
+
+    #[test]
+    fn both_transports_read_text_and_keymaps_within_their_bounds() {
+        // Needles are assembled at runtime so this test cannot match itself.
+        let units = format!("MAX_TEXT_PROPERTY_BYTES {} 4", "/");
+        // GetProperty counts 32-bit units: passing the byte cap fetched 1 MiB
+        // titles on every PropertyNotify.
+        for source in [X11RB_BACKEND_SRC, XCB_BACKEND_SRC] {
+            assert!(source.contains(&units));
+        }
+        // A server reporting zero keysyms per keycode (or keycodes per
+        // modifier) must not reach `chunks(0)`, which panics.
+        let guarded = format!("usize::from(mapping.{}).max(1)", "keysyms_per_keycode");
+        assert!(X11RB_BACKEND_SRC.contains(&guarded));
+        for width in ["keysyms_per_keycode", "keycodes_per_modifier"] {
+            let unguarded = format!("{width}() as {}", "usize");
+            assert!(!XCB_BACKEND_SRC.contains(&unguarded), "xcb: {unguarded}");
+        }
+        let unguarded = format!("mapping.{} as usize", "keysyms_per_keycode");
+        assert!(!X11RB_BACKEND_SRC.contains(&unguarded));
+    }
 
     #[test]
     fn native_pointer_queue_fence_preserves_release_payloads_and_reply_prefetch() {

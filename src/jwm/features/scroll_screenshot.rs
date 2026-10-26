@@ -24,6 +24,9 @@ const MAX_HEIGHT: u32 = 65_535;
 struct ScrollImage {
     pixels: Vec<u8>,
     previous: RgbaImage,
+    /// The page reached the height or memory limit. What was stitched so far
+    /// is kept and can still be saved; later viewports add nothing.
+    full: bool,
 }
 
 impl ScrollImage {
@@ -37,6 +40,7 @@ impl ScrollImage {
         Ok(Self {
             pixels,
             previous: frame,
+            full: false,
         })
     }
 
@@ -47,9 +51,16 @@ impl ScrollImage {
 
     /// An unmatched frame leaves the last accepted viewport intact. Scrolling
     /// back to an overlapping position can therefore recover without a seam.
+    /// A viewport that would pass the height or memory limit marks the image
+    /// full and is otherwise ignored, so the page captured so far survives.
     fn append(&mut self, frame: RgbaImage) -> Result<bool, String> {
         if frame.dimensions() != self.previous.dimensions() {
             return Err("The capture size changed; select the page again".into());
+        }
+        // Once full, nothing more is stitched, and any viewport — including
+        // the final one taken on Enter — leaves the image ready to save.
+        if self.full {
+            return Ok(true);
         }
         if alignment_error(&self.previous, &frame, 0, 96, 96) < 0.25 {
             return Ok(true); // paused, at the bottom, or returned to the last viewport
@@ -58,14 +69,19 @@ impl ScrollImage {
             return Ok(false);
         };
         let (width, height) = self.dimensions();
-        let height = height
+        let reserved = height
             .checked_add(offset)
             .filter(|h| *h <= MAX_HEIGHT)
-            .ok_or("Long screenshot reached the 65535-pixel height limit")?;
-        let len = rgba_capture_len(width, height).map_err(|e| e.to_string())?;
-        self.pixels
-            .try_reserve_exact(len - self.pixels.len())
-            .map_err(|e| e.to_string())?;
+            .and_then(|height| rgba_capture_len(width, height).ok())
+            .is_some_and(|len| {
+                self.pixels
+                    .try_reserve_exact(len - self.pixels.len())
+                    .is_ok()
+            });
+        if !reserved {
+            self.full = true;
+            return Ok(true);
+        }
         let start = ((frame.height() - offset) as usize) * width as usize * 4;
         self.pixels.extend_from_slice(&frame.as_raw()[start..]);
         self.previous = frame;
@@ -256,7 +272,10 @@ impl Jwm {
                         capture.finish = None;
                         capture.final_sample = false;
                     }
-                    backend.compositor_set_capture_hint(Some(if matched {
+                    let full = capture.image.as_ref().is_some_and(|image| image.full);
+                    backend.compositor_set_capture_hint(Some(if full {
+                        format!("Long screenshot {width}×{height} · reached the size limit · Enter save · Ctrl+C copy · Esc cancel")
+                    } else if matched {
                         format!("Long screenshot {width}×{height} · scroll down slowly · Enter save · Ctrl+C copy · Esc cancel")
                     } else {
                         format!("Long screenshot {width}×{height} · cannot match: scroll back up, keep overlap; exclude fixed headers · Esc cancel")
@@ -420,6 +439,28 @@ mod tests {
         assert_eq!(image.pixels, original);
         assert!(image.append(viewport(&page, 180)).unwrap());
         assert_eq!(image.dimensions(), (120, 320));
+    }
+
+    #[test]
+    fn reaching_the_height_limit_keeps_the_page_captured_so_far() {
+        let page = page();
+        let mut image = ScrollImage::new(viewport(&page, 0)).unwrap();
+        assert!(image.append(viewport(&page, 125)).unwrap());
+        let kept = image.pixels.clone();
+        // Pretend the stitched page already sits just under the limit.
+        let tall_previous = image.previous.clone();
+        image.pixels.resize(120 * 4 * (MAX_HEIGHT as usize - 10), 0);
+        let near_limit = image.pixels.clone();
+        image.previous = tall_previous;
+
+        // The next viewport would pass the limit: the image is kept, marked
+        // full, and still saveable; before, the whole capture was discarded.
+        assert!(image.append(viewport(&page, 250)).unwrap());
+        assert!(image.full);
+        assert_eq!(image.pixels, near_limit);
+        assert!(image.append(viewport(&page, 375)).unwrap());
+        assert_eq!(image.pixels.len(), near_limit.len());
+        assert_eq!(&image.pixels[..kept.len()], &kept[..]);
     }
 
     #[test]

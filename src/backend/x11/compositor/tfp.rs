@@ -790,6 +790,10 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.minimized_window_intents.remove(&x11_win);
         self.minimized_window_metadata.remove(&x11_win);
+        // The X server recycles XIDs: a later window must not inherit a closed
+        // game's VRR classification. A remap re-sends the class with the new
+        // window, which classifies it afresh.
+        self.is_game_window.remove(&x11_win);
         let Some(wt) = self.windows.remove(&x11_win) else {
             return;
         };
@@ -1291,6 +1295,27 @@ mod tests {
         let mut marker = None;
         assert_eq!(super::take_direct_presentation_marker(&mut marker, 7), None);
         assert_eq!(marker, None);
+    }
+
+    /// A retired XID forgets its game classification before the early
+    /// return for untracked windows, so a recycled XID cannot turn on VRR.
+    #[test]
+    fn immediate_removal_forgets_the_game_classification() {
+        let source: String = include_str!("tfp.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let remove = source
+            .split_once("pub(super)fnremove_window_immediate(")
+            .expect("remove_window_immediate")
+            .1;
+        let forgotten = remove
+            .find(&format!("self.is_game_window.{}(&x11_win)", "remove"))
+            .expect("the game classification is dropped");
+        let untracked_return = remove
+            .find("self.windows.remove(&x11_win)")
+            .expect("the texture entry is removed");
+        assert!(forgotten < untracked_return);
     }
 
     /// A directly presented window retired without a fade must get its

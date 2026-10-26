@@ -1084,7 +1084,13 @@ impl Jwm {
                 .output_path
                 .as_deref()
                 .unwrap_or("(unset)");
-            info!("[cleanup_x11_resources] Recording stopped on shutdown; output is at {target}");
+            // A GIF recording writes an MP4 first and is converted after the
+            // stop; that export does not run once JWM is gone.
+            let written = crate::jwm::features::gif_recording::capture_path(target);
+            info!("[cleanup_x11_resources] Recording stopped on shutdown; output is at {written}");
+            if written != target {
+                info!("[cleanup_x11_resources] The GIF export of {written} was not started");
+            }
         }
 
         // A recording the key stop left finalizing is still writing its file:

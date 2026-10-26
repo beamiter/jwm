@@ -14,7 +14,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const MAX_GIF_EXPORTS: usize = 2;
-const WRITER_TIMEOUT: Duration = Duration::from_secs(90);
+/// Waiting on the encoder's stop receipt outlasts the writer's own deadline:
+/// a long capture on a slow disk can take minutes to finalize, and giving up
+/// first threw away a GIF whose source then finished fine.
+const WRITER_TIMEOUT: Duration = Duration::from_secs(
+    crate::backend::compositor_common::recording_sink::WRITER_STOP_DEADLINE.as_secs() + 30,
+);
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const GIF_SCALE: &str = "fps=15,scale=w='min(960,iw)':h=-1:flags=lanczos";
 
@@ -144,13 +149,57 @@ impl RecordingPreferences {
 /// a hard link is atomic and cannot overwrite a destination created meanwhile.
 struct ExportDirectory(PathBuf);
 
+/// Prefix of an export's private work directory, followed by 16 hex digits.
+const EXPORT_DIRECTORY_PREFIX: &str = ".jwm-gif-";
+
+/// Remove export work directories a previous JWM left behind: an export that
+/// was running when JWM exited or restarted never reached its cleanup. Only
+/// exact names, real directories owned by this user and older than any live
+/// export can be (its deadline plus a margin) are touched.
+fn sweep_abandoned_export_directories(parent: &Path, now: std::time::SystemTime) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    for entry in entries.flatten().take(4096) {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(EXPORT_DIRECTORY_PREFIX))
+        else {
+            continue;
+        };
+        if suffix.len() != 16 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let abandoned = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > EXPORT_TIMEOUT * 3);
+        if metadata.is_dir() && metadata.uid() == uid && abandoned {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 impl ExportDirectory {
     fn new(output: &Path) -> std::io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
         let parent = output
             .parent()
             .ok_or_else(|| std::io::Error::other("missing GIF directory"))?;
-        let directory = parent.join(format!(".jwm-gif-{:016x}", rand::random::<u64>()));
+        sweep_abandoned_export_directories(parent, std::time::SystemTime::now());
+        let directory = parent.join(format!(
+            "{EXPORT_DIRECTORY_PREFIX}{:016x}",
+            rand::random::<u64>()
+        ));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         Ok(Self(directory))
     }
@@ -595,6 +644,41 @@ pub(super) mod tests {
     use super::*;
     use crate::backend::recording_completion::{EncoderWaitOutcome, writer_completion_channel};
     use crate::core::types::Rect;
+
+    #[test]
+    fn abandoned_export_directories_are_swept_and_nothing_else() {
+        let scratch = Scratch::new();
+        let parent = Path::new(&scratch.0);
+        let abandoned = parent.join(".jwm-gif-0123456789abcdef");
+        let live = parent.join(".jwm-gif-fedcba9876543210");
+        let foreign = parent.join(".jwm-gif-not-ours");
+        for directory in [&abandoned, &live, &foreign] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        std::fs::write(abandoned.join("palette.png"), b"x").unwrap();
+        let user_file = parent.join(".jwm-gif-0000000000000000");
+        std::fs::write(&user_file, b"a file, not an export directory").unwrap();
+
+        // An hour from now, the first two directories are stale by age; the
+        // third and the plain file do not match an export directory.
+        let later = std::time::SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::open(&live)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        sweep_abandoned_export_directories(parent, later);
+
+        assert!(!abandoned.exists(), "an abandoned export is removed");
+        assert!(live.exists(), "a directory as new as a live export stays");
+        assert!(foreign.exists() && user_file.exists());
+    }
+
+    #[test]
+    fn the_export_waits_longer_than_the_writer_can_take_to_stop() {
+        use crate::backend::compositor_common::recording_sink::WRITER_STOP_DEADLINE;
+        assert!(WRITER_TIMEOUT > WRITER_STOP_DEADLINE);
+        assert!(WRITER_STOP_DEADLINE >= Duration::from_secs(120));
+    }
     use crate::jwm::features::monitor_lock::test_support::{LockSpyBackend, jwm_on_two_monitors};
     use image::AnimationDecoder;
 

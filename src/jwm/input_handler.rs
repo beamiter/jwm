@@ -3635,8 +3635,12 @@ impl Jwm {
             let btn = MouseButton::from_u8(detail_btn);
             let (px, py) = self.last_mouse_root;
 
+            // While a long screenshot samples, the pointer belongs to the
+            // page being scrolled. On X11 an unfocused window's passive grab
+            // hands its wheel and clicks to JWM first; consuming them meant
+            // the page never scrolled. Replay them to the window instead.
             if self.features.screenshot.scrolling {
-                return Ok(PointerPressDisposition::Consumed);
+                return Ok(PointerPressDisposition::Replay);
             }
 
             // The wheel adjusts the stroke instead of cancelling the capture,
@@ -4572,6 +4576,34 @@ mod tests {
     use crate::jwm::WMArgEnum;
     use std::any::Any;
     use std::sync::Mutex;
+
+    #[test]
+    fn presses_during_a_long_screenshot_are_replayed_to_the_page() {
+        use crate::core::controller::PointerPressDisposition;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        jwm.features.screenshot.active = true;
+        jwm.features.screenshot.scrolling = true;
+        // X11 hands an unfocused window's wheel steps (buttons 4/5) and clicks
+        // to JWM through its passive grab. Consuming them meant the page under
+        // the pointer never scrolled.
+        for button in [4, 5, 1] {
+            let disposition = jwm
+                .on_button_press_internal(
+                    &mut backend,
+                    HitTarget::Surface(WindowId::from_raw(0x5c1)),
+                    0,
+                    button,
+                    0,
+                )
+                .unwrap();
+            assert!(
+                matches!(disposition, PointerPressDisposition::Replay),
+                "button {button}"
+            );
+        }
+    }
 
     #[test]
     fn ordinary_system_ui_targets_the_selected_monitor_in_global_coordinates() {

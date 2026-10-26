@@ -429,7 +429,11 @@ impl Jwm {
                 store.reported_save_error = false;
             }
             Err(error) => {
-                store.dirty = Some(now);
+                // A transient failure is retried on the next debounce. One
+                // that would fail again (the file refused as a symlink, a
+                // read-only or full disk, permissions) waits for the next
+                // change instead of rewriting and warning every half second.
+                store.dirty = save_failure_is_transient(&error).then_some(now);
                 log::warn!("[window-preferences] could not save dropdown size: {error}");
                 if !std::mem::replace(&mut store.reported_save_error, true) {
                     self.push_system_toast(
@@ -452,6 +456,18 @@ impl Jwm {
             .dirty
             .map(|changed| (changed + SAVE_DELAY).saturating_duration_since(now))
     }
+}
+
+/// Whether a failed preferences write is worth retrying on the next
+/// debounce; see `layout::persist` for the same rule on layouts.
+fn save_failure_is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::AlreadyExists
+    )
 }
 
 #[cfg(test)]
@@ -491,6 +507,31 @@ mod tests {
             connector: Some("DP-2".into()),
             tags: 0b10100,
         }
+    }
+
+    #[test]
+    fn an_unwritable_preferences_file_is_not_retried_every_debounce() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let fixture = Fixture::new();
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        // The store's path is a directory: every write fails the same way.
+        jwm.window_preferences = WindowPreferences::load_from_path(fixture.0.clone());
+        let area = Rect::new(0, 0, 1920, 1080);
+        jwm.window_preferences
+            .remember_size("term", Rect::new(100, 100, 800, 500), area);
+        let now = Instant::now();
+        assert!(jwm.window_preferences_next_wakeup(now).is_some());
+
+        jwm.flush_window_preferences(&mut backend, now, true);
+
+        assert_eq!(jwm.window_preferences_next_wakeup(now), None);
+        assert!(save_failure_is_transient(&io::Error::from(
+            io::ErrorKind::Interrupted
+        )));
+        assert!(!save_failure_is_transient(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 
     #[test]

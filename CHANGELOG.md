@@ -5,6 +5,27 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Long screenshots, GIF export and smaller fixes
+
+- A long screenshot that reaches the 65,535-pixel height (or memory) limit
+  keeps the page captured so far and can still be saved, instead of failing
+  and discarding every captured viewport.
+- On X11, scrolling a long screenshot over a window that does not have focus
+  works: the wheel and clicks reach the page instead of being swallowed.
+- GIF export waits as long as the recording encoder may take to finish, so a
+  long capture on a slow disk no longer fails with a timeout while its source
+  completes. Export work directories left behind when JWM exits mid-export
+  are cleaned up, and the shutdown log names the file actually written.
+- A dropdown size that cannot be saved (a symlinked or read-only preferences
+  file, a full disk) is no longer retried every half second for the rest of
+  the session; the next change tries again.
+- X11: a server reporting an empty keymap no longer crashes JWM at start or on
+  a keymap change, window titles are read with the intended 256 KiB cap
+  instead of 1 MiB per title change, and a reused window id of a closed game
+  no longer turns on variable refresh rate.
+- Wayland: interface animations (panel springs, toolbar fades) no longer
+  freeze mid-motion when a screenshot step queues nothing.
+
 ### Window policy fixes
 
 - Hiding a sticky scratchpad works: parking a scratchpad ends its

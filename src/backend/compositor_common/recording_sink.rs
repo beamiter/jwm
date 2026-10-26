@@ -47,6 +47,13 @@ const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Closing stdin normally lets ffmpeg flush and rewrite even a long recording.
 /// A process that ignores EOF is eventually killed rather than leaked forever.
 const ENCODER_FINALIZE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The longest a writer can take, once stopped, before its receipt resolves:
+/// writing out the queued frames at the per-frame bound, then the encoder's
+/// finalize. Anything waiting on a stop receipt must wait at least this long.
+pub(crate) const WRITER_STOP_DEADLINE: Duration = Duration::from_secs(
+    FRAME_WRITE_TIMEOUT.as_secs() * POOL_DEPTH as u64 + ENCODER_FINALIZE_TIMEOUT.as_secs(),
+);
 const PIPE_POLL_SLICE: Duration = Duration::from_millis(20);
 
 /// Ask the kernel for a bigger pipe to the encoder.

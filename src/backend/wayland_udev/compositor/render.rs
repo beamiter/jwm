@@ -875,6 +875,22 @@ mod tests {
     }
 
     #[test]
+    fn a_screenshot_step_never_cancels_the_next_frame_others_asked_for() {
+        // Overlay springs and eases set `needs_render` while drawing; the
+        // screenshot step that runs after them used to overwrite it with
+        // "readbacks pending", freezing those animations whenever a capture
+        // queued nothing. Needles are assembled at runtime.
+        let source = include_str!("render.rs");
+        let body = body_of(
+            source,
+            &format!("unsafe fn capture_pending_{}(", "screenshots"),
+        );
+        let readback = "self.screenshot_readback.has_pending();";
+        assert!(body.contains(&format!("self.needs_render {} {readback}", "|=")));
+        assert!(!body.contains(&format!("self.needs_render {} {readback}", "=")));
+    }
+
+    #[test]
     fn the_sender_line_is_baked_into_the_title_texture() {
         // The attribution rides the title texture: one upload holds the dim
         // sender band over the bright title band, so the draw pass and the
@@ -5438,8 +5454,10 @@ impl WaylandCompositor {
             }
             // The next compositor tick polls the fence with a zero timeout.
             // Keep it armed until every queued readback has been handed to
-            // the PNG worker.
-            self.needs_render = self.screenshot_readback.has_pending();
+            // the PNG worker. `|=`: overlay springs and eases drawn earlier in
+            // this frame asked for the next one too, and a capture that queued
+            // nothing must not cancel that and freeze them mid-motion.
+            self.needs_render |= self.screenshot_readback.has_pending();
         }
     }
 
