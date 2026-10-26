@@ -334,7 +334,8 @@ pub enum SystemUiState {
 }
 
 /// What a [`SystemUiState::ListPanel`] prompt is asking for. Wi-Fi asks for a
-/// passphrase; Bluetooth pairing adds the three agent-driven shapes. The
+/// passphrase; Bluetooth pairing adds agent-driven shapes, and the clipboard
+/// asks before clearing its history. The
 /// secret-carrying variants are wiped before their buffers are dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
@@ -354,21 +355,30 @@ pub enum PromptKind {
         device: String,
         service: Option<String>,
     },
+    /// Clear the entire clipboard history, including entries outside the
+    /// current filter. A history refresh cancels this snapshot's question.
+    ClearClipboard { count: usize },
 }
 
 impl PromptKind {
     /// Whether this prompt is part of a Bluetooth pairing session (as opposed
-    /// to the Wi-Fi passphrase).
+    /// to a Wi-Fi passphrase or a clipboard confirmation).
     #[must_use]
     pub fn is_pairing(&self) -> bool {
-        !matches!(self, Self::Passphrase(_))
+        matches!(
+            self,
+            Self::Pin { .. } | Self::Confirm { .. } | Self::Display { .. } | Self::Authorize { .. }
+        )
     }
 
     /// The editable secret buffer, for the prompts that have one.
     fn secret(&mut self) -> Option<&mut String> {
         match self {
             Self::Passphrase(typed) | Self::Pin { typed, .. } => Some(typed),
-            Self::Confirm { .. } | Self::Display { .. } | Self::Authorize { .. } => None,
+            Self::Confirm { .. }
+            | Self::Display { .. }
+            | Self::Authorize { .. }
+            | Self::ClearClipboard { .. } => None,
         }
     }
 
@@ -401,6 +411,7 @@ impl PromptKind {
                 device: device.clone(),
                 service: service.clone(),
             },
+            Self::ClearClipboard { count } => Self::ClearClipboard { count: *count },
         }
     }
 
@@ -464,6 +475,9 @@ impl ListKind {
                 }
                 PromptKind::Display { .. } => "Esc  cancel pairing",
                 PromptKind::Authorize { .. } => "y/Enter  allow    n  refuse    Esc  close window",
+                PromptKind::ClearClipboard { .. } => {
+                    "Enter  clear all history    Esc / click outside  cancel"
+                }
             };
         }
         match self {
@@ -471,7 +485,7 @@ impl ListKind {
                 "Click/Enter  activate    \u{f060}/\u{f061} 1-6  action    d  dismiss    c  clear    Esc"
             }
             Self::Clipboard => {
-                "Click/Enter  copy    type  filter    d  forget    c  clear all    Esc  close"
+                "type  filter    Click/Enter  copy    Del  forget    Ctrl+Del  clear all    Esc  close"
             }
             Self::Wifi => {
                 "Click/Enter  join    \u{f062}/\u{f063}  select    d / middle-click  forget    Esc  close"
@@ -2201,6 +2215,7 @@ impl SystemUiState {
             selected,
             query,
             message,
+            prompt,
             ..
         } = self
         else {
@@ -2217,6 +2232,9 @@ impl SystemUiState {
             .and_then(|key| rows.iter().position(|row| row.key == key))
             .unwrap_or(0);
         message.clear();
+        // A changed history must not be deleted using a confirmation shown
+        // for an older set of entries, even if its count happened to match.
+        *prompt = None;
     }
 
     /// Build the clipboard picker from the live history, newest first. The
@@ -2238,6 +2256,48 @@ impl SystemUiState {
 
     pub fn is_clipboard_picker(&self) -> bool {
         self.is_list(ListKind::Clipboard)
+    }
+
+    /// Ask before clearing the whole history. The count describes the live
+    /// history, not just the rows that happen to match the filter.
+    pub fn request_clipboard_clear(&mut self, count: usize) -> bool {
+        let Self::ListPanel {
+            kind: ListKind::Clipboard,
+            prompt,
+            message,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if count == 0 || prompt.is_some() {
+            return false;
+        }
+        message.clear();
+        *prompt = Some(PromptKind::ClearClipboard { count });
+        true
+    }
+
+    pub fn clipboard_clear_pending(&self) -> bool {
+        matches!(
+            self,
+            Self::ListPanel {
+                kind: ListKind::Clipboard,
+                prompt: Some(PromptKind::ClearClipboard { .. }),
+                ..
+            }
+        )
+    }
+
+    /// Return to the same query and selection without losing any history.
+    pub fn cancel_clipboard_clear(&mut self) -> bool {
+        if !self.clipboard_clear_pending() {
+            return false;
+        }
+        if let Self::ListPanel { prompt, .. } = self {
+            *prompt = None;
+        }
+        true
     }
 
     /// Position in the history of the selected entry.
@@ -4069,7 +4129,9 @@ impl SystemUiState {
     /// last). Used by a click on the compositor-drawn scroll track. Returns
     /// whether the selection moved.
     pub fn seek_scroll(&mut self, t: f32) -> bool {
-        if !t.is_finite() {
+        // The scrollbar must not move the subject underneath a modal
+        // question. Keyboard and wheel navigation obey the same boundary.
+        if self.is_prompting() || !t.is_finite() {
             return false;
         }
         let t = t.clamp(0.0, 1.0);
@@ -4899,6 +4961,11 @@ impl SystemUiState {
                                 ),
                                 None => format!("\u{f293}  Allow '{device}' to pair?"),
                             });
+                        }
+                        PromptKind::ClearClipboard { count } => {
+                            items.push(format!(
+                                "\u{f071}  Clear all {count} history entries?"
+                            ));
                         }
                     }
                     if let Some(icons) = &mut icons {
@@ -6350,6 +6417,43 @@ mod tests {
         assert!(!panel.seek_scroll(f32::NAN));
         let mut empty = SystemUiState::Inactive;
         assert!(!empty.seek_scroll(0.5));
+    }
+
+    #[test]
+    fn clipboard_clear_prompt_blocks_scrollbar_seek_and_keeps_the_filtered_selection() {
+        let mut history = crate::jwm::features::ClipboardHistory::default();
+        for index in 0..24 {
+            let prefix = if index < 20 { "matching" } else { "hidden" };
+            history.record(&format!("{prefix} entry {index}"), index as u64);
+        }
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        for ch in "matching".chars() {
+            panel.push_clipboard_query(ch, &history);
+        }
+        panel.move_selection(7);
+        let selected = panel.selected_clipboard();
+        let before = panel.overlay_parts();
+        assert_eq!(before.scroll.as_ref().unwrap().total, 20);
+        assert_eq!(before.scroll.as_ref().unwrap().visible, 14);
+        assert!(panel.request_clipboard_clear(history.len()));
+
+        for position in [0.0, 0.5, 1.0] {
+            assert!(!panel.seek_scroll(position));
+            assert_eq!(panel.selected_clipboard(), selected);
+            assert_eq!(panel.clipboard_query(), Some("matching"));
+            assert!(panel.clipboard_clear_pending());
+        }
+        assert!(panel.cancel_clipboard_clear());
+        let cancelled = panel.overlay_parts();
+        assert_eq!(cancelled.query, before.query);
+        assert_eq!(cancelled.selected, before.selected);
+        assert_eq!(cancelled.items, before.items);
+        assert_eq!(panel.selected_clipboard(), selected);
+        assert_eq!(history.len(), 24);
+        assert!(
+            panel.seek_scroll(1.0),
+            "the track works again after cancelling"
+        );
     }
 
     #[test]

@@ -551,6 +551,20 @@ fn component_bounds(nodes: &[&SceneNode]) -> Option<Rect> {
         .reduce(Rect::union)
 }
 
+/// A held control gains an inset, contrasting boundary. Keep its existing
+/// fill, glyphs and geometry: selection/urgency and wallpaper contrast remain
+/// legible, and the pointer never has to chase a shrinking or moving target.
+fn press_stroke(stroke: Option<Stroke>, foreground: Rgba, pressed: bool) -> Option<Stroke> {
+    if pressed {
+        Some(Stroke {
+            color: foreground,
+            width: stroke.map_or(2.0, |stroke| stroke.width + 1.5).min(3.5),
+        })
+    } else {
+        stroke
+    }
+}
+
 /// Pointer state retained by a frontend between scene builds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct InteractionState {
@@ -605,6 +619,23 @@ impl InteractionState {
     #[must_use]
     pub const fn pointer(&self) -> Option<Point> {
         self.pointer
+    }
+
+    /// Keep press feedback tied to the captured intent, just like release.
+    /// Leaving the target or replacing its action disarms the visual without
+    /// moving its acquisition region or stealing the pending gesture.
+    fn press_matches(
+        &self,
+        id: NodeId,
+        primary: Option<UserAction>,
+        secondary: Option<UserAction>,
+    ) -> bool {
+        self.hovered == Some(id)
+            && self.pressed == Some(id)
+            && (primary.is_some() || secondary.is_some())
+            && self.pressed_bindings.is_some_and(|bindings| {
+                bindings.primary == primary && bindings.secondary == secondary
+            })
     }
 
     /// Update exact pointer position and semantic target in one hit test.
@@ -2422,16 +2453,31 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             } else {
                 palette.hovered
             };
+            let color = if hovered {
+                palette.selected_text
+            } else {
+                palette.text
+            };
+            let bindings = if control.state.enabled {
+                control.bindings
+            } else {
+                crate::controls::InputBindings::default()
+            };
+            let stroke = state.urgent.then_some(Stroke {
+                color: palette.urgent_stroke,
+                width: 1.0,
+            });
             scene.nodes.push(SceneNode::RoundedRect {
                 id: control.id,
                 bounds: item_bounds,
                 radius: finite_non_negative(self.config.dock_corner_radius)
                     .min(item_bounds.height.min(item_bounds.width) * 0.5),
                 fill,
-                stroke: state.urgent.then_some(Stroke {
-                    color: palette.urgent_stroke,
-                    width: 1.0,
-                }),
+                stroke: press_stroke(
+                    stroke,
+                    color,
+                    interaction.press_matches(control.id, bindings.primary, bindings.secondary),
+                ),
                 state,
             });
             scene.nodes.push(SceneNode::Text {
@@ -2439,19 +2485,10 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                 bounds: item_bounds,
                 text: control.icon.clone(),
                 size: (item_bounds.height * 0.56).max(1.0),
-                color: if hovered {
-                    palette.selected_text
-                } else {
-                    palette.text
-                },
+                color,
                 align: TextAlign::Center,
                 state,
             });
-            let bindings = if control.state.enabled {
-                control.bindings
-            } else {
-                crate::controls::InputBindings::default()
-            };
             scene.hits.push(HitRegion {
                 id: control.id,
                 bounds: metrics.slot_rect(axis, slot),
@@ -2470,6 +2507,26 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             let action = hidden
                 .filter(|control| control.state.enabled)
                 .and_then(|control| control.bindings.primary);
+            let hovered = action.is_some() && interaction.hovered() == Some(NodeId::DockShelf);
+            let state = VisualState {
+                hovered,
+                ..VisualState::default()
+            };
+            if hovered {
+                scene.nodes.push(SceneNode::RoundedRect {
+                    id: NodeId::DockShelf,
+                    bounds: overflow_bounds,
+                    radius: finite_non_negative(self.config.dock_corner_radius)
+                        .min(overflow_bounds.width.min(overflow_bounds.height) * 0.5),
+                    fill: palette.hovered,
+                    stroke: press_stroke(
+                        None,
+                        palette.text,
+                        interaction.press_matches(NodeId::DockShelf, action, None),
+                    ),
+                    state,
+                });
+            }
             scene.nodes.push(SceneNode::Text {
                 id: NodeId::DockShelf,
                 bounds: overflow_bounds,
@@ -2479,9 +2536,13 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
                     "…".to_owned()
                 },
                 size: self.font_size(),
-                color: palette.muted_text,
+                color: if hovered {
+                    palette.text
+                } else {
+                    palette.muted_text
+                },
                 align: TextAlign::Center,
-                state: VisualState::default(),
+                state,
             });
             scene.hits.push(HitRegion {
                 id: NodeId::DockShelf,
@@ -2540,6 +2601,13 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         } else {
             palette.pill
         };
+        let color = if let Some(colors) = tag_colors {
+            colors.foreground
+        } else if spec.state.selected {
+            palette.selected_text
+        } else {
+            palette.text
+        };
         // Tags use their explicit contrast boundary. Other controls retain
         // the existing material with a stroke reserved for urgency.
         let stroke = if let Some(colors) = tag_colors {
@@ -2558,7 +2626,11 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             radius: finite_non_negative(self.config.corner_radius)
                 .min(bounds.width.min(bounds.height) * 0.5),
             fill,
-            stroke,
+            stroke: press_stroke(
+                stroke,
+                color,
+                interaction.press_matches(spec.id, spec.primary, spec.secondary),
+            ),
             state: spec.state,
         });
 
@@ -2570,13 +2642,6 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         let marker_fits = tag_colors.is_some() && spec.state.occupied && bounds.width >= 10.0 && {
             let text_height = self.measurer.measure(&text, self.font_size()).height;
             text_height.is_finite() && bounds.height >= text_height.max(0.0) + 12.0
-        };
-        let color = if let Some(colors) = tag_colors {
-            colors.foreground
-        } else if spec.state.selected {
-            palette.selected_text
-        } else {
-            palette.text
         };
         let network_columns = spec
             .network
@@ -4200,6 +4265,163 @@ mod tests {
         assert_eq!(hovered.hit_test(point).map(|region| region.id), Some(id));
     }
 
+    #[test]
+    fn pressed_pills_preserve_geometry_and_colors_across_edges_themes_and_scales() {
+        use crate::placement::BarEdge;
+
+        let tags = [
+            TagState::default(),
+            TagState {
+                selected: true,
+                ..TagState::default()
+            },
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            },
+            TagState {
+                urgent: true,
+                ..TagState::default()
+            },
+        ];
+        let material = |scene: &Scene, id| {
+            scene
+                .nodes_for(id)
+                .find_map(|node| match node {
+                    SceneNode::RoundedRect {
+                        bounds,
+                        fill,
+                        stroke,
+                        ..
+                    } => Some((*bounds, *fill, *stroke)),
+                    _ => None,
+                })
+                .expect("control material")
+        };
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            for theme in [ThemeMode::Dark, ThemeMode::Light] {
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    let thickness = 42.0 / scale;
+                    let engine = LayoutEngine::new(
+                        PresentationConfig {
+                            edge,
+                            bar_height: thickness,
+                            tag_labels: vec!["1".into(), "2".into(), "3".into(), "4".into()],
+                            ..PresentationConfig::default()
+                        },
+                        ApproximateTextMeasurer::default(),
+                    );
+                    let viewport = if edge.is_vertical() {
+                        Size::new(thickness, 1600.0)
+                    } else {
+                        Size::new(1600.0, thickness)
+                    };
+                    let input = BarView {
+                        theme,
+                        ..view(&tags, "")
+                    };
+                    let initial = engine.build(input, viewport, &InteractionState::default());
+                    for id in (0..4)
+                        .map(|index| NodeId::Tag(TagId::new(index).unwrap()))
+                        .chain([NodeId::Audio])
+                    {
+                        let hit = initial.hits.iter().find(|hit| hit.id == id).unwrap();
+                        let point = Point::new(
+                            hit.bounds.x + hit.bounds.width * 0.5,
+                            hit.bounds.y + hit.bounds.height * 0.5,
+                        );
+                        let mut interaction = InteractionState::default();
+                        interaction.update_hover(&initial, point);
+                        let hovered = engine.build(input, viewport, &interaction);
+                        interaction.press(&hovered, point);
+                        let pressed = engine.build(input, viewport, &interaction);
+                        let (before_bounds, before_fill, before_stroke) = material(&hovered, id);
+                        let (after_bounds, after_fill, after_stroke) = material(&pressed, id);
+                        assert_eq!(pressed.hits, hovered.hits);
+                        assert_eq!(after_bounds, before_bounds);
+                        assert_eq!(after_fill, before_fill);
+                        assert!(
+                            after_stroke.unwrap().width
+                                > before_stroke.map_or(0.0, |stroke| stroke.width)
+                        );
+                        let text_nodes = |scene: &Scene| {
+                            scene
+                                .nodes_for(id)
+                                .filter(|node| matches!(node, SceneNode::Text { .. }))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(text_nodes(&pressed), text_nodes(&hovered));
+                        assert!(!pressed.damage_from(&hovered).is_empty());
+                        interaction.cancel_press();
+                        assert_eq!(engine.build(input, viewport, &interaction), hovered);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dock_cards_and_overflow_acknowledge_press_without_moving_targets() {
+        use crate::placement::BarEdge;
+
+        let windows: Vec<_> = (1..=12)
+            .map(|token| minimized(token, "Terminal", "terminal"))
+            .collect();
+        let input = BarView {
+            minimized_windows: &windows,
+            ..view(&[], "")
+        };
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            let mut engine = dock_engine();
+            engine.config_mut().edge = edge;
+            let viewport = if edge.is_vertical() {
+                Size::new(42.0, 400.0)
+            } else {
+                Size::new(400.0, 42.0)
+            };
+            let initial = engine.build(input, viewport, &InteractionState::default());
+            assert!(initial.hits.iter().any(|hit| hit.id == NodeId::DockShelf));
+            for hit in initial
+                .hits
+                .iter()
+                .filter(|hit| matches!(hit.id, NodeId::DockShelf | NodeId::MinimizedWindow(_)))
+            {
+                let point = Point::new(
+                    hit.bounds.x + hit.bounds.width * 0.5,
+                    hit.bounds.y + hit.bounds.height * 0.5,
+                );
+                let mut interaction = InteractionState::default();
+                interaction.update_hover(&initial, point);
+                let hovered = engine.build(input, viewport, &interaction);
+                interaction.press(&hovered, point);
+                let pressed = engine.build(input, viewport, &interaction);
+                assert_eq!(pressed.hits, hovered.hits);
+                assert_eq!(pressed.bounds_for(hit.id), hovered.bounds_for(hit.id));
+                assert!(pressed.nodes_for(hit.id).any(|node| {
+                    matches!(
+                        node,
+                        SceneNode::RoundedRect {
+                            stroke: Some(_),
+                            ..
+                        }
+                    )
+                }));
+                assert!(!pressed.damage_from(&hovered).is_empty());
+
+                // A held button may leave and return to its target, but must
+                // not look armed or activate while released outside the bar.
+                let outside = Point::new(-1.0, -1.0);
+                interaction.update_hover(&pressed, outside);
+                assert_eq!(engine.build(input, viewport, &interaction), initial);
+                assert_eq!(
+                    interaction.release(&pressed, outside, PointerAction::Primary),
+                    None
+                );
+            }
+        }
+    }
+
     fn damage_scene(nodes: Vec<SceneNode>) -> Scene {
         Scene {
             viewport: Size::new(200.0, 40.0),
@@ -4840,7 +5062,18 @@ mod tests {
         let first = make_scene(UserAction::ViewTag(TagId::new(2).unwrap()));
         let replaced = make_scene(UserAction::ViewTag(TagId::new(3).unwrap()));
         let mut interaction = InteractionState::default();
+        interaction.update_hover(&first, point);
         interaction.press(&first, point);
+        assert!(interaction.press_matches(
+            first.hits[0].id,
+            first.hits[0].primary,
+            first.hits[0].secondary
+        ));
+        assert!(!interaction.press_matches(
+            replaced.hits[0].id,
+            replaced.hits[0].primary,
+            replaced.hits[0].secondary
+        ));
         assert_eq!(
             interaction.release(&replaced, point, PointerAction::Primary),
             None
@@ -4861,7 +5094,13 @@ mod tests {
         original.hits[0].id = NodeId::MinimizedWindow(WindowToken(7));
         let mut replacement = make_scene(restore(2));
         replacement.hits[0].id = original.hits[0].id;
+        interaction.update_hover(&original, point);
         interaction.press(&original, point);
+        assert!(!interaction.press_matches(
+            replacement.hits[0].id,
+            replacement.hits[0].primary,
+            replacement.hits[0].secondary
+        ));
         assert_eq!(
             interaction.release(&replacement, point, PointerAction::Primary),
             None

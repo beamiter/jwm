@@ -462,18 +462,11 @@ fn sanitize_notification(notification: &mut ToastNotification) {
 /// it.
 pub(crate) const SENDER_TITLE_GAP_PX: u32 = 2;
 
-/// The sender line's ink: the body's label ink at a reduced alpha, so the
-/// attribution reads quieter than the message in every theme without a new
-/// palette tone. The card's type scale is one size with brightness as the
-/// hierarchy — the title is the brightest ink, the body one step down, and
-/// the sender sits at the dim end.
+/// Sender attribution uses the readable secondary ink at its authored alpha.
+/// The palette already separates it from the primary title; fading it again
+/// made normal-size text disappear against light or busy backdrops.
 pub(crate) fn sender_ink(label_ink: [u8; 4]) -> [u8; 4] {
-    [
-        label_ink[0],
-        label_ink[1],
-        label_ink[2],
-        (f32::from(label_ink[3]) * 0.72).round() as u8,
-    ]
+    label_ink
 }
 
 /// Stack rasterized RGBA text bands into one texture buffer, top band first,
@@ -1146,12 +1139,12 @@ mod tests {
     }
 
     #[test]
-    fn the_sender_ink_only_dims_the_alpha() {
+    fn the_sender_ink_preserves_the_palette_contrast_and_authored_alpha() {
         let label = [136, 148, 172, 255];
-        assert_eq!(sender_ink(label), [136, 148, 172, 184]);
+        assert_eq!(sender_ink(label), label);
         // Zero alpha is a fixed point; the hue never moves.
         assert_eq!(sender_ink([10, 20, 30, 0]), [10, 20, 30, 0]);
-        assert_eq!(sender_ink([0, 0, 0, 128]), [0, 0, 0, 92]);
+        assert_eq!(sender_ink([0, 0, 0, 128]), [0, 0, 0, 128]);
     }
 
     #[test]

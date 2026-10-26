@@ -3,7 +3,9 @@
 //!
 //! cargo run -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-bar-previews
 //! Append `named` for compact named workspaces or `crowded` for multi-selection
-//! and hidden urgent workspaces on a short output.
+//! and hidden urgent workspaces on a short output. `pressed` holds the active
+//! workspace; `pressed-dock` holds the hovered Browser card. Standard snapshots
+//! remain unchanged; use separate output directories to compare the scenarios.
 //!
 //! PNGs use portable text labels so geometry can be inspected even on CI hosts
 //! without Nerd Fonts. JSON contains the identical scene and pointer targets.
@@ -76,7 +78,7 @@ mod preview {
         config.labels.shell_routes[0] = "≡".to_owned();
 
         match scenario {
-            "standard" => {}
+            "standard" | "pressed" | "pressed-dock" => {}
             "named" => {
                 snapshot.tags = (0..4)
                     .map(|index| TagState {
@@ -104,7 +106,7 @@ mod preview {
             }
             _ => {
                 return Err(format!(
-                    "Unknown scenario {scenario:?}: use standard, named or crowded"
+                    "Unknown scenario {scenario:?}: use standard, named, crowded, pressed or pressed-dock"
                 )
                 .into());
             }
@@ -138,18 +140,20 @@ mod preview {
                     let initial =
                         engine.build(snapshot.view(), viewport, &InteractionState::default());
                     let mut interaction = InteractionState::default();
-                    if let Some(hit) = initial
-                        .hits
-                        .iter()
-                        .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(2)))
-                    {
-                        interaction.update_hover(
-                            &initial,
-                            Point::new(
-                                hit.bounds.x + hit.bounds.width * 0.5,
-                                hit.bounds.y + hit.bounds.height * 0.5,
-                            ),
+                    let target = if scenario == "pressed" {
+                        NodeId::Tag(TagId::new(2).unwrap())
+                    } else {
+                        NodeId::MinimizedWindow(WindowToken(2))
+                    };
+                    if let Some(hit) = initial.hits.iter().find(|hit| hit.id == target) {
+                        let point = Point::new(
+                            hit.bounds.x + hit.bounds.width * 0.5,
+                            hit.bounds.y + hit.bounds.height * 0.5,
                         );
+                        interaction.update_hover(&initial, point);
+                        if matches!(scenario, "pressed" | "pressed-dock") {
+                            interaction.press(&initial, point);
+                        }
                     }
                     let scene = engine.build(snapshot.view(), viewport, &interaction);
                     renderer.render(&context, &scene)?;

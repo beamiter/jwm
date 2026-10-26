@@ -2152,6 +2152,11 @@ impl Jwm {
         shift: bool,
     ) {
         backend.compositor_set_system_ui_hover(None);
+        // A prompt owns the list until it is answered. Pointer scrolling
+        // must preserve its subject just as keyboard navigation does.
+        if self.features.system_ui.is_prompting() {
+            return;
+        }
         // Scroll-on-slider: a wheel click over a Volume/Brightness row
         // adjusts the value under the pointer instead of browsing the list;
         // over Power Profile it cycles like Left/Right (with OSD). The
@@ -2356,7 +2361,9 @@ impl Jwm {
             return;
         }
         backend.compositor_set_system_ui_hover(None);
-        if self.features.system_ui.cancel_wifi_passphrase() {
+        if self.features.system_ui.cancel_clipboard_clear()
+            || self.features.system_ui.cancel_wifi_passphrase()
+        {
             self.sync_system_ui(backend);
         } else if self.features.system_ui.pairing_prompt().is_some() {
             // Clicking the scrim out of a pairing prompt cancels the pairing.
@@ -2706,6 +2713,27 @@ impl Jwm {
                     return Ok(());
                 }
             }
+            // Keypad Enter is the same activation key on every native panel.
+            // Keep the original keysym through the configured-toggle lookup
+            // above so a user's explicit keypad binding still has priority.
+            let keysym = if keysym == keys::KEY_KP_Enter {
+                keys::KEY_Return
+            } else {
+                keysym
+            };
+            if self.features.system_ui.clipboard_clear_pending() {
+                // This question owns input until answered; an auto-repeat or
+                // a second Ctrl+Delete cannot confirm a destructive action.
+                if keysym == keys::KEY_Escape {
+                    self.features.system_ui.cancel_clipboard_clear();
+                    self.sync_system_ui(backend);
+                } else if keysym == keys::KEY_Return && clean_state.is_empty() && !repeat {
+                    self.features.system_ui.cancel_clipboard_clear();
+                    self.clear_clipboard_history();
+                    self.sync_system_ui(backend);
+                }
+                return Ok(());
+            }
             if keysym == keys::KEY_Escape && locked {
                 // A monitor's unlock prompt is not the session lock: the
                 // desktop around it is live, so Escape on an idle card hands
@@ -2857,19 +2885,26 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_clipboard_picker() {
-                // The picker is type-to-filter: printable characters narrow
-                // the list and BackSpace edits the query. `d`, `c`, Delete,
-                // space and Return keep their picker meanings and act on the
-                // filtered selection — what you see is what they touch — so
-                // those letters never land in the query itself.
-                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
-                    self.copy_selected_clipboard(backend);
-                } else if keysym == keys::KEY_d || keysym == keys::KEY_Delete {
-                    self.forget_selected_clipboard(backend);
-                } else if keysym == keys::KEY_c {
-                    self.clear_clipboard_history();
+                // All printable characters belong to search. In particular,
+                // c/d/Space must never erase history or copy the current row
+                // when the user is simply typing a word or phrase.
+                let plain = clean_state.is_empty();
+                if keysym == keys::KEY_Return && plain {
+                    if !repeat {
+                        self.copy_selected_clipboard(backend);
+                    }
+                } else if keysym == keys::KEY_Delete && clean_state == Mods::CONTROL {
+                    if !repeat {
+                        self.features
+                            .system_ui
+                            .request_clipboard_clear(self.features.clipboard.len());
+                    }
                     self.sync_system_ui(backend);
-                } else if keysym == keys::KEY_BackSpace {
+                } else if keysym == keys::KEY_Delete && plain {
+                    if !repeat {
+                        self.forget_selected_clipboard(backend);
+                    }
+                } else if keysym == keys::KEY_BackSpace && plain {
                     self.consume_system_ui_query_replace();
                     self.features
                         .system_ui
@@ -2881,7 +2916,9 @@ impl Jwm {
                 } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
                     self.features.system_ui.move_selection(1);
                     self.sync_system_ui(backend);
-                } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+                } else if !clean_state.intersects(Mods::CONTROL | Mods::ALT | Mods::SUPER)
+                    && let Some(ch) = Self::system_ui_char(keysym, clean_state)
+                {
                     self.consume_system_ui_query_replace();
                     self.features
                         .system_ui
@@ -5445,6 +5482,341 @@ mod tests {
         backend.key_ops = Box::new(input.clone());
         backend.toast_log.lock().unwrap().clear();
         (jwm, backend, input)
+    }
+
+    fn clipboard_dispatch_fixture() -> (Jwm, ConfigureReplyBackend, RepeatDispatchKeys) {
+        let (mut jwm, backend, input) = repeat_dispatch_fixture();
+        for (index, text) in ["cd documents", "cd drafts", "other text"]
+            .iter()
+            .enumerate()
+        {
+            jwm.features.clipboard.record(text, index as u64);
+        }
+        jwm.features.system_ui =
+            crate::jwm::features::SystemUiState::clipboard_picker(&jwm.features.clipboard);
+        (jwm, backend, input)
+    }
+
+    fn dispatch_shell_test_key(
+        jwm: &mut Jwm,
+        backend: &mut ConfigureReplyBackend,
+        input: &RepeatDispatchKeys,
+        keysym: u32,
+        mods: Mods,
+        repeat: bool,
+    ) {
+        input.select(keysym);
+        jwm.on_key_press_internal_with_repeat(backend, 1, mods.bits(), repeat)
+            .unwrap();
+    }
+
+    #[test]
+    fn clipboard_typing_letters_spaces_and_modified_letters_never_deletes_history() {
+        let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+        for ch in "cd documents".chars() {
+            dispatch_shell_test_key(
+                &mut jwm,
+                &mut backend,
+                &input,
+                ch as u32,
+                Mods::empty(),
+                false,
+            );
+        }
+        assert_eq!(
+            jwm.features.system_ui.clipboard_query(),
+            Some("cd documents")
+        );
+        assert_eq!(jwm.features.clipboard.len(), 3);
+        assert_eq!(jwm.features.system_ui.selected_clipboard(), Some(2));
+        for mods in [Mods::CONTROL, Mods::ALT, Mods::SUPER] {
+            for keysym in [keys::KEY_c, keys::KEY_d, keys::KEY_space, keys::KEY_Return] {
+                dispatch_shell_test_key(&mut jwm, &mut backend, &input, keysym, mods, false);
+            }
+        }
+        assert_eq!(
+            jwm.features.system_ui.clipboard_query(),
+            Some("cd documents")
+        );
+        assert_eq!(jwm.features.clipboard.len(), 3);
+        assert!(jwm.features.system_ui.is_clipboard_picker());
+        assert!(!jwm.features.system_ui.clipboard_clear_pending());
+    }
+
+    #[test]
+    fn clipboard_delete_targets_the_filtered_selection_once_per_physical_press() {
+        let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+        for ch in "cd ".chars() {
+            dispatch_shell_test_key(
+                &mut jwm,
+                &mut backend,
+                &input,
+                ch as u32,
+                Mods::empty(),
+                false,
+            );
+        }
+        assert_eq!(jwm.features.system_ui.selected_clipboard(), Some(1));
+        for mods in [
+            Mods::SHIFT,
+            Mods::ALT,
+            Mods::SUPER,
+            Mods::CONTROL | Mods::SHIFT,
+        ] {
+            dispatch_shell_test_key(
+                &mut jwm,
+                &mut backend,
+                &input,
+                keys::KEY_Delete,
+                mods,
+                false,
+            );
+            assert_eq!(jwm.features.clipboard.len(), 3);
+            assert!(!jwm.features.system_ui.clipboard_clear_pending());
+        }
+        for repeat in [false, true, true] {
+            dispatch_shell_test_key(
+                &mut jwm,
+                &mut backend,
+                &input,
+                keys::KEY_Delete,
+                Mods::empty(),
+                repeat,
+            );
+        }
+        assert_eq!(jwm.features.clipboard.len(), 2);
+        assert!(matches!(
+            jwm.features.clipboard.get(0),
+            Some(crate::jwm::features::ClipboardEntry::Text { text, .. }) if text == "other text"
+        ));
+        assert!(matches!(
+            jwm.features.clipboard.get(1),
+            Some(crate::jwm::features::ClipboardEntry::Text { text, .. }) if text == "cd documents"
+        ));
+        assert_eq!(jwm.features.system_ui.clipboard_query(), Some("cd "));
+    }
+
+    #[test]
+    fn clipboard_clear_requires_a_visible_question_and_nonrepeated_unmodified_enter() {
+        let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_c,
+            Mods::empty(),
+            false,
+        );
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Delete,
+            Mods::CONTROL,
+            false,
+        );
+        let parts = jwm.features.system_ui.overlay_parts();
+        assert!(
+            parts
+                .items
+                .iter()
+                .any(|row| row.contains("Clear all 3 history entries"))
+        );
+        assert!(parts.hint.contains("Enter  clear all history"));
+        assert!(parts.selected.is_none());
+        assert_eq!(jwm.features.system_ui.visible_row_target(0), None);
+        assert!(jwm.features.system_ui.pairing_prompt().is_none());
+        let selected = jwm.features.system_ui.selected_clipboard();
+        jwm.scroll_system_ui_from_pointer(&mut backend, 1, Some(0), false);
+        assert_eq!(jwm.features.system_ui.selected_clipboard(), selected);
+        for (keysym, mods, repeat) in [
+            (keys::KEY_Delete, Mods::CONTROL, true),
+            (keys::KEY_Delete, Mods::CONTROL, false),
+            (keys::KEY_Return, Mods::empty(), true),
+            (keys::KEY_Return, Mods::CONTROL, false),
+            (keys::KEY_c, Mods::empty(), false),
+            (keys::KEY_Down, Mods::empty(), false),
+        ] {
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, keysym, mods, repeat);
+            assert!(jwm.features.system_ui.clipboard_clear_pending());
+            assert_eq!(jwm.features.clipboard.len(), 3);
+        }
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_KP_Enter,
+            Mods::empty(),
+            false,
+        );
+        assert!(jwm.features.clipboard.is_empty());
+        assert!(!jwm.features.system_ui.clipboard_clear_pending());
+        assert!(jwm.features.system_ui.is_clipboard_picker());
+        assert_eq!(jwm.features.system_ui.clipboard_query(), Some("c"));
+    }
+
+    #[test]
+    fn clipboard_clear_escape_and_scrim_cancel_before_returning_to_hub() {
+        let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+        jwm.features.system_ui_return_to_hub = true;
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_c,
+            Mods::empty(),
+            false,
+        );
+        let selected = jwm.features.system_ui.selected_clipboard();
+        for pointer in [false, true] {
+            dispatch_shell_test_key(
+                &mut jwm,
+                &mut backend,
+                &input,
+                keys::KEY_Delete,
+                Mods::CONTROL,
+                false,
+            );
+            if pointer {
+                jwm.dismiss_system_ui_from_pointer(&mut backend);
+            } else {
+                dispatch_shell_test_key(
+                    &mut jwm,
+                    &mut backend,
+                    &input,
+                    keys::KEY_Escape,
+                    Mods::empty(),
+                    false,
+                );
+            }
+            assert!(!jwm.features.system_ui.clipboard_clear_pending());
+            assert!(jwm.features.system_ui.is_clipboard_picker());
+            assert_eq!(jwm.features.system_ui.selected_clipboard(), selected);
+            assert_eq!(jwm.features.system_ui.clipboard_query(), Some("c"));
+            assert_eq!(jwm.features.clipboard.len(), 3);
+        }
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Escape,
+            Mods::empty(),
+            false,
+        );
+        assert!(matches!(
+            jwm.features.system_ui,
+            crate::jwm::features::SystemUiState::ControlCenter {
+                shell_hub: true,
+                ..
+            }
+        ));
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Escape,
+            Mods::empty(),
+            false,
+        );
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn clipboard_history_refresh_invalidates_a_pending_clear_confirmation() {
+        let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Delete,
+            Mods::CONTROL,
+            false,
+        );
+        assert!(jwm.features.system_ui.clipboard_clear_pending());
+        jwm.features.clipboard.record("newly copied", 4);
+        jwm.features
+            .system_ui
+            .refresh_clipboard(&jwm.features.clipboard);
+        assert!(!jwm.features.system_ui.clipboard_clear_pending());
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Return,
+            Mods::empty(),
+            false,
+        );
+        assert_eq!(jwm.features.clipboard.len(), 4);
+    }
+
+    #[test]
+    fn clipboard_keypad_enter_uses_the_same_activation_path_as_return() {
+        for keysym in [keys::KEY_Return, keys::KEY_KP_Enter] {
+            let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, keysym, Mods::empty(), false);
+            // This backend deliberately cannot publish a clipboard. The
+            // visible error proves both keys reached the real copy action.
+            assert!(
+                jwm.features
+                    .system_ui
+                    .overlay_parts()
+                    .items
+                    .iter()
+                    .any(|row| { row.contains("this backend cannot set the clipboard") })
+            );
+        }
+    }
+
+    #[test]
+    fn clipboard_navigation_and_actions_work_with_caps_and_num_lock() {
+        let (mut jwm, mut backend, input) = clipboard_dispatch_fixture();
+        let locks = Mods::CAPS | Mods::NUMLOCK;
+        for (keysym, mods, selected) in [
+            (keys::KEY_Tab, locks, 1),
+            (keys::KEY_Tab, locks | Mods::SHIFT, 0),
+            (keys::KEY_ISO_Left_Tab, locks, 2),
+            (keys::KEY_Home, locks, 0),
+            (keys::KEY_End, locks, 2),
+        ] {
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, keysym, mods, false);
+            assert_eq!(jwm.features.system_ui.selected_clipboard(), Some(selected));
+        }
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Delete,
+            locks,
+            false,
+        );
+        assert_eq!(jwm.features.clipboard.len(), 2);
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Delete,
+            locks | Mods::CONTROL,
+            false,
+        );
+        assert!(jwm.features.system_ui.clipboard_clear_pending());
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Return,
+            locks,
+            false,
+        );
+        assert!(jwm.features.clipboard.is_empty());
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Delete,
+            locks | Mods::CONTROL,
+            false,
+        );
+        assert!(!jwm.features.system_ui.clipboard_clear_pending());
     }
 
     fn shortcut_passthrough_fixture() -> (

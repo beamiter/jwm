@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-10-26：日常 UI/UX 人体工学优化（输入防误触 / 按压反馈 / 文字可读性）
+
+基于 `274780391ba8d6bffdcc413876d42a4c51395207`。本轮从真实输入与绘制
+路径中的缺口入手；设计与复现入口见 `docs/ergonomics.md`。
+
+**已实现**：
+
+| 范围 | 用户可见变化 | 回归落点 |
+| --- | --- | --- |
+| 剪贴板搜索 | `c`、`d`、空格都进入查询；Delete 只删当前过滤结果且每次物理按下只删一次；Ctrl+Delete 显示全量历史数量，新的无修饰 Enter 才确认 | `input_handler` 的 7 项真实 modal dispatcher 测试 |
+| 确认状态 | Esc/点击外侧先取消问题、保留查询与选择；历史刷新使旧确认失效；滚轮、列表行点击、滚动条拖动不能改变确认期间的选择 | `clipboard_clear_prompt_blocks_scrollbar_seek_and_keeps_the_filtered_selection`，含超出 14 行的过滤列表 |
+| 键盘一致性 | 小键盘 Enter 复用普通 Enter 激活路径；已配置的面板 opener 优先；原有 Shift+Tab/Home/End 与 Caps/Num Lock 行为有回归覆盖 | modal 输入测试；Shell Hub 返回层级保持 |
+| 状态栏按压 | workspace/status/Dock 卡片/+N 入口有固定位置的对比边框；保留原填充、文字、选中与 urgent 信号；取消、离开、动作替换后撤销反馈 | 四边 × 深浅主题 × 1/1.25/1.5/2 倍几何矩阵，Cairo 实际像素回归 |
+| 渲染接入 | Egui 静止指针的 press/release/cancel 当帧重建；Cairo/Egui 无对应按钮动作时不显示已按下 | `stationary_button_edges_rebuild_immediately_and_unbound_buttons_stay_unarmed`、Cairo primary-only Dock 测试 |
+| 可读性 | 三种玻璃的辅助文字与衬底重调，普通字号文字按 4.5:1 检查；通知来源不再额外降到 72% alpha；深色搜索框/chip 避免线性混合发白 | 七主题/两颜色域/亮暗背景/有无 backdrop/父子填充配对矩阵 |
+| 颜色域 | 共享 `readable_surface_fill` 给线性混合下的深色表面补足覆盖率，含 interior sheen/grain 和舍入余量；X11/Wayland 共用策略 | 新增两个真实 GLSL readback 测试，覆盖三个玻璃主题、四种文字表面、三个内侧位置与黑白背景 |
+
+**验证**（Ubuntu 24.04，Rust 1.99.1；surfaceless EGL，OpenGL ES 3 / OpenGL
+3.3，Cairo 1.18、Pango 1.52、Xvfb；没有物理显示器拓扑/刷新率验收）：
+
+- 原始基线 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1 scripts/test.sh`：
+  **7249 passed / 0 failed / 1 ignored**；本轮相同完整命令：
+  **7260 passed / 0 failed / 1 ignored**，新增 11 项根包回归。
+- `scripts/test.sh -p xbar_core --all-features --all-targets`：**394 passed**。
+- `scripts/test.sh -p xbar_linux_actions -p xbar_dbus_providers --all-targets`：
+  **33 passed**；两适配包的严格 Clippy `-D warnings` 通过。
+- Egui 独立 manifest 的 `scripts/test.sh --manifest-path bars/egui_bar/Cargo.toml
+  --all-targets`：**7 passed**。该独立包未跟踪 lockfile，验证时按现有 manifest
+  生成本地忽略的 lockfile，未提交依赖更新。
+- 根包 `cargo check --locked --all-targets`、根工作区及 Egui `cargo fmt --check`、
+  `git diff --check` 通过。生成 standard/pressed/pressed-dock 三场景共 **48 张**
+  真实 Cairo/Pango PNG 与对应 Scene JSON，并抽查水平/垂直、深浅和 1×/2×。
+- 根包严格 Clippy **仍受既有 warning 阻塞**：Rust 1.99.1 将未改动的
+  `src/remote/host.rs:1434` 中 `AtomicUsize::fetch_update` 标为 deprecated，
+  原始基线编译也报告同一 warning。仅在验证命令中显式排除此已知告警的
+  `cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings -A deprecated`
+  通过；未修改源码 lint、MSRV、依赖或远程控制逻辑来掩盖它。
+
+**边界/后续**：对比度保证限定在完全可见且稳定的文字区域内部，非整个桌面
+WCAG 认证；装饰 bevel/glint、淡入淡出、自定义 accent 和 HDR tone mapping
+未纳入保证。尚未验证实际桌面 DRM/KMS、多屏混合 DPI 与手感，也未重跑七种
+CI 特性矩阵或 Rust 1.89。默认 bar 透明/毛玻璃选择、窗口恢复快捷键和焦点策略
+未改。实际生效需重建 JWM 和所用 bar 后重启进程；配置 reload 不替换二进制。
+
+---
+
 ## 2026-10-26：virtual-keyboard 独立兼容迁移（实机验收待完成）
 
 基于 `707c2d623b9df5f41d57cffca63941cb3ee4056f`，分支

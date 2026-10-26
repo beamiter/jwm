@@ -6172,6 +6172,8 @@ impl WaylandCompositor {
         alpha: f32,
         scene_linear: bool,
     ) {
+        let surface =
+            palette.readable_surface_fill(surface, scene_linear, self.glass_backdrop.is_some());
         unsafe {
             let drew_glass = match palette.glass {
                 Some(params) if self.glass_backdrop.is_some() => {

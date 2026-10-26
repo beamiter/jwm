@@ -1176,8 +1176,12 @@ impl CairoBar {
                 self.scroll.reset();
                 self.last_pointer = Some(point);
                 let hover_changed = self.interaction.update_hover(&self.scene, point);
-                let press_changed = self.interaction.press(&self.scene, point);
-                self.pressed_button = Some(button);
+                let press_changed = if self.scene.action_at(point, button.action()).is_some() {
+                    self.interaction.press(&self.scene, point)
+                } else {
+                    self.interaction.cancel_press()
+                };
+                self.pressed_button = self.interaction.pressed().map(|_| button);
                 self.synchronize_dock_model();
                 self.flush_dock_commands(Instant::now());
                 PointerUpdate {
@@ -2831,6 +2835,133 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn cairo_press_feedback_changes_retained_pixels_and_clears_on_cancel_or_button_mismatch() {
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            for scale in [1.0, 2.0] {
+                let mut bar = CairoBar::new(
+                    BarRuntime::default(),
+                    crate::presentation::PresentationConfig {
+                        edge,
+                        physical_thickness: Some(42),
+                        bar_height: 42.0 / scale as f32,
+                        ..crate::presentation::PresentationConfig::default()
+                    },
+                    FontDescription::from_string("Sans"),
+                );
+                let mut canvas = CpuCanvas::new();
+                let (width, height) = if edge.is_vertical() {
+                    (42, 1600)
+                } else {
+                    (1600, 42)
+                };
+                canvas.render(&mut bar, width, height, scale).unwrap();
+                let hit = bar
+                    .scene()
+                    .hits
+                    .iter()
+                    .find(|hit| hit.id == NodeId::Theme)
+                    .expect("theme control remains reachable");
+                let point = Point::new(
+                    hit.bounds.x + hit.bounds.width * 0.5,
+                    hit.bounds.y + hit.bounds.height * 0.5,
+                );
+                bar.handle_pointer(PointerInput::Move(point));
+                let hovered = canvas
+                    .render(&mut bar, width, height, scale)
+                    .unwrap()
+                    .data
+                    .to_vec();
+                for end in [
+                    PointerInput::Cancel,
+                    PointerInput::Release {
+                        point,
+                        button: PointerButton::Secondary,
+                    },
+                ] {
+                    let press = bar.handle_pointer(PointerInput::Press {
+                        point,
+                        button: PointerButton::Primary,
+                    });
+                    assert!(press.needs_redraw());
+                    let frame = canvas.render(&mut bar, width, height, scale).unwrap();
+                    assert_ne!(frame.data, hovered.as_slice(), "press must change pixels");
+                    assert!(!frame.damage.as_ref().unwrap().is_empty());
+
+                    let cancelled = bar.handle_pointer(end);
+                    assert!(cancelled.needs_redraw());
+                    assert!(cancelled.runtime.is_empty());
+                    assert_eq!(bar.snapshot().theme, ThemeMode::Dark);
+                    let restored = canvas.render(&mut bar, width, height, scale).unwrap();
+                    assert_eq!(restored.data, hovered.as_slice());
+                    assert!(!restored.damage.as_ref().unwrap().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cairo_primary_only_dock_does_not_arm_for_secondary_press() {
+        use crate::{BarEvent, MinimizedWindow, MonitorId, WindowToken, WmSnapshot};
+
+        let mut runtime = BarRuntime::default();
+        runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
+            wm_session_id: 1,
+            minimized_windows: vec![MinimizedWindow {
+                token: WindowToken(1),
+                monitor: MonitorId(0),
+                title: "Terminal".into(),
+                app_id: "terminal".into(),
+                flags: 0,
+            }],
+            ..WmSnapshot::default()
+        }));
+        let mut bar = CairoBar::new(
+            runtime,
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+        let mut canvas = CpuCanvas::new();
+        canvas.render(&mut bar, 1600, 42, 1.0).unwrap();
+        let hit = bar
+            .scene()
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(1)))
+            .unwrap();
+        assert!(hit.primary.is_some());
+        assert!(hit.secondary.is_none());
+        let point = Point::new(
+            hit.bounds.x + hit.bounds.width * 0.5,
+            hit.bounds.y + hit.bounds.height * 0.5,
+        );
+        bar.handle_pointer(PointerInput::Move(point));
+        let hovered = canvas
+            .render(&mut bar, 1600, 42, 1.0)
+            .unwrap()
+            .data
+            .to_vec();
+        for input in [
+            PointerInput::Press {
+                point,
+                button: PointerButton::Secondary,
+            },
+            PointerInput::Release {
+                point,
+                button: PointerButton::Secondary,
+            },
+        ] {
+            let update = bar.handle_pointer(input);
+            assert!(update.runtime.is_empty());
+            assert_eq!(bar.interaction.pressed(), None);
+            assert_eq!(bar.pressed_button, None);
+            assert_eq!(
+                canvas.render(&mut bar, 1600, 42, 1.0).unwrap().data,
+                hovered.as_slice()
+            );
+        }
     }
 
     #[test]

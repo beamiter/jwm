@@ -213,8 +213,8 @@ impl EguiBarApp {
 
     /// Feed this frame's pointer state through the scene's hit map.
     ///
-    /// Returns true when hover changed, which means the scene has to be built
-    /// again before it is painted — the same second pass `CairoBar` makes.
+    /// Returns true when hover or press feedback changed, so the scene is
+    /// rebuilt before this frame is painted, as in `CairoBar`.
     fn handle_pointer(&mut self, ctx: &egui::Context, origin: Pos2) -> bool {
         let pointer = ctx.input(|input| {
             input
@@ -226,6 +226,7 @@ impl EguiBarApp {
         let logical = pointer.map(|pos| Point::new(pos.x - origin.x, pos.y - origin.y));
 
         let mut interaction = self.interaction;
+        let mut changed = false;
         let mut actions = Vec::new();
         for event in ctx.input(|input| input.events.clone()) {
             match event {
@@ -235,26 +236,17 @@ impl EguiBarApp {
                     pressed,
                     ..
                 } => {
-                    let input = match button {
-                        egui::PointerButton::Primary => Some(PointerAction::Primary),
-                        egui::PointerButton::Secondary => Some(PointerAction::Secondary),
-                        _ => None,
-                    };
-                    if let Some(input) = input {
-                        let point = Point::new(pos.x - origin.x, pos.y - origin.y);
-                        if pressed {
-                            interaction.press(&self.scene, point);
-                            self.pressed_pointer_button = Some(button);
-                        } else if self.pressed_pointer_button != Some(button) {
-                            interaction.cancel_press();
-                            self.pressed_pointer_button = None;
-                        } else {
-                            self.pressed_pointer_button = None;
-                            if let Some(action) = interaction.release(&self.scene, point, input) {
-                                actions.push(action);
-                            }
-                        }
-                    }
+                    let point = Point::new(pos.x - origin.x, pos.y - origin.y);
+                    let (button_changed, action) = update_pointer_button(
+                        &self.scene,
+                        &mut interaction,
+                        &mut self.pressed_pointer_button,
+                        point,
+                        button,
+                        pressed,
+                    );
+                    changed |= button_changed;
+                    actions.extend(action);
                 }
                 egui::Event::MouseWheel { delta, .. } => {
                     if let (Some(point), Some(input)) = (
@@ -268,7 +260,7 @@ impl EguiBarApp {
             }
         }
 
-        let changed = match logical {
+        changed |= match logical {
             Some(point) => interaction.update_hover(&self.scene, point),
             None => {
                 self.pressed_pointer_button = None;
@@ -433,6 +425,42 @@ impl EguiBarApp {
     }
 }
 
+/// Keep button-state invalidation independent of hover: a stationary press
+/// still changes the material in the scene that will be painted this frame.
+fn update_pointer_button(
+    scene: &Scene,
+    interaction: &mut InteractionState,
+    pressed_button: &mut Option<egui::PointerButton>,
+    point: Point,
+    button: egui::PointerButton,
+    pressed: bool,
+) -> (bool, Option<UserAction>) {
+    let input = match button {
+        egui::PointerButton::Primary => PointerAction::Primary,
+        egui::PointerButton::Secondary => PointerAction::Secondary,
+        _ => return (false, None),
+    };
+    if pressed {
+        let changed = if scene.action_at(point, input).is_some() {
+            interaction.press(scene, point)
+        } else {
+            interaction.cancel_press()
+        };
+        *pressed_button = interaction.pressed().map(|_| button);
+        (changed, None)
+    } else {
+        let changed = interaction.pressed().is_some();
+        let action = if *pressed_button == Some(button) {
+            interaction.release(scene, point, input)
+        } else {
+            interaction.cancel_press();
+            None
+        };
+        *pressed_button = None;
+        (changed, action)
+    }
+}
+
 fn send_placement(ctx: &egui::Context, placement: BarPlacement) {
     let scale = ctx.pixels_per_point().max(f32::EPSILON);
     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
@@ -524,11 +552,55 @@ fn model_config(config: &xbar_core::config::BarConfig) -> ModelConfig {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    use xbar_core::presentation::{HitRegion, NodeId, Rect};
 
     #[test]
     fn configured_light_theme_seeds_the_egui_model() {
         let config = xbar_core::config::BarConfig::from_toml("theme = 'light'").unwrap();
         let model = xbar_core::BarModel::new(model_config(&config)).unwrap();
         assert_eq!(model.view().theme, xbar_core::ThemeMode::Light);
+    }
+
+    #[test]
+    fn stationary_button_edges_rebuild_immediately_and_unbound_buttons_stay_unarmed() {
+        let scene = Scene {
+            viewport: Size::new(80.0, 40.0),
+            clip: Rect::new(0.0, 0.0, 80.0, 40.0),
+            nodes: Vec::new(),
+            hits: vec![HitRegion {
+                id: NodeId::Theme,
+                bounds: Rect::new(0.0, 0.0, 80.0, 40.0),
+                primary: Some(UserAction::ToggleTheme),
+                secondary: None,
+                scroll_up: None,
+                scroll_down: None,
+            }],
+        };
+        let point = Point::new(40.0, 20.0);
+        let mut interaction = InteractionState::default();
+        let mut held = None;
+        interaction.update_hover(&scene, point);
+        for (button, pressed, expected) in [
+            (egui::PointerButton::Primary, true, (true, None)),
+            // A mismatched release cancels and must erase the pressed ring.
+            (egui::PointerButton::Secondary, false, (true, None)),
+            // Primary-only controls must not look armed by a right press.
+            (egui::PointerButton::Secondary, true, (false, None)),
+            (egui::PointerButton::Secondary, false, (false, None)),
+            (egui::PointerButton::Primary, true, (true, None)),
+            (
+                egui::PointerButton::Primary,
+                false,
+                (true, Some(UserAction::ToggleTheme)),
+            ),
+        ] {
+            assert_eq!(
+                update_pointer_button(&scene, &mut interaction, &mut held, point, button, pressed),
+                expected
+            );
+            assert!(!interaction.update_hover(&scene, point));
+        }
+        assert_eq!(interaction.pressed(), None);
+        assert_eq!(held, None);
     }
 }

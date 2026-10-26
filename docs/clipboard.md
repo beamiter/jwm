@@ -6,17 +6,17 @@ puts the entry you choose back on the clipboard.
 | Key | Action |
 | --- | --- |
 | `Up` / `Down` | move the selection |
-| type | filter the list — case-insensitive substring on text, or tokens like `png` / dimensions for images |
+| type (including `c`, `d`, and spaces) | filter the list — case-insensitive substring on text, or tokens like `png` / dimensions for images |
 | `BackSpace` | edit the filter |
-| `Enter` / left click | copy the entry back |
-| `d` / `Delete` / middle click | forget the selected (or pointed) entry |
-| `c` | clear the whole history |
+| `Enter` / keypad `Enter` / left click | copy the entry back |
+| `Delete` / middle click | forget the selected (or pointed) entry |
+| `Ctrl+Delete`, then `Enter` | confirm clearing the whole history, including filtered-out entries |
 | `Esc` or `Alt+Ctrl+V` | close — the key that opened the list also dismisses it |
 
 ## Pointer
 
 Left click on a row copies it back — the same as `Enter`. The vertical or horizontal wheel browses the list (Up/Down keyboard twins). Middle click on a row selects that row and forgets it in one shot
-(the pointer twin of `d` / `Delete`; no arm, and never clear-all). A middle
+(the pointer twin of `Delete`; no arm, and never clear-all). A middle
 click on blank space is inert. Wi-Fi and Bluetooth pickers use the same
 middle-click hit shape, but keep their two-press armed confirm (first
 press arms, second deletes — the pointer twin of `d`).
@@ -26,6 +26,15 @@ every open. Row numbers keep their history positions, so a filtered list
 shows gaps; with nothing matching, the panel says so instead of going blank.
 The filter accepts up to 256 Unicode characters; remove characters to enter
 more after reaching the limit. Clipboard payload limits are separate.
+
+Printable characters always belong to the filter: typing `cd documents` cannot
+delete entries or close the picker. The former bare `c` / `d` actions now use
+`Ctrl+Delete` / `Delete`, and Space is search text. Holding Delete removes only
+one entry per physical press. Clear-all opens a visible question with the full
+history count; `Esc` or clicking outside cancels the question and preserves the
+query and selection. A second Escape follows the usual close / return-to-Hub
+path. If the history changes while the question is open, the confirmation is
+cancelled so newly copied entries are never cleared by an older confirmation.
 
 Each text row shows its position, how much was copied (`31c` for a single
 line of 31 characters, `3L` for three lines), and a one-line preview with

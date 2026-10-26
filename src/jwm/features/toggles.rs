@@ -2161,7 +2161,7 @@ impl Jwm {
         }
     }
 
-    /// Forget the selected entry — keyboard `d` / Delete and middle-click
+    /// Forget the selected entry — keyboard Delete and middle-click
     /// on a row share this path. One shot, no arm; never clear-all.
     pub(crate) fn forget_selected_clipboard(&mut self, backend: &mut dyn Backend) {
         let Some(index) = self.features.system_ui.selected_clipboard() else {

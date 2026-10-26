@@ -52,7 +52,7 @@ a **thick pane of glass**, not a translucent rectangle:
 | **Fresnel-weighted rim + inner glow** | Reflectance is reconstructed from the bevel's own surface, so the hairline and the glow behind it brighten where the glass is grazing and fade out over the flat face. The line runs the whole perimeter, brightest on the two edges aligned with the light. No accent ring is drawn: a circular ring would not follow the squircle |
 | **Real specular** | The bevel's normal rotates through the mirror angle in the corner nearest the light, so the glint lands where a pane actually catches one, instead of a flat diagonal wash across the whole face. A broad, soft lift toward the light is the diffuse half of the same illumination |
 | **Chroma lift** | A blur averages color toward gray, so saturation is pushed back up |
-| **White veil (≈0.5 alpha)** | Heavy enough that even over a *black* desktop the surface lands near mid-gray, keeping the dark inks above 4.5:1. That floor is what makes a light material safe on a window manager, where the content behind it is whatever the user opened |
+| **White veil (0.62–0.64 alpha)** | Holds normal-size body text and keyboard hints above the 4.5:1 text contrast floor over a black desktop, while the blurred desktop still supplies the sheet's colour |
 
 Corner radii are larger, paddings roomier, and the shadow is wide but nearly
 absent: the optics already separate the card, so a hard elevation shadow would
@@ -176,10 +176,34 @@ Four things it does that are worth knowing as a user:
 | **A hairline separates the list from the footer** | The footer hint names the keys that work on the panel. It is drawn one step quieter than the rows, and the rule is what keeps it from reading as one more row |
 | **Long text is fitted before upload** | Every row is ellipsized against the real font metrics before its CPU/GL texture is allocated. Queries retain the caret end, and a narrow nested output wins over the normal desktop width floor |
 
-Every theme's footer hint is held to WCAG's 3:1 contrast floor against its own
-panel over the worst-case desktop, and the typed query line to the 4.5:1 body
-ratio, with tests in `ui_theme.rs` that fail if a retoned palette drops under
-them.
+### Text legibility
+
+Footer shortcuts, notification bodies and sender names are normal-size text.
+They use the same **4.5:1 minimum** as list rows and queries; being secondary
+information does not make them large or decorative text. This follows the
+[W3C normal-text contrast guidance](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html).
+The footer remains visually separate through its position and divider; toast
+attribution keeps the readable secondary palette ink instead of fading it a
+second time.
+
+The glass palettes pair stronger secondary inks with slightly heavier card
+veils. Dark glass search fields and action chips have their own dark tints,
+so a light backdrop cannot wash out the controls. The status bar retains its
+independent clear/frosted setting and tint.
+
+The regression matrix in `ui_theme.rs` checks actual title, row, label, footer,
+query, notification and action-chip pairs over **both black and white**,
+including the control fill on top of its parent card. It covers encoded-sRGB
+compositing and the optional scene-linear path, with or without the glass
+backdrop. Dark translucent fills need more coverage in linear light; both
+compositors use the same fill resolver, which includes the glass interior's
+maximum face sheen and grain in its bound. The linear path targets 4.65:1 to
+leave room for framebuffer rounding.
+
+These checks cover fully visible, settled text-bearing interiors. They do
+not certify transition fades, decorative bevels and glints, arbitrary custom
+accent washes, HDR tone mapping, display calibration, or the whole desktop
+as WCAG conformant.
 
 ## Requirements and fallback
 

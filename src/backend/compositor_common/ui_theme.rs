@@ -139,8 +139,8 @@ const RECORDING_LIVE: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
 /// over whatever the compositor put behind it. That veil is deliberate — it is
 /// what holds the bar's own text at contrast on an arbitrary wallpaper — so the
 /// compositor's tint is only the *hue* of the sheet, not its opacity. Stacking
-/// the panels' coverage (0.46–0.62) under a 0.55 client wash would land near
-/// 0.8 total and the sheet would read as a muddy stripe rather than glass.
+/// the panels' stronger coverage under a 0.55 client wash would hide most of
+/// the backdrop and the sheet would read as a muddy stripe rather than glass.
 ///
 /// Both backends read this, so the two compositors' bars stay identical.
 pub(crate) const STATUS_BAR_GLASS_TINT_ALPHA: f32 = 0.08;
@@ -325,6 +325,49 @@ pub(crate) struct UiPalette {
 }
 
 impl UiPalette {
+    /// Resolve the base fill of a text-bearing card in the renderer's domain.
+    ///
+    /// The authored palette is tuned for the legacy encoded-sRGB path. A
+    /// translucent dark veil mixed in linear light lets much more luminance
+    /// through: its encoded-mode alpha cannot safely be reused over a white
+    /// window. Increase coverage just enough for the quietest normal text,
+    /// including the glass shader's maximum face sheen and half-step grain.
+    /// This applies to the settled interior, outside the decorative bevel;
+    /// fade envelopes and arbitrary user accent washes are separate effects.
+    ///
+    /// Status-bar glass does not call this helper. Its independently authored
+    /// transparency and material stay unchanged.
+    pub(crate) fn readable_surface_fill(
+        &self,
+        mut surface: [f32; 4],
+        scene_linear: bool,
+        glass_available: bool,
+    ) -> [f32; 4] {
+        // Light surfaces get brighter in linear light, which already helps
+        // their dark ink. Opaque surfaces need no additional coverage either.
+        if !scene_linear || surface[3] >= 1.0 {
+            return surface;
+        }
+        let tint_luminance = srgb_luminance([surface[0], surface[1], surface[2]]);
+        if ink_luminance(self.item_ink) < tint_luminance {
+            return surface;
+        }
+        let ink_luminance = [self.label_ink, self.hint_ink, self.chip_ink]
+            .into_iter()
+            .map(ink_luminance)
+            .fold(1.0_f32, f32::min);
+        // A little headroom covers 8-bit framebuffer rounding at the minimum.
+        let max_background = (ink_luminance + 0.05) / 4.65 - 0.05;
+        let lift = self.glass.filter(|_| glass_available).map_or(0.0, |glass| {
+            // In the flat face bevel/spec/rim are zero, Fresnel weight is
+            // zero, and face is in [0, 1]: sheen contributes at most 0.55.
+            0.55 * glass.sheen + 0.5 * glass.grain
+        });
+        let required = (1.0 + lift - max_background) / (1.0 - tint_luminance).max(f32::EPSILON);
+        surface[3] = surface[3].max(required).clamp(0.0, 1.0);
+        surface
+    }
+
     /// Shadow spread for a surface whose Material spread is `base`.
     pub(crate) fn spread(&self, base: f32) -> f32 {
         base * self.shadow_spread_scale
@@ -519,6 +562,25 @@ fn finite01(value: f32) -> f32 {
     }
 }
 
+fn srgb_luminance(rgb: [f32; 3]) -> f32 {
+    let decode = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * decode(rgb[0]) + 0.7152 * decode(rgb[1]) + 0.0722 * decode(rgb[2])
+}
+
+fn ink_luminance(ink: [u8; 4]) -> f32 {
+    srgb_luminance([
+        f32::from(ink[0]) / 255.0,
+        f32::from(ink[1]) / 255.0,
+        f32::from(ink[2]) / 255.0,
+    ])
+}
+
 fn ink_argb(ink: [u8; 4]) -> ArgbColor {
     ArgbColor::new(ink[3], ink[0], ink[1], ink[2])
 }
@@ -582,10 +644,10 @@ pub(crate) const MATERIAL: UiPalette = UiPalette {
 /// rim hairline. Radii are larger and paddings roomier, matching the
 /// proportions of iOS sheets and macOS Control Center.
 ///
-/// The white veil is deliberately heavy enough (≈0.5) that even over a black
-/// desktop the surface lands around mid-gray, so the dark inks below never
-/// drop under roughly 6:1. That floor is what makes a light material safe on
-/// a window manager, where the content behind it is whatever the user opened.
+/// The white veil is deliberately heavy enough (0.62–0.64) that even over a
+/// black desktop the normal-size secondary inks remain readable. The quiet
+/// tones use the same 4.5:1 floor as primary text: translucency must not turn
+/// a keyboard hint or notification body into decorative, unreadable detail.
 pub(crate) const GLASS: UiPalette = UiPalette {
     glass: Some(GlassParams {
         blur_levels: 5,
@@ -605,10 +667,10 @@ pub(crate) const GLASS: UiPalette = UiPalette {
 
     // White veil over the blurred backdrop. The modal panel carries the most
     // text, so it takes the heaviest one.
-    card: [1.0, 1.0, 1.0, 0.46],
-    panel: [1.0, 1.0, 1.0, 0.54],
-    toast: [1.0, 1.0, 1.0, 0.48],
-    osd: [1.0, 1.0, 1.0, 0.48],
+    card: [1.0, 1.0, 1.0, 0.62],
+    panel: [1.0, 1.0, 1.0, 0.64],
+    toast: [1.0, 1.0, 1.0, 0.62],
+    osd: [1.0, 1.0, 1.0, 0.62],
     // Raised controls go lighter still; recessed tracks go dark, the way
     // they do on a light material.
     chip: [1.0, 1.0, 1.0, 0.55],
@@ -632,17 +694,15 @@ pub(crate) const GLASS: UiPalette = UiPalette {
     selection_alpha: 0.42,
 
     title_ink: [22, 26, 34, 255],
-    chip_ink: [70, 78, 94, 255],
-    label_ink: [86, 94, 110, 255],
+    chip_ink: [48, 52, 64, 255],
+    label_ink: [40, 44, 54, 255],
     value_ink: [16, 20, 28, 255],
     panel_title_ink: [20, 24, 32, 255],
     query_ink: [12, 16, 24, 255],
     item_ink: [26, 30, 40, 255],
-    // Dark enough to clear 3:1 against the veil over a black desktop, which
-    // the old [96, 104, 120] missed at 1.6:1 — the least legible text on the
-    // panel was the line naming the keys. Still well above the rows, so the
-    // footer stays a footer.
-    hint_ink: [52, 60, 76, 255],
+    // Keyboard hints are normal-size guidance, so they need the same 4.5:1
+    // minimum as rows. The divider and placement supply the quieter hierarchy.
+    hint_ink: [44, 48, 60, 255],
     osd_ink: [16, 20, 28, 255],
     card_radius: 22.0,
     chip_radius: 11.0,
@@ -676,12 +736,14 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
         grain: 0.016,
     }),
 
-    card: [0.10, 0.12, 0.16, 0.55],
-    panel: [0.09, 0.11, 0.15, 0.62],
-    toast: [0.10, 0.12, 0.16, 0.55],
-    osd: [0.10, 0.12, 0.16, 0.55],
-    chip: [1.0, 1.0, 1.0, 0.18],
-    field: [1.0, 1.0, 1.0, 0.15],
+    card: [0.10, 0.12, 0.16, 0.78],
+    panel: [0.09, 0.11, 0.15, 0.79],
+    toast: [0.10, 0.12, 0.16, 0.78],
+    osd: [0.10, 0.12, 0.16, 0.78],
+    // Authored dark controls retain their text contrast in both blend domains;
+    // a translucent white wash became much too bright on the linear path.
+    chip: [0.18, 0.20, 0.26, 0.92],
+    field: [0.15, 0.17, 0.23, 0.90],
     track: [1.0, 1.0, 1.0, 0.22],
     slider_track: [1.0, 1.0, 1.0, 0.24],
     scrim: [0.02, 0.03, 0.05, 0.34],
@@ -696,13 +758,13 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     selection_alpha: 0.34,
 
     title_ink: [244, 248, 255, 255],
-    chip_ink: [206, 216, 234, 255],
-    label_ink: [198, 208, 226, 255],
+    chip_ink: [216, 226, 244, 255],
+    label_ink: [220, 228, 244, 255],
     value_ink: [250, 252, 255, 255],
     panel_title_ink: [246, 250, 255, 255],
     query_ink: [252, 253, 255, 255],
     item_ink: [238, 243, 252, 255],
-    hint_ink: [196, 206, 224, 255],
+    hint_ink: [216, 224, 240, 255],
     osd_ink: [250, 252, 255, 255],
     card_radius: 22.0,
     chip_radius: 11.0,
@@ -737,13 +799,12 @@ pub(crate) const AURORA: UiPalette = UiPalette {
         grain: 0.016,
     }),
 
-    card: [0.10, 0.08, 0.20, 0.55],
-    panel: [0.09, 0.07, 0.19, 0.62],
-    toast: [0.10, 0.08, 0.20, 0.55],
-    osd: [0.10, 0.08, 0.20, 0.55],
-    // Raised controls take a periwinkle wash rather than plain white.
-    chip: [0.62, 0.70, 1.0, 0.20],
-    field: [0.62, 0.70, 1.0, 0.16],
+    card: [0.10, 0.08, 0.20, 0.79],
+    panel: [0.09, 0.07, 0.19, 0.79],
+    toast: [0.10, 0.08, 0.20, 0.79],
+    osd: [0.10, 0.08, 0.20, 0.79],
+    chip: [0.18, 0.17, 0.32, 0.92],
+    field: [0.15, 0.14, 0.28, 0.90],
     track: [1.0, 1.0, 1.0, 0.20],
     slider_track: [0.62, 0.95, 0.90, 0.30],
     scrim: [0.02, 0.02, 0.06, 0.36],
@@ -757,13 +818,13 @@ pub(crate) const AURORA: UiPalette = UiPalette {
     selection_alpha: 0.36,
 
     title_ink: [240, 240, 255, 255],
-    chip_ink: [204, 208, 240, 255],
-    label_ink: [196, 200, 234, 255],
+    chip_ink: [224, 228, 252, 255],
+    label_ink: [222, 226, 250, 255],
     value_ink: [248, 248, 255, 255],
     panel_title_ink: [242, 242, 255, 255],
     query_ink: [250, 250, 255, 255],
     item_ink: [232, 234, 252, 255],
-    hint_ink: [188, 192, 226, 255],
+    hint_ink: [218, 222, 246, 255],
     osd_ink: [248, 248, 255, 255],
     card_radius: 22.0,
     chip_radius: 11.0,
@@ -808,7 +869,7 @@ pub(crate) const NORD: UiPalette = UiPalette {
     panel_title_ink: [236, 239, 244, 255],
     query_ink: [236, 239, 244, 255],
     item_ink: [216, 222, 233, 255],
-    hint_ink: [143, 157, 179, 255],
+    hint_ink: [158, 172, 194, 255],
     osd_ink: [229, 233, 240, 255],
     card_radius: 16.0,
     chip_radius: 9.0,
@@ -850,7 +911,7 @@ pub(crate) const TOKYO_NIGHT: UiPalette = UiPalette {
     panel_title_ink: [192, 202, 245, 255],
     query_ink: [212, 220, 252, 255],
     item_ink: [169, 177, 214, 255],
-    hint_ink: [108, 117, 160, 255],
+    hint_ink: [128, 138, 180, 255],
     osd_ink: [205, 214, 250, 255],
     card_radius: 16.0,
     chip_radius: 9.0,
@@ -897,7 +958,7 @@ pub(crate) const PAPER: UiPalette = UiPalette {
     panel_title_ink: [26, 25, 22, 255],
     query_ink: [16, 15, 12, 255],
     item_ink: [36, 35, 30, 255],
-    hint_ink: [122, 120, 112, 255],
+    hint_ink: [112, 110, 102, 255],
     osd_ink: [22, 21, 18, 255],
     card_radius: 14.0,
     chip_radius: 8.0,
@@ -978,7 +1039,7 @@ mod tests {
     fn relative_luminance(ink: [u8; 4]) -> f32 {
         let channel = |c: u8| {
             let c = f32::from(c) / 255.0;
-            if c <= 0.03928 {
+            if c <= 0.04045 {
                 c / 12.92
             } else {
                 ((c + 0.055) / 1.055).powf(2.4)
@@ -987,13 +1048,10 @@ mod tests {
         0.2126 * channel(ink[0]) + 0.7152 * channel(ink[1]) + 0.0722 * channel(ink[2])
     }
 
-    /// Worst-case panel surface for a theme: its tint composited over a black
-    /// desktop, which for straight alpha is just the tint scaled by coverage.
-    /// A flat opaque theme's own colour is already that worst case.
+    /// Worst-case encoded fill: dark ink is tested over black, light ink over
+    /// white. Testing every theme only over black hid dark-glass regressions.
     fn worst_case_panel(palette: &UiPalette) -> [u8; 4] {
-        let panel = palette.panel;
-        let channel = |c: f32| (c * panel[3] * 255.0).clamp(0.0, 255.0) as u8;
-        [channel(panel[0]), channel(panel[1]), channel(panel[2]), 255]
+        worst_case_fill(palette.panel, palette.item_ink)
     }
 
     fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {
@@ -1004,9 +1062,8 @@ mod tests {
     /// The footer hint is the one line on the panel that tells a first-time
     /// user which keys do anything, and it used to be the least legible thing
     /// on screen — 1.6:1 under the default theme, against 4.7:1 for the rows
-    /// above it. It is deliberately quieter than body text, so it is held to
-    /// WCAG's 3:1 floor for large and incidental text rather than the 4.5:1
-    /// body ratio, but quieter is not the same as invisible.
+    /// above it. Footer shortcuts use the ordinary text size, so the normal
+    /// 4.5:1 floor applies. Their location and divider establish hierarchy.
     #[test]
     fn every_theme_keeps_its_footer_hint_readable() {
         for theme in [
@@ -1021,7 +1078,7 @@ mod tests {
             let palette = theme.palette();
             let surface = worst_case_panel(palette);
             let hint = contrast(surface, palette.hint_ink);
-            assert!(hint >= 3.0, "{theme:?} draws its hint at {hint:.1}:1");
+            assert!(hint >= 4.5, "{theme:?} draws its hint at {hint:.1}:1");
 
             // ... and still recessed relative to the rows it sits under, or it
             // stops reading as a footer.
@@ -1052,8 +1109,14 @@ mod tests {
         }
     }
 
-    fn worst_case_fill(fill: [f32; 4]) -> [u8; 4] {
-        let channel = |c: f32| (c * fill[3] * 255.0).clamp(0.0, 255.0) as u8;
+    fn worst_case_fill(fill: [f32; 4], ink: [u8; 4]) -> [u8; 4] {
+        let backdrop = if relative_luminance(ink) > srgb_luminance([fill[0], fill[1], fill[2]]) {
+            1.0
+        } else {
+            0.0
+        };
+        let channel =
+            |c: f32| ((c * fill[3] + backdrop * (1.0 - fill[3])) * 255.0).clamp(0.0, 255.0) as u8;
         [channel(fill[0]), channel(fill[1]), channel(fill[2]), 255]
     }
 
@@ -1069,24 +1132,122 @@ mod tests {
             UiTheme::Paper,
         ] {
             let palette = theme.palette();
-            let osd_floor = match theme {
-                UiTheme::Glass | UiTheme::GlassDark | UiTheme::Aurora => 3.0,
-                _ => 4.5,
-            };
-            let osd_ratio = contrast(worst_case_fill(palette.osd), palette.osd_ink);
-            assert!(
-                osd_ratio >= osd_floor,
-                "{theme:?} draws OSD ink at {osd_ratio:.1}:1 (floor {osd_floor})"
+            let osd_ratio = contrast(
+                worst_case_fill(palette.osd, palette.osd_ink),
+                palette.osd_ink,
             );
-            let toast_floor = match theme {
-                UiTheme::Glass | UiTheme::GlassDark | UiTheme::Aurora => 3.0,
-                _ => 4.5,
-            };
-            let toast_ratio = contrast(worst_case_fill(palette.toast), palette.title_ink);
             assert!(
-                toast_ratio >= toast_floor,
-                "{theme:?} draws toast titles at {toast_ratio:.1}:1 (floor {toast_floor})"
+                osd_ratio >= 4.5,
+                "{theme:?} draws OSD ink at {osd_ratio:.1}:1"
             );
+            let toast_ratio = contrast(
+                worst_case_fill(palette.toast, palette.title_ink),
+                palette.title_ink,
+            );
+            assert!(
+                toast_ratio >= 4.5,
+                "{theme:?} draws toast titles at {toast_ratio:.1}:1"
+            );
+        }
+    }
+
+    fn decode_channel(c: f32) -> f32 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn encode_channel(c: f32) -> f32 {
+        if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    fn composite_fill(fill: [f32; 4], under: [f32; 3], linear: bool, light: f32) -> [f32; 3] {
+        std::array::from_fn(|channel| {
+            let (over, under) = if linear {
+                (
+                    decode_channel(fill[channel]),
+                    decode_channel(under[channel]),
+                )
+            } else {
+                (fill[channel], under[channel])
+            };
+            let value = (over * fill[3] + under * (1.0 - fill[3]) + light).clamp(0.0, 1.0);
+            if linear { encode_channel(value) } else { value }
+        })
+    }
+
+    /// Exercise the actual text/surface pairs, including the second blend for
+    /// fields and action chips. Bound the settled glass interior by every
+    /// possible backdrop channel in [0, 1], maximum face sheen and ±half grain.
+    /// This deliberately does not rely on the modal scrim or dark wallpaper.
+    #[test]
+    fn normal_text_survives_bright_and_dark_backdrops_in_both_color_domains() {
+        for theme in [
+            UiTheme::Glass,
+            UiTheme::GlassDark,
+            UiTheme::Aurora,
+            UiTheme::Material,
+            UiTheme::Nord,
+            UiTheme::TokyoNight,
+            UiTheme::Paper,
+        ] {
+            let p = theme.palette();
+            let pairs = [
+                ("panel title", p.panel, None, p.panel_title_ink),
+                ("panel row", p.panel, None, p.item_ink),
+                ("footer shortcut", p.panel, None, p.hint_ink),
+                ("query", p.panel, Some(p.field), p.query_ink),
+                ("HUD title", p.card, None, p.title_ink),
+                ("HUD label", p.card, None, p.label_ink),
+                ("HUD value", p.card, None, p.value_ink),
+                ("HUD chip", p.card, Some(p.chip), p.chip_ink),
+                ("toast title", p.toast, None, p.title_ink),
+                ("toast body", p.toast, None, p.label_ink),
+                (
+                    "toast sender",
+                    p.toast,
+                    None,
+                    super::super::toast::sender_ink(p.label_ink),
+                ),
+                ("toast action", p.toast, Some(p.chip), p.chip_ink),
+                ("OSD value", p.osd, None, p.osd_ink),
+            ];
+            for linear in [false, true] {
+                for glass_available in [false, true] {
+                    let bounds = p.glass.filter(|_| glass_available).map_or([0.0; 2], |g| {
+                        [-g.grain * 0.5, g.sheen * 0.55 + g.grain * 0.5]
+                    });
+                    for backdrop in [[0.0; 3], [1.0; 3]] {
+                        for light in bounds {
+                            for (label, surface, overlay, ink) in pairs {
+                                let fill =
+                                    p.readable_surface_fill(surface, linear, glass_available);
+                                let mut color = composite_fill(fill, backdrop, linear, light);
+                                if let Some(overlay) = overlay {
+                                    color = composite_fill(overlay, color, linear, 0.0);
+                                }
+                                let ink = ink.map(|c| f32::from(c) / 255.0);
+                                // Text is premultiplied and composited in the same working domain.
+                                let rendered_ink = composite_fill(ink, color, linear, 0.0);
+                                let surface_luminance = srgb_luminance(color);
+                                let text_luminance = srgb_luminance(rendered_ink);
+                                let ratio = (surface_luminance.max(text_luminance) + 0.05)
+                                    / (surface_luminance.min(text_luminance) + 0.05);
+                                assert!(
+                                    ratio >= 4.5,
+                                    "{theme:?} {label}: {ratio:.3}:1; linear={linear}, glass={glass_available}, backdrop={backdrop:?}, light={light}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -1771,6 +1771,7 @@ impl<C: CompositorConnection> Compositor<C> {
         surface: [f32; 4],
         alpha: f32,
     ) {
+        let surface = palette.readable_surface_fill(surface, false, self.glass_backdrop.is_some());
         unsafe {
             let drew_glass = match palette.glass {
                 Some(params) if self.glass_backdrop.is_some() => {

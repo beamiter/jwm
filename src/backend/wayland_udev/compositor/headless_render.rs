@@ -7677,6 +7677,168 @@ fn x11_glass_surface_frosts_its_backdrop() {
     );
 }
 
+/// Read the actual glass programs, not just palette constants: tint ingress,
+/// face sheen and grain all affect the background a small glyph is drawn on.
+/// The probes are inside the settled sheet, outside its decorative bevel. HDR
+/// tone mapping, faded surfaces and antialiased glyph edges are not measured.
+fn assert_glass_text_contrast(
+    api: GlApi,
+    vs: &'static str,
+    fs: &'static str,
+    linear_supported: bool,
+) {
+    use crate::backend::compositor_common::ui_theme::UiTheme;
+
+    let Some(context) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping glass text contrast");
+        return;
+    };
+    let gl = &context.gl;
+    let program = link(gl, vs, fs).expect("glass contrast program must link");
+    let decode = |value: f32| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = |rgb: [f32; 3]| 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+
+    for theme in [UiTheme::Glass, UiTheme::GlassDark, UiTheme::Aurora] {
+        let palette = theme.palette();
+        let params = palette.glass.expect("glass theme has optics");
+        let surfaces = [
+            (
+                "panel",
+                palette.panel,
+                vec![palette.panel_title_ink, palette.item_ink, palette.hint_ink],
+            ),
+            (
+                "card",
+                palette.card,
+                vec![palette.title_ink, palette.label_ink, palette.value_ink],
+            ),
+            (
+                "toast",
+                palette.toast,
+                vec![palette.title_ink, palette.label_ink],
+            ),
+            ("osd", palette.osd, vec![palette.osd_ink]),
+        ];
+        for scene_linear in [false, true] {
+            if scene_linear && !linear_supported {
+                continue;
+            }
+            for (name, surface, inks) in &surfaces {
+                let fill = palette.readable_surface_fill(*surface, scene_linear, true);
+                for backdrop in [[0, 0, 0, 255], [255, 255, 255, 255]] {
+                    for point in [24.0, 80.0, 136.0] {
+                        let pixel = render_quad(gl, program, backdrop, 16, 16, |gl| unsafe {
+                            let u = |name: &str| gl.get_uniform_location(program, name);
+                            gl.uniform_4_f32(
+                                u("u_rect").as_ref(),
+                                8.5 - point,
+                                8.5 - point,
+                                160.0,
+                                160.0,
+                            );
+                            gl.uniform_matrix_4_f32_slice(
+                                u("u_projection").as_ref(),
+                                false,
+                                &ortho(16.0, 16.0),
+                            );
+                            gl.uniform_1_i32(u("u_backdrop").as_ref(), 0);
+                            gl.uniform_2_f32(u("u_screen_size").as_ref(), 16.0, 16.0);
+                            gl.uniform_4_f32(
+                                u("u_tint").as_ref(),
+                                fill[0],
+                                fill[1],
+                                fill[2],
+                                fill[3],
+                            );
+                            gl.uniform_2_f32(u("u_size").as_ref(), 160.0, 160.0);
+                            gl.uniform_1_f32(u("u_radius").as_ref(), 18.0);
+                            gl.uniform_1_f32(u("u_radius_top").as_ref(), 18.0);
+                            gl.uniform_1_f32(u("u_corner_exp").as_ref(), params.corner_exponent);
+                            gl.uniform_1_f32(u("u_saturation").as_ref(), params.saturation);
+                            gl.uniform_1_f32(u("u_luminance").as_ref(), params.luminance);
+                            gl.uniform_1_f32(u("u_bevel_width").as_ref(), params.bevel_width);
+                            gl.uniform_1_f32(u("u_refraction").as_ref(), params.refraction);
+                            gl.uniform_1_f32(u("u_rim_width").as_ref(), params.rim_width);
+                            gl.uniform_1_f32(u("u_rim_intensity").as_ref(), params.rim_intensity);
+                            gl.uniform_3_f32(
+                                u("u_rim_tint").as_ref(),
+                                params.rim_tint[0],
+                                params.rim_tint[1],
+                                params.rim_tint[2],
+                            );
+                            gl.uniform_1_f32(u("u_sheen").as_ref(), params.sheen);
+                            gl.uniform_1_f32(u("u_edge_shade").as_ref(), params.edge_shade);
+                            gl.uniform_1_f32(u("u_grain").as_ref(), params.grain);
+                            gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+                            gl.uniform_1_i32(u("u_scene_linear").as_ref(), i32::from(scene_linear));
+                            gl.uniform_1_i32(u("u_backdrop_encoded").as_ref(), 1);
+                        });
+                        assert_eq!(pixel[3], 255, "probe must be inside the settled sheet");
+                        let background =
+                            [pixel[0], pixel[1], pixel[2]].map(|v| f32::from(v) / 255.0);
+                        let bg_luma = luminance(if scene_linear {
+                            background
+                        } else {
+                            background.map(decode)
+                        });
+                        for ink in inks {
+                            let alpha = f32::from(ink[3]) / 255.0;
+                            let foreground = [ink[0], ink[1], ink[2]].map(|v| {
+                                let code = f32::from(v) / 255.0;
+                                if scene_linear { decode(code) } else { code }
+                            });
+                            let blended = std::array::from_fn(|i| {
+                                foreground[i] * alpha + background[i] * (1.0 - alpha)
+                            });
+                            let fg_luma = luminance(if scene_linear {
+                                blended
+                            } else {
+                                blended.map(decode)
+                            });
+                            let contrast =
+                                (fg_luma.max(bg_luma) + 0.05) / (fg_luma.min(bg_luma) + 0.05);
+                            assert!(
+                                contrast >= 4.5,
+                                "{api:?} {theme:?} {name} linear={scene_linear} backdrop={backdrop:?} point={point} ink={ink:?}: {contrast:.3}:1 on {pixel:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_glass_small_text_is_readable_in_encoded_and_linear_frames() {
+    use super::shaders as s;
+    assert_glass_text_contrast(
+        GlApi::Gles3,
+        s::VERTEX_SHADER,
+        s::GLASS_FRAGMENT_SHADER,
+        true,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_glass_small_text_is_readable_over_bright_and_dark_backdrops() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_glass_text_contrast(
+        GlApi::GlCore33,
+        s::VERTEX_SHADER,
+        s::GLASS_FRAGMENT_SHADER,
+        false,
+    );
+}
+
 /// Read back the real X11 glass program at both flat interior edges. The
 /// backdrop is already frosted (constant blue), so reduced alpha proves that
 /// unblurred scene pixels would leak through when this layer is composited.
