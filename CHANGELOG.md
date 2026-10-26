@@ -5,6 +5,15 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### GIF screen recording
+
+- The Alt+Ctrl+R selector offers MP4 / GIF buttons and `V` / `F` shortcuts,
+  remembers the last format, and retains its start/stop shortcuts. The Alt+S
+  editor's GIF button / Ctrl+G reuses the selected crop.
+- GIF mode captures without audio and exports a looping, palette-optimized
+  animation in the background after its encoder finishes. A saved toast confirms
+  completion; failures retain the source video and never publish a partial GIF.
+
 ### Browser long screenshots
 
 - `Alt+S` now offers a long-screenshot button and `S` shortcut after selecting

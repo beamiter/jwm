@@ -925,6 +925,7 @@ impl Jwm {
             ToolbarCommand::Undo => self.features.screenshot.undo_annotation(),
             ToolbarCommand::Redo => self.features.screenshot.redo_annotation(),
             ToolbarCommand::Scroll => return self.start_scroll_screenshot(backend),
+            ToolbarCommand::RecordGif => return self.record_gif_from_screenshot(backend),
             ToolbarCommand::Copy => return self.finish_screenshot_select(backend, true),
             ToolbarCommand::Save => return self.finish_screenshot_select(backend, false),
             ToolbarCommand::Cancel => return self.cancel_screenshot_select(backend),
@@ -3014,6 +3015,17 @@ impl Jwm {
         if self.features.recording.selecting_region {
             let ctrl = clean_state.contains(Mods::CONTROL);
             let shift = clean_state.contains(Mods::SHIFT);
+            if !ctrl && !self.features.recording.adjusting_region {
+                let format = match keysym {
+                    keys::KEY_v => Some(crate::jwm::features::gif_recording::RecordingFormat::Mp4),
+                    keys::KEY_f => Some(crate::jwm::features::gif_recording::RecordingFormat::Gif),
+                    _ => None,
+                };
+                if let Some(format) = format {
+                    self.select_recording_format(backend, format);
+                    return Ok(());
+                }
+            }
             let capture_target = if !ctrl && keysym == keys::KEY_Tab {
                 self.cycle_recording_capture_target(backend, shift);
                 None
@@ -3109,6 +3121,10 @@ impl Jwm {
             let ctrl = clean_state.contains(Mods::CONTROL);
             let shift = clean_state.contains(Mods::SHIFT);
 
+            if ctrl && keysym == keys::KEY_g && self.features.screenshot.committed {
+                self.record_gif_from_screenshot(backend);
+                return Ok(());
+            }
             if !ctrl && keysym == keys::KEY_s && self.features.screenshot.committed {
                 self.start_scroll_screenshot(backend);
                 return Ok(());
@@ -3566,6 +3582,15 @@ impl Jwm {
 
         // Recording source selection/adjustment intercept.
         if self.features.recording.selecting_region {
+            if detail_btn == 1
+                && self.recording_toolbar_press(
+                    backend,
+                    self.last_mouse_root.0,
+                    self.last_mouse_root.1,
+                )?
+            {
+                return Ok(PointerPressDisposition::Consumed);
+            }
             let button = MouseButton::from_u8(detail_btn);
             if button == MouseButton::Left {
                 let (x, y) = self.last_mouse_root;

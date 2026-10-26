@@ -146,6 +146,9 @@ pub struct RecordingState {
     pub adjusting_region: bool,
     /// Output path held while the initial interactive selection is in progress.
     pub pending_output_path: Option<String>,
+    /// Format/start controls painted by the shared capture toolbar renderer.
+    pub(crate) toolbar:
+        Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
     /// Last start/stop failure message for `get_recording_status`; cleared on
     /// a successful start. Mirrors audio recording's `last_error`.
     pub last_error: Option<String>,
@@ -178,6 +181,7 @@ impl RecordingState {
         self.selecting_region = false;
         self.adjusting_region = false;
         self.pending_output_path = None;
+        self.toolbar = None;
         self.last_error = None;
         self.original_region = None;
         self.last_applied_region = None;
@@ -278,6 +282,7 @@ impl RecordingState {
     }
 
     pub fn begin_initial_region_selection(&mut self, output_path: String) {
+        self.toolbar = None;
         self.selecting_region = true;
         self.adjusting_region = false;
         self.pending_output_path = Some(output_path);
@@ -301,6 +306,7 @@ impl RecordingState {
     }
 
     pub fn cancel_region_selection(&mut self) -> Option<Rect> {
+        self.toolbar = None;
         if self.adjusting_region {
             self.region = self.original_region;
         } else {
@@ -317,6 +323,7 @@ impl RecordingState {
     }
 
     pub fn finish_region_selection(&mut self) {
+        self.toolbar = None;
         self.selecting_region = false;
         self.adjusting_region = false;
         self.original_region = None;

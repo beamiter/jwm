@@ -169,8 +169,7 @@ impl RecordingStopReceipt {
         self
     }
 
-    #[cfg(test)]
-    fn poll(&mut self) -> Option<WriterOutcome> {
+    pub(crate) fn poll(&mut self) -> Option<WriterOutcome> {
         self.poll_completion().map(|completion| completion.outcome)
     }
 

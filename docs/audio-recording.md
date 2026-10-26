@@ -148,7 +148,7 @@ example `start_audio_recording --args '{"path":"/tmp/note.opus"}'`.
 
 ## Recording the microphone with the screen
 
-By default a screen recording also captures the microphone and writes it
+By default an MP4 screen recording also captures the microphone and writes it
 straight into the MP4 as an AAC track. Video frames and audio carry their own
 system-clock timestamps, and ffmpeg's asynchronous resampling corrects the
 slight clock drift of long recordings. Stopping the screen recording ends both
@@ -237,3 +237,43 @@ jwm-tool msg get_recording_status
 ```
 
 `jwm-tool health` prints compact `audio_recording` for audio recording operators.
+
+## Recording a GIF
+
+`Alt+Ctrl+R` (also `Ctrl+Print`) opens the screen recorder. After selecting a
+window or dragging a region, its toolbar offers **MP4**, **GIF**, **REC**, and
+Cancel. Click a format, or press `V` for MP4 / `F` for GIF, then `Enter` / `Space`
+or **REC** to start. Press `Alt+Ctrl+R` again to stop. The initial format is MP4;
+the last format choice is saved in `$XDG_STATE_HOME/jwm/capture.json` (normally
+`~/.local/state/jwm/capture.json`). The Alt+S editor's **GIF** button / `Ctrl+G`
+reuses its selected rectangle and opens this same recorder. Screenshot drawing
+annotations are not part of the live screen recording.
+
+GIF recording uses the existing X11 / native Wayland capture and source-adjustment
+paths, with audio disabled. It neither takes the microphone nor stops a standalone
+audio recording. Its final `.gif` goes to `behavior.recording_output_dir` or the
+resolved Videos directory, alongside a temporary `.source.mp4` while recording.
+After that exact encoder confirms a successful stop, a background two-pass
+palette export produces an indefinitely looping animation at 15 fps and a maximum
+width of 960 pixels, preserving aspect ratio and never upscaling smaller captures.
+
+The **Generating GIF** toast means the encoder/export is still finishing; only
+**GIF saved** confirms publication. Export is bounded to two pending jobs and a
+five-minute conversion budget per job. Successful export removes its source
+MP4. Failed capture/export preserves the video and reports its path, cleans
+private palette/partial GIF files, and never overwrites an existing destination.
+
+Automation chooses the format through the output extension:
+
+```bash
+jwm-tool msg start_recording \
+  --args '{"path":"/tmp/demo.gif","x":100,"y":80,"width":640,"height":480}'
+jwm-tool msg stop_recording
+jwm-tool msg get_recording_status
+```
+
+Recording status includes `format` (`mp4` / `gif`) and `exporting`; `finalized`
+stays false until GIF export succeeds. The completion event is
+`recording/finalized`; export failures emit `recording/error` with
+`operation: "gif_export"`. An older export can complete while a new recording
+runs without changing that recording's status or source.

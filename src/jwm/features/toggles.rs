@@ -4303,7 +4303,7 @@ impl Jwm {
         Ok(())
     }
 
-    fn require_recording_runtime() -> Result<(), String> {
+    pub(super) fn require_recording_runtime() -> Result<(), String> {
         let path = std::env::var_os("PATH");
         let missing = crate::jwm::features::recording_plan::missing_runtime_tools(|tool| {
             crate::terminal_prober::command_exists_in_path(tool, path.as_deref())
@@ -4350,7 +4350,9 @@ impl Jwm {
         Ok(())
     }
 
-    fn prepare_recording_output_path(&self) -> Result<String, Box<dyn std::error::Error>> {
+    pub(super) fn prepare_recording_output_path(
+        &self,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         use crate::jwm::features::recording_plan::{output_file_name, resolve_output_directory};
 
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
@@ -4376,6 +4378,7 @@ impl Jwm {
         })?;
         Ok(output_dir
             .join(output_file_name(&timestamp.to_string()))
+            .with_extension(self.features.recording_preferences.format.extension())
             .to_string_lossy()
             .to_string())
     }
@@ -4423,7 +4426,7 @@ impl Jwm {
         }
     }
 
-    fn begin_recording_region_selection(
+    pub(super) fn begin_recording_region_selection(
         &mut self,
         backend: &mut dyn Backend,
         output_path: String,
@@ -4483,6 +4486,7 @@ impl Jwm {
         backend.compositor_force_full_redraw();
         self.sync_capture_hint(backend);
         self.sync_recording_selection_cursor(backend, self.last_mouse_root);
+        self.sync_recording_format_toolbar(backend);
     }
 
     pub(crate) fn finish_recording_region_interaction(
@@ -4512,6 +4516,7 @@ impl Jwm {
         self.features.recording.finish_region_selection();
         self.features.capture.clear_recording_double_click();
         self.release_recording_region_input(backend);
+        backend.compositor_set_screenshot_toolbar(None);
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
         backend.compositor_set_capture_hint(None);
@@ -4533,7 +4538,21 @@ impl Jwm {
             let message = error.to_string();
             self.features.recording_start = None;
             self.features.recording.cancel();
-            self.features.recording.note_error(message);
+            self.features.recording.note_error(message.clone());
+            if crate::jwm::features::gif_recording::RecordingFormat::of(&output_path)
+                == crate::jwm::features::gif_recording::RecordingFormat::Gif
+            {
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f03d}  GIF recording could not start".into(),
+                        body: message,
+                        urgency: 2,
+                        timeout_ms: 8000,
+                        ..Default::default()
+                    },
+                );
+            }
             backend.compositor_force_full_redraw();
             return Err(error);
         }
@@ -4545,6 +4564,7 @@ impl Jwm {
         let restored = self.features.recording.cancel_region_selection();
         self.features.capture.clear_recording_double_click();
         self.release_recording_region_input(backend);
+        backend.compositor_set_screenshot_toolbar(None);
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
         backend.compositor_set_capture_hint(None);
@@ -4949,15 +4969,30 @@ impl Jwm {
         Self::require_recording_runtime()?;
         let output = std::path::Path::new(output_path);
         crate::jwm::features::recording_plan::validate_output_path(output)?;
+        let gif = crate::jwm::features::gif_recording::RecordingFormat::of(output_path)
+            == crate::jwm::features::gif_recording::RecordingFormat::Gif;
+        if gif {
+            self.require_gif_capacity()?;
+            if !backend.compositor_tracks_recording_encoder_exit() {
+                return Err("This backend cannot confirm encoder completion for GIF export".into());
+            }
+        }
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
         if output.exists() {
             return Err(format!("recording output already exists: {output_path}").into());
         }
+        let capture_path = crate::jwm::features::gif_recording::capture_path(output_path);
+        if gif && std::path::Path::new(&capture_path).exists() {
+            return Err(format!("recording source already exists: {capture_path}").into());
+        }
         let region = self.normalize_initial_recording_region(region)?;
 
-        let audio = crate::backend::recording_admission::RecordingAudioOptions::snapshot();
+        let mut audio = crate::backend::recording_admission::RecordingAudioOptions::snapshot();
+        if gif {
+            audio.enabled = false;
+        }
         let captures_audio = audio.enabled;
         if captures_audio
             && let Some(error) = self.features.recording_stops.audio_release().refusal()
@@ -4997,8 +5032,9 @@ impl Jwm {
         }
         let region_tuple = Self::recording_region_tuple(region)
             .ok_or("recording region dimensions are invalid")?;
+        let capture_path = crate::jwm::features::gif_recording::capture_path(output_path);
         let receipt = match backend.compositor_request_recording_region_with_audio_tracked(
-            output_path,
+            &capture_path,
             region_tuple,
             audio,
         ) {
@@ -5022,9 +5058,7 @@ impl Jwm {
             .start_with_audio(output_path.to_string(), audio.enabled);
         self.features.recording.set_region(region);
         self.features.recording.set_output_size_from_region();
-        self.features
-            .recording
-            .start_segment(output_path.to_string());
+        self.features.recording.start_segment(capture_path);
         info!(
             "[recording] start → {output_path} ({}x{}+{}+{})",
             region.w, region.h, region.x, region.y
@@ -5150,17 +5184,26 @@ impl Jwm {
             "[recording] stop → {output_path} ({} segments)",
             segments.len()
         );
+        let gif = crate::jwm::features::gif_recording::RecordingFormat::of(&output_path)
+            == crate::jwm::features::gif_recording::RecordingFormat::Gif;
         self.push_system_toast(
             backend,
             crate::backend::api::ToastNotification {
-                title: "\u{f03d}  Recording stopped".into(),
+                title: if gif {
+                    "\u{f03d}  Generating GIF"
+                } else {
+                    "\u{f03d}  Recording stopped"
+                }
+                .into(),
                 body: output_path.clone(),
                 urgency: 1,
                 timeout_ms: 5000,
                 ..Default::default()
             },
         );
-        Self::finalize_recording(segments, output_path);
+        if !gif {
+            Self::finalize_recording(segments, output_path);
+        }
         Ok(())
     }
 
@@ -5194,7 +5237,12 @@ impl Jwm {
             .output_path
             .clone()
             .unwrap_or_default();
-        if failure_reported {
+        if !failure_reported
+            && crate::jwm::features::gif_recording::RecordingFormat::of(&output_path)
+                == crate::jwm::features::gif_recording::RecordingFormat::Gif
+        {
+            self.queue_gif_export(segments.clone(), output_path.clone(), receipt);
+        } else if failure_reported {
             self.features
                 .recording_stops
                 .observe_with_notice(receipt, protects_audio, true);
@@ -5226,7 +5274,12 @@ impl Jwm {
             .filter(|path| !path.is_empty());
         let retained = output.map_or_else(
             || "Any output was left untouched".to_string(),
-            |path| format!("Any output at {path} was left untouched"),
+            |path| {
+                format!(
+                    "Any output at {} was left untouched",
+                    crate::jwm::features::gif_recording::capture_path(path)
+                )
+            },
         );
         let message = format!(
             "The recording encoder failed and capture stopped. {retained}; it may be incomplete and has not been confirmed saved. Check the encoder log."
@@ -7994,6 +8047,92 @@ pub(crate) mod keyboard_grab_tests {
         assert!(backend.scroll_capture_active);
         jwm.tick_scroll_screenshot(backend, std::time::Instant::now());
         jwm
+    }
+
+    #[test]
+    fn gif_recording_reuses_capture_keeps_audio_running_and_exports_after_stop() {
+        use crate::backend::recording_completion::{
+            EncoderWaitOutcome, RecordingStopReceipt, writer_completion_channel,
+        };
+        use crate::jwm::features::gif_recording::{
+            capture_path,
+            tests::{has_encoder, make_video},
+        };
+        if !has_encoder() {
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("jwm-gif-session-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&directory).unwrap();
+        let output = directory.join("demo.gif").to_str().unwrap().to_owned();
+        let source = capture_path(&output);
+        let mut backend = GrabSpyBackend::new();
+        backend.recording_tracks_exit = true;
+        let mut jwm = jwm(&mut backend);
+        jwm.s_w = 640;
+        jwm.s_h = 480;
+        jwm.features.audio_recording.active = true;
+        let (writer, receipt) = writer_completion_channel();
+        backend
+            .recording_stop_receipts
+            .push_back(RecordingStopReceipt::from_writer(Some(receipt)));
+        jwm.start_recording_region(&mut backend, &output, Rect::new(0, 0, 64, 48))
+            .unwrap();
+        assert_eq!(
+            backend.recording_requests,
+            [(source.clone(), (0, 0, 64, 48))]
+        );
+        assert!(!backend.recording_audio_options[0].enabled);
+        assert!(jwm.features.audio_recording.active);
+        assert!(!jwm.features.recording.audio_requested);
+        assert_eq!(
+            jwm.features.recording.output_path.as_deref(),
+            Some(output.as_str())
+        );
+        assert_eq!(
+            jwm.features.recording.current_segment.as_deref(),
+            Some(source.as_str())
+        );
+        make_video(&source);
+        jwm.stop_recording(&mut backend).unwrap();
+        jwm.poll_gif_exports(&mut backend);
+        assert!(!jwm.features.recording.active);
+        assert_eq!(jwm.features.gif_exports.len(), 1);
+        assert!(!std::path::Path::new(&output).exists());
+        let before = jwm
+            .handle_ipc_query("get_rec", &serde_json::json!({}), &mut backend)
+            .data
+            .unwrap();
+        assert_eq!(before["format"], "gif");
+        assert_eq!(before["exporting"], true);
+        assert_eq!(before["finalized"], false);
+        writer.finish(None, Some(EncoderWaitOutcome::Exited(true)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !jwm.features.gif_exports.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "GIF export did not settle"
+            );
+            jwm.poll_gif_exports(&mut backend);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(jwm.features.recording.finalized);
+        assert!(std::path::Path::new(&output).is_file());
+        assert!(!std::path::Path::new(&source).exists());
+        assert!(
+            backend
+                .toast_titles()
+                .iter()
+                .any(|title| title.ends_with("GIF saved"))
+        );
+        let after = jwm
+            .handle_ipc_query("get_rec", &serde_json::json!({}), &mut backend)
+            .data
+            .unwrap();
+        assert_eq!(after["exporting"], false);
+        assert_eq!(after["finalized"], true);
+        assert!(jwm.features.audio_recording.active);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     fn deliver_long_screenshot_frame(jwm: &mut Jwm, backend: &mut GrabSpyBackend, top: u32) {

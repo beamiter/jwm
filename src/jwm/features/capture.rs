@@ -491,6 +491,14 @@ impl Jwm {
                     self.probed_capture_hint_title(self.last_mouse_root)
                 },
             );
+            let label = if self.features.recording.adjusting_region {
+                label
+            } else {
+                format!(
+                    "{label} · {} · V video / F GIF",
+                    self.selected_recording_format().label()
+                )
+            };
             backend.compositor_set_capture_hint(Some(label));
             return;
         }
@@ -537,6 +545,22 @@ impl Jwm {
 
         if !self.features.recording.selecting_region || self.features.recording.is_region_dragging()
         {
+            return;
+        }
+        if self
+            .features
+            .recording
+            .toolbar
+            .as_ref()
+            .is_some_and(|toolbar| {
+                crate::backend::compositor_common::screenshot_toolbar::hits_toolbar(
+                    toolbar.bar,
+                    pointer.0 as f32,
+                    pointer.1 as f32,
+                )
+            })
+        {
+            self.apply_grab_cursor(backend, StdCursorKind::Hand);
             return;
         }
         let kind = if self.features.recording.region.is_some() {

@@ -3016,6 +3016,11 @@ impl Jwm {
             "get_recording_status" | "get_recording" | "get_rec" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;
+                let format = output_path
+                    .as_deref()
+                    .map(crate::jwm::features::gif_recording::RecordingFormat::of)
+                    .unwrap_or(self.features.recording_preferences.format);
+                let gif = format == crate::jwm::features::gif_recording::RecordingFormat::Gif;
                 // Validation still runs synchronously (with a hard helper
                 // deadline), and `stop` deliberately keeps `output_path` so the
                 // bar can still report where the recording went. Probe only
@@ -3027,12 +3032,13 @@ impl Jwm {
                 let mut finalized = !active
                     && !self.features.recording.capture_failed
                     && (self.features.recording.finalized
-                        || output_path.as_deref().is_some_and(|path| {
-                            recording_file_is_valid(
-                                path,
-                                &mut self.features.recording.rejected_probe,
-                            )
-                        }));
+                        || (!gif
+                            && output_path.as_deref().is_some_and(|path| {
+                                recording_file_is_valid(
+                                    path,
+                                    &mut self.features.recording.rejected_probe,
+                                )
+                            })));
                 // The bounded probe may have overlapped the writer's exit.
                 // Collect again before publishing its verdict, without holding
                 // a lock across that wait or consuming post-render notices.
@@ -3054,12 +3060,14 @@ impl Jwm {
                     .map(|stats| (stats.elapsed_secs * 10.0).round() / 10.0);
                 IpcResponse::ok(Some(serde_json::json!({
                     "active": active,
+                    "format": format,
+                    "exporting": output_path.as_deref().is_some_and(|path| self.features.gif_exports.iter().any(|export| export.output == path)),
                     "finalized": finalized,
                     "output_path": output_path,
                     "segment_path": self.features.recording.current_segment.clone(),
                     "fps": cfg.behavior().recording_fps,
                     "encoder": cfg.behavior().recording_encoder,
-                    "audio_enabled": cfg.behavior().recording_audio_enabled,
+                    "audio_enabled": !gif && cfg.behavior().recording_audio_enabled,
                     "audio_device": cfg.behavior().recording_audio_device,
                     "audio_bitrate": cfg.behavior().recording_audio_bitrate,
                     "region": self.features.recording.region.map(|region| serde_json::json!({

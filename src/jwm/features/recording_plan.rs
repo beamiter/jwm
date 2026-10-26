@@ -54,19 +54,22 @@ pub fn normalize_initial_region(
     Ok(Rect::new(x, y, width, height))
 }
 
-/// 校验录制输出路径的纯性质：绝对路径且以 .mp4 结尾。
+/// Validate a recording's final destination (video or animated GIF).
 ///
 /// 文件系统层面的检查（父目录创建、目标已存在）留给调用方。
 ///
 /// # Errors
 ///
-/// 路径不是绝对路径或扩展名不是 `mp4` 时返回错误。
+/// The path must be absolute and end in `.mp4` or `.gif`.
 pub fn validate_output_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("recording output path must be absolute".to_string());
     }
-    if path.extension().and_then(|value| value.to_str()) != Some("mp4") {
-        return Err("recording output path must end in .mp4".to_string());
+    if !matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("mp4" | "gif")
+    ) {
+        return Err("recording output path must end in .mp4 or .gif".to_string());
     }
     Ok(())
 }
@@ -212,8 +215,9 @@ mod tests {
     }
 
     #[test]
-    fn output_paths_must_be_absolute_mp4_files() {
+    fn output_paths_must_be_absolute_video_or_gif_files() {
         assert!(validate_output_path(Path::new("/tmp/out.mp4")).is_ok());
+        assert!(validate_output_path(Path::new("/tmp/out.gif")).is_ok());
         assert!(
             validate_output_path(Path::new("relative/out.mp4"))
                 .unwrap_err()

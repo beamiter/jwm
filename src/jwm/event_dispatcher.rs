@@ -1038,6 +1038,10 @@ impl WMController for Jwm {
         }
         if self.features.recording.selecting_region {
             self.last_mouse_root = (root_x, root_y);
+            if self.recording_toolbar_motion(backend, root_x, root_y) {
+                self.sync_recording_selection_cursor(backend, (root_x, root_y));
+                return;
+            }
             backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
             if self.features.capture.recording == CaptureTarget::Region
                 && self.features.recording.is_region_dragging()
@@ -15527,6 +15531,9 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        if !self.features.gif_exports.is_empty() {
+            next = min_optional_duration(next, Some(std::time::Duration::from_millis(100)));
+        }
         if let Some(capture) = &self.features.scroll_capture {
             next = min_optional_duration(next, Some(capture.next_wakeup(now)));
         }
@@ -15908,6 +15915,7 @@ impl EventHandler for Jwm {
         self.poll_recording_start(backend);
         self.poll_recording_failure(backend);
         self.poll_recording_stops(backend);
+        self.poll_gif_exports(backend);
 
         // A request the pointer was busy for retries here rather than from a
         // sleep, so waiting for a status bar's click to end costs no frames.

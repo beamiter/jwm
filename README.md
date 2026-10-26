@@ -469,6 +469,7 @@ ink swatch, and the four ways out:
 | Ink (8-colour ring) | `1`…`8`, or click the swatch to step |
 | Undo / redo | `Ctrl+Z`, `Backspace` / `Ctrl+Shift+Z`, `Ctrl+Y` |
 | Long screenshot | `S`, or the downward-arrow page button |
+| Record GIF using this crop | `Ctrl+G`, or the GIF button |
 | Save to file | `Enter` or `Ctrl+S` |
 | Copy to clipboard | `Ctrl+C` |
 | Cancel | `Escape` |
@@ -544,6 +545,20 @@ dot and a static `MIC` label take the corner while the recorder runs —
 stacking directly above the `REC` chip when both run together — appearing
 only once the recorder actually started and clearing on stop, success or
 failure.
+
+For an animated GIF, press `Alt+Ctrl+R`, choose a region or window, then click
+**GIF** or press `F` (`V` selects MP4). `Enter`, `Space`, or the **REC** button
+starts capture; `Alt+Ctrl+R` again stops it. MP4 is the initial default and the
+last format choice is remembered across restarts. The screenshot editor's
+**GIF** button / `Ctrl+G` opens the same recorder with its crop already selected.
+
+GIF capture has no audio and leaves a standalone microphone recording running.
+On stop, a background worker creates a looping, palette-optimized GIF at 15 fps,
+up to 960 pixels wide, without enlarging small captures. A **GIF saved** toast
+announces the completed `.gif` in the recording output directory. If capture or
+export fails, its source video is preserved for recovery; partial GIFs are not
+published and existing files are not overwritten. See
+[GIF recording](docs/audio-recording.md#recording-a-gif) for IPC and output details.
 
 The X11 compositor freezes the desktop behind the interactive selector/editor
 by default. To keep clients and animations live instead, set this in the

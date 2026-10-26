@@ -82,8 +82,7 @@ pub enum ToolbarIcon {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ButtonFace {
     Icon(ToolbarIcon),
-    /// A short readout — the selection's pixel size — drawn as text. Wider
-    /// than an icon button, which is why measurement goes through
+    /// A short readout or text button. Wider than an icon button, so measurement goes through
     /// [`face_units`] rather than assuming every button is square.
     Label(String),
 }
@@ -120,7 +119,7 @@ impl ToolbarButton {
         }
     }
 
-    /// A read-only text cell. Never active, never a click target.
+    /// An initially read-only text cell. Use `available(true)` for a text button.
     #[must_use]
     pub fn label(text: impl Into<String>) -> Self {
         Self {

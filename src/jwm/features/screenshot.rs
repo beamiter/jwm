@@ -332,6 +332,7 @@ pub enum ToolbarCommand {
     Undo,
     Redo,
     Scroll,
+    RecordGif,
     Copy,
     Save,
     Cancel,
@@ -358,6 +359,7 @@ impl ToolbarCommand {
                 ScreenshotTool::Invert => "Invert colors · I · drag over a region",
             },
             Self::Scroll => "Long screenshot · S · scroll a web page to stitch",
+            Self::RecordGif => "Record GIF · Ctrl+G · reuse this region",
             Self::Thinner => "Thinner stroke · Minus / Ctrl+Down",
             Self::Thicker => "Thicker stroke · Plus / Ctrl+Up",
             Self::NextColor => "Next ink color · 1–8 choose a color",
@@ -990,7 +992,7 @@ impl ScreenshotState {
     /// apart.
     #[must_use]
     pub fn toolbar_entries(&self) -> Vec<ToolbarEntry> {
-        let mut entries = Vec::with_capacity(ScreenshotTool::PALETTE.len() + 10);
+        let mut entries = Vec::with_capacity(ScreenshotTool::PALETTE.len() + 11);
         for tool in ScreenshotTool::PALETTE {
             entries.push(ToolbarEntry {
                 button: ToolbarButton::icon(tool.icon()).selected(self.tool == tool),
@@ -1004,6 +1006,10 @@ impl ScreenshotState {
         entries.push(ToolbarEntry {
             button: ToolbarButton::label(size),
             command: None,
+        });
+        entries.push(ToolbarEntry {
+            button: ToolbarButton::label("GIF").available(true),
+            command: Some(ToolbarCommand::RecordGif),
         });
 
         // Stroke and ink together, then the four ways out. A control that

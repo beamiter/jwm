@@ -19,6 +19,7 @@ pub mod clipboard;
 pub mod connectivity;
 pub mod deferred_grab;
 pub mod expose_plan;
+pub(crate) mod gif_recording;
 pub(crate) use crate::external_command;
 pub mod idle;
 pub mod launcher;
@@ -143,6 +144,8 @@ pub struct FeatureStates {
     pub screenshot_completions: Vec<screenshot::ScreenshotCompletionJob>,
     pub overview: OverviewState,
     pub recording: RecordingState,
+    pub(crate) recording_preferences: gif_recording::RecordingPreferences,
+    pub(crate) gif_exports: Vec<gif_recording::GifExport>,
     pub(crate) recording_start: Option<PendingRecordingStart>,
     pub(crate) recording_stops: crate::backend::recording_completion::RecordingStopObservations,
     pub magnifier: MagnifierState,
@@ -274,6 +277,7 @@ impl FeatureStates {
             // later mutation saves it back. A missing or damaged file is an
             // empty history, never a startup failure.
             notifications: NotificationCenter::load(),
+            recording_preferences: gif_recording::RecordingPreferences::load(),
             ..Self::default()
         }
     }
