@@ -1016,12 +1016,8 @@ mod tests {
             };
             let startup = current_output_baseline(fallback, Some(startup_output), &config, 1.0);
             for current_scale in [1.25, 2.0] {
-                let restored = current_output_baseline(
-                    startup,
-                    Some(current_output),
-                    &config,
-                    current_scale,
-                );
+                let restored =
+                    current_output_baseline(startup, Some(current_output), &config, current_scale);
                 assert_eq!(
                     restored.position,
                     Some(PhysicalPosition::new(position.0, position.1))
