@@ -4,6 +4,58 @@
 
 ---
 
+## 2026-10-26：全面升级进化第二轮（新功能与未覆盖子系统审计 / 4 批修复）
+
+分支 `claude/jwm-upgrade-evolution`（基于 `2cd89f5`），未开 PR。审计第一轮之后
+合入的新功能（GIF 录制导出、长截图、窗口偏好、virtual-keyboard 迁移、bridge
+升级重载）和第一轮没覆盖的部分（bar 共享内存环、X11 窗口策略、portal、状态栏
+电池、jwm-tool）。只修有复现路径的问题，每条都有回归测试。
+
+| 批次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 0 `da6120c` | ctutils 0.4.6（需 Rust 1.87，MSRV 1.89 不受影响） | — |
+| A `8dde0ce` | bar 共享内存环：容量只在 create/open 时读一次并缓存，对端改写头部不再让 JWM 越界读写；非阻塞读写等锁最多 100 ms，被停住的对端不再让合成线程空转。Smithay virtual-keyboard keymap 改为有界 `pread`（≤4 MiB，不再 mmap），谎报大小不再 SIGBUS。JWM 锁屏卡、shell 面板、截图/长截图、会话不活跃时虚拟键盘不再把按键送进应用，已按下的键释放给原目标；显示器锁遮罩按键盘焦点判断，不再看指针 | 环形缓冲 2 项、超大 memfd keymap 线协议、锁卡释放、焦点跟随 |
+| B `90cc622` | `_NET_WM_MOVERESIZE` 只在指定按钮仍按下时开始（松开后不再“粘”住拖动）；`Input=False` + `WM_TAKE_FOCUS` 窗口映射时得到焦点；sticky 草稿本窗口能隐藏；进入全屏走堆叠规划器（PiP 仍在最上）；tab 拖到最后一格不再插到浮动窗之后 | 每条一个行为测试 |
+| C `c40fa08` | 长截图到 65,535 像素或内存上限时保留已拼接部分；X11 长截图滚动期间按键 replay 给页面；GIF 导出等待时间长于录制写入停止上限，清理遗留的 `.jwm-gif-<hex>` 目录（只删本用户、超时 3 倍的）；偏好文件永久性保存失败不再每 500 ms 重试；X11 空 keymap 不再 panic，标题读取上限 256 KiB；Wayland 截图步骤不再清掉动画请求的重绘；X11 合成器立即移除窗口时清游戏分类 | 9 项 |
+| D `1ec8fde` | 状态栏电池跳过 `scope=Device`（无线鼠标/手柄）；`jwm-tool daemon-check` 未运行时退出码 1；portal 的选择器等待、采集与 PipeWire 协商（每源最多 5 秒）、恢复文件写入、线程回收移到 blocking 池（运行时只有 2 个异步线程，两个选择器同时打开曾卡住全部 portal 调用）；恢复存储上限 64（先淘汰临时授权，再按最久未用），临时文件 + rename 原子替换；portal 21 条既有 clippy 警告清零，CI portal job 加 `clippy -D warnings` | xbar 电池、`tests/jwm_tool_cli.rs`（真实二进制 + 伪守护进程）、单线程运行时测试与路由 pin、存储上限与硬链接见证 |
+
+**审计后判定不改**：
+- bridge `Notify` 在 jwm 回复缺 `id` 时返回 0：notify 命令与 bridge 同一提交
+  引入，jwm 始终返回非零 id，没有现实路径。
+- bridge `reload` 找不到会话总线时退出 0：`docs/notifications.md` 写明“没有会话
+  总线的系统不动”，且这条 info 日志直接出现在安装器输出里。非 systemd 环境
+  （dbus-launch 总线不在 `/run/user/UID/bus`）需在桌面会话里手动
+  `jwm-bridge reload`。
+- portal `persist_mode` 未夹到 0..=2：xdg-desktop-portal 前端先校验，后端收不到
+  越界值。
+
+**推迟（需真机或更大改动）**：
+- X11 合成器每次 Damage 都对所有驱动重新 EGL 导入（性能问题，属于 stale-Vulkan
+  修复的一部分，需真机测量）；damage 失败升级为整窗重新导入；`refresh_pixmap`
+  重定向失败的处理。
+- 虚拟键盘修饰键覆盖客户端修饰键状态；焦点 A→无→A 时旧释放事件。
+- 状态栏把 sticky 窗口算作占用 tag；关闭位置记录的聚合大小。
+- `_NET_ACTIVE_WINDOW` 来源指示（X11 信任模型已有文档）；x11rb/xcb 两后端
+  `fetch_normal_hints` 一致性。
+- 长截图最后一次采样未匹配时要再按一次 Enter；portal `buffer_size` 重新协商。
+- 第一轮遗留项（非焦点显示器 sel、半关闭订阅者等）不变。
+
+**最终验证**：`EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1 scripts/test.sh`
+**7309 passed / 0 failed / 1 ignored**（本轮开始 7291，根包新增 18 项）；
+`cargo clippy --locked --workspace --exclude jwm-portal --all-targets --no-deps
+-- -D warnings` 与 `cargo fmt --all -- --check` 通过；Rust 1.99.1
+`cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings`
+（含 portal）通过。CI 特性矩阵 7 个 `--no-default-features` profile 加默认特性
+全部 0 警告；`cargo +1.89.0 check --locked --all-targets`（MSRV）通过。
+xbar_core `--all-features` 397 通过；portal 81 通过（77 → 81）+ clippy
+`-D warnings`；bridge fmt / clippy `-D warnings` / `JWM_REQUIRE_DBUS_DAEMON=1`
+测试 98 通过；`scripts/test-install-jwm-build.sh` 通过。shared_structures
+239 通过、1 失败：`stale_reclaim_keeps_mapping_when_matching_flink_cannot_be_removed`
+依赖“无权删除”，沙箱以 root 运行时必然失败，在未改动的代码上同样失败，
+非本轮引入。真实 DRM/KMS、X11 实机、fcitx5 桌面与 portal 屏幕共享未实测。
+
+---
+
 ## 2026-10-26：远控握手名额 CAS / 严格 Clippy 修复
 
 基于 `af78d4edfe979aab3a7e4f5aaebe19053f49ed3c`。
