@@ -5,6 +5,15 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Browser long screenshots
+
+- `Alt+S` now offers a long-screenshot button and `S` shortcut after selecting
+  a page region. Scroll down to stitch overlapping viewports from the current
+  browser session; `Enter` saves, `Ctrl+C` copies, and `Esc` cancels.
+- Matching runs in the background, rejects ambiguous or missing overlaps, and
+  keeps the last accepted viewport so scrolling back can recover. X11 and native
+  Wayland keep capture keys modal while allowing the browser to scroll.
+
 ### Virtual keyboard input-device compatibility migration
 
 - Backport Smithay's virtual-keyboard device events and its IME-loop and

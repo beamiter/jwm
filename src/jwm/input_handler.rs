@@ -829,7 +829,10 @@ impl Jwm {
     /// them a second time at click time is how a button ends up doing its
     /// neighbour's job.
     pub(crate) fn sync_screenshot_toolbar(&mut self, backend: &mut dyn Backend) {
-        if !self.features.screenshot.active || !self.features.screenshot.committed {
+        if !self.features.screenshot.active
+            || !self.features.screenshot.committed
+            || self.features.screenshot.scrolling
+        {
             if self.features.screenshot.toolbar.take().is_some() {
                 backend.compositor_set_screenshot_toolbar(None);
             }
@@ -921,6 +924,7 @@ impl Jwm {
             ToolbarCommand::NextColor => self.features.screenshot.next_palette_color(),
             ToolbarCommand::Undo => self.features.screenshot.undo_annotation(),
             ToolbarCommand::Redo => self.features.screenshot.redo_annotation(),
+            ToolbarCommand::Scroll => return self.start_scroll_screenshot(backend),
             ToolbarCommand::Copy => return self.finish_screenshot_select(backend, true),
             ToolbarCommand::Save => return self.finish_screenshot_select(backend, false),
             ToolbarCommand::Cancel => return self.cancel_screenshot_select(backend),
@@ -3059,6 +3063,19 @@ impl Jwm {
         // Screenshot region selection mode
         if self.features.screenshot.active {
             self.features.capture.clear_confirm_double_click();
+            if self.features.screenshot.scrolling {
+                let ctrl = clean_state.contains(Mods::CONTROL);
+                match keysym {
+                    keys::KEY_Escape => self.cancel_screenshot_select(backend),
+                    keys::KEY_Return | keys::KEY_KP_Enter | keys::KEY_space => {
+                        self.finish_scroll_screenshot(backend, false);
+                    }
+                    keys::KEY_c if ctrl => self.finish_scroll_screenshot(backend, true),
+                    keys::KEY_s if ctrl => self.finish_scroll_screenshot(backend, false),
+                    _ => {}
+                }
+                return Ok(());
+            }
             // A label under construction owns the keyboard: every printable
             // key is text, so no tool shortcut may fire while one is open.
             if self.features.screenshot.is_typing() {
@@ -3091,6 +3108,11 @@ impl Jwm {
 
             let ctrl = clean_state.contains(Mods::CONTROL);
             let shift = clean_state.contains(Mods::SHIFT);
+
+            if !ctrl && keysym == keys::KEY_s && self.features.screenshot.committed {
+                self.start_scroll_screenshot(backend);
+                return Ok(());
+            }
 
             let capture_target = if !ctrl && keysym == keys::KEY_Tab {
                 self.cycle_screenshot_capture_target(backend, shift);
@@ -3587,6 +3609,10 @@ impl Jwm {
         if self.features.screenshot.active {
             let btn = MouseButton::from_u8(detail_btn);
             let (px, py) = self.last_mouse_root;
+
+            if self.features.screenshot.scrolling {
+                return Ok(PointerPressDisposition::Consumed);
+            }
 
             // The wheel adjusts the stroke instead of cancelling the capture,
             // which is what every other annotation tool does with it — and
@@ -6731,6 +6757,32 @@ mod tests {
                 .unwrap()
                 .contains("Enter / Space save")
         );
+
+        // Long capture has the same entry through its advertised key and
+        // toolbar command; drawing keys must stop changing the editor in it.
+        jwm.on_key_press_internal(&mut backend, b's', 0).unwrap();
+        assert!(jwm.features.screenshot.scrolling);
+        let tool = jwm.features.screenshot.tool;
+        jwm.on_key_press_internal(&mut backend, b'p', 0).unwrap();
+        assert_eq!(jwm.features.screenshot.tool, tool);
+        jwm.on_key_press_internal(&mut backend, b'c', Mods::CONTROL.bits())
+            .unwrap();
+        assert!(
+            backend
+                .capture_hint
+                .as_deref()
+                .unwrap()
+                .contains("finishing")
+        );
+        jwm.cancel_screenshot_select(&mut backend);
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(100, 100, 200, 100));
+        jwm.apply_screenshot_toolbar_command(&mut backend, ToolbarCommand::Scroll);
+        assert!(jwm.features.screenshot.scrolling);
+        assert!(jwm.features.screenshot.toolbar.is_none());
+        jwm.cancel_screenshot_select(&mut backend);
     }
 
     #[test]

@@ -68,6 +68,8 @@ pub enum ToolbarIcon {
     Undo,
     /// Put back the last dropped annotation.
     Redo,
+    /// Stitch a scrolling page into a long image.
+    Scroll,
     /// Finish, to the clipboard.
     Copy,
     /// Finish, to a file.
@@ -853,6 +855,28 @@ fn shapes_for(icon: ToolbarIcon) -> Vec<Shape> {
                 a: [0.22, 0.78],
                 b: [0.33, 0.67],
                 r: 0.035,
+            },
+        ],
+        ToolbarIcon::Scroll => vec![
+            Shape::Frame {
+                min: [0.24, 0.14],
+                max: [0.76, 0.86],
+                r: s,
+            },
+            Shape::Capsule {
+                a: [0.5, 0.34],
+                b: [0.5, 0.68],
+                r: s,
+            },
+            Shape::Capsule {
+                a: [0.36, 0.54],
+                b: [0.5, 0.68],
+                r: s,
+            },
+            Shape::Capsule {
+                a: [0.64, 0.54],
+                b: [0.5, 0.68],
+                r: s,
             },
         ],
         ToolbarIcon::Line => vec![Shape::Capsule {
@@ -1735,7 +1759,8 @@ mod tests {
 
     #[test]
     fn every_icon_rasterises_to_something_visible_and_correctly_tinted() {
-        const ICONS: [ToolbarIcon; 19] = [
+        const ICONS: [ToolbarIcon; 20] = [
+            ToolbarIcon::Scroll,
             ToolbarIcon::Pencil,
             ToolbarIcon::Line,
             ToolbarIcon::Arrow,
@@ -1805,7 +1830,8 @@ mod tests {
     /// in memory, keeping ordinary test runs deterministic and side-effect free.
     #[test]
     fn icon_contact_sheet_composites_every_icon_at_every_size() {
-        const ICONS: [ToolbarIcon; 19] = [
+        const ICONS: [ToolbarIcon; 20] = [
+            ToolbarIcon::Scroll,
             ToolbarIcon::Pencil,
             ToolbarIcon::Line,
             ToolbarIcon::Arrow,

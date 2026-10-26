@@ -462,6 +462,10 @@ impl Jwm {
     pub(crate) fn sync_capture_hint(&mut self, backend: &mut dyn Backend) {
         use crate::backend::compositor_common::capture_hint::capture_hint_label;
 
+        if self.features.screenshot.scrolling {
+            return;
+        }
+
         if self.features.screenshot.active && !self.features.screenshot.committed {
             let probe = self.probed_capture_hint_title(self.last_mouse_root);
             let label =

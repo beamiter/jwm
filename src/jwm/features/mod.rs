@@ -36,6 +36,7 @@ pub mod recording;
 pub mod recording_plan;
 pub mod resources;
 pub mod screenshot;
+pub(crate) mod scroll_screenshot;
 pub mod session;
 pub mod shell_hub;
 pub mod switcher;
@@ -135,6 +136,7 @@ pub struct FeatureStates {
     /// status bar mid-click, most often — lets go. See `deferred_grab`.
     pub deferred_grab: Option<DeferredGrab>,
     pub screenshot: ScreenshotState,
+    pub(crate) scroll_capture: Option<scroll_screenshot::ScrollCapture>,
     /// Completion watchers for queued screenshot captures, one per capture.
     /// The workers only wait for the compositor's PNG publish (and run the
     /// clipboard hand-off); the frame tick turns their outcomes into toasts.
@@ -293,6 +295,7 @@ impl FeatureStates {
     /// 禁用所有特性（紧急退出）
     pub fn disable_all(&mut self) {
         self.screenshot.cancel();
+        self.scroll_capture = None;
         self.capture = CaptureInteractionState::default();
         self.system_ui.cancel();
         self.system_ui_return_to_hub = false;

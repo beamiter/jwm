@@ -3145,6 +3145,10 @@ pub trait BackendDiagnostics: Send {
 
 /// Runtime controls for compositor-wide visual state.
 pub trait CompositorControl: Send {
+    /// Keep capture confirmation keys modal while the pointer is released to
+    /// a scrolling page. X11 already owns a separate native keyboard grab.
+    fn compositor_set_scroll_capture_active(&mut self, _active: bool) {}
+
     /// Requeue current wallpaper and preview images after an explicit refresh.
     /// Preserve visible textures while asynchronous replacement loads run.
     fn compositor_refresh_wallpapers(&mut self) {}

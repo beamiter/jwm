@@ -637,6 +637,8 @@ struct SharedState {
     /// True while the WM screenshot region-select grab is active.
     /// Suppresses pointer/keyboard events from reaching Wayland clients.
     screenshot_grab_active: bool,
+    /// Long screenshots release pointer input but retain capture keys.
+    scroll_capture_active: bool,
     /// True while JWM's built-in launcher or lock screen owns all input.
     system_ui_grab_active: bool,
     touch_routes: TouchRoutes,
@@ -679,6 +681,7 @@ impl Default for SharedState {
             kms_needs_reinit: false,
             session_active: true,
             screenshot_grab_active: false,
+            scroll_capture_active: false,
             system_ui_grab_active: false,
             touch_routes: TouchRoutes::default(),
             button_routes: ButtonRoutes::default(),
@@ -3345,7 +3348,7 @@ impl UdevBackend {
 
                                 let modal_grab_active = {
                                     let s = shared.lock_safe();
-                                    s.screenshot_grab_active || s.system_ui_grab_active
+                                    s.screenshot_grab_active || s.scroll_capture_active || s.system_ui_grab_active
                                 };
 
                                 let exclusive_surface = if session_locked || modal_grab_active
@@ -3532,7 +3535,7 @@ impl UdevBackend {
                                             // since typing a label means every
                                             // printable key is a screenshot
                                             // control.
-                                            let is_screenshot_control = s.screenshot_grab_active;
+                                            let is_screenshot_control = s.screenshot_grab_active || s.scroll_capture_active;
                                             let should_suppress = s.system_ui_grab_active
                                                 || is_screenshot_control
                                                 || (!session_locked
@@ -3564,7 +3567,7 @@ impl UdevBackend {
                             // and keep the WM repeat state quiet.
                             let (screenshot_grab_active, system_ui_grab_active) = {
                                 let s = shared.lock_safe();
-                                (s.screenshot_grab_active, s.system_ui_grab_active)
+                                (s.screenshot_grab_active || s.scroll_capture_active, s.system_ui_grab_active)
                             };
                             if session_locked
                                 || (!(screenshot_grab_active || system_ui_grab_active)
@@ -4722,6 +4725,10 @@ impl BackendDiagnostics for UdevBackend {
 }
 
 impl CompositorControl for UdevBackend {
+    fn compositor_set_scroll_capture_active(&mut self, active: bool) {
+        self.shared.lock_safe().scroll_capture_active = active;
+    }
+
     fn compositor_refresh_wallpapers(&mut self) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.refresh_wallpaper_images();

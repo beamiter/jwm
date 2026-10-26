@@ -11,7 +11,7 @@ const SCREENSHOT_CANCEL_POLL: std::time::Duration = std::time::Duration::from_mi
 /// Cancellation is shared by the capture, result waiter and main-thread owner.
 /// The gate serializes cancellation with the final clipboard offer, so an old
 /// request cannot replace the clipboard after cancellation has returned.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ScreenshotCancellation {
     gate: std::sync::Arc<std::sync::Mutex<bool>>,
 }

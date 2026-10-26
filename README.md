@@ -468,9 +468,29 @@ ink swatch, and the four ways out:
 | Thinner / thicker stroke | `-` / `+`, `Ctrl+Down` / `Ctrl+Up`, or the wheel |
 | Ink (8-colour ring) | `1`…`8`, or click the swatch to step |
 | Undo / redo | `Ctrl+Z`, `Backspace` / `Ctrl+Shift+Z`, `Ctrl+Y` |
+| Long screenshot | `S`, or the downward-arrow page button |
 | Save to file | `Enter` or `Ctrl+S` |
 | Copy to clipboard | `Ctrl+C` |
 | Cancel | `Escape` |
+
+For a browser long screenshot, press `Alt+S`, drag a region around the page's
+scrolling content, then press `S` or click the long-screenshot button. Wait for
+the pixel-size hint, move the pointer into the page and scroll down slowly.
+JWM samples the live region and stitches overlapping viewports, removing the
+repeated content. Pause between scrolls and retain at least a quarter of the
+previous viewport. `Enter` / `Space` / `Ctrl+S` saves the combined PNG;
+`Ctrl+C` copies it, and `Escape` cancels. Capture starts at the current page
+position, so scroll to the top before `Alt+S` to capture the whole page.
+
+This uses the current browser session without an extension or remote-debugging
+port, on X11 and native Wayland. Exclude browser chrome, fixed headers, sticky
+sidebars and video from the region; the content must move together vertically.
+If a scroll is too large or the overlap is ambiguous, the hint asks you to
+scroll back up; the last accepted image stays intact and saving waits for a
+matching final viewport. Marks made before starting are retained on the first
+viewport. During scrolling the pointer belongs to the browser and the toolbar
+is hidden; finish or cancel with the keyboard. Output is bounded to 65,535
+pixels high and the existing 512 MiB RGBA / 64 MiB clipboard PNG limits.
 
 While a text label is open every key is text; `Enter` commits it, `Escape`
 drops it, and switching tools commits it. A control with nothing to do — undo

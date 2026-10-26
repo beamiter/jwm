@@ -7651,6 +7651,8 @@ pub(crate) mod keyboard_grab_tests {
         capture_selection_updates: Vec<bool>,
         capture_hints: Vec<Option<String>>,
         screenshot_overlay_updates: Vec<String>,
+        scroll_capture_active: bool,
+        scroll_frames: Vec<crate::backend::compositor_common::screenshot::ScreenshotMemorySender>,
     }
 
     impl GrabSpyBackend {
@@ -7685,6 +7687,8 @@ pub(crate) mod keyboard_grab_tests {
                 capture_selection_updates: Vec::new(),
                 capture_hints: Vec::new(),
                 screenshot_overlay_updates: Vec::new(),
+                scroll_capture_active: false,
+                scroll_frames: Vec::new(),
             }
         }
 
@@ -7702,8 +7706,27 @@ pub(crate) mod keyboard_grab_tests {
 
     impl CompositorBenchmark for GrabSpyBackend {}
     impl BackendDiagnostics for GrabSpyBackend {}
-    impl CompositorControl for GrabSpyBackend {}
+    impl CompositorControl for GrabSpyBackend {
+        fn compositor_set_scroll_capture_active(&mut self, active: bool) {
+            self.scroll_capture_active = active;
+        }
+    }
     impl CompositorMedia for GrabSpyBackend {
+        fn take_screenshot_region_to_memory(
+            &mut self,
+            target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+            _x: i32,
+            _y: i32,
+            width: u32,
+            height: u32,
+        ) -> Result<bool, BackendError> {
+            if !self.scroll_capture_active {
+                return Ok(false);
+            }
+            assert_eq!((width, height), (120, 240));
+            self.scroll_frames.push(target);
+            Ok(true)
+        }
         fn compositor_request_recording_region(
             &mut self,
             path: &str,
@@ -7948,6 +7971,162 @@ pub(crate) mod keyboard_grab_tests {
 
     fn jwm(backend: &mut GrabSpyBackend) -> Jwm {
         Jwm::new_with_runtime_backend(backend, "test").expect("test jwm")
+    }
+
+    fn start_long_screenshot(backend: &mut GrabSpyBackend) -> Jwm {
+        let mut jwm = jwm(backend);
+        jwm.features.screenshot.start();
+        jwm.features
+            .screenshot
+            .set_output_path("/unused/long-screenshot.png".into());
+        backend
+            .key_ops
+            .grab_keyboard(WindowId::from_raw(1))
+            .unwrap();
+        backend.input_ops.grab_pointer(0, None).unwrap();
+        jwm.features
+            .screenshot
+            .select_rect(Rect::new(0, 0, 120, 240));
+        jwm.start_scroll_screenshot(backend);
+        assert!(jwm.features.screenshot.scrolling);
+        assert!(backend.keyboard_held());
+        assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        assert!(backend.scroll_capture_active);
+        jwm.tick_scroll_screenshot(backend, std::time::Instant::now());
+        jwm
+    }
+
+    fn deliver_long_screenshot_frame(jwm: &mut Jwm, backend: &mut GrabSpyBackend, top: u32) {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot,
+        };
+        let frame = image::RgbaImage::from_fn(120, 240, |x, y| {
+            let n = x.wrapping_mul(7919) ^ (y + top).wrapping_mul(104729);
+            image::Rgba([(n >> 8) as u8, n as u8, (n >> 16) as u8, 255])
+        });
+        let sender = backend.scroll_frames.pop().expect("queued viewport");
+        save_screenshot(
+            ScreenshotDestination::Memory(sender),
+            frame.as_raw(),
+            120,
+            240,
+        )
+        .unwrap();
+        let expected = format!("120×{}", top + 240);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !backend
+            .capture_hints
+            .last()
+            .and_then(|h| h.as_ref())
+            .is_some_and(|h| h.contains(&expected))
+            && jwm.features.screenshot.scrolling
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "viewport did not complete"
+            );
+            jwm.tick_scroll_screenshot(backend, std::time::Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn long_screenshot_releases_only_pointer_and_copies_the_final_viewport() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = start_long_screenshot(&mut backend);
+        deliver_long_screenshot_frame(&mut jwm, &mut backend, 0);
+        assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        assert!(backend.keyboard_held());
+        assert!(backend.scroll_capture_active);
+        jwm.tick_scroll_screenshot(
+            &mut backend,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        deliver_long_screenshot_frame(&mut jwm, &mut backend, 80);
+        jwm.finish_screenshot_select(&mut backend, true);
+        jwm.tick_scroll_screenshot(&mut backend, std::time::Instant::now());
+        deliver_long_screenshot_frame(&mut jwm, &mut backend, 140);
+        assert!(!jwm.features.screenshot.active);
+        assert!(!backend.scroll_capture_active);
+        assert!(!backend.keyboard_held());
+        assert_eq!(jwm.features.screenshot_completions.len(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let completion = loop {
+            if let Some(result) = jwm.features.screenshot_completions[0].take() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        let crate::jwm::features::screenshot::ScreenshotCompletion::CopiedToClipboard {
+            png, ..
+        } = completion
+        else {
+            panic!("long screenshot did not produce a clipboard PNG: {completion:?}");
+        };
+        let image = image::load_from_memory(&png).unwrap().into_rgba8();
+        let expected = image::RgbaImage::from_fn(120, 380, |x, y| {
+            let n = x.wrapping_mul(7919) ^ y.wrapping_mul(104729);
+            image::Rgba([(n >> 8) as u8, n as u8, (n >> 16) as u8, 255])
+        });
+        assert_eq!(image, expected);
+    }
+
+    #[test]
+    fn long_screenshot_cancel_rejects_a_late_frame_and_preserves_new_selection() {
+        use crate::backend::compositor_common::screenshot::{
+            ScreenshotDestination, save_screenshot,
+        };
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = start_long_screenshot(&mut backend);
+        let sender = backend.scroll_frames.pop().unwrap();
+        jwm.cancel_screenshot_select(&mut backend);
+        assert!(!backend.scroll_capture_active);
+        assert!(!backend.keyboard_held());
+        jwm.features.screenshot.start();
+        backend
+            .key_ops
+            .grab_keyboard(WindowId::from_raw(1))
+            .unwrap();
+        backend.input_ops.grab_pointer(0, None).unwrap();
+        assert!(
+            save_screenshot(
+                ScreenshotDestination::Memory(sender),
+                &vec![0; 120 * 240 * 4],
+                120,
+                240
+            )
+            .is_err()
+        );
+        jwm.tick_scroll_screenshot(&mut backend, std::time::Instant::now());
+        assert!(jwm.features.screenshot.active);
+        assert!(!jwm.features.screenshot.scrolling);
+        assert!(backend.keyboard_held());
+        assert!(backend.input_ops.held.load(Ordering::Relaxed));
+        assert!(jwm.features.screenshot_completions.is_empty());
+        jwm.cancel_screenshot_select(&mut backend);
+    }
+
+    #[test]
+    fn long_screenshot_capture_failure_clears_input_ownership() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = start_long_screenshot(&mut backend);
+        backend.scroll_frames.clear(); // producer disconnects without a PNG
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while jwm.features.screenshot.active {
+            assert!(std::time::Instant::now() < deadline);
+            jwm.tick_scroll_screenshot(&mut backend, std::time::Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!backend.scroll_capture_active);
+        assert!(!backend.keyboard_held());
+        assert!(!backend.input_ops.held.load(Ordering::Relaxed));
+        assert!(
+            backend
+                .toast_titles()
+                .iter()
+                .any(|title| title.contains("Screenshot failed"))
+        );
     }
 
     /// Drive the real screenshot poll after a newer UI owner has been arranged.

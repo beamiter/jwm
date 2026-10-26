@@ -633,6 +633,9 @@ impl WMController for Jwm {
             self.sync_system_ui(backend);
         }
         let swallowed_capture_release = self.features.capture.take_swallowed_button_release();
+        if self.features.screenshot.scrolling {
+            return;
+        }
         if self.features.screenshot.active && self.features.screenshot.committed {
             let (x, y) = self.last_mouse_root;
             let (x, y) = (x.round() as i32, y.round() as i32);
@@ -1051,6 +1054,10 @@ impl WMController for Jwm {
                 self.preview_recording_capture_target(backend, target, (root_x, root_y));
                 self.sync_recording_selection_cursor(backend, (root_x, root_y));
             }
+            return;
+        }
+        if self.features.screenshot.scrolling {
+            self.last_mouse_root = (root_x, root_y);
             return;
         }
         if self.features.screenshot.active && self.features.screenshot.committed {
@@ -15520,6 +15527,9 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        if let Some(capture) = &self.features.scroll_capture {
+            next = min_optional_duration(next, Some(capture.next_wakeup(now)));
+        }
         if self.wallpaper_drag.is_some() {
             next = min_optional_duration(next, Some(FRAME_INTERVAL));
         }
@@ -15902,6 +15912,7 @@ impl EventHandler for Jwm {
         // A request the pointer was busy for retries here rather than from a
         // sleep, so waiting for a status bar's click to end costs no frames.
         self.tick_deferred_grab(backend, now);
+        self.tick_scroll_screenshot(backend, now);
 
         // _NET_WM_PING: send pings every 2 seconds, check for timeouts
         self.tick_ping_check(backend, now);

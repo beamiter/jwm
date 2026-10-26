@@ -331,6 +331,7 @@ pub enum ToolbarCommand {
     NextColor,
     Undo,
     Redo,
+    Scroll,
     Copy,
     Save,
     Cancel,
@@ -356,6 +357,7 @@ impl ToolbarCommand {
                 ScreenshotTool::Pixelate => "Pixelate · X · drag over a region",
                 ScreenshotTool::Invert => "Invert colors · I · drag over a region",
             },
+            Self::Scroll => "Long screenshot · S · scroll a web page to stitch",
             Self::Thinner => "Thinner stroke · Minus / Ctrl+Down",
             Self::Thicker => "Thicker stroke · Plus / Ctrl+Up",
             Self::NextColor => "Next ink color · 1–8 choose a color",
@@ -513,6 +515,8 @@ pub struct ScreenshotState {
     pub dragging: bool,
     /// 选择已完成，等待保存操作
     pub committed: bool,
+    /// The pointer belongs to the page while a scrolling capture is running.
+    pub scrolling: bool,
     /// 选择起始点 (x, y)
     pub start: (f64, f64),
     /// 选择结束点 (x, y)
@@ -569,6 +573,7 @@ impl ScreenshotState {
         self.active = true;
         self.dragging = false;
         self.committed = false;
+        self.scrolling = false;
         self.start = (0.0, 0.0);
         self.end = (0.0, 0.0);
         self.tool = ScreenshotTool::Select;
@@ -581,6 +586,7 @@ impl ScreenshotState {
     pub fn reset_selection(&mut self) {
         self.dragging = false;
         self.committed = false;
+        self.scrolling = false;
         self.start = (0.0, 0.0);
         self.end = (0.0, 0.0);
         self.tool = ScreenshotTool::Select;
@@ -984,7 +990,7 @@ impl ScreenshotState {
     /// apart.
     #[must_use]
     pub fn toolbar_entries(&self) -> Vec<ToolbarEntry> {
-        let mut entries = Vec::with_capacity(ScreenshotTool::PALETTE.len() + 9);
+        let mut entries = Vec::with_capacity(ScreenshotTool::PALETTE.len() + 10);
         for tool in ScreenshotTool::PALETTE {
             entries.push(ToolbarEntry {
                 button: ToolbarButton::icon(tool.icon()).selected(self.tool == tool),
@@ -1017,6 +1023,7 @@ impl ScreenshotState {
             (ToolbarIcon::Color, ToolbarCommand::NextColor, true),
             (ToolbarIcon::Undo, ToolbarCommand::Undo, self.can_undo()),
             (ToolbarIcon::Redo, ToolbarCommand::Redo, self.can_redo()),
+            (ToolbarIcon::Scroll, ToolbarCommand::Scroll, true),
             (ToolbarIcon::Copy, ToolbarCommand::Copy, true),
             (ToolbarIcon::Save, ToolbarCommand::Save, true),
             (ToolbarIcon::Close, ToolbarCommand::Cancel, true),
@@ -1540,6 +1547,8 @@ impl Jwm {
     /// 取消交互式截图选择模式
     pub(crate) fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
         info!("[take_screenshot] cancelling region selection");
+        self.features.scroll_capture = None;
+        backend.compositor_set_scroll_capture_active(false);
         self.features.screenshot.cancel();
         self.features.capture.clear_confirm_double_click();
         backend.compositor_set_screenshot_freeze(false);
@@ -1574,6 +1583,11 @@ impl Jwm {
             CaptureCompletion, CaptureExecution, execute_capture_plan,
             execute_capture_plan_to_memory, plan_capture_completion,
         };
+
+        if self.features.screenshot.scrolling {
+            self.finish_scroll_screenshot(backend, to_clipboard);
+            return;
+        }
 
         // A label still being typed counts as part of the capture — finishing
         // with text half-entered should keep the text, not discard it.
@@ -1696,6 +1710,7 @@ impl Jwm {
 
     /// Called after shutdown preflight has committed, before backend teardown.
     pub(crate) fn cancel_private_screenshot_completions(&mut self) {
+        self.features.scroll_capture = None;
         for completion in &self.features.screenshot_completions {
             if let Some(cancellation) = &completion.cancellation {
                 cancellation.cancel();
@@ -1842,7 +1857,7 @@ impl Jwm {
         )
     }
 
-    fn ensure_screenshot_completion_capacity(
+    pub(super) fn ensure_screenshot_completion_capacity(
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), crate::backend::error::BackendError> {
@@ -2046,7 +2061,7 @@ impl Jwm {
         published
     }
 
-    fn draw_annotation(
+    pub(super) fn draw_annotation(
         image: &mut RgbaImage,
         region_origin: (i32, i32),
         annotation: &ScreenshotAnnotation,
