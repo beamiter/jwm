@@ -2060,11 +2060,20 @@ impl XcbBackend {
             ClientMessageKind::ActiveWindow => Some(BackendEvent::ActiveWindowMessage { window }),
             ClientMessageKind::CloseWindow => Some(BackendEvent::CloseWindowRequest { window }),
             ClientMessageKind::MoveResize { direction, button } => {
-                Some(BackendEvent::MoveResizeRequest {
-                    window,
-                    direction,
-                    button,
-                })
+                // Drop a request whose button is no longer (or was never)
+                // down: the drag would hold the pointer grab until some
+                // later click.
+                let mask = self
+                    .input_ops
+                    .query_pointer_root()
+                    .map_or(0, |(_, _, mask, _)| mask);
+                crate::backend::x11::wm::moveresize_button_held(direction, button, mask).then_some(
+                    BackendEvent::MoveResizeRequest {
+                        window,
+                        direction,
+                        button,
+                    },
+                )
             }
             // The pinged window travels in the payload, addressed to the
             // root: resolve it the same non-allocating way.
@@ -3530,6 +3539,18 @@ impl WindowOps for XcbWindowOps {
             .iter()
             .map(|&w| self.ids.intern(w))
             .collect())
+    }
+
+    fn supports_take_focus(&self, win: WindowId) -> XcbResult<bool> {
+        let w = self.win(win)?;
+        let protocols = get_atoms_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_protocols,
+            self.atoms.atom,
+            MAX_PROTOCOL_ATOMS,
+        );
+        Ok(protocol_supported(&protocols, self.atoms.wm_take_focus))
     }
 
     fn send_take_focus(&self, win: WindowId) -> XcbResult<bool> {

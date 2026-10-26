@@ -267,20 +267,23 @@ impl Jwm {
         let Some(new_order) = plan_tab_reorder(&group, drag.client, slot) else {
             return Ok(());
         };
+        let successor = new_order
+            .iter()
+            .position(|&k| k == drag.client)
+            .and_then(|pos| new_order.get(pos + 1))
+            .copied();
+        let clients = &self.state.clients;
         if let Some(list) = self.state.monitor_clients.get_mut(mon_key) {
-            // Same re-insertion tail as `attach_dragged_client`: out of the
-            // list, then back in right before the window the new order puts
-            // after ours — or at the end when ours is now last.
-            let successor = new_order
-                .iter()
-                .position(|&k| k == drag.client)
-                .and_then(|pos| new_order.get(pos + 1))
-                .copied();
+            // Same re-insertion as `attach_dragged_client`: out of the list,
+            // then back in right before the window the new order puts after
+            // ours, or at the tiled/floating boundary when ours is now last.
             list.retain(|&k| k != drag.client);
-            let insert_pos = successor
-                .and_then(|k| list.iter().position(|&k2| k2 == k))
-                .unwrap_or(list.len());
-            list.insert(insert_pos.min(list.len()), drag.client);
+            let insert_pos = tab_reinsert_index(list, successor, |key| {
+                clients
+                    .get(key)
+                    .is_some_and(|client| client.state.is_floating)
+            });
+            list.insert(insert_pos, drag.client);
         }
         info!(
             "[commit_window_tab_reorder] moved {:?} to slot {} on monitor {:?} (drag from {:?})",
@@ -337,6 +340,23 @@ pub(crate) fn without_tab_bar(area: Rect, reserved: i32) -> Rect {
     Rect::new(area.x, area.y + reserved, area.w, area.h - reserved)
 }
 
+/// Where a dropped tab goes back into its monitor's client list (`list`,
+/// without the dragged window): right before `successor`, the window the new
+/// tab order puts after it, or — when it is now last — at the end of the
+/// tiled group. The list keeps tiled windows first and floating ones last,
+/// and appending after the floating group broke that for every caller that
+/// treats the first floating window as the end of the tiles.
+fn tab_reinsert_index(
+    list: &[ClientKey],
+    successor: Option<ClientKey>,
+    is_floating: impl Fn(ClientKey) -> bool,
+) -> usize {
+    successor
+        .and_then(|successor| list.iter().position(|&key| key == successor))
+        .or_else(|| list.iter().position(|&key| is_floating(key)))
+        .unwrap_or(list.len())
+}
+
 /// The tab order after dragging `dragged` to `target_slot`. Cells share the
 /// monitor's tiled order, so slot indexes index the group itself; an
 /// out-of-range slot clamps to the last one. `None` when the drag changes
@@ -360,7 +380,7 @@ pub(crate) fn plan_tab_reorder(
 
 #[cfg(test)]
 mod tests {
-    use super::{Jwm, plan_tab_reorder, without_tab_bar};
+    use super::{Jwm, plan_tab_reorder, tab_reinsert_index, without_tab_bar};
     use crate::backend::common_define::WindowId;
     use crate::core::animation::AnimationManager;
     use crate::core::models::{ClientKey, MonitorKey, WMClient};
@@ -548,6 +568,21 @@ mod tests {
     fn a_bar_taller_than_the_area_cannot_make_it_negative() {
         let area = Rect::new(0, 0, 800, 20);
         assert_eq!(without_tab_bar(area, 200), Rect::new(0, 20, 800, 0));
+    }
+
+    #[test]
+    fn a_tab_dropped_last_stays_ahead_of_the_floating_windows() {
+        // The monitor list with the dragged tab taken out.
+        let all = keys(3);
+        let (b, c, floating) = (all[0], all[1], all[2]);
+        let list = [b, c, floating];
+        let is_floating = |key| key == floating;
+        // Last in the new tab order: end of the tiles, not after `floating`.
+        assert_eq!(tab_reinsert_index(&list, None, is_floating), 2);
+        // A successor still decides when there is one.
+        assert_eq!(tab_reinsert_index(&list, Some(c), is_floating), 1);
+        // No floating window: the end of the list.
+        assert_eq!(tab_reinsert_index(&list[..2], None, |_| false), 2);
     }
 
     #[test]

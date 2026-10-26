@@ -1890,6 +1890,27 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn a_sticky_scratchpad_still_hides() {
+        // A sticky window is visible on every tag, so parking it on no tag
+        // left it on screen and every toggle only stole focus.
+        let (mut jwm, scratchpad, window, _target) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        assert!(jwm.reveal_and_focus(&mut backend, window).unwrap());
+        jwm.set_client_sticky(&mut backend, scratchpad, true);
+        assert!(jwm.is_client_visible_by_key(scratchpad));
+
+        let arg = WMArgEnum::StringVec(vec!["term".into()]);
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+
+        let client = &jwm.state.clients[scratchpad];
+        assert!(!client.state.is_sticky, "parking ends stickiness");
+        assert_eq!(client.state.tags, 0);
+        assert!(!jwm.is_client_visible_by_key(scratchpad));
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        assert!(jwm.is_client_visible_by_key(scratchpad));
+    }
+
+    #[test]
     fn reveal_places_a_parked_scratchpad_on_the_current_monitor_and_tag() {
         let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(false);
         let mut backend = ScratchpadBackend::new();

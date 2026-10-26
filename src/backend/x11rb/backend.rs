@@ -3285,11 +3285,22 @@ mod event_source {
                             Some(BackendEvent::CloseWindowRequest { window })
                         }
                         ClientMessageKind::MoveResize { direction, button } => {
-                            Some(BackendEvent::MoveResizeRequest {
-                                window,
-                                direction,
-                                button,
-                            })
+                            // Drop a request whose button is no longer (or was
+                            // never) down: the drag would hold the pointer
+                            // grab until some later click.
+                            let mask = x11rb::protocol::xproto::ConnectionExt::query_pointer(
+                                &*self.conn,
+                                self.root_x11,
+                            )
+                            .ok()
+                            .and_then(|cookie| cookie.reply().ok())
+                            .map_or(0, |reply| reply.mask.bits() as u16);
+                            crate::backend::x11::wm::moveresize_button_held(direction, button, mask)
+                                .then_some(BackendEvent::MoveResizeRequest {
+                                    window,
+                                    direction,
+                                    button,
+                                })
                         }
                         // The pinged window travels in the payload, addressed
                         // to the root: resolve it the same non-allocating way.
@@ -7186,6 +7197,16 @@ mod window_ops {
             self.conn
                 .set_input_focus(InputFocus::PARENT, w, x11rb::CURRENT_TIME)?;
             Ok(())
+        }
+
+        fn supports_take_focus(&self, win: WindowId) -> Result<bool, BackendError> {
+            let w = self.ids.x11(win)?;
+            let reply = self
+                .conn
+                .get_property(false, w, self.atoms.WM_PROTOCOLS, AtomEnum::ATOM, 0, 1024)?
+                .reply()?;
+            let protocols = reply.value32().into_iter().flatten().collect::<Vec<_>>();
+            Ok(protocol_supported(&protocols, self.atoms.WM_TAKE_FOCUS))
         }
 
         fn send_take_focus(&self, win: WindowId) -> Result<bool, BackendError> {

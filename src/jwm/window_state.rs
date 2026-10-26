@@ -1,7 +1,7 @@
 use crate::backend::api::Backend;
 use crate::backend::api::{
     Geometry, MAX_MINIMIZED_RESTORE_ORDER, MinimizedRestoreRect, MinimizedRestoreState, NetWmState,
-    StackMode, WindowChanges, WindowType,
+    WindowType,
 };
 use crate::backend::common_define::{SchemeType, WindowId};
 use crate::config::CONFIG;
@@ -1044,11 +1044,13 @@ impl Jwm {
                     self.resizeclient(backend, client_key, target.x, target.y, target.w, target.h)?;
                 }
             }
-            let changes = WindowChanges {
-                stack_mode: Some(StackMode::Above),
-                ..Default::default()
-            };
-            backend.window_ops().apply_window_changes(win, changes)?;
+            // Stack through the planner, never with a bare raise: a focused
+            // fullscreen window still stays under PiP, an unfocused one stays
+            // in its EWMH layer, and the compositor draws from the same plan.
+            if let Some(mon_key) = self.state.clients.get(client_key).and_then(|c| c.mon) {
+                self.last_stacking.remove(mon_key);
+                self.restack(backend, Some(mon_key))?;
+            }
         } else if !fullscreen && is_fullscreen {
             backend.property_ops().set_fullscreen_state(win, false)?;
 
@@ -2354,7 +2356,7 @@ mod tests {
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
         EventHandler, EwmhSourceIndication, InputOps, KeyOps, MaximizeAxes, NetWmAction,
         NetWmState, NormalHints, OutputOps, PropertyOps, RenderScheduler, WindowAttributes,
-        WindowOps, WindowType, WmHints,
+        WindowChanges, WindowOps, WindowType, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -2636,6 +2638,10 @@ mod tests {
         fail_next_input_focus: AtomicBool,
         fail_next_attributes: AtomicBool,
         force_unmapped: AtomicBool,
+        /// Every bottom-to-top order handed to `restack_windows`.
+        restack_orders: Mutex<Vec<Vec<WindowId>>>,
+        /// Windows given a bare stacking change through `apply_window_changes`.
+        stack_changes: Mutex<Vec<WindowId>>,
     }
 
     impl WindowOps for MinimizeWindowOps {
@@ -2714,11 +2720,15 @@ mod tests {
             Ok(())
         }
 
-        fn restack_windows(&self, _windows: &[WindowId]) -> Result<(), BackendError> {
+        fn restack_windows(&self, windows: &[WindowId]) -> Result<(), BackendError> {
             let countdown = self.fail_restack_countdown.load(Ordering::Relaxed);
             if countdown > 0 && self.fail_restack_countdown.fetch_sub(1, Ordering::Relaxed) == 1 {
                 return Err(BackendError::Message("injected restack failure".into()));
             }
+            self.restack_orders
+                .lock()
+                .expect("restack orders lock")
+                .push(windows.to_vec());
             Ok(())
         }
 
@@ -2799,13 +2809,19 @@ mod tests {
 
         fn apply_window_changes(
             &self,
-            _win: WindowId,
-            _changes: WindowChanges,
+            win: WindowId,
+            changes: WindowChanges,
         ) -> Result<(), BackendError> {
             if self.fail_apply_window_changes.load(Ordering::Relaxed) {
                 return Err(BackendError::Message(
                     "injected apply-window-changes failure".into(),
                 ));
+            }
+            if changes.stack_mode.is_some() {
+                self.stack_changes
+                    .lock()
+                    .expect("stack changes lock")
+                    .push(win);
             }
             Ok(())
         }
@@ -3620,6 +3636,59 @@ mod tests {
     }
 
     #[test]
+    fn entering_fullscreen_stacks_through_the_planner_and_keeps_pip_on_top() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let pip_window = WindowId::from_raw(0x5101);
+        let video_window = WindowId::from_raw(0x5102);
+        let (_, pip) = add_mode_client(
+            &mut jwm,
+            pip_window,
+            Rect::new(area.x + 40, area.y + 40, 320, 180),
+            false,
+            false,
+        );
+        assert!(jwm.set_client_pip(&mut backend, pip, true).unwrap());
+        let (_, video) = add_mode_client(
+            &mut jwm,
+            video_window,
+            Rect::new(area.x + 200, area.y + 120, 640, 360),
+            false,
+            false,
+        );
+        jwm.focus(&mut backend, Some(video)).unwrap();
+        backend.window_ops.restack_orders.lock().unwrap().clear();
+        backend.window_ops.stack_changes.lock().unwrap().clear();
+
+        jwm.setfullscreen(&mut backend, video, true).unwrap();
+
+        // The X server, and the compositor scene built from `last_stacking`,
+        // both get the planner's order: the focused fullscreen window under
+        // PiP, never a bare raise above it.
+        assert!(
+            backend.window_ops.stack_changes.lock().unwrap().is_empty(),
+            "no bare raise outside the planner"
+        );
+        let order = backend
+            .window_ops
+            .restack_orders
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("entering fullscreen restacks");
+        assert_eq!(jwm.last_stacking.get(monitor), Some(&order));
+        let position = |window| order.iter().position(|&w| w == window);
+        assert!(
+            position(video_window) < position(pip_window),
+            "PiP stays above the fullscreen window: {order:?}"
+        );
+        assert_eq!(order.last(), Some(&pip_window));
+    }
+
+    #[test]
     fn pip_to_fullscreen_target_failures_restore_the_exact_original_mode() {
         for hidden in [false, true] {
             for failure in ["property", "configure", "stack"] {
@@ -3659,10 +3728,12 @@ mod tests {
                             .expect("configure failure size lock") =
                             Some((monitor_geometry.m_w as u32, monitor_geometry.m_h as u32));
                     }
+                    // Entering fullscreen stacks through the planner, so
+                    // the stacking step is the restack.
                     "stack" => backend
                         .window_ops
-                        .fail_apply_window_changes
-                        .store(true, Ordering::Relaxed),
+                        .fail_restack_countdown
+                        .store(1, Ordering::Relaxed),
                     _ => unreachable!(),
                 }
 

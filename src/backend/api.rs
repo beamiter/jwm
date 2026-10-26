@@ -2430,6 +2430,13 @@ pub trait WindowOps: Send {
         Ok(false)
     }
 
+    /// Whether the window lists WM_TAKE_FOCUS in WM_PROTOCOLS. With an input
+    /// hint of false that makes it an ICCCM "globally active" client, which
+    /// takes focus through WM_TAKE_FOCUS rather than SetInputFocus.
+    fn supports_take_focus(&self, _win: WindowId) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Restack windows in order (first = bottom, last = top).
     /// Uses sibling stacking for fewer X11 round-trips.
     /// Default implementation falls back to sequential raise_window.

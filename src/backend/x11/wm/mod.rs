@@ -394,6 +394,30 @@ pub fn net_wm_action_from_raw(action: u32) -> Option<NetWmAction> {
     }
 }
 
+/// Whether a `_NET_WM_MOVERESIZE` request may start an interactive move or
+/// resize, given the pointer's button mask from `QueryPointer`.
+///
+/// A pointer-driven move or resize ends on the button release, so it is only
+/// meaningful while the button the client names (any button for 0) is down.
+/// A request sent after the user already let go — the ordinary race with
+/// client-side decorations — or with no press at all would otherwise grab the
+/// pointer until some later click. Cancel and the keyboard variants need no
+/// button.
+pub(crate) fn moveresize_button_held(direction: u32, button: u32, mask: u16) -> bool {
+    const SIZE_KEYBOARD: u32 = 9;
+    const MOVE_KEYBOARD: u32 = 10;
+    const CANCEL: u32 = 11;
+    // Button1Mask .. Button5Mask.
+    const ANY_BUTTON: u16 = 0x1f00;
+    if matches!(direction, SIZE_KEYBOARD | MOVE_KEYBOARD | CANCEL) {
+        return true;
+    }
+    match button {
+        1..=5 => mask & (1 << (7 + button)) != 0,
+        _ => mask & ANY_BUTTON != 0,
+    }
+}
+
 pub fn classify_client_message(
     type_: u32,
     format: u8,
@@ -1319,6 +1343,25 @@ fn decode_latin1(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moveresize_needs_the_named_button_held() {
+        use super::moveresize_button_held as held;
+        const BUTTON1: u16 = 1 << 8;
+        const BUTTON3: u16 = 1 << 10;
+        // Move with button 1 down, or any button when the client names none.
+        assert!(held(8, 1, BUTTON1));
+        assert!(held(8, 0, BUTTON3));
+        // Released before the WM saw the request, or never pressed.
+        assert!(!held(8, 1, 0));
+        assert!(!held(4, 0, 0));
+        assert!(!held(8, 1, BUTTON3), "a different button is not the drag");
+        // Modifier bits are not buttons.
+        assert!(!held(8, 0, 0x00ff));
+        // Cancel and the keyboard variants pass regardless.
+        for direction in [9, 10, 11] {
+            assert!(held(direction, 0, 0));
+        }
+    }
 
     #[test]
     fn activation_and_close_require_the_ewmh_word_format() {

@@ -504,12 +504,20 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (client_win, client_mon_key, is_never_focus) =
+        let (client_win, client_mon_key, never_focus) =
             if let Some(c) = self.state.clients.get(client_key) {
                 (c.win, c.mon, c.state.never_focus)
             } else {
                 return Err("Client not found".into());
             };
+        // Input=False alone does not mean "never focus": an ICCCM globally
+        // active client (Wine's default) lists WM_TAKE_FOCUS and takes focus
+        // through it. Only a true No Input client stays unfocused on map.
+        let is_never_focus = never_focus
+            && !backend
+                .window_ops()
+                .supports_take_focus(client_win)
+                .unwrap_or(false);
         let current_sel = self.get_selected_client_key();
         let current_sel_mon = self.state.sel_mon;
         if self.is_popup_like(backend, client_key) {
@@ -527,7 +535,7 @@ impl Jwm {
                 .apply_window_changes(client_win, changes)?;
 
             let should_focus_this = if let Some(c) = self.state.clients.get(client_key) {
-                if c.state.never_focus {
+                if is_never_focus {
                     false
                 } else {
                     let types = backend.property_ops().get_window_types(c.win);
@@ -2846,9 +2854,19 @@ mod unmanage_minimized_tests {
         geometry_calls: AtomicUsize,
         fail_next_configure: AtomicBool,
         initial_iconic_operations: Mutex<Vec<InitialIconicOperation>>,
+        /// Windows that list WM_TAKE_FOCUS in WM_PROTOCOLS.
+        take_focus_windows: Mutex<Vec<WindowId>>,
     }
 
     impl WindowOps for ClientWindowOps {
+        fn supports_take_focus(&self, win: WindowId) -> Result<bool, BackendError> {
+            Ok(self
+                .take_focus_windows
+                .lock()
+                .expect("take-focus windows")
+                .contains(&win))
+        }
+
         fn set_position(&self, win: WindowId, x: i32, y: i32) -> Result<(), BackendError> {
             self.placements.lock().unwrap().push(RecordedPlacement {
                 window: win,
@@ -3448,6 +3466,27 @@ mod unmanage_minimized_tests {
             backend.focus_changes,
             vec![Some(jwm.state.clients[foreground].win)]
         );
+    }
+
+    #[test]
+    fn globally_active_windows_take_focus_when_they_map() {
+        // Input=False plus WM_TAKE_FOCUS (Wine's default) is ICCCM's
+        // "globally active" model: such a window takes focus on map like any
+        // other, through WM_TAKE_FOCUS. Only a true No Input window does not.
+        for kind in [WindowType::Normal, WindowType::Dialog] {
+            let (mut jwm, mut backend, _foreground, window) =
+                popup_focus_fixture(kind, kind == WindowType::Dialog, false);
+            let win = jwm.state.clients[window].win;
+            backend
+                .window_ops
+                .take_focus_windows
+                .lock()
+                .expect("take-focus windows")
+                .push(win);
+            jwm.handle_new_client_focus(&mut backend, window).unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(window), "{kind:?}");
+            assert_eq!(backend.focus_changes.last(), Some(&Some(win)), "{kind:?}");
+        }
     }
 
     #[test]

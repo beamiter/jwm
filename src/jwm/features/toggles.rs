@@ -5698,6 +5698,10 @@ impl Jwm {
             // Scratchpad exists — toggle visibility
             let is_visible = self.is_client_visible_by_key(sp_key);
             if is_visible {
+                // A sticky window is visible on every tag, so parking it on
+                // no tag would leave it on screen: hiding a scratchpad ends
+                // its stickiness.
+                self.set_client_sticky(backend, sp_key, false);
                 self.remember_scratchpad_size(sp_key);
                 self.flush_window_preferences(backend, std::time::Instant::now(), true);
                 // Hide: animate upward then hide

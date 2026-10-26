@@ -5,6 +5,26 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Window policy fixes
+
+- Hiding a sticky scratchpad works: parking a scratchpad ends its
+  stickiness, instead of leaving it on screen while every toggle only moved
+  focus.
+- Entering fullscreen stacks through the same planner as everything else. A
+  focused fullscreen video stays under a picture-in-picture window, an
+  unfocused window that asks for fullscreen stays in its layer, and the
+  composited scene matches the window that receives input.
+- Dropping a tab on the last cell keeps the window among the tiles. It no
+  longer lands behind the floating windows, which made later tiling and
+  new-window placement put windows in the wrong slot.
+- On X11, `_NET_WM_MOVERESIZE` starts a move or resize only while the named
+  mouse button is held. A request that arrives after the button was released
+  (common with client-side decorations) no longer grabs the pointer until the
+  next click.
+- On X11, windows that use the "globally active" focus model (input hint off,
+  `WM_TAKE_FOCUS` listed, which is Wine's default) take focus when they map,
+  like other windows.
+
 ### Shared-memory, virtual-keyboard and lock hardening
 
 - The status-bar shared-memory ring no longer trusts ring sizes that a bar
