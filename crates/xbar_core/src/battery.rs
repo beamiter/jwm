@@ -8,7 +8,8 @@ const MAX_POWER_SUPPLY_ENTRIES: usize = 64;
 
 /// Battery state read from `/sys/class/power_supply`.
 ///
-/// Aggregates all present `type == Battery` entries (capacity + status).
+/// Aggregates all present `type == Battery` entries (capacity + status),
+/// skipping peripheral batteries (`scope == Device`).
 #[derive(Debug)]
 pub struct BatteryManager {
     capacity: Option<u8>,
@@ -124,7 +125,7 @@ fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
 
     for dir in directories {
         let kind = read_power_supply_attribute(&dir.join("type")).unwrap_or_default();
-        if kind.trim() != "Battery" {
+        if kind.trim() != "Battery" || is_device_scoped(&dir) {
             continue;
         }
 
@@ -154,6 +155,20 @@ fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
         charging,
         present,
     })
+}
+
+/// Whether a supply powers a peripheral rather than the machine.
+///
+/// Wireless mice, keyboards and game controllers (hid-input, hidpp,
+/// hid-playstation, ...) register as `type=Battery` with `scope=Device`.
+/// Averaging one into the system figure would show a laptop at 50% when its
+/// battery is full and the mouse is nearly empty, and a desktop with a
+/// wireless mouse as running on battery. ACPI batteries usually have no
+/// `scope` file, so a missing, unreadable, `System` or `Unknown` scope still
+/// counts, as in upower and JWM's own battery probes.
+fn is_device_scoped(dir: &Path) -> bool {
+    read_power_supply_attribute(&dir.join("scope"))
+        .is_ok_and(|scope| scope.trim().eq_ignore_ascii_case("Device"))
 }
 
 fn read_power_supply_attribute(path: &Path) -> io::Result<String> {
@@ -240,6 +255,41 @@ mod tests {
                 charging: true,
                 present: true,
             }
+        );
+    }
+
+    #[test]
+    fn peripheral_batteries_are_not_the_system_battery() {
+        let directory = TestDirectory::new();
+        directory.add_supply("BAT0", "Battery", Some("90"), "Discharging", None);
+        directory.add_supply("hidpp_battery_0", "Battery", Some("10"), "Charging", None);
+        fs::write(directory.path().join("hidpp_battery_0/scope"), "Device\n").expect("write scope");
+        directory.add_supply("BAT1", "Battery", Some("70"), "Discharging", None);
+        fs::write(directory.path().join("BAT1/scope"), "System\n").expect("write scope");
+
+        assert_eq!(
+            read_battery_from(directory.path()),
+            BatterySnapshot {
+                capacity: Some(80),
+                charging: false,
+                present: true,
+            }
+        );
+
+        // A desktop whose only battery is the mouse's has no battery.
+        let desktop = TestDirectory::new();
+        desktop.add_supply(
+            "hid-00:11:22-battery",
+            "Battery",
+            Some("5"),
+            "Discharging",
+            None,
+        );
+        fs::write(desktop.path().join("hid-00:11:22-battery/scope"), "device")
+            .expect("write scope");
+        assert_eq!(
+            read_battery_from(desktop.path()),
+            BatterySnapshot::default()
         );
     }
 

@@ -84,7 +84,6 @@ mod tests {
             identifier: id.into(),
             app_id: app_id.into(),
             title: title.into(),
-            ..Default::default()
         }
     }
 

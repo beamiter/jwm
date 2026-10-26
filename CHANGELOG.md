@@ -5,6 +5,24 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Status bar, jwm-tool and screen-cast portal fixes
+
+- Status bars no longer count a wireless mouse, keyboard or game controller
+  battery as the laptop battery. A full laptop battery next to a nearly empty
+  mouse showed about 50%, and a desktop with a wireless mouse showed a
+  battery at all. Only supplies the kernel marks `scope=Device` are skipped,
+  the same rule JWM's own battery probes use.
+- `jwm-tool daemon-check` exits with status 1 when the daemon is not
+  running, so `jwm-tool daemon-check || jwm-tool daemon-restart` works.
+- Screen-cast portal: the source picker, capture and PipeWire negotiation,
+  restore-file writes and stream teardown run off the portal's two async
+  threads. Two screen-share pickers open at once no longer stall every other
+  portal call, including closing sessions.
+- Screen-cast portal: saved "use last selection" grants are capped at 64,
+  dropping transient grants before permanent ones, and the file is replaced
+  atomically, so a full disk or a crash mid-save no longer forgets every
+  saved selection.
+
 ### Long screenshots, GIF export and smaller fixes
 
 - A long screenshot that reaches the 65,535-pixel height (or memory) limit

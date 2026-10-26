@@ -21,6 +21,7 @@ struct Inner {
     pub wayland: SharedSnapshot,
 }
 
+#[derive(Default)]
 pub struct Session {
     /// Whatever the caller asked for in SelectSources, resolved against current
     /// outputs/toplevels at the time the call was made.
@@ -42,19 +43,6 @@ pub struct Session {
     /// frames. Mirrors the cursor_mode bit set in SelectSources (Embedded=true,
     /// Hidden=false). Defaults to false as required by the backend interface.
     pub paint_cursors: bool,
-}
-
-impl Default for Session {
-    fn default() -> Self {
-        Self {
-            selection: None,
-            streams: Vec::new(),
-            captures: Vec::new(),
-            persist_mode: 0,
-            restore_token: None,
-            paint_cursors: false,
-        }
-    }
 }
 
 impl Runtime {

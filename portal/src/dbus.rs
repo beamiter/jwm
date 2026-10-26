@@ -19,6 +19,7 @@ use crate::picker::{SourceSelection, pick_sources, selection_fits_request};
 use crate::pipewire_stream::{self, Source, StreamHandle, StreamSpec};
 use crate::restore;
 use crate::session::Runtime;
+use crate::wayland::{OutputInfo, ToplevelInfo};
 
 /// Source type bits per the portal spec.
 #[bitflags]
@@ -66,8 +67,10 @@ impl SessionImpl {
     ) -> zbus::fdo::Result<()> {
         info!("Session.Close {}", self.handle);
         // Drop streams + capture threads first so the Closed signal observers
-        // can rely on PW nodes already being gone.
-        let _ = self.rt.remove_session(&self.handle).await;
+        // can rely on PW nodes already being gone. Dropping joins those
+        // threads, so it runs on the blocking pool.
+        let session = self.rt.remove_session(&self.handle).await;
+        off_runtime(move || drop(session)).await;
         let _ = Self::closed(&emitter).await;
         let path = self.handle.clone();
         let _ = server.remove::<SessionImpl, _>(path.as_str()).await;
@@ -87,7 +90,7 @@ impl ScreenCast {
 
     #[zbus(property, name = "AvailableSourceTypes")]
     fn available_source_types(&self) -> u32 {
-        BitFlags::from(SourceType::Monitor | SourceType::Window).bits()
+        (SourceType::Monitor | SourceType::Window).bits()
     }
 
     #[zbus(property, name = "AvailableCursorModes")]
@@ -137,57 +140,23 @@ impl ScreenCast {
         let want_monitor = types_mask & (SourceType::Monitor as u32) != 0;
         let want_window = types_mask & (SourceType::Window as u32) != 0;
 
-        let (mut outputs, toplevels) = {
+        let (outputs, toplevels) = {
             let snap = self.rt.wayland().lock().expect("wayland snapshot mutex");
             (snap.outputs.clone(), snap.toplevels.clone())
         };
-        crate::ipc::enrich_outputs_with_connectors(&mut outputs);
-
-        // Try the restore path first — if the caller handed us a token and the
-        // stored sources still resolve, skip the picker entirely.
-        let mut selection: Option<SourceSelection> = None;
-        let mut honored_token: Option<String> = None;
-        if let Some(tok) = restore_token_in.as_deref() {
-            if let Some((sel, _prev_mode)) = restore::resolve(tok, &outputs, &toplevels) {
-                let filtered = SourceSelection {
-                    outputs: if want_monitor {
-                        sel.outputs
-                    } else {
-                        Vec::new()
-                    },
-                    toplevels: if want_window {
-                        sel.toplevels
-                    } else {
-                        Vec::new()
-                    },
-                };
-                if selection_fits_request(&filtered, multiple) {
-                    info!("SelectSources honoring saved source selection");
-                    selection = Some(filtered);
-                    honored_token = Some(tok.to_string());
-                }
-            }
-        }
-
-        let selection = if let Some(sel) = selection {
-            sel
-        } else {
-            let permitted_outputs = if want_monitor {
-                outputs.as_slice()
-            } else {
-                &[]
-            };
-            let permitted_toplevels = if want_window {
-                toplevels.as_slice()
-            } else {
-                &[]
-            };
-            let Some(selection) = pick_sources(permitted_outputs, permitted_toplevels, multiple)
-            else {
-                info!("SelectSources cancelled by user or invalid source override");
-                return (1, HashMap::new());
-            };
-            selection
+        let request = SourceRequest {
+            outputs,
+            toplevels,
+            restore_token: restore_token_in,
+            want_monitor,
+            want_window,
+            multiple,
+        };
+        let Some((selection, honored_token)) =
+            off_runtime(move || choose_sources(request)).await.flatten()
+        else {
+            info!("SelectSources cancelled by user or invalid source override");
+            return (1, HashMap::new());
         };
         info!(
             "SelectSources picked {} output(s), {} toplevel(s)",
@@ -232,110 +201,31 @@ impl ScreenCast {
             .await
             .unwrap_or((SourceSelection::default(), 0, None, true));
 
-        // For each picked output, spawn:
-        //   1. Wayland capture thread (negotiates real buffer_size + format,
-        //      then pumps frames into a SharedFrame).
-        //   2. PipeWire producer thread (drains the SharedFrame in on_process).
-        //
-        // Toplevels still use the zero-fill placeholder — the wl_output side
-        // needed for re-binding inside a fresh capture thread isn't relevant
-        // for toplevels, which would need their own re-discovery path.
-        let mut streams_meta: Vec<(u32, HashMap<String, OwnedValue>)> = Vec::new();
-        let mut handles: Vec<StreamHandle> = Vec::new();
-        let mut captures: Vec<CaptureHandle> = Vec::new();
-        for (idx, o) in selection.outputs.iter().enumerate() {
-            let capture = match capture::spawn_output_capture(o.name.clone(), paint_cursors) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        "Start: failed to spawn capture for output `{}`: {e}",
-                        o.name
-                    );
-                    continue;
-                }
-            };
-            let spec = StreamSpec {
-                width: capture.width,
-                height: capture.height,
-                framerate_num: capture.framerate_num,
-                framerate_den: capture.framerate_den,
-            };
-            let name = if o.name.is_empty() {
-                format!("jwm-output-{idx}")
-            } else {
-                format!("jwm-output-{}", o.name)
-            };
-            let source = match &capture.transport {
-                CaptureTransport::Shm(f) => Source::Shm(f.clone()),
-                CaptureTransport::Dmabuf(b) => Source::Dmabuf(b.clone()),
-            };
-            match pipewire_stream::spawn(spec, name, source) {
-                Ok(h) => {
-                    let mut props: HashMap<String, OwnedValue> = HashMap::new();
-                    if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
-                        props.insert("size".to_string(), v);
-                    }
-                    if let Ok(v) = Value::from(SourceType::Monitor as u32).try_into() {
-                        props.insert("source_type".to_string(), v);
-                    }
-                    streams_meta.push((h.node_id, props));
-                    handles.push(h);
-                    captures.push(capture);
-                }
-                Err(e) => warn!("Start: failed to spawn output PW stream: {e}"),
-            }
-        }
-        for (idx, t) in selection.toplevels.iter().enumerate() {
-            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), paint_cursors)
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        "Start: failed to spawn capture for toplevel `{}` (app_id=`{}`): {e}",
-                        t.identifier, t.app_id
-                    );
-                    continue;
-                }
-            };
-            let spec = StreamSpec {
-                width: capture.width,
-                height: capture.height,
-                framerate_num: capture.framerate_num,
-                framerate_den: capture.framerate_den,
-            };
-            let name = if t.app_id.is_empty() {
-                format!("jwm-window-{idx}")
-            } else {
-                format!("jwm-window-{}", t.app_id)
-            };
-            let source = match &capture.transport {
-                CaptureTransport::Shm(f) => Source::Shm(f.clone()),
-                CaptureTransport::Dmabuf(b) => Source::Dmabuf(b.clone()),
-            };
-            match pipewire_stream::spawn(spec, name, source) {
-                Ok(h) => {
-                    let mut props: HashMap<String, OwnedValue> = HashMap::new();
-                    if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
-                        props.insert("size".to_string(), v);
-                    }
-                    if let Ok(v) = Value::from(SourceType::Window as u32).try_into() {
-                        props.insert("source_type".to_string(), v);
-                    }
-                    streams_meta.push((h.node_id, props));
-                    handles.push(h);
-                    captures.push(capture);
-                }
-                Err(e) => warn!("Start: failed to spawn window PW stream: {e}"),
-            }
-        }
+        // Each capture and PipeWire stream negotiates for up to 5 seconds.
+        let sources = selection.clone();
+        let Some(StartedStreams {
+            streams_meta,
+            handles,
+            captures,
+        }) = off_runtime(move || start_streams(&sources, paint_cursors)).await
+        else {
+            return (2, HashMap::new());
+        };
 
-        let _ = self
+        // The streams replace any from an earlier Start. Replaced ones, and new
+        // ones for a session closed meanwhile, are joined off the runtime.
+        let mut started = Some((handles, captures));
+        let replaced = self
             .rt
             .with_session(&session_handle.to_string(), |s| {
-                s.streams = handles;
-                s.captures = captures;
+                let (handles, captures) = started.take().expect("streams are stored once");
+                (
+                    std::mem::replace(&mut s.streams, handles),
+                    std::mem::replace(&mut s.captures, captures),
+                )
             })
             .await;
+        off_runtime(move || drop((replaced, started))).await;
 
         // Empty selection → SelectSources was either never called or returned
         // nothing. Empty streams_meta with non-empty selection → every capture
@@ -356,18 +246,22 @@ impl ScreenCast {
             results.insert("streams".to_string(), v);
         }
         if persist_mode > 0 && (!selection.outputs.is_empty() || !selection.toplevels.is_empty()) {
-            let token = match prior_token {
+            // The restore store writes its file synchronously.
+            let token = off_runtime(move || match prior_token {
                 Some(t) => {
                     restore::touch(&t, &selection, persist_mode);
                     t
                 }
                 None => restore::save_new(&selection, persist_mode),
-            };
-            if let Ok(v) = restore::encode_data(&token) {
-                results.insert("restore_data".to_string(), v);
-            }
-            if let Ok(v) = Value::from(persist_mode).try_into() {
-                results.insert("persist_mode".to_string(), v);
+            })
+            .await;
+            if let Some(token) = token {
+                if let Ok(v) = restore::encode_data(&token) {
+                    results.insert("restore_data".to_string(), v);
+                }
+                if let Ok(v) = Value::from(persist_mode).try_into() {
+                    results.insert("persist_mode".to_string(), v);
+                }
             }
         }
         info!("Start {session_handle} returning streams");
@@ -391,6 +285,199 @@ impl ScreenCast {
         })?;
         let owned: std::os::fd::OwnedFd = stream.into();
         Ok(zbus::zvariant::OwnedFd::from(owned))
+    }
+}
+
+/// Run work that blocks on tokio's blocking pool: the consent picker waiting
+/// for the user, capture and PipeWire negotiation, restore-file writes and
+/// joining stream threads. The runtime has two async workers. Blocking one
+/// directly halves D-Bus throughput, and two open pickers stall every call
+/// of every session, `Session.Close` included. `None` means the work
+/// panicked.
+async fn off_runtime<T, F>(work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => Some(value),
+        Err(error) => {
+            warn!("blocking portal work failed: {error}");
+            None
+        }
+    }
+}
+
+/// What `SelectSources` asked for, resolved against one snapshot.
+struct SourceRequest {
+    outputs: Vec<OutputInfo>,
+    toplevels: Vec<ToplevelInfo>,
+    restore_token: Option<String>,
+    want_monitor: bool,
+    want_window: bool,
+    multiple: bool,
+}
+
+/// The blocking half of `SelectSources`: JWM IPC for connector names, the
+/// restore store, then the picker. Returns the selection and the restore
+/// token it honored, or `None` when the user cancelled.
+fn choose_sources(request: SourceRequest) -> Option<(SourceSelection, Option<String>)> {
+    let SourceRequest {
+        mut outputs,
+        toplevels,
+        restore_token,
+        want_monitor,
+        want_window,
+        multiple,
+    } = request;
+    crate::ipc::enrich_outputs_with_connectors(&mut outputs);
+
+    // Try the restore path first — if the caller handed us a token and the
+    // stored sources still resolve, skip the picker entirely.
+    if let Some(tok) = restore_token.as_deref()
+        && let Some((sel, _prev_mode)) = restore::resolve(tok, &outputs, &toplevels)
+    {
+        let filtered = SourceSelection {
+            outputs: if want_monitor {
+                sel.outputs
+            } else {
+                Vec::new()
+            },
+            toplevels: if want_window {
+                sel.toplevels
+            } else {
+                Vec::new()
+            },
+        };
+        if selection_fits_request(&filtered, multiple) {
+            info!("SelectSources honoring saved source selection");
+            return Some((filtered, Some(tok.to_string())));
+        }
+    }
+
+    let permitted_outputs = if want_monitor {
+        outputs.as_slice()
+    } else {
+        &[]
+    };
+    let permitted_toplevels = if want_window {
+        toplevels.as_slice()
+    } else {
+        &[]
+    };
+    pick_sources(permitted_outputs, permitted_toplevels, multiple)
+        .map(|selection| (selection, None))
+}
+
+/// Streams `Start` brought up, in the order of its `streams` result.
+struct StartedStreams {
+    streams_meta: Vec<(u32, HashMap<String, OwnedValue>)>,
+    handles: Vec<StreamHandle>,
+    captures: Vec<CaptureHandle>,
+}
+
+/// The blocking half of `Start`: one capture thread and one PipeWire stream
+/// per selected source, each negotiating before it returns.
+fn start_streams(selection: &SourceSelection, paint_cursors: bool) -> StartedStreams {
+    // For each picked output, spawn:
+    //   1. Wayland capture thread (negotiates real buffer_size + format,
+    //      then pumps frames into a SharedFrame).
+    //   2. PipeWire producer thread (drains the SharedFrame in on_process).
+    //
+    // Toplevels still use the zero-fill placeholder — the wl_output side
+    // needed for re-binding inside a fresh capture thread isn't relevant
+    // for toplevels, which would need their own re-discovery path.
+    let mut streams_meta: Vec<(u32, HashMap<String, OwnedValue>)> = Vec::new();
+    let mut handles: Vec<StreamHandle> = Vec::new();
+    let mut captures: Vec<CaptureHandle> = Vec::new();
+    for (idx, o) in selection.outputs.iter().enumerate() {
+        let capture = match capture::spawn_output_capture(o.name.clone(), paint_cursors) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    "Start: failed to spawn capture for output `{}`: {e}",
+                    o.name
+                );
+                continue;
+            }
+        };
+        let spec = StreamSpec {
+            width: capture.width,
+            height: capture.height,
+            framerate_num: capture.framerate_num,
+            framerate_den: capture.framerate_den,
+        };
+        let name = if o.name.is_empty() {
+            format!("jwm-output-{idx}")
+        } else {
+            format!("jwm-output-{}", o.name)
+        };
+        let source = match &capture.transport {
+            CaptureTransport::Shm(f) => Source::Shm(f.clone()),
+            CaptureTransport::Dmabuf(b) => Source::Dmabuf(b.clone()),
+        };
+        match pipewire_stream::spawn(spec, name, source) {
+            Ok(h) => {
+                let mut props: HashMap<String, OwnedValue> = HashMap::new();
+                if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
+                    props.insert("size".to_string(), v);
+                }
+                if let Ok(v) = Value::from(SourceType::Monitor as u32).try_into() {
+                    props.insert("source_type".to_string(), v);
+                }
+                streams_meta.push((h.node_id, props));
+                handles.push(h);
+                captures.push(capture);
+            }
+            Err(e) => warn!("Start: failed to spawn output PW stream: {e}"),
+        }
+    }
+    for (idx, t) in selection.toplevels.iter().enumerate() {
+        let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), paint_cursors) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    "Start: failed to spawn capture for toplevel `{}` (app_id=`{}`): {e}",
+                    t.identifier, t.app_id
+                );
+                continue;
+            }
+        };
+        let spec = StreamSpec {
+            width: capture.width,
+            height: capture.height,
+            framerate_num: capture.framerate_num,
+            framerate_den: capture.framerate_den,
+        };
+        let name = if t.app_id.is_empty() {
+            format!("jwm-window-{idx}")
+        } else {
+            format!("jwm-window-{}", t.app_id)
+        };
+        let source = match &capture.transport {
+            CaptureTransport::Shm(f) => Source::Shm(f.clone()),
+            CaptureTransport::Dmabuf(b) => Source::Dmabuf(b.clone()),
+        };
+        match pipewire_stream::spawn(spec, name, source) {
+            Ok(h) => {
+                let mut props: HashMap<String, OwnedValue> = HashMap::new();
+                if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
+                    props.insert("size".to_string(), v);
+                }
+                if let Ok(v) = Value::from(SourceType::Window as u32).try_into() {
+                    props.insert("source_type".to_string(), v);
+                }
+                streams_meta.push((h.node_id, props));
+                handles.push(h);
+                captures.push(capture);
+            }
+            Err(e) => warn!("Start: failed to spawn window PW stream: {e}"),
+        }
+    }
+    StartedStreams {
+        streams_meta,
+        handles,
+        captures,
     }
 }
 
@@ -575,6 +662,54 @@ mod tests {
         let mut opts = HashMap::new();
         opts.insert("restore_token".into(), ov_str("abc123deadbeef"));
         assert!(parse_select_sources_opts(&opts).restore_token.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_work_leaves_the_runtime_free_for_other_calls() {
+        // A picker that waits until another task on this one-thread runtime
+        // has run: run inline, it would hold the thread for the whole wait.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let picker = tokio::spawn(off_runtime(move || {
+            released
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok()
+        }));
+        let other_call = tokio::spawn(async move { release.send(()).unwrap() });
+        other_call.await.unwrap();
+        assert_eq!(picker.await.unwrap(), Some(true));
+    }
+
+    #[test]
+    fn handlers_keep_blocking_work_off_the_async_workers() {
+        let source = include_str!("dbus.rs");
+        let helper = format!("{}{}", "async fn off_", "runtime<");
+        let handlers = &source[..source.find(&helper).expect("helper is defined")];
+        for work in [
+            "choose_sources(request)",
+            "start_streams(&sources",
+            "drop(session)",
+            "drop((replaced, started))",
+            "match prior_token",
+        ] {
+            let routed = format!("{}{work}", "off_runtime(move || ");
+            assert!(
+                handlers.contains(&routed),
+                "`{work}` must run off the runtime"
+            );
+        }
+        for direct in [
+            "pick_sources(",
+            "spawn_output_capture(",
+            "spawn_toplevel_capture(",
+            "pipewire_stream::spawn(",
+            "restore::resolve(",
+            "enrich_outputs_with_connectors(",
+        ] {
+            assert!(
+                !handlers.contains(direct),
+                "`{direct}` blocks an async worker"
+            );
+        }
     }
 
     #[test]

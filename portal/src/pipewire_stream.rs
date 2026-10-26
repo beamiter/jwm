@@ -326,15 +326,15 @@ fn run(
                 // SHM path — old memcpy behavior.
                 let mut written_size: u32 = 0;
                 let mut written_stride: i32 = 0;
-                if let Some(slot) = shm.as_ref() {
-                    if let (Some(dst), Ok(f)) = (data.data(), slot.lock()) {
-                        if f.seq != 0 && !f.data.is_empty() {
-                            let n = dst.len().min(f.data.len());
-                            dst[..n].copy_from_slice(&f.data[..n]);
-                            written_size = (f.stride as u64 * f.height as u64).min(n as u64) as u32;
-                            written_stride = f.stride as i32;
-                        }
-                    }
+                if let Some(slot) = shm.as_ref()
+                    && let (Some(dst), Ok(f)) = (data.data(), slot.lock())
+                    && f.seq != 0
+                    && !f.data.is_empty()
+                {
+                    let n = dst.len().min(f.data.len());
+                    dst[..n].copy_from_slice(&f.data[..n]);
+                    written_size = (f.stride as u64 * f.height as u64).min(n as u64) as u32;
+                    written_stride = f.stride as i32;
                 }
                 let chunk = data.chunk_mut();
                 *chunk.offset_mut() = 0;
@@ -380,10 +380,10 @@ fn run(
                     reported.set(true);
                 }
             }
-            if shutdown_requested(&shutdown_rx) {
-                if let Some(ml) = mainloop_weak.upgrade() {
-                    ml.quit();
-                }
+            if shutdown_requested(&shutdown_rx)
+                && let Some(ml) = mainloop_weak.upgrade()
+            {
+                ml.quit();
             }
         })
     };
@@ -403,7 +403,7 @@ fn run(
 
 /// Build the params slice we hand to `stream.connect()`. For SHM we send just
 /// an EnumFormat. For dmabuf we send EnumFormat (with VideoModifier=0 pinned)
-/// + a Buffers param declaring `DataType::DmaBuf`, `buffers=3`,
+/// and a Buffers param declaring `DataType::DmaBuf`, `buffers=3`,
 /// `size=stride*height`.
 fn build_connect_params(spec: &StreamSpec, source: &Source) -> Result<Vec<OwnedPod>, String> {
     use spa::param::format::{FormatProperties, MediaSubtype, MediaType};

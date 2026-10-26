@@ -56,7 +56,7 @@ use crate::dmabuf::{self, DmabufBuffer, GbmContext};
 use crate::pipewire_stream::{DmabufBridge, SharedBridge};
 
 /// One captured frame, ready for the PipeWire producer to drain.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct FrameSlot {
     pub width: u32,
     pub height: u32,
@@ -69,19 +69,6 @@ pub struct FrameSlot {
     /// Monotonic counter incremented per frame; PW side may use it for skip
     /// detection but the MVP just always copies.
     pub seq: u64,
-}
-
-impl Default for FrameSlot {
-    fn default() -> Self {
-        Self {
-            width: 0,
-            height: 0,
-            stride: 0,
-            has_alpha: false,
-            data: Vec::new(),
-            seq: 0,
-        }
-    }
 }
 
 pub type SharedFrame = Arc<Mutex<FrameSlot>>;
@@ -519,7 +506,7 @@ fn run_capture(
             wl_buffers.push(dmabuf::create_wl_buffer::<State>(dmabuf_mgr, b, &qh));
         }
         let stride0 = buffers[0].stride;
-        let size = stride0 as u32 * height;
+        let size = stride0 * height;
         let modifier = buffers[0].modifier;
         let (fill_req_tx, fill_req_rx) = mpsc::channel::<(u64, usize)>();
         let (fill_done_tx, fill_done_rx) = mpsc::channel::<(u64, bool)>();
@@ -528,7 +515,7 @@ fn run_capture(
             modifier,
             width,
             height,
-            stride: stride0 as u32,
+            stride: stride0,
             size,
             fds: pw_fds,
             next_req_seq: std::sync::atomic::AtomicU64::new(1),
@@ -939,16 +926,16 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
                 state.buffer_width = width;
                 state.buffer_height = height;
             }
-            ext_image_copy_capture_session_v1::Event::ShmFormat { format } => {
-                if let WEnum::Value(f) = format {
-                    let take = match (state.chosen_shm_format, f) {
-                        (None, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888) => true,
-                        (Some(wl_shm::Format::Argb8888), wl_shm::Format::Xrgb8888) => true,
-                        _ => false,
-                    };
-                    if take {
-                        state.chosen_shm_format = Some(f);
-                    }
+            ext_image_copy_capture_session_v1::Event::ShmFormat {
+                format: WEnum::Value(f),
+            } => {
+                let take = matches!(
+                    (state.chosen_shm_format, f),
+                    (None, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888)
+                        | (Some(wl_shm::Format::Argb8888), wl_shm::Format::Xrgb8888)
+                );
+                if take {
+                    state.chosen_shm_format = Some(f);
                 }
             }
             ext_image_copy_capture_session_v1::Event::DmabufDevice { device } => {
@@ -959,12 +946,10 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
             }
             ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
                 let mods: Vec<u64> = modifiers
-                    .chunks_exact(8)
-                    .map(|c| {
-                        let mut b = [0u8; 8];
-                        b.copy_from_slice(c);
-                        u64::from_le_bytes(b)
-                    })
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|chunk| u64::from_le_bytes(*chunk))
                     .collect();
                 state.dmabuf_formats.push((format, mods));
             }

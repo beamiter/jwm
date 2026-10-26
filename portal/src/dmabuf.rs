@@ -7,10 +7,10 @@
 //!
 //! Pool synchronization model (Stage 1+2+3, "full sync"):
 //!   * Three slots, fixed at startup. State per slot:
-//!       Free        — neither side touching it
-//!       Filling     — capture thread has it attached to a wayland frame
-//!       Ready       — capture wrote pixels; PW side hasn't picked yet
-//!       PwInFlight  — PW dequeued + queued this slot, hasn't released it
+//!     - Free: neither side touching it
+//!     - Filling: capture thread has it attached to a wayland frame
+//!     - Ready: capture wrote pixels; PW side hasn't picked yet
+//!     - PwInFlight: PW dequeued + queued this slot, hasn't released it
 //!   * Capture picks `Free` (or the oldest `Ready`, replacing it) → Filling
 //!     → on Ready event, atomic transition to Ready w/ a monotonic seq.
 //!   * PW `on_process` scans for highest-seq Ready → marks PwInFlight,
@@ -138,7 +138,7 @@ impl GbmContext {
             .map_err(|e| io::Error::new(e.kind(), format!("gbm alloc: {e}")))?;
         let fd = bo
             .fd()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("gbm bo fd: {e}")))?;
+            .map_err(|e| io::Error::other(format!("gbm bo fd: {e}")))?;
         let stride = bo.stride();
         let offset = bo.offset(0);
         let modifier: u64 = bo.modifier().into();
@@ -202,7 +202,7 @@ fn pick_render_node(want: Option<u64>) -> io::Result<PathBuf> {
 
 fn pick_render_node_in_dir(dir_path: impl AsRef<Path>, want: Option<u64>) -> io::Result<PathBuf> {
     let dir_path = dir_path.as_ref();
-    let dir = std::fs::read_dir(&dir_path)?;
+    let dir = std::fs::read_dir(dir_path)?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in dir.flatten() {
         let name = entry.file_name();
@@ -211,12 +211,12 @@ fn pick_render_node_in_dir(dir_path: impl AsRef<Path>, want: Option<u64>) -> io:
             continue;
         }
         let path = entry.path();
-        if let Some(want) = want {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                use std::os::unix::fs::MetadataExt;
-                if meta.rdev() == want {
-                    return Ok(path);
-                }
+        if let Some(want) = want
+            && let Ok(meta) = std::fs::metadata(&path)
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.rdev() == want {
+                return Ok(path);
             }
         }
         candidates.push(path);

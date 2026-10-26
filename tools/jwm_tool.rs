@@ -462,7 +462,7 @@ enum Commands {
         jwm_dir: String,
     },
 
-    /// 检查守护进程是否存活
+    /// 检查守护进程是否存活（未运行时退出码为 1）
     DaemonCheck,
     /// 重启守护进程
     DaemonRestart,
@@ -3012,7 +3012,11 @@ fn main() -> io::Result<()> {
         }
 
         Commands::DaemonCheck => {
-            let _ = check_daemon();
+            // A check reports through its exit status, so scripts can run
+            // `jwm-tool daemon-check || jwm-tool daemon-restart`.
+            if !check_daemon() {
+                std::process::exit(1);
+            }
         }
         Commands::DaemonRestart => {
             let _ = force_restart_daemon()?;

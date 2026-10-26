@@ -817,7 +817,7 @@ show_jwm_tool_help() {
     echo "  quit"
     echo "  status"
     echo "  rebuild         编译并重启 JWM"
-    echo "  daemon-check    守护进程检查/重启"
+    echo "  daemon-check    守护进程存活检查"
     echo "  daemon-restart"
     echo "  debug           调试信息"
     echo "  help            Print this message or the help of the given subcommand(s)"

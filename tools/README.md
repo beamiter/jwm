@@ -46,7 +46,7 @@ jwm-tool quit       # 退出
 ### 守护进程管理
 
 ```bash
-jwm-tool daemon-check     # 守护进程健康检查/自动重启
+jwm-tool daemon-check     # 守护进程存活检查；未运行时退出码为 1
 jwm-tool daemon-restart   # 重启守护进程
 ```
 

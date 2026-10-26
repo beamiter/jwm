@@ -12,10 +12,17 @@
 //! identifier). At restore time we resolve them against the current snapshot —
 //! anything that no longer exists is silently dropped. If nothing resolves, we
 //! fall back to the regular picker path.
+//!
+//! The store keeps at most 64 selections (`MAX_SESSIONS`), evicting transient
+//! (`persist_mode` 1) grants before permanent ones and the least recently
+//! used first, and replaces its file atomically, so a full disk or a crash
+//! mid-save keeps the previous contents.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{info, warn};
 use once_cell::sync::Lazy;
@@ -26,6 +33,16 @@ use crate::wayland::{OutputInfo, ToplevelInfo};
 
 const RESTORE_VENDOR: &str = "JWM";
 const RESTORE_VERSION: u32 = 1;
+
+/// Saved selections kept at most. Every `Start` with a `persist_mode` and no
+/// still-valid token saves a new one, and frontends drop tokens on their own
+/// (a transient grant when its app exits, an app that never stores its
+/// token), so without a cap the store, and each rewrite of its file, would
+/// grow for as long as the account is used.
+const MAX_SESSIONS: usize = 64;
+
+/// `persist_mode` of a grant that outlives its application.
+const PERSIST_PERMANENT: u32 = 2;
 
 /// Backend wire format, distinct from the frontend's public restore_token.
 pub fn encode_data(token: &str) -> Result<zvariant::OwnedValue, zvariant::Error> {
@@ -59,6 +76,10 @@ pub struct RestoredSelection {
     pub outputs: Vec<String>,
     pub toplevels: Vec<String>,
     pub persist_mode: u32,
+    /// Unix seconds of the last save or reuse; decides what the cap evicts.
+    /// Files written before the cap existed read as 0, the oldest.
+    #[serde(default)]
+    pub last_used: u64,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -67,6 +88,44 @@ struct Store {
 }
 
 static STORE: Lazy<Mutex<Store>> = Lazy::new(|| Mutex::new(load().unwrap_or_default()));
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Drop saved selections beyond [`MAX_SESSIONS`]: transient grants first,
+/// then the least recently used, so a permanent grant an application relies
+/// on (OBS's "use last selection") outlasts a stream of one-off shares.
+fn enforce_cap(store: &mut Store) {
+    let excess = store.sessions.len().saturating_sub(MAX_SESSIONS);
+    if excess == 0 {
+        return;
+    }
+    let mut candidates: Vec<(bool, u64, String)> = store
+        .sessions
+        .iter()
+        .map(|(token, entry)| {
+            (
+                entry.persist_mode >= PERSIST_PERMANENT,
+                entry.last_used,
+                token.clone(),
+            )
+        })
+        .collect();
+    candidates.sort_unstable();
+    for (_, _, token) in candidates.into_iter().take(excess) {
+        store.sessions.remove(&token);
+    }
+}
+
+/// Save `entry` under `token` as used now, keeping the store within its cap.
+fn insert_entry(store: &mut Store, token: String, mut entry: RestoredSelection) {
+    entry.last_used = now_unix_secs();
+    store.sessions.insert(token, entry);
+    enforce_cap(store);
+}
 
 fn config_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -80,11 +139,12 @@ fn load() -> Option<Store> {
     let path = config_path();
     let bytes = std::fs::read(&path).ok()?;
     match serde_json::from_slice::<Store>(&bytes) {
-        Ok(s) => {
+        Ok(mut s) => {
             info!(
                 "restore: loaded {} session(s) from {path:?}",
                 s.sessions.len()
             );
+            enforce_cap(&mut s);
             Some(s)
         }
         Err(e) => {
@@ -96,20 +156,32 @@ fn load() -> Option<Store> {
 
 fn flush(store: &Store) {
     let path = config_path();
+    if let Err(e) = write_store(&path, store) {
+        warn!("restore: write {path:?}: {e}");
+    }
+}
+
+/// Replace the store file in one step: write a sibling temporary file, then
+/// rename it over the old one. Rewriting in place truncates first, so a full
+/// disk or a crash mid-write left a file that no longer parses, and the
+/// next start silently forgot every saved selection.
+fn write_store(path: &Path, store: &Store) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(store).map_err(io::Error::other)?;
     if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            warn!("restore: mkdir {parent:?}: {e}");
-            return;
-        }
+        std::fs::create_dir_all(parent)?;
     }
-    match serde_json::to_vec_pretty(store) {
-        Ok(bytes) => {
-            if let Err(e) = std::fs::write(&path, &bytes) {
-                warn!("restore: write {path:?}: {e}");
-            }
-        }
-        Err(e) => warn!("restore: serialize: {e}"),
+    let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
+    temp_name.push(format!(".tmp-{}", std::process::id()));
+    let temp = path.with_file_name(temp_name);
+    let written = std::fs::File::create(&temp).and_then(|mut file| {
+        file.write_all(&bytes)?;
+        file.sync_all()
+    });
+    let result = written.and_then(|()| std::fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    result
 }
 
 /// Pure resolution step: given a stored entry and the currently-available
@@ -188,9 +260,10 @@ pub fn save_new(selection: &SourceSelection, persist_mode: u32) -> String {
             .map(|t| t.identifier.clone())
             .collect(),
         persist_mode,
+        last_used: 0,
     };
     let mut store = STORE.lock().expect("restore store mutex");
-    store.sessions.insert(token.clone(), entry);
+    insert_entry(&mut store, token.clone(), entry);
     flush(&store);
     info!("restore: saved selection under token `{token}` (persist_mode={persist_mode})");
     token
@@ -207,9 +280,10 @@ pub fn touch(token: &str, selection: &SourceSelection, persist_mode: u32) {
             .map(|t| t.identifier.clone())
             .collect(),
         persist_mode,
+        last_used: 0,
     };
     let mut store = STORE.lock().expect("restore store mutex");
-    store.sessions.insert(token.to_string(), entry);
+    insert_entry(&mut store, token.to_string(), entry);
     flush(&store);
 }
 
@@ -258,7 +332,88 @@ mod tests {
             outputs: outs.iter().map(|s| s.to_string()).collect(),
             toplevels: tops.iter().map(|s| s.to_string()).collect(),
             persist_mode,
+            last_used: 0,
         }
+    }
+
+    fn used_at(persist_mode: u32, last_used: u64) -> RestoredSelection {
+        RestoredSelection {
+            last_used,
+            ..entry(&["DP-1"], &[], persist_mode)
+        }
+    }
+
+    #[test]
+    fn the_store_is_capped_and_evicts_transient_grants_first() {
+        let mut store = Store::default();
+        // OBS's permanent grant, used long ago, outlives a stream of one-off
+        // transient shares.
+        store.sessions.insert("obs".into(), used_at(2, 1));
+        for index in 0..MAX_SESSIONS + 10 {
+            store
+                .sessions
+                .insert(format!("share-{index:03}"), used_at(1, 100 + index as u64));
+            enforce_cap(&mut store);
+        }
+        assert_eq!(store.sessions.len(), MAX_SESSIONS);
+        assert!(store.sessions.contains_key("obs"));
+        assert!(!store.sessions.contains_key("share-000"));
+        assert!(!store.sessions.contains_key("share-010"));
+        assert!(store.sessions.contains_key("share-011"));
+        assert!(
+            store
+                .sessions
+                .contains_key(&format!("share-{:03}", MAX_SESSIONS + 9))
+        );
+
+        // Among permanent grants alone, the least recently used goes.
+        let mut store = Store::default();
+        for index in 0..=MAX_SESSIONS {
+            store.sessions.insert(
+                format!("grant-{index:03}"),
+                used_at(2, 1_000 - index as u64),
+            );
+        }
+        enforce_cap(&mut store);
+        assert_eq!(store.sessions.len(), MAX_SESSIONS);
+        assert!(
+            !store
+                .sessions
+                .contains_key(&format!("grant-{MAX_SESSIONS:03}"))
+        );
+        assert!(store.sessions.contains_key("grant-000"));
+    }
+
+    #[test]
+    fn saving_replaces_the_file_instead_of_rewriting_it_in_place() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-portal-restore-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let path = directory.join("jwm-portal").join("sessions.json");
+        let mut store = Store::default();
+        store.sessions.insert("old-token".into(), used_at(2, 1));
+        write_store(&path, &store).expect("first save");
+
+        // A second name for the old file sees whether the save truncated and
+        // rewrote it (what a failed write would have left half-done) or put
+        // a complete new file in its place.
+        let witness = directory.join("witness.json");
+        std::fs::hard_link(&path, &witness).expect("link old file");
+        store.sessions.clear();
+        store.sessions.insert("new-token".into(), used_at(2, 2));
+        write_store(&path, &store).expect("second save");
+
+        let old = std::fs::read_to_string(&witness).expect("read old file");
+        let new = std::fs::read_to_string(&path).expect("read new file");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .expect("list store directory")
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(old.contains("old-token") && !old.contains("new-token"));
+        assert!(new.contains("new-token") && !new.contains("old-token"));
+        assert_eq!(leftovers, ["sessions.json"], "no temporary file is left");
     }
 
     #[test]

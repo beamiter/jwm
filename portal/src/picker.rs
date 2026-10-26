@@ -583,7 +583,6 @@ mod unified_source_tests {
             identifier: "window-1".into(),
             app_id: "editor".into(),
             title: "Draft".into(),
-            ..Default::default()
         }]
     }
 
