@@ -38,7 +38,7 @@ sysinfo = { version = "0.39.6", features = ["multithread"], optional = true }
 # construction — no tag/rev to keep in sync.
 shared_structures = { path = "../shared_structures", default-features = false, features = ["use-futex"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
-toml = { version = "0.9.8", optional = true }
+toml = { version = "1.1.8", optional = true }
 
 alsa = { version = "0.12.0", optional = true }
 log = { version = "0.4.33", optional = true }
