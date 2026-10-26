@@ -1430,12 +1430,21 @@ struct PendingHandshake(Arc<std::sync::atomic::AtomicUsize>);
 
 impl PendingHandshake {
     fn admit(pending: &Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
-        pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_PENDING_HANDSHAKES).then_some(count + 1)
-            })
-            .ok()
-            .map(|_| Self(Arc::clone(pending)))
+        let mut count = pending.load(Ordering::Acquire);
+        while count < MAX_PENDING_HANDSHAKES {
+            // Recheck the cap after contention (or a spurious failure). Only
+            // the successful CAS owns a permit; keep the MSRV at Rust 1.89.
+            match pending.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self(Arc::clone(pending))),
+                Err(observed) => count = observed,
+            }
+        }
+        None
     }
 }
 
@@ -3384,6 +3393,109 @@ mod tests {
         let connector = thread::spawn(move || TcpStream::connect(address).unwrap());
         let (accepted, _) = listener.accept().unwrap();
         (connector.join().unwrap(), accepted)
+    }
+
+    mod pending_handshake_tests {
+        use super::*;
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        #[test]
+        fn cap_rejects_without_mutation_and_drop_allows_readmission() {
+            let pending = Arc::new(AtomicUsize::new(0));
+            let mut permits: Vec<_> = (0..MAX_PENDING_HANDSHAKES)
+                .map(|_| PendingHandshake::admit(&pending).unwrap())
+                .collect();
+            for _ in 0..32 {
+                assert!(PendingHandshake::admit(&pending).is_none());
+                assert_eq!(pending.load(Ordering::Acquire), MAX_PENDING_HANDSHAKES);
+            }
+            drop(permits.pop());
+            let replacement = PendingHandshake::admit(&pending).unwrap();
+            assert!(PendingHandshake::admit(&pending).is_none());
+            drop(permits);
+            assert_eq!(pending.load(Ordering::Acquire), 1);
+            drop(replacement);
+            assert_eq!(pending.load(Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn concurrent_contenders_never_exceed_cap_or_leak_permits() {
+            const CONTENDERS: usize = MAX_PENDING_HANDSHAKES * 4;
+            let pending = Arc::new(AtomicUsize::new(0));
+            let barrier = Arc::new(Barrier::new(CONTENDERS));
+            thread::scope(|scope| {
+                for _ in 0..CONTENDERS {
+                    let pending = &pending;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut counts_correct = true;
+                        for _ in 0..64 {
+                            barrier.wait();
+                            let permit = PendingHandshake::admit(pending);
+                            // Hold every successful permit until all contenders
+                            // have attempted admission, then inspect saturation.
+                            barrier.wait();
+                            counts_correct &=
+                                pending.load(Ordering::Acquire) == MAX_PENDING_HANDSHAKES;
+                            barrier.wait();
+                            drop(permit);
+                            barrier.wait();
+                            counts_correct &= pending.load(Ordering::Acquire) == 0;
+                            barrier.wait();
+                        }
+                        // Assert only after the final barrier so a regression
+                        // cannot strand the other contenders at a rendezvous.
+                        assert!(
+                            counts_correct,
+                            "admission exceeded the cap or leaked a permit"
+                        );
+                    });
+                }
+            });
+            assert_eq!(pending.load(Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn disconnected_handshake_releases_permit_and_allows_readmission() {
+            let pending = Arc::new(AtomicUsize::new(0));
+            let held: Vec<_> = (0..MAX_PENDING_HANDSHAKES - 1)
+                .map(|_| PendingHandshake::admit(&pending).unwrap())
+                .collect();
+            for _ in 0..16 {
+                let admission = PendingHandshake::admit(&pending).unwrap();
+                let (peer, stream) = loopback_pair();
+                drop(peer);
+                thread::spawn(move || {
+                    let authenticated = authenticate_peer(stream, &[0x5a; 32]);
+                    drop(admission);
+                    assert!(authenticated.is_err());
+                })
+                .join()
+                .unwrap();
+                assert_eq!(pending.load(Ordering::Acquire), MAX_PENDING_HANDSHAKES - 1);
+            }
+            drop(held);
+            assert_eq!(pending.load(Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn unwind_and_unstarted_worker_release_their_permits() {
+            let pending = Arc::new(AtomicUsize::new(0));
+            let admission = PendingHandshake::admit(&pending).unwrap();
+            // A failed spawn drops its captured closure without running it.
+            let unstarted_worker = move || drop(admission);
+            drop(unstarted_worker);
+            assert_eq!(pending.load(Ordering::Acquire), 0);
+            let result = std::panic::catch_unwind(|| {
+                let _admission = PendingHandshake::admit(&pending).unwrap();
+                panic!("handshake worker failed");
+            });
+            assert!(result.is_err());
+            assert_eq!(pending.load(Ordering::Acquire), 0);
+            assert!(PendingHandshake::admit(&pending).is_some());
+            assert_eq!(pending.load(Ordering::Acquire), 0);
+        }
     }
 
     mod accept_loop {

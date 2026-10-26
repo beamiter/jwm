@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-10-26：远控握手名额 CAS / 严格 Clippy 修复
+
+基于 `af78d4edfe979aab3a7e4f5aaebe19053f49ed3c`。
+从原始 `PendingHandshake` 提取无依赖复现，Rust 1.99.1 `rustc -D warnings`
+确认 `fetch_update` 因重命名为 `try_update` 被标记 deprecated。
+为兼容 Rust 1.89，改用 `compare_exchange_weak` 循环：初始 Acquire load，
+成功 AcqRel、失败 Acquire；竞争/伪失败后重新检查上限 8。满额仍返回
+`None`，仅 CAS 成功创建 RAII guard，Drop 的 AcqRel `fetch_sub` 不变。
+accept、认证、线程创建失败清理、viewer slot 及线协议均未修改。
+
+新增 4 项测试：满额拒绝不改计数与释放后重入；32 线程 × 64 轮同步竞争，
+持有阶段恰好 8 个名额、释放后归零；真实 loopback 断连认证失败后连续
+16 次复用名额；异常展开和未执行 worker closure 丢弃后的回收。
+未执行 closure 测试覆盖捕获值析构，不声称注入了 OS 线程创建失败。
+
+验证：
+- `cargo fmt --all --check`、`git diff --check` 通过。
+- `cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings`
+  通过，**无 deprecated 或其他 warning 豁免**。
+- Rust 1.99.1 `cargo check --locked --all-targets` 通过。
+- `cargo +1.89.0 check --locked --all-targets --target-dir /tmp/jwm-msrv-target`
+  通过。
+- `CARGO_INCREMENTAL=0 scripts/test.sh --lib remote::`：
+  **312 passed / 0 failed / 0 ignored**，含新增 4 项及已有 accept-loop 回归。
+  首次默认增量构建在链接时出现 `rust-lld undefined hidden symbol`，未运行
+  测试；关闭增量编译重建后链接及测试通过，未为此改动业务代码或依赖。
+- 本轮未重跑全项目测试、七种特性矩阵或物理桌面远控验收。
+
+---
+
 ## 2026-10-26：日常 UI/UX 人体工学优化（输入防误触 / 按压反馈 / 文字可读性）
 
 基于 `274780391ba8d6bffdcc413876d42a4c51395207`。本轮从真实输入与绘制
