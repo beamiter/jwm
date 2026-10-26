@@ -79,7 +79,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: native-bars-protocol-core
 
@@ -165,7 +165,7 @@ jobs:
           components: rustfmt
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: native-bars-presenters-${{ matrix.family }}
 
@@ -277,7 +277,7 @@ jobs:
           components: rustfmt
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: native-bars-toolkit-${{ matrix.name }}
 
@@ -363,7 +363,7 @@ jobs:
           components: rustfmt
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: native-bars-git-toolkit-${{ matrix.name }}
 
@@ -401,7 +401,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: native-bars-tauri-wasm-${{ matrix.name }}
 
@@ -510,7 +510,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Node for the isolated startup regression
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6, verified 2026-10-09
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6, verified 2026-10-09
         with:
           node-version: "24"
           package-manager-cache: false
@@ -585,7 +585,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6, verified 2026-10-09
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6, verified 2026-10-09
         with:
           node-version: "24"
           package-manager-cache: false
