@@ -7731,6 +7731,15 @@ impl Backend for UdevBackend {
             // Policy may have opened (and even closed) a modal while handling
             // queued input. Flush cancellation before blocking for new input.
             reconcile_touch_routes(&mut self.state, &self.shared);
+            // Virtual keyboards are served during this dispatch and bypass the
+            // physical key filter; give them the same modal answer.
+            self.state.virtual_input_blocked = {
+                let shared = self.shared.lock_safe();
+                shared.system_ui_grab_active
+                    || shared.screenshot_grab_active
+                    || shared.scroll_capture_active
+                    || !shared.session_active
+            };
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -8410,6 +8419,30 @@ mod udev_backend_selection_tests {
         )
         .unwrap();
         assert!(matches!(event, BackendEvent::KeyPress { time: 299, .. }));
+    }
+
+    #[test]
+    fn virtual_keyboards_see_the_modal_state_before_every_client_dispatch() {
+        // Virtual keyboards are served inside the client dispatch and bypass
+        // the physical key filter, so the run loop must hand the state the
+        // same modal answer right before it, every iteration.
+        let source = include_str!("backend.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let sync = production
+            .find("self.state.virtual_input_blocked = {")
+            .expect("the run loop mirrors the modal state");
+        let dispatch = production[sync..]
+            .find(".dispatch(timeout, &mut *self.state)")
+            .expect("the mirror comes before the client dispatch");
+        let mirrored = &production[sync..sync + dispatch];
+        for flag in [
+            "system_ui_grab_active",
+            "screenshot_grab_active",
+            "scroll_capture_active",
+            "!shared.session_active",
+        ] {
+            assert!(mirrored.contains(flag), "missing {flag}");
+        }
     }
 
     #[test]

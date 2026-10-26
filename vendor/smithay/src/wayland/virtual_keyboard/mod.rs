@@ -383,29 +383,45 @@ where
     }
 }
 
+/// Largest keymap accepted from a virtual keyboard. Real keymaps are tens of
+/// kilobytes.
+const MAX_KEYMAP_SIZE: usize = 4 * 1024 * 1024;
+
 /// Compile a client-supplied `xkb_v1` keymap, normalizing it to
 /// `XKB_KEYMAP_FORMAT_TEXT_V1`, and returning it if valid.
+///
+/// The keymap is read rather than memory-mapped: a client can claim a `size`
+/// past the end of its file, or truncate the file afterwards, and touching a
+/// mapped page past the end of the file raises SIGBUS in the compositor.
 fn compile_keymap(fd: OwnedFd, size: usize) -> Option<String> {
+    use std::os::unix::fs::FileExt;
+
+    if size == 0 || size > MAX_KEYMAP_SIZE {
+        warn!("Rejected a virtual keyboard keymap of {size} bytes");
+        return None;
+    }
+    let mut bytes = vec![0; size];
+    if let Err(err) = std::fs::File::from(fd).read_exact_at(&mut bytes, 0) {
+        warn!("Failed to read virtual keyboard keymap: {err}");
+        return None;
+    }
+    // The protocol's size includes the terminating NUL.
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        warn!("Virtual keyboard keymap is not UTF-8 text");
+        return None;
+    };
     let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-    // SAFETY: we can map the keymap into the memory.
-    let keymap = match unsafe {
-        xkb::Keymap::new_from_fd(
-            &context,
-            fd,
-            size,
-            xkb::KEYMAP_FORMAT_TEXT_V1,
-            xkb::KEYMAP_COMPILE_NO_FLAGS,
-        )
-    } {
-        Ok(Some(keymap)) => keymap,
-        Ok(None) => {
-            warn!("Failed to compile virtual keyboard keymap");
-            return None;
-        }
-        Err(err) => {
-            warn!("Failed to map virtual keyboard keymap: {err:?}");
-            return None;
-        }
+    let Some(keymap) = xkb::Keymap::new_from_string(
+        &context,
+        text,
+        xkb::KEYMAP_FORMAT_TEXT_V1,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    ) else {
+        warn!("Failed to compile virtual keyboard keymap");
+        return None;
     };
 
     Some(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))

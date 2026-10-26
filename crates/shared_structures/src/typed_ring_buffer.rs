@@ -860,6 +860,31 @@ fn prepare_stale_mapping_reclaim(shmem: &mut Shmem, flink_path: &Path) -> Result
     Ok(())
 }
 
+/// How long one ring operation waits for a direction lock another task holds;
+/// see [`TypedRingBuffer::lock_for_operation`].
+const LOCK_CONTENTION_LIMIT: Duration = Duration::from_millis(100);
+
+/// Why a ring operation could not take its direction lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockFailure {
+    /// The buffer was destroyed while waiting.
+    Destroyed,
+    /// Another task kept the lock past [`LOCK_CONTENTION_LIMIT`].
+    Contended,
+}
+
+impl LockFailure {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Destroyed => Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"),
+            Self::Contended => Error::new(
+                ErrorKind::WouldBlock,
+                "a peer holds the shared ring lock and is not releasing it",
+            ),
+        }
+    }
+}
+
 /// 跨进程方向锁的 RAII guard。
 ///
 /// 锁字存放持有线程的 Linux TID（0 表示空闲）。线程在临界区内退出时，
@@ -1123,6 +1148,12 @@ pub struct TypedRingBuffer<M: WireSafe, C: WireSafe> {
     adaptive_poll_spins: u32,
     strategy: SyncStrategy,
     backend: AnySyncBackend,
+    /// Ring capacities validated against the mapping when it was created or
+    /// opened. The header copies stay writable by every peer, so slot
+    /// indexing never trusts them again: a peer that rewrote them could
+    /// otherwise steer reads and writes past the end of the mapping.
+    buffer_size: u32,
+    command_buffer_size: u32,
     _payload: PhantomData<(M, C)>,
 }
 
@@ -1165,17 +1196,56 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
 
     #[inline]
     fn buffer_size(&self) -> u32 {
-        self.header().buffer_size
+        self.buffer_size
     }
 
     #[inline]
     fn buffer_mask(&self) -> u32 {
-        self.buffer_size() - 1
+        self.buffer_size - 1
+    }
+
+    #[inline]
+    fn cmd_buffer_size(&self) -> u32 {
+        self.command_buffer_size
     }
 
     #[inline]
     fn cmd_buffer_mask(&self) -> u32 {
-        self.header().command_buffer_size - 1
+        self.command_buffer_size - 1
+    }
+
+    /// Take a direction lock for one operation, giving up when the buffer is
+    /// destroyed or the lock stays held past [`LOCK_CONTENTION_LIMIT`].
+    ///
+    /// The critical sections copy a single slot, so a healthy holder lets go
+    /// within microseconds. A holder that is stopped (SIGSTOP, a debugger) or
+    /// a peer that wrote a live task id into the lock word would otherwise
+    /// keep the caller spinning forever — for JWM that is its event loop.
+    fn lock_for_operation<'a>(
+        &self,
+        cursor: &'a QueueCursor,
+    ) -> std::result::Result<CursorGuard<'a>, LockFailure> {
+        let started = std::cell::Cell::new(None::<Instant>);
+        let contended = std::cell::Cell::new(false);
+        let guard = CursorGuard::acquire_until(cursor, || {
+            if self.is_destroyed() {
+                return true;
+            }
+            // The first call comes before the first attempt, so an
+            // uncontended lock never waits on the clock afterwards.
+            let Some(start) = started.get() else {
+                started.set(Some(Instant::now()));
+                return false;
+            };
+            let expired = start.elapsed() >= LOCK_CONTENTION_LIMIT;
+            contended.set(expired);
+            expired
+        });
+        match guard {
+            Some(guard) => Ok(guard),
+            None if contended.get() && !self.is_destroyed() => Err(LockFailure::Contended),
+            None => Err(LockFailure::Destroyed),
+        }
     }
 
     /// 自动识别后端并打开已有缓冲区。
@@ -1288,6 +1358,8 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             adaptive_poll_spins,
             strategy,
             backend,
+            buffer_size: buffer_size as u32,
+            command_buffer_size: command_buffer_size as u32,
             _payload: PhantomData,
         })
     }
@@ -1460,6 +1532,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             adaptive_poll_spins: adaptive_poll_spins.unwrap_or(DEFAULT_ADAPTIVE_POLL_SPINS),
             strategy,
             backend,
+            // Both passed `BufferLayout::calculate` against the exact mapping
+            // length above, and came from `u32` header fields.
+            buffer_size: buffer_size as u32,
+            command_buffer_size: command_buffer_size as u32,
             _payload: PhantomData,
         })
     }
@@ -1710,10 +1786,9 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         let written_at = now_millis();
 
         let header = self.header();
-        let Some(guard) = CursorGuard::acquire_until(&header.message_write, || self.is_destroyed())
-        else {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        };
+        let guard = self
+            .lock_for_operation(&header.message_write)
+            .map_err(LockFailure::into_error)?;
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
         }
@@ -1770,10 +1845,9 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         let written_at = now_millis();
 
         let header = self.header();
-        let Some(guard) = CursorGuard::acquire_until(&header.message_write, || self.is_destroyed())
-        else {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        };
+        let guard = self
+            .lock_for_operation(&header.message_write)
+            .map_err(LockFailure::into_error)?;
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
         }
@@ -1789,11 +1863,9 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             )?;
             if pending == self.buffer_size() {
                 // 锁序固定为「写锁 → 读锁」，与其他多锁路径一致，不会死锁。
-                let Some(_read_guard) =
-                    CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
-                else {
-                    return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-                };
+                let _read_guard = self
+                    .lock_for_operation(&header.message_read)
+                    .map_err(LockFailure::into_error)?;
                 let read_idx = header.message_read.index.load(Ordering::Relaxed);
                 let pending = checked_pending(
                     write_idx,
@@ -1836,8 +1908,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
-        else {
+        let Ok(_guard) = self.lock_for_operation(&header.message_read) else {
             return Ok(None);
         };
         if self.is_destroyed() {
@@ -1883,8 +1954,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
-        else {
+        let Ok(_guard) = self.lock_for_operation(&header.message_read) else {
             return Ok(None);
         };
         if self.is_destroyed() {
@@ -1932,8 +2002,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
-        else {
+        let Ok(_guard) = self.lock_for_operation(&header.message_read) else {
             return Ok(None);
         };
         if self.is_destroyed() {
@@ -1976,8 +2045,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
-        else {
+        let Ok(_guard) = self.lock_for_operation(&header.message_read) else {
             return Ok(Vec::new());
         };
         if self.is_destroyed() {
@@ -2025,10 +2093,9 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             payload: command,
         };
         let header = self.header();
-        let Some(guard) = CursorGuard::acquire_until(&header.command_write, || self.is_destroyed())
-        else {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        };
+        let guard = self
+            .lock_for_operation(&header.command_write)
+            .map_err(LockFailure::into_error)?;
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
         }
@@ -2039,10 +2106,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             let pending = checked_pending(
                 write_idx,
                 read_idx,
-                header.command_buffer_size,
+                self.cmd_buffer_size(),
                 "command cursor distance exceeds buffer capacity",
             )?;
-            if pending == header.command_buffer_size {
+            if pending == self.cmd_buffer_size() {
                 return Ok(false);
             }
 
@@ -2068,8 +2135,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let Some(_guard) = CursorGuard::acquire_until(&header.command_read, || self.is_destroyed())
-        else {
+        let Ok(_guard) = self.lock_for_operation(&header.command_read) else {
             return Ok(None);
         };
         if self.is_destroyed() {
@@ -2082,7 +2148,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             let pending = checked_pending(
                 write_idx,
                 read_idx,
-                header.command_buffer_size,
+                self.cmd_buffer_size(),
                 "command cursor distance exceeds buffer capacity",
             )?;
             if pending == 0 {
@@ -2273,7 +2339,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             .index
             .load(Ordering::Acquire)
             .wrapping_sub(header.message_read.index.load(Ordering::Acquire))
-            .min(header.buffer_size) as usize
+            .min(self.buffer_size()) as usize
     }
 
     /// 返回是否有待读命令。
@@ -2285,7 +2351,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     /// 返回命令环容量。
     #[must_use]
     pub fn command_capacity(&self) -> usize {
-        self.header().command_buffer_size as usize
+        self.cmd_buffer_size() as usize
     }
 
     /// 返回当前待读命令数（免锁快照，语义同
@@ -2301,7 +2367,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             .index
             .load(Ordering::Acquire)
             .wrapping_sub(header.command_read.index.load(Ordering::Acquire))
-            .min(header.command_buffer_size) as usize
+            .min(self.cmd_buffer_size()) as usize
     }
 
     /// 返回当前后端。
@@ -3119,6 +3185,84 @@ mod tests {
 
         header.message_write.index.store(4, Ordering::Release);
         header.command_write.index.store(4, Ordering::Release);
+    }
+
+    #[test]
+    fn typed_ring_ignores_capacities_a_peer_rewrites_in_the_header() {
+        let path = mk_path("rewritten_capacity");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .command_capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        // A peer process rewrites the plain capacity fields. No reference to
+        // the header is alive while the test does the same through the raw
+        // pointer.
+        let raw = ring.header;
+        let rewrite = |capacity: u32, write_index: u32| unsafe {
+            std::ptr::addr_of_mut!((*raw).buffer_size).write(capacity);
+            std::ptr::addr_of_mut!((*raw).command_buffer_size).write(capacity);
+            (*raw)
+                .message_write
+                .index
+                .store(write_index, Ordering::Release);
+            (*raw)
+                .command_write
+                .index
+                .store(write_index, Ordering::Release);
+        };
+        for capacity in [1u32 << 31, 0] {
+            // Trusting the header would index slot 0x1000 of a four-slot
+            // ring, or underflow the mask at zero.
+            rewrite(capacity, 0x1000);
+            for error in [
+                ring.try_receive_command().map(|_| ()).unwrap_err(),
+                ring.try_read_next_message().map(|_| ()).unwrap_err(),
+                ring.write_message_overwrite(&7).map(|_| ()).unwrap_err(),
+            ] {
+                assert_eq!(error.kind(), ErrorKind::InvalidData, "{error}");
+            }
+            assert_eq!((ring.capacity(), ring.command_capacity()), (4, 4));
+            assert!(ring.available_messages() <= 4);
+            assert!(ring.available_commands() <= 4);
+        }
+
+        rewrite(4, 0);
+        assert!(ring.try_send_command(9).unwrap());
+        assert_eq!(ring.try_receive_command().unwrap(), Some(9));
+    }
+
+    #[test]
+    fn non_blocking_operations_give_up_on_a_lock_that_is_never_released() {
+        let path = mk_path("held_lock");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .command_capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        assert!(ring.try_send_command(3).unwrap());
+        let header = ring.header();
+        // Task 1 (init) is always alive, so the dead-holder reclaim never
+        // applies: this is a stopped peer, or one that wrote a live id.
+        header.command_read.lock.store(1, Ordering::Release);
+        header.message_write.lock.store(1, Ordering::Release);
+
+        let started = Instant::now();
+        assert_eq!(ring.try_receive_command().unwrap(), None);
+        let error = ring.write_message_overwrite(&5).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::WouldBlock, "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the caller must not wait on a stuck holder: {:?}",
+            started.elapsed()
+        );
+
+        header.command_read.lock.store(0, Ordering::Release);
+        header.message_write.lock.store(0, Ordering::Release);
+        assert_eq!(ring.try_receive_command().unwrap(), Some(3));
+        ring.write_message_overwrite(&5).unwrap();
     }
 
     #[test]

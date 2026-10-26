@@ -142,6 +142,41 @@ mod virtual_keyboard_regressions {
     }
 
     #[test]
+    fn virtual_keyboard_keymap_larger_than_its_file_is_rejected_not_mapped() {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        let mut server = Server::new();
+        let mut app = App::new(&mut server);
+        app.focus(&mut server);
+        let mut ime = App::new(&mut server);
+        let vk = virtual_keyboard(&mut server, &mut ime.client, ime.seat);
+
+        // One page of keymap text, announced as a megabyte. Mapping the
+        // announced size and reading past the end of the file raised SIGBUS
+        // and took the compositor down.
+        // SAFETY: memfd_create returns a fresh descriptor this test owns.
+        let mut file = unsafe {
+            let fd = libc::memfd_create(c"vk-keymap".as_ptr(), 0);
+            assert!(fd >= 0, "memfd_create failed");
+            std::fs::File::from_raw_fd(fd)
+        };
+        file.write_all(&[b'x'; 4096]).unwrap();
+        ime.client.vk_fd(vk, &[1, 1 << 20], file.as_raw_fd());
+        // One fd-carrying message per roundtrip: the raw test client does not
+        // keep two SCM_RIGHTS messages apart on the socket.
+        server.roundtrip();
+        // An announced size beyond the cap is refused before any read.
+        ime.client.vk_fd(vk, &[1, u32::MAX], file.as_raw_fd());
+        server.roundtrip();
+
+        // The keyboard keeps the keymap it had and still types.
+        key(&mut ime.client, vk, 30, true);
+        key(&mut ime.client, vk, 30, false);
+        server.roundtrip();
+        assert_eq!(app.keys(), [(30, 1), (30, 0)]);
+    }
+
+    #[test]
     fn virtual_keyboard_focus_switch_does_not_release_into_another_client() {
         let mut server = Server::new();
         let mut a = App::new(&mut server);
@@ -220,6 +255,82 @@ mod virtual_keyboard_regressions {
         key(&mut ime.client, vk, 32, false);
         server.roundtrip();
         assert_eq!(app.keys(), [(32, 1), (32, 0)]);
+    }
+
+    #[test]
+    fn virtual_keyboard_stops_at_jwms_own_lock_card_and_releases_held_keys() {
+        let mut server = Server::new();
+        let mut app = App::new(&mut server);
+        app.focus(&mut server);
+        let mut ime = App::new(&mut server);
+        let vk = virtual_keyboard(&mut server, &mut ime.client, ime.seat);
+        key(&mut ime.client, vk, 30, true);
+        server.roundtrip();
+        assert_eq!(app.keys(), [(30, 1)]);
+
+        // JWM's lock card (or another shell panel) opens. Keyboard focus stays
+        // on the app, so typing must stop here, and the key that was down is
+        // released rather than left repeating.
+        server.state.virtual_input_blocked = true;
+        key(&mut ime.client, vk, 31, true);
+        key(&mut ime.client, vk, 31, false);
+        server.roundtrip();
+        assert_eq!(app.keys(), [(30, 0)]);
+        key(&mut ime.client, vk, 30, false);
+        server.roundtrip();
+        assert!(app.keys().is_empty(), "the release already went out");
+
+        server.state.virtual_input_blocked = false;
+        key(&mut ime.client, vk, 32, true);
+        key(&mut ime.client, vk, 32, false);
+        server.roundtrip();
+        assert_eq!(app.keys(), [(32, 1), (32, 0)]);
+    }
+
+    #[test]
+    fn virtual_keyboard_follows_focus_not_the_pointer_over_a_lock_shade() {
+        use crate::backend::api::{Geometry, MonitorShade};
+        let mut server = Server::new();
+        let mut app = App::new(&mut server);
+        app.focus(&mut server);
+        let mut ime = App::new(&mut server);
+        let vk = virtual_keyboard(&mut server, &mut ime.client, ime.seat);
+        let left = Rectangle::new((0, 0).into(), (1920, 1080).into());
+        let right = Rectangle::new((1920, 0).into(), (1920, 1080).into());
+        server.state.output_rects = vec![left, right];
+        let window = WindowId::from_raw(0x7a1);
+        server
+            .state
+            .surface_to_window
+            .insert(app.surface.id(), window);
+        server.state.window_geometry.insert(
+            window,
+            Geometry {
+                x: 100,
+                y: 100,
+                w: 800,
+                h: 600,
+                border: 0,
+            },
+        );
+
+        // The right monitor is locked and the pointer rests on its shade;
+        // the focused window is on the left one and keeps receiving keys.
+        let shade = MonitorShade::new(2, 1920, 0, 1920, 1080).expect("shade");
+        server.state.set_monitor_shades(&[shade]);
+        server.state.pointer_location = (2500.0, 500.0).into();
+        key(&mut ime.client, vk, 30, true);
+        key(&mut ime.client, vk, 30, false);
+        server.roundtrip();
+        assert_eq!(app.keys(), [(30, 1), (30, 0)]);
+
+        // A focused window shown only behind a shade receives nothing.
+        let shade = MonitorShade::new(1, 0, 0, 1920, 1080).expect("shade");
+        server.state.set_monitor_shades(&[shade]);
+        key(&mut ime.client, vk, 31, true);
+        key(&mut ime.client, vk, 31, false);
+        server.roundtrip();
+        assert!(app.keys().is_empty());
     }
 
     #[test]

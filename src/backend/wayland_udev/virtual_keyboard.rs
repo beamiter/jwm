@@ -31,6 +31,15 @@ impl VirtualKeyboardDelivery {
         self.held.clear();
     }
 
+    /// Keys this device pressed into `focus` during the current lock epoch.
+    fn held_for(&self, focus: &WlSurface, epoch: u64) -> Vec<u32> {
+        self.held
+            .iter()
+            .filter(|(_, (surface, held_epoch))| surface == focus && *held_epoch == epoch)
+            .map(|(code, _)| *code)
+            .collect()
+    }
+
     fn reset_after_lock(&mut self, epoch: u64) {
         self.lock_epoch = epoch;
         self.held.clear();
@@ -113,18 +122,58 @@ impl VirtualKeyboardHandler for JwmWaylandState {
             }
             return;
         }
+        let focus = keyboard
+            .current_focus()
+            .filter(|surface| surface.is_alive());
         // Desktop virtual keyboards must never type into a locker or an app
         // behind it, including devices created before the lock. Physical lock
         // input continues through route_locked_keyboard_input.
-        if self.session_locked || self.point_in_monitor_shade(self.pointer_location) {
+        if self.session_locked {
             if let Some(delivery) = self.virtual_keyboards.get_mut(&device) {
                 delivery.reset_after_lock(self.session_lock_epoch);
             }
             return;
         }
-        let focus = keyboard
-            .current_focus()
-            .filter(|surface| surface.is_alive());
+        // JWM's own lock card and shell panels, an interactive capture and an
+        // inactive session keep physical keys from clients without moving
+        // keyboard focus; virtual keys bypass that filter, so they stop here.
+        // So does a focused window behind a monitor-lock shade.
+        if self.virtual_input_blocked
+            || focus
+                .as_ref()
+                .is_some_and(|surface| self.surface_is_behind_monitor_shade(surface))
+        {
+            let time = match &event {
+                InputEvent::Keyboard { event } => event.time(),
+                _ => smithay::backend::input::InputTime::from_millis(0),
+            };
+            if let Some(mut delivery) = self.virtual_keyboards.remove(&device) {
+                // Focus stays put, so no wl_keyboard.leave ends a key that was
+                // down when the block began: release it to the window that got
+                // the press, or the client repeats it forever.
+                let released = focus
+                    .as_ref()
+                    .map(|focus| delivery.held_for(focus, self.session_lock_epoch))
+                    .unwrap_or_default();
+                delivery.clear_held();
+                for code in released {
+                    keyboard.forward_virtual_keyboard(
+                        self,
+                        &delivery.keymap,
+                        delivery.modifiers,
+                        Some((
+                            code.into(),
+                            KeyState::Released,
+                            SERIAL_COUNTER.next_serial(),
+                            time,
+                        )),
+                    );
+                    self.request_client_flush();
+                }
+                self.virtual_keyboards.insert(device, delivery);
+            }
+            return;
+        }
         let Some(mut delivery) = self.virtual_keyboards.remove(&device) else {
             return;
         };

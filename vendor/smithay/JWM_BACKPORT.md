@@ -60,6 +60,12 @@ Deliberately not backported:
 - `wl_seat` `missing_capability` errors (`6bc53e3c`): spec-correct, but it disconnects clients that request a never-advertised device (for example touch on a laptop without a touchscreen). Revisit with the full upstream update.
 - New protocols and backends not used by JWM (`2bf8be86` virtual pointer, `928d4a9b` winit gestures, `138ddbb6` ppc atomics).
 
+## Local virtual-keyboard keymap read (2026-10-26)
+
+`src/wayland/virtual_keyboard/mod.rs`, `compile_keymap`. The client's keymap is read with a bounded `pread` (at most 4 MiB, trailing NULs stripped, UTF-8 required) and compiled with `xkb::Keymap::new_from_string`, instead of `xkb::Keymap::new_from_fd`. The latter maps exactly the `size` the client announces: a one-page memfd announced as a megabyte, or a file truncated after the request, made libxkbcommon read past the end of the file, and the resulting SIGBUS killed the compositor (Smithay's SIGBUS handler covers only shm pools). Upstream (as of `24647fc8`) still maps the fd.
+
+Regression: root `src/backend/wayland_udev/virtual_keyboard_tests.rs`, `virtual_keyboard_keymap_larger_than_its_file_is_rejected_not_mapped`; with the previous code the test process dies with SIGBUS.
+
 ## Local touch change
 
 `src/input/touch/mod.rs`, `TouchInternal::cancel`. Cancellation creates a frame marker even after a previously framed batch, retires every active slot and deferred up-frame target, emits cancellation once per involved client target using the existing marker mechanism, and removes the marker. Previously a framed sequence had no pending marker, so cancellation returned without revoking it; unchanged slots and up-pending targets were also retained. Upstream (as of `24647fc8`) still has the original behavior.

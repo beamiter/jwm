@@ -436,6 +436,12 @@ pub struct JwmWaylandState {
     /// Monotonic lock generation. A repeat armed before a fast lock/unlock
     /// cycle must not resume after the lock disappears.
     pub session_lock_epoch: u64,
+    /// Whether JWM's own modal UI owns the keyboard: its lock card and other
+    /// shell panels, an interactive screenshot or long-screenshot capture, or
+    /// an inactive session. Physical keys are kept from clients then; the
+    /// backend mirrors the condition here before serving client requests,
+    /// because virtual keyboards bypass the physical key filter.
+    pub(crate) virtual_input_blocked: bool,
     /// Outputs covered by a per-monitor lock shade, in desktop-global logical
     /// coordinates. A shade hides its output from input as well as from the
     /// eye: hit testing finds no client, layer surface or popup inside it, so
@@ -3444,6 +3450,7 @@ impl JwmWaylandState {
                 session_lock_supported: true,
                 session_locked: false,
                 session_lock_epoch: 0,
+                virtual_input_blocked: false,
                 monitor_shades: Vec::new(),
                 lock_surfaces: HashMap::new(),
                 pending_session_lock: None,
@@ -3710,6 +3717,36 @@ impl JwmWaylandState {
     }
 
     /// Whether `location` lies on an output hidden by a monitor-lock shade.
+    /// Whether `surface` belongs to a window shown only behind monitor-lock
+    /// shades. The window manager keeps keyboard focus off locked monitors;
+    /// this is the input side's own check for anything typed at one anyway.
+    pub(crate) fn surface_is_behind_monitor_shade(&self, surface: &WlSurface) -> bool {
+        if self.monitor_shades.is_empty() {
+            return false;
+        }
+        let Some(geometry) = self
+            .committed_surface_window(surface)
+            .and_then(|win| self.window_geometry.get(&win))
+        else {
+            return false;
+        };
+        let window = Rectangle::new(
+            (geometry.x, geometry.y).into(),
+            (geometry.w as i32, geometry.h as i32).into(),
+        );
+        let mut shown = self
+            .output_rects
+            .iter()
+            .filter_map(|output| output.intersection(window))
+            .peekable();
+        shown.peek().is_some()
+            && shown.all(|part| {
+                self.monitor_shades
+                    .iter()
+                    .any(|shade| shade.contains_rect(part))
+            })
+    }
+
     pub(crate) fn point_in_monitor_shade(&self, location: Point<f64, Logical>) -> bool {
         self.monitor_shades
             .iter()

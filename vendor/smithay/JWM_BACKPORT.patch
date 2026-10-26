@@ -1369,7 +1369,7 @@ index 00000000..218af511
 +    },
 +}
 diff --git a/src/wayland/virtual_keyboard/mod.rs b/src/wayland/virtual_keyboard/mod.rs
-index a8039004..b40508c5 100644
+index a8039004..ccfd58d6 100644
 --- a/src/wayland/virtual_keyboard/mod.rs
 +++ b/src/wayland/virtual_keyboard/mod.rs
 @@ -1,69 +1,103 @@
@@ -1385,7 +1385,7 @@ index a8039004..b40508c5 100644
 +//! [`VirtualKeyboardHandler::process_virtual_keyboard_event`] so synthetic
 +//! input is handled the same way as a real one (making compositor bindings,
 +//! idle handling, and focus all behave properly).
- //!
++//!
 +//! The device shows up (as [`InputEvent::DeviceAdded`]) only after the initial
 +//! keymap is sent since the keycodes don't mean anything without one. The
 +//! device is removed when the client destroys the keyboard, after releasing any
@@ -1408,15 +1408,8 @@ index a8039004..b40508c5 100644
 +//! } else {
 +//!     keyboard.input_from_source(device.source(), state, keycode, key_state, serial, time, filter);
 +//! }
- //! ```
--//! use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
--//! # use smithay::wayland::compositor::{CompositorHandler, CompositorState, CompositorClientState};
--//! use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
--//! use smithay::reexports::wayland_server::{Display, protocol::wl_surface::WlSurface};
--//! # use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
--//! # use smithay::reexports::wayland_server::Client;
- //!
--//! # struct State { seat_state: SeatState<Self> };
++//! ```
++//!
 +//! Since the keycodes belong to the client's keymap, not the seat, it must be
 +//! activated (see [`VirtualKeyboardDevice::keymap`]) before handling them. A
 +//! client may send the `no_keymap` format to use the existing seat keymap, in
@@ -1424,14 +1417,21 @@ index a8039004..b40508c5 100644
 +//!
 +//! Requests with no [`InputEvent`] equivalent are [`InputEvent::Special`] (see
 +//! [`VirtualKeyboardSpecialEvent`]).
-+//!
-+//! ```
+ //!
+ //! ```
+-//! use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
+-//! # use smithay::wayland::compositor::{CompositorHandler, CompositorState, CompositorClientState};
+-//! use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
+-//! use smithay::reexports::wayland_server::{Display, protocol::wl_surface::WlSurface};
+-//! # use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
+-//! # use smithay::reexports::wayland_server::Client;
 +//! use smithay::backend::input::InputEvent;
 +//! use smithay::wayland::virtual_keyboard::{
 +//!     VirtualKeyboardManagerState, VirtualKeyboardBackend, VirtualKeyboardHandler,
 +//! };
 +//! # use smithay::reexports::wayland_server::Display;
-+//!
+ //!
+-//! # struct State { seat_state: SeatState<Self> };
 +//! # struct State;
  //!
  //! smithay::delegate_dispatch2!(State);
@@ -1603,7 +1603,7 @@ index a8039004..b40508c5 100644
                      },
                  );
              }
-@@ -165,3 +193,220 @@ where
+@@ -165,3 +193,236 @@ where
          }
      }
  }
@@ -1797,29 +1797,45 @@ index a8039004..b40508c5 100644
 +    }
 +}
 +
++/// Largest keymap accepted from a virtual keyboard. Real keymaps are tens of
++/// kilobytes.
++const MAX_KEYMAP_SIZE: usize = 4 * 1024 * 1024;
++
 +/// Compile a client-supplied `xkb_v1` keymap, normalizing it to
 +/// `XKB_KEYMAP_FORMAT_TEXT_V1`, and returning it if valid.
++///
++/// The keymap is read rather than memory-mapped: a client can claim a `size`
++/// past the end of its file, or truncate the file afterwards, and touching a
++/// mapped page past the end of the file raises SIGBUS in the compositor.
 +fn compile_keymap(fd: OwnedFd, size: usize) -> Option<String> {
++    use std::os::unix::fs::FileExt;
++
++    if size == 0 || size > MAX_KEYMAP_SIZE {
++        warn!("Rejected a virtual keyboard keymap of {size} bytes");
++        return None;
++    }
++    let mut bytes = vec![0; size];
++    if let Err(err) = std::fs::File::from(fd).read_exact_at(&mut bytes, 0) {
++        warn!("Failed to read virtual keyboard keymap: {err}");
++        return None;
++    }
++    // The protocol's size includes the terminating NUL.
++    while bytes.last() == Some(&0) {
++        bytes.pop();
++    }
++    let Ok(text) = String::from_utf8(bytes) else {
++        warn!("Virtual keyboard keymap is not UTF-8 text");
++        return None;
++    };
 +    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-+    // SAFETY: we can map the keymap into the memory.
-+    let keymap = match unsafe {
-+        xkb::Keymap::new_from_fd(
-+            &context,
-+            fd,
-+            size,
-+            xkb::KEYMAP_FORMAT_TEXT_V1,
-+            xkb::KEYMAP_COMPILE_NO_FLAGS,
-+        )
-+    } {
-+        Ok(Some(keymap)) => keymap,
-+        Ok(None) => {
-+            warn!("Failed to compile virtual keyboard keymap");
-+            return None;
-+        }
-+        Err(err) => {
-+            warn!("Failed to map virtual keyboard keymap: {err:?}");
-+            return None;
-+        }
++    let Some(keymap) = xkb::Keymap::new_from_string(
++        &context,
++        text,
++        xkb::KEYMAP_FORMAT_TEXT_V1,
++        xkb::KEYMAP_COMPILE_NO_FLAGS,
++    ) else {
++        warn!("Failed to compile virtual keyboard keymap");
++        return None;
 +    };
 +
 +    Some(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))

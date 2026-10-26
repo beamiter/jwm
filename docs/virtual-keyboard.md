@@ -13,6 +13,8 @@ nor that protocol tests validate a real fcitx5 desktop.
 | IME composition | text-input-v3 enable/commit → input-method-v2 preedit/commit_string/commit → active text input | Unchanged; covered by wire tests |
 | Focus | SeatHandler::focus_changed → invalidate accepted virtual key presses → normal data-device focus | Prevents old releases after A→B→A |
 | Session lock | session_locked + lock epoch → drop virtual keys/modifiers, clear transient device state | Physical input continues through the existing locker route |
+| JWM modal UI | virtual_input_blocked (lock card, shell panels, screenshot/long-screenshot capture, inactive session) → release held keys to their target, drop the rest | Focus does not move, so held keys are released explicitly |
+| Monitor-lock shade | focused window shown only behind shades → same as modal UI | Follows keyboard focus, not the pointer |
 
 The upstream commits are `7454d68a`, `553eaf9d`, and `9786228e`. Their source
 changes are backported together. Upstream's example installs a virtual keymap
@@ -38,7 +40,14 @@ No-keymap devices follow configured seat keymap reloads. Modifier masks can be
 stored while no client is focused but are never applied to physical XKB state.
 All virtual input is blocked during a session lock, including virtual input
 into the locker; enabling an on-screen keyboard for a locker would require an
-explicit authenticated policy, outside this change.
+explicit authenticated policy, outside this change. JWM's own lock card, its
+shell panels and interactive captures block virtual input the same way while
+they keep physical keys from clients; keyboard focus stays on the app then, so
+a key held when the block began is released to that app instead of repeating.
+A monitor-lock shade blocks virtual input only for a focused window shown
+behind it: typing continues on the unlocked monitor wherever the pointer rests.
+Keymaps are read with a bounded `pread`, never memory-mapped, so a size larger
+than the client's file cannot crash the compositor.
 
 ## Reproducible automated checks
 

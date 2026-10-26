@@ -5,6 +5,24 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Shared-memory, virtual-keyboard and lock hardening
+
+- The status-bar shared-memory ring no longer trusts ring sizes that a bar
+  process can rewrite. JWM uses the capacities it validated when the ring was
+  created, so a crashed or hostile bar writing into the header can no longer
+  make JWM read or write outside the mapping. Non-blocking ring operations
+  give up after 100 ms on a lock that a stopped or misbehaving bar never
+  releases, instead of freezing JWM's event loop.
+- A virtual keyboard (wtype, an on-screen keyboard, wayvnc, keys forwarded by
+  an input method) can no longer type into the focused app while JWM's own
+  lock card, a shell panel or an interactive screenshot is up, or into a
+  window behind a monitor-lock shade. A key held when such a block begins is
+  released instead of repeating. Typing on the unlocked monitor keeps working
+  while the pointer rests on a locked one.
+- A virtual-keyboard keymap announced as larger than its file no longer
+  crashes the compositor with SIGBUS: keymaps are read with a bounded read
+  instead of being memory-mapped.
+
 ### Spawn pins and persistent dropdown sizes
 
 - `Alt+Ctrl+P` toggles a saved spawn monitor and tag mask for the focused
