@@ -5531,7 +5531,13 @@ impl<C: CompositorConnection> Compositor<C> {
             // rendering to complete before sampling. The GLX extension has no
             // implicit X/GL synchronization; omitting this on NVIDIA can show
             // an older client frame (most visibly terminal cursor/text damage).
-            if (wt.dirty && wt.binding.is_some())
+            if (wt.dirty
+                && wt.binding.is_some()
+                && !wt.fading_out
+                && wt
+                    .pixmap_refresh
+                    .next_refresh_in(pixmap_refresh_now, false)
+                    .is_none_or(|delay| delay.is_zero()))
                 || wt
                     .pixmap_refresh
                     .needs_refresh_at(pixmap_refresh_now, wt.fading_out)
@@ -5795,12 +5801,18 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let mut tfp_budget_exhausted = false;
         let mut tfp_budget_deferred = false;
+        let mut native_textures_ready = true;
         if needs_native_texture_sync && !pixmaps_native_synced {
-            if let Err(error) = self.graphics.sync_x11() {
+            // DamageSubtract lives on the protocol connection, while the
+            // graphics native fence uses another Xlib connection. Flush the
+            // former before fencing/sampling so NonEmpty damage is rearmed
+            // even when the WM goes idle immediately after this frame.
+            if let Err(error) = self.conn.flush_x11().and_then(|_| self.graphics.sync_x11()) {
                 log::warn!(
                     "{}: {error}",
                     self.renderer_ctx("frame: synchronize native textures")
                 );
+                native_textures_ready = false;
             }
         }
         for win in &tfp_order {
@@ -5813,16 +5825,36 @@ impl<C: CompositorConnection> Compositor<C> {
             // bar indefinitely, leaving its previous title on screen.
             if tfp_budget_exhausted && !latency_critical {
                 tfp_budget_deferred |= self.windows.get(&win).is_some_and(|wt| {
-                    tfp_budget_skip_needs_followup_frame(
-                        wt.dirty,
-                        wt.binding.is_some(),
-                        wt.audio_sync_target.is_some(),
-                    )
+                    !wt.fading_out
+                        && wt
+                            .pixmap_refresh
+                            .next_refresh_in(pixmap_refresh_now, false)
+                            .is_none_or(|delay| delay.is_zero())
+                        && tfp_budget_skip_needs_followup_frame(
+                            wt.dirty,
+                            wt.binding.is_some(),
+                            wt.audio_sync_target.is_some(),
+                        )
                 });
                 continue;
             }
             if let Some(wt) = self.windows.get_mut(&win) {
-                if wt.dirty && wt.binding.is_some() {
+                if wt.dirty && wt.binding.is_some() && !wt.fading_out {
+                    // Keep the previous picture through a transient import or
+                    // synchronization failure, then retry on the existing
+                    // deadline. Unrelated animation frames must not bypass
+                    // that backoff and hammer the native driver.
+                    if wt
+                        .pixmap_refresh
+                        .next_refresh_in(pixmap_refresh_now, false)
+                        .is_some_and(|delay| !delay.is_zero())
+                    {
+                        continue;
+                    }
+                    if !native_textures_ready {
+                        wt.pixmap_refresh.refresh_failed();
+                        continue;
+                    }
                     // Audio sync: skip texture update if this window's audio timing
                     // says it's not yet time to present the next frame.
                     // This prevents forcing all video windows into the compositor's
@@ -5839,11 +5871,14 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                     }
 
-                    if let Some(binding) = wt.binding.as_ref() {
-                        if let Err(error) =
-                            self.graphics
-                                .refresh_pixmap_binding(&self.gl, wt.gl_texture, binding)
-                        {
+                    if let Some(binding) = wt.binding.as_mut() {
+                        if let Err(error) = self.graphics.refresh_pixmap_binding(
+                            &self.gl,
+                            wt.gl_texture,
+                            wt.pixmap,
+                            binding,
+                        ) {
+                            wt.pixmap_refresh.refresh_failed();
                             log::warn!(
                                 "{}: {} binding for 0x{win:x}: {error}",
                                 self.renderer_ctx("frame: refresh pixmap binding"),
@@ -9180,6 +9215,31 @@ mod tests {
             .find("iftfp_budget_deferred{self.damage_render_pending=true;}")
             .expect("a stale skipped window must re-arm the next frame");
         assert!(rearm > skip_end, "re-arm after the refresh loop");
+    }
+
+    #[test]
+    fn failed_native_refresh_preserves_dirty_content_and_uses_a_retry_deadline() {
+        let frame = compact_render_frame();
+        let flush = frame
+            .find("self.conn.flush_x11().and_then(|_|self.graphics.sync_x11())")
+            .expect("flush protocol damage subtraction before the native graphics fence");
+        let refresh = frame
+            .find("ifletErr(error)=self.graphics.refresh_pixmap_binding(")
+            .expect("refresh the selected native image");
+        assert!(flush < refresh);
+        let failure = &frame[refresh..frame[refresh..].find("wt.dirty=false;").unwrap() + refresh];
+        assert!(failure.contains("wt.pixmap_refresh.refresh_failed();"));
+        assert!(
+            failure.contains("continue;"),
+            "an unsuccessful import must never clear dirty"
+        );
+        assert!(
+            frame
+                .contains("if!native_textures_ready{wt.pixmap_refresh.refresh_failed();continue;}")
+        );
+        let backoff = frame.find("ifwt.pixmap_refresh.next_refresh_in(pixmap_refresh_now,false).is_some_and(|delay|!delay.is_zero())")
+            .expect("intervening scene frames must respect the native import backoff");
+        assert!(backoff < refresh);
     }
 
     #[test]

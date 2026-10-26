@@ -824,3 +824,17 @@ case "$ACTION" in
         fi
         ;;
 esac
+
+# Reload an upgraded per-user D-Bus owner only after the filesystem transaction
+# succeeds. Staged package installs must never touch the running desktop.
+if [[ ( "$ACTION" == install || "$ACTION" == rollback ) && -z "$DESTDIR" && -x /usr/local/bin/jwm-bridge ]]; then
+    bridge_reload_status=0
+    if [[ $(id -u) -eq 0 && -n ${SUDO_USER:-} ]]; then
+        sudo -u "$SUDO_USER" timeout 8s /usr/local/bin/jwm-bridge reload || bridge_reload_status=$?
+    else
+        timeout 8s /usr/local/bin/jwm-bridge reload || bridge_reload_status=$?
+    fi
+    if ((bridge_reload_status != 0)); then
+        printf '%s\n' 'install-release: bridge installed; run jwm-bridge reload as the desktop user to retire its old process' >&2
+    fi
+fi

@@ -700,6 +700,19 @@ build_and_install_bridge() {
     fi
 
     ok "jwm-bridge 安装完成，并已注册 org.freedesktop.Notifications 激活文件"
+    # Replacing the file does not retire an old D-Bus owner. In particular a
+    # wedged bridge makes Feishu wait 25s on GetCapabilities before drawing UI.
+    # The helper verifies the exact owner/uid/executable and uses a pidfd;
+    # healthy current builds and other notification servers are untouched.
+    local reload_status=0
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" timeout 8s /usr/local/bin/jwm-bridge reload || reload_status=$?
+    else
+        timeout 8s /usr/local/bin/jwm-bridge reload || reload_status=$?
+    fi
+    if ((reload_status != 0)); then
+        warn "通知桥文件已更新，但运行中旧进程未能自动重载；请以桌面用户运行 /usr/local/bin/jwm-bridge reload"
+    fi
 }
 
 # ============================================================

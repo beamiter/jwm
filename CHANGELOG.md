@@ -5,6 +5,28 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### EGL refresh for Vulkan application windows
+
+- Refresh dirty X11 windows through a new preserved EGLImage instead of
+  retargeting the old image. This fixes the real Docker Isaac Sim 4.5 stale/frozen
+  interface case on NVIDIA/EGL while retaining the existing X pixmap and GL
+  texture. XCB and X11RB use the same implementation.
+- Preserve the last valid image through import or synchronization failures and
+  schedule bounded retries; unchanged scenes and retiring windows do not churn
+  imports. Verified with actual cold startup and manual menu/Stage operation,
+  alongside compositor regressions and both X11 backend builds.
+
+### Reload the notification bridge after upgrades
+
+- Source and release installs retire the desktop user's replaced `jwm-bridge`
+  D-Bus owner and verify discovery through the installed binary. Other
+  notification servers, current builds, and staged installs are untouched.
+- Fix the observed Feishu meeting-preview delay caused by an unresponsive old
+  notification bridge: `GetCapabilities` waited 25 seconds before startup could
+  continue. Reloading only the bridge reduced the measured delay to 0.64 seconds
+  with compositing enabled. Real-window and D-Bus tracing identified the
+  notification service as the cause of that separate startup delay.
+
 ### GIF screen recording
 
 - The Alt+Ctrl+R selector offers MP4 / GIF buttons and `V` / `F` shortcuts,

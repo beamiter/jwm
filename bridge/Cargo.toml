@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 jwm_ipc_transport = { path = "../crates/jwm_ipc_transport" }
-# zbus needs an executor; the bridge is otherwise idle, so a single worker
-# thread is enough for both the service and the event pump.
+# Keep independent executor capacity for notification discovery and media work;
+# applications can synchronously wait for GetCapabilities before drawing UI.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 # D-Bus session bus service.

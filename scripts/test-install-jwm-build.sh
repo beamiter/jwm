@@ -31,7 +31,7 @@ if [[ $package == jwm-bridge && $SCENARIO == bridge-failure ]]; then
     echo 'error: bridge compilation failure' >&2
     exit 101
 fi
-if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure && $SCENARIO != sudo-target && $SCENARIO != xdg-target ]]; then
+if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure && $SCENARIO != sudo-target && $SCENARIO != xdg-target && $SCENARIO != reload-failure ]]; then
     count=0
     [[ ! -f $CASE_DIR/count ]] || read -r count < "$CASE_DIR/count"
     count=$((count + 1))
@@ -91,6 +91,12 @@ else
     /usr/bin/getent "$@"
 fi
 STUB
+cat > "$TEST_ROOT/bin/timeout" <<'STUB'
+#!/usr/bin/env bash
+# Never reach the host's live D-Bus service from an installer fixture.
+printf 'bridge-reload %s\n' "$*" >> "$CASE_DIR/system.log"
+if [[ $SCENARIO == reload-failure ]]; then exit 124; fi
+STUB
 chmod +x "$TEST_ROOT/bin/"*
 fail() { printf 'test-install-jwm-build: FAIL: %s\n' "$*" >&2; exit 1; }
 run_case() {
@@ -128,6 +134,11 @@ run_case() {
         grep -Fq '<-p> <jwm-bridge>' "$CASE_DIR/cargo.log" || fail 'bridge build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
         if [[ $scenario == sudo-target ]]; then
+            grep -Fq -- '-u fixture-user timeout 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'bridge reload did not run as login user'
+        else
+            grep -Fq 'bridge-reload 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'installed bridge did not reload its replaced D-Bus owner'
+        fi
+        if [[ $scenario == sudo-target ]]; then
             grep -Fq -- "-u fixture-user bash $REPO/scripts/install-wallpapers.sh --dest $CASE_DIR/config/jwm/wallpapers" "$CASE_DIR/system.log" || fail 'sudo wallpaper install did not switch user'
         else
             [[ $(cat "$CASE_DIR/config/jwm/wallpapers/01-fixture.png") == "bundled fixture" ]] || fail 'bundled wallpaper install missing'
@@ -155,6 +166,9 @@ run_case() {
     elif [[ $scenario == xdg-target ]]; then
         grep -Fq "$CASE_DIR/custom data/dbus-1/services/org.freedesktop.Notifications.service" "$CASE_DIR/system.log" || fail 'bridge activation ignored XDG_DATA_HOME'
     fi
+    if [[ $scenario == reload-failure ]]; then
+        grep -Fq '运行中旧进程未能自动重载' "$CASE_DIR/output.log" || fail 'bridge reload failure was hidden'
+    fi
     if [[ $scenario == repeated ]]; then
         [[ $(cat "$CASE_DIR/count") == 2 ]] || fail 'recovery retried more than once'
     fi
@@ -164,6 +178,7 @@ run_case missing debug "$TEST_ROOT/absolute target" 0
 run_case success debug 'normal target' 0
 run_case sudo-target debug 'sudo target' 0
 run_case xdg-target release 'xdg target' 0
+run_case reload-failure release 'reload degraded target' 0
 run_case ordinary release 'failed target' 101
 run_case repeated release 'repeated target' 101
 run_case tee-cargo release 'tee cargo target' 101

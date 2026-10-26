@@ -160,6 +160,11 @@ non-positive or malformed `--jobs` values before building or installing.
 The bridge activation file uses the target login user's data directory when
 run through sudo. Both the bridge and portal installers honor an absolute
 `XDG_DATA_HOME`; the portal also honors an absolute `XDG_CONFIG_HOME`.
+After installing the bridge, the installer reloads a replaced `jwm-bridge`
+process belonging to the desktop user. Replacing its executable alone leaves
+the old D-Bus owner running and can make applications wait 25 seconds during
+notification discovery. Other notification servers and an already-current
+bridge are left alone; staged release installs never touch the live session.
 
 ## Control JWM
 

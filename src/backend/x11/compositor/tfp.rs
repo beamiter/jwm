@@ -404,12 +404,13 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
         self.finish_add_window_minimize_lifecycle(x11_win, disposition, x, y, w, h);
         log::debug!(
-            "compositor: add_window 0x{:x} {}x{} at ({},{}) via {}",
+            "compositor: add_window 0x{:x} {}x{} at ({},{}) pixmap=0x{:x} via {}",
             x11_win,
             w,
             h,
             x,
             y,
+            pixmap,
             self.graphics.api_name()
         );
     }
@@ -985,6 +986,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     if old_pixmap != 0 {
                         let _ = self.conn.free_window_pixmap(old_pixmap);
                     }
+                    log::debug!(
+                        "compositor: refreshed window 0x{x11_win:x} pixmap=0x{pixmap:x} previous=0x{old_pixmap:x}"
+                    );
                     if refreshed_window_settles_pending_minimize(
                         self.minimized_window_intents.get(&win).copied(),
                         true,

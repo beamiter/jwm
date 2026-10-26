@@ -480,6 +480,17 @@ impl EglPlatform {
         pixmap: u32,
         depth: u8,
     ) -> Result<(PixmapBinding, bool), String> {
+        let image = self.create_pixmap_image(pixmap)?;
+
+        if let Err(error) = self.bind_image_to_texture_checked(gl, texture, image) {
+            self.release_pixmap(image);
+            return Err(error);
+        }
+
+        Ok((PixmapBinding::Egl { image }, depth == 32))
+    }
+
+    fn create_pixmap_image(&self, pixmap: u32) -> Result<EglImage, String> {
         let preserved = [EGL_IMAGE_PRESERVED_KHR, EGL_TRUE.cast_signed(), EGL_NONE];
         let client_buffer = pixmap as usize as EglClientBuffer;
         let image = unsafe {
@@ -497,36 +508,34 @@ impl EglPlatform {
             )));
         }
 
-        if let Err(error) = self.bind_image_to_texture_checked(gl, texture, image) {
-            unsafe {
-                (self.destroy_image)(self.display, image);
-            }
-            return Err(error);
-        }
-
-        Ok((PixmapBinding::Egl { image }, depth == 32))
+        Ok(image)
     }
 
     pub(super) fn refresh_pixmap(
         &self,
         gl: &glow::Context,
         texture: glow::Texture,
-        image: EglImage,
-    ) {
-        // NVIDIA's X11 EGL path can keep sampling the first contents of a
-        // redirected GPU pixmap even though the EGLImage remains a live
-        // sibling. Re-specifying the texture target on Damage forces the
-        // driver through its target-definition path again, analogous to the
-        // GLX release/bind workaround. This is not a producer fence; native
-        // synchronization remains a separate step before this refresh.
+        pixmap: u32,
+        image: &mut EglImage,
+    ) -> Result<(), String> {
+        // On stale native-pixmap import paths an existing EGLImage can keep
+        // sampling import-time GPU contents. Retargeting that same image then
+        // leaves startup/loading frames stuck instead of reading new pixels.
+        // Import the updated native pixmap, bind it, then retire the old image.
+        // Do this only for dirty content, never for an unchanged scene frame.
+        // A failed import leaves both the old image and its texture intact.
+        let replacement = self.create_pixmap_image(pixmap)?;
         unsafe {
             // Keep Damage refresh free of glGetError: querying it can serialize
-            // a high-frequency producer/consumer hot path, and this exact
-            // texture/image pair was validated when it was imported.
+            // the hot path. The immutable pixmap format and texture target were
+            // already validated on initial import; creation validates the new image.
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            (self.image_target_texture)(glow::TEXTURE_2D, image.cast_const());
+            (self.image_target_texture)(glow::TEXTURE_2D, replacement.cast_const());
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
+        let previous = std::mem::replace(image, replacement);
+        self.release_pixmap(previous);
+        Ok(())
     }
 
     fn bind_image_to_texture_checked(
@@ -742,7 +751,7 @@ mod tests {
     use std::ffi::c_void;
     use std::num::NonZeroU32;
     use std::ptr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Mutex, PoisonError};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -754,6 +763,12 @@ mod tests {
     static GL_CALLS: Mutex<Vec<GlCall>> = Mutex::new(Vec::new());
     static CREATE_IMAGE_ARGS: Mutex<Option<(u32, usize, Vec<EglInt>)>> = Mutex::new(None);
     static GL_ERROR_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static IMAGE_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static NEXT_IMAGE: AtomicUsize = AtomicUsize::new(0x5678);
+    static PIXMAP_GENERATION: AtomicUsize = AtomicUsize::new(1);
+    static SAMPLED_GENERATION: AtomicUsize = AtomicUsize::new(0);
+    static IMAGE_SNAPSHOTS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+    static FAIL_IMAGE_CREATE: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "system" fn fake_gl_get_string(name: u32) -> *const u8 {
         if name == glow::VERSION {
@@ -788,6 +803,9 @@ mod tests {
         buffer: EglClientBuffer,
         attributes: *const EglInt,
     ) -> EglImage {
+        if FAIL_IMAGE_CREATE.load(Ordering::Relaxed) {
+            return ptr::null_mut();
+        }
         let mut attribute_values = Vec::new();
         if !attributes.is_null() {
             for index in 0..5 {
@@ -802,14 +820,31 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) =
             Some((target, buffer as usize, attribute_values));
-        0x5678usize as EglImage
+        let image = NEXT_IMAGE.fetch_add(1, Ordering::Relaxed);
+        IMAGE_SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((image, PIXMAP_GENERATION.load(Ordering::Relaxed)));
+        image as EglImage
     }
 
-    unsafe extern "C" fn fake_destroy_image(_display: EglDisplay, _image: EglImage) -> EglBoolean {
+    unsafe extern "C" fn fake_destroy_image(_display: EglDisplay, image: EglImage) -> EglBoolean {
+        IMAGE_SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|&(id, _)| id != image as usize);
         EGL_TRUE
     }
 
     unsafe extern "system" fn fake_bind_image(target: u32, image: *const c_void) {
+        let generation = IMAGE_SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|&&(id, _)| id == image as usize)
+            .map(|&(_, generation)| generation)
+            .unwrap_or(0);
+        SAMPLED_GENERATION.store(generation, Ordering::Relaxed);
         GL_CALLS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -914,7 +949,10 @@ mod tests {
     }
 
     #[test]
-    fn imports_preserved_pixmap_and_rebinds_it_on_damage_without_error_query() {
+    fn imports_preserved_pixmap_and_reimports_on_damage_without_error_query() {
+        let _serial = IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         GL_CALLS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -932,7 +970,7 @@ mod tests {
         let (binding, has_rgba) = egl
             .import_pixmap(&gl, texture, pixmap, 32)
             .expect("fake EGLImage import should succeed");
-        let PixmapBinding::Egl { image } = binding else {
+        let PixmapBinding::Egl { mut image } = binding else {
             panic!("EGL import returned a non-EGL binding");
         };
 
@@ -954,7 +992,8 @@ mod tests {
             .clear();
         GL_ERROR_CALLS.store(0, Ordering::Relaxed);
 
-        egl.refresh_pixmap(&gl, texture, image);
+        egl.refresh_pixmap(&gl, texture, pixmap, &mut image)
+            .unwrap();
 
         assert_eq!(
             *GL_CALLS.lock().unwrap_or_else(PoisonError::into_inner),
@@ -978,5 +1017,98 @@ mod tests {
             0,
             "Damage refresh must not serialize the hot path with glGetError"
         );
+        egl.release_pixmap(image);
+    }
+
+    #[test]
+    fn damage_refresh_observes_gpu_content_after_the_first_import() {
+        let _serial = IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        PIXMAP_GENERATION.store(1, Ordering::Relaxed);
+        IMAGE_SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let gl = fake_gl_context();
+        let egl = fake_egl_platform();
+        let texture = glow::NativeTexture(NonZeroU32::new(7).unwrap());
+        FAIL_IMAGE_CREATE.store(false, Ordering::Relaxed);
+        let (PixmapBinding::Egl { mut image }, _) =
+            egl.import_pixmap(&gl, texture, 0x1234, 32).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(SAMPLED_GENERATION.load(Ordering::Relaxed), 1);
+        // Model a native GPU pixmap whose existing EGLImage still exposes
+        // the import-time generation after the producer updates its buffer.
+        GL_ERROR_CALLS.store(0, Ordering::Relaxed);
+        for generation in 2..=120 {
+            PIXMAP_GENERATION.store(generation, Ordering::Relaxed);
+            egl.refresh_pixmap(&gl, texture, 0x1234, &mut image)
+                .unwrap();
+            assert_eq!(
+                SAMPLED_GENERATION.load(Ordering::Relaxed),
+                generation,
+                "Damage must sample the finished UI rather than its cached loading frame"
+            );
+            assert_eq!(
+                IMAGE_SNAPSHOTS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .len(),
+                1,
+                "repeated updates must retire every superseded native image"
+            );
+        }
+        assert_eq!(GL_ERROR_CALLS.load(Ordering::Relaxed), 0);
+        egl.release_pixmap(image);
+        assert!(
+            IMAGE_SNAPSHOTS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_damage_import_retains_the_previous_image_and_recovers() {
+        let _serial = IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        FAIL_IMAGE_CREATE.store(false, Ordering::Relaxed);
+        PIXMAP_GENERATION.store(1, Ordering::Relaxed);
+        IMAGE_SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let gl = fake_gl_context();
+        let egl = fake_egl_platform();
+        let texture = glow::NativeTexture(NonZeroU32::new(7).unwrap());
+        let (PixmapBinding::Egl { mut image }, _) =
+            egl.import_pixmap(&gl, texture, 0x1234, 32).unwrap()
+        else {
+            unreachable!()
+        };
+        let original = image;
+        PIXMAP_GENERATION.store(2, Ordering::Relaxed);
+        FAIL_IMAGE_CREATE.store(true, Ordering::Relaxed);
+        let failed = egl.refresh_pixmap(&gl, texture, 0x1234, &mut image);
+        FAIL_IMAGE_CREATE.store(false, Ordering::Relaxed);
+        assert!(failed.is_err());
+        assert_eq!(image, original);
+        assert_eq!(SAMPLED_GENERATION.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            IMAGE_SNAPSHOTS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            1
+        );
+        egl.refresh_pixmap(&gl, texture, 0x1234, &mut image)
+            .unwrap();
+        assert_eq!(SAMPLED_GENERATION.load(Ordering::Relaxed), 2);
+        assert_ne!(image, original);
+        egl.release_pixmap(image);
     }
 }

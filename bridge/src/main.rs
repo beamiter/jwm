@@ -15,6 +15,7 @@ mod bluez;
 mod jwm_ipc;
 mod mpris;
 mod notifications;
+mod reload;
 
 use jwm_ipc::JwmIpc;
 
@@ -30,6 +31,8 @@ enum Verb {
     Pair,
     Accept,
     Discover,
+    /// Retire this user's notification daemon only if its binary was replaced.
+    Reload,
     /// A subcommand this build does not recognize.
     Unknown,
 }
@@ -45,6 +48,7 @@ fn classify_verb(arg: Option<&str>) -> Verb {
         Some("pair") => Verb::Pair,
         Some("accept") => Verb::Accept,
         Some("discover") => Verb::Discover,
+        Some("reload") => Verb::Reload,
         Some(_) => Verb::Unknown,
     }
 }
@@ -62,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut argv = std::env::args().skip(1);
     let verb = argv.next();
     match classify_verb(verb.as_deref()) {
+        Verb::Reload => return reload::run().await,
         Verb::Pair => {
             let Some(address) = argv.next() else {
                 eprintln!("usage: jwm-bridge pair <AA:BB:CC:DD:EE:FF>");
@@ -112,7 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "jwm-bridge: unknown subcommand {:?}",
                 verb.as_deref().unwrap_or_default()
             );
-            eprintln!("usage: jwm-bridge [pair <AA:BB:CC:DD:EE:FF> | accept | discover [seconds]]");
+            eprintln!(
+                "usage: jwm-bridge [reload | pair <AA:BB:CC:DD:EE:FF> | accept | discover [seconds]]"
+            );
             std::process::exit(bluez::EXIT_USAGE);
         }
         // No subcommand: fall through to the long-lived notification daemon.
@@ -166,6 +173,7 @@ mod tests {
         assert_eq!(classify_verb(Some("pair")), Verb::Pair);
         assert_eq!(classify_verb(Some("accept")), Verb::Accept);
         assert_eq!(classify_verb(Some("discover")), Verb::Discover);
+        assert_eq!(classify_verb(Some("reload")), Verb::Reload);
 
         // Anything else is a usage error, not the daemon: a near-miss, an
         // empty string, and a plausible-but-unimplemented verb all reject so

@@ -15,6 +15,32 @@ application --Notify()--> jwm-bridge --IPC notify--> jwm --> toast card
 The compositor stays synchronous and D-Bus-free: the bridge is a separate
 process, so a wedged session bus can never stall a frame.
 
+## Upgrading a running bridge
+
+The source and release installers run `jwm-bridge reload` after a successful
+bridge installation. This checks the owner of `org.freedesktop.Notifications`
+on the desktop user's existing session bus. Only a `jwm-bridge` process owned by
+that user and running a replaced executable is retired. A pidfd pins the exact
+process; no process-name-wide kill is used. D-Bus then activates the installed
+binary and a `GetCapabilities` call confirms that it responds. Other notification
+servers, an already-current bridge, and systems without a session bus are left
+alone. Release installations under `--destdir` never reload the live service.
+
+For a manually updated installation, run this as the desktop user:
+
+```bash
+/usr/local/bin/jwm-bridge reload
+```
+
+A stuck old bridge can affect application startup even while the desktop
+continues rendering normally: Feishu synchronously asks for notification
+capabilities before completing its meeting preview and waits about 25 seconds
+if the old service never replies. In the verified case, the bridge still ran a
+deleted executable after an upgrade; restarting only the bridge reduced preview
+loading from about 25.6 seconds to 0.64 seconds with compositing still enabled.
+Notification discovery is covered by a private-bus regression test while a
+`Notify` call is blocked waiting for JWM IPC.
+
 ## Toast cards
 
 Cards dock under the status bar, centred on it like a dynamic island: the top

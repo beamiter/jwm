@@ -77,14 +77,28 @@ bursts can recreate named pixmaps without synchronous `GetWindowAttributes` /
 `GetGeometry` requests. GLES only queries depth on first import; GLX sends both
 format requests before waiting for their replies. Damage refreshes also avoid
 creating per-window GL fences that are not consumed by a later rendering
-decision. On EGL, a Damage refresh re-specifies the existing EGLImage as the
-texture target. This forces stale-binding-prone drivers through their target
-definition path again without recreating the EGLImage or allocating another
-texture; producer synchronization remains separate. The initial dirty-region
+decision. On EGL, a dirty window refresh imports a fresh preserved EGLImage from
+the existing named pixmap, binds it to the existing GL texture, then releases the
+previous image. Rebinding the same old EGLImage can keep sampling stale contents
+from GPU/Vulkan producers even when XDamage arrives and the named pixmap already
+contains current pixels. Static windows create no new images; ordinary updates
+do not allocate GL textures or rename X pixmaps. Producer synchronization stays
+separate: the protocol connection is flushed before the native graphics fence,
+including pending damage subtraction. The initial dirty-region
 scan also records whether native texture synchronization is needed, avoiding
 another scene lookup pass. During resize bursts, the synchronization performed
 before pixmap import is reused by the ensuing texture refresh instead of issuing
 a second native round trip.
+
+A failed native fence or image import keeps the previous valid picture and the
+dirty state, then retries through the existing bounded pixmap-refresh deadline.
+Intervening animation frames respect that backoff, and closing windows retain
+their final picture without new native imports. Tests model stale image
+generations, repeated replacement/resource retirement and failed import recovery.
+The fix was also verified on the real XCB/EGL desktop with NVIDIA 570.153.02 and
+Isaac Sim 4.5 launched from Docker's `env_isaaclab_test` conda environment: a fresh
+application start, continuing frames and manual File-menu/Stage interaction all
+work with composition enabled. X11RB shares this renderer and passes build checks.
 
 XComposite allocates a new backing pixmap when the window size or X border
 width changes. JWM therefore lets the compositor observe every

@@ -523,15 +523,15 @@ impl GraphicsPlatform {
         &self,
         gl: &glow::Context,
         texture: glow::Texture,
-        binding: &PixmapBinding,
+        pixmap: u32,
+        binding: &mut PixmapBinding,
     ) -> Result<(), String> {
         match (&self.backend, binding) {
             (PlatformBackend::Glx(glx), PixmapBinding::Glx { drawable }) => {
                 glx.refresh_pixmap(self.xlib_display, gl, texture, *drawable)
             }
             (PlatformBackend::Egl(egl), PixmapBinding::Egl { image }) => {
-                egl.refresh_pixmap(gl, texture, *image);
-                Ok(())
+                egl.refresh_pixmap(gl, texture, pixmap, image)
             }
             _ => Err("window pixmap binding belongs to a different graphics API".into()),
         }

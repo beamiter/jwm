@@ -364,4 +364,155 @@ mod tests {
         let args = notify_args("app", 0, "s", "b", &[], 1, -1);
         assert_eq!(args["actions"], serde_json::json!([]));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn discovery_replies_while_a_notification_waits_for_jwm() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        struct PrivateBus(Child);
+        impl Drop for PrivateBus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = match Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                assert!(
+                    std::env::var_os("JWM_REQUIRE_DBUS_DAEMON").is_none(),
+                    "dbus-daemon required: {error}"
+                );
+                return;
+            }
+        };
+        let mut bus = PrivateBus(child);
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let address = address.trim();
+        assert!(!address.is_empty(), "private bus did not start");
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+                "jwm-notify-discovery-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+        std::fs::create_dir(&directory.0).unwrap();
+        let socket = directory.0.join("ipc.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let (release, wait_for_release) = std::sync::mpsc::channel();
+        let backend = tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("notification IPC did not arrive: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            assert!(request.contains("\"notify\""));
+            let _ = ready.send(());
+            let _ = wait_for_release.recv_timeout(Duration::from_secs(3));
+            writeln!(stream, "{{\"success\":true,\"data\":{{\"id\":42}}}}").unwrap();
+        });
+        let _server = zbus::connection::Builder::address(address)
+            .unwrap()
+            .name(NAME)
+            .unwrap()
+            .serve_at(PATH, Notifications::new(JwmIpc::with_socket(socket)))
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let notify_client = client.clone();
+        let notification = tokio::spawn(async move {
+            notify_client
+                .call_method(
+                    Some(NAME),
+                    PATH,
+                    Some(NAME),
+                    "Notify",
+                    &(
+                        "test-app",
+                        0u32,
+                        "",
+                        "discovery regression",
+                        "",
+                        Vec::<String>::new(),
+                        HashMap::<String, OwnedValue>::new(),
+                        1000i32,
+                    ),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(2), received)
+            .await
+            .unwrap()
+            .unwrap();
+        // Chromium/Feishu can block startup on these discovery methods. They
+        // must not wait behind a pending compositor command or subscription.
+        let reply = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.call_method(Some(NAME), PATH, Some(NAME), "GetCapabilities", &()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let capabilities: Vec<String> = reply.body().deserialize().unwrap();
+        assert_eq!(capabilities, ["body", "actions", "persistence"]);
+        let info = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.call_method(Some(NAME), PATH, Some(NAME), "GetServerInformation", &()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (name, _, _, spec): (String, String, String, String) =
+            info.body().deserialize().unwrap();
+        assert_eq!((name.as_str(), spec.as_str()), ("jwm", "1.2"));
+        release.send(()).unwrap();
+        let reply = notification.await.unwrap();
+        assert_eq!(reply.body().deserialize::<u32>().unwrap(), 42);
+        backend.await.unwrap();
+    }
 }
