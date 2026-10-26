@@ -35,7 +35,7 @@ libspa-sys = "0.10"
 # capture thread allocates linear Argb/Xrgb buffers on the same DRM node
 # the compositor announces via dmabuf_device.
 gbm = { version = "0.18", default-features = false, features = ["drm-support"] }
-drm = { version = "0.14", default-features = false }
+drm = { version = "0.15", default-features = false }
 drm-fourcc = "2.2"
 
 # Shared between portal and jwm for IPC matchers / output identity.
