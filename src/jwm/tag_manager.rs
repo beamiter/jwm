@@ -55,6 +55,7 @@ impl Jwm {
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.tags = target_tag;
         }
+        self.retarget_client_spawn_pin(backend, client_key);
         let _ = self.setclienttagprop(backend, client_key);
 
         self.focus(backend, None)?;

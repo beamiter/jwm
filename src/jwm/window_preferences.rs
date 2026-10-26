@@ -200,6 +200,29 @@ impl WindowPreferences {
         Ok(enabled)
     }
 
+    /// Retarget an existing pin without enabling an unpinned identity. Keep
+    /// the live rule current immediately; the shared debounce persists it.
+    fn retarget_pin(&mut self, pin: SpawnPlacement) {
+        let Some(saved) = self
+            .data
+            .spawn
+            .iter_mut()
+            .find(|old| old.identity == pin.identity)
+        else {
+            return;
+        };
+        if pin.tags == 0
+            || pin.monitor_num < 0
+            || (saved.tags == pin.tags
+                && saved.monitor_num == pin.monitor_num
+                && saved.connector == pin.connector)
+        {
+            return;
+        }
+        *saved = pin;
+        self.dirty = Some(Instant::now());
+    }
+
     fn remember_size(&mut self, name: &str, rect: Rect, area: Rect) {
         if !valid_scratchpad_name(name) || rect.w <= 0 || rect.h <= 0 || area.w <= 0 || area.h <= 0
         {
@@ -328,6 +351,45 @@ impl Jwm {
                 identity.to_string()
             },
         ))
+    }
+
+    /// An explicit tag move chooses a new home for an already pinned app.
+    /// Do not call from manage, session restore, or automatic output migration.
+    pub(crate) fn retarget_client_spawn_pin(&mut self, backend: &mut dyn Backend, key: ClientKey) {
+        let Some(client) = self.state.clients.get(key) else {
+            return;
+        };
+        let Some(identity) = PlacementIdentity::new(&client.class, &client.instance) else {
+            return;
+        };
+        if self.window_preferences.pin(&identity).is_none()
+            || client.state.is_sticky
+            || client.state.is_dock
+            || client.state.is_desktop
+            || self.scratchpads.values().any(|&value| value == key)
+            || self.get_transient_for(backend, client.win).is_some()
+        {
+            return;
+        }
+        let types = backend.property_ops().get_window_types(client.win);
+        if RuleMatcher::types_are_popup_like(&types)
+            || RuleMatcher::is_structurally_borderless(&types)
+        {
+            return;
+        }
+        let Some(mon) = client.mon else {
+            return;
+        };
+        let Some(monitor) = self.state.monitors.get(mon) else {
+            return;
+        };
+        let pin = SpawnPlacement {
+            identity,
+            monitor_num: monitor.num,
+            connector: self.output_key_for_monitor(backend, mon),
+            tags: client.state.tags & CONFIG.load().tagmask(),
+        };
+        self.window_preferences.retarget_pin(pin);
     }
 
     /// Some means this identity is explicitly pinned, even when it was already
@@ -567,6 +629,28 @@ mod tests {
             fs::metadata(fixture.path()).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn retargeted_pin_survives_reload_and_does_not_reenable_after_unpin() {
+        let fixture = Fixture::new();
+        let mut store = WindowPreferences::load_from_path(fixture.path());
+        let mut destination = pin();
+        destination.tags = 1 << 7;
+        store.retarget_pin(destination.clone());
+        assert!(store.pin(&destination.identity).is_none());
+        assert!(store.dirty.is_none());
+        store.toggle_pin(pin()).unwrap();
+        store.retarget_pin(destination.clone());
+        assert_eq!(store.pin(&destination.identity).unwrap().tags, 1 << 7);
+        assert!(store.dirty.is_some());
+        store.save(&store.data).unwrap();
+        let mut restored = WindowPreferences::load_from_path(fixture.path());
+        assert_eq!(restored.pin(&destination.identity).unwrap().tags, 1 << 7);
+        assert!(!restored.toggle_pin(destination.clone()).unwrap());
+        restored.retarget_pin(pin());
+        assert!(restored.pin(&destination.identity).is_none());
+        assert!(restored.dirty.is_none());
     }
 
     #[test]

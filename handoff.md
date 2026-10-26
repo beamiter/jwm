@@ -1,3 +1,18 @@
+## 2026-10-27 — Spawn pins follow explicit tag moves
+
+- Alt+Ctrl+P keeps its existing persistent application-identity pin. Alt+Shift+1–9,
+  tag-overview moves, and toggletag now update an enabled pin to the new tag mask
+  immediately; subsequent spawns use that destination even before the save debounce.
+- Moving an unpinned window never creates a pin. Closing does not remove it;
+  toggling pin off remains the explicit release. Transients, scratchpads, sticky
+  windows and shell surfaces cannot retarget a regular application pin.
+- Automatic manage/session/output placement does not rewrite the saved pin.
+- Validation: Rust 1.99.1, no-default-features lib build; 3 spawn-pin tests,
+  7 window-preferences tests and 37 tag-manager tests passed (47 total).
+  `cargo fmt --all --check` and `git diff --check` passed. No live GUI verification.
+  This runner used the installed libxkbcommon.so.0 via a temporary linker search
+  directory because the system development symlink was absent.
+
 # Handoff
 
 滚动记录待办：每条写清楚「现状 / 缺口 / 落点」，让下一次接手的人不必重新考古。

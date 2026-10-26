@@ -6883,6 +6883,56 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn spawn_pin_follows_explicit_tag_moves_until_unpinned() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        set_class(&backend, "MovingPinProbe", "probe");
+        let original = manage_window(&mut jwm, &mut backend, 0x9c30);
+        jwm.toggle_spawn_placement(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        // Alt+Shift+8 updates the rule before any disk debounce or close.
+        jwm.tag(&mut backend, &WMArgEnum::UInt(1 << 7)).unwrap();
+        assert_eq!(jwm.state.clients[original].state.tags, 1 << 7);
+        let reopened = manage_window(&mut jwm, &mut backend, 0x9c31);
+        assert_eq!(jwm.state.clients[reopened].state.tags, 1 << 7);
+        jwm.reveal_and_focus(&mut backend, jwm.state.clients[reopened].win)
+            .unwrap();
+        assert_eq!(jwm.state.clients[reopened].state.tags, 1 << 7);
+
+        // Move again through the shared drag/keyboard path, then close/reopen.
+        jwm.move_client_to_tag(&mut backend, reopened, 0b10)
+            .unwrap();
+        jwm.move_client_to_tag(&mut backend, reopened, 0).unwrap();
+        jwm.unmanage(&mut backend, Some(reopened), true).unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        jwm.note_jwm_launch(external_pid(), std::time::Instant::now());
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+        let reopened = manage_window(&mut jwm, &mut backend, 0x9c32);
+        assert_eq!(jwm.state.clients[reopened].state.tags, 0b10);
+
+        jwm.reveal_and_focus(&mut backend, jwm.state.clients[reopened].win)
+            .unwrap();
+        jwm.toggletag(&mut backend, &WMArgEnum::UInt(0b100))
+            .unwrap();
+        let peer = manage_window(&mut jwm, &mut backend, 0x9c33);
+        assert_eq!(jwm.state.clients[peer].state.tags, 0b110);
+        jwm.focus(&mut backend, Some(reopened)).unwrap();
+        jwm.toggle_spawn_placement(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.move_client_to_tag(&mut backend, reopened, 1 << 7)
+            .unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(1)).unwrap();
+        let unpinned = manage_window(&mut jwm, &mut backend, 0x9c34);
+        assert_eq!(jwm.state.clients[unpinned].state.tags, 1);
+    }
+
+    #[test]
     fn spawn_pin_overrides_close_history_but_leaves_transients_with_their_parent() {
         use crate::jwm::WMArgEnum;
 

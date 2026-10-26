@@ -1086,6 +1086,7 @@ impl Jwm {
                     return Ok(());
                 }
 
+                self.retarget_client_spawn_pin(backend, sel_client_key);
                 self.setclienttagprop(backend, sel_client_key)?;
 
                 self.focus(backend, None)?;

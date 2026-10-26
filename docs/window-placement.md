@@ -45,8 +45,11 @@ and tags. Future windows with exactly the same class and instance (the native
 Wayland app identity on Wayland) open there, including windows started from
 the launcher or another terminal. Window titles are not part of the match.
 Press the shortcut again on a window of that identity to remove the pin;
-move the window and toggle off/on to choose a new home. Moving or closing a
-window never changes an existing pin. Transient dialogs follow their parent;
+moving it with **Alt+Shift+1…9** (or the tag overview) automatically updates
+the pin to the destination. Toggling tag membership updates the saved tag
+mask too. The pin stays enabled until explicitly toggled off; future spawns
+use the latest destination, even before the debounced save completes.
+Closing a window does not remove its pin. Transient dialogs follow their parent;
 scratchpads, sticky windows, docks and popup windows cannot create pins.
 
 The action is `toggle_spawn_placement`, also available with
