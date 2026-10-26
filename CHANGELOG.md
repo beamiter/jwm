@@ -5,6 +5,15 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Spawn pins and persistent dropdown sizes
+
+- `Alt+Ctrl+P` toggles a saved spawn monitor and tag mask for the focused
+  application's exact class/instance identity, with on-screen confirmation.
+  Pins survive restarts and apply to launcher and terminal launches.
+- Named scratchpads, including the `Alt+Shift+N` dropdown terminal, remember
+  resized dimensions across hide/show, relaunch and restart, scaled to the
+  destination output's usable area.
+
 ### EGL refresh for Vulkan application windows
 
 - Refresh dirty X11 windows through a new preserved EGLImage instead of

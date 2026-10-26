@@ -898,6 +898,7 @@ impl WMController for Jwm {
 
                             if !matches!(ctl.mode, DragMode::Reorder) {
                                 self.settle_released_drag(backend, ctl.client);
+                                self.remember_scratchpad_size(ctl.client);
                             }
                         }
                         // Legacy path: a backend interaction without a drag
@@ -955,6 +956,9 @@ impl WMController for Jwm {
 
                             // Sync floating window geometry after drag ends
                             self.sync_focused_floating_geometry(backend);
+                            if let Some(key) = self.get_selected_client_key() {
+                                self.remember_scratchpad_size(key);
+                            }
 
                             if let Err(e) = self.check_monitor_consistency(backend) {
                                 error!(
@@ -3410,6 +3414,7 @@ mod tests {
             scratchpad_pending: crate::jwm::scratchpad_pending::ScratchpadPendingRegistry::default(
             ),
             closed_placements: crate::jwm::closed_placement::ClosedPlacementMemory::default(),
+            window_preferences: crate::jwm::window_preferences::WindowPreferences::default(),
             jwm_launches: crate::jwm::closed_placement::JwmLaunchRegistry::default(),
             animations: AnimationManager::new(),
             hidden_client_park_retries: crate::jwm::monitor::HiddenClientParkRetries::default(),
@@ -15556,6 +15561,7 @@ impl Jwm {
         next = min_optional_duration(next, self.transient_child_next_wakeup(now));
         next = min_optional_duration(next, self.scratchpad_pending.next_wakeup(now));
         next = min_optional_duration(next, self.layout_persist_next_wakeup(now));
+        next = min_optional_duration(next, self.window_preferences_next_wakeup(now));
         next = min_optional_duration(next, self.secondary_bar_next_wakeup(now));
         next = min_optional_duration(next, self.ping_next_wakeup(now));
         next = min_optional_duration(next, self.idle_next_wakeup(now));
@@ -15898,6 +15904,7 @@ impl EventHandler for Jwm {
         // After the reload poll: a pending edit of the user's gets to land
         // before JWM writes its own per-tag layouts over the same file.
         self.flush_layout_persistence(backend, now);
+        self.flush_window_preferences(backend, now, false);
         let active_bar_monitors: Vec<i32> = self.secondary_bars.keys().copied().collect();
         crate::backend::compositor_common::bar_wallpaper::retain_monitors(&active_bar_monitors);
         for monitor in crate::backend::compositor_common::bar_wallpaper::take_changed_monitors() {

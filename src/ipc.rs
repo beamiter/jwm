@@ -325,6 +325,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_recording",
         "toggle_scratchpad",
         "toggle_shortcut_passthrough",
+        "toggle_spawn_placement",
         "toggle_sticky",
         "toggle_tag",
         "toggle_tags_overview",
@@ -1563,6 +1564,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglesticky" | "toggle_sticky" | "sticky" => {
             Ok((Jwm::togglesticky, parse_int_arg(args, 0)?))
         }
+        "toggle_spawn_placement" => Ok((Jwm::toggle_spawn_placement, parse_int_arg(args, 0)?)),
         "togglepip" | "toggle_pip" | "pip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
         "togglemaximize" | "toggle_maximize" | "maximize" => {
             Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?))

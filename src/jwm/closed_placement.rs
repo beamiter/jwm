@@ -82,10 +82,10 @@ const MAX_CLOSED_PLACEMENT_TEMPORARY_CREATE_ATTEMPTS: usize = 128;
 static CLOSED_PLACEMENT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// WM_CLASS identity a placement is remembered under. Exact, case-sensitive.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct PlacementIdentity {
-    class: String,
-    instance: String,
+    pub(super) class: String,
+    pub(super) instance: String,
 }
 
 impl PlacementIdentity {
@@ -325,7 +325,8 @@ fn sweep_orphaned_closed_placement_temporaries(parent: &Path) {
     }
 }
 
-fn atomic_write_closed_placement(path: &Path, contents: &[u8]) -> io::Result<()> {
+/// Private atomic state writer, also used by explicit window preferences.
+pub(super) fn atomic_write_closed_placement(path: &Path, contents: &[u8]) -> io::Result<()> {
     atomic_write_closed_placement_with_sync(path, contents, |parent, _temporary| {
         fs::File::open(parent)?.sync_all()
     })
@@ -934,9 +935,10 @@ impl Jwm {
 
     /// After rules ran for a freshly managed top-level: mark it as one whose
     /// closing is worth remembering, and, when the memory has an entry for
-    /// its identity and JWM did not launch it, move it there. Rule-pinned
-    /// tags or monitor are left alone. Returns whether anything moved, so
-    /// the caller knows the window may have left the user's view.
+    /// its identity and JWM did not launch it, move it there. Explicit spawn
+    /// pins take precedence; automatic close history leaves rule-pinned tags
+    /// and monitors alone. Returns whether placement moved the window away
+    /// from its default, so the caller can preserve the user's focused view.
     pub(crate) fn adopt_remembered_placement(
         &mut self,
         backend: &mut dyn Backend,
@@ -963,6 +965,12 @@ impl Jwm {
         };
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.remembers_closed_placement = true;
+        }
+
+        // An explicit keyboard pin applies to every launch origin and wins
+        // over both configured placement rules and automatic close history.
+        if let Some(moved) = self.adopt_pinned_spawn_placement(backend, client_key) {
+            return moved;
         }
 
         let cfg = CONFIG.load();

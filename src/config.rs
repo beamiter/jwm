@@ -2305,6 +2305,15 @@ fn next_gesture_policy_generation() -> u64 {
 }
 
 impl Config {
+    fn default_spawn_placement_key() -> KeyConfig {
+        KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into()],
+            key: "p".into(),
+            function: "toggle_spawn_placement".into(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
     pub(crate) fn gesture_swipe_signature(&self) -> String {
         format!(
             "{}|{}",
@@ -3037,6 +3046,7 @@ impl Config {
             },
             Self::default_restore_preview_key(),
             Self::default_shortcut_passthrough_key(),
+            Self::default_spawn_placement_key(),
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "t".to_string(),
@@ -3728,6 +3738,29 @@ impl Config {
         (!occupied && !leader_occupied).then_some(fallback)
     }
 
+    /// Old key lists gain the pin toggle unless a user binding or leader owns
+    /// its chord. Use the same decision in the runtime and shortcut viewer.
+    pub fn spawn_placement_fallback_key(&self) -> Option<KeyConfig> {
+        let fallback = Self::default_spawn_placement_key();
+        let modifiers = self.parse_modifiers(&fallback.modifier);
+        let keysym = self.parse_keysym(&fallback.key)?;
+        let occupied = self.key_configs().iter().any(|key| {
+            self.convert_key_config(key).is_some()
+                && (key.function == fallback.function
+                    || ((self.parse_modifiers(&key.modifier) & !(Mods::CAPS | Mods::NUMLOCK))
+                        == modifiers
+                        && self.parse_keysym(&key.key) == Some(keysym)))
+        });
+        let chord = self.chord_config();
+        let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
+            && self.parse_keysym(&chord.leader_key) == Some(keysym);
+        let in_chord = self.compile_chord().is_some()
+            && chord.bindings.iter().any(|key| {
+                key.function == fallback.function && self.convert_key_config(key).is_some()
+            });
+        (!occupied && !leader_occupied && !in_chord).then_some(fallback)
+    }
+
     pub fn get_keys(&self) -> Vec<WMKey> {
         let mut keys = Vec::new();
 
@@ -3928,6 +3961,11 @@ impl Config {
         {
             keys.push(binding);
         }
+        if let Some(fallback) = self.spawn_placement_fallback_key()
+            && let Some(binding) = self.convert_key_config(&fallback)
+        {
+            keys.push(binding);
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -4073,6 +4111,7 @@ impl Config {
             "setlayout" => Some(Jwm::setlayout),
             "lastlayout" => Some(Jwm::lastlayout),
             "togglefloating" => Some(Jwm::togglefloating),
+            "toggle_spawn_placement" => Some(Jwm::toggle_spawn_placement),
             "togglebar" => Some(Jwm::togglebar),
             "setmfact" => Some(Jwm::setmfact),
             "setgaps" => Some(Jwm::setgaps),
@@ -7659,6 +7698,7 @@ mod tests {
                 Jwm::adjust_recording_region,
             ),
             ("space", Mods::ALT | Mods::CONTROL, Jwm::togglefloating),
+            ("p", Mods::ALT | Mods::CONTROL, Jwm::toggle_spawn_placement),
             ("Return", Mods::ALT | Mods::CONTROL, Jwm::togglemaximize),
             ("F10", Mods::ALT | Mods::SHIFT, Jwm::bluetooth_picker),
         ] {
@@ -9691,6 +9731,51 @@ border_px = 3
         cfg.inner.keybindings.keys.push(custom);
         assert!(cfg.shortcut_passthrough_fallback_key().is_none());
         assert_eq!(toggle_keys(&cfg), 1);
+    }
+
+    #[test]
+    fn spawn_placement_fallback_respects_custom_bindings_and_chords() {
+        use crate::jwm::{Jwm, WMFuncType};
+
+        let mut cfg = Config::default();
+        assert!(cfg.spawn_placement_fallback_key().is_none());
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "toggle_spawn_placement");
+        assert!(cfg.spawn_placement_fallback_key().is_some());
+        let count = |cfg: &Config| {
+            cfg.get_keys()
+                .iter()
+                .filter(|key| {
+                    key.func_opt.is_some_and(|function| {
+                        std::ptr::fn_addr_eq(function, Jwm::toggle_spawn_placement as WMFuncType)
+                    })
+                })
+                .count()
+        };
+        assert_eq!(count(&cfg), 1);
+        let fallback = Config::default_spawn_placement_key();
+        let mut custom = fallback.clone();
+        custom.function = "minimize".into();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.spawn_placement_fallback_key().is_none());
+        assert_eq!(count(&cfg), 0);
+        cfg.inner.keybindings.keys.pop();
+        let mut custom = fallback.clone();
+        custom.key = "F9".into();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.spawn_placement_fallback_key().is_none());
+        assert_eq!(count(&cfg), 1);
+        cfg.inner.keybindings.keys.pop();
+        cfg.inner.keybindings.chord.leader_modifier = fallback.modifier.clone();
+        cfg.inner.keybindings.chord.leader_key = fallback.key.clone();
+        assert!(cfg.spawn_placement_fallback_key().is_none());
+        cfg.inner.keybindings.chord.leader_key = "F9".into();
+        cfg.inner.keybindings.chord.bindings = vec![fallback];
+        assert!(cfg.spawn_placement_fallback_key().is_none());
+        cfg.inner.keybindings.chord.leader_key.clear();
+        assert!(cfg.spawn_placement_fallback_key().is_some());
     }
 
     #[test]

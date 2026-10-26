@@ -715,10 +715,8 @@ impl Jwm {
         self.setclienttagprop(backend, client_key)?;
 
         if let Some(area) = self.monitor_work_area(target_monitor) {
-            let width = area.w.saturating_mul(4) / 5;
-            let height = area.h.saturating_mul(4) / 5;
-            let x = area.x + (area.w - width) / 2;
-            let y = area.y + (area.h - height) / 2;
+            let rect = self.scratchpad_reveal_rect(client_key, area);
+            let (x, y, width, height) = (rect.x, rect.y, rect.w, rect.h);
 
             if is_hidden {
                 let desktop_left = self.desktop_left_edge();
@@ -1251,6 +1249,7 @@ mod scratchpad_reveal_tests {
             scratchpad_pending: crate::jwm::scratchpad_pending::ScratchpadPendingRegistry::default(
             ),
             closed_placements: crate::jwm::closed_placement::ClosedPlacementMemory::default(),
+            window_preferences: crate::jwm::window_preferences::WindowPreferences::default(),
             jwm_launches: crate::jwm::closed_placement::JwmLaunchRegistry::default(),
             animations: AnimationManager::new(),
             hidden_client_park_retries: crate::jwm::monitor::HiddenClientParkRetries::default(),
@@ -1863,6 +1862,31 @@ mod scratchpad_reveal_tests {
         jwm.scratchpads.insert("term".into(), scratchpad_key);
 
         (jwm, scratchpad_key, scratchpad_window, target)
+    }
+
+    #[test]
+    fn resized_dropdown_keeps_its_size_after_hide_and_reveal() {
+        let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+            .unwrap();
+        jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+            .unwrap();
+        let geometry = &jwm.state.clients[scratchpad].geometry;
+        let expected = (geometry.w, geometry.h);
+        let area = jwm.monitor_work_area(target).unwrap();
+        assert!(expected.0 < area.w * 4 / 5 && expected.1 < area.h * 4 / 5);
+        let arg = WMArgEnum::StringVec(vec!["term".into()]);
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        assert_eq!(jwm.state.clients[scratchpad].state.tags, 0);
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        let geometry = &jwm.state.clients[scratchpad].geometry;
+        assert_eq!((geometry.w, geometry.h), expected);
+        if let Some(animation) = jwm.animations.active.get(&scratchpad) {
+            assert_eq!((animation.to.w, animation.to.h), expected);
+        }
+        assert_eq!(jwm.get_selected_client_key(), Some(scratchpad));
     }
 
     #[test]

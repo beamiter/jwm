@@ -367,6 +367,7 @@ impl Jwm {
                 c.geometry.floating_w = c.geometry.w;
                 c.geometry.floating_h = c.geometry.h;
             }
+            self.remember_scratchpad_size(key);
             self.broadcast_visible_window_states_on_monitor(backend, mon);
             return Ok(());
         }

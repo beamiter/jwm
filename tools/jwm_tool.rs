@@ -540,7 +540,7 @@ enum Commands {
                       名称以 get_ 开头或已注册为查询时自动发送 query。\n\n\
                       \x1b[1m可用命令:\x1b[0m\n  \
                       窗口: focusstack, killclient, zoom, togglefloating, togglemaximize,\n        \
-                      togglesticky, togglepip, togglescratchpad, movestack\n  \
+                      togglesticky, togglepip, togglescratchpad, toggle_spawn_placement, movestack\n  \
                       布局: setmfact, setcfact, incnmaster, setlayout, cyclelayout, togglebar\n  \
                       标签: view, tag, toggleview, toggletag, loopview\n  \
                       显示器: focusmon, tagmon\n  \

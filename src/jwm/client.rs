@@ -340,10 +340,8 @@ impl Jwm {
             }
             if let Some(mk) = mon_key {
                 if let Some(area) = self.monitor_work_area(mk) {
-                    let w = (area.w as f32 * 0.8) as i32;
-                    let h = (area.h as f32 * 0.8) as i32;
-                    let x = area.x + (area.w - w) / 2;
-                    let y = area.y + (area.h - h) / 2;
+                    let rect = self.scratchpad_reveal_rect(client_key, area);
+                    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
 
                     // Suppress animation during resize to set target position
                     let suppress_flag = self.suppress_layout_animation;
@@ -355,11 +353,16 @@ impl Jwm {
                 self.arrange(backend, Some(mk));
 
                 // Start downward animation on initial appearance
-                if let Some(area) = self.monitor_work_area(mk) {
-                    let w = (area.w as f32 * 0.8) as i32;
-                    let h = (area.h as f32 * 0.8) as i32;
-                    let x = area.x + (area.w - w) / 2;
-                    let y = area.y + (area.h - h) / 2;
+                if let Some(area) = self.monitor_work_area(mk)
+                    && let Some(client) = self.state.clients.get(client_key)
+                {
+                    let rect = Rect::new(
+                        client.geometry.x,
+                        client.geometry.y,
+                        client.geometry.w,
+                        client.geometry.h,
+                    );
+                    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
 
                     if cfg.animation_enabled() {
                         let from_y = area.y - h;
@@ -1155,9 +1158,9 @@ impl Jwm {
 
     /// Give a new client its monitor and tags: a transient follows its
     /// parent, anything else starts on the selected monitor, takes the
-    /// configured rules, and then the closed-placement memory. Returns
-    /// whether that memory moved the client somewhere other than the
-    /// default, so the caller can reveal the tag it landed on.
+    /// configured rules, then explicit spawn pins or closed-placement memory.
+    /// Returns whether a saved placement moved the client away from the
+    /// default, so the caller can preserve the user's focused view.
     pub(crate) fn handle_transient_for(
         &mut self,
         backend: &mut dyn Backend,
@@ -1980,6 +1983,8 @@ impl Jwm {
         client_key: ClientKey,
         destroyed: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.remember_scratchpad_size(client_key);
+        self.flush_window_preferences(backend, std::time::Instant::now(), true);
         self.animations.remove(client_key);
         // Where this window sat is the best guess for where its application
         // goes next time; capture it while monitor and tags are still bound.
@@ -6787,6 +6792,92 @@ mod unmanage_minimized_tests {
             assert!(jwm.state.clients[dialog].state.is_floating);
             assert!(!jwm.state.clients[dialog].state.remembers_closed_placement);
         }
+    }
+
+    #[test]
+    fn spawn_pin_applies_to_jwm_launches_and_toggle_off_restores_default_placement() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.add_monitor(second_output());
+        let first = jwm.state.monitor_order[0];
+        let second = jwm.state.monitor_order[1];
+        jwm.switch_to_monitor(&mut backend, second).unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(0b10100)).unwrap();
+        set_class(&backend, "SpawnPinProbe", "probe");
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+        let original = manage_window(&mut jwm, &mut backend, 0x9c01);
+        jwm.toggle_spawn_placement(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.unmanage(&mut backend, Some(original), true).unwrap();
+        jwm.switch_to_monitor(&mut backend, first).unwrap();
+        let terminal = focused_terminal(&mut jwm, &mut backend, 0x9c02);
+        set_class(&backend, "SpawnPinProbe", "probe");
+        jwm.note_jwm_launch(external_pid(), std::time::Instant::now());
+        let reopened = manage_window(&mut jwm, &mut backend, 0x9c03);
+        assert_eq!(jwm.state.clients[reopened].mon, Some(second));
+        assert_eq!(jwm.state.clients[reopened].state.tags, 0b10100);
+        assert_eq!(jwm.get_selected_client_key(), Some(terminal));
+        assert!(jwm.state.clients[reopened].state.is_urgent);
+        assert!(
+            jwm.closed_placements.is_empty(),
+            "explicit pins work with close history disabled"
+        );
+
+        // Cancelling a pin from a different tag still removes its saved home.
+        jwm.reveal_and_focus(&mut backend, jwm.state.clients[reopened].win)
+            .unwrap();
+        jwm.tag(&mut backend, &WMArgEnum::UInt(0b10)).unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(0b10)).unwrap();
+        jwm.focus(&mut backend, Some(reopened)).unwrap();
+        jwm.toggle_spawn_placement(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.switch_to_monitor(&mut backend, first).unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(0b1000000)).unwrap();
+        let unpinned = manage_window(&mut jwm, &mut backend, 0x9c04);
+        assert_eq!(jwm.state.clients[unpinned].mon, Some(first));
+        assert_eq!(jwm.state.clients[unpinned].state.tags, 0b1000000);
+    }
+
+    #[test]
+    fn spawn_pin_overrides_close_history_but_leaves_transients_with_their_parent() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, first, second) =
+            jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        jwm.closed_placements.set_enabled_for_test(false);
+        set_class(&backend, "firefox", "Navigator");
+        let browser = manage_window(&mut jwm, &mut backend, 0x9c10);
+        jwm.toggle_spawn_placement(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.unmanage(&mut backend, Some(browser), true).unwrap();
+        jwm.closed_placements.set_enabled_for_test(true);
+        jwm.switch_to_monitor(&mut backend, second).unwrap();
+        let reopened = manage_window(&mut jwm, &mut backend, 0x9c11);
+        assert_eq!(jwm.state.clients[reopened].mon, Some(first));
+        assert_eq!(jwm.state.clients[reopened].state.tags, 1);
+        set_class(&backend, "ParentProbe", "parent");
+        let parent = manage_window(&mut jwm, &mut backend, 0x9c12);
+        let parent_mon = jwm.state.clients[parent].mon;
+        let parent_tags = jwm.state.clients[parent].state.tags;
+        set_class(&backend, "firefox", "Navigator");
+        backend
+            .property_ops
+            .popup_properties
+            .lock()
+            .unwrap()
+            .insert(
+                WindowId::from_raw(0x9c13),
+                (WindowType::Dialog, Some(jwm.state.clients[parent].win)),
+            );
+        let dialog = manage_window(&mut jwm, &mut backend, 0x9c13);
+        assert_eq!(jwm.state.clients[dialog].mon, parent_mon);
+        assert_eq!(jwm.state.clients[dialog].state.tags, parent_tags);
     }
 
     #[test]

@@ -417,6 +417,7 @@ mod tests {
             scratchpad_pending: crate::jwm::scratchpad_pending::ScratchpadPendingRegistry::default(
             ),
             closed_placements: crate::jwm::closed_placement::ClosedPlacementMemory::default(),
+            window_preferences: crate::jwm::window_preferences::WindowPreferences::default(),
             jwm_launches: crate::jwm::closed_placement::JwmLaunchRegistry::default(),
             animations: AnimationManager::new(),
             hidden_client_park_retries: crate::jwm::monitor::HiddenClientParkRetries::default(),

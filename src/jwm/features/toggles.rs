@@ -5698,6 +5698,8 @@ impl Jwm {
             // Scratchpad exists — toggle visibility
             let is_visible = self.is_client_visible_by_key(sp_key);
             if is_visible {
+                self.remember_scratchpad_size(sp_key);
+                self.flush_window_preferences(backend, std::time::Instant::now(), true);
                 // Hide: animate upward then hide
                 if let Some(client) = self.state.clients.get(sp_key) {
                     let current_rect = Rect::new(
@@ -5770,11 +5772,15 @@ impl Jwm {
                 if !was_minimized
                     && let Some(mon_key) = self.state.sel_mon
                     && let Some(area) = self.monitor_work_area(mon_key)
+                    && let Some(client) = self.state.clients.get(sp_key)
                 {
-                    let w = area.w.saturating_mul(4) / 5;
-                    let h = area.h.saturating_mul(4) / 5;
-                    let x = area.x + (area.w - w) / 2;
-                    let y = area.y + (area.h - h) / 2;
+                    let rect = Rect::new(
+                        client.geometry.x,
+                        client.geometry.y,
+                        client.geometry.w,
+                        client.geometry.h,
+                    );
+                    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
 
                     if cfg.animation_enabled() {
                         // Animate from above screen to target position

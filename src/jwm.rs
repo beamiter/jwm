@@ -38,6 +38,7 @@ pub(crate) mod native_chrome;
 pub mod positioning;
 pub mod process;
 pub mod rendering;
+pub(crate) mod window_preferences;
 pub mod window_state;
 pub mod window_tabs;
 pub use types::{
@@ -224,6 +225,7 @@ pub struct Jwm {
     /// back without JWM launching it lands there. See
     /// [`closed_placement`].
     pub(crate) closed_placements: closed_placement::ClosedPlacementMemory,
+    pub(crate) window_preferences: window_preferences::WindowPreferences,
     /// Every child JWM spawned itself, for telling a keybinding/launcher
     /// window apart from one opened from a terminal or by an application.
     pub(crate) jwm_launches: closed_placement::JwmLaunchRegistry,
@@ -1060,6 +1062,8 @@ impl Jwm {
             "layout_picker"
         } else if eq!(Jwm::togglefloating) {
             "togglefloating"
+        } else if eq!(Jwm::toggle_spawn_placement) {
+            "toggle_spawn_placement"
         } else if eq!(Jwm::togglebar) {
             "togglebar"
         } else if eq!(Jwm::setmfact) {
@@ -1368,6 +1372,7 @@ impl Jwm {
                     }
                 }
             },
+            window_preferences: window_preferences::WindowPreferences::load(),
             jwm_launches: closed_placement::JwmLaunchRegistry::default(),
             animations: AnimationManager::new(),
             hidden_client_park_retries: monitor::HiddenClientParkRetries::default(),
@@ -2511,6 +2516,9 @@ impl Jwm {
             key_configs.push(fallback);
         }
         if let Some(fallback) = cfg.shortcut_passthrough_fallback_key() {
+            key_configs.push(fallback);
+        }
+        if let Some(fallback) = cfg.spawn_placement_fallback_key() {
             key_configs.push(fallback);
         }
         let lines = keybinding_viewer_lines(

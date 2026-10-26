@@ -8,9 +8,12 @@ this order:
 2. Everything else starts on the currently focused monitor, on that monitor's
    active tags.
 3. A matching `[[rules]]` entry can pin the tags, the monitor, or both.
-4. If explicitly enabled, the closed-placement memory described below moves
+4. A spawn pin saved with `Alt+Ctrl+P` fixes both the output and tags for that
+   application, overriding placement from `[[rules]]`.
+5. If explicitly enabled, the closed-placement memory described below moves
    the window to where the same application was last closed, unless a rule
-   already pinned that part or JWM launched the window itself.
+   already pinned that part, an explicit spawn pin applies, or JWM launched
+   the window itself.
 
 By default, new windows open on the currently focused tag, including windows
 reopened from a terminal, by an agent (`claude`, `codex`), or by a running
@@ -33,6 +36,47 @@ forgets everything remembered so far — both the in-memory map and the on-disk
 snapshot — so a later re-enable starts from what the user does next rather
 than from stale history. While the feature is disabled the snapshot file is
 deleted (or ignored); it is only loaded at startup when the feature is on.
+
+## Pin an application's spawn location
+
+Move a regular application window to the monitor and tag(s) where it should
+open, focus it, then press **Alt+Ctrl+P**. A toast confirms the saved output
+and tags. Future windows with exactly the same class and instance (the native
+Wayland app identity on Wayland) open there, including windows started from
+the launcher or another terminal. Window titles are not part of the match.
+Press the shortcut again on a window of that identity to remove the pin;
+move the window and toggle off/on to choose a new home. Moving or closing a
+window never changes an existing pin. Transient dialogs follow their parent;
+scratchpads, sticky windows, docks and popup windows cannot create pins.
+
+The action is `toggle_spawn_placement`, also available with
+`jwm-tool ipc toggle_spawn_placement`. Older key lists receive Alt+Ctrl+P
+automatically when the key and action are unused; a custom binding or chord
+leader takes precedence. The shortcut viewer shows the effective fallback.
+
+Pins do not require `remember_closed_placement`. They survive JWM restarts in
+`$XDG_STATE_HOME/jwm/window_preferences.json` (by default
+`~/.local/state/jwm/window_preferences.json`). Output matching uses the stable
+panel identity, with the monitor number as fallback. If that output and
+monitor are unavailable, the pinned tags apply on the current output.
+Windows placed outside the focused view request attention without switching
+the user's monitor or tag. At most 256 identities can be pinned; reaching
+the limit leaves existing pins intact.
+
+## Dropdown terminal size
+
+The terminal opened with **Alt+Shift+N** remembers its size after keyboard
+resizing (`Alt+H/L`, `Alt+Shift+H/L`, `Alt+Ctrl+arrows`, or custom bindings
+for `resize_horizontal` / `resize_vertical`) or a completed pointer resize.
+Hiding and showing it, closing and launching it again, and restarting JWM
+keep that size. Sizes are saved independently for each named scratchpad
+(`term`, `music`, `calc`, etc.) in `window_preferences.json`.
+
+The size is a fraction of the monitor's usable area: showing the terminal on
+another monitor scales it to fit and centers it there. New scratchpads start
+at 80% width and height. Fullscreen, maximized, PiP and hidden geometry do not
+replace the remembered size. Writes are debounced for half a second while
+resizing, and flushed on hide, close and exit; a failed save raises a toast.
 
 ## Dragging between outputs
 
