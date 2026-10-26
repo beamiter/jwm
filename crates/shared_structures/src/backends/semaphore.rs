@@ -2,22 +2,49 @@
 #![cfg(feature = "semaphore")]
 
 use super::common::{RegisterOutcome, SyncBackend, WaiterGate};
-use libc::{sem_destroy, sem_init, sem_post, sem_t, sem_timedwait, sem_wait};
+use libc::{sem_destroy, sem_init, sem_post, sem_t, sem_trywait, sem_wait};
 use std::hint;
 use std::io::{Error, ErrorKind, Result};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicI32, AtomicU32};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// 自旋阶段每多少次迭代检查一次超时。
 const SPIN_TIMEOUT_CHECK_INTERVAL: u32 = 1024;
 
-/// 每轮 `sem_timedwait` 的最长绝对期限。
-///
-/// 超时的权威判定基于单调钟（`Instant`）；`sem_timedwait` 只能接受
-/// CLOCK_REALTIME 的绝对期限，把它切成短片段后，墙钟跳变（NTP 回拨等）
-/// 最多影响一个片段，不会把有界等待放大成近乎无限等待。
-const REALTIME_SLICE: Duration = Duration::from_millis(100);
+/// Bound each finite wait before rechecking the queue's monotonic deadline.
+const WAIT_SLICE: Duration = Duration::from_millis(100);
+
+/// Older libcs without sem_clockwait use bounded relative sleeps. This fallback
+/// adds a polling interval of up to 1 ms (plus scheduling delay) in exchange
+/// for immunity to wall-clock changes.
+const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+type SemClockWait =
+    unsafe extern "C" fn(*mut sem_t, libc::clockid_t, *const libc::timespec) -> libc::c_int;
+
+fn monotonic_sem_wait() -> Option<SemClockWait> {
+    static WAIT: OnceLock<Option<SemClockWait>> = OnceLock::new();
+    *WAIT.get_or_init(|| unsafe {
+        // On 32-bit time64 targets libc may redirect this API to a differently
+        // named symbol. Do not guess its timespec ABI through dlsym.
+        if !cfg!(target_pointer_width = "64") {
+            return None;
+        }
+        // Resolve at runtime rather than linking a glibc 2.30+ symbol, retaining
+        // compatibility with older glibc and libcs which do not export it.
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"sem_clockwait".as_ptr());
+        if symbol.is_null() {
+            None
+        } else {
+            // POSIX dlsym returns a callable address for a function symbol.
+            Some(std::mem::transmute::<*mut libc::c_void, SemClockWait>(
+                symbol,
+            ))
+        }
+    })
+}
 
 /// 单个通道的等待原语，独占 cache line 以避免消息/命令通道间的 false sharing。
 #[repr(C, align(64))]
@@ -281,40 +308,35 @@ unsafe fn wake_registered_waiters(
     Ok(())
 }
 
-/// 在信号量上等待至多一个 `REALTIME_SLICE` 片段（或 `remaining`，取更小者）。
-///
-/// 返回 `Ok(true)` 表示消费到一个 token，`Ok(false)` 表示本片段超时。
-/// 整体超时由调用方基于单调钟判定。
+/// Wait for one token using only monotonic time for finite waits.
+/// The caller rechecks the queue state and overall deadline between slices.
 fn wait_one_slice(sem: *mut sem_t, remaining: Option<Duration>) -> Result<bool> {
     match remaining {
         Some(remaining) => {
-            let slice = remaining.min(REALTIME_SLICE);
-            let deadline = SystemTime::now()
-                .checked_add(slice)
-                .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid time"))?;
-            let ts = deadline
-                .duration_since(UNIX_EPOCH)
-                .map(|d| libc::timespec {
-                    tv_sec: d.as_secs() as libc::time_t,
-                    tv_nsec: d.subsec_nanos() as libc::c_long,
-                })
-                .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid time"))?;
-
-            // Retry EINTR against the same absolute deadline. Recomputing
-            // `now + slice` here would let a signal storm extend a finite wait
-            // indefinitely and prevent the outer monotonic deadline check.
-            unsafe {
-                loop {
-                    if sem_timedwait(sem, &ts) == 0 {
-                        return Ok(true);
-                    }
-
-                    let error = Error::last_os_error();
-                    match error.raw_os_error() {
-                        Some(libc::EINTR) => continue,
-                        Some(libc::ETIMEDOUT) => return Ok(false),
-                        _ => return Err(error),
-                    }
+            let slice = remaining.min(WAIT_SLICE);
+            let Some(wait) = monotonic_sem_wait() else {
+                return wait_polling(sem, slice);
+            };
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+                return Err(Error::last_os_error());
+            }
+            let nanos = ts.tv_nsec + slice.subsec_nanos() as libc::c_long;
+            ts.tv_sec += slice.as_secs() as libc::time_t + (nanos / 1_000_000_000) as libc::time_t;
+            ts.tv_nsec = nanos % 1_000_000_000;
+            loop {
+                if unsafe { wait(sem, libc::CLOCK_MONOTONIC, &ts) } == 0 {
+                    return Ok(true);
+                }
+                let error = Error::last_os_error();
+                match error.raw_os_error() {
+                    // Reuse the same monotonic absolute deadline under signals.
+                    Some(libc::EINTR) => continue,
+                    Some(libc::ETIMEDOUT) => return Ok(false),
+                    _ => return Err(error),
                 }
             }
         }
@@ -323,13 +345,32 @@ fn wait_one_slice(sem: *mut sem_t, remaining: Option<Duration>) -> Result<bool> 
                 if sem_wait(sem) == 0 {
                     return Ok(true);
                 }
-
                 let error = Error::last_os_error();
                 if error.raw_os_error() != Some(libc::EINTR) {
                     return Err(error);
                 }
             }
         },
+    }
+}
+
+fn wait_polling(sem: *mut sem_t, slice: Duration) -> Result<bool> {
+    let deadline = Instant::now() + slice;
+    loop {
+        if unsafe { sem_trywait(sem) } == 0 {
+            return Ok(true);
+        }
+        let error = Error::last_os_error();
+        if !matches!(error.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) {
+            return Err(error);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        // Relative sleep is unaffected by CLOCK_REALTIME adjustments. Always
+        // recheck the original deadline rather than restarting it after EINTR.
+        std::thread::sleep(remaining.min(FALLBACK_POLL_INTERVAL));
     }
 }
 
@@ -455,5 +496,35 @@ mod tests {
 
         assert!(status.success(), "semaphore EINTR child failed: {status}");
         assert!(child_completed, "semaphore EINTR child did not run");
+    }
+    #[test]
+    fn polling_fallback_observes_tokens_and_monotonic_timeout() {
+        let mut storage = MaybeUninit::<sem_t>::uninit();
+        let sem = storage.as_mut_ptr();
+        assert_eq!(unsafe { sem_init(sem, 0, 0) }, 0);
+        assert!(!wait_polling(sem, Duration::ZERO).unwrap());
+        assert_eq!(unsafe { sem_post(sem) }, 0);
+        assert!(wait_polling(sem, Duration::ZERO).unwrap());
+        let started = Instant::now();
+        assert!(!wait_polling(sem, Duration::from_millis(20)).unwrap());
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(unsafe { sem_destroy(sem) }, 0);
+    }
+
+    #[test]
+    fn polling_fallback_observes_delayed_notification() {
+        let mut storage = MaybeUninit::<sem_t>::uninit();
+        let sem = storage.as_mut_ptr();
+        assert_eq!(unsafe { sem_init(sem, 0, 0) }, 0);
+        let address = sem as usize;
+        let producer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            assert_eq!(unsafe { sem_post(address as *mut sem_t) }, 0);
+        });
+        let result = wait_polling(sem, Duration::from_secs(1));
+        producer.join().unwrap();
+        assert_eq!(unsafe { sem_destroy(sem) }, 0);
+        assert!(result.unwrap());
     }
 }

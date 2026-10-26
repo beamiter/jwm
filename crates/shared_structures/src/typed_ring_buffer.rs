@@ -914,14 +914,28 @@ impl<'a> CursorGuard<'a> {
     /// Acquire the direction lock, but stop spinning when the owning buffer
     /// is destroyed. The condition is also rechecked after a successful CAS
     /// so shutdown cannot strand a contender behind a live/preempted holder.
+    #[cfg(test)]
     fn acquire_until(cursor: &'a QueueCursor, is_cancelled: impl Fn() -> bool) -> Option<Self> {
+        Self::acquire_until_deadline(cursor, is_cancelled, None)
+    }
+
+    /// Include direction-lock contention in a timeout read's budget. Always
+    /// allow one immediate lock attempt, including for a zero timeout, so an
+    /// already queued item can still be consumed without waiting.
+    fn acquire_until_deadline(
+        cursor: &'a QueueCursor,
+        is_cancelled: impl Fn() -> bool,
+        deadline: Option<Instant>,
+    ) -> Option<Self> {
         let self_task_id = current_task_id();
         let mut attempts = 0u32;
         loop {
-            if is_cancelled() {
+            if is_cancelled()
+                || (attempts != 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline))
+            {
                 return None;
             }
-            match cursor.lock.compare_exchange_weak(
+            match cursor.lock.compare_exchange(
                 0,
                 self_task_id,
                 Ordering::Acquire,
@@ -936,11 +950,17 @@ impl<'a> CursorGuard<'a> {
                     return Some(guard);
                 }
                 Err(holder) => {
+                    // Check before liveness probing or yielding: a live holder
+                    // must not turn a finite read timeout into an infinite spin.
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        return None;
+                    }
                     attempts = attempts.wrapping_add(1);
                     if holder != 0
                         && holder != self_task_id
                         && attempts % Self::LIVENESS_CHECK_INTERVAL == 0
                         && !process_alive(holder)
+                        && !deadline.is_some_and(|deadline| Instant::now() >= deadline)
                         && cursor
                             .lock
                             .compare_exchange(
@@ -1225,22 +1245,34 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         &self,
         cursor: &'a QueueCursor,
     ) -> std::result::Result<CursorGuard<'a>, LockFailure> {
+        self.lock_for_operation_until(cursor, None)
+    }
+
+    fn lock_for_operation_until<'a>(
+        &self,
+        cursor: &'a QueueCursor,
+        deadline: Option<Instant>,
+    ) -> std::result::Result<CursorGuard<'a>, LockFailure> {
         let started = std::cell::Cell::new(None::<Instant>);
         let contended = std::cell::Cell::new(false);
-        let guard = CursorGuard::acquire_until(cursor, || {
-            if self.is_destroyed() {
-                return true;
-            }
-            // The first call comes before the first attempt, so an
-            // uncontended lock never waits on the clock afterwards.
-            let Some(start) = started.get() else {
-                started.set(Some(Instant::now()));
-                return false;
-            };
-            let expired = start.elapsed() >= LOCK_CONTENTION_LIMIT;
-            contended.set(expired);
-            expired
-        });
+        let guard = CursorGuard::acquire_until_deadline(
+            cursor,
+            || {
+                if self.is_destroyed() {
+                    return true;
+                }
+                // The first call comes before the first attempt, so an
+                // uncontended lock never waits on the clock afterwards.
+                let Some(start) = started.get() else {
+                    started.set(Some(Instant::now()));
+                    return false;
+                };
+                let expired = start.elapsed() >= LOCK_CONTENTION_LIMIT;
+                contended.set(expired);
+                expired
+            },
+            deadline,
+        );
         match guard {
             Some(guard) => Ok(guard),
             None if contended.get() && !self.is_destroyed() => Err(LockFailure::Contended),
@@ -1544,7 +1576,23 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         path: &str,
         options: SharedRingBufferOptions,
     ) -> Result<Self> {
-        let deadline = Instant::now() + OPEN_RETRY_TIMEOUT;
+        Self::open_or_create_with_opener(path, options, Instant::now() + OPEN_RETRY_TIMEOUT, || {
+            Self::open_impl(
+                path,
+                Some(options.strategy),
+                Some(options.adaptive_poll_spins),
+            )
+        })
+    }
+
+    // Isolate opening from the retry state machine so races between open and
+    // probing the public name can be reproduced without timing-sensitive threads.
+    fn open_or_create_with_opener(
+        path: &str,
+        options: SharedRingBufferOptions,
+        deadline: Instant,
+        mut open: impl FnMut() -> Result<Self>,
+    ) -> Result<Self> {
         let mut may_create = true;
         let mut may_reclaim = options.reclaim_stale;
         let create = |may_create: &mut bool| -> Result<Option<Self>> {
@@ -1561,11 +1609,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             }
         };
         loop {
-            match Self::open_impl(
-                path,
-                Some(options.strategy),
-                Some(options.adaptive_poll_spins),
-            ) {
+            match open() {
                 Ok(mut buffer) => {
                     if may_reclaim && !buffer.is_creator() && !buffer.creator_alive() {
                         // 只回收一次：若竞争者抢先重建，第二轮 open 到的就是新映射。
@@ -1608,7 +1652,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                             // replacement. Retry the public name instead of
                             // returning the obsolete backend error.
                             Err(probe_error) if probe_error.kind() == ErrorKind::NotFound => {
-                                continue
+                                if Instant::now() >= deadline {
+                                    return Err(error);
+                                }
+                                continue;
                             }
                             Err(_) => return Err(error),
                         };
@@ -1653,7 +1700,12 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         Ok(legacy) => legacy,
                         // The flink disappeared between open and probe. Let
                         // the normal create/retry path observe the new state.
-                        Err(probe_error) if probe_error.kind() == ErrorKind::NotFound => continue,
+                        Err(probe_error) if probe_error.kind() == ErrorKind::NotFound => {
+                            if Instant::now() >= deadline {
+                                return Err(error);
+                            }
+                            continue;
+                        }
                         Err(_) => return Err(error),
                     };
                     let Some(mut legacy) = legacy else {
@@ -1903,12 +1955,16 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     /// （读游标已推进），下一次调用会读取后续消息，损坏内容不会重复
     /// 出现，也无法找回。
     pub fn try_read_next_message(&self) -> Result<Option<M>> {
+        self.read_next_message_until(None)
+    }
+
+    fn read_next_message_until(&self, deadline: Option<Instant>) -> Result<Option<M>> {
         if self.is_destroyed() {
             return Ok(None);
         }
 
         let header = self.header();
-        let Ok(_guard) = self.lock_for_operation(&header.message_read) else {
+        let Ok(_guard) = self.lock_for_operation_until(&header.message_read, deadline) else {
             return Ok(None);
         };
         if self.is_destroyed() {
@@ -2040,18 +2096,39 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     /// 只做一次方向锁获取。校验和不匹配的 slot 会被跳过并记录警告，
     /// 不会中断整个批次。
     pub fn drain_messages(&self, max: usize) -> Result<Vec<M>> {
+        let mut output = Vec::new();
+        self.drain_messages_into(&mut output, max)?;
+        Ok(output)
+    }
+
+    /// Append up to `max` valid messages to a reusable buffer, returning the number appended.
+    /// Existing elements are retained. Corrupt slots are consumed but do not count toward `max`.
+    /// Capacity is reserved once, bounded by the currently pending messages, before consuming slots.
+    pub fn drain_messages_into(&self, output: &mut Vec<M>, max: usize) -> Result<usize> {
+        self.drain_messages_into_with(output, max, |message| message)
+    }
+
+    // Only internal, infallible conversions may run while the cursor lock is held.
+    pub(crate) fn drain_messages_into_with<T>(
+        &self,
+        output: &mut Vec<T>,
+        max: usize,
+        convert: impl Fn(M) -> T,
+    ) -> Result<usize> {
         if max == 0 || self.is_destroyed() {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         let header = self.header();
-        let Ok(_guard) = self.lock_for_operation(&header.message_read) else {
-            return Ok(Vec::new());
+        let Ok(guard) = self.lock_for_operation(&header.message_read) else {
+            return Ok(0);
         };
         if self.is_destroyed() {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
+        let mut corrupt = 0usize;
+        let initial_len = output.len();
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Acquire);
             let mut read_idx = header.message_read.index.load(Ordering::Relaxed);
@@ -2061,23 +2138,29 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                 self.buffer_size(),
                 "message cursor distance exceeds buffer capacity",
             )?;
-
+            output
+                .try_reserve((pending as usize).min(max))
+                .map_err(Error::other)?;
             let mut remaining = pending;
-            let mut drained = Vec::new();
-            while remaining != 0 && drained.len() < max {
+            while remaining != 0 && output.len() - initial_len < max {
                 let slot_idx = (read_idx & self.buffer_mask()) as usize;
                 let slot = self.message_slots.add(slot_idx).read();
                 read_idx = read_idx.wrapping_add(1);
                 remaining -= 1;
                 header.message_read.index.store(read_idx, Ordering::Release);
                 if checksum_of(&slot.payload) == slot.checksum {
-                    drained.push(slot.payload);
+                    output.push(convert(slot.payload));
                 } else {
-                    warn!("skipped a corrupt message slot while draining");
+                    corrupt += 1;
                 }
             }
-            Ok(drained)
         }
+        // Logging may invoke user code: never call it while holding the cursor lock.
+        drop(guard);
+        if corrupt != 0 {
+            warn!("skipped {corrupt} corrupt message slots while draining");
+        }
+        Ok(output.len() - initial_len)
     }
 
     /// 尝试写入命令。命令队列已满时返回 `Ok(false)`；共享游标距离超过
@@ -2130,12 +2213,16 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
 
     /// 读取并移除最早的命令，并校验其完整性。
     pub fn try_receive_command(&self) -> Result<Option<C>> {
+        self.receive_command_until(None)
+    }
+
+    fn receive_command_until(&self, deadline: Option<Instant>) -> Result<Option<C>> {
         if self.is_destroyed() {
             return Ok(None);
         }
 
         let header = self.header();
-        let Ok(_guard) = self.lock_for_operation(&header.command_read) else {
+        let Ok(_guard) = self.lock_for_operation_until(&header.command_read, deadline) else {
             return Ok(None);
         };
         if self.is_destroyed() {
@@ -2239,11 +2326,12 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     /// 阻塞读取一条消息：内部完成「等待 → 读取 → 被抢走则重试」循环。
     ///
     /// 返回 `Ok(None)` 表示超时或缓冲区被销毁；校验和错误原样上抛
-    /// （对应的损坏 slot 已被消费）。
+    /// （对应的损坏 slot 已被消费）。超时预算包含方向锁竞争；零超时
+    /// 只尝试立即取锁和读取，不等待其他消费者释放锁。
     pub fn read_message_timeout(&self, timeout: Option<Duration>) -> Result<Option<M>> {
         let deadline = deadline_from_timeout(timeout)?;
         loop {
-            if let Some(message) = self.try_read_next_message()? {
+            if let Some(message) = self.read_next_message_until(deadline)? {
                 return Ok(Some(message));
             }
             let remaining = match deadline {
@@ -2267,7 +2355,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     pub fn receive_command_timeout(&self, timeout: Option<Duration>) -> Result<Option<C>> {
         let deadline = deadline_from_timeout(timeout)?;
         loop {
-            if let Some(command) = self.try_receive_command()? {
+            if let Some(command) = self.receive_command_until(deadline)? {
                 return Ok(Some(command));
             }
             let remaining = match deadline {
@@ -2722,6 +2810,79 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
+    fn assert_reclaim_probe_disappearance_respects_expired_deadline(kind: ErrorKind) {
+        let path = mk_path("reclaim_probe_deadline");
+        let mut attempts = 0;
+        let result = TypedRingBuffer::<u64, u64>::open_or_create_with_opener(
+            &path,
+            SharedRingBufferOptions::new().reclaim_stale(true),
+            Instant::now(),
+            || {
+                attempts += 1;
+                // Model the public name appearing for open then disappearing
+                // before the reclaim probe, on every attempt.
+                std::fs::write(&path, "raced mapping").unwrap();
+                std::fs::remove_file(&path).unwrap();
+                if attempts > 4 {
+                    // Bound the old implementation so a regression fails rather
+                    // than hanging the test runner indefinitely.
+                    return Err(Error::new(ErrorKind::Unsupported, "retry sentinel"));
+                }
+                Err(Error::new(kind, "original open failure"))
+            },
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a disappearing mapping cannot open"),
+        };
+        assert_eq!(error.kind(), kind);
+        assert_eq!(error.to_string(), "original open failure");
+        assert_eq!(attempts, 1, "expired budget must not retry a reclaim probe");
+    }
+
+    #[test]
+    fn current_reclaim_probe_disappearance_respects_expired_deadline() {
+        for kind in [
+            ErrorKind::NotConnected,
+            ErrorKind::BrokenPipe,
+            ErrorKind::TimedOut,
+        ] {
+            assert_reclaim_probe_disappearance_respects_expired_deadline(kind);
+        }
+    }
+
+    #[test]
+    fn legacy_reclaim_probe_disappearance_respects_expired_deadline() {
+        assert_reclaim_probe_disappearance_respects_expired_deadline(ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn reclaim_probe_disappearance_can_retry_before_deadline() {
+        for kind in [ErrorKind::NotConnected, ErrorKind::InvalidData] {
+            let path = mk_path("reclaim_probe_retry");
+            let mut attempts = 0;
+            let options = SharedRingBufferOptions::new().reclaim_stale(true);
+            let result = TypedRingBuffer::<u64, u64>::open_or_create_with_opener(
+                &path,
+                options,
+                Instant::now() + Duration::from_secs(5),
+                || {
+                    attempts += 1;
+                    if attempts <= 3 {
+                        std::fs::write(&path, "raced mapping").unwrap();
+                        std::fs::remove_file(&path).unwrap();
+                        Err(Error::new(kind, "raced open"))
+                    } else {
+                        options.create_typed(&path)
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(attempts, 4);
+            assert!(result.is_creator());
+        }
+    }
+
     #[test]
     fn open_or_create_retries_after_a_raced_flink_disappears() {
         let path = mk_path("raced_flink_disappears");
@@ -2974,6 +3135,52 @@ mod tests {
     }
 
     #[test]
+    fn typed_drain_into_reuses_storage_and_skips_corruption() {
+        let path = mk_path("drain_into");
+        let ring: TypedRingBuffer<u64, u32> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        let mut output = Vec::with_capacity(8);
+        output.push(99);
+        let allocation = output.as_ptr();
+        let capacity = output.capacity();
+        for value in 0..4 {
+            assert!(ring.try_write_message(&value).unwrap());
+        }
+        // No concurrent accesses: damage the first slot and verify it does not use the limit.
+        unsafe {
+            (*ring.message_slots).checksum ^= 1;
+        }
+        assert_eq!(ring.drain_messages_into(&mut output, 2).unwrap(), 2);
+        assert_eq!(output, [99, 1, 2]);
+        assert_eq!(ring.drain_messages_into(&mut output, 0).unwrap(), 0);
+        assert_eq!(ring.available_messages(), 1);
+        assert_eq!(
+            ring.drain_messages_into(&mut output, usize::MAX).unwrap(),
+            1
+        );
+        assert_eq!(output, [99, 1, 2, 3]);
+        assert_eq!(output.as_ptr(), allocation);
+        assert_eq!(output.capacity(), capacity);
+        // Wrap physical slots and reuse the same allocation for a second batch.
+        output.clear();
+        for value in 4..8 {
+            assert!(ring.try_write_message(&value).unwrap());
+        }
+        assert_eq!(
+            ring.drain_messages_into(&mut output, usize::MAX).unwrap(),
+            4
+        );
+        assert_eq!(output, [4, 5, 6, 7]);
+        assert_eq!(output.as_ptr(), allocation);
+        ring.destroy().unwrap();
+        assert_eq!(ring.drain_messages_into(&mut output, 1).unwrap(), 0);
+        assert_eq!(output, [4, 5, 6, 7]);
+    }
+
+    #[test]
     fn typed_peek_drain_and_overwrite() {
         let path = mk_path("peek_drain");
         let ring: TypedRingBuffer<u64, u32> = SharedRingBufferOptions::new()
@@ -3139,6 +3346,16 @@ mod tests {
             .message_write
             .index
             .store(8, Ordering::Release);
+        let mut output = vec![99];
+        let into_error = ring
+            .drain_messages_into(&mut output, usize::MAX)
+            .unwrap_err();
+        assert_eq!(into_error.kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            output,
+            [99],
+            "invalid cursors must preserve existing output"
+        );
         let result = ring.drain_messages(usize::MAX);
         let read_after_drain = ring.header().message_read.index.load(Ordering::Acquire);
         ring.header()
@@ -3759,6 +3976,137 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn zero_timeout_consumes_ready_items_without_waiting() {
+        let path = mk_path("zero_timeout_ready");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        assert!(ring.try_write_message(&41).unwrap());
+        assert!(ring.try_send_command(42).unwrap());
+        assert_eq!(
+            ring.read_message_timeout(Some(Duration::ZERO)).unwrap(),
+            Some(41)
+        );
+        assert_eq!(
+            ring.receive_command_timeout(Some(Duration::ZERO)).unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            ring.read_message_timeout(Some(Duration::ZERO)).unwrap(),
+            None
+        );
+        assert_eq!(
+            ring.receive_command_timeout(Some(Duration::ZERO)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn caller_deadline_precedes_operation_contention_limit() {
+        for is_message in [true, false] {
+            let path = mk_path("caller_deadline_before_contention_limit");
+            let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+                .adaptive_poll_spins(0)
+                .create_typed(&path)
+                .unwrap();
+            assert!(ring.try_write_message(&41).unwrap());
+            assert!(ring.try_send_command(42).unwrap());
+            let cursor = if is_message {
+                &ring.header().message_read
+            } else {
+                &ring.header().command_read
+            };
+            std::thread::scope(|scope| {
+                let (held_tx, held_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    let guard = CursorGuard::acquire(cursor);
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    // Release after the caller's budget, before the separate
+                    // 100ms operation limit. Ignoring the caller's deadline
+                    // would consume the queued item when this lock is released.
+                    std::thread::sleep(Duration::from_millis(70));
+                    drop(guard);
+                });
+                held_rx.recv().unwrap();
+                release_tx.send(()).unwrap();
+                let result = if is_message {
+                    ring.read_message_timeout(Some(Duration::from_millis(20)))
+                } else {
+                    ring.receive_command_timeout(Some(Duration::from_millis(20)))
+                };
+                assert_eq!(result.unwrap(), None);
+            });
+            assert_eq!(ring.available_messages(), 1);
+            assert_eq!(ring.available_commands(), 1);
+        }
+    }
+
+    fn assert_timeout_includes_reader_lock(is_message: bool, timeout: Duration) {
+        let path = mk_path("timeout_reader_lock");
+        let ring: std::sync::Arc<TypedRingBuffer<u64, u64>> = std::sync::Arc::new(
+            SharedRingBufferOptions::new()
+                .adaptive_poll_spins(0)
+                .create_typed(&path)
+                .unwrap(),
+        );
+        assert!(ring.try_write_message(&41).unwrap());
+        assert!(ring.try_send_command(42).unwrap());
+        let cursor = if is_message {
+            &ring.header().message_read
+        } else {
+            &ring.header().command_read
+        };
+        let held = CursorGuard::acquire(cursor);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reader_ring = std::sync::Arc::clone(&ring);
+        let reader = std::thread::spawn(move || {
+            let result = if is_message {
+                reader_ring.read_message_timeout(Some(timeout))
+            } else {
+                reader_ring.receive_command_timeout(Some(timeout))
+            };
+            result_tx.send(result).unwrap();
+        });
+        let result = result_rx.recv_timeout(Duration::from_secs(1));
+        // Release before assertions/join: a pre-fix failure must not leave an
+        // indefinitely spinning reader thread behind in the test process.
+        drop(held);
+        reader.join().unwrap();
+        assert_eq!(
+            result
+                .expect("reader ignored its finite lock timeout")
+                .unwrap(),
+            None
+        );
+        assert!(!ring.is_destroyed());
+        assert_eq!(ring.try_read_next_message().unwrap(), Some(41));
+        assert_eq!(ring.try_receive_command().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn message_timeout_includes_direction_lock_contention() {
+        assert_timeout_includes_reader_lock(true, Duration::from_millis(20));
+    }
+
+    #[test]
+    fn command_timeout_includes_direction_lock_contention() {
+        assert_timeout_includes_reader_lock(false, Duration::from_millis(20));
+    }
+
+    #[test]
+    fn zero_timeout_does_not_wait_for_message_direction_lock() {
+        assert_timeout_includes_reader_lock(true, Duration::ZERO);
+    }
+
+    #[test]
+    fn zero_timeout_does_not_wait_for_command_direction_lock() {
+        assert_timeout_includes_reader_lock(false, Duration::ZERO);
     }
 
     #[test]

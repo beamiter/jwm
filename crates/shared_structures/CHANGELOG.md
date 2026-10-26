@@ -6,6 +6,8 @@
 
 ### Added
 
+- `TypedRingBuffer` / `SharedRingBuffer::drain_messages_into` 复用调用方 Vec；领域批量读取省去中间 wire Vec，损坏槽日志移出游标锁。
+
 - `ShellHubRoute::Theme = 6`：状态栏可请求打开 Shell Hub 的 Theme 页面；未知编号从 7 起仍经 `from_raw_or_hub` 退化为 Hub。
 - 协议 v13 的三类 Dock 命令新增 minimized generation 回显；窗口管理器可精确拒绝同一 session/monitor 内延迟到下一次最小化 incarnation 的 geometry、preview 与 restore。
 - 协议 v12 新增固定上限的最小化窗口投影：`SharedMessage` 携带 WM session、generation、overflow 状态及最多 16 个 `MinimizedWindowInfo`（窗口 ID、monitor、flags、title、app-id/class）。
@@ -16,6 +18,11 @@
 - 共享内存协议提升到 v13；命令 payload 从 56 字节扩为 64 字节，与 v12 及更早映射不兼容，需协调重启并重建映射。
 
 ### Fixed
+
+- `open_or_create` 的当前/legacy reclaim probe 在 flink 连续消失时遵守重试截止时间，并保留原始打开错误；期限内仍允许重试恢复。
+
+- 消息/命令读取超时包含方向锁竞争；零超时保留立即读取机会但不等待活持有者。
+- Semaphore 有限等待使用动态可用的 `sem_clockwait(CLOCK_MONOTONIC)`，否则以最多 1ms 相对休眠轮询；修正旧 REALTIME 切片在墙钟回拨时仍可无界等待的问题，协议布局不变。
 
 - 进程存活探测改为读取 `/proc/<pid>/stat`，把尚未被父进程 `wait` 的 zombie/dead 进程视为已退出；方向锁崩溃恢复、`creator_alive()` 与 `reclaim_stale(true)` 不再被永久存在的僵尸 PID 卡住。共享布局和公开 API 不变。
 

@@ -914,8 +914,53 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+// Compare identical refill/drain workloads; refill is excluded from measured time.
+fn bench_batch_drain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_drain");
+    for size in [1usize, 16, 64] {
+        group.throughput(Throughput::Elements(size as u64));
+        for reuse in [false, true] {
+            group.bench_with_input(
+                BenchmarkId::new(if reuse { "reused" } else { "allocated" }, size),
+                &size,
+                |b, &size| {
+                    let path = mk_path("batch_drain");
+                    let ring = create_default(&path, Some(64), Some(0)).unwrap();
+                    let message = create_test_message(7);
+                    let mut output = Vec::with_capacity(size);
+                    b.iter_custom(|iterations| {
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iterations {
+                            for _ in 0..size {
+                                assert!(ring.try_write_message(&message).unwrap());
+                            }
+                            output.clear();
+                            let start = Instant::now();
+                            if reuse {
+                                assert_eq!(
+                                    ring.drain_messages_into(&mut output, size).unwrap(),
+                                    size
+                                );
+                                black_box(&output);
+                            } else {
+                                let batch = ring.drain_messages(size).unwrap();
+                                assert_eq!(batch.len(), size);
+                                black_box(&batch);
+                            }
+                            elapsed += start.elapsed();
+                        }
+                        elapsed
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_batch_drain,
     bench_single_threaded_write,
     bench_single_threaded_read,
     bench_throughput_varying_sizes,

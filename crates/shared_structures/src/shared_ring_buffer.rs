@@ -515,12 +515,21 @@ impl SharedRingBuffer {
     /// 只做一次方向锁获取。校验和不匹配的 slot 会被跳过并记录警告，
     /// 不会中断整个批次。
     pub fn drain_messages(&self, max: usize) -> Result<Vec<SharedMessage>> {
-        Ok(self
-            .inner
-            .drain_messages(max)?
-            .into_iter()
-            .map(SharedMessage::from)
-            .collect())
+        let mut output = Vec::new();
+        self.drain_messages_into(&mut output, max)?;
+        Ok(output)
+    }
+
+    /// Append up to `max` messages, retaining existing elements and reusing buffer capacity.
+    /// Returns the number appended; corrupt slots are skipped without counting toward `max`.
+    /// Converts directly into the destination without an intermediate wire-message allocation.
+    pub fn drain_messages_into(
+        &self,
+        output: &mut Vec<SharedMessage>,
+        max: usize,
+    ) -> Result<usize> {
+        self.inner
+            .drain_messages_into_with(output, max, SharedMessage::from)
     }
 
     /// 尝试写入命令的兼容别名。
@@ -2996,6 +3005,28 @@ mod tests {
         let read = buf.try_read_next_message().unwrap().unwrap();
         assert_eq!(read.get_monitor_info().monitor_num, 5);
         assert_eq!(buf.available_messages(), 0);
+    }
+
+    #[test]
+    fn test_drain_into_appends_without_reallocating() {
+        let path = mk_path("drain_into");
+        let buf = SharedRingBuffer::create_aux(&path, Some(4), Some(0)).unwrap();
+        let mut output = Vec::with_capacity(5);
+        output.push(make_msg(99));
+        let allocation = output.as_ptr();
+        for i in 0..4 {
+            assert!(buf.try_write_message(&make_msg(i)).unwrap());
+        }
+        assert_eq!(buf.drain_messages_into(&mut output, usize::MAX).unwrap(), 4);
+        assert_eq!(output.as_ptr(), allocation);
+        assert_eq!(
+            output
+                .iter()
+                .map(|m| m.get_monitor_info().monitor_num)
+                .collect::<Vec<_>>(),
+            [99, 0, 1, 2, 3]
+        );
+        assert_eq!(buf.drain_messages_into(&mut output, 1).unwrap(), 0);
     }
 
     #[test]
