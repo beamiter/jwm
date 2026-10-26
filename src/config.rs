@@ -401,13 +401,24 @@ fn config_temporary_path(destination: &Path, process_id: u32, sequence: u64) -> 
 fn atomic_write_with_sequence(
     path: &Path,
     contents: &[u8],
+    next_sequence: impl FnMut() -> u64,
+) -> std::io::Result<ConfigWriteOutcome> {
+    atomic_write_with_sequence_and_guard(path, contents, next_sequence, || Ok(()), false)
+}
+
+fn atomic_write_with_sequence_and_guard(
+    path: &Path,
+    contents: &[u8],
     mut next_sequence: impl FnMut() -> u64,
+    mut before_publish: impl FnMut() -> std::io::Result<()>,
+    create_only: bool,
 ) -> std::io::Result<ConfigWriteOutcome> {
     // Never publish a config the bounded reader cannot load on the next
     // reload or startup. Check before resolving paths or creating directories.
     if contents.len() as u64 > MAX_CONFIG_FILE_BYTES {
         return Err(config_file_too_large(path));
     }
+    before_publish()?;
     // Preserve symlink-based dotfile setups. Renaming over `path` itself would
     // replace the link; resolving the complete chain lets us atomically
     // replace its target while leaving every user-managed link intact. The
@@ -431,7 +442,14 @@ fn atomic_write_with_sequence(
         // Capture from the owned descriptor before publishing. A pathname stat
         // after rename could instead acknowledge a subsequent external edit.
         let revision = file.metadata().and_then(|metadata| metadata.modified());
-        fs::rename(&temporary, &destination)?;
+        before_publish()?;
+        if create_only {
+            // Claim a missing path without replacing a concurrently created config.
+            fs::hard_link(&temporary, &destination)?;
+            fs::remove_file(&temporary)?;
+        } else {
+            fs::rename(&temporary, &destination)?;
+        }
         Ok(ConfigWriteOutcome { revision })
     })();
 
@@ -5212,6 +5230,64 @@ impl Config {
         default_config.save_to_file(path)
     }
 
+    /// Install defaults only when the existing configuration has different fields.
+    /// `None` means the existing bytes were kept; `Some` contains an optional backup.
+    pub fn update_template<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Option<Option<std::path::PathBuf>>, ConfigError> {
+        let path = path.as_ref();
+        let default_config = Self::default();
+        let template = Self::add_option_comments(&toml::to_string_pretty(&default_config.inner)?);
+        let original = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(None),
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let Some(original) = original else {
+            atomic_write_with_sequence_and_guard(
+                path,
+                template.as_bytes(),
+                || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+                || match fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                    Ok(_) => Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "config was concurrently created; keeping it",
+                    )),
+                },
+                true,
+            )?;
+            return Ok(Some(None));
+        };
+        let (bytes, _) = read_config_bytes(path)?;
+        let verify = || verify_config_snapshot(path, &original, &bytes);
+        verify()?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let current: toml::Value = toml::from_str(text)?;
+        let defaults = toml::Value::try_from(&default_config.inner)?;
+        if !config_fields_changed(&defaults, &current) {
+            return Ok(None);
+        }
+        let backup = Self::backup_config(path)?;
+        if read_config_bytes(&backup)?.0 != bytes {
+            return Err(
+                std::io::Error::other("config changed while backing up; backup retained").into(),
+            );
+        }
+        verify()?;
+        atomic_write_with_sequence_and_guard(
+            path,
+            template.as_bytes(),
+            || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            verify,
+            false,
+        )?;
+        Ok(Some(Some(backup)))
+    }
+
     pub fn backup_config<P: AsRef<Path>>(
         original_path: P,
     ) -> Result<std::path::PathBuf, ConfigError> {
@@ -6035,6 +6111,90 @@ pub fn reload_global() -> Result<(), ConfigError> {
     let new_config = Config::load_from_file(Config::resolve_load_path())?;
     CONFIG.store(Arc::new(new_config));
     Ok(())
+}
+
+// Compare both inode revision and bytes: publication must use the exact snapshot
+// used for the field comparison, rather than acknowledging a later user edit.
+fn verify_config_snapshot(
+    path: &Path,
+    original: &fs::Metadata,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let current = fs::symlink_metadata(path)?;
+    let revision = |metadata: &fs::Metadata| {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    };
+    if !current.file_type().is_file()
+        || revision(&current) != revision(original)
+        || read_config_bytes(path)?.0 != bytes
+    {
+        return Err(std::io::Error::other(
+            "config changed while preparing upgrade; backup retained",
+        ));
+    }
+    Ok(())
+}
+
+// Scalars and scalar-list contents are settings, not field definitions. For
+// arrays of tables compare the union of member fields, independent of item count.
+fn config_fields_changed(left: &toml::Value, right: &toml::Value) -> bool {
+    fn fields(
+        value: &toml::Value,
+        prefix: Vec<String>,
+        result: &mut std::collections::BTreeSet<Vec<String>>,
+    ) {
+        match value {
+            toml::Value::Table(table) => {
+                for (key, value) in table {
+                    let mut path = prefix.clone();
+                    path.push(key.clone());
+                    result.insert(path.clone());
+                    fields(value, path, result);
+                }
+            }
+            toml::Value::Array(items) => {
+                for item in items {
+                    fields(item, prefix.clone(), result);
+                }
+            }
+            _ => {}
+        }
+    }
+    match (left, right) {
+        (toml::Value::Table(left), toml::Value::Table(right)) => {
+            left.len() != right.len()
+                || left.iter().any(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_none_or(|other| config_fields_changed(value, other))
+                })
+        }
+        (toml::Value::Array(left), toml::Value::Array(right)) => {
+            if left.is_empty() || right.is_empty() {
+                return false;
+            }
+            let mut left_fields = std::collections::BTreeSet::new();
+            let mut right_fields = std::collections::BTreeSet::new();
+            for value in left {
+                fields(value, Vec::new(), &mut left_fields);
+            }
+            for value in right {
+                fields(value, Vec::new(), &mut right_fields);
+            }
+            left_fields != right_fields
+        }
+        (toml::Value::Table(_), _) | (_, toml::Value::Table(_)) => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -9208,6 +9368,114 @@ border_px = 3
             toml::to_string(&config.inner).unwrap()
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn installer_config_publication_refuses_concurrent_edits_and_creation() {
+        let path = temporary_config_path("installer-concurrent-update");
+        std::fs::write(&path, "original").unwrap();
+        let original = std::fs::metadata(&path).unwrap();
+        let result = super::atomic_write_with_sequence_and_guard(
+            &path,
+            b"defaults",
+            || {
+                std::fs::write(&path, "concurrent user edit").unwrap();
+                CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+            },
+            || super::verify_config_snapshot(&path, &original, b"original"),
+            false,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "concurrent user edit"
+        );
+        let result = super::atomic_write_with_sequence_and_guard(
+            &path,
+            b"defaults",
+            || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            || Ok(()),
+            true,
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "concurrent user edit"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn installer_config_fields_ignore_values_order_and_array_count() {
+        let parse = |text: &str| toml::from_str::<toml::Value>(text).unwrap();
+        for (left, right, changed) in [
+            ("x = 1\ny = true", "# custom\ny = false\nx = 2", false),
+            ("x = 1", "x = 'custom'", false),
+            ("x = [1, 2]", "x = []", false),
+            (
+                "[[keys]]\nname = 'a'",
+                "[[keys]]\nname = 'b'\n[[keys]]\nname = 'c'",
+                false,
+            ),
+            (
+                "[[keys]]\nname = 'a'",
+                "[[keys]]\nname = 'a'\nextra = true",
+                true,
+            ),
+            ("[nested]\nx = 1", "[nested]\nx = 1\ny = 2", true),
+            ("[nested]\nx = 1", "[nested]\ny = 1", true),
+            ("x = 1\ny = 2", "x = 1", true),
+        ] {
+            assert_eq!(
+                super::config_fields_changed(&parse(left), &parse(right)),
+                changed
+            );
+        }
+    }
+
+    #[test]
+    fn installer_config_update_preserves_values_and_backs_up_schema_changes() {
+        let path = temporary_config_path("installer-field-update");
+        assert_eq!(Config::update_template(&path).unwrap(), Some(None));
+        let defaults = std::fs::read_to_string(&path).unwrap();
+        let changed_values = defaults
+            .replacen("border_px = 3", "border_px = 7", 1)
+            .replacen("name = \"tao_glow_bar\"", "name = \"custom_bar\"", 1);
+        assert_ne!(changed_values, defaults);
+        let parsed: toml::Value = toml::from_str(&changed_values).unwrap();
+        assert_eq!(parsed["status_bar"]["name"].as_str(), Some("custom_bar"));
+        let custom = format!("# custom user configuration\n{changed_values}");
+        std::fs::write(&path, &custom).unwrap();
+        assert_eq!(Config::update_template(&path).unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        // Removing one known field models an older configuration missing a new field.
+        let mut old: toml::Value = toml::from_str(&custom).unwrap();
+        old.as_table_mut().unwrap().remove("behavior");
+        let old = toml::to_string(&old).unwrap();
+        std::fs::write(&path, &old).unwrap();
+        let backup = Config::update_template(&path).unwrap().unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), defaults);
+        std::fs::write(&path, "invalid TOML!").unwrap();
+        assert!(Config::update_template(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid TOML!");
+        std::fs::remove_file(&backup).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        // Managed external configuration links, including dangling ones, survive installs.
+        let external = path.with_extension("external");
+        std::os::unix::fs::symlink(&external, &path).unwrap();
+        assert_eq!(Config::update_template(&path).unwrap(), None);
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!external.exists());
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

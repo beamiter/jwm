@@ -113,6 +113,7 @@ ALL_BARS=(
 BUILD_MODE="release"
 JWM_BAR_NAME="tao_pixels_bar"
 JWM_BAR_SET_BY_ARGS=false
+UPDATED_CONFIG_PATHS=()
 SKIP_BAR=false
 SKIP_JWM=false
 REGEN_CONFIG=false
@@ -133,7 +134,7 @@ usage() {
                               不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
-  --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
+  --gen-config                检查配置字段，仅字段变化时备份旧配置并生成默认配置
   --skip-bar                  跳过 bar 安装
   --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
   单独安装/更新内置壁纸（无需编译）: bash scripts/install-wallpapers.sh
@@ -141,7 +142,7 @@ usage() {
 
 说明:
   - 推荐日用会话是 Wayland（jwm-wayland.desktop / wayland-udev）；X11 会话条目仍会安装，作为兼容面。
-  - 官方推荐 status bar 是 tao_glow_bar（脚本默认）；bars/ 下其它 crate 是可选示例，不是日用默认。
+  - 官方推荐 status bar 是 tao_glow_bar；脚本默认安装 tao_pixels_bar，可通过 -b 选择其它 bar。
   - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
@@ -151,16 +152,17 @@ usage() {
     在运行时选择 bar，切换 bar 不需要重编 jwm。
   - 完整安装还将内置静态壁纸复制到 ~/.config/jwm/wallpapers/（支持 XDG_CONFIG_HOME）；
     重装只更新原样保留的受管文件，不覆盖用户修改或同名自定义文件。
-  - 安装完成后，脚本会把选中的 bar 同步写入 config_x11.toml 和 config_wayland.toml；
-    如果任一配置文件不存在，会先运行 jwm --gen-config 生成默认配置。
+  - 显式指定 -b/--bar 后同步两份配置的 bar；默认安装仅同步新建或字段变化后重建的配置，保留原配置的 bar。
+    每次完整安装比较配置字段，仅字段结构变化时备份并替换；仅默认值变化保留现有配置。
+    缺失的配置会自动生成；手动 jwm --gen-config 可主动强制重置。
 
 示例:
-  $(basename "$0")                           # 安装 jwm + 官方默认 bar（tao_glow_bar）
-  $(basename "$0") --gen-config              # 同上，并重新生成默认配置
+  $(basename "$0")                           # 安装 jwm + 默认 bar（tao_pixels_bar）
+  $(basename "$0") --gen-config              # 同上，并按字段变化更新配置
   $(basename "$0") -m debug                  # debug 模式编译安装
   $(basename "$0") -b xcb_bar                # 安装示例 bar（非官方默认）
   $(basename "$0") -b xcb_bar --skip-jwm     # 仅安装该 bar
-  $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不安装 bar
+  $(basename "$0") --gen-config --skip-bar   # 检查并更新配置，不安装 bar
 EOF
     exit "$status"
 }
@@ -653,6 +655,15 @@ sync_selected_bar_config() {
             exit 1
         fi
 
+        # Existing configurations with unchanged fields keep their custom bar.
+        # Fresh/replaced templates must select the bar this install actually built.
+        if [[ "$JWM_BAR_SET_BY_ARGS" != true ]]; then
+            local updated_path selected=false
+            for updated_path in "${UPDATED_CONFIG_PATHS[@]}"; do
+                [[ "$updated_path" != "$path" ]] || selected=true
+            done
+            [[ "$selected" == true ]] || continue
+        fi
         update_toml_status_bar_name "$path" "$bar"
         ok "已同步 bar 到配置: $path -> $bar"
     done
@@ -787,19 +798,57 @@ build_and_install_jwm() {
 }
 
 # ============================================================
-# 重新生成 JWM 配置文件（覆盖旧配置，旧配置自动备份）
+# 更新 JWM 配置文件（按字段比较；字段相同时保留自定义值）
 # ============================================================
 regenerate_config() {
-    info "重新生成 JWM 配置文件..."
+    info "检查 JWM 配置字段并按需更新..."
     local jwm_bin="/usr/local/bin/jwm"
     if [[ ! -x "$jwm_bin" ]]; then
         jwm_bin="$JWM_TARGET_DIR/$BUILD_MODE/jwm"
     fi
-    if "$jwm_bin" --gen-config; then
-        ok "配置文件已重新生成"
-    else
-        warn "配置文件生成失败，请手动运行: $jwm_bin --gen-config"
+    local config_home config_dir path before after index=0
+    local -a previous_revisions=()
+    config_dir="$(jwm_config_dir)"
+    config_home="$(dirname -- "$config_dir")"
+    for path in "$config_dir/config_x11.toml" "$config_dir/config_wayland.toml"; do
+        before=""
+        if [[ -f "$path" && ! -L "$path" ]]; then
+            before="$(stat -c '%d:%i:%s:%y:%z' -- "$path")"
+        fi
+        previous_revisions+=("$before")
+    done
+    local -a command=(env "XDG_CONFIG_HOME=$config_home" "$jwm_bin" --update-config)
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        command=(sudo -u "$SUDO_USER" "${command[@]}")
     fi
+    local output generated_ok=false
+    output="$(mktemp "${TMPDIR:-/tmp}/jwm-config-update.XXXXXXXX")"
+    if "${command[@]}" > "$output"; then
+        generated_ok=true
+    fi
+    # Keep the binary's output intact, including partial success before an error.
+    if ! cat -- "$output"; then
+        rm -f -- "$output"
+        return 1
+    fi
+    if [[ "$generated_ok" == true ]]; then
+        ok "配置字段检查完成"
+    else
+        warn "配置字段检查失败，原配置未主动重置，请手动运行: $jwm_bin --update-config"
+    fi
+    for path in "$config_dir/config_x11.toml" "$config_dir/config_wayland.toml"; do
+        if [[ -f "$path" && ! -L "$path" ]]; then
+            after="$(stat -c '%d:%i:%s:%y:%z' -- "$path")"
+            # A revision change alone may belong to a concurrent user edit.
+            # Only synchronize templates this invocation explicitly published.
+            if [[ "$after" != "${previous_revisions[index]}" ]] \
+                && grep -Fxq -- "Generated configuration: $path" "$output"; then
+                UPDATED_CONFIG_PATHS+=("$path")
+            fi
+        fi
+        index=$((index + 1))
+    done
+    rm -f -- "$output"
 }
 
 # ============================================================
@@ -854,8 +903,10 @@ if [[ "$SKIP_JWM" == false ]]; then
     show_jwm_tool_help
 fi
 
-# 3. 重新生成配置（可选）
+# 3. 完整安装及 --gen-config 都按字段变化更新配置
 if [[ "$REGEN_CONFIG" == true ]]; then
+    regenerate_config
+elif [[ "$SKIP_JWM" == false ]]; then
     regenerate_config
 fi
 

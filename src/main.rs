@@ -42,6 +42,10 @@ struct Cli {
     )]
     gen_config: bool,
 
+    /// Update configuration templates only when their field structure changes.
+    #[arg(long, conflicts_with_all = ["gen_config", "check_config", "print_config_path", "doctor"])]
+    update_config: bool,
+
     /// Validate the selected backend's configuration and exit.
     #[arg(
         long,
@@ -197,6 +201,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             check.path.display(),
             check.diagnostics.warning_count()
         );
+        return Ok(());
+    }
+
+    if cli.update_config {
+        for family in [
+            jwm::config::BackendFamily::X11,
+            jwm::config::BackendFamily::Wayland,
+        ] {
+            let path = jwm::config::Config::get_config_path_for(family);
+            match jwm::config::Config::update_template(&path)? {
+                None => println!(
+                    "Keeping configuration (fields unchanged): {}",
+                    path.display()
+                ),
+                Some(backup) => {
+                    if let Some(backup) = backup {
+                        println!("Backed up existing configuration: {}", backup.display());
+                    }
+                    println!("Generated configuration: {}", path.display());
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -573,6 +599,19 @@ mod tests {
     #[test]
     fn cli_rejects_conflicting_config_actions() {
         assert!(Cli::try_parse_from(["jwm", "--gen-config", "--check-config"]).is_err());
+        assert!(
+            Cli::try_parse_from(["jwm", "--update-config"])
+                .unwrap()
+                .update_config
+        );
+        for other in [
+            "--gen-config",
+            "--check-config",
+            "--print-config-path",
+            "--doctor",
+        ] {
+            assert!(Cli::try_parse_from(["jwm", "--update-config", other]).is_err());
+        }
     }
 
     #[test]

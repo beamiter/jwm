@@ -40,10 +40,17 @@ Use the process-safe maintenance commands instead of starting a display server:
 ```bash
 jwm --backend x11rb --print-config-path
 jwm --backend wayland --check-config
+jwm --update-config
 jwm --gen-config
 ```
 
-`--gen-config` writes both templates. An existing file is backed up to the matching
+`--update-config` checks both templates and is used by the source installer.
+It keeps the existing bytes when only values, comments, ordering, or array
+lengths differ. Changed fields, including nested fields, cause a backup and
+replacement with defaults. Missing files are created; invalid TOML and symbolic
+links are kept. A concurrent edit detected before publication stops the update.
+
+`--gen-config` explicitly resets both templates. An existing file is backed up to the matching
 `*.toml.backup` path before replacement, with numbered suffixes when earlier
 backups exist. A backup is published only after its complete contents are synced.
 Writes use a same-directory atomic

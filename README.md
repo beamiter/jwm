@@ -98,7 +98,7 @@ X11 and Wayland use separate files under `~/.config/jwm`. Prefer a Wayland
 session for day-to-day use:
 
 ```bash
-target/release/jwm --gen-config
+target/release/jwm --update-config
 target/release/jwm --backend wayland-udev --check-config
 target/release/jwm --backend x11rb --check-config
 
@@ -118,10 +118,15 @@ fails if an unrelated validation error would remain. Use a batch for correlated
 hot-tunable changes that must become valid together; non-hot-tunable values must
 be edited in the configuration file.
 
-The installation helper builds JWM and the **official status bar**
-(`tao_glow_bar` by default; other crates under `bars/` are examples), installs
-the session files (Wayland session recommended), and keeps existing
-configuration unless `--gen-config` is used:
+The installation helper builds JWM and the selected status bar
+(`tao_pixels_bar` by default; use `--bar` to choose another crate under `bars/`), installs
+the session files (Wayland session recommended), and compares both configuration
+files with the new defaults. Values, comments, and ordering changes keep the
+existing configuration. Added, removed, or renamed fields trigger a backup and
+replacement; missing files are created. The installer's `--gen-config` option
+uses this same policy. To explicitly reset both files, run `jwm --gen-config`.
+An ordinary reinstall keeps a customized `status_bar.name`; an explicit
+`--bar NAME` also updates that setting in both files.
 
 ```bash
 scripts/install_jwm_scripts.sh --help
