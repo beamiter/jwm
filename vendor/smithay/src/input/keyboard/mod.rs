@@ -164,6 +164,14 @@ impl Xkb {
         &self.state
     }
 
+    /// The active keymap as `XKB_KEYMAP_FORMAT_TEXT_V1`.
+    ///
+    /// This identical to what gets sent to clients, so it can be compared
+    /// against keymaps received from them.
+    pub fn keymap_as_string(&self) -> String {
+        self.keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)
+    }
+
     /// Get the active layout of the keyboard.
     pub fn active_layout(&self) -> Layout {
         (0..self.keymap.num_layouts())
@@ -584,6 +592,32 @@ impl XkbContext<'_> {
         *self.leds_changed = self.leds_state.update_with(&xkb.state, self.leds_mapping);
     }
 
+    /// Set the modifier state from raw masks.
+    ///
+    /// The arguments are the raw xkb depressed, latched and locked modifier
+    /// masks, and the locked layout group index, e.g. as specified by the
+    /// `modifiers` request of `zwp_virtual_keyboard_v1`.
+    pub fn set_modifier_mask(
+        &mut self,
+        mods_depressed: u32,
+        mods_latched: u32,
+        mods_locked: u32,
+        group: u32,
+    ) {
+        let mut xkb = self.xkb.lock().unwrap();
+
+        let state = xkb
+            .state
+            .update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+
+        if state != 0 {
+            self.mods_state.update_with(&xkb.state);
+            *self.mods_changed = true;
+        }
+
+        *self.leds_changed = self.leds_state.update_with(&xkb.state, self.leds_mapping);
+    }
+
     /// Switches layout forward cycling when it reaches the end.
     pub fn cycle_next_layout(&mut self) {
         let xkb = self.xkb.lock().unwrap();
@@ -843,6 +877,44 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         }
 
         true
+    }
+
+    /// Deliver compositor-approved virtual input without replacing physical XKB state.
+    ///
+    /// JWM compatibility bridge for the input-device migration. Unlike `input`,
+    /// this does not run grabs or update physical/source key bookkeeping. The
+    /// compositor owns authorization, focus/lock epochs and virtual key pairing.
+    /// This preserves the pre-migration IME pass-through semantics; use the
+    /// ordinary source-aware input API when opting into compositor shortcuts.
+    #[cfg(feature = "wayland_frontend")]
+    pub fn forward_virtual_keyboard(
+        &self,
+        data: &mut D,
+        keymap: &KeymapFile,
+        modifiers: ModifiersState,
+        key: Option<(Keycode, KeyState, Serial, InputTime)>,
+    ) where
+        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
+    {
+        use crate::wayland::seat::{WaylandFocus, keyboard::for_each_focused_kbds};
+        let mut internal = self.arc.internal.lock().unwrap();
+        let focus = internal.focus.as_mut().map(|(focus, _)| focus);
+        if focus.is_none() {
+            return;
+        }
+        let changed = self.send_keymap(data, &focus, keymap, modifiers);
+        let seat = self.get_seat(data);
+        if let Some(focus) = focus {
+            // A focus switch may need modifiers even when the keymap is unchanged.
+            if !changed {
+                focus.modifiers(&seat, data, modifiers, SERIAL_COUNTER.next_serial());
+            }
+            if let (Some(surface), Some((code, state, serial, time))) = (focus.wl_surface(), key) {
+                for_each_focused_kbds(&seat, &surface, |kbd| {
+                    kbd.key(serial.into(), time.millis(), code.raw() - 8, state.into());
+                });
+            }
+        }
     }
 
     fn update_xkb_state(&self, data: &mut D, keymap: xkb::Keymap) {
@@ -1157,6 +1229,44 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         time: InputTime,
         mods_changed: bool,
     ) {
+        self.forward(data, keycode, state, serial, time, mods_changed, false);
+    }
+
+    /// Forward a key event to the focused client, bypassing the active grab, if any.
+    ///
+    /// This can be used by compositors to prevent infinite loops when a client
+    /// with a grab (e.g., fcitx) forwards a key through its own virtual keyboard, which
+    /// can be tracked with `InputMethodHandle::keyboard_grab_client`.
+    ///
+    /// Like [`KeyboardHandle::input_forward`], this doesn't update the xkb state, and
+    /// `mods_changed` only controls whether a `modifiers` event is sent along with the
+    /// key. While a grab is active the focus doesn't receive modifier updates (they go
+    /// to the grab), so the compositor has no way of knowing if the client's modifiers
+    /// are stale, and it's safe to pass `true` in this case, since a redundant
+    /// `modifiers` event is harmless.
+    pub fn input_forward_bypassing_grab(
+        &self,
+        data: &mut D,
+        keycode: Keycode,
+        state: KeyState,
+        serial: Serial,
+        time: InputTime,
+        mods_changed: bool,
+    ) {
+        self.forward(data, keycode, state, serial, time, mods_changed, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward(
+        &self,
+        data: &mut D,
+        keycode: Keycode,
+        state: KeyState,
+        serial: Serial,
+        time: InputTime,
+        mods_changed: bool,
+        bypass_grab: bool,
+    ) {
         let mut guard = self.arc.internal.lock().unwrap();
         match state {
             KeyState::Pressed => {
@@ -1174,9 +1284,17 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         let seat = self.get_seat(data);
         let mods = guard.mods_state;
         let modifiers = mods_changed.then_some(mods);
-        guard.with_grab(data, &seat, |data, handle, grab| {
-            grab.input(data, handle, keycode, state, modifiers, serial, time);
-        });
+        if bypass_grab {
+            let mut handle = KeyboardInnerHandle {
+                inner: &mut guard,
+                seat: &seat,
+            };
+            DefaultGrab.input(data, &mut handle, keycode, state, modifiers, serial, time);
+        } else {
+            guard.with_grab(data, &seat, |data, handle, grab| {
+                grab.input(data, handle, keycode, state, modifiers, serial, time);
+            });
+        }
         if guard.focus.is_some() {
             trace!("Input forwarded to client");
         } else {

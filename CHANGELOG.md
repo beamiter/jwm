@@ -5,6 +5,20 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Virtual keyboard input-device compatibility migration
+
+- Backport Smithay's virtual-keyboard device events and its IME-loop and
+  modifier-lifetime follow-ups together. JWM now owns virtual input routing,
+  while retaining the existing pass-through policy (no new virtual global
+  shortcuts and no changes to physical XKB state).
+- Pair virtual key releases with their original focus and lock generation;
+  release accepted held keys on device teardown, and block virtual keys and
+  modifier updates during session lock.
+- Add 13 socket-level regressions including IME grab pass-through, UTF-8
+  preedit/commit, focus changes, physical modifier isolation and lock-client
+  isolation. Real fcitx5 desktop validation remains required; see
+  `docs/virtual-keyboard.md`.
+
 ### Capture frames and lock-screen secrets
 
 - An `ext-image-copy-capture` session allows one frame at a time, as the

@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-10-26：virtual-keyboard 独立兼容迁移（实机验收待完成）
+
+基于 `707c2d623b9df5f41d57cffca63941cb3ee4056f`，分支
+`codex/virtual-keyboard-compat`。未认定原版本中文输入故障。
+
+**已实现**：一起回补 Smithay `7454d68a` / `553eaf9d` / `9786228e`
+的 `src/` 改动；virtual-keyboard 协议事件交给 JWM 的共享 state callback。
+独立 `virtual_keyboard.rs` 管理每设备 keymap/modifiers、焦点按键配对、
+销毁/断连释放与锁屏代际。`SeatHandler::focus_changed` 清理虚拟旧按键，
+防止 A→B→A 后释放落入新焦点会话。physical 输入路径未改。
+
+**兼容边界**：新增本地 Smithay `forward_virtual_keyboard` 适配 API，
+保留原有虚拟输入直通语义，不重入 IME grab、不触发新的全局快捷键、
+不覆盖物理 XKB/锁定修饰键、不生成可信 popup/activation 输入凭据。
+这次完成设备事件接口迁移，不宣称完成所有合成输入与物理快捷键策略统一。
+锁屏时一律拒绝虚拟键盘，包括向 locker 的虚拟输入；物理 locker 输入保留。
+`no_keymap` 跟随配置布局重载。回退应整体 revert 本次原子提交。
+
+**验证**：13 项新增真实 socket 协议测试全部通过，含 keycode、modifier、
+IME grab 无回环、UTF-8 preedit/候选结果 commit、跨焦点/往返焦点、
+销毁/断连、无 keymap 错误、布局重载、物理 filter、真实 session-lock 请求。
+模拟 IME 发出的“你好”只证明文本传输，不能当作 fcitx5 选词验收。
+
+相同环境与 nested 特性下，原始基线库测试 **5217 passed / 35 failed /
+1 ignored**，本分支 **5230 passed / 35 failed / 1 ignored**；失败名称集合
+完全相同，无新增失败。失败涉及受限 Unix listener、/proc/进程语义及缺失
+Xvfb。未修改这些无关测试；库失败使该次后续 bins/integration 组未执行。
+默认特性 `cargo check --locked --all-targets` 通过（Rust 1.99.1 对未改动
+`src/remote/host.rs:1434` 的 `fetch_update` 发出弃用警告）；默认严格
+Clippy 因同一既有警告失败；nested 特性严格 Clippy `-D warnings` 通过。
+格式检查和回补 patch 反向应用检查通过。
+本次未重跑 Rust 1.89、七种 CI 特性矩阵或严格 EGL 全套。
+
+**下一步/缺口**：环境没有 fcitx5、真实 Wayland 桌面或 DRM 设备，未做
+真实中文组合、候选窗点击/数字选词、GTK/Qt/浏览器、物理快捷键与多输出
+端到端验收。执行 `docs/virtual-keyboard.md` 的实机矩阵后再合入部署；
+通用虚拟设备进入物理快捷键管线应作为另一个行为变更评审。
+
+---
+
 ## 2026-10-25：全面升级进化（依赖 / Smithay 回补 / 审计修复 10 批）
 
 分支 `claude/jwm-upgrade-evolution`（基于 `711438b`），未开 PR。先升级依赖与

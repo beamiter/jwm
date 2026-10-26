@@ -531,6 +531,8 @@ pub struct JwmWaylandState {
     recent_popup_keys: RecentPopupKeys<ClientId>,
 
     pub im_popups: Vec<ImPopupSurface>,
+    virtual_keyboards:
+        HashMap<smithay::wayland::virtual_keyboard::VirtualKeyboardDevice, VirtualKeyboardDelivery>,
     pub im_client_id: Option<ObjectId>,
     /// (popup surface, failure kind) pairs `im_popup_positions` has already
     /// warned about; the warn-once contract lives with that function. `Mutex`
@@ -3479,6 +3481,7 @@ impl JwmWaylandState {
                 recent_popup_keys: RecentPopupKeys::default(),
 
                 im_popups: Vec::new(),
+                virtual_keyboards: HashMap::new(),
                 im_client_id: None,
                 im_popup_warned: Mutex::new(HashSet::new()),
 
@@ -4837,6 +4840,9 @@ impl SeatHandler for JwmWaylandState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        for delivery in self.virtual_keyboards.values_mut() {
+            delivery.clear_held();
+        }
         let client = focused.and_then(|surface| surface.client());
         set_data_device_focus(&self.display_handle, seat, client.clone());
         set_primary_focus(&self.display_handle, seat, client);
@@ -7954,6 +7960,8 @@ mod protocol_hardening_tests {
         assert!(state.drain_clipboard_captured().is_empty());
     }
 
+    include!("virtual_keyboard_tests.rs");
+
     // ext_session_lock_manager_v1.lock / ext_session_lock_v1 wire opcodes.
     const LOCK_REQUEST: u16 = 1;
     const LOCK_DESTROY: u16 = 0;
@@ -8973,3 +8981,7 @@ mod popup_input_authority_tests {
         assert!(!popup_chain_serial_authorized(true, Some(8), 7));
     }
 }
+
+#[path = "virtual_keyboard.rs"]
+mod virtual_keyboard;
+use virtual_keyboard::VirtualKeyboardDelivery;

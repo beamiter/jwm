@@ -2,7 +2,7 @@
 
 Base: https://github.com/Smithay/smithay/tree/d33a9c98fbd4d0ddd85315f93d436747bf3393a6
 
-License: MIT, preserved in LICENSE.txt. Package version is unchanged. This tree contains the exact tracked upstream snapshot, a set of unmodified upstream bug-fix commits cherry-picked from later upstream history, and one documented local change with its regression evidence. It is not an upstream release or a claimed upstream fix.
+License: MIT, preserved in LICENSE.txt. Package version is unchanged. This tree contains the exact tracked upstream snapshot, a set of unmodified upstream bug-fix commits cherry-picked from later upstream history, and documented local changes with regression evidence. It is not an upstream release or a claimed upstream fix.
 
 `JWM_BACKPORT.patch` is the complete difference from the base revision (`git diff d33a9c98..` of the vendored tree, excluding these two notes). Applying it to a pristine checkout of the base reproduces this directory.
 
@@ -32,14 +32,35 @@ Each commit below is taken verbatim (`git cherry-pick -x`, no conflicts) from up
 | `8a270232` | Keymap updates reach active keyboard grabs (input-method keyboard grabs). |
 | `023b78b1` | `ForeignToplevelListState::remove_toplevel` removes the requested handle, not a live neighbour after a lazily dropped one. |
 
+## Virtual-keyboard compatibility migration (2026-10-26)
+
+The `src/` changes from `7454d68aba1efc14735911f8a0bd86200b11e510`,
+`553eaf9d4228e0b3a9bccdc26a9d46a156f7fa06`, and
+`9786228efad25d65af0bb516642c1e8b0c359f37` are applied together. Upstream Anvil
+examples and release notes are not imported. The event callback, per-device
+source, destroy/disconnect key releases, raw modifier-mask API and IME grab
+client/bypass APIs are included.
+
+JWM adds `KeyboardHandle::forward_virtual_keyboard`, a **local compatibility
+bridge**, not an upstream API. It reuses the previous keymap/target delivery
+semantics without replacing the physical XKB state. Authorization, focus/lock
+epochs, accepted-key pairing and device lifetime are now compositor-owned in
+`src/backend/wayland_udev/virtual_keyboard.rs` (root repository).
+Virtual input intentionally remains pass-through and bypasses grabs/WM
+shortcuts. A generic virtual-to-physical shortcut-policy change is not part of
+this migration. See root `docs/virtual-keyboard.md` for the real-fcitx5 gate.
+
+Permanent socket-level tests live in root
+`src/backend/wayland_udev/virtual_keyboard_tests.rs`, included by the existing
+headless state tests. They are not real desktop or fcitx5 validation.
+
 Deliberately not backported:
 
-- The virtual-keyboard input-device rework (`7454d68a` and its follow-ups `553eaf9d`, `9786228e`) changes `VirtualKeyboardManagerState::new` and moves key delivery into the compositor's input pipeline. IMEs such as fcitx5 forward keys through a virtual keyboard, so adopting it needs a dedicated, hardware-validated change to JWM's keyboard path.
 - `input_intercept` source/early-return (`254f8873`, `61eb2e00`), text-input activation hooks (`19c16d3e`), `PointerRc`/`TouchRc` and weak seat references (`39044641`, `d2079108`, `5c2ba413`, `0fb2a21d`): API changes with no JWM-visible fix.
 - `wl_seat` `missing_capability` errors (`6bc53e3c`): spec-correct, but it disconnects clients that request a never-advertised device (for example touch on a laptop without a touchscreen). Revisit with the full upstream update.
 - New protocols and backends not used by JWM (`2bf8be86` virtual pointer, `928d4a9b` winit gestures, `138ddbb6` ppc atomics).
 
-## Local change
+## Local touch change
 
 `src/input/touch/mod.rs`, `TouchInternal::cancel`. Cancellation creates a frame marker even after a previously framed batch, retires every active slot and deferred up-frame target, emits cancellation once per involved client target using the existing marker mechanism, and removes the marker. Previously a framed sequence had no pending marker, so cancellation returned without revoking it; unchanged slots and up-pending targets were also retained. Upstream (as of `24647fc8`) still has the original behavior.
 

@@ -3,9 +3,9 @@ index 3d941182..ba878c99 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -237,6 +237,24 @@ additionally drops the buffers cached for copying between a render and a target
- 
+
  ### Bugfixes
- 
+
 +`ForeignToplevelListState::remove_toplevel` no longer removes a different toplevel from the list when
 +a handle in front of it was dropped without being removed (the lazy cleanup that the documentation
 +allows). Previously the removed entry was picked by its position among the live handles, so a live
@@ -30,7 +30,7 @@ index 3d941182..ba878c99 100644
 @@ -262,6 +280,14 @@ logged and the first error returned.
  `send_frames_surface_tree` (and `Window::send_frame`, `LayerSurface::send_frame`) no longer sends frame
  callbacks to surfaces whose renderer state has no buffer, or to their subsurfaces.
- 
+
 +`GlesRenderer::cleanup_texture_cache` and `GlesRenderer::invalidate_caches` now only make their EGL
 +context current when resources are queued for destruction. This avoids waking idle GPUs and
 +blocking the compositor while they resume.
@@ -40,7 +40,7 @@ index 3d941182..ba878c99 100644
 +the request was accepted and the extra frame was silently added to the session.
 +
  ## 0.7.0
- 
+
  ### Breaking changes
 diff --git a/Cargo.toml b/Cargo.toml
 index 072c78e9..270051a5 100644
@@ -74,15 +74,15 @@ index d0b02e6e..4e3632e8 100644
 @@ -5,6 +5,7 @@ use std::{
  };
  use tracing::{error, info, warn};
- 
+
 +use crate::backend::drm::{DrmNode, NodeType};
  use crate::utils::{DevPath, DeviceFd};
- 
+
  #[derive(Debug)]
 @@ -71,13 +72,18 @@ impl DrmDeviceFd {
              privileged: false,
          };
- 
+
 +        // Render nodes have no master; the kernel refuses SET_MASTER on them.
 +        let render_node = DrmNode::from_file(&dev.fd).is_ok_and(|node| node.ty() == NodeType::Render);
 +
@@ -100,7 +100,7 @@ index d0b02e6e..4e3632e8 100644
 +                dev.privileged = true;
 +            }
          }
- 
+
          DrmDeviceFd(Arc::new(dev))
 diff --git a/src/backend/drm/surface/mod.rs b/src/backend/drm/surface/mod.rs
 index 70c1f737..677fa132 100644
@@ -131,14 +131,14 @@ index 70c1f737..677fa132 100644
 +            }
          }
      }
- 
+
 diff --git a/src/backend/renderer/gles/mod.rs b/src/backend/renderer/gles/mod.rs
 index 28b44588..7518d196 100644
 --- a/src/backend/renderer/gles/mod.rs
 +++ b/src/backend/renderer/gles/mod.rs
 @@ -324,7 +324,7 @@ impl Default for GlesCleanup {
  }
- 
+
  impl GlesCleanup {
 -    fn cleanup(&self, egl: &EGLContext, gl: &ffi::Gles2) {
 +    fn cleanup(&self, egl: &EGLContext, gl: &ffi::Gles2) -> Result<(), MakeCurrentError> {
@@ -176,7 +176,7 @@ index 28b44588..7518d196 100644
 +        Ok(())
      }
  }
- 
+
 @@ -816,7 +828,7 @@ impl GlesRenderer {
              self.egl.make_current()?;
          }
@@ -188,7 +188,7 @@ index 28b44588..7518d196 100644
      }
 @@ -826,10 +838,11 @@ impl GlesRenderer {
      }
- 
+
      #[profiling::function]
 -    fn cleanup(&mut self) {
 +    fn cleanup(&mut self) -> Result<(), GlesError> {
@@ -198,10 +198,10 @@ index 28b44588..7518d196 100644
 +        self.gles_cleanup().cleanup(&self.egl, &self.gl)?;
 +        Ok(())
      }
- 
+
      /// Returns the supported [`Capabilities`](Capability) of this renderer.
 @@ -2353,22 +2366,14 @@ impl Renderer for GlesRenderer {
- 
+
      #[profiling::function]
      fn cleanup_texture_cache(&mut self) -> Result<(), Self::Error> {
 -        unsafe {
@@ -211,7 +211,7 @@ index 28b44588..7518d196 100644
 -        Ok(())
 +        self.cleanup()
      }
- 
+
      #[profiling::function]
      fn invalidate_caches(&mut self) -> Result<(), Self::Error> {
 -        unsafe {
@@ -224,7 +224,7 @@ index 28b44588..7518d196 100644
 +        self.cleanup()
      }
  }
- 
+
 @@ -2570,7 +2575,7 @@ impl GlesFrame<'_, '_> {
                  .renderer
                  .profiler
@@ -233,7 +233,7 @@ index 28b44588..7518d196 100644
 +            self.renderer.cleanup()?;
              self.renderer.profiler.exit(&self.renderer.gl, scope);
          }
- 
+
 @@ -3611,3 +3616,59 @@ mod tests {
          assert_eq!(tex_mat * bottom_left, Vec3::new(0f32, 1f32, 1f32));
      }
@@ -295,13 +295,172 @@ index 28b44588..7518d196 100644
 +    }
 +}
 diff --git a/src/input/keyboard/mod.rs b/src/input/keyboard/mod.rs
-index 530bddf4..c491ccf3 100644
+index 530bddf4..73124802 100644
 --- a/src/input/keyboard/mod.rs
 +++ b/src/input/keyboard/mod.rs
-@@ -1523,6 +1523,15 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
+@@ -164,6 +164,14 @@ impl Xkb {
+         &self.state
+     }
+
++    /// The active keymap as `XKB_KEYMAP_FORMAT_TEXT_V1`.
++    ///
++    /// This identical to what gets sent to clients, so it can be compared
++    /// against keymaps received from them.
++    pub fn keymap_as_string(&self) -> String {
++        self.keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1)
++    }
++
+     /// Get the active layout of the keyboard.
+     pub fn active_layout(&self) -> Layout {
+         (0..self.keymap.num_layouts())
+@@ -584,6 +592,32 @@ impl XkbContext<'_> {
+         *self.leds_changed = self.leds_state.update_with(&xkb.state, self.leds_mapping);
+     }
+
++    /// Set the modifier state from raw masks.
++    ///
++    /// The arguments are the raw xkb depressed, latched and locked modifier
++    /// masks, and the locked layout group index, e.g. as specified by the
++    /// `modifiers` request of `zwp_virtual_keyboard_v1`.
++    pub fn set_modifier_mask(
++        &mut self,
++        mods_depressed: u32,
++        mods_latched: u32,
++        mods_locked: u32,
++        group: u32,
++    ) {
++        let mut xkb = self.xkb.lock().unwrap();
++
++        let state = xkb
++            .state
++            .update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
++
++        if state != 0 {
++            self.mods_state.update_with(&xkb.state);
++            *self.mods_changed = true;
++        }
++
++        *self.leds_changed = self.leds_state.update_with(&xkb.state, self.leds_mapping);
++    }
++
+     /// Switches layout forward cycling when it reaches the end.
+     pub fn cycle_next_layout(&mut self) {
+         let xkb = self.xkb.lock().unwrap();
+@@ -845,6 +879,44 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
+         true
+     }
+
++    /// Deliver compositor-approved virtual input without replacing physical XKB state.
++    ///
++    /// JWM compatibility bridge for the input-device migration. Unlike `input`,
++    /// this does not run grabs or update physical/source key bookkeeping. The
++    /// compositor owns authorization, focus/lock epochs and virtual key pairing.
++    /// This preserves the pre-migration IME pass-through semantics; use the
++    /// ordinary source-aware input API when opting into compositor shortcuts.
++    #[cfg(feature = "wayland_frontend")]
++    pub fn forward_virtual_keyboard(
++        &self,
++        data: &mut D,
++        keymap: &KeymapFile,
++        modifiers: ModifiersState,
++        key: Option<(Keycode, KeyState, Serial, InputTime)>,
++    ) where
++        D::KeyboardFocus: crate::wayland::seat::WaylandFocus,
++    {
++        use crate::wayland::seat::{WaylandFocus, keyboard::for_each_focused_kbds};
++        let mut internal = self.arc.internal.lock().unwrap();
++        let focus = internal.focus.as_mut().map(|(focus, _)| focus);
++        if focus.is_none() {
++            return;
++        }
++        let changed = self.send_keymap(data, &focus, keymap, modifiers);
++        let seat = self.get_seat(data);
++        if let Some(focus) = focus {
++            // A focus switch may need modifiers even when the keymap is unchanged.
++            if !changed {
++                focus.modifiers(&seat, data, modifiers, SERIAL_COUNTER.next_serial());
++            }
++            if let (Some(surface), Some((code, state, serial, time))) = (focus.wl_surface(), key) {
++                for_each_focused_kbds(&seat, &surface, |kbd| {
++                    kbd.key(serial.into(), time.millis(), code.raw() - 8, state.into());
++                });
++            }
++        }
++    }
++
+     fn update_xkb_state(&self, data: &mut D, keymap: xkb::Keymap) {
+         let mut internal = self.arc.internal.lock().unwrap();
+
+@@ -1156,6 +1228,44 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
+         serial: Serial,
+         time: InputTime,
+         mods_changed: bool,
++    ) {
++        self.forward(data, keycode, state, serial, time, mods_changed, false);
++    }
++
++    /// Forward a key event to the focused client, bypassing the active grab, if any.
++    ///
++    /// This can be used by compositors to prevent infinite loops when a client
++    /// with a grab (e.g., fcitx) forwards a key through its own virtual keyboard, which
++    /// can be tracked with `InputMethodHandle::keyboard_grab_client`.
++    ///
++    /// Like [`KeyboardHandle::input_forward`], this doesn't update the xkb state, and
++    /// `mods_changed` only controls whether a `modifiers` event is sent along with the
++    /// key. While a grab is active the focus doesn't receive modifier updates (they go
++    /// to the grab), so the compositor has no way of knowing if the client's modifiers
++    /// are stale, and it's safe to pass `true` in this case, since a redundant
++    /// `modifiers` event is harmless.
++    pub fn input_forward_bypassing_grab(
++        &self,
++        data: &mut D,
++        keycode: Keycode,
++        state: KeyState,
++        serial: Serial,
++        time: InputTime,
++        mods_changed: bool,
++    ) {
++        self.forward(data, keycode, state, serial, time, mods_changed, true);
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn forward(
++        &self,
++        data: &mut D,
++        keycode: Keycode,
++        state: KeyState,
++        serial: Serial,
++        time: InputTime,
++        mods_changed: bool,
++        bypass_grab: bool,
+     ) {
+         let mut guard = self.arc.internal.lock().unwrap();
+         match state {
+@@ -1174,9 +1284,17 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
+         let seat = self.get_seat(data);
+         let mods = guard.mods_state;
+         let modifiers = mods_changed.then_some(mods);
+-        guard.with_grab(data, &seat, |data, handle, grab| {
+-            grab.input(data, handle, keycode, state, modifiers, serial, time);
+-        });
++        if bypass_grab {
++            let mut handle = KeyboardInnerHandle {
++                inner: &mut guard,
++                seat: &seat,
++            };
++            DefaultGrab.input(data, &mut handle, keycode, state, modifiers, serial, time);
++        } else {
++            guard.with_grab(data, &seat, |data, handle, grab| {
++                grab.input(data, handle, keycode, state, modifiers, serial, time);
++            });
++        }
+         if guard.focus.is_some() {
+             trace!("Input forwarded to client");
+         } else {
+@@ -1523,6 +1641,15 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
          self.inner.focus.as_ref().map(|f| &f.0)
      }
- 
+
 +    /// Access the keymap file currently used by this keyboard.
 +    #[cfg(feature = "wayland_frontend")]
 +    pub(crate) fn with_keymap_file<R>(&self, f: impl FnOnce(&KeymapFile) -> R) -> R {
@@ -314,10 +473,10 @@ index 530bddf4..c491ccf3 100644
      /// Convert a given keycode as a [`KeysymHandle`] modified by this keyboards state
      pub fn keysym_handle(&self, keycode: Keycode) -> KeysymHandle<'_> {
          KeysymHandle {
-@@ -1563,12 +1572,10 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
+@@ -1563,12 +1690,10 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
              keycode,
          };
- 
+
 -        // Modifiers must be sent before the key event so the client resolves the key against the
 -        // updated modifier state.
 +        focus.key(self.seat, data, key, key_state, serial, time);
@@ -326,7 +485,7 @@ index 530bddf4..c491ccf3 100644
          }
 -        focus.key(self.seat, data, key, key_state, serial, time);
      }
- 
+
      /// Iterate over the currently pressed keys.
 diff --git a/src/input/tablet/tool/mod.rs b/src/input/tablet/tool/mod.rs
 index 9b83121f..b9315303 100644
@@ -334,7 +493,7 @@ index 9b83121f..b9315303 100644
 +++ b/src/input/tablet/tool/mod.rs
 @@ -914,6 +914,17 @@ impl<D: TabletSeatHandler + 'static> TabletToolInternal<D> {
              }
- 
+
              if self.tip_down {
 +                // Compat with other compositors, more on this in https://github.com/Smithay/smithay/pull/1851
 +                // tldr: Spec-wise there is no reason to send this, but some clients depend on this
@@ -374,7 +533,7 @@ index 199aa33a..db36948b 100644
 +++ b/src/input/touch/mod.rs
 @@ -671,19 +671,21 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
      }
- 
+
      fn cancel(&mut self, data: &mut D, seat: &Seat<D>) {
 -        let Some(marker) = self.pending_frame.take() else {
 -            tracing::warn!("cancel called without prior events");
@@ -413,7 +572,7 @@ index c18aef34..84c326cc 100644
 +++ b/src/wayland/compositor/handlers.rs
 @@ -390,20 +390,28 @@ where
          let client_scale = state.client_compositor_state(client).client_scale();
- 
+
          match request {
 -            wl_region::Request::Add { x, y, width, height } => guard.rects.push((
 -                RectangleKind::Add,
@@ -461,7 +620,7 @@ index 90d17392..eaac316f 100644
 @@ -408,14 +408,10 @@ impl ForeignToplevelListState {
      pub fn remove_toplevel(&mut self, handle: &ForeignToplevelHandle) {
          handle.send_closed();
- 
+
 -        if let Some(pos) = self
 -            .toplevels
 -            .iter()
@@ -475,7 +634,7 @@ index 90d17392..eaac316f 100644
 +        self.toplevels
 +            .retain(|h| h.upgrade().is_some_and(|h| !Arc::ptr_eq(&h.inner, &handle.inner)));
      }
- 
+
      /// Auto cleanup closed handles
 @@ -540,3 +536,50 @@ impl<D: ForeignToplevelListHandler> Dispatch2<ExtForeignToplevelHandleV1, D> for
          self.remove_instance(resource);
@@ -539,7 +698,7 @@ index 66dfe8d6..b1e2d085 100644
 -    active_frames: Vec<FrameRef>,
 +    active_frame: Option<FrameRef>,
  }
- 
+
  impl SessionInner {
 @@ -222,7 +222,7 @@ impl SessionInner {
              constraints: None,
@@ -553,7 +712,7 @@ index 66dfe8d6..b1e2d085 100644
 @@ -343,8 +343,8 @@ impl Drop for Session {
              return;
          }
- 
+
 -        // Fail all active frames
 -        for frame in inner.active_frames.drain(..) {
 +        // Fail the active frame
@@ -569,7 +728,7 @@ index 66dfe8d6..b1e2d085 100644
 +    active_frame: Option<FrameRef>,
      pointer: WlPointer,
  }
- 
+
 @@ -398,7 +398,7 @@ impl CursorSessionInner {
              source,
              position: None,
@@ -582,14 +741,14 @@ index 66dfe8d6..b1e2d085 100644
 @@ -566,7 +566,7 @@ impl Drop for CursorSession {
          }
          inner.constraints.take();
- 
+
 -        for frame in inner.active_frames.drain(..) {
 +        if let Some(frame) = inner.active_frame.take() {
              frame
                  .inner
                  .lock()
 @@ -635,7 +635,7 @@ impl FrameInner {
- 
+
  /// A cloneable reference to a capture frame.
  ///
 -/// Used for tracking active frames within a session.
@@ -673,7 +832,7 @@ index 66dfe8d6..b1e2d085 100644
 @@ -1380,22 +1386,22 @@ where
              inner: self.inner.clone(),
          };
- 
+
 -        // Remove from active frames in sessions
 +        // Remove the frame from whichever session holds it
          for session in &state.image_copy_capture_state().sessions {
@@ -696,10 +855,10 @@ index 66dfe8d6..b1e2d085 100644
 +                .active_frame
 +                .take_if(|f| f == &frame_ref);
          }
- 
+
          state.frame_aborted(frame_ref);
 diff --git a/src/wayland/input_method/input_method_handle.rs b/src/wayland/input_method/input_method_handle.rs
-index fc73a979..2512b279 100644
+index fc73a979..5e6c8d00 100644
 --- a/src/wayland/input_method/input_method_handle.rs
 +++ b/src/wayland/input_method/input_method_handle.rs
 @@ -57,9 +57,9 @@ pub struct InputMethodHandle {
@@ -718,7 +877,7 @@ index fc73a979..2512b279 100644
 @@ -73,6 +73,16 @@ impl InputMethodHandle {
          self.inner.lock().unwrap().instance.is_some()
      }
- 
+
 +    /// Whether `object` is the seat's active input method instance.
 +    pub(super) fn is_active_instance(&self, object: &ZwpInputMethodV2) -> bool {
 +        self.inner
@@ -732,7 +891,28 @@ index fc73a979..2512b279 100644
      /// Callback function to access the input method object
      pub(crate) fn with_instance<F>(&self, f: F)
      where
-@@ -203,6 +213,31 @@ where
+@@ -100,6 +110,20 @@ impl InputMethodHandle {
+         keyboard.grab.is_some()
+     }
+
++    /// The client of the input method that has grabbed the keyboard, if any.
++    ///
++    /// This is necessary since input methods like fcitx typically grab the
++    /// keyboard, and forward unhandled keys through its own virtual keyboard.
++    /// These may result in an infinite loop if forwarded back through the grab.
++    /// The compositor should compare the client of virtual keyboards with this,
++    /// and forward keys from them with
++    /// [`KeyboardHandle::input_forward_bypassing_grab`].
++    pub fn keyboard_grab_client(&self) -> Option<Client> {
++        let inner = self.inner.lock().unwrap();
++        let keyboard = inner.keyboard_grab.inner.lock().unwrap();
++        keyboard.grab.as_ref()?.client()
++    }
++
+     pub(crate) fn set_text_input_rectangle<D: SeatHandler + 'static>(
+         &self,
+         state: &mut D,
+@@ -203,6 +227,31 @@ where
          _dh: &DisplayHandle,
          data_init: &mut DataInit<'_, D>,
      ) {
@@ -764,7 +944,7 @@ index fc73a979..2512b279 100644
          match request {
              zwp_input_method_v2::Request::CommitString { text } => {
                  self.text_input_handle.with_active_text_input(|ti, _surface| {
-@@ -300,6 +335,8 @@ where
+@@ -300,6 +349,8 @@ where
                  if let Err(err) = res {
                      warn!(err = ?err, "Failed to send keymap to client");
                  } else {
@@ -773,10 +953,10 @@ index fc73a979..2512b279 100644
                      // Modifiers can be latched when taking the grab, thus we must send them to keep
                      // them in sync.
                      let mods = guard.mods_state.serialized;
-@@ -319,8 +356,11 @@ where
+@@ -319,8 +370,11 @@ where
          }
      }
- 
+
 -    fn destroyed(&self, _state: &mut D, _client: ClientId, _input_method: &ZwpInputMethodV2) {
 -        self.handle.inner.lock().unwrap().instance = None;
 -        self.text_input_handle.leave();
@@ -795,14 +975,14 @@ index bf806763..75074416 100644
 @@ -3,16 +3,17 @@ use std::{
      sync::{Arc, Mutex},
  };
- 
+
 +use tracing::warn;
  use wayland_protocols_misc::zwp_input_method_v2::server::zwp_input_method_keyboard_grab_v2::{
      self, ZwpInputMethodKeyboardGrabV2,
  };
 -use wayland_server::backend::ClientId;
 +use wayland_server::{backend::ClientId, protocol::wl_keyboard::KeymapFormat};
- 
+
  use crate::input::{
      SeatHandler,
      keyboard::{
@@ -818,7 +998,7 @@ index bf806763..75074416 100644
      pub text_input_handle: TextInputHandle,
 +    pub keymap_id: Option<KeymapFileId>,
  }
- 
+
  /// Handle to an input method instance
 @@ -41,27 +43,64 @@ where
      fn input(
@@ -896,7 +1076,7 @@ index bf806763..75074416 100644
              });
      }
 @@ -100,7 +139,10 @@ impl<D: SeatHandler> fmt::Debug for InputMethodKeyboardUserData<D> {
- 
+
  impl<D: SeatHandler + 'static> Dispatch2<ZwpInputMethodKeyboardGrabV2, D> for InputMethodKeyboardUserData<D> {
      fn destroyed(&self, state: &mut D, _client: ClientId, _object: &ZwpInputMethodKeyboardGrabV2) {
 -        self.handle.inner.lock().unwrap().grab = None;
@@ -906,7 +1086,7 @@ index bf806763..75074416 100644
 +        drop(inner);
          self.keyboard_handle.unset_grab(state);
      }
- 
+
 diff --git a/src/wayland/seat/mod.rs b/src/wayland/seat/mod.rs
 index 3740623c..2aec3f7e 100644
 --- a/src/wayland/seat/mod.rs
@@ -940,7 +1120,7 @@ index 941a075a..bbe55acd 100644
      ) {
 -        use self::zxdg_toplevel_decoration_v1::Request;
 +        use self::zxdg_toplevel_decoration_v1::{Error, Request};
- 
+
          match request {
              Request::SetMode { mode } => {
                  if let WEnum::Value(mode) = mode {
@@ -949,7 +1129,7 @@ index 941a075a..bbe55acd 100644
 +                    resource.post_error(Error::InvalidMode, "invalid decoration mode");
                  }
              }
- 
+
 diff --git a/src/wayland/shell/xdg/handlers/surface/toplevel.rs b/src/wayland/shell/xdg/handlers/surface/toplevel.rs
 index 41576b11..cf2a0070 100644
 --- a/src/wayland/shell/xdg/handlers/surface/toplevel.rs
@@ -980,6 +1160,886 @@ index 41576b11..cf2a0070 100644
                  with_toplevel_pending_state(self, |toplevel_data| {
                      toplevel_data.min_size = (width, height).into();
                  });
+diff --git a/src/wayland/virtual_keyboard/input.rs b/src/wayland/virtual_keyboard/input.rs
+new file mode 100644
+index 00000000..218af511
+--- /dev/null
++++ b/src/wayland/virtual_keyboard/input.rs
+@@ -0,0 +1,202 @@
++//! [`InputBackend`] event types for virtual keyboard devices.
++
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
++use wayland_server::protocol::wl_seat::WlSeat;
++use wayland_server::{Client, Resource};
++
++use crate::backend::input::{self, InputBackend, InputTime, UnusedEvent};
++use crate::input::keyboard::KeyboardSource;
++
++use super::VirtualKeyboardData;
++
++/// Backend type identifying events from `zwp_virtual_keyboard_v1`.
++///
++/// This backend is never constructed since virtual keyboards are created by the
++/// client; only the associated event types are used.
++#[derive(Debug)]
++pub struct VirtualKeyboardBackend;
++
++impl InputBackend for VirtualKeyboardBackend {
++    type Device = VirtualKeyboardDevice;
++    type KeyboardKeyEvent = VirtualKeyboardKeyEvent;
++
++    type PointerAxisEvent = UnusedEvent;
++    type PointerButtonEvent = UnusedEvent;
++    type PointerMotionEvent = UnusedEvent;
++    type PointerMotionAbsoluteEvent = UnusedEvent;
++
++    type GestureSwipeBeginEvent = UnusedEvent;
++    type GestureSwipeUpdateEvent = UnusedEvent;
++    type GestureSwipeEndEvent = UnusedEvent;
++    type GesturePinchBeginEvent = UnusedEvent;
++    type GesturePinchUpdateEvent = UnusedEvent;
++    type GesturePinchEndEvent = UnusedEvent;
++    type GestureHoldBeginEvent = UnusedEvent;
++    type GestureHoldEndEvent = UnusedEvent;
++
++    type TouchDownEvent = UnusedEvent;
++    type TouchUpEvent = UnusedEvent;
++    type TouchMotionEvent = UnusedEvent;
++    type TouchCancelEvent = UnusedEvent;
++    type TouchFrameEvent = UnusedEvent;
++
++    type TabletToolAxisEvent = UnusedEvent;
++    type TabletToolProximityEvent = UnusedEvent;
++    type TabletToolTipEvent = UnusedEvent;
++    type TabletToolButtonEvent = UnusedEvent;
++
++    type SwitchToggleEvent = UnusedEvent;
++
++    type SpecialEvent = VirtualKeyboardSpecialEvent;
++}
++
++/// A keyboard device created by a `zwp_virtual_keyboard_v1` client.
++///
++/// The device is only actually added once the client has sent a keymap request,
++/// which may or may not carry a keymap (see [`Self::keymap`]).
++#[derive(Debug, Clone)]
++pub struct VirtualKeyboardDevice {
++    pub(super) keyboard: ZwpVirtualKeyboardV1,
++    pub(super) data: Arc<VirtualKeyboardData>,
++}
++
++impl PartialEq for VirtualKeyboardDevice {
++    fn eq(&self, other: &Self) -> bool {
++        self.keyboard == other.keyboard
++    }
++}
++
++impl Eq for VirtualKeyboardDevice {}
++
++impl std::hash::Hash for VirtualKeyboardDevice {
++    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
++        self.keyboard.hash(state)
++    }
++}
++
++impl VirtualKeyboardDevice {
++    /// The seat this virtual keyboard was created for.
++    pub fn wl_seat(&self) -> &WlSeat {
++        &self.data.seat
++    }
++
++    /// The client that created this virtual keyboard, if it's still alive.
++    pub fn client(&self) -> Option<Client> {
++        self.keyboard.client()
++    }
++
++    /// The [`KeyboardSource`] for this device's key events.
++    ///
++    /// Pass this to `KeyboardHandle::input_from_source` so a key event sent for
++    /// a key already down isn't released prematurely (i.e., so it's released on
++    /// the last release rather than the first one).
++    pub fn source(&self) -> KeyboardSource {
++        self.data.source
++    }
++
++    /// The client's keymap, as `XKB_KEYMAP_FORMAT_TEXT_V1`.
++    ///
++    /// This device's keycodes must be processed using the keymap, which isn't
++    /// usually the default one, so it needs to be activated (e.g. with
++    /// [`KeyboardHandle::set_keymap_from_string`](crate::input::keyboard::KeyboardHandle::set_keymap_from_string))
++    /// before processing the device's key events.
++    ///
++    /// [`None`] when the client sent the `no_keymap` format, meaning its
++    /// keycodes are to be read with whatever keymap the seat already has, so
++    /// there is nothing to activate. Also [`None`] before the device is added.
++    pub fn keymap(&self) -> Option<Arc<str>> {
++        self.data.keymap.lock().unwrap().clone()
++    }
++}
++
++impl input::Device for VirtualKeyboardDevice {
++    fn id(&self) -> String {
++        format!("virtual-keyboard-{}", self.keyboard.id())
++    }
++
++    fn name(&self) -> String {
++        String::from("virtual keyboard")
++    }
++
++    fn has_capability(&self, capability: input::DeviceCapability) -> bool {
++        matches!(capability, input::DeviceCapability::Keyboard)
++    }
++
++    fn usb_id(&self) -> Option<(u32, u32)> {
++        None
++    }
++
++    fn syspath(&self) -> Option<PathBuf> {
++        None
++    }
++}
++
++/// A key event generated by a virtual keyboard.
++#[derive(Debug)]
++pub struct VirtualKeyboardKeyEvent {
++    pub(super) device: VirtualKeyboardDevice,
++    pub(super) time: u32,
++    pub(super) key: u32,
++    pub(super) state: input::KeyState,
++}
++
++impl input::Event<VirtualKeyboardBackend> for VirtualKeyboardKeyEvent {
++    fn time(&self) -> InputTime {
++        InputTime::from_millis(self.time)
++    }
++
++    fn device(&self) -> VirtualKeyboardDevice {
++        self.device.clone()
++    }
++}
++
++impl input::KeyboardKeyEvent<VirtualKeyboardBackend> for VirtualKeyboardKeyEvent {
++    fn key_code(&self) -> input::Keycode {
++        // Keycodes from the protocol are offset by 8 from raw xkb keycodes,
++        // matching `wl_keyboard` and evdev.
++        input::Keycode::from(self.key.saturating_add(8))
++    }
++
++    fn state(&self) -> input::KeyState {
++        self.state
++    }
++
++    fn count(&self) -> u32 {
++        1
++    }
++}
++
++/// Virtual keyboard requests that have no generic [`InputEvent`] equivalent.
++///
++/// [`InputEvent`]: crate::backend::input::InputEvent
++#[derive(Debug)]
++pub enum VirtualKeyboardSpecialEvent {
++    /// The client replaced the keymap of a device that was already added.
++    ///
++    /// [`VirtualKeyboardDevice::keymap`] now returns the new one.
++    KeymapChanged {
++        /// The virtual keyboard device
++        device: VirtualKeyboardDevice,
++    },
++    /// The client set the modifier state directly, rather than through key
++    /// presses.
++    ///
++    /// The masks are relative to the device's keymap (or the seat's, if it sent
++    /// no keymap) and must be applied only while that keymap is active, using
++    /// [`XkbContext::set_modifier_mask`](crate::input::keyboard::XkbContext::set_modifier_mask).
++    Modifiers {
++        /// The virtual keyboard device
++        device: VirtualKeyboardDevice,
++        /// Depressed (pressed) modifier mask
++        mods_depressed: u32,
++        /// Latched modifier mask
++        mods_latched: u32,
++        /// Locked modifier mask
++        mods_locked: u32,
++        /// Locked layout group index
++        group: u32,
++    },
++}
+diff --git a/src/wayland/virtual_keyboard/mod.rs b/src/wayland/virtual_keyboard/mod.rs
+index a8039004..b40508c5 100644
+--- a/src/wayland/virtual_keyboard/mod.rs
++++ b/src/wayland/virtual_keyboard/mod.rs
+@@ -1,69 +1,103 @@
+-//! Utilities for virtual keyboard support
++//! Implementation of the `zwp_virtual_keyboard_v1` protocol.
+ //!
+-//! This module provides you with utilities to handle virtual keyboard instances.
+-//! It can be used standalone to implement virtual keyboards or together with
+-//! an input method to pass through keys from the keyboard.
++//! A virtual keyboard is exposed as a regular input device instead of being
++//! wired straight to the seat. Requests are converted into
++//! [`VirtualKeyboardBackend`] [`InputEvent`]s and passed to
++//! [`VirtualKeyboardHandler::process_virtual_keyboard_event`] so synthetic
++//! input is handled the same way as a real one (making compositor bindings,
++//! idle handling, and focus all behave properly).
+ //!
++//! The device shows up (as [`InputEvent::DeviceAdded`]) only after the initial
++//! keymap is sent since the keycodes don't mean anything without one. The
++//! device is removed when the client destroys the keyboard, after releasing any
++//! held keys (see [`InputEvent::DeviceRemoved`]).
++//!
++//! Modifiers set directly through the `modifiers` request are not reset on
++//! DeviceRemoved since the masks are absolute, and a virtual keyboard using the
++//! seat's keymap shares its modifier state with the other devices. The
++//! compositor is responsible for choosing if/how to reconcile the modifier
++//! state on virtual keyboard removal (e.g., by tracking the bits set by it).
++//!
++//! Some clients (e.g., IMEs like fcitx) grab the keyboard and forward unhandled
++//! keys through a virtual keyboard of their own. Those must not be passed back
++//! to the grab, otherwise it may loop infinitely.
++//!
++//! ```ignore
++//! let grab_client = seat.input_method().keyboard_grab_client();
++//! if grab_client.is_some() && grab_client == device.client() {
++//!     keyboard.input_forward_bypassing_grab(state, keycode, key_state, serial, time, true);
++//! } else {
++//!     keyboard.input_from_source(device.source(), state, keycode, key_state, serial, time, filter);
++//! }
+ //! ```
+-//! use smithay::input::{Seat, SeatState, SeatHandler, pointer::CursorImageStatus};
+-//! # use smithay::wayland::compositor::{CompositorHandler, CompositorState, CompositorClientState};
+-//! use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
+-//! use smithay::reexports::wayland_server::{Display, protocol::wl_surface::WlSurface};
+-//! # use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
+-//! # use smithay::reexports::wayland_server::Client;
+ //!
+-//! # struct State { seat_state: SeatState<Self> };
++//! Since the keycodes belong to the client's keymap, not the seat, it must be
++//! activated (see [`VirtualKeyboardDevice::keymap`]) before handling them. A
++//! client may send the `no_keymap` format to use the existing seat keymap, in
++//! which case it will be `None`.
++//!
++//! Requests with no [`InputEvent`] equivalent are [`InputEvent::Special`] (see
++//! [`VirtualKeyboardSpecialEvent`]).
++//!
++//! ```
++//! use smithay::backend::input::InputEvent;
++//! use smithay::wayland::virtual_keyboard::{
++//!     VirtualKeyboardManagerState, VirtualKeyboardBackend, VirtualKeyboardHandler,
++//! };
++//! # use smithay::reexports::wayland_server::Display;
++//!
++//! # struct State;
+ //!
+ //! smithay::delegate_dispatch2!(State);
+ //!
+ //! # let mut display = Display::<State>::new().unwrap();
+ //! # let display_handle = display.handle();
+ //!
+-//! let seat_state = SeatState::<State>::new();
+-//!
+-//! // implement the required traits
+-//! impl SeatHandler for State {
+-//!     type KeyboardFocus = WlSurface;
+-//!     type PointerFocus = WlSurface;
+-//!     type TouchFocus = WlSurface;
+-//!     fn seat_state(&mut self) -> &mut SeatState<Self> {
+-//!         &mut self.seat_state
++//! impl VirtualKeyboardHandler for State {
++//!     fn process_virtual_keyboard_event(&mut self, event: InputEvent<VirtualKeyboardBackend>) {
++//!         // process_input_event(event);
+ //!     }
+-//!     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) { unimplemented!() }
+-//!     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) { unimplemented!() }
+ //! }
+-//! # impl PointerConstraintsHandler for State {}
+ //!
+-//! // Add the seat state to your state, create manager global and add client filter
+-//! // to avoid untrusted clients requesting a new keyboard
++//! // The function decides which clients may create keyboards.
+ //! VirtualKeyboardManagerState::new::<State, _>(&display_handle, |_client| true);
+-//!
+-//! # impl CompositorHandler for State {
+-//! #     fn compositor_state(&mut self) -> &mut CompositorState { unimplemented!() }
+-//! #     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState { unimplemented!() }
+-//! #     fn commit(&mut self, surface: &WlSurface) {}
+-//! # }
+ //! ```
+-//!
+
++use std::os::unix::io::OwnedFd;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Mutex};
++
++use tracing::warn;
+ use wayland_protocols_misc::zwp_virtual_keyboard_v1::server::{
+     zwp_virtual_keyboard_manager_v1::{self, ZwpVirtualKeyboardManagerV1},
+-    zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
++    zwp_virtual_keyboard_v1::{self, ZwpVirtualKeyboardV1},
+ };
+-use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, backend::GlobalId};
+-
+-use crate::{
+-    input::{Seat, SeatHandler},
+-    wayland::{Dispatch2, GlobalData, GlobalDispatch2},
++use wayland_server::{
++    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, backend::ClientId,
++    backend::GlobalId, protocol::wl_keyboard::KeymapFormat, protocol::wl_seat::WlSeat,
+ };
++use xkbcommon::xkb;
+
+-use self::virtual_keyboard_handle::VirtualKeyboardHandle;
++use crate::backend::input::{InputEvent, InputTime, KeyState};
++use crate::input::keyboard::KeyboardSource;
++use crate::wayland::{Dispatch2, GlobalData, GlobalDispatch2};
+
+ const MANAGER_VERSION: u32 = 1;
+
+-mod virtual_keyboard_handle;
++mod input;
+
+-pub use virtual_keyboard_handle::VirtualKeyboardUserData;
++pub use input::{
++    VirtualKeyboardBackend, VirtualKeyboardDevice, VirtualKeyboardKeyEvent, VirtualKeyboardSpecialEvent,
++};
++
++/// Handler for virtual keyboard input events.
++pub trait VirtualKeyboardHandler {
++    /// Handle an event from a virtual keyboard.
++    ///
++    /// Process it the same way as any other
++    /// [`InputBackend`](crate::backend::input::InputBackend).
++    fn process_virtual_keyboard_event(&mut self, event: InputEvent<VirtualKeyboardBackend>);
++}
+
+ /// State of wp misc virtual keyboard protocol
+ #[derive(Debug)]
+@@ -77,35 +111,26 @@ pub struct VirtualKeyboardManagerGlobalData {
+     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
+ }
+
+-fn create_global_with_filter<D, F>(display: &DisplayHandle, filter: F) -> GlobalId
+-where
+-    D: GlobalDispatch<ZwpVirtualKeyboardManagerV1, VirtualKeyboardManagerGlobalData> + 'static,
+-    F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
+-{
+-    let data = VirtualKeyboardManagerGlobalData {
+-        filter: Box::new(filter),
+-    };
+-
+-    display.create_global::<D, ZwpVirtualKeyboardManagerV1, _>(MANAGER_VERSION, data)
+-}
+-
+ impl VirtualKeyboardManagerState {
+     /// Initialize a virtual keyboard manager global.
+     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
+     where
+         D: GlobalDispatch<ZwpVirtualKeyboardManagerV1, VirtualKeyboardManagerGlobalData>,
+         D: Dispatch<ZwpVirtualKeyboardManagerV1, GlobalData>,
+-        D: Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData<D>>,
+-        D: SeatHandler,
++        D: Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData>,
++        D: VirtualKeyboardHandler,
+         D: 'static,
+         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
+     {
+-        let global = create_global_with_filter::<D, F>(display, filter);
++        let data = VirtualKeyboardManagerGlobalData {
++            filter: Box::new(filter),
++        };
++        let global = display.create_global::<D, ZwpVirtualKeyboardManagerV1, _>(MANAGER_VERSION, data);
+
+         Self { global }
+     }
+
+-    /// Get the id of ZwpVirtualKeyboardManagerV1 global
++    /// Get the id of ZwpVirtualKeyboardManagerV1 global.
+     pub fn global(&self) -> GlobalId {
+         self.global.clone()
+     }
+@@ -114,8 +139,8 @@ impl VirtualKeyboardManagerState {
+ impl<D> GlobalDispatch2<ZwpVirtualKeyboardManagerV1, D> for VirtualKeyboardManagerGlobalData
+ where
+     D: Dispatch<ZwpVirtualKeyboardManagerV1, GlobalData>,
+-    D: Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData<D>>,
+-    D: SeatHandler,
++    D: Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData>,
++    D: VirtualKeyboardHandler,
+     D: 'static,
+ {
+     fn bind(
+@@ -136,8 +161,8 @@ where
+
+ impl<D> Dispatch2<ZwpVirtualKeyboardManagerV1, D> for GlobalData
+ where
+-    D: Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData<D>>,
+-    D: SeatHandler,
++    D: Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData>,
++    D: VirtualKeyboardHandler,
+     D: 'static,
+ {
+     fn request(
+@@ -151,13 +176,16 @@ where
+     ) {
+         match request {
+             zwp_virtual_keyboard_manager_v1::Request::CreateVirtualKeyboard { seat, id } => {
+-                let seat = Seat::<D>::from_resource(&seat).unwrap();
+-                let virtual_keyboard_handle = VirtualKeyboardHandle::default();
+                 data_init.init(
+                     id,
+                     VirtualKeyboardUserData {
+-                        handle: virtual_keyboard_handle,
+-                        seat: seat.clone(),
++                        data: Arc::new(VirtualKeyboardData {
++                            seat,
++                            has_keymap: AtomicBool::new(false),
++                            keymap: Mutex::new(None),
++                            pressed_keys: Mutex::new(Vec::new()),
++                            source: KeyboardSource::new_auxiliary(),
++                        }),
+                     },
+                 );
+             }
+@@ -165,3 +193,220 @@ where
+         }
+     }
+ }
++
++/// User data for ZwpVirtualKeyboardV1
++#[derive(Debug)]
++pub struct VirtualKeyboardUserData {
++    data: Arc<VirtualKeyboardData>,
++}
++
++#[derive(Debug)]
++struct VirtualKeyboardData {
++    seat: WlSeat,
++    /// Whether a keymap request was accepted. Even if set, there may still be
++    /// no keymap if `no_keymap` was explicitly requested.
++    has_keymap: AtomicBool,
++    keymap: Mutex<Option<Arc<str>>>,
++    pressed_keys: Mutex<Vec<u32>>,
++    source: KeyboardSource,
++}
++
++impl VirtualKeyboardUserData {
++    fn device(&self, keyboard: &ZwpVirtualKeyboardV1) -> VirtualKeyboardDevice {
++        VirtualKeyboardDevice {
++            keyboard: keyboard.clone(),
++            data: self.data.clone(),
++        }
++    }
++}
++
++impl<D> Dispatch2<ZwpVirtualKeyboardV1, D> for VirtualKeyboardUserData
++where
++    D: VirtualKeyboardHandler + 'static,
++{
++    fn request(
++        &self,
++        state: &mut D,
++        _client: &Client,
++        virtual_keyboard: &ZwpVirtualKeyboardV1,
++        request: zwp_virtual_keyboard_v1::Request,
++        _dh: &DisplayHandle,
++        _data_init: &mut DataInit<'_, D>,
++    ) {
++        match request {
++            zwp_virtual_keyboard_v1::Request::Keymap { format, fd, size } => {
++                let keymap = if format == KeymapFormat::NoKeymap as u32 {
++                    // Use the current seat keymap to process keycodes.
++                    None
++                } else if format == KeymapFormat::XkbV1 as u32 {
++                    match compile_keymap(fd, size as usize) {
++                        Some(keymap) => Some(Arc::from(keymap)),
++                        // Client will get a `no_keymap` error on the next `key`
++                        // request if no other keymap requests have succeeded
++                        // yet.
++                        None => return,
++                    }
++                } else {
++                    // TODO: uncomment this once zwp_virtual_keyboard_v1 is updated
++                    // virtual_keyboard.post_error(
++                    //     zwp_virtual_keyboard_v1::Error::InvalidKeymapFormat,
++                    //     "invalid keymap format",
++                    // );
++                    warn!("Client sent an unsupported keymap format: {format}");
++                    return;
++                };
++
++                *self.data.keymap.lock().unwrap() = keymap;
++                let added = !self.data.has_keymap.swap(true, Ordering::Relaxed);
++
++                let device = self.device(virtual_keyboard);
++                if added {
++                    state.process_virtual_keyboard_event(InputEvent::DeviceAdded { device });
++                } else {
++                    state.process_virtual_keyboard_event(InputEvent::Special(
++                        VirtualKeyboardSpecialEvent::KeymapChanged { device },
++                    ));
++                }
++            }
++            zwp_virtual_keyboard_v1::Request::Key {
++                time,
++                key,
++                state: key_state,
++            } => {
++                if !self.data.has_keymap.load(Ordering::Relaxed) {
++                    virtual_keyboard.post_error(
++                        zwp_virtual_keyboard_v1::Error::NoKeymap,
++                        "`key` sent before keymap.",
++                    );
++                    return;
++                }
++
++                // In wlroots, this is passed through if it isn't 0 or 1, but
++                // smithay key states are enums, so we need to choose pressed or
++                // released (repeated isn't available until wl_keyboard v10).
++                let key_state = match key_state {
++                    0 => KeyState::Released,
++                    // Repeated is sent zero or more times after Pressed and
++                    // before Released.
++                    // 2 => KeyState::Repeated,
++                    _ => KeyState::Pressed,
++                };
++
++                // Tracked so `destroyed` can release held keys.
++                {
++                    let mut pressed = self.data.pressed_keys.lock().unwrap();
++                    match key_state {
++                        KeyState::Pressed => {
++                            if !pressed.contains(&key) {
++                                pressed.push(key);
++                            }
++                        }
++                        KeyState::Released => pressed.retain(|pressed| *pressed != key),
++                    }
++                }
++
++                state.process_virtual_keyboard_event(InputEvent::Keyboard {
++                    event: VirtualKeyboardKeyEvent {
++                        device: self.device(virtual_keyboard),
++                        time,
++                        key,
++                        state: key_state,
++                    },
++                });
++            }
++            zwp_virtual_keyboard_v1::Request::Modifiers {
++                mods_depressed,
++                mods_latched,
++                mods_locked,
++                group,
++            } => {
++                if !self.data.has_keymap.load(Ordering::Relaxed) {
++                    virtual_keyboard.post_error(
++                        zwp_virtual_keyboard_v1::Error::NoKeymap,
++                        "`modifiers` sent before keymap.",
++                    );
++                    return;
++                }
++
++                state.process_virtual_keyboard_event(InputEvent::Special(
++                    VirtualKeyboardSpecialEvent::Modifiers {
++                        device: self.device(virtual_keyboard),
++                        mods_depressed,
++                        mods_latched,
++                        mods_locked,
++                        group,
++                    },
++                ));
++            }
++            zwp_virtual_keyboard_v1::Request::Destroy => {
++                // no-op; the device is removed in `destroyed`
++            }
++            _ => unreachable!(),
++        }
++    }
++
++    fn destroyed(&self, state: &mut D, _client: ClientId, virtual_keyboard: &ZwpVirtualKeyboardV1) {
++        // The device only exists once a keymap request was accepted.
++        if !self.data.has_keymap.load(Ordering::Relaxed) {
++            return;
++        }
++
++        let device = self.device(virtual_keyboard);
++
++        // A client may destroy the keyboard, or die, with keys still down.
++        // Release them here like how libinput does with an unplugged keyboard.
++        let pressed = std::mem::take(&mut *self.data.pressed_keys.lock().unwrap());
++        let time = InputTime::now().millis();
++        for key in pressed.into_iter().rev() {
++            state.process_virtual_keyboard_event(InputEvent::Keyboard {
++                event: VirtualKeyboardKeyEvent {
++                    device: device.clone(),
++                    time,
++                    key,
++                    state: KeyState::Released,
++                },
++            });
++        }
++
++        // Modifiers set through the `modifiers` request are deliberately not
++        // cleared since the masks are absolute, and a virtual keyboard using
++        // the seat's keymap (either by sending `no_keymap`, or the same one)
++        // shares the seat's xkb state, so an all-zero mask would clear
++        // modifiers set by other devices. A virtual keyboard with its own
++        // keymap doesn't have this problem, since the seat's xkb state is
++        // rebuilt when the compositor switches keymaps back.
++        //
++        // The compositor should reconcile the modifier state itself on
++        // DeviceRemoved (e.g., based on the bits the virtual keyboard actually
++        // changed).
++        state.process_virtual_keyboard_event(InputEvent::DeviceRemoved { device });
++    }
++}
++
++/// Compile a client-supplied `xkb_v1` keymap, normalizing it to
++/// `XKB_KEYMAP_FORMAT_TEXT_V1`, and returning it if valid.
++fn compile_keymap(fd: OwnedFd, size: usize) -> Option<String> {
++    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
++    // SAFETY: we can map the keymap into the memory.
++    let keymap = match unsafe {
++        xkb::Keymap::new_from_fd(
++            &context,
++            fd,
++            size,
++            xkb::KEYMAP_FORMAT_TEXT_V1,
++            xkb::KEYMAP_COMPILE_NO_FLAGS,
++        )
++    } {
++        Ok(Some(keymap)) => keymap,
++        Ok(None) => {
++            warn!("Failed to compile virtual keyboard keymap");
++            return None;
++        }
++        Err(err) => {
++            warn!("Failed to map virtual keyboard keymap: {err:?}");
++            return None;
++        }
++    };
++
++    Some(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
++}
+diff --git a/src/wayland/virtual_keyboard/virtual_keyboard_handle.rs b/src/wayland/virtual_keyboard/virtual_keyboard_handle.rs
+deleted file mode 100644
+index 40e3ee45..00000000
+--- a/src/wayland/virtual_keyboard/virtual_keyboard_handle.rs
++++ /dev/null
+@@ -1,210 +0,0 @@
+-use std::os::unix::io::OwnedFd;
+-use std::{
+-    fmt,
+-    sync::{Arc, Mutex},
+-};
+-
+-use tracing::debug;
+-use wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::Error::NoKeymap;
+-use wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::{
+-    self, ZwpVirtualKeyboardV1,
+-};
+-use wayland_server::{
+-    Client, DataInit, DisplayHandle, Resource,
+-    protocol::wl_keyboard::{KeyState, KeymapFormat},
+-};
+-use xkbcommon::xkb;
+-
+-use crate::input::keyboard::{KeyboardTarget, KeymapFile, ModifiersState};
+-use crate::{
+-    input::{Seat, SeatHandler},
+-    utils::SERIAL_COUNTER,
+-    wayland::{
+-        Dispatch2,
+-        seat::{WaylandFocus, keyboard::for_each_focused_kbds},
+-    },
+-};
+-
+-#[derive(Debug, Default)]
+-pub(crate) struct VirtualKeyboard {
+-    state: Option<VirtualKeyboardState>,
+-}
+-
+-struct VirtualKeyboardState {
+-    keymap: KeymapFile,
+-    mods: ModifiersState,
+-    state: xkb::State,
+-}
+-
+-impl fmt::Debug for VirtualKeyboardState {
+-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        f.debug_struct("VirtualKeyboardState")
+-            .field("keymap", &self.keymap)
+-            .field("mods", &self.mods)
+-            .field("state", &self.state.get_raw_ptr())
+-            .finish()
+-    }
+-}
+-
+-// This is OK because all parts of `xkb` will remain on the
+-// same thread
+-unsafe impl Send for VirtualKeyboard {}
+-
+-/// Handle to a virtual keyboard instance
+-#[derive(Debug, Clone, Default)]
+-pub(crate) struct VirtualKeyboardHandle {
+-    pub(crate) inner: Arc<Mutex<VirtualKeyboard>>,
+-}
+-
+-/// User data of ZwpVirtualKeyboardV1 object
+-pub struct VirtualKeyboardUserData<D: SeatHandler> {
+-    pub(super) handle: VirtualKeyboardHandle,
+-    pub(crate) seat: Seat<D>,
+-}
+-
+-impl<D: SeatHandler> fmt::Debug for VirtualKeyboardUserData<D> {
+-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        f.debug_struct("VirtualKeyboardUserData")
+-            .field("handle", &self.handle)
+-            .field("seat", &self.seat.arc)
+-            .finish()
+-    }
+-}
+-
+-impl<D> Dispatch2<ZwpVirtualKeyboardV1, D> for VirtualKeyboardUserData<D>
+-where
+-    D: SeatHandler + 'static,
+-    <D as SeatHandler>::KeyboardFocus: WaylandFocus,
+-{
+-    fn request(
+-        &self,
+-        user_data: &mut D,
+-        _client: &Client,
+-        virtual_keyboard: &ZwpVirtualKeyboardV1,
+-        request: zwp_virtual_keyboard_v1::Request,
+-        _dh: &DisplayHandle,
+-        _data_init: &mut DataInit<'_, D>,
+-    ) {
+-        match request {
+-            zwp_virtual_keyboard_v1::Request::Keymap { format, fd, size } => {
+-                update_keymap(self, format, fd, size as usize);
+-            }
+-            zwp_virtual_keyboard_v1::Request::Key { time, key, state } => {
+-                // Ensure keymap was initialized.
+-                let mut virtual_data = self.handle.inner.lock().unwrap();
+-                let vk_state = match virtual_data.state.as_mut() {
+-                    Some(vk_state) => vk_state,
+-                    None => {
+-                        virtual_keyboard.post_error(NoKeymap, "`key` sent before keymap.");
+-                        return;
+-                    }
+-                };
+-
+-                // Ensure virtual keyboard's keymap is active.
+-                let keyboard_handle = self.seat.get_keyboard().unwrap();
+-                let mut internal = keyboard_handle.arc.internal.lock().unwrap();
+-                let focus = internal.focus.as_mut().map(|(focus, _)| focus);
+-                keyboard_handle.send_keymap(user_data, &focus, &vk_state.keymap, vk_state.mods);
+-
+-                if let Some(wl_surface) = focus.and_then(|f| f.wl_surface()) {
+-                    for_each_focused_kbds(&self.seat, &wl_surface, |kbd| {
+-                        // This should be wl_keyboard::KeyState, but the protocol does not state
+-                        // the parameter is an enum.
+-                        let key_state = if state == 1 {
+-                            KeyState::Pressed
+-                        } else {
+-                            KeyState::Released
+-                        };
+-
+-                        kbd.key(SERIAL_COUNTER.next_serial().0, time, key, key_state);
+-                    });
+-                }
+-            }
+-            zwp_virtual_keyboard_v1::Request::Modifiers {
+-                mods_depressed,
+-                mods_latched,
+-                mods_locked,
+-                group,
+-            } => {
+-                // Ensure keymap was initialized.
+-                let mut virtual_data = self.handle.inner.lock().unwrap();
+-                let state = match virtual_data.state.as_mut() {
+-                    Some(state) => state,
+-                    None => {
+-                        virtual_keyboard.post_error(NoKeymap, "`modifiers` sent before keymap.");
+-                        return;
+-                    }
+-                };
+-
+-                // Update virtual keyboard's modifier state.
+-                state
+-                    .state
+-                    .update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+-                state.mods.update_with(&state.state);
+-
+-                // Ensure virtual keyboard's keymap is active.
+-                let keyboard_handle = self.seat.get_keyboard().unwrap();
+-                let mut internal = keyboard_handle.arc.internal.lock().unwrap();
+-                let focus = internal.focus.as_mut().map(|(focus, _)| focus);
+-                let keymap_changed =
+-                    keyboard_handle.send_keymap(user_data, &focus, &state.keymap, state.mods);
+-
+-                // Report modifiers change to all keyboards.
+-                if !keymap_changed {
+-                    if let Some(focus) = focus {
+-                        focus.modifiers(&self.seat, user_data, state.mods, SERIAL_COUNTER.next_serial());
+-                    }
+-                }
+-            }
+-            zwp_virtual_keyboard_v1::Request::Destroy => {
+-                // Nothing to do
+-            }
+-            _ => unreachable!(),
+-        }
+-    }
+-}
+-
+-/// Handle the zwp_virtual_keyboard_v1::keymap request.
+-///
+-/// The `true` returns when keymap was properly loaded.
+-fn update_keymap<D>(data: &VirtualKeyboardUserData<D>, format: u32, fd: OwnedFd, size: usize)
+-where
+-    D: SeatHandler + 'static,
+-{
+-    // Only libxkbcommon compatible keymaps are supported.
+-    if format != KeymapFormat::XkbV1 as u32 {
+-        debug!("Unsupported keymap format: {format:?}");
+-        return;
+-    }
+-
+-    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+-    // SAFETY: we can map the keymap into the memory.
+-    let new_keymap = match unsafe {
+-        xkb::Keymap::new_from_fd(
+-            &context,
+-            fd,
+-            size,
+-            xkb::KEYMAP_FORMAT_TEXT_V1,
+-            xkb::KEYMAP_COMPILE_NO_FLAGS,
+-        )
+-    } {
+-        Ok(Some(new_keymap)) => new_keymap,
+-        Ok(None) => {
+-            debug!("Invalid libxkbcommon keymap");
+-            return;
+-        }
+-        Err(err) => {
+-            debug!("Could not map the keymap: {err:?}");
+-            return;
+-        }
+-    };
+-
+-    // Store active virtual keyboard map.
+-    let mut inner = data.handle.inner.lock().unwrap();
+-    let mods = inner.state.take().map(|state| state.mods).unwrap_or_default();
+-    inner.state = Some(VirtualKeyboardState {
+-        mods,
+-        keymap: KeymapFile::new(&new_keymap),
+-        state: xkb::State::new(&new_keymap),
+-    });
+-}
 diff --git a/src/xwayland/xwm/mod.rs b/src/xwayland/xwm/mod.rs
 index 29e2f570..e7446699 100644
 --- a/src/xwayland/xwm/mod.rs
@@ -998,7 +2058,7 @@ index 29e2f570..e7446699 100644
 @@ -1048,12 +1048,14 @@ impl X11Wm {
              span,
          };
- 
+
 -        let event_handle = handle.clone();
 +        let event_handle = handle.downgrade();
          let dh = dh.clone();
