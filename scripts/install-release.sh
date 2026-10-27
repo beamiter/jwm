@@ -120,6 +120,7 @@ valid_stable_path() {
         usr/local/bin/jwm-tool|\
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
+        usr/local/bin/jwm-player|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
@@ -129,6 +130,8 @@ valid_stable_path() {
         usr/share/wayland-sessions/jwm-wayland.desktop|\
         usr/share/wayland-sessions/jwm-wayland-debug.desktop|\
         usr/share/dbus-1/services/org.freedesktop.Notifications.service|\
+        usr/local/share/applications/jwm-player.desktop|\
+        usr/local/share/applications/jwm-video.desktop|\
         usr/local/share/doc/jwm)
             return 0
             ;;
@@ -516,6 +519,7 @@ INSTALL_TX_VERSION=""
 INSTALL_TX_STAGING=""
 INSTALL_TX_OLD_CURRENT=""
 declare -a INSTALL_TX_OLD_INSTALLED=() INSTALL_TX_OLD_HISTORY=()
+declare -a INSTALL_TX_OLD_STABLE=() INSTALL_TX_OLD_BACKUPS=()
 declare -a INSTALL_TX_LINKS=() INSTALL_TX_BACKUPS=()
 
 finish_install_transaction() {
@@ -560,6 +564,10 @@ finish_install_transaction() {
                 rollback_ok=0
             fi
         done
+        if ((rollback_ok == 1 && INSTALL_TX_NEW_STATE == 0 && INSTALL_TX_STATE_CHANGED == 1)); then
+            atomic_lines "$STATE/stable-paths.tsv" "${INSTALL_TX_OLD_STABLE[@]}" || rollback_ok=0
+            atomic_lines "$STATE/backups.tsv" "${INSTALL_TX_OLD_BACKUPS[@]}" || rollback_ok=0
+        fi
         if ((rollback_ok == 1)); then
             if ((INSTALL_TX_NEW_VERSION == 1)); then
                 rm -rf -- "${VERSIONS:?}/${INSTALL_TX_VERSION:?}"
@@ -581,7 +589,9 @@ declare -A INSTALL_TX_LINK_TARGETS=()
 install_release() {
     local manifest="$SCRIPT_DIR/release-manifest.tsv" version_file="$SCRIPT_DIR/VERSION"
     local version payload index destination expected collision base_preexisting new_install=0
-    local -a collisions=() installed=() history=() stored_map=() bundle_map=()
+    local version_path
+    local -a collisions=() installed=() history=() stored_map=() merged_map=()
+    local -A stored_paths=()
 
     [[ -f $version_file && ! -L $version_file ]] || die "missing regular VERSION file"
     IFS= read -r version < "$version_file" || true
@@ -601,18 +611,32 @@ install_release() {
         validate_state
         load_stable_state
         mapfile -t stored_map < "$STATE/stable-paths.tsv"
-        for ((index = 0; index < ${#MANIFEST_STABLE_PATHS[@]}; index++)); do
-            if [[ ${MANIFEST_STABLE_PATHS[$index]} != - ]]; then
-                bundle_map+=("${MANIFEST_VERSION_PATHS[$index]}"$'\t'"${MANIFEST_STABLE_PATHS[$index]}")
-            fi
-        done
-        [[ ${#stored_map[@]} -eq ${#bundle_map[@]} ]] || die "bundle stable paths do not match the installed release"
-        for ((index = 0; index < ${#stored_map[@]}; index++)); do
-            [[ ${stored_map[$index]} == "${bundle_map[$index]}" ]] || die "bundle stable paths do not match the installed release"
-        done
-        load_stable_state
         assert_stable_links
         assert_current_link
+        merged_map=("${stored_map[@]}")
+        for ((index = 0; index < ${#STABLE_DESTINATIONS[@]}; index++)); do
+            stored_paths[${STABLE_DESTINATIONS[$index]}]=${STABLE_VERSION_PATHS[$index]}
+        done
+        # New helpers may add stable paths. Existing destinations keep exactly
+        # their old targets; rollback to an older payload leaves a new helper's
+        # symlink inactive until that helper exists again. Retain the union so
+        # final uninstall still restores every explicitly replaced legacy file.
+        for ((index = 0; index < ${#MANIFEST_STABLE_PATHS[@]}; index++)); do
+            destination=${MANIFEST_STABLE_PATHS[$index]}
+            [[ $destination != - ]] || continue
+            version_path=${MANIFEST_VERSION_PATHS[$index]}
+            if [[ -n ${stored_paths[$destination]+set} ]]; then
+                [[ ${stored_paths[$destination]} == "$version_path" ]] ||
+                    die "bundle changes an installed stable path: $destination"
+                continue
+            fi
+            STABLE_VERSION_PATHS+=("$version_path")
+            STABLE_DESTINATIONS+=("$destination")
+            merged_map+=("$version_path"$'\t'"$destination")
+            if [[ -e $(root_path "$destination") || -L $(root_path "$destination") ]]; then
+                collisions+=("$destination")
+            fi
+        done
         read_versions "$STATE/installed" installed
         for collision in "${installed[@]}"; do
             [[ $collision != "$version" ]] || die "version is already installed: $version"
@@ -630,13 +654,13 @@ install_release() {
                 collisions+=("$destination")
             fi
         done
-        if ((${#collisions[@]} > 0 && REPLACE == 0)); then
-            printf 'install-release: existing destinations require --replace:\n' >&2
-            printf '  /%s\n' "${collisions[@]}" >&2
-            exit 1
-        fi
         base_preexisting=0
         [[ -d $BASE && ! -L $BASE ]] && base_preexisting=1
+    fi
+    if ((${#collisions[@]} > 0 && REPLACE == 0)); then
+        printf 'install-release: existing destinations require --replace:\n' >&2
+        printf '  /%s\n' "${collisions[@]}" >&2
+        exit 1
     fi
 
     # Build the complete immutable tree before moving any legacy destination or
@@ -653,6 +677,8 @@ install_release() {
         read_versions "$STATE/history" history
         INSTALL_TX_OLD_HISTORY=("${history[@]}")
         INSTALL_TX_OLD_CURRENT=${history[-1]}
+        INSTALL_TX_OLD_STABLE=("${stored_map[@]}")
+        mapfile -t INSTALL_TX_OLD_BACKUPS < "$STATE/backups.tsv"
     fi
     trap finish_install_transaction EXIT
     trap 'exit 129' HUP
@@ -674,10 +700,13 @@ install_release() {
         for ((index = 0; index < ${#STABLE_DESTINATIONS[@]}; index++)); do
             printf '%s\t%s\n' "${STABLE_VERSION_PATHS[$index]}" "${STABLE_DESTINATIONS[$index]}" >> "$STATE/stable-paths.tsv"
         done
-        for collision in "${collisions[@]}"; do
-            backup_existing "$collision"
-        done
+    else
+        INSTALL_TX_STATE_CHANGED=1
+        atomic_lines "$STATE/stable-paths.tsv" "${merged_map[@]}"
     fi
+    for collision in "${collisions[@]}"; do
+        backup_existing "$collision"
+    done
     mv -- "$staging" "$VERSIONS/$version"
     INSTALL_TX_NEW_VERSION=1
 
@@ -836,5 +865,17 @@ if [[ ( "$ACTION" == install || "$ACTION" == rollback ) && -z "$DESTDIR" && -x /
     fi
     if ((bridge_reload_status != 0)); then
         printf '%s\n' 'install-release: bridge installed; run jwm-bridge reload as the desktop user to retire its old process' >&2
+    fi
+fi
+
+# Register Open With metadata only; never change the user's MIME defaults.
+# DESTDIR runs, including packaging tests, never touch the host's app cache.
+if [[ -z $DESTDIR ]]; then
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database /usr/local/share/applications || \
+            printf '%s\n' 'install-release: desktop application cache refresh failed' >&2
+    fi
+    if [[ ( $ACTION == install || $ACTION == rollback ) && -x /usr/local/bin/jwm-player ]] && ! command -v mpv >/dev/null 2>&1; then
+        printf '%s\n' 'install-release: music/video playback needs mpv (Debian/Ubuntu: sudo apt-get install mpv); JWM is installed' >&2
     fi
 fi

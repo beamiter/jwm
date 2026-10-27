@@ -147,7 +147,8 @@ usage() {
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
     dioxus_bar 使用 dx；Tauri bar 会同时构建前端与 src-tauri 后端，再把可执行文件安装到同一目录。
-  - jwm / jwm-tool / jwm-support / jwm-remote 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
+  - jwm / jwm-tool / jwm-support / jwm-remote / jwm-player 通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
+  - 音乐和视频播放运行时需要 mpv；缺少它不影响 JWM 的构建与安装。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
   - 完整安装还将内置静态壁纸复制到 ~/.config/jwm/wallpapers/（支持 XDG_CONFIG_HOME）；
@@ -376,7 +377,7 @@ remove_jwm_cargo_bins() {
     local binary
 
     # JWM 不再安装到 cargo bin；清理历史版本遗留的 JWM 二进制。
-    for binary in jwm jwm-tool jwm-support jwm-remote; do
+    for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
         if [[ -e "$bin_dir/$binary" ]]; then
             info "清理旧的 cargo bin/$binary ..."
             rm -f -- "$bin_dir/$binary"
@@ -670,7 +671,7 @@ sync_selected_bar_config() {
 }
 
 # ============================================================
-# 构建并安装 jwm-bridge
+# 构建并安装 jwm-bridge 和 jwm-player
 #
 # bridge/ 是 workspace 成员，产物落在根 target/；主 cargo build 只构建
 # 根 package，所以这里显式 -p jwm-bridge。
@@ -686,8 +687,8 @@ build_and_install_bridge() {
         exit 1
     fi
 
-    info "编译 jwm-bridge（$BUILD_MODE 模式）..."
-    (cd "$PROJECT_ROOT" && build_workspace -p jwm-bridge)
+    info "编译 jwm-bridge 和 jwm-player（$BUILD_MODE 模式）..."
+    (cd "$PROJECT_ROOT" && build_workspace -p jwm-bridge --bins)
 
     local bridge_target="$JWM_TARGET_DIR"
     if [[ "$BUILD_MODE" == "release" ]]; then
@@ -696,8 +697,22 @@ build_and_install_bridge() {
         bridge_target="$bridge_target/debug"
     fi
 
-    info "同步 jwm-bridge 到 /usr/local/bin ..."
+    info "同步 jwm-bridge 和 jwm-player 到 /usr/local/bin ..."
     install_system_binary "$bridge_target/jwm-bridge" /usr/local/bin
+    install_system_binary "$bridge_target/jwm-player" /usr/local/bin
+
+    # Register Open With choices without touching the user's MIME defaults.
+    local desktop
+    for desktop in jwm-player.desktop jwm-video.desktop; do
+        sudo install -Dm644 "$bridge_dir/dist/$desktop" "/usr/local/share/applications/$desktop"
+    done
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        sudo update-desktop-database /usr/local/share/applications || \
+            warn "播放器已安装，桌面应用缓存更新失败；可稍后运行 update-desktop-database"
+    fi
+    if ! command -v mpv >/dev/null 2>&1; then
+        warn "音乐/视频播放需要 mpv；Debian/Ubuntu: sudo apt-get install mpv（JWM 已正常安装）"
+    fi
 
     # D-Bus 按需激活：应用第一次调用 Notify 时总线才启动 bridge，
     # 不需要写进任何 autostart，也能在 jwm 重启后继续工作。

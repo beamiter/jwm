@@ -466,6 +466,8 @@ impl Jwm {
         // an open launcher keeps its query and is redrawn by the single flush
         // at the end of this tick.
         self.poll_launcher_catalog_job();
+        self.poll_media_library_jobs();
+        self.poll_media_launch_job(backend);
 
         // The wallpaper picker lists its directory on a worker; fill an open
         // picker in the same way.

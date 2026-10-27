@@ -7360,6 +7360,16 @@ mod tests {
 
         jwm.control_center(&mut backend, &WMArgEnum::Int(0))
             .unwrap();
+        // The growing Hub is scrollable. Select the action as a user would,
+        // then verify its visible row, rather than assuming every session
+        // action fits in the first viewport above the Music/Video entries.
+        jwm.features
+            .system_ui
+            .restore_control_selection_kind(Some(ControlKind::LockMonitor), 0);
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::LockMonitor)
+        );
         assert!(
             jwm.features
                 .system_ui
@@ -7392,6 +7402,14 @@ mod tests {
         jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
         jwm.control_center(&mut backend, &WMArgEnum::Int(0))
             .unwrap();
+
+        jwm.features
+            .system_ui
+            .restore_control_selection_kind(Some(ControlKind::UnlockMonitor), 0);
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::UnlockMonitor)
+        );
 
         let text = jwm.features.system_ui.overlay_text();
         assert!(text.contains("Unlock Monitor 0"), "{text}");
@@ -9989,6 +10007,26 @@ mod tests {
         jwm.features.native_root_job = Some(jwm.track_background_job(job));
         assert!(jwm.background_job_readiness_is_complete());
         jwm.features.native_root_job = None;
+        assert!(jwm.background_job_readiness_is_complete());
+    }
+
+    #[test]
+    fn media_workers_keep_idle_poll_until_readiness_is_registered() {
+        use crate::jwm::features::connectivity::BackgroundJob;
+        let mut jwm = empty_jwm();
+        let (scan, _publish) = BackgroundJob::controlled_for_test();
+        jwm.features.media_library.scans[0] = Some(scan);
+        assert!(!jwm.background_job_readiness_is_complete());
+        jwm.async_update_notifier =
+            Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
+        let scan = jwm.features.media_library.scans[0].take().unwrap();
+        jwm.features.media_library.scans[0] = Some(jwm.track_background_job(scan));
+        assert!(jwm.background_job_readiness_is_complete());
+        let (launch, _finish) = BackgroundJob::controlled_for_test();
+        jwm.features.media_library.launch = Some(launch);
+        assert!(!jwm.background_job_readiness_is_complete());
+        let launch = jwm.features.media_library.launch.take().unwrap();
+        jwm.features.media_library.launch = Some(jwm.track_background_job(launch));
         assert!(jwm.background_job_readiness_is_complete());
     }
 
@@ -15575,6 +15613,18 @@ impl Jwm {
             && self
                 .features
                 .launcher_catalog_job
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .media_library
+                .scans
+                .iter()
+                .all(|job| job.as_ref().is_none_or(BackgroundJob::readiness_is_covered))
+            && self
+                .features
+                .media_library
+                .launch
                 .as_ref()
                 .is_none_or(BackgroundJob::readiness_is_covered)
             && self

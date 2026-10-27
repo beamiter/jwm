@@ -17,6 +17,19 @@ Prefer installing the Wayland session (`jwm-wayland.desktop`) and the official
 bar `tao_glow_bar`. See [hardware-validation](../docs/hardware-validation.md)
 before calling a package "stable".
 
+Music/video playback ships as `jwm-player`, built with the `jwm-bridge`
+package. It requires the `mpv` executable at runtime; the compositor and
+installer continue to work when mpv is absent. Both source and release installs
+register `jwm-player.desktop` / `jwm-video.desktop` as **Open With** choices,
+without changing a user's default MIME associations.
+
+The release installer accepts additional stable helper paths while preserving
+every existing destination's target. Use the newer bundle's installer for
+upgrade, rollback, and uninstall. Rolling back to a pre-player payload leaves
+the player's managed links inactive; final uninstall restores any legacy files
+that were replaced with explicit `--replace`. Existing unrelated files at new
+destinations are never overwritten without that option.
+
 ## Arch Linux (AUR sketch)
 
 ```pkgbuild
@@ -29,6 +42,7 @@ arch=('x86_64')
 url="https://github.com/<org>/jwm"
 license=('MIT')
 depends=('libx11' 'libxkbcommon' 'wayland' 'mesa' 'libinput' 'seatd' 'alsa-lib' 'dbus')
+optdepends=('mpv: JWM music and video playback')
 makedepends=('cargo' 'git' 'clang' 'pkgconf')
 provides=('jwm')
 conflicts=('jwm')
@@ -43,12 +57,16 @@ pkgver() {
 build() {
   cd jwm
   cargo build --locked --release --bins
+  cargo build --locked --release -p jwm-bridge --bins
 }
 
 package() {
   cd jwm
   install -Dm755 target/release/jwm target/release/jwm-tool \
-    target/release/jwm-support target/release/jwm-remote -t "$pkgdir/usr/bin"
+    target/release/jwm-support target/release/jwm-remote \
+    target/release/jwm-bridge target/release/jwm-player -t "$pkgdir/usr/bin"
+  install -Dm644 bridge/dist/jwm-player.desktop bridge/dist/jwm-video.desktop \
+    -t "$pkgdir/usr/share/applications"
   install -Dm644 jwm-wayland.desktop \
     "$pkgdir/usr/share/wayland-sessions/jwm.desktop"
   install -Dm644 jwm-x11rb.desktop jwm-xcb.desktop -t "$pkgdir/usr/share/xsessions"

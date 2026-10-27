@@ -9,6 +9,7 @@ mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bridge/dist" "$REPO/as
 cp "$ROOT/scripts/install_jwm_scripts.sh" "$ROOT/scripts/install-wallpapers.sh" "$REPO/scripts/"
 printf 'bundled fixture\n' > "$REPO/assets/wallpapers/01-fixture.png"
 touch "$REPO/bars/tao_glow_bar/Cargo.toml" "$REPO/bridge/Cargo.toml" "$REPO/bridge/dist/org.freedesktop.Notifications.service"
+cp "$ROOT/bridge/dist/jwm-player.desktop" "$ROOT/bridge/dist/jwm-video.desktop" "$REPO/bridge/dist/"
 cat > "$TEST_ROOT/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -31,7 +32,7 @@ if [[ $package == jwm-bridge && $SCENARIO == bridge-failure ]]; then
     echo 'error: bridge compilation failure' >&2
     exit 101
 fi
-if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure && $SCENARIO != sudo-target && $SCENARIO != xdg-target && $SCENARIO != reload-failure ]]; then
+if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SCENARIO != bridge-failure && $SCENARIO != install-failure && $SCENARIO != sudo-target && $SCENARIO != xdg-target && $SCENARIO != reload-failure && $SCENARIO != player-missing && $SCENARIO != player-install-failure ]]; then
     count=0
     [[ ! -f $CASE_DIR/count ]] || read -r count < "$CASE_DIR/count"
     count=$((count + 1))
@@ -47,7 +48,8 @@ if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SC
     fi
 fi
 mkdir -p "$target/$profile"
-for binary in jwm jwm-tool jwm-support jwm-remote jwm-bridge; do
+for binary in jwm jwm-tool jwm-support jwm-remote jwm-bridge jwm-player; do
+    [[ $SCENARIO != player-missing || $binary != jwm-player ]] || continue
     printf '#!/bin/sh\nexit 0\n' > "$target/$profile/$binary"
     chmod +x "$target/$profile/$binary"
 done
@@ -56,6 +58,9 @@ cat > "$TEST_ROOT/bin/sudo" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CASE_DIR/system.log"
 if [[ $SCENARIO == install-failure && $* == *jwm-remote* ]]; then
+    exit 73
+fi
+if [[ $SCENARIO == player-install-failure && $* == *jwm-player* ]]; then
     exit 73
 fi
 STUB
@@ -107,7 +112,7 @@ run_case() {
     [[ $scenario != xdg-target ]] || data_home="$CASE_DIR/custom data"
     mkdir -p "$CASE_DIR/home/.cargo/bin" "$CASE_DIR/config/jwm"
     local binary
-    for binary in jwm jwm-tool jwm-support jwm-remote; do
+    for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
         printf 'old %s\n' "$binary" > "$CASE_DIR/home/.cargo/bin/$binary"
     done
     printf '[status_bar]\nname = "old"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
@@ -115,7 +120,7 @@ run_case() {
     TMPDIR="$CASE_DIR" SUDO_USER="$sudo_user" XDG_DATA_HOME="$data_home" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" CARGO_TARGET_DIR="$target" \
         bash "$REPO/scripts/install_jwm_scripts.sh" --mode "$mode" --jobs 2 --bar tao_glow_bar > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $status == "$expected" ]] || fail "$scenario/$mode status $status, expected $expected"
-    for binary in jwm jwm-tool jwm-support jwm-remote; do
+    for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
         if [[ $expected == 0 ]]; then
             [[ ! -e $CASE_DIR/home/.cargo/bin/$binary ]] || fail "successful migration retained $binary"
         else
@@ -131,8 +136,13 @@ run_case() {
     grep -Fq "build <--locked> <--target-dir> <$resolved>" "$CASE_DIR/cargo.log" || fail 'workspace target missing'
     [[ $(grep -c '<-j> <2>' "$CASE_DIR/cargo.log") -ge 2 ]] || fail 'jobs not passed as two arguments to build/install'
     if [[ $expected == 0 ]]; then
-        grep -Fq '<-p> <jwm-bridge>' "$CASE_DIR/cargo.log" || fail 'bridge build missing'
+        grep -Fq '<-p> <jwm-bridge> <--bins>' "$CASE_DIR/cargo.log" || fail 'bridge/player build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
+        grep -Fq "install -m755 $resolved/$mode/jwm-player /usr/local/bin/" "$CASE_DIR/system.log" || fail 'player artifact not installed'
+        for desktop in jwm-player.desktop jwm-video.desktop; do
+            grep -Fq "install -Dm644 $REPO/bridge/dist/$desktop /usr/local/share/applications/$desktop" "$CASE_DIR/system.log" || fail "player desktop entry missing: $desktop"
+        done
+        ! grep -Eq 'xdg-mime|mimeapps.list' "$CASE_DIR/system.log" || fail 'installer changed default MIME associations'
         if [[ $scenario == sudo-target ]]; then
             grep -Fq -- '-u fixture-user timeout 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'bridge reload did not run as login user'
         else
@@ -144,7 +154,7 @@ run_case() {
             [[ $(cat "$CASE_DIR/config/jwm/wallpapers/01-fixture.png") == "bundled fixture" ]] || fail 'bundled wallpaper install missing'
         fi
     else
-        if [[ $scenario != bridge-failure && $scenario != install-failure ]]; then
+        if [[ $scenario != bridge-failure && $scenario != install-failure && $scenario != player-missing && $scenario != player-install-failure ]]; then
             [[ ! -e $CASE_DIR/system.log ]] || fail 'failed build installed system files'
         fi
     fi
@@ -185,15 +195,17 @@ run_case tee-cargo release 'tee cargo target' 101
 run_case tee-success release 'tee success target' 74
 run_case bridge-failure release 'bridge failed target' 101
 run_case install-failure debug 'install failed target' 73
+run_case player-missing release 'missing player target' 1
+run_case player-install-failure release 'player install failed target' 73
 # A bar-only/no-op invocation must never remove an existing JWM installation.
 export CASE_DIR="$TEST_ROOT/skip-jwm" SCENARIO=success
 mkdir -p "$CASE_DIR/home/.cargo/bin"
-for binary in jwm jwm-tool jwm-support jwm-remote; do
+for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
     printf 'old %s\n' "$binary" > "$CASE_DIR/home/.cargo/bin/$binary"
 done
 PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" \
     bash "$REPO/scripts/install_jwm_scripts.sh" --skip-jwm --skip-bar > "$CASE_DIR/output.log" 2>&1
-for binary in jwm jwm-tool jwm-support jwm-remote; do
+for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
     [[ $(cat "$CASE_DIR/home/.cargo/bin/$binary") == "old $binary" ]] || fail "--skip-jwm removed $binary"
 done
 # Reject malformed input before any build, installation or config generation.

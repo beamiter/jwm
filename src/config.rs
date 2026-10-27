@@ -4191,6 +4191,8 @@ impl Config {
             "media_next" => Some(Jwm::media_next),
             "media_previous" => Some(Jwm::media_previous),
             "media_stop" => Some(Jwm::media_stop),
+            "music_player" => Some(Jwm::music_player),
+            "video_player" => Some(Jwm::video_player),
             "session_menu" => Some(Jwm::session_menu),
             "toggle_night_light" => Some(Jwm::toggle_night_light),
             "toggle_idle_inhibit" => Some(Jwm::toggle_idle_inhibit),

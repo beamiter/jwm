@@ -122,6 +122,9 @@ APT_RUNTIME=(
     # Built-in screen recording encodes and validates MP4 files through these
     # two executables (both are shipped by Debian/Ubuntu's ffmpeg package).
     ffmpeg
+    # JWM's standalone music/video player uses mpv for decoding and display.
+    # This is a runtime executable, not a compositor link-time dependency.
+    mpv
 )
 
 # Optional: xdg-desktop-portal ScreenCast backend (PipeWire).
@@ -154,6 +157,7 @@ if [[ "$DO_APT" == true ]]; then
         warn "  x11:       libx11 libxcb + extensions libxkbcommon"
         warn "  wayland:   libwayland libdrm libgbm libEGL libGLES libinput libseat libudev pixman"
         warn "  misc:      libasound2 libdbus-1 fontconfig freetype openssl"
+        warn "  runtime:   ffmpeg mpv xwayland"
         if [[ "$WITH_TAURI" == "1" ]]; then
             warn "  tauri:     WebKitGTK 4.1 libxdo Ayatana AppIndicator librsvg"
         fi

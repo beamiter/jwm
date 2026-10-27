@@ -2634,6 +2634,20 @@ impl Jwm {
             return IpcResponse::ok(None);
         }
 
+        // Local files are validated by the player worker; IPC admission is
+        // bounded and does not touch disk or wait for D-Bus on this thread.
+        if name == "open_media" {
+            let (kind, paths, enqueue) =
+                match crate::jwm::features::media_library::parse_open_request(args) {
+                    Ok(request) => request,
+                    Err(error) => return IpcResponse::err(error),
+                };
+            return match self.queue_media_playback(backend, kind, paths, enqueue) {
+                Ok(()) => IpcResponse::ok(Some(serde_json::json!({"queued": true}))),
+                Err(error) => IpcResponse::err(error),
+            };
+        }
+
         // Special command: media_control — drive the active player.
         if name == "media_control" {
             let Some(action) = args.get("action").and_then(|value| value.as_str()) else {
@@ -3180,6 +3194,8 @@ impl Jwm {
                         .audio_picker_direction()
                         == Some(crate::jwm::features::system_controls::AudioDirection::Input),
                     "media_players": self.features.system_ui.is_media_players_picker(),
+                    "music_player": self.features.system_ui.is_music_library(),
+                    "video_player": self.features.system_ui.is_video_library(),
                     "window_switcher": self.features.system_ui.is_window_switcher(),
                     "session_lock": self.features.system_ui.is_session_lock(),
                     "monitor_lock": self
@@ -4094,6 +4110,8 @@ impl Jwm {
                 audio_input_picker: self.features.system_ui.audio_picker_direction()
                     == Some(crate::jwm::features::system_controls::AudioDirection::Input),
                 media_players: self.features.system_ui.is_media_players_picker(),
+                music_player: self.features.system_ui.is_music_library(),
+                video_player: self.features.system_ui.is_video_library(),
                 window_switcher: self.features.system_ui.is_window_switcher(),
                 session_lock: self.features.system_ui.is_session_lock(),
                 monitor_lock: self.features.system_ui.lock_scope().is_some_and(|scope| {

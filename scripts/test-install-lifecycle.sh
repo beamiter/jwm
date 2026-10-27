@@ -89,11 +89,15 @@ mkdir -p -- "$DESTDIR/usr/local/bin"
 printf 'legacy-jwm\n' > "$DESTDIR/usr/local/bin/jwm"
 chmod 0751 -- "$DESTDIR/usr/local/bin/jwm"
 
-# Model a real pre-remote release: v1 has no helper entry at all, while v2
-# adds jwm-remote as versioned-only content.  The stable destination map must
-# remain compatible across that manifest extension.
+# Model a pre-player release. v2 adds player/desktop stable destinations and
+# the older versioned-only remote helper. Upgrade and rollback must retain the
+# original managed paths and restore collisions only with explicit --replace.
 LEGACY_MANIFEST="$TMP_ROOT/release-manifest-v1.tsv"
-awk -F '\t' '$1 == "built" && $2 == "jwm-remote" { next } { print }' \
+awk -F '\t' '
+    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player") { next }
+    $2 == "bridge/dist/jwm-player.desktop" || $2 == "bridge/dist/jwm-video.desktop" { next }
+    { print }
+' \
     "$MANIFEST" > "$LEGACY_MANIFEST"
 BUNDLE_V1=$(make_fake_bundle 1.0.0 release-v1 "$LEGACY_MANIFEST")
 BUNDLE_V2=$(make_fake_bundle 2.0.0 release-v2 "$MANIFEST")
@@ -154,12 +158,34 @@ assert_file_contains "$DESTDIR/usr/local/lib/jwm/.release-state/backups/usr/loca
 while IFS=$'\t' read -r kind source version_path stable_path mode extra || [[ -n ${kind:-} ]]; do
     [[ -n ${kind:-} && $kind != \#* && $stable_path != - ]] || continue
     assert_relative_link "$DESTDIR/$stable_path"
-done < "$MANIFEST"
+done < "$LEGACY_MANIFEST"
 
-bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR"
+# New destinations are allowed; changing an existing managed target is not.
+BAD_REMAP="$TMP_ROOT/bundle-remapped"
+cp -a -- "$BUNDLE_V2" "$BAD_REMAP"
+sed -i 's@bin/jwm-tool\t@bin/renamed-tool\t@' "$BAD_REMAP/release-manifest.tsv"
+cp -- "$BAD_REMAP/payload/usr/local/lib/jwm/versions/2.0.0/bin/jwm-tool" \
+    "$BAD_REMAP/payload/usr/local/lib/jwm/versions/2.0.0/bin/renamed-tool"
+if bash "$BAD_REMAP/install-release.sh" install --destdir "$DESTDIR" --replace >"$TMP_ROOT/remap.log" 2>&1; then
+    fail "upgrade changed an existing managed symlink's target"
+fi
+assert_file_contains "$TMP_ROOT/remap.log" 'bundle changes an installed stable path'
+[[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "rejected path remap changed current"
+
+printf 'legacy-player\n' > "$DESTDIR/usr/local/bin/jwm-player"
+if bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR" >"$TMP_ROOT/player-collision.log" 2>&1; then
+    fail "upgrade replaced a newly managed player destination without --replace"
+fi
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-player" legacy-player
+[[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "player collision changed current"
+bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR" --replace
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/2.0.0 ]] || fail "v2 did not become current"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v2:jwm
 assert_file_contains "$DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote" release-v2:jwm-remote
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-player" release-v2:jwm-player
+assert_relative_link "$DESTDIR/usr/local/share/applications/jwm-player.desktop"
+assert_relative_link "$DESTDIR/usr/local/share/applications/jwm-video.desktop"
+assert_file_contains "$DESTDIR/usr/local/lib/jwm/.release-state/backups/usr/local/bin/jwm-player" legacy-player
 [[ ! -e $DESTDIR/usr/local/bin/jwm-remote && ! -L $DESTDIR/usr/local/bin/jwm-remote ]] ||
     fail "v2 created an upgrade-incompatible stable jwm-remote path"
 
@@ -168,6 +194,8 @@ bash "$BUNDLE_V2/install-release.sh" rollback --destdir "$DESTDIR"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v1:jwm
 [[ ! -e $DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote ]] ||
     fail "rollback to pre-remote v1 left jwm-remote active"
+[[ -L $DESTDIR/usr/local/bin/jwm-player && ! -e $DESTDIR/usr/local/bin/jwm-player ]] ||
+    fail "rollback to pre-player release left player executable active"
 [[ -d $DESTDIR/usr/local/lib/jwm/versions/2.0.0 ]] || fail "rollback unexpectedly deleted v2"
 
 # Exercise both version-selective branches: removing an inactive version must
@@ -194,9 +222,10 @@ assert_file_contains "$DESTDIR/usr/local/bin/jwm" legacy-jwm
 
 while IFS=$'\t' read -r kind source version_path stable_path mode extra || [[ -n ${kind:-} ]]; do
     [[ -n ${kind:-} && $kind != \#* && $stable_path != - ]] || continue
-    [[ $stable_path == usr/local/bin/jwm ]] && continue
+    [[ $stable_path == usr/local/bin/jwm || $stable_path == usr/local/bin/jwm-player ]] && continue
     [[ ! -e $DESTDIR/$stable_path && ! -L $DESTDIR/$stable_path ]] || fail "managed destination remains after uninstall: $stable_path"
 done < "$MANIFEST"
+assert_file_contains "$DESTDIR/usr/local/bin/jwm-player" legacy-player
 
 # A fixed source epoch and identical inputs must produce byte-identical release
 # archives, and each adjacent checksum must verify from its output directory.
@@ -251,11 +280,14 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-support \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-remote \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-bridge \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-player \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_glow_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_pixels_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/xsessions/jwm-x11rb.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/wayland-sessions/jwm-wayland.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/dbus-1/services/org.freedesktop.Notifications.service \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/applications/jwm-player.desktop \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/applications/jwm-video.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/README.md \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/CHANGELOG.md \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/LICENSE \

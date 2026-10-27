@@ -9,6 +9,10 @@ license = "MIT"
 name = "jwm-bridge"
 path = "src/main.rs"
 
+[[bin]]
+name = "jwm-player"
+path = "src/bin/jwm_player.rs"
+
 [dependencies]
 jwm_ipc_transport = { path = "../crates/jwm_ipc_transport" }
 # Keep independent executor capacity for notification discovery and media work;

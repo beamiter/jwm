@@ -1,3 +1,39 @@
+## 2026-10-27 — Native music and video playback
+
+- Shell Hub now opens searchable Music / Video libraries with **Alt+F10 → U / V**.
+  Enter plays one file, Shift+Enter appends it, Ctrl+Enter queues the filtered
+  results from the selection, and F5 rescans. Background discovery includes XDG
+  media folders and configured recording directories, with bounded traversal,
+  no directory-symlink recursion, and event-loop completion wakeups.
+- The new `jwm-player` bridge binary runs one native mpv window per D-Bus session.
+  Private socket-pair IPC and standard MPRIS connect playback state, metadata,
+  media keys, seek, volume, repeat, and queue controls to the existing JWM UI.
+  Concurrent launches forward to the existing player; stopping retains the
+  queue. Decoder errors surface as JWM notifications. Decoder work stays outside
+  the compositor, and the launcher registers its exact child PID for reaping.
+- Source installers, updater, release packaging, dependency bootstrap, and
+  managed-path migrations include the player and Music / Video desktop entries.
+  Existing MIME defaults are preserved. Usage and IPC examples are in
+  `docs/media-playback.md`; playback requires mpv and a session D-Bus.
+- Validation on Rust 1.99.1: default all-targets check passed; complete root
+  tests passed **7330 / 0 failed / 1 ignored** across 11 targets with
+  `scripts/test.sh --offline --lib --bins --tests -- --test-threads=1`.
+  The existing one-second IPC timing test exceeded its wall-clock bound once
+  during a parallel run, then passed alone in 0.24 seconds and in the complete
+  serial run without code or assertion changes. All private Xvfb/XWM protocol
+  fixtures and Hub navigation tests ran. Root and bridge strict Clippy passed.
+- Bridge tests passed **126 / 0 failed / 0 ignored** with
+  `JWM_REQUIRE_DBUS_DAEMON=1 RUN_JWM_MPV_TESTS=1`, including real mpv 0.37
+  WAV / MP4 decoding, transport, seeking, queue and stop/resume behavior, private
+  D-Bus ownership races, forwarding, and clean shutdown. Source-install,
+  bootstrap, release lifecycle / reproducibility, updater (16 Python cases),
+  and release failure / rollback (21 cases) checks passed; changed scripts passed
+  ShellCheck and both desktop entries passed desktop-file-validate.
+- Remaining verification boundary: decoder tests use null audio / video sinks;
+  physical speakers, GPU presentation, and live Wayland / X11 player-window
+  behavior require a desktop session. No compositor was launched on a user's
+  display and no live desktop configuration was changed.
+
 ## 2026-10-27 — Spawn pins follow explicit tag moves
 
 - Alt+Ctrl+P keeps its existing persistent application-identity pin. Alt+Shift+1–9,

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+# Canonical desktop ID matches the player's Wayland app-id and MPRIS identity.
+Name=JWM Music
+Name[zh_CN]=JWM 音乐
+Comment=Play music and recordings with JWM media controls
+Exec=jwm-player --music -- %F
+TryExec=jwm-player
+Icon=audio-x-generic
+Terminal=false
+StartupNotify=false
+StartupWMClass=jwm-player
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/ogg;audio/opus;audio/x-wav;audio/wav;audio/mp4;audio/aac;audio/x-aiff;audio/x-ms-wma;
+Keywords=Music;Audio;Recordings;Playlist;

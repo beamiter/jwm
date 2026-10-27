@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=JWM Video
+Name[zh_CN]=JWM 视频
+Comment=Play videos and screen recordings with JWM media controls
+Exec=jwm-player --video -- %F
+TryExec=jwm-player
+Icon=video-x-generic
+Terminal=false
+StartupNotify=false
+StartupWMClass=jwm-player
+Categories=AudioVideo;Video;Player;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/ogg;video/x-ms-wmv;video/mp2t;
+Keywords=Video;Movie;Recordings;Playlist;

@@ -1012,6 +1012,8 @@ impl Jwm {
             || eq!(Jwm::bluetooth_picker)
             || eq!(Jwm::clipboard_picker)
             || eq!(Jwm::wallpaper_picker)
+            || eq!(Jwm::music_player)
+            || eq!(Jwm::video_player)
             || eq!(Jwm::audio_output_picker)
             || eq!(Jwm::audio_input_picker)
             || eq!(Jwm::monitor_layout)
@@ -1137,6 +1139,10 @@ impl Jwm {
             "toggle_audio_recording"
         } else if eq!(Jwm::toggle_mic_mute) {
             "toggle_mic_mute"
+        } else if eq!(Jwm::music_player) {
+            "music_player"
+        } else if eq!(Jwm::video_player) {
+            "video_player"
         } else {
             "<unknown>"
         }

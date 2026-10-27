@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import re
 
 SCRIPT = Path(__file__).resolve().with_name('git-update-all.sh')
 
@@ -99,6 +100,29 @@ class UpdateInstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.lines(), ['cargo:build --release --locked'])
         self.assertIn('已编译', result.stdout)
+
+    def test_jwm_build_only_builds_bridge_and_player_helpers(self):
+        self.project('jwm')
+        result = self.run_script('-B', '-C', '-q')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lines(), ['cargo:build --release --locked -p jwm -p jwm-bridge --bins'])
+
+    def test_jwm_readiness_requires_player_beside_compositor(self):
+        # Exercise the production predicate against a private install prefix;
+        # never create or inspect a fixture in the host's /usr/local/bin.
+        predicate = re.search(r'^jwm_helpers_are_ready\(\) \{\n.*?^\}',
+                              SCRIPT.read_text(), re.MULTILINE | re.DOTALL).group()
+        for name in ('jwm', 'jwm-bridge'):
+            self.executable(self.installed / name, '#!/bin/sh\nexit 0\n')
+        def ready():
+            return subprocess.run(['bash', '-c', predicate + '\njwm_helpers_are_ready "$1"',
+                                   'test', str(self.installed / 'jwm')],
+                                  env=self.env, capture_output=True).returncode
+        self.assertNotEqual(ready(), 0)
+        self.executable(self.installed / 'jwm-player', '#!/bin/sh\nexit 0\n')
+        self.assertEqual(ready(), 0)
+        (self.installed / 'jwm-player').chmod(0o644)
+        self.assertNotEqual(ready(), 0)
 
     def test_missing_installed_command_triggers_install_even_with_existing_artifact(self):
         self.project('ember')

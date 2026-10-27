@@ -1,5 +1,9 @@
 # Media controls
 
+For playing local music, videos, and recordings, see
+[JWM music and video playback](media-playback.md). Its `jwm-player` helper uses
+the same MPRIS controls described here.
+
 The shell shows what is playing and drives it: a transport row at the top of
 the control center, media keys bound out of the box, and an OSD card when the
 track changes.

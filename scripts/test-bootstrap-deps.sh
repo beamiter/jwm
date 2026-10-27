@@ -39,4 +39,19 @@ mkdir -p "$TEST_ROOT/custom cargo"
 HOME="$TEST_ROOT/home" CARGO_HOME="$TEST_ROOT/custom cargo" PATH="$TEST_ROOT/bin:$PATH" \
     bash "$ROOT/scripts/bootstrap_deps.sh" --no-apt --no-rust --cn > "$TEST_ROOT/custom.log" 2>&1
 [[ -f $TEST_ROOT/custom\ cargo/config.toml ]] || fail 'CARGO_HOME was ignored'
+# Record the requested packages without contacting apt or requiring privileges.
+cat > "$TEST_ROOT/bin/id" <<'STUB'
+#!/bin/sh
+printf '0\n'
+STUB
+cat > "$TEST_ROOT/bin/apt-get" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" >> "$BOOTSTRAP_TEST_APT_LOG"
+STUB
+chmod +x "$TEST_ROOT/bin/id" "$TEST_ROOT/bin/apt-get"
+HOME="$TEST_ROOT/home" CARGO_HOME="$TEST_ROOT/home/.cargo" JWM_CN_MIRROR=0 \
+    BOOTSTRAP_TEST_APT_LOG="$TEST_ROOT/apt.log" PATH="$TEST_ROOT/bin:$PATH" \
+    bash "$ROOT/scripts/bootstrap_deps.sh" --no-rust > "$TEST_ROOT/apt-output.log" 2>&1
+grep -Fxq mpv "$TEST_ROOT/apt.log" || fail 'player runtime omitted from bootstrap'
+grep -Fxq ffmpeg "$TEST_ROOT/apt.log" || fail 'recording runtime omitted from bootstrap'
 printf 'test-bootstrap-deps: PASS\n'

@@ -188,7 +188,7 @@ usage() {
                     预构建产物；默认装到 ~/.local/bin。这四个目标都不需要 sudo。
   jwm              scripts/install_jwm_scripts.sh —— 默认安装完整组件：
                    裸 cargo build 只出根 package 的四个二进制，不编 bar 和
-                   jwm-bridge，也不同步到 /usr/local/bin，更新完跑的还是旧的
+                   jwm-bridge/jwm-player，也不同步到 /usr/local/bin，更新完跑的还是旧的
                    那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
   jsh              scripts/install-jsh.sh --force（本地源码构建并安装静态 musl）
   jagent,jterm_core cargo build --release --locked（库 crate）
@@ -196,7 +196,7 @@ usage() {
   LifeAI.jl        锁定项目环境下 instantiate/precompile 并加载 LifeAI
 
 jagent/jterm_core/cplus/LifeAI.jl 只构建或预编译。-C 可让应用也只编译不安装。
-产物检测看的是各项目真正落地的位置: jwm 看 /usr/local/bin/jwm，四个终端看
+产物检测看的是各项目真正落地的位置: jwm 检查 /usr/local/bin 下的 jwm、bridge、player，四个终端看
 安装脚本的目标目录（四终端默认 ~/.local/bin，跟随 --prefix/--bin-dir/DESTDIR），
 jsh 看其安装目录；仅编译模式和 jagent/jterm_core 看 Cargo release 产物，cplus 看 build/m；
 LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在更新或 -B 时执行。
@@ -755,6 +755,14 @@ artifact_path() {
     printf '%s/release/%s\n' "$target_dir" "$name"
 }
 
+jwm_helpers_are_ready() {
+    local binary="$1" directory helper
+    directory=${binary%/*}
+    for helper in jwm jwm-bridge jwm-player; do
+        [ -x "$directory/$helper" ] || return 1
+    done
+}
+
 artifact_is_ready() {
     local name="$1" repo="$2" artifact
     # Julia's precompile cache belongs to DEPOT_PATH, not the repository.  A
@@ -763,6 +771,7 @@ artifact_is_ready() {
     [ "$name" = "LifeAI.jl" ] && return 0
     artifact="$(artifact_path "$name" "$repo")"
     case "$name" in
+        jwm)              jwm_helpers_are_ready "$artifact" ;;
         jagent|jterm_core) [ -f "$artifact" ] ;;
         *)                 [ -x "$artifact" ] ;;
     esac
@@ -805,7 +814,8 @@ build_cmd() {
                     printf '%s\n' cargo build --release --locked
                 fi
                 return ;;
-            ember|frost|jwm) printf '%s\n' cargo build --release --locked; return ;;
+            ember|frost) printf '%s\n' cargo build --release --locked; return ;;
+            jwm) printf '%s\n' cargo build --release --locked -p jwm -p jwm-bridge --bins; return ;;
         esac
     fi
     case "$name" in
@@ -820,7 +830,7 @@ build_cmd() {
             [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
             ;;
         # jwm 只有“安装”这一种做法：根 workspace 的 cargo build 只产出
-        # jwm/jwm-tool/jwm-support/jwm-remote，bar 和 jwm-bridge 都不在里面，产物也不会
+        # jwm/jwm-tool/jwm-support/jwm-remote，bar、bridge/player 都不在里面，产物也不会
         # 进 /usr/local/bin，编完了跑的还是旧的那份。所以直接跑安装脚本，
         # 它自带构建（装 bar、bridge、desktop 文件，要 sudo）。
         jwm)

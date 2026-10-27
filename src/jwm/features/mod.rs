@@ -26,6 +26,8 @@ pub mod launcher;
 pub mod layout_picker;
 pub mod magnifier;
 pub mod media;
+pub mod media_library;
+mod media_playback;
 pub mod monitor_lock;
 pub mod native_root;
 pub mod notifications;
@@ -232,6 +234,8 @@ pub struct FeatureStates {
     /// Completion time of the last catalog scan, for the bounded stale-while-
     /// revalidate policy in the launcher opener.
     pub launcher_catalog_refreshed_at: Option<std::time::Instant>,
+    /// Bounded worker catalogs and launch admission for native media playback.
+    pub media_library: media_library::MediaLibrary,
     /// The directory listing for an open wallpaper picker: the resolved
     /// directory and the images in it. A large folder or a network mount
     /// can take seconds to read, so the picker opens scanning and the frame

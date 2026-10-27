@@ -41,6 +41,9 @@ not a new tiling paradigm and not a feature-count race.
 - Tags, per-monitor state, overview/expose, display layout UI, screenshots,
   screen/audio recording, session restore, gestures, accessibility filters,
   HDR/VRR/color-management plumbing, and direct-scanout diagnostics.
+- [Music and video playback](docs/media-playback.md) from the Shell Hub, with
+  searchable local libraries, playlists, a native player window, and shared
+  media keys / now-playing controls (`mpv` runtime).
 - Full-screen WaterLily.jl simulation frames on the X11RB/XCB compositor,
   produced externally on CPU, CUDA, or ROCm.
 - Live configuration reload and a newline-delimited JSON IPC API exposed through

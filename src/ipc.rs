@@ -182,6 +182,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "attach",
         "audio_input_picker",
         "audio_output_picker",
+        "music_player",
+        "video_player",
         "bar",
         "bluetooth_picker",
         "bt",
@@ -371,6 +373,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "close_notification",
         "command_batch",
         "media_control",
+        "open_media",
         "move_window_to_monitor",
         "notify",
         "reload_config",
@@ -644,6 +647,11 @@ pub struct RuntimeFeatureStates {
     pub audio_input_picker: bool,
     /// Media players picker is up.
     pub media_players: bool,
+    /// Native local music/video library is open (additive status fields).
+    #[serde(default)]
+    pub music_player: bool,
+    #[serde(default)]
+    pub video_player: bool,
     /// Window switcher is up.
     pub window_switcher: bool,
     /// Session lock screen is up (not a per-monitor lock shade).
@@ -1528,6 +1536,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "media_next" | "next" => Ok((Jwm::media_next as WMFuncType, WMArgEnum::Int(0))),
         "media_previous" | "prev" => Ok((Jwm::media_previous as WMFuncType, WMArgEnum::Int(0))),
         "media_stop" | "stop" => Ok((Jwm::media_stop as WMFuncType, WMArgEnum::Int(0))),
+        "music_player" => Ok((Jwm::music_player as WMFuncType, WMArgEnum::Int(0))),
+        "video_player" => Ok((Jwm::video_player as WMFuncType, WMArgEnum::Int(0))),
         "session_menu" | "session" => Ok((Jwm::session_menu as WMFuncType, WMArgEnum::Int(0))),
         "toggle_night_light" | "night" => {
             Ok((Jwm::toggle_night_light as WMFuncType, WMArgEnum::Int(0)))
@@ -3467,6 +3477,8 @@ mod tests {
                 audio_output_picker: false,
                 audio_input_picker: false,
                 media_players: false,
+                music_player: false,
+                video_player: false,
                 window_switcher: false,
                 session_lock: false,
                 monitor_lock: false,

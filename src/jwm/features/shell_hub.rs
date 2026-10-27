@@ -18,16 +18,20 @@ pub enum ShellHubRoute {
     Wallpaper,
     /// After Wallpaper: Theme lists the known `appearance.ui_theme` values.
     Theme,
+    Music,
+    Video,
 }
 
 impl ShellHubRoute {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Applications,
         Self::Notifications,
         Self::Clipboard,
         Self::Calendar,
         Self::Wallpaper,
         Self::Theme,
+        Self::Music,
+        Self::Video,
     ];
 
     #[must_use]
@@ -39,6 +43,8 @@ impl ShellHubRoute {
             Self::Calendar => "Calendar",
             Self::Wallpaper => "Wallpaper",
             Self::Theme => "Theme",
+            Self::Music => "Music",
+            Self::Video => "Video",
         }
     }
 
@@ -51,6 +57,8 @@ impl ShellHubRoute {
             Self::Calendar => "\u{f073}",      // calendar
             Self::Wallpaper => "\u{f03e}",     // image
             Self::Theme => "\u{f1fc}",         // paint-brush (FA-4, <0xf600)
+            Self::Music => "\u{f001}",
+            Self::Video => "\u{f008}",
         }
     }
 
@@ -63,6 +71,9 @@ impl ShellHubRoute {
             Self::Calendar => 'd',
             Self::Wallpaper => 'w',
             Self::Theme => 't',
+            // M already mutes the Volume/Input rows in the control center.
+            Self::Music => 'u',
+            Self::Video => 'v',
         }
     }
 
@@ -75,6 +86,8 @@ impl ShellHubRoute {
             'd' => Some(Self::Calendar),
             'w' => Some(Self::Wallpaper),
             't' => Some(Self::Theme),
+            'u' => Some(Self::Music),
+            'v' => Some(Self::Video),
             _ => None,
         }
     }
@@ -103,6 +116,8 @@ impl ShellHubRoute {
                 .filter(|name| !name.is_empty())
                 .map(compact_status)
                 .unwrap_or_else(|| "choose theme".to_string()),
+            Self::Music => "browse & play".into(),
+            Self::Video => "browse & watch".into(),
         };
         let shortcut = self.shortcut().to_ascii_uppercase();
         format!(

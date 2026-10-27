@@ -169,6 +169,8 @@ fn status_bar_shell_is_mine(
         Some(ShellHubRoute::Calendar) => state.is_calendar(),
         Some(ShellHubRoute::Wallpaper) => state.is_wallpaper_picker(),
         Some(ShellHubRoute::Theme) => state.is_theme_picker(),
+        Some(ShellHubRoute::Music) => state.is_music_library(),
+        Some(ShellHubRoute::Video) => state.is_video_library(),
     }
 }
 
@@ -1413,6 +1415,10 @@ impl Jwm {
             ShellHubRoute::Calendar => SystemUiState::calendar(chrono::Local::now().naive_local()),
             ShellHubRoute::Wallpaper => self.wallpaper_picker_state(backend),
             ShellHubRoute::Theme => Self::theme_picker_state(),
+            ShellHubRoute::Music => self
+                .media_library_state(crate::jwm::features::media_library::MediaKind::Music, false),
+            ShellHubRoute::Video => self
+                .media_library_state(crate::jwm::features::media_library::MediaKind::Video, false),
         };
 
         self.features.system_ui_return_to_hub = true;

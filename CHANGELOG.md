@@ -5,6 +5,19 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Music and video playback
+
+- Shell Hub has searchable Music (`U`) and Video (`V`) libraries, including
+  JWM's saved recordings. Enter plays one file, Shift+Enter appends it, and
+  Ctrl+Enter plays the filtered list from the selected file. F5 refreshes.
+- The new `jwm-player` helper owns one mpv window per D-Bus session and exposes
+  playback, seeking and track metadata through MPRIS. Existing media keys,
+  status bars and Shell Hub controls work with the player. Music shows album
+  artwork when present; video has normal window and fullscreen controls.
+- File-manager Open With entries, shell-free `open_media` IPC, source builds,
+  updater checks and release installation include the player. mpv is a runtime
+  dependency; decoding and bounded library scans stay outside the compositor.
+
 ### Status bar, jwm-tool and screen-cast portal fixes
 
 - Status bars no longer count a wireless mouse, keyboard or game controller

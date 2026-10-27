@@ -439,6 +439,8 @@ pub enum ListKind {
     /// MPRIS bus suffixes the control-center media row can pin — the `o`
     /// picker counterpart of the `p` cycle key.
     MediaPlayers,
+    Music,
+    Video,
     /// The Alt+Tab MRU switcher. Unlike the other lists it is not opened to
     /// be browsed: it exists for one held-modifier gesture and closes the
     /// moment the modifier comes up.
@@ -457,6 +459,8 @@ impl ListKind {
             Self::AudioOutput => "\u{f028}  AUDIO OUTPUT",
             Self::AudioInput => "\u{f130}  AUDIO INPUT",
             Self::MediaPlayers => "\u{f001}  PLAYERS",
+            Self::Music => "\u{f001}  MUSIC",
+            Self::Video => "\u{f008}  VIDEO",
             Self::WindowSwitcher => "\u{f0ec}  WINDOWS",
         }
     }
@@ -497,6 +501,9 @@ impl ListKind {
                 "type  filter    Click/Enter  apply    F5  refresh    PgUp/PgDn  page    Esc  close"
             }
             Self::Theme => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Music | Self::Video => {
+                "type  filter    Enter  play    Shift+Enter  enqueue    Ctrl+Enter  play list    F5  refresh    Esc"
+            }
             Self::AudioOutput | Self::AudioInput | Self::MediaPlayers => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
@@ -554,6 +561,8 @@ pub enum RowData {
     AudioDevice,
     /// The MPRIS bus suffix lives in the row's key.
     MediaPlayer,
+    /// Absolute local media path in the row's key.
+    MediaFile,
     /// The Alt+Tab switcher: the row stands for this raw window id, resolved
     /// back through `wintoclient` when the gesture commits.
     WindowSwitcher {
@@ -1300,6 +1309,8 @@ impl SystemUiState {
                 ListKind::AudioOutput => "audio_output_picker",
                 ListKind::AudioInput => "audio_input_picker",
                 ListKind::MediaPlayers => "media_players",
+                ListKind::Music => "music_player",
+                ListKind::Video => "video_player",
                 ListKind::WindowSwitcher => "window_switcher",
             },
             Self::Calendar { .. } => "calendar",
@@ -1640,6 +1651,14 @@ impl SystemUiState {
                 enabled: false,
                 label: ShellHubRoute::Theme.row(None, ui_theme),
             });
+            for route in [ShellHubRoute::Music, ShellHubRoute::Video] {
+                entries.push(ControlEntry {
+                    kind: ControlKind::Shell(route),
+                    percent: 0,
+                    enabled: false,
+                    label: route.row(None, None),
+                });
+            }
         }
         if let Some(media) = media {
             entries.push(ControlEntry {
@@ -2362,7 +2381,7 @@ impl SystemUiState {
         match self {
             Self::Launcher { query, .. } | Self::Info { query, .. } => !query.is_empty(),
             Self::ListPanel {
-                kind: ListKind::Clipboard | ListKind::Wallpaper,
+                kind: ListKind::Clipboard | ListKind::Wallpaper | ListKind::Music | ListKind::Video,
                 query,
                 prompt: None,
                 ..
@@ -2378,7 +2397,7 @@ impl SystemUiState {
             Self::Launcher { query, .. }
             | Self::Info { query, .. }
             | Self::ListPanel {
-                kind: ListKind::Wallpaper,
+                kind: ListKind::Wallpaper | ListKind::Music | ListKind::Video,
                 query,
                 ..
             } => {
@@ -2745,6 +2764,140 @@ impl SystemUiState {
         };
         taken.wipe();
         true
+    }
+
+    // --- Music and video libraries ---
+
+    pub fn media_library(
+        kind: crate::jwm::features::media_library::MediaKind,
+        catalog: Option<&crate::jwm::features::media_library::MediaCatalog>,
+        scanning: bool,
+    ) -> Self {
+        use crate::jwm::features::media_library::MediaKind;
+        let rows: Vec<_> = catalog
+            .into_iter()
+            .flat_map(|catalog| catalog.entries.iter())
+            .map(|entry| ListRow {
+                key: entry.path.clone(),
+                text: format!(
+                    "{}  {}",
+                    if kind == MediaKind::Music {
+                        "\u{f001}"
+                    } else {
+                        "\u{f008}"
+                    },
+                    entry.label
+                ),
+                data: RowData::MediaFile,
+            })
+            .collect();
+        let source_rows = Some(rows.clone().into());
+        Self::ListPanel {
+            kind: if kind == MediaKind::Music {
+                ListKind::Music
+            } else {
+                ListKind::Video
+            },
+            rows,
+            source_rows,
+            row_icons: Vec::new(),
+            selected: 0,
+            message: if scanning {
+                "Scanning media folders…".into()
+            } else {
+                catalog.map_or_else(
+                    || "Scan unavailable; press F5 to retry".into(),
+                    |catalog| catalog.message.clone(),
+                )
+            },
+            prompt: None,
+            query: String::new(),
+            empty: "No media files found".into(),
+        }
+    }
+
+    pub fn media_library_kind(&self) -> Option<crate::jwm::features::media_library::MediaKind> {
+        use crate::jwm::features::media_library::MediaKind;
+        match self {
+            Self::ListPanel {
+                kind: ListKind::Music,
+                ..
+            } => Some(MediaKind::Music),
+            Self::ListPanel {
+                kind: ListKind::Video,
+                ..
+            } => Some(MediaKind::Video),
+            _ => None,
+        }
+    }
+
+    pub fn is_music_library(&self) -> bool {
+        self.is_list(ListKind::Music)
+    }
+    pub fn is_video_library(&self) -> bool {
+        self.is_list(ListKind::Video)
+    }
+
+    /// Preserve typed queries and the selected file when an asynchronous scan
+    /// completes, even when new recordings changed the sorted order.
+    pub fn refresh_media_library(&mut self, mut next: Self) {
+        if self.media_library_kind().is_none()
+            || self.media_library_kind() != next.media_library_kind()
+        {
+            return;
+        }
+        let Self::ListPanel {
+            rows,
+            selected,
+            query,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let previous = rows.get(*selected).map(|row| row.key.clone());
+        if let Self::ListPanel {
+            query: next_query, ..
+        } = &mut next
+        {
+            next_query.clone_from(query);
+        }
+        next.refresh_matches();
+        if let Self::ListPanel { rows, selected, .. } = &mut next {
+            *selected = previous
+                .and_then(|key| rows.iter().position(|row| row.key == key))
+                .unwrap_or(0);
+        }
+        *self = next;
+    }
+
+    /// Ctrl+Enter plays the visible filtered list, beginning with the selected
+    /// file and wrapping once. Oversized lists remain errors, never truncations.
+    pub fn media_library_paths(&self, all: bool) -> Vec<String> {
+        let Self::ListPanel {
+            kind: ListKind::Music | ListKind::Video,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        if all {
+            rows.iter()
+                .cycle()
+                .skip(*selected)
+                .take(
+                    rows.len()
+                        .min(crate::jwm::features::media_library::MAX_QUEUE_FILES + 1),
+                )
+                .map(|row| row.key.clone())
+                .collect()
+        } else {
+            rows.get(*selected)
+                .map(|row| vec![row.key.clone()])
+                .unwrap_or_default()
+        }
     }
 
     // --- Wallpaper picker ---
@@ -3738,14 +3891,14 @@ impl SystemUiState {
     }
 
     pub fn push_char(&mut self, ch: char) {
-        if self.is_wallpaper_picker() && ch.is_control() {
+        if (self.is_wallpaper_picker() || self.media_library_kind().is_some()) && ch.is_control() {
             return;
         }
         match self {
             Self::Launcher { query, .. }
             | Self::Info { query, .. }
             | Self::ListPanel {
-                kind: ListKind::Wallpaper,
+                kind: ListKind::Wallpaper | ListKind::Music | ListKind::Video,
                 query,
                 prompt: None,
                 ..
@@ -3789,7 +3942,7 @@ impl SystemUiState {
                 query.pop();
             }
             Self::ListPanel {
-                kind: ListKind::Wallpaper,
+                kind: ListKind::Wallpaper | ListKind::Music | ListKind::Video,
                 query,
                 prompt: None,
                 ..
@@ -4836,7 +4989,7 @@ impl SystemUiState {
                         ControlKind::BarPosition | ControlKind::BarThickness | ControlKind::BarPadding)) {
                         "\u{f060}/\u{f061} / wheel  adjust    Click/Enter  next    Saved automatically    Esc".into()
                     } else if *shell_hub {
-                        "A apps  N notices  C clipboard  D calendar  W wallpaper    \u{f062}/\u{f063} move  Click/Enter  Esc"
+                        "U music  V video  A apps  N notices  C clipboard  D calendar  W wallpaper  T theme    \u{f062}/\u{f063}  Enter  Esc"
                             .into()
                     } else {
                         "\u{f060}/\u{f061}  adjust    Click/Enter  toggle    Esc  close".into()
@@ -4874,6 +5027,8 @@ impl SystemUiState {
                     // Wallpaper scan status remains visible below that result.
                     let fallback: &str = if !query.is_empty() && *kind == ListKind::Wallpaper {
                         "No matching wallpapers"
+                    } else if !query.is_empty() && matches!(kind, ListKind::Music | ListKind::Video) {
+                        "No matching media files"
                     } else if !message.is_empty() {
                         message.as_str()
                     } else if !query.is_empty() && *kind == ListKind::Clipboard {
@@ -4972,7 +5127,7 @@ impl SystemUiState {
                         icons.push(None);
                     }
                 } else if !message.is_empty()
-                    && (!rows.is_empty() || (*kind == ListKind::Wallpaper && !query.is_empty()))
+                    && (!rows.is_empty() || (matches!(kind, ListKind::Wallpaper | ListKind::Music | ListKind::Video) && !query.is_empty()))
                 {
                     items.push(String::new());
                     items.push(format!("  {message}"));
@@ -5002,7 +5157,7 @@ impl SystemUiState {
                 let forget_armed =
                     prompt.is_none() && rows.iter().any(|row| row.data.forget_armed());
                 OverlayParts {
-                    title: if *kind == ListKind::Wallpaper {
+                    title: if matches!(kind, ListKind::Wallpaper | ListKind::Music | ListKind::Video) {
                         let position = if rows.is_empty() { 0 } else { selected + 1 };
                         format!("{}  ·  {position}/{}", kind.title(), rows.len())
                     } else {
@@ -5010,7 +5165,7 @@ impl SystemUiState {
                     },
                     // Searchable pickers share the launcher's query bar and
                     // caret. Other kinds never collect a query.
-                    query: matches!(kind, ListKind::Clipboard | ListKind::Wallpaper)
+                    query: matches!(kind, ListKind::Clipboard | ListKind::Wallpaper | ListKind::Music | ListKind::Video)
                         .then(|| query.clone()),
                     selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
@@ -5199,7 +5354,7 @@ impl SystemUiState {
                 *offset = 0;
             }
             Self::ListPanel {
-                kind: ListKind::Wallpaper,
+                kind: ListKind::Wallpaper | ListKind::Music | ListKind::Video,
                 rows,
                 source_rows: Some(source),
                 selected,
@@ -6123,6 +6278,82 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
 mod tests {
     use super::*;
     use crate::jwm::features::system_controls::{AudioDevice, AudioDirection};
+
+    fn media_catalog(names: &[&str]) -> crate::jwm::features::media_library::MediaCatalog {
+        use crate::jwm::features::media_library::{MediaCatalog, MediaEntry, MediaKind};
+        MediaCatalog {
+            kind: MediaKind::Music,
+            entries: names
+                .iter()
+                .map(|name| MediaEntry {
+                    path: format!("/Music/{name}.flac"),
+                    label: (*name).into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            message: "ready".into(),
+        }
+    }
+
+    #[test]
+    fn media_library_refresh_preserves_query_selection_and_filtered_queue() {
+        use crate::jwm::features::media_library::MediaKind;
+        let mut panel = SystemUiState::media_library(
+            MediaKind::Music,
+            Some(&media_catalog(&["Album One", "Album Two", "Other"])),
+            false,
+        );
+        for ch in "album".chars() {
+            panel.push_char(ch);
+        }
+        panel.move_selection(1);
+        assert_eq!(panel.media_library_paths(false), ["/Music/Album Two.flac"]);
+        panel.refresh_media_library(SystemUiState::media_library(
+            MediaKind::Music,
+            Some(&media_catalog(&[
+                "Album New",
+                "Album One",
+                "Album Two",
+                "Other",
+            ])),
+            false,
+        ));
+        assert_eq!(panel.media_library_paths(false), ["/Music/Album Two.flac"]);
+        assert_eq!(
+            panel.media_library_paths(true),
+            [
+                "/Music/Album Two.flac",
+                "/Music/Album New.flac",
+                "/Music/Album One.flac"
+            ]
+        );
+        assert!(panel.has_search_query());
+        panel.clear_search_query();
+        assert_eq!(panel.media_library_paths(true).len(), 4);
+        assert!(!panel.has_search_query());
+    }
+
+    #[test]
+    fn media_library_empty_and_unicode_search_do_not_activate_a_status_row() {
+        use crate::jwm::features::media_library::MediaKind;
+        let mut panel = SystemUiState::media_library(MediaKind::Music, None, true);
+        assert!(panel.media_library_paths(false).is_empty());
+        panel.push_char('曲');
+        panel.refresh_media_library(SystemUiState::media_library(
+            MediaKind::Music,
+            Some(&media_catalog(&["歌曲 live", "Album One"])),
+            false,
+        ));
+        assert_eq!(panel.media_library_paths(false), ["/Music/歌曲 live.flac"]);
+        panel.push_char('x');
+        assert!(panel.media_library_paths(true).is_empty());
+        panel.backspace();
+        assert_eq!(panel.media_library_paths(false).len(), 1);
+        assert_eq!(panel.panel_kind(), Some("music_player"));
+        let before = panel.media_library_paths(false);
+        panel.refresh_media_library(SystemUiState::media_library(MediaKind::Video, None, false));
+        assert_eq!(panel.media_library_paths(false), before);
+    }
 
     /// Every byte a secret buffer owns, spare capacity included.
     fn owned_bytes(secret: &mut String) -> Vec<u8> {

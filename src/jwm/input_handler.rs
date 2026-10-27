@@ -2101,6 +2101,8 @@ impl Jwm {
             self.apply_selected_wallpaper(backend);
         } else if self.features.system_ui.is_theme_picker() {
             self.apply_selected_theme(backend);
+        } else if self.features.system_ui.media_library_kind().is_some() {
+            self.play_selected_media(backend, false, false);
         } else {
             let _ = self.activate_launcher_selection(backend)?;
         }
@@ -2930,6 +2932,37 @@ impl Jwm {
                         .push_clipboard_query(ch, &self.features.clipboard);
                     self.sync_system_ui(backend);
                 } else {
+                    self.sync_system_ui(backend);
+                }
+                return Ok(());
+            }
+            if self.features.system_ui.media_library_kind().is_some() {
+                if keysym == keys::KEY_Return {
+                    if !repeat && !clean_state.intersects(Mods::ALT | Mods::SUPER) {
+                        self.play_selected_media(
+                            backend,
+                            clean_state.contains(Mods::SHIFT),
+                            clean_state.contains(Mods::CONTROL),
+                        );
+                    }
+                } else if keysym == keys::KEY_F5 {
+                    if !repeat {
+                        self.refresh_media_library(backend);
+                    }
+                } else {
+                    if keysym == keys::KEY_BackSpace {
+                        self.consume_system_ui_query_replace();
+                        self.features.system_ui.backspace();
+                    } else if keysym == keys::KEY_Up {
+                        self.features.system_ui.move_selection(-1);
+                    } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                        self.features.system_ui.move_selection(1);
+                    } else if !clean_state.intersects(Mods::CONTROL | Mods::ALT | Mods::SUPER)
+                        && let Some(ch) = Self::system_ui_char(keysym, clean_state)
+                    {
+                        self.consume_system_ui_query_replace();
+                        self.features.system_ui.push_char(ch);
+                    }
                     self.sync_system_ui(backend);
                 }
                 return Ok(());
