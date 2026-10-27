@@ -51,7 +51,15 @@ minimized, moved between tags, or made fullscreen like other applications.
 On first launch, Music opens a compact window and Video fits within 80% of the
 screen. Music shows embedded artwork when available. Later opens reuse the
 existing window size, preserving any resizing, tiling, or fullscreen choice.
-Move the pointer over the window to show mpv's on-screen controls and seek bar.
+Move the pointer over the window to show the bottom transport bar, draggable
+seek bar, and volume control. A JWM companion panel at the top right provides
+clickable **Queue**, **Subtitles**, and **HW: Auto / Off** controls. Queue entries
+can be selected directly, with paging for large queues; arrow keys and Enter
+work while a panel is open, and Escape closes it. The panel only captures clicks
+inside its buttons, leaving the transport bar available. In fullscreen, the
+header hides after three seconds without pointer movement unless paused or a
+panel is open. The bundled Lua UI is embedded in `jwm-player`, so installing or
+packaging the binary also installs its UI; no third-party scripts are loaded.
 
 | In the player window | Key |
 | --- | --- |
@@ -61,6 +69,10 @@ Move the pointer over the window to show mpv's on-screen controls and seek bar.
 | Mute | M |
 | Previous / next queue item | `<` / `>` |
 | Fullscreen | F |
+| Queue panel | L |
+| Subtitle selection panel | S |
+| Cycle subtitle track / toggle subtitle visibility | J / V |
+| Adjust subtitle delay | Z / X |
 | Quit player | Q |
 
 The keyboard's media keys and the Shell Hub's current-track row work through
@@ -125,3 +137,44 @@ plays but JWM shows no current track, check that `jwm-bridge` is running on the
 same session bus and select JWM Player in the Shell Hub's Players list. A
 request to raise an existing window remains subject to the Wayland
 compositor's activation policy.
+
+## Subtitles and decoding
+
+Embedded subtitle tracks and matching local sidecar files (for example
+`movie.mkv` plus `movie.en.srt` or `movie.ass`) appear in the Subtitles panel.
+Select a track or Off; mpv handles subtitle timing and rendering. Sidecar
+matching uses mpv's `sub-auto=fuzzy` in the media directory. No subtitle download
+service is contacted.
+
+Hardware decode starts with `hwdec=auto-safe`; mpv falls back to software when
+no compatible decoder is available. **HW: Off** forces software decoding for
+troubleshooting, and **HW: Auto** retries automatic selection. This label is the
+requested policy, **not proof that hardware decoding is active**. Use mpv's
+statistics (`I`) to inspect the active decoder and frame statistics. Decode and
+all player UI rendering remain in the mpv child, outside JWM's compositor.
+
+## Regression checks and desktop acceptance
+
+```bash
+RUN_JWM_MPV_TESTS=1 cargo test --manifest-path bridge/Cargo.toml --bin jwm-player
+mpv --no-config --vo=null --ao=null --idle=yes --script=bridge/src/player/ui_test.lua
+python3 scripts/test_player_ui.py
+```
+
+The Lua test checks paging, keyboard/mouse routing, subtitle selection, decoder
+policy switching, UTF-8 labels, and ASS escaping. The Python test starts a
+private Xvfb, a generated local video and SRT, and real mpv; it checks queue
+selection, subtitles, fullscreen, and continued playback after decoder-policy
+changes. It requires permission to create Unix sockets, plus Xvfb, ffmpeg,
+libX11, and libXtst. It never connects to the user's display or sound output.
+The Rust decoder tests cover play/pause, seek, volume, stop/resume, queue advance,
+MPRIS ownership, and crash cleanup. Null sinks and Xvfb cannot establish GPU
+compatibility, audible synchronization, or compositor integration quality.
+
+On actual Wayland and X11 sessions, verify a long audio/video synchronization
+sample, 1080p/4K playback with the statistics overlay, seeking while playing and
+paused, HW Auto/Off, embedded and sidecar subtitles, fullscreen exit, window
+moves/minimize/tag changes, and the Hub/status bar/media-key/OSD path. Kill the
+mpv child during playback and confirm JWM remains responsive and a fresh open
+restarts playback. Record GPU/driver, codec, dropped frames and observed sync;
+do not substitute headless test success for these observations.

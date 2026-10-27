@@ -1,3 +1,31 @@
+## 2026-10-27 — Player queue, subtitles and decoder controls
+
+- Continued from `bfd71cfe` rather than duplicating the newly merged player.
+  Embedded a JWM companion Lua panel in the standalone helper: clickable paged
+  queue, keyboard selection, subtitle tracks/off, and HW Auto/Off. The existing
+  mpv bottom OSC provides transport, volume and draggable seek; the existing
+  MPRIS bridge still owns shell integration. Fullscreen hides the panel header
+  when idle. Metadata is escaped before ASS rendering and UTF-8 labels are
+  truncated on codepoint boundaries.
+- Enabled matching local sidecar subtitles and conservative automatic hardware
+  decoding with a software override. The UI file is exclusively created with
+  mode 0600, retained for the child lifetime and removed on drop, including
+  failed startup and decoder-crash teardown. Packaging needs no extra asset.
+- Validation: 13 focused Rust player tests passed with RUN_JWM_MPV_TESTS=1,
+  including real mpv 0.37 WAV/MP4 playback, seeking, queue advance, stop/resume,
+  volume and decoder-crash cleanup; player strict Clippy passed. The Lua
+  interaction harness passed paging, keyboard/mouse routing, subtitle selection,
+  decode-policy toggling, UTF-8 and ASS injection checks. Python desktop test
+  syntax and git diff whitespace checks passed.
+- Environment limitation: the complete player binary test run had 20 passes
+  and 9 failures before the additional crash test was added. Eight existing IPC
+  fixtures failed at Unix socket creation with EPERM; the private D-Bus fixture
+  could not obtain a bus address for the same environment restriction. The new
+  real Xvfb interaction test also stopped at Unix socket creation. These gates
+  are not claimed passed. No /dev/dri or /dev/snd exists here; physical A/V sync,
+  GPU hardware decode, Wayland rendering and desktop integration still require
+  the acceptance checks documented in docs/media-playback.md.
+
 ## 2026-10-27 — Native music and video playback
 
 - Shell Hub now opens searchable Music / Video libraries with **Alt+F10 → U / V**.

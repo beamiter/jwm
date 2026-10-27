@@ -216,6 +216,7 @@ struct Mpv {
     resume_index: usize,
     refresh_position: bool,
     seek_pending: bool,
+    _ui: Option<super::ui::Script>,
 }
 
 impl Mpv {
@@ -228,6 +229,8 @@ impl Mpv {
             .set_write_timeout(Some(COMMAND_TIMEOUT))
             .map_err(|e| e.to_string())?;
         let child_fd: OwnedFd = child_socket.into();
+        let ui =
+            super::ui::Script::create().map_err(|e| format!("cannot prepare player UI: {e}"))?;
         let mut command = Command::new("mpv");
         command.args([
             "--no-config",
@@ -246,9 +249,13 @@ impl Mpv {
             "--access-references=no",
             "--load-unsafe-playlists=no",
             "--osc=yes",
+            "--hwdec=auto-safe",
+            "--sub-auto=fuzzy",
+            "--script-opts=osc-layout=bottombar,osc-seekbarstyle=bar",
             "--input-default-bindings=yes",
             "--input-vo-keyboard=yes",
         ]);
+        command.arg(format!("--script={}", ui.path().display()));
         // Leave audio-display at mpv's version-specific default: old mpv
         // calls it `attachment`, newer mpv `embedded-first`. Both show art.
         command.arg(if mode == Mode::Music {
@@ -276,6 +283,7 @@ impl Mpv {
             resume_index: 0,
             refresh_position: false,
             seek_pending: false,
+            _ui: Some(ui),
         })
     }
 
@@ -636,6 +644,7 @@ mod tests {
             resume_index: 0,
             refresh_position: false,
             seek_pending: false,
+            _ui: None,
         };
         let filename = "/tmp/音乐 \"q\"\n${title}.flac";
         let server = std::thread::spawn(move || {
@@ -675,6 +684,7 @@ mod tests {
             resume_index: 0,
             refresh_position: false,
             seek_pending: false,
+            _ui: None,
         };
         assert_eq!(
             mpv.next_message().unwrap_err().kind(),
@@ -810,6 +820,26 @@ mod tests {
             .unwrap();
         assert!(!controller.snapshot().alive);
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn real_mpv_crash_reaps_child_and_removes_ui() {
+        if std::env::var_os("RUN_JWM_MPV_TESTS").is_none() {
+            return;
+        }
+        let mut mpv =
+            Mpv::spawn(Arc::new(Mutex::new(State::default())), Mode::Video, true).unwrap();
+        mpv.command(json!(["get_property", "mpv-version"])).unwrap();
+        let script = mpv._ui.as_ref().unwrap().path().to_owned();
+        assert!(script.exists());
+        mpv.child.kill().unwrap();
+        let status = mpv.child.wait().unwrap();
+        assert!(!status.success());
+        assert!(mpv.command(json!(["get_property", "pause"])).is_err());
+        let started = Instant::now();
+        drop(mpv);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!script.exists());
     }
 
     async fn wait_for(controller: &Controller, predicate: impl Fn(&State) -> bool) {

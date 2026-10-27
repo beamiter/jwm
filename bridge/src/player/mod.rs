@@ -2,6 +2,7 @@ mod backend;
 mod cli;
 mod model;
 mod service;
+mod ui;
 
 pub async fn run() -> Result<(), String> {
     match cli::parse(std::env::args_os().skip(1))? {
