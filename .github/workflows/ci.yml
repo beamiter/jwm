@@ -60,6 +60,7 @@ jobs:
           bash scripts/test-install-jwm-build.sh
           bash scripts/test-wallpaper-install.sh
           bash scripts/test-install-portal.sh
+          bash scripts/test-ensure-pipewire.sh
           bash scripts/test-runtime-helpers.sh
           bash scripts/test-bootstrap-deps.sh
           python3 scripts/test-release-install-failures.py
@@ -275,7 +276,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: ~/.cache/jwm/pipewire-prefix
-          key: pipewire-prefix-${{ runner.os }}-1.2.7
+          key: pipewire-prefix-${{ runner.os }}-1.6.10
 
       - name: Ensure PipeWire >= 1.2 development metadata
         run: bash scripts/ensure_pipewire.sh --env >> "$GITHUB_ENV"
@@ -294,6 +295,9 @@ jobs:
       - name: Test the portal crate
         working-directory: portal
         run: cargo test --locked --all-targets
+
+      - name: Test stream lifecycle against a private PipeWire daemon
+        run: bash scripts/test-portal-pipewire.sh
 
   bridge:
     name: Bridge (freedesktop notifications and MPRIS)

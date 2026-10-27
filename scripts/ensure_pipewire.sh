@@ -4,8 +4,8 @@
 # The portal binds the pipewire-rs v1_2_0 API surface, whose generated
 # bindings need PipeWire >= 1.2 headers (spa_meta_sync_timeline and friends).
 # Distributions shipping older PipeWire (for example Ubuntu 24.04's 1.0.x)
-# can still build the portal by letting this script compile a minimal,
-# libraries-only PipeWire into a private prefix.
+# can still build the portal by letting this script compile a private
+# development prefix with the core SPA plugins used by the client library.
 #
 # Usage:
 #   bash scripts/ensure_pipewire.sh          # human output
@@ -17,18 +17,27 @@
 #
 # Environment:
 #   JWM_PIPEWIRE_MIN      minimum acceptable version   (default 1.2.0)
-#   JWM_PIPEWIRE_VERSION  version to build if needed   (default 1.2.7)
+#   JWM_PIPEWIRE_VERSION  version to build if needed   (default 1.6.10)
 #   JWM_PIPEWIRE_PREFIX   install prefix for the build (default
 #                         ~/.cache/jwm/pipewire-prefix)
 set -euo pipefail
 
 MIN_VERSION=${JWM_PIPEWIRE_MIN:-1.2.0}
-BUILD_VERSION=${JWM_PIPEWIRE_VERSION:-1.2.7}
+BUILD_VERSION=${JWM_PIPEWIRE_VERSION:-1.6.10}
 PREFIX=${JWM_PIPEWIRE_PREFIX:-"$HOME/.cache/jwm/pipewire-prefix"}
 ENV_OUTPUT=false
 [[ "${1:-}" == "--env" ]] && ENV_OUTPUT=true
 
 log() { echo "ensure_pipewire: $*" >&2; }
+
+command -v pkg-config >/dev/null || {
+    log "missing pkg-config (install pkg-config before building the portal)"
+    exit 1
+}
+[[ "$PREFIX" == /* && "$PREFIX" != *$'\n'* ]] || {
+    log "JWM_PIPEWIRE_PREFIX must be an absolute path without newlines"
+    exit 1
+}
 
 prefix_pkgconfig_dir() {
     for dir in "$PREFIX/lib/pkgconfig" "$PREFIX/lib64/pkgconfig" \
@@ -53,24 +62,38 @@ emit_env() {
     fi
 }
 
-# 1. A system installation that satisfies the minimum needs nothing else.
-if pkg-config --atleast-version="$MIN_VERSION" libpipewire-0.3 2>/dev/null; then
+# An explicit private prefix takes priority even when system metadata exists.
+# Check SPA too: a runtime package or an incomplete -dev prefix cannot build
+# the generated Rust bindings.
+use_prefix() {
+    local pc_dir version
+    pc_dir=$(prefix_pkgconfig_dir) || return 1
+    [[ -f "$pc_dir/libspa-0.2.pc" ]] || return 1
+    if ! PKG_CONFIG_PATH="$pc_dir" pkg-config --atleast-version="$MIN_VERSION" libpipewire-0.3 ||
+       ! PKG_CONFIG_PATH="$pc_dir" pkg-config --exists libspa-0.2; then
+        return 1
+    fi
+    version=$(PKG_CONFIG_PATH="$pc_dir" pkg-config --modversion libpipewire-0.3)
+    log "reusing PipeWire $version already built in $PREFIX"
+    emit_env "$pc_dir"
+}
+
+if [[ -n "${JWM_PIPEWIRE_PREFIX:-}" ]]; then
+    if use_prefix; then
+        exit 0
+    fi
+    log "private prefix $PREFIX needs PipeWire >= $MIN_VERSION and SPA development files"
+elif pkg-config --atleast-version="$MIN_VERSION" libpipewire-0.3 2>/dev/null &&
+     pkg-config --exists libspa-0.2; then
+    # A complete system installation needs neither a private build nor rpath.
     log "system PipeWire $(pkg-config --modversion libpipewire-0.3) >= $MIN_VERSION; nothing to do"
+    exit 0
+elif use_prefix; then
     exit 0
 fi
 
-# 2. A previously built prefix is reused as-is.
-if pc_dir=$(prefix_pkgconfig_dir); then
-    version=$(PKG_CONFIG_PATH="$pc_dir" pkg-config --modversion libpipewire-0.3)
-    if PKG_CONFIG_PATH="$pc_dir" pkg-config --atleast-version="$MIN_VERSION" libpipewire-0.3; then
-        log "reusing PipeWire $version already built in $PREFIX"
-        emit_env "$pc_dir"
-        exit 0
-    fi
-    log "prefix at $PREFIX holds $version < $MIN_VERSION; rebuilding"
-fi
-
-# 3. Build a minimal, libraries-only PipeWire.
+# Build the private development prefix. SPA support must stay enabled for
+# PipeWire 1.6's build graph and the client's event loop implementation.
 for tool in meson ninja cc git; do
     command -v "$tool" >/dev/null || {
         log "missing build tool '$tool' (install meson, ninja-build, a C toolchain, and git)"
@@ -82,14 +105,15 @@ workdir=$(mktemp -d "${TMPDIR:-/tmp}/jwm-pipewire-build.XXXXXX")
 trap 'rm -rf "$workdir"' EXIT
 log "building PipeWire $BUILD_VERSION into $PREFIX"
 git clone --depth 1 --branch "$BUILD_VERSION" \
-    https://gitlab.freedesktop.org/pipewire/pipewire.git "$workdir/pipewire" >&2
+    https://github.com/PipeWire/pipewire.git "$workdir/pipewire" >&2
 
 meson setup "$workdir/build" "$workdir/pipewire" \
     --prefix="$PREFIX" \
+    --libdir=lib \
     --buildtype=release \
     -Dauto_features=disabled \
     -Dsession-managers=[] \
-    -Dspa-plugins=disabled \
+    -Dspa-plugins=enabled \
     -Dexamples=disabled \
     -Dtests=disabled \
     -Dman=disabled \

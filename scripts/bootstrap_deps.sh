@@ -129,7 +129,7 @@ APT_RUNTIME=(
 # older version, `scripts/ensure_pipewire.sh` builds a minimal private prefix
 # and prints the PKG_CONFIG_PATH / JWM_PIPEWIRE_PREFIX environment to use.
 APT_PORTAL=(
-    libpipewire-0.3-dev libspa-0.2-dev
+    libpipewire-0.3-dev libspa-0.2-dev meson
 )
 
 # Optional: Tauri 2 web bars. Keep this opt-in because WebKitGTK is a large

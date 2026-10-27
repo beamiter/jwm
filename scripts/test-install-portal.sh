@@ -7,6 +7,7 @@ trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project"
 mkdir -p "$REPO/scripts" "$REPO/portal/dist" "$TEST_ROOT/bin"
 cp "$ROOT/scripts/install-portal.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/ensure_pipewire.sh" "$REPO/scripts/"
 cp "$ROOT/portal/dist/"{jwm-portal.service,jwm.portal,jwm-portals.conf} "$REPO/portal/dist/"
 cat > "$TEST_ROOT/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
@@ -26,6 +27,14 @@ STUB
 for command in systemctl pkill; do
     printf '#!/bin/sh\nexit 0\n' > "$TEST_ROOT/bin/$command"
 done
+cat > "$TEST_ROOT/bin/pkg-config" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+    --modversion) printf '1.6.10\n' ;;
+    --atleast-version=*|--exists) exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
 chmod +x "$TEST_ROOT/bin/"*
 fail() { printf 'test-install-portal: FAIL: %s\n' "$*" >&2; exit 1; }
 for mode in default custom relative; do

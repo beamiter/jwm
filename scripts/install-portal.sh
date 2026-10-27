@@ -23,10 +23,17 @@ PORTAL_BINARY="$PORTAL_TARGET_DIR/release/jwm-portal"
 SERVICE_TEMPLATE="$ROOT/portal/dist/jwm-portal.service"
 SERVICE_DEST="$DBUS_SVC/org.freedesktop.impl.portal.desktop.jwm.service"
 
-if [[ -n "${JWM_PIPEWIRE_PREFIX:-}" ]]; then
-    PIPEWIRE_PKG_CONFIG="$JWM_PIPEWIRE_PREFIX/lib/pkgconfig:$JWM_PIPEWIRE_PREFIX/lib64/pkgconfig"
-    export PKG_CONFIG_PATH="$PIPEWIRE_PKG_CONFIG${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-fi
+# Resolve complete development metadata before Cargo starts any dependency
+# build scripts. A shell that only has the PipeWire runtime gets a reusable
+# private development prefix, including rpath for D-Bus activation.
+PIPEWIRE_ENV=$(bash "$ROOT/scripts/ensure_pipewire.sh" --env)
+while IFS= read -r setting; do
+    case "$setting" in
+        PKG_CONFIG_PATH=*|JWM_PIPEWIRE_PREFIX=*) export "${setting?}" ;;
+        '') ;;
+        *) echo "[install-portal] unexpected PipeWire environment entry" >&2; exit 1 ;;
+    esac
+done <<< "$PIPEWIRE_ENV"
 
 echo "[install-portal] building jwm-portal (release)…"
 (

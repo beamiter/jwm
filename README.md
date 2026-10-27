@@ -622,13 +622,17 @@ Dedicated cancellable capture connections require the session’s named
 supported by this path. Closing a portal session interrupts that private
 connection rather than the discovery connection.
 
-Portal builds require PipeWire 1.2 development files, `pkg-config`, and libclang.
-System installations are discovered automatically. For a private PipeWire
-prefix, set `JWM_PIPEWIRE_PREFIX`; the installer derives the pkg-config search
-path and runtime rpath, and it also honors `CARGO_TARGET_DIR`:
+Portal builds require PipeWire 1.2+ development files, `pkg-config`, and libclang.
+The PipeWire runtime package alone does not include the headers. The installer
+uses a complete system development installation when available; otherwise it
+reuses or builds PipeWire 1.6.10 in `~/.cache/jwm/pipewire-prefix`, with Meson,
+Ninja, Git, and a C compiler. This prefix is private to the portal build.
+For a custom prefix, set `JWM_PIPEWIRE_PREFIX`; it takes priority over system
+metadata. Both lib64 and multiarch layouts are supported. The installer derives
+the pkg-config search path and runtime rpath, and honors `CARGO_TARGET_DIR`:
 
 ```bash
-JWM_PIPEWIRE_PREFIX=/opt/pipewire-1.2 scripts/install-portal.sh
+JWM_PIPEWIRE_PREFIX=/opt/pipewire-1.6.10 scripts/install-portal.sh
 ```
 
 The built-in shell — the [control center](docs/control-center.md), native

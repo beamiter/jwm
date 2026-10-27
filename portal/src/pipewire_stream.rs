@@ -36,7 +36,7 @@ use crate::dmabuf;
 /// Caller-side handle. Drop to tear the stream + worker thread down.
 pub struct StreamHandle {
     pub node_id: u32,
-    shutdown: Option<mpsc::Sender<()>>,
+    shutdown: Option<pw::channel::Sender<()>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -113,7 +113,7 @@ pub enum Source {
 /// assigned PipeWire node_id (or fails after a 5s startup deadline).
 pub fn spawn(spec: StreamSpec, node_name: String, source: Source) -> Result<StreamHandle, String> {
     let (node_tx, node_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
-    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = pw::channel::channel::<()>();
 
     let join = std::thread::Builder::new()
         .name("jwm-portal-pw".into())
@@ -125,16 +125,19 @@ pub fn spawn(spec: StreamSpec, node_name: String, source: Source) -> Result<Stre
         })
         .map_err(|e| format!("spawn pw worker: {e}"))?;
 
-    let node_id = node_rx
+    // Own shutdown before waiting: errors and the startup deadline must wake
+    // and join the worker just like dropping a successfully started stream.
+    let mut handle = StreamHandle {
+        node_id: pw::constants::ID_ANY,
+        shutdown: Some(shutdown_tx),
+        join: Some(join),
+    };
+    handle.node_id = node_rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|e| format!("pw worker did not report node_id within 5s: {e}"))?
         .map_err(|e| format!("pw worker failed: {e}"))?;
 
-    Ok(StreamHandle {
-        node_id,
-        shutdown: Some(shutdown_tx),
-        join: Some(join),
-    })
+    Ok(handle)
 }
 
 fn run(
@@ -142,9 +145,17 @@ fn run(
     node_name: String,
     source: Source,
     node_tx: mpsc::SyncSender<Result<u32, String>>,
-    shutdown_rx: mpsc::Receiver<()>,
+    shutdown_rx: pw::channel::Receiver<()>,
 ) -> Result<(), String> {
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| format!("MainLoop: {e}"))?;
+    let _shutdown = shutdown_rx.attach(mainloop.loop_(), {
+        let mainloop = mainloop.downgrade();
+        move |_| {
+            if let Some(mainloop) = mainloop.upgrade() {
+                mainloop.quit();
+            }
+        }
+    });
     let context =
         pw::context::ContextRc::new(&mainloop, None).map_err(|e| format!("Context: {e}"))?;
     let core = context
@@ -182,8 +193,31 @@ fn run(
 
     let _listener = stream
         .add_local_listener_with_user_data::<()>(())
-        .state_changed(|_, _, old, new| {
-            info!("pw stream state: {old:?} -> {new:?}");
+        .state_changed({
+            let mainloop = mainloop.downgrade();
+            let mut reported = false;
+            move |stream, _, old, new| {
+                info!("pw stream state: {old:?} -> {new:?}");
+                if let pw::stream::StreamState::Error(error) = new {
+                    if !reported {
+                        let _ = node_tx.try_send(Err(error));
+                        reported = true;
+                    }
+                    if let Some(mainloop) = mainloop.upgrade() {
+                        mainloop.quit();
+                    }
+                } else if matches!(
+                    new,
+                    pw::stream::StreamState::Paused | pw::stream::StreamState::Streaming
+                ) {
+                    let id = stream.node_id();
+                    if id != pw::constants::ID_ANY && !reported {
+                        info!("pw stream node_id assigned: {id}");
+                        let _ = node_tx.try_send(Ok(id));
+                        reported = true;
+                    }
+                }
+            }
         })
         .param_changed(|_stream, _ud, id, param| {
             if id != pw::spa::param::ParamType::Format.as_raw() {
@@ -348,11 +382,10 @@ fn run(
     let mut owned_pods = build_connect_params(&spec, &source)?;
     let mut params: Vec<&Pod> = owned_pods.iter_mut().map(|v| v.as_pod()).collect();
 
-    // For dmabuf transport, disable MAP_BUFFERS (PW would try to mmap the
-    // dmabuf which is wrong for hardware buffers). The DRIVER flag stays —
-    // we're still the source-of-truth for frame rate.
+    // GBM supplies the dmabuf allocation in add_buffer. Tell PipeWire who
+    // owns that allocation, and leave MAP_BUFFERS off for hardware buffers.
     let stream_flags = if is_dmabuf {
-        pw::stream::StreamFlags::DRIVER
+        pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::ALLOC_BUFFERS
     } else {
         pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::MAP_BUFFERS
     };
@@ -365,37 +398,9 @@ fn run(
         )
         .map_err(|e| format!("stream connect: {e}"))?;
 
-    // Poll the assigned node_id once it becomes valid, then report it back.
-    let node_id_reporter = {
-        let stream = stream.clone();
-        let node_tx = node_tx.clone();
-        let mainloop_weak = mainloop.downgrade();
-        let reported = std::cell::Cell::new(false);
-        mainloop.loop_().add_timer(move |_| {
-            if !reported.get() {
-                let id = stream.node_id();
-                if id != pw::constants::ID_ANY {
-                    info!("pw stream node_id assigned: {id}");
-                    let _ = node_tx.send(Ok(id));
-                    reported.set(true);
-                }
-            }
-            if shutdown_requested(&shutdown_rx)
-                && let Some(ml) = mainloop_weak.upgrade()
-            {
-                ml.quit();
-            }
-        })
-    };
-    let _ = node_id_reporter.update_timer(
-        Some(Duration::from_millis(50)),
-        Some(Duration::from_millis(100)),
-    );
-
     info!("pw mainloop running for stream `{node_name}`");
     mainloop.run();
 
-    drop(node_id_reporter);
     let _ = stream.disconnect();
     info!("pw mainloop exited for stream `{node_name}`");
     Ok(())
@@ -513,29 +518,62 @@ impl OwnedPod {
     }
 }
 
-/// Dropping the startup owner (including its five-second timeout path) is
-/// cancellation too; a worker must not outlive the only handle that can stop it.
-fn shutdown_requested(receiver: &mpsc::Receiver<()>) -> bool {
-    !matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty))
-}
-
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
 
     #[test]
-    fn timed_out_startup_owner_disconnect_requests_worker_shutdown() {
-        let (owner, worker) = mpsc::channel();
-        assert!(!shutdown_requested(&worker));
-        drop(owner);
-        assert!(shutdown_requested(&worker));
+    fn dropping_startup_handle_wakes_and_joins_worker_without_a_timer() {
+        let (shutdown, receiver) = pw::channel::channel();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let join = std::thread::spawn(move || {
+            let mainloop = pw::main_loop::MainLoopRc::new(None).unwrap();
+            let _receiver = receiver.attach(mainloop.loop_(), {
+                let mainloop = mainloop.downgrade();
+                move |_| mainloop.upgrade().unwrap().quit()
+            });
+            ready_tx.send(()).unwrap();
+            mainloop.run();
+            done_tx.send(()).unwrap();
+        });
+        let handle = StreamHandle {
+            node_id: pw::constants::ID_ANY,
+            shutdown: Some(shutdown),
+            join: Some(join),
+        };
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Send before the worker enters run() is also supported by the wakeup
+        // channel. No periodic timer is present to rescue a missed message.
+        let dropped = std::thread::spawn(move || drop(handle));
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        dropped.join().unwrap();
     }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
 
     #[test]
-    fn explicit_stream_shutdown_requests_worker_shutdown() {
-        let (owner, worker) = mpsc::channel();
-        owner.send(()).unwrap();
-        assert!(shutdown_requested(&worker));
+    #[ignore = "requires scripts/test-portal-pipewire.sh's private PipeWire daemon"]
+    fn private_daemon_stream_starts_and_stops() {
+        assert!(std::env::var_os("JWM_PORTAL_TEST_PIPEWIRE").is_some());
+        for iteration in 0..3 {
+            let handle = spawn(
+                StreamSpec {
+                    width: 64,
+                    height: 64,
+                    framerate_num: 1,
+                    framerate_den: 1,
+                },
+                format!("jwm-portal-lifecycle-test-{iteration}"),
+                Source::Empty,
+            )
+            .expect("the private daemon must publish a stream node");
+            assert_ne!(handle.node_id, pw::constants::ID_ANY);
+            drop(handle);
+        }
     }
 }
 
