@@ -352,36 +352,7 @@ impl Jwm {
                 let _ = self.focus(backend, Some(client_key));
                 self.arrange(backend, Some(mk));
 
-                // Start downward animation on initial appearance
-                if let Some(area) = self.monitor_work_area(mk)
-                    && let Some(client) = self.state.clients.get(client_key)
-                {
-                    let rect = Rect::new(
-                        client.geometry.x,
-                        client.geometry.y,
-                        client.geometry.w,
-                        client.geometry.h,
-                    );
-                    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
-
-                    if cfg.animation_enabled() {
-                        let from_y = area.y - h;
-                        let from_rect = Rect::new(x, from_y, w, h);
-                        let to_rect = Rect::new(x, y, w, h);
-                        info!(
-                            "[manage] scratchpad '{}' initial animation from y={} to y={}",
-                            sp_name, from_y, y
-                        );
-                        self.animations.start(
-                            client_key,
-                            from_rect,
-                            to_rect,
-                            cfg.animation_duration(),
-                            cfg.animation_easing(),
-                            AnimationKind::Appear,
-                        );
-                    }
-                }
+                self.start_scratchpad_slide(backend, client_key, true, None);
             }
         }
 

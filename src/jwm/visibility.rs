@@ -288,20 +288,30 @@ impl Jwm {
         }
 
         if let Some((duration, easing)) = animation {
-            let now = Instant::now();
-            let visual = self
-                .animations
-                .current_visual_rect(client_key, now)
-                .unwrap_or(Rect::new(x, y, w, h));
-            let target = Rect::new(hidden_x, y, w, h);
-            self.animations.start(
-                client_key,
-                visual,
-                target,
-                duration,
-                easing,
-                AnimationKind::Hide,
-            );
+            // A scratchpad toggle already planned its upward slide. Parking
+            // still updates real input geometry, but must not replace that
+            // visual path with the generic horizontal workspace hide.
+            let scratchpad_slide = self.scratchpads.values().any(|&key| key == client_key)
+                && self
+                    .animations
+                    .active
+                    .get(&client_key)
+                    .is_some_and(|anim| anim.kind == AnimationKind::Hide);
+            if !scratchpad_slide {
+                let visual = self
+                    .animations
+                    .current_visual_rect(client_key, Instant::now())
+                    .unwrap_or(Rect::new(x, y, w, h));
+                let target = Rect::new(hidden_x, y, w, h);
+                self.animations.start(
+                    client_key,
+                    visual,
+                    target,
+                    duration,
+                    easing,
+                    AnimationKind::Hide,
+                );
+            }
             // When compositor is active, move the actual X11 window to the
             // hidden position immediately.  The compositor handles the visual
             // slide-out via the scene, but the X server delivers input events

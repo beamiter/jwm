@@ -6,6 +6,11 @@ fullscreen, fixed-size windows, PiP and realized maximize keep their existing
 state rules; leave that state before resizing. The `fullscreen` **layout** is
 separate from true application fullscreen and supports layout resizing.
 
+Layout transitions resume from each window's current visual rectangle, including
+rapid Alt+J/K focus cycling in vstack. Wayland viewport clients resize against
+the final configured size while continuing to refresh their committed content
+during the animation.
+
 ## Controls
 
 Default bindings:
@@ -56,6 +61,11 @@ with their existing meanings, including scrolling's column-focus interpretation
 of `setcfact`. Existing user bindings to them keep working. Changing an actual
 layout factor or master count clears the physical resize override so that an
 old size intention cannot swallow the factor command.
+
+Alt+Enter (`zoom`) also clears the current layout's resize override when it
+promotes another tiled client to master. Master and stack windows then take
+their new native layout sizes, so a promoted stack window cannot retain its
+old half-height. A zoom with no eligible replacement leaves resizing unchanged.
 
 ### Existing configuration files
 
@@ -176,10 +186,15 @@ size hints. If the anchor leaves that topology, its intention is discarded;
 returning later does not resurrect it. This includes hiding or moving the anchor
 out of the current workspace or monitor.
 
+When multiple tiled windows become a single tiled window (for example after a
+neighbour closes, moves to another workspace/output, or is minimized), the old
+resize intention is discarded. The survivor takes the layout's normal
+single-window size. A new resize made while it is alone persists normally.
+
 A membership or grouping change cancels an active resize gesture and restores
 its pre-grab intention, provided the original anchor still belongs to the new
-topology. It never commits an unfinished drag or transfers its size to another
-client.
+topology and the layout has not just become a singleton. It never commits an
+unfinished drag or transfers its size to another client.
 
 These intentions survive mouse release and subsequent arrange calls. Verified
 X11 restarts can also hand off committed normalized intentions and scrolling

@@ -85,6 +85,17 @@ fn allowed_shortcut_mods() -> Mods {
     Mods::SHIFT | Mods::CONTROL | Mods::ALT | Mods::SUPER | Mods::MOD2 | Mods::MOD3 | Mods::MOD5
 }
 
+/// Client buffers acknowledge the configured size, independently of the
+/// interpolated rectangle used to draw a layout transition.
+fn viewport_resize_pending(
+    committed: (u32, u32),
+    configured: Option<&crate::backend::api::Geometry>,
+) -> bool {
+    configured.is_some_and(|geometry| {
+        committed.0.abs_diff(geometry.w.max(1)) > 4 || committed.1.abs_diff(geometry.h.max(1)) > 4
+    })
+}
+
 fn gesture_swipe_should_intercept(
     fingers: u32,
     bindings: &[crate::config::GestureSwipeConfig],
@@ -6179,14 +6190,17 @@ impl Backend for UdevBackend {
                         let committed_w = cw.max(1) as u32;
                         let committed_h = ch.max(1) as u32;
                         let wait_for_configured_size = has_viewport_state
-                            && (committed_w.abs_diff(w) > 4 || committed_h.abs_diff(h) > 4);
+                            && viewport_resize_pending(
+                                (committed_w, committed_h),
+                                self.state.window_geometry.get(&win),
+                            );
                         if wait_for_configured_size {
                             self.state.enforce_toplevel_configure_size(win, &surface);
                             self.state.needs_redraw = true;
                             flush_after_resize_configure = true;
                             if crf_log_this {
                                 log::debug!(
-                                    "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}; keeping previous texture while deferring update",
+                                    "[crf] win={win_id:#x} viewport awaiting configured size, committed={}x{} visual={}x{}",
                                     committed_w,
                                     committed_h,
                                     w,
@@ -6199,8 +6213,13 @@ impl Backend for UdevBackend {
                                     minimized_capture_frame,
                                     MinimizedCaptureAttemptResult::AwaitSurfaceCommit,
                                 );
+                                continue;
                             }
-                            continue;
+                            // Keep importing live committed buffers while the
+                            // client catches up. The compositor fits them to
+                            // the animated rectangle; freezing the old texture
+                            // here stalls terminal text and subsurface clients
+                            // throughout rapid focus/layout changes.
                         }
                         let (target_w, target_h) = (cw.max(1), ch.max(1));
                         let composited = kms_ref.with_gles_renderer(|renderer| {
@@ -7993,6 +8012,41 @@ pub(super) use self::kms::composite_scaled_buffer_for_tests;
 
 #[cfg(test)]
 mod udev_backend_selection_tests {
+    #[test]
+    fn viewport_resize_tracks_configured_size_independently_of_animation() {
+        let configured = crate::backend::api::Geometry {
+            x: 400,
+            y: 200,
+            w: 1200,
+            h: 800,
+            border: 0,
+        };
+        // Both an old-size commit and a commit for a superseded layout must
+        // still request the latest target; a target-sized buffer is ready
+        // even while its visual rectangle is only halfway there.
+        assert!(super::viewport_resize_pending(
+            (800, 600),
+            Some(&configured)
+        ));
+        assert!(super::viewport_resize_pending(
+            (1000, 700),
+            Some(&configured)
+        ));
+        assert!(!super::viewport_resize_pending(
+            (1200, 800),
+            Some(&configured)
+        ));
+        assert!(!super::viewport_resize_pending(
+            (1196, 804),
+            Some(&configured)
+        ));
+        assert!(super::viewport_resize_pending(
+            (1195, 800),
+            Some(&configured)
+        ));
+        assert!(!super::viewport_resize_pending((800, 600), None));
+    }
+
     #[cfg(test)]
     mod builtin_lock_recovery_tests {
         use super::*;

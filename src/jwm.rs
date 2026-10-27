@@ -20,6 +20,7 @@ pub mod property_handler;
 pub(crate) mod restart_preflight;
 pub(crate) mod restart_state;
 pub mod rules;
+pub(crate) mod scratchpad_animation;
 pub(crate) mod scratchpad_handoff;
 pub(crate) mod scratchpad_pending;
 pub mod session;

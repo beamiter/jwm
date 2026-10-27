@@ -2,6 +2,7 @@ use crate::backend::api::Backend;
 use crate::backend::common_define::{Pixel, SchemeType, WindowId};
 use crate::backend::error::BackendError;
 use crate::config::CONFIG;
+use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use log::info;
@@ -594,7 +595,22 @@ impl Jwm {
         }
 
         for key in completed {
-            self.animations.active.remove(&key);
+            if let Some(animation) = self.animations.active.remove(&key)
+                && !composited
+                && animation.kind == AnimationKind::Hide
+                && let Some(client) = self.state.clients.get(key)
+            {
+                // The visual endpoint of a dropdown is above its output;
+                // native input must finish at the logical parking location.
+                let _ = backend.window_ops().configure(
+                    client.win,
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w.max(1) as u32,
+                    client.geometry.h.max(1) as u32,
+                    client.geometry.border_w.max(0) as u32,
+                );
+            }
         }
     }
 
@@ -623,6 +639,24 @@ impl Jwm {
             })
             .collect();
 
+        // Parked scratchpads leave the interactive stack immediately, but
+        // their upward slides remain in the visual stack until completion.
+        let closing_scratchpads: HashSet<ClientKey> = self
+            .scratchpads
+            .values()
+            .copied()
+            .filter(|key| {
+                self.state.clients.get(*key).is_some_and(|client| {
+                    client.state.tags == 0 && !client.state.is_hidden && !client.state.is_swallowed
+                }) && visual_overrides.contains_key(key)
+                    && self
+                        .animations
+                        .active
+                        .get(key)
+                        .is_some_and(|animation| animation.kind == AnimationKind::Hide)
+            })
+            .collect();
+
         // Iterate all monitors, using last_stacking order (bottom to top)
         for &mon_key in &self.state.monitor_order {
             if debug_compositor {
@@ -648,7 +682,21 @@ impl Jwm {
             // monitor_stack so the compositor still has something to render
             // when restack() hasn't run yet for this monitor. Iterate borrowed
             // storage directly to avoid cloning/collecting a temporary Vec every frame.
-            if let Some(stacking) = self.last_stacking.get(mon_key) {
+            if !closing_scratchpads.is_empty() {
+                // Reuse the layer planner so a closing dropdown still stays
+                // below Above, focused fullscreen and PiP windows.
+                for win_id in
+                    self.monitor_stacking_order(mon_key, |key| closing_scratchpads.contains(&key))
+                {
+                    push_scene_window(
+                        self,
+                        &mut scene,
+                        &secondary_bar_wins,
+                        visual_overrides,
+                        win_id,
+                    );
+                }
+            } else if let Some(stacking) = self.last_stacking.get(mon_key) {
                 for &win_id in stacking {
                     push_scene_window(
                         self,

@@ -81,6 +81,11 @@ at 80% width and height. Fullscreen, maximized, PiP and hidden geometry do not
 replace the remembered size. Writes are debounced for half a second while
 resizing, and flushed on hide, close and exit; a failed save raises a toast.
 
+Opening and closing share a vertical slide above the output's top edge.
+Toggling again during the slide reverses from the current position and takes
+only the remaining fraction of the animation time. A closing terminal stops
+accepting focus immediately while its visual finishes sliding upward.
+
 ## Dragging between outputs
 
 A floating move or resize transfers the window to the output showing the

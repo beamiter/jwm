@@ -5,7 +5,6 @@
 use crate::backend::api::{Backend, MaximizeAxes};
 use crate::backend::common_define::{EventMaskBits, Mods, StdCursorKind};
 use crate::config::CONFIG;
-use crate::core::animation::AnimationKind;
 use crate::core::maximize::MaximizeOrigin;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
@@ -5669,7 +5668,6 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let cfg = CONFIG.load();
         // Parse name and optional command from argument
         let (name, spawn_cmd) = match arg {
             WMArgEnum::StringVec(v) if !v.is_empty() => {
@@ -5704,37 +5702,12 @@ impl Jwm {
                 self.set_client_sticky(backend, sp_key, false);
                 self.remember_scratchpad_size(sp_key);
                 self.flush_window_preferences(backend, std::time::Instant::now(), true);
-                // Hide: animate upward then hide
-                if let Some(client) = self.state.clients.get(sp_key) {
-                    let current_rect = Rect::new(
-                        client.geometry.x,
-                        client.geometry.y,
-                        client.geometry.w,
-                        client.geometry.h,
-                    );
-                    // Target: move up by window height
-                    let hidden_y = current_rect.y - current_rect.h - 100;
-                    let hidden_rect =
-                        Rect::new(current_rect.x, hidden_y, current_rect.w, current_rect.h);
+                let visual = self
+                    .animations
+                    .current_visual_rect(sp_key, std::time::Instant::now());
+                self.start_scratchpad_slide(backend, sp_key, false, visual);
 
-                    if cfg.animation_enabled() {
-                        self.animations.start(
-                            sp_key,
-                            current_rect,
-                            hidden_rect,
-                            cfg.animation_duration(),
-                            cfg.animation_easing(),
-                            AnimationKind::Hide,
-                        );
-                    } else {
-                        // If animations disabled, immediately hide
-                        if let Some(c) = self.state.clients.get_mut(sp_key) {
-                            c.state.tags = 0;
-                        }
-                    }
-                }
-
-                // Mark for deferred hiding after animation completes
+                // Remove focus/input eligibility while the visual slides out.
                 if let Some(c) = self.state.clients.get_mut(sp_key) {
                     c.state.tags = 0;
                 }
@@ -5749,6 +5722,17 @@ impl Jwm {
                     self.broadcast_monitor_bar_ipc(backend, mk);
                 }
             } else {
+                // Placement/arrange cancels the old Hide trajectory. Sample it
+                // first so a same-output reversal starts where it was drawn.
+                let visual = self
+                    .state
+                    .clients
+                    .get(sp_key)
+                    .filter(|client| client.mon == self.state.sel_mon)
+                    .and_then(|_| {
+                        self.animations
+                            .current_visual_rect(sp_key, std::time::Instant::now())
+                    });
                 let was_minimized = self
                     .state
                     .clients
@@ -5773,40 +5757,8 @@ impl Jwm {
                 // Genie. Starting the scratchpad Appear animation as well would
                 // fight over the same geometry and can flash the real surface.
                 // A merely parked scratchpad keeps its original downward reveal.
-                if !was_minimized
-                    && let Some(mon_key) = self.state.sel_mon
-                    && let Some(area) = self.monitor_work_area(mon_key)
-                    && let Some(client) = self.state.clients.get(sp_key)
-                {
-                    let rect = Rect::new(
-                        client.geometry.x,
-                        client.geometry.y,
-                        client.geometry.w,
-                        client.geometry.h,
-                    );
-                    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
-
-                    if cfg.animation_enabled() {
-                        // Animate from above screen to target position
-                        // from_y: window top is at (area.y - h), so window is completely above visible area
-                        let from_y = area.y - h;
-                        let from_rect = Rect::new(x, from_y, w, h);
-                        let to_rect = Rect::new(x, y, w, h);
-
-                        info!(
-                            "[togglescratchpad] scratchpad show animation from y={} to y={}",
-                            from_y, y
-                        );
-
-                        self.animations.start(
-                            sp_key,
-                            from_rect,
-                            to_rect,
-                            cfg.animation_duration(),
-                            cfg.animation_easing(),
-                            AnimationKind::Appear,
-                        );
-                    }
+                if !was_minimized {
+                    self.start_scratchpad_slide(backend, sp_key, true, visual);
                 }
             }
         } else {

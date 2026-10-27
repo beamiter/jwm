@@ -119,6 +119,39 @@ fn plan_stacking(clients_bottom_to_top: impl IntoIterator<Item = StackingClient>
 }
 
 impl Jwm {
+    /// Visual-only closing windows use the same layer order as interactive
+    /// clients, without putting them back into the native input stack.
+    pub(super) fn monitor_stacking_order(
+        &self,
+        mon_key: MonitorKey,
+        include_visual: impl Fn(ClientKey) -> bool,
+    ) -> Vec<WindowId> {
+        let selected = self
+            .state
+            .monitors
+            .get(mon_key)
+            .and_then(|monitor| monitor.sel);
+        plan_stacking(
+            self.get_monitor_stack(mon_key)
+                .iter()
+                .rev()
+                .filter_map(|&key| {
+                    let client = self.state.clients.get(key)?;
+                    Some(StackingClient {
+                        window: client.win,
+                        visible: self.is_client_visible_on_monitor(key, mon_key)
+                            || include_visual(key),
+                        floating: client.state.is_floating,
+                        pip: client.state.is_pip,
+                        fullscreen: client.state.is_fullscreen,
+                        above: client.state.is_above,
+                        below: client.state.is_below,
+                        selected: selected == Some(key),
+                    })
+                }),
+        )
+    }
+
     /// 将窗口提升到堆叠顶部并聚焦
     ///
     /// - 将窗口从当前位置分离
@@ -165,24 +198,7 @@ impl Jwm {
             .ok_or("Monitor not found")?;
         let monitor_num = monitor.num;
 
-        let sel_win = monitor
-            .sel
-            .and_then(|ck| self.state.clients.get(ck))
-            .map(|c| c.win);
-        let stack = self.get_monitor_stack(mon_key);
-        let final_bottom_to_top = plan_stacking(stack.iter().rev().filter_map(|&ck| {
-            let client = self.state.clients.get(ck)?;
-            Some(StackingClient {
-                window: client.win,
-                visible: self.is_client_visible_on_monitor(ck, mon_key),
-                floating: client.state.is_floating,
-                pip: client.state.is_pip,
-                fullscreen: client.state.is_fullscreen,
-                above: client.state.is_above,
-                below: client.state.is_below,
-                selected: sel_win == Some(client.win),
-            })
-        }));
+        let final_bottom_to_top = self.monitor_stacking_order(mon_key, |_| false);
 
         let need_restack_windows = match self.last_stacking.get(mon_key) {
             Some(prev) => prev.as_slice() != final_bottom_to_top.as_slice(),

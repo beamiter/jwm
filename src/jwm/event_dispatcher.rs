@@ -14367,6 +14367,67 @@ mod tests {
     }
 
     #[test]
+    fn master_resize_runtime_two_tiles_to_one_restores_native_singleton_size() {
+        use crate::core::layout::LayoutEnum;
+        for layout in LayoutEnum::all()
+            .iter()
+            .filter(|l| **l != LayoutEnum::FLOAT)
+        {
+            let (mut single, mut single_backend, single_mon, single_keys) =
+                master_resize_scene(layout.clone(), 1);
+            single.state.monitors[single_mon].layout.n_master = 1;
+            single.arrange(&mut single_backend, Some(single_mon));
+            let native = live_rect(&single, single_keys[0]);
+            for survivor_index in 0..2 {
+                for removal in 0..3 {
+                    let (mut jwm, mut backend, mon, keys) = master_resize_scene(layout.clone(), 2);
+                    jwm.state.monitors[mon].layout.n_master = 1;
+                    let survivor = keys[survivor_index];
+                    let departing = keys[1 - survivor_index];
+                    jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(survivor));
+                    jwm.arrange(&mut backend, Some(mon));
+                    jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.1))
+                        .unwrap();
+                    let scope = jwm.layout_resize_scope(mon).unwrap();
+                    assert!(jwm.state.monitors[mon].layout_resizes.contains_key(&scope));
+                    match removal {
+                        0 => jwm.move_client_to_tag(&mut backend, departing, 2).unwrap(),
+                        1 => {
+                            let win = jwm.state.clients[departing].win;
+                            jwm.handle_event(&mut backend, BackendEvent::WindowDestroyed(win))
+                                .unwrap();
+                        }
+                        _ => {
+                            jwm.set_client_minimized(&mut backend, departing, true)
+                                .unwrap();
+                        }
+                    }
+                    let context =
+                        format!("{} survivor={survivor_index} removal={removal}", layout.0);
+                    assert_eq!(jwm.collect_tileable_clients(mon).len(), 1, "{context}");
+                    assert_eq!(live_rect(&jwm, survivor), native, "{context}");
+                    assert!(
+                        !jwm.state.monitors[mon].layout_resizes.contains_key(&scope),
+                        "{context}"
+                    );
+                    jwm.arrange(&mut backend, Some(mon));
+                    assert_eq!(live_rect(&jwm, survivor), native, "{context}");
+
+                    // Resizing after the transition is an explicit new choice
+                    // for the singleton and must still survive arrange.
+                    jwm.state.monitors[mon].set_selected_client_for_current_tag(Some(survivor));
+                    jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.05))
+                        .unwrap();
+                    let resized = live_rect(&jwm, survivor);
+                    assert!(resized.w < native.w, "{context}");
+                    jwm.arrange(&mut backend, Some(mon));
+                    assert_eq!(live_rect(&jwm, survivor), resized, "{context}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn master_resize_runtime_membership_retains_anchor_until_anchor_is_destroyed() {
         use crate::core::layout::LayoutEnum;
         use crate::core::types::Rect;

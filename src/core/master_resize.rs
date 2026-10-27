@@ -69,12 +69,14 @@ impl<K: Copy + Eq> ResizeContext<K> {
         if self.topology != topology {
             self.cancel_drag();
         }
-        // Reordering, adding, or removing neighbours must not erase a manual
-        // size. The fresh native frames below remain the planner's only input.
-        // A missing anchor cannot transfer its intent to another client.
-        if self
-            .intent
-            .is_some_and(|intent| !topology.contains(&intent.client))
+        // When the last neighbour leaves, the survivor takes its native
+        // singleton geometry instead of retaining a master/stack-sized box.
+        // Explicit resizing of an existing singleton still survives arrange.
+        // Other topology changes retain a live anchor's manual size.
+        if (self.topology.len() > 1 && topology.len() == 1)
+            || self
+                .intent
+                .is_some_and(|intent| !topology.contains(&intent.client))
         {
             self.intent = None;
         }
@@ -625,7 +627,7 @@ mod tests {
         c.sync(vec![2, 1], c.area, 0, f.clone());
         assert_eq!(c.intent, Some(i));
         assert_eq!(c.drag_snapshot, None);
-        for topology in [vec![1, 2], vec![1, 3, 2], vec![1, 3], vec![1]] {
+        for topology in [vec![1, 2], vec![1, 3, 2], vec![1, 3]] {
             c.drag_snapshot = Some(Some(i));
             c.sync(topology, c.area, 0, f.clone());
             assert_eq!(c.intent, Some(i));
@@ -636,6 +638,45 @@ mod tests {
         c.sync(vec![1, 2], c.area, 0, f);
         assert_eq!(c.intent, None, "a removed anchor must not resurrect");
     }
+    #[test]
+    fn singleton_transition_discards_multiwindow_size_and_pending_drag() {
+        let area = Rect::new(0, 0, 1000, 800);
+        let original = ResizeIntent {
+            client: 1,
+            width: 0.55,
+            height: 1.0,
+        };
+        let provisional = ResizeIntent {
+            width: 0.4,
+            ..original
+        };
+        let mut c = ResizeContext {
+            topology: vec![1, 2],
+            intent: Some(provisional),
+            drag_snapshot: Some(Some(original)),
+            ..ResizeContext::default()
+        };
+        c.sync(vec![1], area, 0, vec![frame(1, 0, 0, 1000, 800)]);
+        assert_eq!(c.intent, None);
+        assert_eq!(
+            c.drag_snapshot, None,
+            "late drag completion must not revive the old size"
+        );
+        c.sync(vec![1, 2], area, 0, vec![]);
+        assert_eq!(
+            c.intent, None,
+            "returning neighbours cannot revive the old size"
+        );
+        c.sync(vec![1], area, 0, vec![]);
+        c.intent = Some(original);
+        c.sync(vec![1], area, 0, vec![]);
+        assert_eq!(
+            c.intent,
+            Some(original),
+            "an explicit singleton resize still persists"
+        );
+    }
+
     #[test]
     fn grouping_changes_retain_intent_but_cancel_drag() {
         let mut c = ResizeContext::default();

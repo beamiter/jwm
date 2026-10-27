@@ -1865,6 +1865,122 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
+    fn scratchpad_hide_retains_its_upward_visual_after_arrange() {
+        let (mut jwm, key, window, monitor) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        jwm.animations.remove(key);
+        let visible = jwm.state.clients[key].rect();
+        jwm.togglescratchpad(&mut backend, &WMArgEnum::StringVec(vec!["term".into()]))
+            .unwrap();
+
+        let animation = jwm.animations.active[&key].clone();
+        assert_eq!(animation.kind, AnimationKind::Hide);
+        assert_eq!(
+            animation.from,
+            Rect::new(visible.0, visible.1, visible.2, visible.3)
+        );
+        assert_eq!(animation.to.x, visible.0, "the hide must stay vertical");
+        assert!(animation.to.y + animation.to.h < jwm.state.monitors[monitor].geometry.m_y);
+        assert_eq!(jwm.state.clients[key].state.tags, 0);
+        assert_ne!(jwm.get_selected_client_key(), Some(key));
+        assert!(!jwm.last_stacking[monitor].contains(&window));
+
+        jwm.arrange(&mut backend, Some(monitor));
+        let repeated = &jwm.animations.active[&key];
+        assert_eq!(repeated.to, animation.to);
+        assert_eq!(repeated.started_at, animation.started_at);
+
+        let halfway = animation
+            .sample(animation.started_at + animation.duration / 2)
+            .0;
+        let overrides = HashMap::from([(key, halfway)]);
+        let scene = jwm.build_compositor_scene(&backend, &overrides);
+        let visual: Vec<_> = scene
+            .iter()
+            .filter(|entry| entry.0 == window.raw())
+            .collect();
+        assert_eq!(visual.len(), 1, "parked slide must still be drawn once");
+        assert_eq!((visual[0].1, visual[0].2), (halfway.x, halfway.y));
+        jwm.animations.remove(key);
+        assert!(
+            !jwm.build_compositor_scene(&backend, &overrides)
+                .iter()
+                .any(|entry| entry.0 == window.raw())
+        );
+    }
+
+    #[test]
+    fn scratchpad_reversal_resumes_the_sampled_rect_and_shortens_the_trip() {
+        let (mut jwm, key, window, monitor) = jwm_with_cross_monitor_scratchpad(false);
+        let mut backend = ScratchpadBackend::new();
+        jwm.reveal_and_focus(&mut backend, window).unwrap();
+        let arg = WMArgEnum::StringVec(vec!["term".into()]);
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        // A long linear test clock fixes the midpoint without sleeps or a
+        // tolerance sensitive to machine load.
+        let animation = jwm.animations.active.get_mut(&key).unwrap();
+        animation.easing = crate::core::animation::Easing::Linear;
+        animation.duration = Duration::from_secs(600);
+        animation.started_at = Instant::now() - Duration::from_secs(300);
+        let midway = animation.sample(Instant::now()).0;
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        let reveal = jwm.animations.active[&key].clone();
+        assert_eq!(reveal.kind, AnimationKind::Appear);
+        assert!((reveal.from.y - midway.y).abs() <= 1);
+        assert_eq!(reveal.from.x, midway.x);
+        assert!(reveal.duration < CONFIG.load().animation_duration());
+
+        jwm.arrange(&mut backend, Some(monitor));
+        assert_eq!(jwm.animations.active[&key].kind, AnimationKind::Appear);
+        assert_eq!(jwm.animations.active[&key].started_at, reveal.started_at);
+
+        let animation = jwm.animations.active.get_mut(&key).unwrap();
+        animation.easing = crate::core::animation::Easing::Linear;
+        animation.duration = Duration::from_secs(600);
+        animation.started_at = Instant::now() - Duration::from_secs(300);
+        let midway = animation.sample(Instant::now()).0;
+        jwm.togglescratchpad(&mut backend, &arg).unwrap();
+        let hide = &jwm.animations.active[&key];
+        assert_eq!(hide.kind, AnimationKind::Hide);
+        assert!((hide.from.y - midway.y).abs() <= 1);
+        assert!(hide.duration < CONFIG.load().animation_duration());
+    }
+
+    #[test]
+    fn vstack_focus_resize_retargets_from_the_current_visual() {
+        let (mut jwm, first, second) = jwm_with_two_tiled_windows();
+        let mut backend = ScratchpadBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.state.monitors[monitor].lt = std::rc::Rc::new(LayoutEnum::VSTACK);
+        jwm.arrange(&mut backend, Some(monitor));
+        jwm.animations.active.clear();
+        let old_size = jwm.state.clients[first].rect();
+        jwm.focusstack(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+        assert_ne!(jwm.state.clients[first].rect(), old_size);
+
+        let animation = jwm.animations.active.get_mut(&first).unwrap();
+        animation.easing = crate::core::animation::Easing::Linear;
+        animation.duration = Duration::from_secs(600);
+        animation.started_at = Instant::now() - Duration::from_secs(300);
+        let visual = animation.sample(Instant::now()).0;
+        jwm.focusstack(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        let animation = jwm.animations.active[&first].clone();
+        assert!((animation.from.w - visual.w).abs() <= 1);
+        assert!((animation.from.h - visual.h).abs() <= 1);
+        assert_eq!(
+            animation.to,
+            Rect::new(old_size.0, old_size.1, old_size.2, old_size.3)
+        );
+        jwm.arrange(&mut backend, Some(monitor));
+        assert_eq!(
+            jwm.animations.active[&first].started_at,
+            animation.started_at
+        );
+    }
+
+    #[test]
     fn resized_dropdown_keeps_its_size_after_hide_and_reveal() {
         let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(false);
         let mut backend = ScratchpadBackend::new();

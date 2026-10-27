@@ -561,6 +561,10 @@ impl Jwm {
         };
 
         if let Some(client_key) = target_client_key {
+            // Zoom changes the master/stack roles. A normalized resize saved
+            // in the old role (including the untouched half-height captured
+            // by a width resize) must not override the new native geometry.
+            self.clear_current_layout_resize();
             self.pop(backend, client_key);
         }
         self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
@@ -1509,7 +1513,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod movestack_tests {
+mod tile_order_tests {
     use crate::Jwm;
     use crate::backend::common_define::WindowId;
     use crate::core::models::{ClientKey, WMClient};
@@ -1576,6 +1580,101 @@ mod movestack_tests {
             jwm.movestack(&mut backend, &WMArgEnum::Int(direction))
                 .unwrap();
             assert_eq!(jwm.state.monitor_clients[monitor], order_before);
+        }
+    }
+
+    #[test]
+    fn zoom_recomputes_master_height_instead_of_retaining_the_stack_resize() {
+        for resize in [None, Some(true), Some(false)] {
+            let (mut backend, mut jwm, monitor) = setup();
+            jwm.state.monitors[monitor].lt =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+            jwm.state.monitors[monitor].layout.n_master = 1;
+            let master = add(&mut jwm, monitor, 0x301, false);
+            let promoted = add(&mut jwm, monitor, 0x302, false);
+            let _other = add(&mut jwm, monitor, 0x303, false);
+            jwm.arrange(&mut backend, Some(monitor));
+            let native_master = jwm.state.clients[master].rect();
+            assert!(jwm.state.clients[promoted].geometry.h < native_master.3);
+            jwm.state.monitors[monitor].sel = Some(promoted);
+
+            if let Some(horizontal) = resize {
+                if horizontal {
+                    jwm.resize_horizontal(&mut backend, &WMArgEnum::Float(-0.025))
+                        .unwrap();
+                } else {
+                    jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.025))
+                        .unwrap();
+                }
+                let scope = jwm.layout_resize_scope(monitor).unwrap();
+                assert_eq!(
+                    jwm.state.monitors[monitor].layout_resizes[&scope]
+                        .intent
+                        .unwrap()
+                        .client,
+                    promoted
+                );
+            }
+
+            jwm.zoom(&mut backend, &WMArgEnum::Int(0)).unwrap();
+            assert_eq!(jwm.nexttiled(monitor, None), Some(promoted));
+            assert_eq!(
+                jwm.state.clients[promoted].rect(),
+                native_master,
+                "resize={resize:?}"
+            );
+            jwm.arrange(&mut backend, Some(monitor));
+            assert_eq!(
+                jwm.state.clients[promoted].rect(),
+                native_master,
+                "repeated arrange, resize={resize:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_from_a_resized_master_refits_both_master_and_stack() {
+        let (mut backend, mut jwm, monitor) = setup();
+        jwm.state.monitors[monitor].lt = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+        jwm.state.monitors[monitor].layout.n_master = 1;
+        let master = add(&mut jwm, monitor, 0x401, false);
+        let next = add(&mut jwm, monitor, 0x402, false);
+        let other = add(&mut jwm, monitor, 0x403, false);
+        jwm.arrange(&mut backend, Some(monitor));
+        let native_master = jwm.state.clients[master].rect();
+        let native_stack = jwm.state.clients[next].rect();
+        let native_other = jwm.state.clients[other].rect();
+        jwm.state.monitors[monitor].sel = Some(master);
+        jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+            .unwrap();
+        assert!(jwm.state.clients[master].geometry.h < native_master.3);
+
+        jwm.zoom(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert_eq!(jwm.nexttiled(monitor, None), Some(next));
+        assert_eq!(jwm.state.clients[next].rect(), native_master);
+        assert_eq!(jwm.state.clients[master].rect(), native_stack);
+        assert_eq!(jwm.state.clients[other].rect(), native_other);
+    }
+
+    #[test]
+    fn zoom_noop_preserves_the_current_resize() {
+        for select_float in [false, true] {
+            let (mut backend, mut jwm, monitor) = setup();
+            jwm.state.monitors[monitor].lt =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+            let tile = add(&mut jwm, monitor, 0x501, false);
+            let float = add(&mut jwm, monitor, 0x502, true);
+            jwm.arrange(&mut backend, Some(monitor));
+            jwm.state.monitors[monitor].sel = Some(tile);
+            jwm.resize_vertical(&mut backend, &WMArgEnum::Float(-0.1))
+                .unwrap();
+            let before = jwm.state.monitors[monitor].layout_resizes.clone();
+            assert!(!before.is_empty());
+            let rect = jwm.state.clients[tile].rect();
+            jwm.state.monitors[monitor].sel = Some(if select_float { float } else { tile });
+            jwm.zoom(&mut backend, &WMArgEnum::Int(0)).unwrap();
+            assert_eq!(jwm.state.clients[tile].rect(), rect);
+            assert_eq!(jwm.state.monitors[monitor].layout_resizes, before);
         }
     }
 }

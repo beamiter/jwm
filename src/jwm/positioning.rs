@@ -105,14 +105,24 @@ impl Jwm {
                     .animations
                     .current_visual_rect(client_key, now)
                     .unwrap_or(old_rect);
-                self.animations.start(
-                    client_key,
-                    visual,
-                    target,
-                    duration,
-                    easing,
-                    AnimationKind::Layout,
-                );
+                // Repeated floating show/arrange calls must preserve an
+                // Appear trajectory as well as its original deadline. A real
+                // layout change retargets from the sampled visual rectangle.
+                if !self
+                    .animations
+                    .active
+                    .get(&client_key)
+                    .is_some_and(|animation| animation.to == target)
+                {
+                    self.animations.start(
+                        client_key,
+                        visual,
+                        target,
+                        duration,
+                        easing,
+                        AnimationKind::Layout,
+                    );
+                }
                 // When compositor is active, move the actual X11 window to the
                 // target position immediately.  The compositor handles visual
                 // interpolation via the scene, but the X server delivers input
