@@ -16,9 +16,10 @@ use zbus::{
 
 use crate::capture::{self, CaptureHandle, CaptureTransport};
 use crate::picker::{SourceSelection, pick_sources, selection_fits_request};
+use crate::pipewire_remote;
 use crate::pipewire_stream::{self, Source, StreamHandle, StreamSpec};
 use crate::restore;
-use crate::session::Runtime;
+use crate::session::{Phase, Runtime, Session, SessionToken, StartRequest};
 use crate::wayland::{OutputInfo, ToplevelInfo};
 
 /// Source type bits per the portal spec.
@@ -51,6 +52,7 @@ struct ScreenCast {
 struct SessionImpl {
     rt: Runtime,
     handle: String,
+    token: SessionToken,
 }
 
 #[interface(name = "org.freedesktop.impl.portal.Session")]
@@ -69,7 +71,10 @@ impl SessionImpl {
         // Drop streams + capture threads first so the Closed signal observers
         // can rely on PW nodes already being gone. Dropping joins those
         // threads, so it runs on the blocking pool.
-        let session = self.rt.remove_session(&self.handle).await;
+        let session = self.rt.remove_session(&self.handle, &self.token).await;
+        if session.is_none() {
+            return Ok(());
+        }
         off_runtime(move || drop(session)).await;
         let _ = Self::closed(&emitter).await;
         let path = self.handle.clone();
@@ -108,15 +113,23 @@ impl ScreenCast {
     ) -> (u32, HashMap<String, OwnedValue>) {
         info!("CreateSession {session_handle}");
         let handle_str = session_handle.to_string();
-        self.rt.insert_session(handle_str.clone()).await;
+        let Some(token) = self.rt.insert_session(handle_str.clone()).await else {
+            return (2, HashMap::new());
+        };
         let sess = SessionImpl {
             rt: self.rt.clone(),
             handle: handle_str.clone(),
+            token: token.clone(),
         };
-        if let Err(e) = server.at(session_handle.clone(), sess).await {
-            warn!("CreateSession: failed to serve Session at {handle_str}: {e}");
+        match server.at(session_handle.clone(), sess).await {
+            Ok(true) => (0, HashMap::new()),
+            result => {
+                warn!("CreateSession: failed to serve Session at {handle_str}: {result:?}");
+                let session = self.rt.remove_session(&handle_str, &token).await;
+                off_runtime(move || drop(session)).await;
+                (2, HashMap::new())
+            }
         }
-        (0, HashMap::new())
     }
 
     async fn select_sources(
@@ -130,6 +143,15 @@ impl ScreenCast {
             "SelectSources {session_handle} options={:?}",
             options.keys().collect::<Vec<_>>()
         );
+        let handle_str = session_handle.as_str();
+        let Some(token) = self
+            .rt
+            .with_session(handle_str, Session::begin_selection)
+            .await
+            .flatten()
+        else {
+            return (2, HashMap::new());
+        };
 
         let parsed = parse_select_sources_opts(&options);
         let types_mask = parsed.types_mask;
@@ -155,6 +177,9 @@ impl ScreenCast {
         let Some((selection, honored_token)) =
             off_runtime(move || choose_sources(request)).await.flatten()
         else {
+            self.rt
+                .with_current_session(handle_str, &token, |s| s.phase = Phase::Failed)
+                .await;
             info!("SelectSources cancelled by user or invalid source override");
             return (1, HashMap::new());
         };
@@ -164,16 +189,17 @@ impl ScreenCast {
             selection.toplevels.len()
         );
 
-        let _ = self
+        let configured = self
             .rt
-            .with_session(&session_handle.to_string(), |s| {
+            .with_current_session(handle_str, &token, |s| {
                 s.selection = Some(selection);
                 s.persist_mode = persist_mode;
                 s.restore_token = honored_token;
                 s.paint_cursors = paint_cursors;
+                s.phase = Phase::Selected;
             })
             .await;
-        (0, HashMap::new())
+        (if configured.is_some() { 0 } else { 1 }, HashMap::new())
     }
 
     async fn start(
@@ -186,59 +212,61 @@ impl ScreenCast {
     ) -> (u32, HashMap<String, OwnedValue>) {
         info!("Start {session_handle}");
 
-        // Pull the resolved selection out of the session — SelectSources put it
-        // there. Without it, this is a no-op-but-success Start.
-        let (selection, persist_mode, prior_token, paint_cursors) = self
+        let handle_str = session_handle.as_str();
+        let Some(StartRequest {
+            token,
+            selection,
+            persist_mode,
+            prior_token,
+            paint_cursors,
+        }) = self
             .rt
-            .with_session(&session_handle.to_string(), |s| {
-                (
-                    s.selection.clone().unwrap_or_default(),
-                    s.persist_mode,
-                    s.restore_token.clone(),
-                    s.paint_cursors,
-                )
-            })
+            .with_session(handle_str, Session::begin_start)
             .await
-            .unwrap_or((SourceSelection::default(), 0, None, true));
-
-        // Each capture and PipeWire stream negotiates for up to 5 seconds.
-        let sources = selection.clone();
-        let Some(StartedStreams {
-            streams_meta,
-            handles,
-            captures,
-        }) = off_runtime(move || start_streams(&sources, paint_cursors)).await
+            .flatten()
         else {
             return (2, HashMap::new());
         };
 
-        // The streams replace any from an earlier Start. Replaced ones, and new
-        // ones for a session closed meanwhile, are joined off the runtime.
+        // Each capture and PipeWire stream negotiates for up to 5 seconds.
+        let sources = selection.clone();
+        let cancellation = token.clone();
+        let Some(StartedStreams {
+            streams_meta,
+            handles,
+            captures,
+        }) = off_runtime(move || start_streams(&sources, paint_cursors, &cancellation)).await
+        else {
+            self.rt
+                .with_current_session(handle_str, &token, |s| s.phase = Phase::Failed)
+                .await;
+            return (2, HashMap::new());
+        };
+
+        if streams_meta.is_empty() {
+            warn!("Start {session_handle}: no streams could be started");
+            self.rt
+                .with_current_session(handle_str, &token, |s| s.phase = Phase::Failed)
+                .await;
+            off_runtime(move || drop((handles, captures))).await;
+            return (if token.is_cancelled() { 1 } else { 2 }, HashMap::new());
+        }
+
+        // Only this session identity can publish the result of its one Start.
+        // A close/recreate while negotiation runs cannot resurrect old streams.
         let mut started = Some((handles, captures));
-        let replaced = self
+        let stored = self
             .rt
-            .with_session(&session_handle.to_string(), |s| {
+            .with_current_session(handle_str, &token, |s| {
                 let (handles, captures) = started.take().expect("streams are stored once");
-                (
-                    std::mem::replace(&mut s.streams, handles),
-                    std::mem::replace(&mut s.captures, captures),
-                )
+                s.streams = handles;
+                s.captures = captures;
+                s.phase = Phase::Started;
             })
             .await;
-        off_runtime(move || drop((replaced, started))).await;
-
-        // Empty selection → SelectSources was either never called or returned
-        // nothing. Empty streams_meta with non-empty selection → every capture
-        // and/or PW spawn failed. Either way, returning success with no streams
-        // makes the client believe the share is active when nothing is flowing.
-        let total_picked = selection.outputs.len() + selection.toplevels.len();
-        if total_picked == 0 {
-            warn!("Start {session_handle}: no sources selected (SelectSources skipped?)");
-            return (2, HashMap::new());
-        }
-        if streams_meta.is_empty() {
-            warn!("Start {session_handle}: all {total_picked} captures failed; returning error");
-            return (2, HashMap::new());
+        off_runtime(move || drop(started)).await;
+        if stored.is_none() {
+            return (1, HashMap::new());
         }
 
         let mut results = HashMap::new();
@@ -264,6 +292,9 @@ impl ScreenCast {
                 }
             }
         }
+        if token.is_cancelled() {
+            return (1, HashMap::new());
+        }
         info!("Start {session_handle} returning streams");
         (0, results)
     }
@@ -274,16 +305,30 @@ impl ScreenCast {
         _options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
         info!("OpenPipeWireRemote {session_handle}");
+        let handle_str = session_handle.as_str();
+        let token = self
+            .rt
+            .with_session(handle_str, |s| s.started_token())
+            .await
+            .flatten()
+            .ok_or_else(|| zbus::fdo::Error::Failed("session has not been started".into()))?;
         // Hand the caller a fresh UNIX-socket fd connected to the user
         // PipeWire daemon. They feed it to `pw_context_connect_fd()` on
         // their side to skip the usual env-var-based discovery.
-        let path = pipewire_socket_path();
-        let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
-            zbus::fdo::Error::Failed(format!(
-                "OpenPipeWireRemote: connect to PipeWire socket {path:?}: {e}"
-            ))
-        })?;
-        let owned: std::os::fd::OwnedFd = stream.into();
+        let owned = pipewire_remote::connect()
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("OpenPipeWireRemote: {e}")))?;
+        if self
+            .rt
+            .with_current_session(handle_str, &token, |s| s.started_token())
+            .await
+            .flatten()
+            .is_none()
+        {
+            return Err(zbus::fdo::Error::Failed(
+                "session closed while connecting".into(),
+            ));
+        }
         Ok(zbus::zvariant::OwnedFd::from(owned))
     }
 }
@@ -378,19 +423,23 @@ struct StartedStreams {
 
 /// The blocking half of `Start`: one capture thread and one PipeWire stream
 /// per selected source, each negotiating before it returns.
-fn start_streams(selection: &SourceSelection, paint_cursors: bool) -> StartedStreams {
+fn start_streams(
+    selection: &SourceSelection,
+    paint_cursors: bool,
+    cancellation: &SessionToken,
+) -> StartedStreams {
     // For each picked output, spawn:
     //   1. Wayland capture thread (negotiates real buffer_size + format,
     //      then pumps frames into a SharedFrame).
     //   2. PipeWire producer thread (drains the SharedFrame in on_process).
     //
-    // Toplevels still use the zero-fill placeholder — the wl_output side
-    // needed for re-binding inside a fresh capture thread isn't relevant
-    // for toplevels, which would need their own re-discovery path.
     let mut streams_meta: Vec<(u32, HashMap<String, OwnedValue>)> = Vec::new();
     let mut handles: Vec<StreamHandle> = Vec::new();
     let mut captures: Vec<CaptureHandle> = Vec::new();
     for (idx, o) in selection.outputs.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            break;
+        }
         let capture = match capture::spawn_output_capture(o.name.clone(), paint_cursors) {
             Ok(c) => c,
             Err(e) => {
@@ -401,6 +450,9 @@ fn start_streams(selection: &SourceSelection, paint_cursors: bool) -> StartedStr
                 continue;
             }
         };
+        if cancellation.is_cancelled() {
+            break;
+        }
         let spec = StreamSpec {
             width: capture.width,
             height: capture.height,
@@ -433,6 +485,9 @@ fn start_streams(selection: &SourceSelection, paint_cursors: bool) -> StartedStr
         }
     }
     for (idx, t) in selection.toplevels.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            break;
+        }
         let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), paint_cursors) {
             Ok(c) => c,
             Err(e) => {
@@ -443,6 +498,9 @@ fn start_streams(selection: &SourceSelection, paint_cursors: bool) -> StartedStr
                 continue;
             }
         };
+        if cancellation.is_cancelled() {
+            break;
+        }
         let spec = StreamSpec {
             width: capture.width,
             height: capture.height,
@@ -479,19 +537,6 @@ fn start_streams(selection: &SourceSelection, paint_cursors: bool) -> StartedStr
         handles,
         captures,
     }
-}
-
-/// Resolve the PipeWire daemon socket path the client should connect to.
-/// Honors `PIPEWIRE_REMOTE` if set, else `$XDG_RUNTIME_DIR/pipewire-0` (the
-/// standard location written by PipeWire's own systemd unit).
-fn pipewire_socket_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("PIPEWIRE_REMOTE") {
-        return std::path::PathBuf::from(p);
-    }
-    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    let mut p = std::path::PathBuf::from(runtime);
-    p.push("pipewire-0");
-    p
 }
 
 pub async fn serve(rt: Runtime) -> Result<Connection, Box<dyn std::error::Error + Send + Sync>> {
@@ -565,6 +610,144 @@ mod tests {
     }
     fn ov_str(s: &str) -> OwnedValue {
         Value::from(s).try_into().unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_lifecycle_is_enforced_over_a_private_bus() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Child, Command, Stdio};
+        use std::sync::{Arc, Mutex};
+
+        struct Bus(Child);
+        impl Drop for Bus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut bus = Bus(Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("install dbus-daemon to run portal integration tests"));
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let rt = Runtime::start(Arc::new(Mutex::new(Default::default())))
+            .await
+            .unwrap();
+        let service = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .name("org.freedesktop.impl.portal.desktop.jwm")
+            .unwrap()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                ScreenCast { rt: rt.clone() },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let proxy = zbus::Proxy::new(
+            &client,
+            "org.freedesktop.impl.portal.desktop.jwm",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.impl.portal.ScreenCast",
+        )
+        .await
+        .unwrap();
+        let request = OwnedObjectPath::try_from("/request/test").unwrap();
+        let session = OwnedObjectPath::try_from("/session/test").unwrap();
+        let options = || HashMap::<String, OwnedValue>::new();
+        let create = || (request.clone(), session.clone(), "test.app", options());
+        let (code, _): (u32, HashMap<String, OwnedValue>) =
+            proxy.call("CreateSession", &create()).await.unwrap();
+        assert_eq!(code, 0);
+        rt.with_session(session.as_str(), |s| s.persist_mode = 2)
+            .await;
+        let (code, _): (u32, HashMap<String, OwnedValue>) =
+            proxy.call("CreateSession", &create()).await.unwrap();
+        assert_eq!(code, 2);
+        assert_eq!(
+            rt.with_session(session.as_str(), |s| s.persist_mode).await,
+            Some(2)
+        );
+
+        let unknown = OwnedObjectPath::try_from("/session/unknown").unwrap();
+        let (code, _): (u32, HashMap<String, OwnedValue>) = proxy
+            .call(
+                "SelectSources",
+                &(request.clone(), unknown.clone(), "test.app", options()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 2);
+        let (code, _): (u32, HashMap<String, OwnedValue>) = proxy
+            .call(
+                "Start",
+                &(request.clone(), session.clone(), "test.app", "", options()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 2);
+        let remote: zbus::Result<zbus::zvariant::OwnedFd> = proxy
+            .call("OpenPipeWireRemote", &(session.clone(), options()))
+            .await;
+        assert!(
+            remote.is_err(),
+            "an unstarted session must not receive a PipeWire FD"
+        );
+
+        // A pre-existing D-Bus object must make creation fail and roll back
+        // the reserved map entry, rather than return an unusable session.
+        let blocked = OwnedObjectPath::try_from("/session/blocked").unwrap();
+        service
+            .object_server()
+            .at(
+                blocked.clone(),
+                SessionImpl {
+                    rt: rt.clone(),
+                    handle: blocked.to_string(),
+                    token: SessionToken::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let (code, _): (u32, HashMap<String, OwnedValue>) = proxy
+            .call(
+                "CreateSession",
+                &(request.clone(), blocked.clone(), "test.app", options()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 2);
+        assert!(rt.with_session(blocked.as_str(), |_| ()).await.is_none());
+
+        let token = rt
+            .with_session(session.as_str(), |s| s.token_for_test())
+            .await
+            .unwrap();
+        let session_proxy = zbus::Proxy::new(
+            &client,
+            "org.freedesktop.impl.portal.desktop.jwm",
+            session.clone(),
+            "org.freedesktop.impl.portal.Session",
+        )
+        .await
+        .unwrap();
+        session_proxy.call::<_, _, ()>("Close", &()).await.unwrap();
+        assert!(token.is_cancelled());
+        assert!(rt.with_session(session.as_str(), |_| ()).await.is_none());
+        let (code, _): (u32, HashMap<String, OwnedValue>) =
+            proxy.call("CreateSession", &create()).await.unwrap();
+        assert_eq!(code, 0);
     }
 
     #[test]
@@ -688,7 +871,7 @@ mod tests {
             "choose_sources(request)",
             "start_streams(&sources",
             "drop(session)",
-            "drop((replaced, started))",
+            "drop(started)",
             "match prior_token",
         ] {
             let routed = format!("{}{work}", "off_runtime(move || ");

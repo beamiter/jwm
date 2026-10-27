@@ -613,6 +613,17 @@ request permits exactly one choice across both kinds. Conflicting or ambiguous
 `JWM_PORTAL_OUTPUT`/`JWM_PORTAL_WINDOW` overrides cancel that request instead of
 sharing multiple sources or silently choosing one. Empty overrides also cancel.
 
+Each session follows `CreateSession` → `SelectSources` → `Start`; selection and
+startup can each be attempted once. Duplicate creation and calls in the wrong
+stage fail. Closing a session invalidates pending work, so a late picker or
+capture result cannot reactivate that session or overwrite a new session at the
+same object path. PipeWire FDs are returned only for started sessions.
+
+PipeWire socket discovery honors `PIPEWIRE_RUNTIME_DIR`, then `XDG_RUNTIME_DIR`,
+then `USERPROFILE`. Relative `PIPEWIRE_REMOTE` names are resolved in that directory;
+absolute socket paths work directly. Remote FD connection attempts have a 500ms
+deadline and leave the D-Bus workers available while waiting.
+
 ScreenCast cursor compatibility: when `cursor_mode` is omitted, the portal uses the
 standard Hidden mode. Applications that want the cursor included must explicitly
 request Embedded mode. Earlier JWM versions incorrectly defaulted to Embedded.

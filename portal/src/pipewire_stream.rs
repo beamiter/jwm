@@ -555,9 +555,9 @@ mod shutdown_tests {
 mod lifecycle_tests {
     use super::*;
 
-    #[test]
+    #[tokio::test]
     #[ignore = "requires scripts/test-portal-pipewire.sh's private PipeWire daemon"]
-    fn private_daemon_stream_starts_and_stops() {
+    async fn private_daemon_stream_starts_and_stops() {
         assert!(std::env::var_os("JWM_PORTAL_TEST_PIPEWIRE").is_some());
         for iteration in 0..3 {
             let handle = spawn(
@@ -572,6 +572,10 @@ mod lifecycle_tests {
             )
             .expect("the private daemon must publish a stream node");
             assert_ne!(handle.node_id, pw::constants::ID_ANY);
+            let remote = crate::pipewire_remote::connect()
+                .await
+                .expect("relative remote name must resolve under PIPEWIRE_RUNTIME_DIR");
+            drop(remote);
             drop(handle);
         }
     }

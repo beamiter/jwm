@@ -37,14 +37,14 @@ context.modules = [
 ]
 CONF
 export PIPEWIRE_RUNTIME_DIR="$TEST_ROOT"
-export PIPEWIRE_REMOTE="$TEST_ROOT/pipewire-0"
+export PIPEWIRE_REMOTE=pipewire-0
 export JWM_PORTAL_TEST_PIPEWIRE=1
 LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "$PIPEWIRE_BIN" --config "$TEST_ROOT/test.conf" > "$TEST_ROOT/daemon.log" 2>&1 &
 daemon_pid=$!
 ready=false
 for ((attempt=0; attempt<100; attempt++)); do
-    if [[ -S $PIPEWIRE_REMOTE ]]; then
+    if [[ -S $TEST_ROOT/pipewire-0 ]]; then
         ready=true
         break
     fi

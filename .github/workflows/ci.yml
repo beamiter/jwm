@@ -257,6 +257,7 @@ jobs:
             ninja-build \
             clang \
             libclang-dev \
+            dbus-daemon \
             libdbus-1-dev \
             libglib2.0-dev \
             libdrm-dev \
