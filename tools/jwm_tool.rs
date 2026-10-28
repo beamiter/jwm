@@ -867,10 +867,26 @@ impl JwmManager {
 
 // --- Atomic response write ---
 
-fn write_response(resp_file: &Path, s: &str) {
+fn write_response(resp_file: &Path, s: &str) -> bool {
     let tmp = resp_file.with_extension("tmp");
-    if fs::write(&tmp, s).is_ok() {
-        let _ = fs::rename(&tmp, resp_file);
+    fs::write(&tmp, s)
+        .and_then(|()| fs::rename(&tmp, resp_file))
+        .is_ok()
+}
+
+fn handle_unexpected_child_exit(
+    manager: &mut JwmManager,
+    response_published: bool,
+    cleanup: impl FnOnce(bool),
+) -> bool {
+    // A status command may already have reaped the child and cleared the
+    // ownership fields. Its final reply still belongs to the waiting client.
+    let _ = manager.is_running();
+    if manager.unexpected_exit {
+        cleanup(response_published);
+        true
+    } else {
+        false
     }
 }
 
@@ -1224,6 +1240,9 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
         let mut poll_fds = [PollFd::new(fifo_fd.as_fd(), PollFlags::POLLIN)];
         let _ = poll(&mut poll_fds, PollTimeout::from(200u8));
 
+        // Only a reply published in this iteration survives an unexpected
+        // child exit. Old files and failed reply writes retain normal cleanup.
+        let mut response_published = false;
         match read_commands_from_fd(&fifo_fd, &mut line_buf) {
             Ok(cmds) => {
                 for cmd in cmds {
@@ -1232,33 +1251,36 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
                     match cmd.as_str() {
                         "restart" => {
                             let response = daemon_command_response("restart", mgr.restart());
-                            write_response(&resp_path, &response);
+                            response_published = write_response(&resp_path, &response);
                         }
                         "stop" => {
                             let response = daemon_command_response("stop", mgr.stop());
-                            write_response(&resp_path, &response);
+                            response_published = write_response(&resp_path, &response);
                         }
                         "start" => {
                             let response = daemon_command_response("start", mgr.start());
-                            write_response(&resp_path, &response);
+                            response_published = write_response(&resp_path, &response);
                         }
                         "quit" => {
                             log_line("收到退出命令");
                             let result = mgr.stop();
                             let stopped = result.is_ok();
-                            write_response(&resp_path, &daemon_command_response("quit", result));
+                            response_published = write_response(
+                                &resp_path,
+                                &daemon_command_response("quit", result),
+                            );
                             if stopped {
-                                cleanup_resources(&control_pipe, true);
+                                cleanup_resources(&control_pipe, response_published);
                                 return Ok(());
                             }
                         }
                         "status" => {
                             let s = mgr.status_str();
-                            write_response(&resp_path, &s);
+                            response_published = write_response(&resp_path, &s);
                         }
                         other => {
                             log_line(&format!("未知命令: {}", other));
-                            write_response(&resp_path, "unknown_command");
+                            response_published = write_response(&resp_path, "unknown_command");
                         }
                     }
                 }
@@ -1268,12 +1290,10 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
             }
         }
 
-        // Child::try_wait is the sole reaper. Keep observed exits even if a
-        // preceding status command already cleared the ownership fields.
-        let _ = mgr.is_running();
-        if mgr.unexpected_exit {
+        if handle_unexpected_child_exit(&mut mgr, response_published, |preserve_response| {
             log_line("检测到JWM意外退出, 守护进程一并退出");
-            cleanup_resources(&control_pipe, false);
+            cleanup_resources(&control_pipe, preserve_response);
+        }) {
             return Ok(());
         }
     }
@@ -5271,6 +5291,91 @@ mod tests {
         assert!(!temporary.exists());
         super::cleanup_response_files(&response, false);
         assert!(!response.exists());
+    }
+
+    fn exited_manager() -> JwmManager {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 17"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        child.wait().unwrap();
+        let mut manager = JwmManager::new(PathBuf::from("unused"), None);
+        manager.jwm_pid = Some(pid);
+        manager.jwm_child = Some(child);
+        manager
+    }
+
+    #[test]
+    fn unexpected_exit_preserves_the_final_status_response() {
+        let dir = TempLogDir::new("exit-status-response");
+        let pipe = dir.0.join("control");
+        mkfifo_safe(&pipe).unwrap();
+        let response = super::response_path(&pipe);
+        let temporary = response.with_extension("tmp");
+        let mut manager = exited_manager();
+        let status = manager.status_str();
+        assert_eq!(status, "JWM未运行");
+        assert!(manager.unexpected_exit);
+        let published = super::write_response(&response, &status);
+        assert!(published);
+        fs::write(&temporary, "unfinished").unwrap();
+        assert!(super::handle_unexpected_child_exit(
+            &mut manager,
+            published,
+            |preserve| {
+                fs::remove_file(&pipe).unwrap();
+                super::cleanup_response_files(&response, preserve);
+            }
+        ));
+        // The client may poll only after daemon cleanup has finished.
+        let received = fs::read_to_string(&response).unwrap();
+        assert_eq!(received, status);
+        validate_daemon_response(&received).unwrap();
+        assert!(!pipe.exists());
+        assert!(!temporary.exists());
+        assert!(manager.jwm_child.is_none());
+    }
+
+    #[test]
+    fn unexpected_exit_without_a_new_reply_removes_stale_responses() {
+        let dir = TempLogDir::new("exit-stale-response");
+        let response = dir.0.join("response");
+        let temporary = response.with_extension("tmp");
+        for stale_response in [false, true] {
+            let mut manager = exited_manager();
+            if stale_response {
+                fs::write(&response, "old response").unwrap();
+            }
+            fs::write(&temporary, "unfinished").unwrap();
+            assert!(super::handle_unexpected_child_exit(
+                &mut manager,
+                false,
+                |preserve| super::cleanup_response_files(&response, preserve)
+            ));
+            assert!(!response.exists());
+            assert!(!temporary.exists());
+        }
+    }
+
+    #[test]
+    fn unexpected_exit_does_not_keep_an_old_reply_when_publication_fails() {
+        let dir = TempLogDir::new("exit-failed-response");
+        let response = dir.0.join("response");
+        let temporary = response.with_extension("tmp");
+        fs::write(&response, "old response").unwrap();
+        fs::create_dir(&temporary).unwrap();
+        let mut manager = exited_manager();
+        let published = super::write_response(&response, &manager.status_str());
+        assert!(!published);
+        assert_eq!(fs::read_to_string(&response).unwrap(), "old response");
+        assert!(super::handle_unexpected_child_exit(
+            &mut manager,
+            published,
+            |preserve| super::cleanup_response_files(&response, preserve)
+        ));
+        assert!(!response.exists());
+        assert!(temporary.is_dir());
     }
 
     #[test]

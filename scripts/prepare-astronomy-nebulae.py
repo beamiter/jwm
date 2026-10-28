@@ -25,7 +25,17 @@ TILE = 1024
 
 def galactic(v):
     # ICRS -> IAU Galactic, rearranged to the sky shader's (X, Z, Y) frame.
-    return [sum(a * b for a, b in zip(row, v)) for row in (
+    # Keep the original left-to-right IEEE-754 evaluation order. Python 3.12
+    # changed float sum() to compensated summation; using it here changes the
+    # last serialized digits and makes the checked-in CPU/GPU catalogues stale
+    # on CI despite identical source data.
+    def dot(row):
+        total = 0.0
+        for a, b in zip(row, v):
+            total += a * b
+        return total
+
+    return [dot(row) for row in (
         (-0.054875560416, -0.873437090235, -0.483835015549),
         (-0.867666149019, -0.198076373431, 0.455983776175),
         (0.494109427876, -0.444829629960, 0.746982244497),

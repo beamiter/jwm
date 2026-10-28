@@ -13,6 +13,12 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
+/// Match Smithay's ordinary frame callback timestamps: low 32 bits of the
+/// millisecond clock, wrapping naturally every 2^32 ms rather than freezing.
+fn frame_callback_timestamp(time: Duration) -> u32 {
+    time.as_millis() as u32
+}
+
 fn popup_key_delivery_candidate(known: bool, forwarded: bool, pressed: bool, locked: bool) -> bool {
     known && forwarded && pressed && !locked
 }
@@ -3635,11 +3641,11 @@ impl JwmWaylandState {
     }
 
     fn send_surface_frame_callbacks_now(&mut self, surface: &WlSurface) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or(std::time::Duration::ZERO)
-            .as_millis()
-            .min(u128::from(u32::MAX)) as u32;
+        let now = frame_callback_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO),
+        );
 
         with_surface_tree_downward(
             surface,
@@ -6828,8 +6834,8 @@ mod clipboard_io_tests {
 mod protocol_hardening_tests {
     use super::{
         JwmClientState, JwmWaylandState, ManagedXwaylandWindow, XDG_ACTIVATION_TOKEN_LIFETIME,
-        XwaylandConfigureRoute, order_clipboard_captures, output_logical_size,
-        route_xwayland_configure_request,
+        XwaylandConfigureRoute, frame_callback_timestamp, order_clipboard_captures,
+        output_logical_size, route_xwayland_configure_request,
     };
     use crate::backend::api::{BackendEvent, Geometry, NetWmAction, NetWmState};
     use crate::backend::clipboard_offer::CapturedClipboard;
@@ -7017,6 +7023,59 @@ mod protocol_hardening_tests {
             }),
             ..JwmClientState::default()
         }
+    }
+
+    #[test]
+    fn compensating_frame_timestamps_wrap_in_the_normal_frame_time_domain() {
+        for (millis, expected) in [
+            (0, 0),
+            (u64::from(u32::MAX), u32::MAX),
+            (u64::from(u32::MAX) + 1, 0),
+            (u64::from(u32::MAX) + 18, 17),
+            (1_792_195_200_123, 1_792_195_200_123_u64 as u32),
+        ] {
+            assert_eq!(
+                frame_callback_timestamp(Duration::from_millis(millis)),
+                expected
+            );
+        }
+        assert_eq!(frame_callback_timestamp(Duration::from_nanos(1_999_999)), 1);
+    }
+
+    #[test]
+    fn compensating_frame_callbacks_deliver_the_current_wrapping_time_once() {
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let surface_id = client.new_id();
+        client.request(compositor, 0, &[surface_id]);
+        let callback_id = client.new_id();
+        client.request(surface_id, 3, &[callback_id]); // wl_surface.frame
+        client.request(surface_id, 6, &[]); // wl_surface.commit
+        server.roundtrip();
+        client.events();
+        let surface = client.surface(&server, surface_id);
+        let current_time = || {
+            frame_callback_timestamp(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap(),
+            )
+        };
+        let before = current_time();
+        server.state.send_surface_frame_callbacks_now(&surface);
+        let after = current_time();
+        // A second flush must not replay the already-drained callbacks.
+        server.state.send_surface_frame_callbacks_now(&surface);
+        server.roundtrip();
+        let timestamps: Vec<_> = client
+            .events()
+            .into_iter()
+            .filter(|(sender, opcode, _)| *sender == callback_id && *opcode == 0)
+            .map(|(_, _, args)| args[0])
+            .collect();
+        assert_eq!(timestamps.len(), 1);
+        assert!(timestamps[0].wrapping_sub(before) <= after.wrapping_sub(before));
     }
 
     fn drain_events(server: &Server) -> Vec<BackendEvent> {

@@ -20,6 +20,7 @@ on:
       - assets/astronomy/**
       - scripts/test-astronomy-shader.py
       - scripts/test-astronomy-assets.py
+      - scripts/test-astronomy-catalog.py
       - scripts/test-deep-sky.py
       - scripts/prepare-astronomy-*.py
       - scripts/install_jwm_scripts.sh
@@ -45,6 +46,7 @@ on:
       - assets/astronomy/**
       - scripts/test-astronomy-shader.py
       - scripts/test-astronomy-assets.py
+      - scripts/test-astronomy-catalog.py
       - scripts/test-deep-sky.py
       - scripts/prepare-astronomy-*.py
       - scripts/install_jwm_scripts.sh
@@ -119,6 +121,7 @@ jobs:
 
       - name: Observed deep-sky catalogue and GL/GLES focus/zoom
         run: |
+          python3 scripts/test-astronomy-catalog.py
           python3 scripts/prepare-astronomy-nebulae.py --check
           python3 scripts/test-deep-sky.py --output "$ASTRONOMY_TEST_OUTPUT/deep-sky"
 

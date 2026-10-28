@@ -5,6 +5,21 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Player paging, daemon replies and frame timestamps
+
+- Paging through the player queue keeps the highlighted row on the visible
+  page. Enter now plays that row after using either page button, including on
+  a partial last page.
+- `jwm-tool status` keeps its final reply when it discovers that the managed
+  compositor exited. Cleanup no longer removes that reply before the waiting
+  client can read it and causes a misleading timeout.
+- Wayland frame callbacks sent while correcting a client's window size now
+  use the same wrapping millisecond timestamp as normal frames, instead of
+  staying stuck at the maximum 32-bit value.
+- Generated deep-sky catalogues use a fixed summation order, so differences
+  between Python float-sum implementations no longer cause spurious stale
+  catalogue failures in CI. Existing CPU/GPU catalogue bytes are unchanged.
+
 ### Layout, media control and configuration reliability
 
 - Layout requests that leave their parameter unchanged, including repeated

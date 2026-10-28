@@ -37,13 +37,42 @@ local function click(x, y)
     key('jwm-panel-mouse', 'MBTN_LEFT')
 end
 local ok, err = pcall(function()
-    local directory = utils.split_path(debug.getinfo(1, 'S').source:sub(2))
+    -- Lua loaders may report either @/absolute/path or /absolute/path.
+    local source = debug.getinfo(1, 'S').source:gsub('^@', '')
+    local directory = utils.split_path(source)
     dofile(directory .. 'ui.lua')
     messages['jwm-queue']()
     assert(overlay.data:find('Track 1.flac', 1, true))
     assert(not overlay.data:find('Track 8.flac', 1, true), 'render must be bounded to one page')
     key('jwm-panel-keys', 'DOWN'); key('jwm-panel-keys', 'ENTER')
     assert(props['playlist-pos'] == 1)
+    -- Paging keeps the selected relative row; Enter must never play a
+    -- previously selected item that is now outside the visible page.
+    click(720, 345)
+    assert(overlay.data:find('Track 8.flac', 1, true))
+    assert(not overlay.data:find('Track 1.flac', 1, true))
+    key('jwm-panel-keys', 'ENTER')
+    assert(props['playlist-pos'] == 8, 'next page must keep the second row selected')
+    click(650, 345)
+    key('jwm-panel-keys', 'ENTER')
+    assert(props['playlist-pos'] == 1, 'previous page must restore the relative row')
+    local full_playlist = props.playlist
+    props.playlist = {}
+    for i = 1, 10 do props.playlist[i] = full_playlist[i] end
+    observers.playlist()
+    click(720, 345)
+    assert(overlay.data:find('Track 4.flac', 1, true))
+    assert(overlay.data:find('Track 10.flac', 1, true))
+    key('jwm-panel-keys', 'ENTER')
+    assert(props['playlist-pos'] == 4, 'partial last page must preserve the relative row')
+    click(720, 345)
+    key('jwm-panel-keys', 'ENTER')
+    assert(props['playlist-pos'] == 4, 'paging past the end must keep selection unchanged')
+    click(650, 345)
+    key('jwm-panel-keys', 'ENTER')
+    assert(props['playlist-pos'] == 1)
+    props.playlist = full_playlist
+    observers.playlist()
     for _ = 1, 10 do key('jwm-panel-keys', 'DOWN') end
     key('jwm-panel-keys', 'ENTER'); assert(props['playlist-pos'] == 11)
     key('jwm-panel-keys', 'ESC'); assert(not groups['jwm-panel-keys'].enabled)
@@ -58,6 +87,7 @@ local ok, err = pcall(function()
     mouse_x, mouse_y = 100, 500; bindings.mouse_move()
     assert(not groups['jwm-panel-mouse'].enabled, 'OSC must retain mouse outside panel')
     props.playlist = {}; messages['jwm-queue']()
+    click(720, 345); click(650, 345) -- empty queue paging safe
     key('jwm-panel-keys', 'ENTER') -- empty queue safe
     props.playlist = {{filename='/x/歌曲😀.mp3'}}; observers.playlist()
     assert(overlay.data:find('歌曲😀.mp3', 1, true))

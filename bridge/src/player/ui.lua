@@ -4,6 +4,7 @@ local mp = require 'mp'
 local assdraw = require 'mp.assdraw'
 local utils = require 'mp.utils'
 local overlay = mp.create_osd_overlay('ass-events')
+local PAGE_ROWS = 7
 local panel, offset, selected = nil, 0, 1
 local regions, width, height = {}, 960, 540
 local last_motion = mp.get_time()
@@ -51,6 +52,15 @@ end
 local function toggle(name)
     panel = panel ~= name and name or nil
     offset, selected = 0, 1
+    draw()
+end
+local function page(direction)
+    local count = #items()
+    local previous = offset
+    offset = math.max(0, math.min(math.max(0, count - PAGE_ROWS), offset + direction * PAGE_ROWS))
+    -- Keep the selected row in the same position on the visible page,
+    -- including when the last page scrolls by fewer than PAGE_ROWS items.
+    selected = math.max(1, math.min(count, selected + offset - previous))
     draw()
 end
 local function pointer()
@@ -103,7 +113,7 @@ draw = function()
     if panel then
         local x, y, rw = width - 346, 60, 332
         local list = items()
-        local rows = 7
+        local rows = PAGE_ROWS
         selected = math.max(1, math.min(selected, #list))
         offset = math.max(0, math.min(offset, math.max(0, #list - rows)))
         rect(x, y, rw, 326, '201D19')
@@ -119,8 +129,8 @@ draw = function()
             end
         end
         if #list == 0 then text(x + 16, y + 64, 'Open files from JWM Music / Videos', 14, 'BDB5AC') end
-        button(x + 8, y + 270, 72, 30, '↑', function() offset = math.max(0, offset - rows); draw() end)
-        button(x + 86, y + 270, 72, 30, '↓', function() offset = math.min(math.max(0, #list - rows), offset + rows); draw() end)
+        button(x + 8, y + 270, 72, 30, '↑', function() page(-1) end)
+        button(x + 86, y + 270, 72, 30, '↓', function() page(1) end)
         text(x + 12, y + 306, panel == 'Subtitles' and 'J: cycle   V: visibility   Z/X: delay' or 'Enter: play   Esc: close   L: queue', 12, 'BDB5AC')
     end
     overlay.res_x, overlay.res_y, overlay.data = width, height, ass.text
@@ -138,7 +148,7 @@ mp.set_key_bindings({{'MBTN_LEFT', function() local r = hit(); if r then r.actio
 local function move(delta)
     selected = math.max(1, math.min(#items(), selected + delta))
     if selected <= offset then offset = selected - 1 end
-    if selected > offset + 7 then offset = selected - 7 end
+    if selected > offset + PAGE_ROWS then offset = selected - PAGE_ROWS end
     draw()
 end
 mp.set_key_bindings({
