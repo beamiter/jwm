@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 pub struct Task {
     pub id: u64,
     pub name: String,
+    #[serde(default)]
+    pub class: String,
     pub monitor: i32,
     pub is_focused: bool,
     pub is_minimized: bool,

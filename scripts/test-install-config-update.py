@@ -65,7 +65,7 @@ UPDATED_CONFIG_PATHS=()
         log = root / name / "log"
         env = dict(os.environ, UPDATE_LOG=str(log), TEST_CONFIG_HOME=str(config_home),
                    UPDATE_FILES=" ".join(updated), UPDATE_MODE=mode)
-        chosen = "tao_glow_bar" if explicit else "tao_pixels_bar"
+        chosen = "tao_pixels_bar" if explicit else "tao_glow_bar"
         program = (setup + edit + regenerate + function("sync_selected_bar_config")
                    + f'\nJWM_BAR_SET_BY_ARGS={str(explicit).lower()}\n'
                    + f'regenerate_config\nsync_selected_bar_config {chosen}\n'

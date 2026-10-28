@@ -88,6 +88,13 @@ impl EdgeReveal {
         self.pending.map(|pending| pending.0)
     }
 
+    /// Change a live edge independently, cancelling deadlines from its old mode.
+    pub fn set_mode(&mut self, mode: RevealMode, pointer_inside: bool) {
+        self.mode = mode;
+        self.pending = None;
+        self.visible = mode == RevealMode::Always || (mode == RevealMode::Hover && pointer_inside);
+    }
+
     pub fn enter(&mut self, now: Instant, config: &EdgeShellConfig) {
         self.pending = if self.mode == RevealMode::Hover && !self.visible {
             Some((now + Duration::from_millis(config.reveal_delay_ms), true))
@@ -117,6 +124,36 @@ impl EdgeReveal {
     }
 }
 
+/// A separate input-only trigger covers the physical edge, independently of
+/// the centered panel's length. Shared corners remain available to their
+/// adjoining edge instead of two windows competing for the same pixels.
+pub fn trigger_geometry(output: MonitorGeometry, edge: BarEdge, trigger: u32) -> BarPlacement {
+    let width = output.width.clamp(1, 16_384);
+    let height = output.height.clamp(1, 16_384);
+    let t = trigger.clamp(1, 8).min(width).min(height);
+    let corner = t.min((if edge.is_vertical() { height } else { width }).saturating_sub(1) / 2);
+    let (x, y, w, h) = match edge {
+        BarEdge::Left => (0, corner, t, height - 2 * corner),
+        BarEdge::Right => (width - t, corner, t, height - 2 * corner),
+        BarEdge::Bottom => (corner, height - t, width - 2 * corner, t),
+        BarEdge::Top => (corner, 0, width - 2 * corner, t),
+    };
+    BarPlacement {
+        x: output.x.saturating_add(x as i32),
+        y: output.y.saturating_add(y as i32),
+        width: w,
+        height: h,
+    }
+}
+
+/// Root-coordinate containment also handles negative monitor origins.
+pub fn contains_pointer(rect: BarPlacement, x: i32, y: i32) -> bool {
+    x >= rect.x
+        && y >= rect.y
+        && i64::from(x) < i64::from(rect.x) + i64::from(rect.width)
+        && i64::from(y) < i64::from(rect.y) + i64::from(rect.height)
+}
+
 /// A panel includes the transparent passage from the physical edge to its
 /// floating capsule. The sensor spans the same long axis, keeping corners free.
 pub fn panel_geometry(
@@ -129,12 +166,14 @@ pub fn panel_geometry(
     let height = output.height.clamp(1, 16_384);
     let vertical = edge.is_vertical();
     let long = if vertical {
-        height.saturating_sub(144).clamp(1, 680)
+        height
+            .saturating_sub(144)
+            .clamp(1, if edge == BarEdge::Right { 720 } else { 680 })
     } else {
-        (width * 4 / 5).clamp(1, 1_280)
+        (width * 4 / 5).clamp(1, 1_344)
     };
     let cross = if visible {
-        if vertical { 84 } else { 88 }
+        if vertical { 90 } else { 76 }
     } else {
         trigger.clamp(1, 8)
     };
@@ -144,8 +183,14 @@ pub fn panel_geometry(
         (long.min(width), cross.min(height))
     };
     let (x, y) = match edge {
-        BarEdge::Left => (0, (height - h) / 2),
-        BarEdge::Right => (width - w, (height - h) / 2),
+        BarEdge::Left => (
+            0,
+            ((height - height.saturating_sub(144).clamp(1, 680)) / 2).saturating_sub(10),
+        ),
+        BarEdge::Right => (
+            width - w,
+            ((height - height.saturating_sub(144).clamp(1, 680)) / 2).saturating_sub(10),
+        ),
         BarEdge::Bottom => ((width - w) / 2, height - h),
         BarEdge::Top => ((width - w) / 2, 0),
     };
@@ -160,6 +205,45 @@ pub fn panel_geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sensors_reach_beyond_the_painted_capsule_on_large_outputs() {
+        let output = MonitorGeometry {
+            x: -3840,
+            y: 100,
+            width: 3840,
+            height: 2160,
+        };
+        for (edge, x, y) in [
+            (BarEdge::Left, -3840, 110),
+            (BarEdge::Right, -1, 2240),
+            (BarEdge::Bottom, -3830, 2259),
+        ] {
+            let sensor = trigger_geometry(output, edge, 2);
+            assert!(contains_pointer(sensor, x, y));
+            assert!(!contains_pointer(
+                panel_geometry(output, edge, true, 2),
+                x,
+                y
+            ));
+        }
+    }
+
+    #[test]
+    fn live_pin_changes_cancel_old_hover_deadlines() {
+        let config = EdgeShellConfig::default();
+        let now = Instant::now();
+        let mut edge = EdgeReveal::new(RevealMode::Hover);
+        edge.enter(now, &config);
+        edge.set_mode(RevealMode::Always, false);
+        edge.leave(now, &config);
+        assert!(edge.visible());
+        assert!(edge.deadline().is_none());
+        edge.set_mode(RevealMode::Hover, true);
+        assert!(edge.visible());
+        edge.set_mode(RevealMode::Disabled, true);
+        assert!(!edge.visible());
+        assert!(!edge.tick(now + Duration::from_secs(10)));
+    }
     #[test]
     fn independent_edges_cancel_accidental_entries_and_delay_hiding() {
         let cfg = EdgeShellConfig::default();

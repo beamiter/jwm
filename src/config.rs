@@ -8366,6 +8366,10 @@ mod tests {
                     .and_then(|value| value.strip_suffix('"'))
             })
             .expect("installer declares its default bar selection");
+        let selected = selected
+            .strip_prefix("${JWM_BAR_NAME:-")
+            .and_then(|value| value.strip_suffix('}'))
+            .unwrap_or(selected);
         for bar in [STATUS_BAR_NAME, selected] {
             assert!(supported.contains(&bar), "unsupported default bar: {bar}");
         }

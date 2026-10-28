@@ -402,7 +402,8 @@ impl BarConfig {
         }
     }
 
-    fn default_path() -> Option<(PathBuf, bool)> {
+    /// Resolved file and whether an explicit XBAR_CONFIG requires it to exist.
+    pub fn default_path() -> Option<(PathBuf, bool)> {
         if let Ok(path) = std::env::var("XBAR_CONFIG")
             && !path.is_empty()
         {

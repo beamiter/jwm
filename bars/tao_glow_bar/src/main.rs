@@ -540,6 +540,19 @@ impl App {
                 });
                 return;
             }
+            Action::MediaPrevious | Action::MediaNext => {
+                let command = if action == Action::MediaPrevious {
+                    "media_previous"
+                } else {
+                    "media_next"
+                };
+                std::thread::spawn(move || {
+                    if let Err(error) = shell_ipc::request(command, serde_json::Value::Null) {
+                        warn!("cannot change media track: {error:#}");
+                    }
+                });
+                return;
+            }
             Action::CycleTasks => return,
             Action::Files => std::env::var_os("HOME").map(|home| ("xdg-open", vec![home])),
             Action::Terminal => Some(("x-terminal-emulator", Vec::new())),
@@ -1305,11 +1318,12 @@ fn main() -> Result<()> {
     );
     if nerd.is_some() {
         presentation.apply_nerd_font_icons_if_stock();
-    } else if app_config.edge_shell.enabled {
+    }
+    if app_config.edge_shell.enabled {
         // A fresh Linux installation should remain readable without a patched
         // icon font. Explicit user labels are preserved.
         let stock = xbar_core::presentation::PresentationConfig::default();
-        if presentation.tag_labels == stock.tag_labels {
+        if app_config.presentation.tag_labels == stock.tag_labels {
             presentation.tag_labels = [
                 "1 Dev", "2 Web", "3 Media", "4 Chat", "5", "6", "7", "8", "9",
             ]
@@ -1317,7 +1331,10 @@ fn main() -> Result<()> {
             .map(str::to_owned)
             .collect();
         }
-        if presentation.labels == stock.labels && presentation.icon_set.is_none() {
+        if app_config.presentation.labels == stock.labels
+            && app_config.presentation.icon_set.is_none()
+        {
+            presentation.icon_set = None;
             presentation.labels = xbar_core::presentation::PresentationLabels {
                 clock: String::new(),
                 screenshot: "▣".into(),
@@ -1337,6 +1354,33 @@ fn main() -> Result<()> {
                 media_paused: "Ⅱ".into(),
                 shell_routes: ["▦", "⌕", "♧", "▤", "▣", "▱", "◐"].map(str::to_owned),
             };
+        }
+    }
+    if app_config.edge_shell.enabled && presentation.edge == BarEdge::Top {
+        let stock = xbar_core::presentation::PresentationConfig::default();
+        presentation.desktop_header = true;
+        presentation.visibility.minimized_windows = false;
+        presentation.visibility.media = false;
+        presentation.visibility.brightness = false;
+        presentation.visibility.theme = false;
+        presentation.visibility.screenshot = false;
+        if presentation.font_size == stock.font_size {
+            presentation.font_size = 12.0;
+        }
+        if presentation.horizontal_padding == stock.horizontal_padding {
+            presentation.horizontal_padding = 12.0;
+        }
+        if presentation.vertical_padding == stock.vertical_padding {
+            presentation.vertical_padding = 7.0;
+        }
+        if presentation.item_gap == stock.item_gap {
+            presentation.item_gap = 8.0;
+        }
+        if presentation.pill_horizontal_padding == stock.pill_horizontal_padding {
+            presentation.pill_horizontal_padding = 12.0;
+        }
+        if presentation.corner_radius == stock.corner_radius {
+            presentation.corner_radius = 16.0;
         }
     }
     let font = FontDescription::from_string(&app_config.font);

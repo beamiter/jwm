@@ -137,11 +137,25 @@ pub(super) fn terminate_secondary_bar_child(
 /// The command that starts monitor `monitor_id`'s status bar on the ring
 /// buffer at `shared_path`: its environment, its stdio and its signal mask.
 fn secondary_bar_command(bar_name: &str, shared_path: &str, monitor_id: i32) -> Command {
+    secondary_bar_command_with_environment(
+        bar_name,
+        shared_path,
+        monitor_id,
+        &crate::child_environment::current_or_default(),
+    )
+}
+
+fn secondary_bar_command_with_environment(
+    bar_name: &str,
+    shared_path: &str,
+    monitor_id: i32,
+    environment: &crate::child_environment::ChildEnvironment,
+) -> Command {
     let mut command = Command::new(bar_name);
     command.arg(shared_path);
 
     // Set environment variables
-    if let Ok(v) = crate::child_environment::var("WAYLAND_DISPLAY") {
+    if let Ok(v) = environment.var("WAYLAND_DISPLAY") {
         command.env("WAYLAND_DISPLAY", v);
     }
     if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {
@@ -173,6 +187,10 @@ fn secondary_bar_command(bar_name: &str, shared_path: &str, monitor_id: i32) -> 
         command.env("GSK_RENDERER", "cairo");
     }
     command.env("GDK_DISABLE", "gl,vulkan,dmabuf");
+    // In a Wayland session DISPLAY is owned by the backend's XWayland
+    // registry, not libc's inherited environment. Keep the companion bars
+    // on this session's server while preserving explicit toolkit overrides.
+    environment.apply(&mut command);
 
     // Spawned from the event thread, whose SIGCHLD stays blocked for the run
     // loop's signalfd; std would hand the bar that mask. Only the mask is
@@ -823,6 +841,37 @@ mod secondary_bar_shared_path_tests {
 
 #[cfg(test)]
 mod secondary_bar_child_tests {
+    #[test]
+    fn bar_uses_session_xwayland_display_without_overwriting_toolkit_choices() {
+        use std::ffi::OsStr;
+        let environment = crate::child_environment::ChildEnvironment::default();
+        environment.set("DISPLAY", ":session-xwayland");
+        environment.set("WAYLAND_DISPLAY", "wayland-session");
+        environment.set("DBUS_SESSION_BUS_ADDRESS", "session-bus");
+        let command = super::secondary_bar_command_with_environment(
+            "tao_glow_bar",
+            "/tmp/probe",
+            0,
+            &environment,
+        );
+        let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            values[OsStr::new("DISPLAY")],
+            Some(OsStr::new(":session-xwayland"))
+        );
+        assert_eq!(
+            values[OsStr::new("WAYLAND_DISPLAY")],
+            Some(OsStr::new("wayland-session"))
+        );
+        assert_eq!(
+            values[OsStr::new("DBUS_SESSION_BUS_ADDRESS")],
+            Some(OsStr::new(""))
+        );
+        assert_eq!(
+            values[OsStr::new("GDK_DISABLE")],
+            Some(OsStr::new("gl,vulkan,dmabuf"))
+        );
+    }
     use super::*;
     use nix::poll::{PollFd, PollFlags, poll};
     use std::os::fd::AsFd;

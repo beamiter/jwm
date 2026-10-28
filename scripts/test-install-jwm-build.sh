@@ -5,10 +5,11 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
-mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bridge/dist" "$REPO/assets/wallpapers" "$TEST_ROOT/bin"
+mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bridge/dist" "$REPO/assets/wallpapers" "$TEST_ROOT/bin"
 cp "$ROOT/scripts/install_jwm_scripts.sh" "$ROOT/scripts/install-wallpapers.sh" "$REPO/scripts/"
 printf 'bundled fixture\n' > "$REPO/assets/wallpapers/01-fixture.png"
 touch "$REPO/bars/tao_glow_bar/Cargo.toml" "$REPO/bridge/Cargo.toml" "$REPO/bridge/dist/org.freedesktop.Notifications.service"
+touch "$REPO/bars/tao_pixels_bar/Cargo.toml"
 cp "$ROOT/bridge/dist/jwm-player.desktop" "$ROOT/bridge/dist/jwm-video.desktop" "$REPO/bridge/dist/"
 cat > "$TEST_ROOT/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
@@ -203,6 +204,30 @@ run_case bridge-failure release 'bridge failed target' 101
 run_case install-failure debug 'install failed target' 73
 run_case player-missing release 'missing player target' 1
 run_case player-install-failure release 'player install failed target' 73
+# Exercise the actual default and selection precedence through the installer,
+# rather than always supplying the official bar explicitly.
+check_bar_selection() {
+    local name=$1 selected_by_env=$2 expected=$3
+    shift 3
+    export CASE_DIR="$TEST_ROOT/bar-$name" SCENARIO=success
+    mkdir -p "$CASE_DIR/home/.cargo" "$CASE_DIR/config/jwm"
+    printf '[status_bar]\nname = "custom_bar"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
+    cp "$CASE_DIR/config/jwm/config_x11.toml" "$CASE_DIR/config/jwm/config_wayland.toml"
+    JWM_BAR_NAME="$selected_by_env" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" \
+        CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" \
+        CARGO_TARGET_DIR="$CASE_DIR/target" \
+        bash "$REPO/scripts/install_jwm_scripts.sh" --skip-jwm "$@" > "$CASE_DIR/output.log" 2>&1
+    [[ $(grep -c '^install ' "$CASE_DIR/cargo.log") == 1 ]] || fail "$name installed more than one bar"
+    grep -Fq -- "--path> <$REPO/bars/$expected>" "$CASE_DIR/cargo.log" || fail "$name selected the wrong bar"
+    local expected_config=custom_bar
+    [[ $# == 0 ]] || expected_config=$expected
+    grep -Fq "\"$expected_config\"" "$CASE_DIR/config/jwm/config_x11.toml" || fail "$name changed or failed to change the selected bar"
+    grep -Fq "\"$expected_config\"" "$CASE_DIR/config/jwm/config_wayland.toml" || fail "$name ignored the Wayland bar configuration"
+}
+check_bar_selection default '' tao_glow_bar
+check_bar_selection environment tao_pixels_bar tao_pixels_bar
+check_bar_selection argument tao_glow_bar tao_pixels_bar --bar tao_pixels_bar
+check_bar_selection argument-over-environment tao_pixels_bar tao_glow_bar --bar tao_glow_bar
 # A bar-only/no-op invocation must never remove an existing JWM installation.
 export CASE_DIR="$TEST_ROOT/skip-jwm" SCENARIO=success
 mkdir -p "$CASE_DIR/home/.cargo/bin"
@@ -228,6 +253,7 @@ check_invalid_args() {
 }
 invalid_index=0
 check_invalid_args --unknown
+JWM_BAR_NAME=not-a-bar check_invalid_args --skip-jwm
 for option in --mode -m --bar -b --jobs -j; do
     check_invalid_args "$option"
     check_invalid_args "$option" ''

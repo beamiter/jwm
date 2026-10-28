@@ -28,20 +28,47 @@ hide_delay_ms = 400
 trigger_pixels = 2
 ```
 
+For the reference image's larger header proportions, merge this into the
+active JWM `config_x11.toml` or `config_wayland.toml`:
+
+```toml
+[appearance]
+status_bar_height = 52
+status_bar_padding = 12
+```
+
+Existing JWM thickness/margin settings remain authoritative. The installer
+also preserves an existing `status_bar.name`; upgrade an older pixels-bar
+installation explicitly with `scripts/install_jwm_scripts.sh -b tao_glow_bar`.
+
 Each edge accepts `hover`, `always` or `disabled`. For example, changing only
 `bottom = "always"` pins the dock while the side panels continue to auto-hide.
-Restart the bar after editing its configuration. `enabled = false` restores
-the single-bar workflow. Existing single-edge placements remain available;
+The running companions reload per-edge modes and hover timing after a file
+edit, within the next status update (normally one second). Invalid edits keep
+the last valid modes. Changing the global `enabled` switch, fonts or the header
+style still requires restarting the bar. `enabled = false` restores
+the single-bar workflow after restart. Existing single-edge placements remain available;
 companions are omitted when the main bar is placed on another edge.
 
-Hover sensors occupy two physical pixels along the middle of their own edge,
-leaving corners free. Entering one sensor reveals only its panel. A transparent
-passage connects the sensor to its floating capsule; leaving schedules a hide
-which re-entry cancels. Dragging a slider holds the panel open. Pinned panels
+Invisible sensors occupy two physical pixels along their entire
+output edge, apart from the shared corner pixels. They are independent of the
+centered capsule's size: approaching the far end of a large display works too.
+Entering one sensor reveals only its panel. Moving between the edge strip and
+its floating capsule retains the same hover ownership; leaving both schedules
+a hide which re-entry cancels. Temporary pointer grabs do not count as physical
+exits. While a hover panel is open, its actual pointer window is checked every
+50 ms, so moving out during another client's grab still allows it to hide;
+rootless XWayland's stale root coordinates do not keep it open over a native
+Wayland client. Dragging a slider holds the panel open. Pinned panels
 publish EWMH reservations at outer desktop edges; auto-hidden panels overlay
 the workspace without changing its layout. Panels follow their monitor and
 hide when JWM hides the bar, a fullscreen window owns the output, or the
-monitor is locked.
+monitor is locked. Short IPC timeouts retain the last observed visibility,
+rather than causing pinned panels to blink off.
+X11 uses input-only trigger windows. Rootless XWayland instead receives
+transparent mapped trigger surfaces, so the Wayland compositor can route
+pointer events to them. Managed bars inherit the active session's XWayland
+`DISPLAY`, including when JWM's own inherited host display is different.
 
 The task dock obtains the real window inventory from JWM's bounded Unix IPC,
 including native Wayland clients. Clicking a task reveals and focuses it;
@@ -68,9 +95,17 @@ dbus-run-session -- python3 scripts/test-edge-shell-x11.py
 ```
 
 The test starts and stops its own Xvfb, uses temporary configuration, exercises
-all three reveal modes, switches a live JWM workspace and activates a task.
+all three reveal modes (including changes without restarting), checks edge
+triggers above later application windows, switches a live JWM workspace and
+activates/restores a task. Slow transfers through the edge strip, transparent
+passage and panel are checked on all three edges with 0/40 ms hide delays.
+Window unmap events are observed to detect brief flicker, including stationary
+external grabs, moving out during a grab, and button drags released outside.
 Set `JWM_EDGE_SCREENSHOT=/absolute/path/desktop.png` to capture the test desktop
 when ImageMagick's `import` is installed.
+For a like-sized reference capture, set `JWM_EDGE_TEST_SIZE=1672x941` and
+`JWM_EDGE_TEST_REFERENCE=1`; the latter applies the 52/12 geometry only to the
+test's temporary JWM configuration.
 
 ## Single-edge placement
 

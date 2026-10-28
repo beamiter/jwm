@@ -1,7 +1,7 @@
 use super::{Action, Hit, Panel};
 use anyhow::Result;
-use cairo::Context;
-use xbar_core::model::{BarSnapshot, DockItemGeometry, ShellRoute, TagId, UserAction};
+use cairo::{Context, LinearGradient};
+use xbar_core::model::{BarSnapshot, ShellRoute, TagId, UserAction};
 pub(super) struct Painter<'a> {
     pub(super) ctx: &'a Context,
     pub(super) panel: &'a mut Panel,
@@ -27,25 +27,43 @@ impl Painter<'_> {
     ) -> Result<()> {
         let [x, y, w, h] = rect;
         let hovered = self.panel.hovered == Some(self.panel.hits.len());
-        rounded(self.ctx, x, y, w, h, 14.0);
-        if selected {
-            self.ctx
-                .set_source_rgb(10.0 / 255.0, 103.0 / 255.0, 227.0 / 255.0);
-        } else {
-            self.ctx.set_source_rgba(
-                1.0,
-                1.0,
-                1.0,
-                if hovered {
-                    0.57
-                } else if self.dark {
-                    0.10
-                } else {
-                    0.30
-                },
+        let pressed = self
+            .panel
+            .pressed
+            .as_ref()
+            .is_some_and(|hit| hit.action == action);
+        // A layered soft shadow gives each glass control lift without moving
+        // either its painted bounds or its input target during hover.
+        for (spread, alpha) in [(2.0, 0.025), (1.0, 0.045)] {
+            rounded(
+                self.ctx,
+                x - spread / 2.0,
+                y + 1.5,
+                w + spread,
+                h + spread,
+                14.0,
             );
+            self.ctx.set_source_rgba(0.12, 0.34, 0.58, alpha);
+            self.ctx.fill()?;
         }
-        self.ctx.fill()?;
+        rounded(self.ctx, x, y, w, h, 14.0);
+        let gradient = LinearGradient::new(x, y, x, y + h);
+        if selected {
+            gradient.add_color_stop_rgba(0.0, 0.08, 0.43, 0.94, 1.0);
+            gradient.add_color_stop_rgba(1.0, 0.03, 0.39, 0.95, 1.0);
+        } else if self.dark {
+            gradient.add_color_stop_rgba(0.0, 0.52, 0.70, 0.92, if hovered { 0.28 } else { 0.15 });
+            gradient.add_color_stop_rgba(1.0, 0.22, 0.36, 0.55, 0.18);
+        } else {
+            gradient.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, if hovered { 0.77 } else { 0.57 });
+            gradient.add_color_stop_rgba(1.0, 0.80, 0.91, 1.0, if pressed { 0.72 } else { 0.34 });
+        }
+        self.ctx.set_source(&gradient)?;
+        self.ctx.fill_preserve()?;
+        self.ctx
+            .set_source_rgba(1.0, 1.0, 1.0, if selected { 0.30 } else { 0.48 });
+        self.ctx.set_line_width(0.8);
+        self.ctx.stroke()?;
         if selected {
             self.ctx.set_source_rgb(1.0, 1.0, 1.0);
         } else {
@@ -58,9 +76,28 @@ impl Painter<'_> {
                 x + 6.0,
                 y + (h - 20.0) / 2.0,
                 w - 12.0,
-                14.0,
+                13.0,
                 true,
             )?;
+        }
+        self.panel.hits.push(Hit {
+            rect,
+            action,
+            slider: None,
+        });
+        Ok(())
+    }
+
+    fn flat_button(&mut self, rect: [f64; 4], label: &str, action: Action) -> Result<()> {
+        let [x, y, w, h] = rect;
+        if self.panel.hovered == Some(self.panel.hits.len()) {
+            rounded(self.ctx, x, y, w, h, 12.0);
+            self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.30);
+            self.ctx.fill()?;
+        }
+        self.ink();
+        if !symbol(self.ctx, label, rect)? {
+            text(self.ctx, label, x, y + (h - 20.0) / 2.0, w, 14.0, true)?;
         }
         self.panel.hits.push(Hit {
             rect,
@@ -82,6 +119,7 @@ impl Painter<'_> {
     pub(super) fn left(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
         let size = (w - 16.0).clamp(1.0, 44.0);
         let bx = x + (w - size) / 2.0;
+        let gap = if h < 620.0 { 6.0 } else { 8.0 };
         let mut cy = y + 14.0;
         for (label, action) in [
             (
@@ -92,58 +130,69 @@ impl Painter<'_> {
             (">_", Action::Terminal),
             ("◎", Action::Browser),
             (
+                "clipboard",
+                Action::Model(UserAction::OpenShellHub(ShellRoute::Clipboard)),
+            ),
+            (
                 "♫",
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Hub)),
             ),
         ] {
-            if cy + size + 64.0 > y + h {
+            if cy + size + 76.0 > y + h {
                 break;
             }
             self.button([bx, cy, size, size], label, action, false)?;
-            cy += size + 8.0;
+            cy += size + gap;
         }
-        self.rule(x + 16.0, cy + 3.0, (w - 32.0).max(1.0))?;
-        cy += 16.0;
+        self.rule(x + 18.0, cy + 4.0, (w - 36.0).max(1.0))?;
+        cy += 20.0;
         let count = self.snapshot.tags.len();
-        let capacity = ((y + h - 64.0 - cy) / (size + 8.0)).max(0.0) as usize;
-        // Keep the actual active workspace reachable even on small outputs.
+        let capacity = (((y + h - 70.0 - cy) / (size + gap)).max(0.0) as usize).min(4);
         let active = self.snapshot.active_tag.map(TagId::index).unwrap_or(0);
-        let start = if active >= capacity {
-            active.saturating_sub(capacity.saturating_sub(1))
-        } else {
-            0
-        };
+        let start = active.checked_div(capacity).unwrap_or(0) * capacity;
         for i in (start..count).take(capacity) {
             let Some(tag) = TagId::new(i) else {
                 continue;
             };
-            let label = format!(
-                "{}{}",
-                i + 1,
-                if self.snapshot.tags[i].occupied {
-                    " •"
-                } else {
-                    ""
-                }
-            );
             self.button(
                 [bx, cy, size, size],
-                &label,
+                &format!("{}", i + 1),
                 Action::Model(UserAction::ViewTagOn {
                     tag,
                     monitor: self.snapshot.monitor,
                 }),
                 self.snapshot.active_tag == Some(tag),
             )?;
-            cy += size + 8.0;
+            // Occupancy is a small independent dot, never a changing text run.
+            if self.snapshot.tags[i].occupied || self.snapshot.active_tag == Some(tag) {
+                if self.snapshot.active_tag == Some(tag) {
+                    self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+                } else {
+                    self.ctx.set_source_rgba(0.08, 0.37, 0.64, 0.86);
+                }
+                self.ctx.arc(
+                    bx + size - 10.0,
+                    cy + size / 2.0,
+                    2.0,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                self.ctx.fill()?;
+            }
+            cy += size + gap;
         }
         if h >= 60.0 {
-            self.button(
-                [bx, y + h - size - 14.0, size, size],
-                "+",
-                Action::Model(UserAction::OpenShellHub(ShellRoute::Applications)),
-                false,
-            )?;
+            let next = (start + capacity.max(1)) % count.max(1);
+            let action = if count > capacity {
+                Action::Model(UserAction::ViewTagOn {
+                    tag: TagId::new(next).expect("bounded workspace index"),
+                    monitor: self.snapshot.monitor,
+                })
+            } else {
+                Action::Model(UserAction::OpenShellHub(ShellRoute::Applications))
+            };
+            self.rule(x + 18.0, y + h - size - 25.0, (w - 36.0).max(1.0))?;
+            self.button([bx, y + h - size - 14.0, size, size], "+", action, false)?;
         }
         Ok(())
     }
@@ -151,49 +200,62 @@ impl Painter<'_> {
     pub(super) fn right(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
         let size = (w - 16.0).clamp(1.0, 44.0);
         let bx = x + (w - size) / 2.0;
-        let mut cy = y + 14.0;
-        self.button(
-            [bx, cy, size, size],
+        let mut cy = y + 10.0;
+        self.flat_button(
+            [bx, cy, size, 36.0],
             "♧",
             Action::Model(UserAction::OpenShellHub(ShellRoute::Notifications)),
-            false,
         )?;
-        cy += size + 18.0;
+        cy += 48.0;
+        self.rule(x + 18.0, cy, (w - 36.0).max(1.0))?;
+        cy += 16.0;
         for (audio, label, value) in [
-            (true, "♪", self.snapshot.audio.volume_percent),
+            (
+                true,
+                if self.snapshot.audio.muted {
+                    "mute"
+                } else {
+                    "speaker"
+                },
+                self.snapshot.audio.volume_percent,
+            ),
             (false, "☼", self.snapshot.brightness.percent),
         ] {
-            let sh = if h < 520.0 { 90.0 } else { 142.0 };
-            if cy + sh + 80.0 > y + h {
+            let sh = if h >= 620.0 {
+                130.0
+            } else if h >= 540.0 {
+                110.0
+            } else {
+                90.0
+            };
+            if cy + sh + 70.0 > y + h {
                 break;
             }
             rounded(self.ctx, bx, cy, size, sh, 18.0);
-            self.ctx
-                .set_source_rgba(1.0, 1.0, 1.0, if self.dark { 0.10 } else { 0.30 });
-            self.ctx.fill()?;
+            let gradient = LinearGradient::new(bx, cy, bx, cy + sh);
+            gradient.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, if self.dark { 0.18 } else { 0.49 });
+            gradient.add_color_stop_rgba(1.0, 0.76, 0.88, 1.0, if self.dark { 0.13 } else { 0.30 });
+            self.ctx.set_source(&gradient)?;
+            self.ctx.fill_preserve()?;
+            self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.30);
+            self.ctx.set_line_width(0.8);
+            self.ctx.stroke()?;
             self.ink();
-            if !symbol(
-                self.ctx,
-                if audio { "♫" } else { label },
-                [bx, cy + 2.0, size, 32.0],
-            )? {
-                text(self.ctx, label, bx, cy + 8.0, size, 18.0, true)?;
-            }
-            if value.is_some() {
-                self.panel.hits.push(Hit {
-                    rect: [bx, cy, size, 36.0],
-                    action: Action::Model(if audio {
-                        UserAction::ToggleMute
-                    } else {
-                        UserAction::OpenShellHub(ShellRoute::Hub)
-                    }),
-                    slider: None,
-                });
-            }
-            let top = cy + 38.0;
-            let length = sh - 52.0;
+            symbol(self.ctx, label, [bx, cy + 2.0, size, 32.0])?;
+            self.panel.hits.push(Hit {
+                rect: [bx, cy, size, 34.0],
+                action: Action::Model(if audio && value.is_some() {
+                    UserAction::ToggleMute
+                } else {
+                    UserAction::OpenShellHub(ShellRoute::Hub)
+                }),
+                slider: None,
+            });
+            let top = cy + 40.0;
+            let length = sh - 54.0;
             rounded(self.ctx, bx + (size - 12.0) / 2.0, top, 12.0, length, 6.0);
-            self.ctx.set_source_rgba(1.0, 1.0, 1.0, 0.60);
+            self.ctx
+                .set_source_rgba(1.0, 1.0, 1.0, if self.dark { 0.30 } else { 0.68 });
             self.ctx.fill()?;
             if let Some(value) = value {
                 let fill = length * value.as_f64() / 100.0;
@@ -206,7 +268,7 @@ impl Painter<'_> {
                         fill,
                         6.0,
                     );
-                    self.ctx.set_source_rgb(0.10, 0.48, 1.0);
+                    self.ctx.set_source_rgb(0.12, 0.50, 1.0);
                     self.ctx.fill()?;
                 }
                 self.panel.hits.push(Hit {
@@ -226,47 +288,74 @@ impl Painter<'_> {
                     bx,
                     top + length / 2.0 - 10.0,
                     size,
-                    14.0,
+                    12.0,
                     true,
                 )?;
             }
-            cy += sh + 14.0;
+            cy += sh + 12.0;
         }
-        self.rule(x + 16.0, cy, (w - 32.0).max(1.0))?;
-        cy += 16.0;
+        self.rule(x + 18.0, cy + 3.0, (w - 36.0).max(1.0))?;
+        cy += 18.0;
+        let quick = (size - 4.0).max(1.0);
+        let qx = x + (w - quick) / 2.0;
         for (label, route) in [
             ("⌁", ShellRoute::Hub),
+            ("bluetooth", ShellRoute::Hub),
             ("◐", ShellRoute::Theme),
             ("▣", ShellRoute::Wallpaper),
             ("▤", ShellRoute::Calendar),
         ] {
-            if cy + size + 64.0 > y + h {
+            if cy + quick + 68.0 > y + h {
                 break;
             }
             self.button(
-                [bx, cy, size, size],
+                [qx, cy, quick, quick],
                 label,
                 Action::Model(UserAction::OpenShellHub(route)),
                 false,
             )?;
-            cy += size + 8.0;
+            cy += quick + 8.0;
         }
         if h >= 60.0 {
-            self.button(
+            self.rule(x + 18.0, y + h - size - 25.0, (w - 36.0).max(1.0))?;
+            self.flat_button(
                 [bx, y + h - size - 14.0, size, size],
                 "⚙",
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Hub)),
-                false,
             )?;
         }
         Ok(())
     }
 
     pub(super) fn bottom(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
-        let size = (h - 20.0).clamp(1.0, 52.0);
+        let size = (h - 20.0).clamp(1.0, 42.0);
         let cy = y + (h - size) / 2.0;
-        let mut cx = x + 18.0;
-        if w > 700.0 {
+        let media_width = if w >= 1000.0 {
+            306.0
+        } else if w >= 800.0 {
+            268.0
+        } else if w >= 640.0 {
+            218.0
+        } else {
+            0.0
+        };
+        if media_width > 0.0 {
+            let art = 36.0_f64.min(size);
+            let ax = x + 20.0;
+            let ay = y + (h - art) / 2.0;
+            // No fabricated album image: show an explicit music tile until
+            // the shared now-playing model supplies artwork in a future API.
+            rounded(self.ctx, ax, ay, art, art, 9.0);
+            let gradient = LinearGradient::new(ax, ay, ax + art, ay + art);
+            gradient.add_color_stop_rgb(0.0, 0.19, 0.48, 0.73);
+            gradient.add_color_stop_rgb(1.0, 0.05, 0.16, 0.32);
+            self.ctx.set_source(&gradient)?;
+            self.ctx.fill()?;
+            self.ctx.set_source_rgba(0.92, 0.97, 1.0, 0.96);
+            symbol(self.ctx, "♫", [ax + 4.0, ay + 4.0, art - 8.0, art - 8.0])?;
+            let tx = ax + art + 12.0;
+            let controls_x = x + media_width - 104.0;
+            let tw = (controls_x - tx - 10.0).max(1.0);
             self.ink();
             text(
                 self.ctx,
@@ -275,124 +364,203 @@ impl Painter<'_> {
                     .title
                     .as_deref()
                     .unwrap_or("Nothing playing"),
-                cx,
-                cy + 4.0,
-                160.0,
-                12.0,
+                tx,
+                cy + 2.0,
+                tw,
+                11.5,
                 false,
             )?;
+            self.ctx.set_source_rgba(
+                if self.dark { 0.80 } else { 0.15 },
+                if self.dark { 0.88 } else { 0.30 },
+                if self.dark { 0.97 } else { 0.47 },
+                0.88,
+            );
             text(
                 self.ctx,
-                self.snapshot.media.artist.as_deref().unwrap_or("JWM Media"),
-                cx,
-                cy + 25.0,
-                160.0,
+                self.snapshot
+                    .media
+                    .artist
+                    .as_deref()
+                    .or(self.snapshot.media.player.as_deref())
+                    .unwrap_or("JWM Media"),
+                tx,
+                cy + 22.0,
+                tw,
                 10.0,
                 false,
             )?;
-            cx += 172.0;
-            self.button(
-                [cx, cy, 44.0, size],
+            self.flat_button(
+                [controls_x, cy + 3.0, 30.0, size - 6.0],
+                "previous",
+                Action::MediaPrevious,
+            )?;
+            self.flat_button(
+                [controls_x + 34.0, cy + 3.0, 30.0, size - 6.0],
                 if self.snapshot.media.playback == xbar_core::model::MediaPlayback::Playing {
                     "Ⅱ"
                 } else {
                     "▶"
                 },
                 Action::Model(UserAction::MediaPlayPause),
-                false,
             )?;
-            cx += 60.0;
+            self.flat_button(
+                [controls_x + 68.0, cy + 3.0, 30.0, size - 6.0],
+                "next",
+                Action::MediaNext,
+            )?;
+            self.ctx.set_source_rgba(0.10, 0.34, 0.58, 0.22);
+            self.ctx.move_to(x + media_width + 8.0, cy + 7.0);
+            self.ctx.line_to(x + media_width + 8.0, cy + size - 7.0);
+            self.ctx.stroke()?;
         }
-        let room = ((w - (cx - x) - 104.0) / 154.0).max(0.0) as usize;
-        let overflow = self.tasks.len() > room;
-        let trailing = if overflow { 152.0 } else { 104.0 };
-        let capacity = ((w - (cx - x) - trailing) / 154.0).max(0.0) as usize;
-        if self.tasks.is_empty() && w - cx + x > 220.0 {
+        let trailing = if w > 480.0 {
+            142.0
+        } else if w > 320.0 {
+            100.0
+        } else if w > 130.0 {
+            50.0
+        } else {
+            0.0
+        };
+        let start = x + media_width + if media_width > 0.0 { 24.0 } else { 14.0 };
+        let end = x + w - trailing - 10.0;
+        let available = (end - start).max(0.0);
+        let inline_width = if available >= 64.0 { 46.0 } else { 0.0 };
+        let capacity = (((available - inline_width) / 154.0).max(0.0) as usize)
+            .max(usize::from(available >= 24.0));
+        let stride = if capacity == 1 {
+            (available - inline_width).min(154.0)
+        } else {
+            154.0
+        };
+        let task_width = (stride - 12.0).max(24.0).min(stride);
+        let task_count = self.tasks.len().min(capacity);
+        let fallback = self.tasks.is_empty() && available >= 210.0;
+        let span = if fallback {
+            154.0
+        } else {
+            task_count as f64 * stride
+        } + inline_width;
+        let mut cx = start + ((available - span) / 2.0).max(0.0);
+        if fallback {
             self.button(
-                [cx, cy, 154.0, size],
+                [cx, cy, 142.0, size],
                 if self.snapshot.client_name.is_empty() {
                     "Desktop"
                 } else {
                     &self.snapshot.client_name
                 },
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Applications)),
-                true,
+                false,
             )?;
-            cx += 166.0;
+            cx += 154.0;
         }
         for task in self
             .tasks
             .iter()
             .cycle()
             .skip(self.panel.task_offset % self.tasks.len().max(1))
-            .take(self.tasks.len())
+            .take(task_count)
         {
-            if cx + 154.0 > x + w - trailing {
-                break;
-            }
-            let label = if task.is_minimized {
-                format!("▱ {}", task.name)
-            } else {
-                task.name.clone()
-            };
-            self.button(
-                [cx, cy, 142.0, size],
-                &label,
-                Action::FocusWindow(task.id),
-                task.is_focused,
-            )?;
-            cx += 154.0;
+            self.task_button([cx, cy, task_width, size], task)?;
+            cx += stride;
         }
-        for window in self
-            .snapshot
-            .minimized_windows
-            .iter()
-            .filter(|window| !self.tasks.iter().any(|task| task.id == window.token.get()))
-            .take(16)
-        {
-            if cx + 154.0 > x + w - trailing {
-                break;
-            }
-            let geometry = DockItemGeometry::new(
-                self.panel.placement.x.saturating_add(cx as i32),
-                self.panel.placement.y.saturating_add(cy as i32),
-                142,
-                size as u32,
-            );
+        // A typed overflow action rotates the live inventory. No window is
+        // discarded merely because its title does not fit in this viewport.
+        if inline_width > 0.0 {
+            let overflow = self.tasks.len() > capacity;
             self.button(
-                [cx, cy, 142.0, size],
-                &window.title,
-                Action::Model(UserAction::RestoreWindow {
-                    window: window.token,
-                    wm_session_id: self.snapshot.wm_session_id,
-                    minimized_generation: self.snapshot.wm_sequence.unwrap_or(0),
-                    geometry,
-                }),
+                [cx, cy, 40.0, size],
+                &if overflow {
+                    format!("+{}", self.tasks.len().saturating_sub(capacity))
+                } else {
+                    "+".into()
+                },
+                if overflow {
+                    Action::CycleTasks
+                } else {
+                    Action::Model(UserAction::OpenShellHub(ShellRoute::Applications))
+                },
                 false,
             )?;
-            cx += 154.0;
         }
-        if w > 110.0 {
-            if overflow && w > 170.0 {
-                self.button(
-                    [x + w - 146.0, cy, 40.0, size],
-                    &format!("+{}", self.tasks.len().saturating_sub(capacity)),
-                    Action::CycleTasks,
-                    false,
-                )?;
-            }
-            self.button(
-                [x + w - 98.0, cy, 40.0, size],
+        if w > 480.0 {
+            self.flat_button(
+                [x + w - 132.0, cy, 34.0, size],
                 "⌕",
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Applications)),
-                false,
             )?;
-            self.button(
-                [x + w - 50.0, cy, 40.0, size],
+            self.ctx.set_source_rgba(0.10, 0.34, 0.58, 0.22);
+            self.ctx.move_to(x + w - 88.0, cy + 7.0);
+            self.ctx.line_to(x + w - 88.0, cy + size - 7.0);
+            self.ctx.stroke()?;
+            self.flat_button(
+                [x + w - 78.0, cy, 34.0, size],
+                "clipboard",
+                Action::Model(UserAction::OpenShellHub(ShellRoute::Clipboard)),
+            )?;
+            self.flat_button(
+                [x + w - 38.0, cy, 30.0, size],
                 "▦",
                 Action::Model(UserAction::OpenShellHub(ShellRoute::Hub)),
+            )?;
+        } else if w > 320.0 {
+            self.flat_button(
+                [x + w - 88.0, cy, 34.0, size],
+                "⌕",
+                Action::Model(UserAction::OpenShellHub(ShellRoute::Applications)),
+            )?;
+            self.flat_button(
+                [x + w - 42.0, cy, 34.0, size],
+                "▦",
+                Action::Model(UserAction::OpenShellHub(ShellRoute::Hub)),
+            )?;
+        } else if w > 130.0 {
+            self.flat_button(
+                [x + w - 42.0, cy, 34.0, size],
+                "▦",
+                Action::Model(UserAction::OpenShellHub(ShellRoute::Hub)),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn task_button(&mut self, rect: [f64; 4], task: &crate::shell_ipc::Task) -> Result<()> {
+        let [x, y, w, h] = rect;
+        self.button(rect, "", Action::FocusWindow(task.id), task.is_focused)?;
+        let compact = w < 96.0;
+        let icon_size = 24.0_f64.min((h - 8.0).max(1.0)).min((w - 8.0).max(1.0));
+        let ix = x + if compact { (w - icon_size) / 2.0 } else { 10.0 };
+        let iy = y + (h - icon_size) / 2.0;
+        app_icon(
+            self.ctx,
+            &task.class,
+            &task.name,
+            [ix, iy, icon_size, icon_size],
+            task.is_focused,
+        )?;
+        if task.is_focused {
+            self.ctx.set_source_rgb(1.0, 1.0, 1.0);
+        } else {
+            self.ink();
+        }
+        if !compact {
+            text(
+                self.ctx,
+                &task.name,
+                x + icon_size + 20.0,
+                y + (h - 18.0) / 2.0,
+                w - icon_size - 32.0,
+                11.0,
                 false,
             )?;
+        }
+        if task.is_minimized {
+            self.ctx.set_source_rgba(0.10, 0.38, 0.65, 0.72);
+            self.ctx
+                .arc(x + w - 9.0, y + h - 8.0, 1.8, 0.0, std::f64::consts::TAU);
+            self.ctx.fill()?;
         }
         Ok(())
     }
@@ -454,6 +622,77 @@ fn text(
     Ok(())
 }
 
+/// Shared capsule material: a cool translucent tint with a restrained upper
+/// highlight. The host supplies the rounded clip and the real desktop backdrop.
+pub(super) fn material(ctx: &Context, rect: [f64; 4], dark: bool) -> Result<()> {
+    let [x, y, _, h] = rect;
+    let tint = LinearGradient::new(x, y, x, y + h);
+    if dark {
+        tint.add_color_stop_rgba(0.0, 0.09, 0.18, 0.30, 0.84);
+        tint.add_color_stop_rgba(1.0, 0.05, 0.12, 0.22, 0.77);
+    } else {
+        tint.add_color_stop_rgba(0.0, 0.80, 0.92, 1.0, 0.64);
+        tint.add_color_stop_rgba(1.0, 0.72, 0.86, 1.0, 0.56);
+    }
+    ctx.set_source(&tint)?;
+    ctx.paint()?;
+    let sheen = LinearGradient::new(x, y, x, y + h.min(120.0));
+    sheen.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, if dark { 0.06 } else { 0.22 });
+    sheen.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0);
+    ctx.set_source(&sheen)?;
+    ctx.paint()?;
+    Ok(())
+}
+
+fn app_icon(ctx: &Context, class: &str, title: &str, rect: [f64; 4], selected: bool) -> Result<()> {
+    let [x, y, w, h] = rect;
+    rounded(ctx, x, y, w, h, 7.0);
+    ctx.set_source_rgba(1.0, 1.0, 1.0, if selected { 0.88 } else { 0.72 });
+    ctx.fill()?;
+    ctx.set_source_rgb(0.08, 0.39, 0.80);
+    let initial = class
+        .chars()
+        .chain(title.chars())
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "□".into());
+    text(ctx, &initial, x, y + (h - 18.0) / 2.0, w, 13.0, true)?;
+    if class.is_empty() {
+        return Ok(());
+    }
+    use xbar_core::presentation::{ImageSource, NodeId, Rect, Scene, SceneNode, Size, VisualState};
+    thread_local! {
+        static ICONS: std::cell::RefCell<(xbar_core::app_icon::AppIconResolver,xbar_core::render::cairo::CairoRenderer)> = std::cell::RefCell::new((
+            xbar_core::app_icon::AppIconResolver::new(24),
+            xbar_core::render::cairo::CairoRenderer::new(pango::FontDescription::from_string("Sans 11"))));
+    }
+    ICONS.with(|cache| -> Result<()> {
+        let mut cache = cache.borrow_mut();
+        let icon = cache.0.resolve(class).cloned();
+        if let Some(icon) = icon {
+            let bounds = Rect::new(x as f32, y as f32, w as f32, h as f32);
+            let scene = Scene {
+                viewport: Size::new((x + w) as f32, (y + h) as f32),
+                clip: bounds,
+                hits: vec![],
+                nodes: vec![SceneNode::Image {
+                    id: NodeId::ClientIcon,
+                    bounds,
+                    source: ImageSource::from(&icon),
+                    state: VisualState::default(),
+                }],
+            };
+            ctx.save()?;
+            rounded(ctx, x, y, w, h, 7.0);
+            ctx.clip();
+            let result = cache.1.render(ctx, &scene);
+            ctx.restore()?;
+            result?;
+        }
+        Ok(())
+    })
+}
+
 /// Small vector symbols stay crisp at any scale without private-use fonts.
 fn symbol(ctx: &Context, label: &str, rect: [f64; 4]) -> Result<bool> {
     if !matches!(
@@ -473,6 +712,12 @@ fn symbol(ctx: &Context, label: &str, rect: [f64; 4]) -> Result<bool> {
             | "▶"
             | "Ⅱ"
             | "+"
+            | "speaker"
+            | "mute"
+            | "bluetooth"
+            | "clipboard"
+            | "previous"
+            | "next"
     ) {
         return Ok(false);
     }
@@ -546,7 +791,80 @@ fn symbol(ctx: &Context, label: &str, rect: [f64; 4]) -> Result<bool> {
             ctx.arc(0.0, 9.0, 2.0, 0.0, std::f64::consts::PI);
             ctx.stroke()?;
         }
-        "☼" | "⚙" => {
+        "speaker" | "mute" => {
+            ctx.move_to(-10.0, -4.0);
+            ctx.line_to(-4.0, -4.0);
+            ctx.line_to(2.0, -9.0);
+            ctx.line_to(2.0, 9.0);
+            ctx.line_to(-4.0, 4.0);
+            ctx.line_to(-10.0, 4.0);
+            ctx.close_path();
+            ctx.stroke()?;
+            if label == "mute" {
+                ctx.move_to(7.0, -4.0);
+                ctx.line_to(13.0, 4.0);
+                ctx.move_to(13.0, -4.0);
+                ctx.line_to(7.0, 4.0);
+                ctx.stroke()?;
+            } else {
+                for r in [7.0, 11.0] {
+                    ctx.arc(1.0, 0.0, r, -0.8, 0.8);
+                    ctx.stroke()?;
+                }
+            }
+        }
+        "⚙" => {
+            for n in 0..32 {
+                let angle = f64::from(n) * std::f64::consts::TAU / 32.0;
+                let radius = if n % 4 == 1 || n % 4 == 2 { 11.0 } else { 8.5 };
+                let (x, y) = (radius * angle.cos(), radius * angle.sin());
+                if n == 0 {
+                    ctx.move_to(x, y);
+                } else {
+                    ctx.line_to(x, y);
+                }
+            }
+            ctx.close_path();
+            ctx.stroke()?;
+            ctx.arc(0.0, 0.0, 3.5, 0.0, std::f64::consts::TAU);
+            ctx.stroke()?;
+        }
+        "clipboard" => {
+            rounded(ctx, -8.0, -8.0, 16.0, 19.0, 2.5);
+            ctx.stroke()?;
+            rounded(ctx, -4.0, -11.0, 8.0, 5.0, 1.5);
+            ctx.fill()?;
+            ctx.move_to(-4.0, -1.0);
+            ctx.line_to(4.0, -1.0);
+            ctx.move_to(-4.0, 4.0);
+            ctx.line_to(2.0, 4.0);
+            ctx.stroke()?;
+        }
+        "bluetooth" => {
+            ctx.move_to(-2.0, -12.0);
+            ctx.line_to(7.0, -5.0);
+            ctx.line_to(-8.0, 7.0);
+            ctx.move_to(-2.0, 12.0);
+            ctx.line_to(7.0, 5.0);
+            ctx.line_to(-8.0, -7.0);
+            ctx.move_to(-2.0, -12.0);
+            ctx.line_to(-2.0, 12.0);
+            ctx.stroke()?;
+        }
+        "previous" | "next" => {
+            if label == "next" {
+                ctx.scale(-1.0, 1.0);
+            }
+            ctx.move_to(5.0, -7.0);
+            ctx.line_to(-4.0, 0.0);
+            ctx.line_to(5.0, 7.0);
+            ctx.close_path();
+            ctx.fill()?;
+            ctx.move_to(-8.0, -7.0);
+            ctx.line_to(-8.0, 7.0);
+            ctx.stroke()?;
+        }
+        "☼" => {
             ctx.arc(0.0, 0.0, 4.0, 0.0, std::f64::consts::TAU);
             ctx.stroke()?;
             for n in 0..8 {
@@ -639,6 +957,117 @@ mod tests {
     use xbar_core::edge_shell::{EdgeReveal, RevealMode};
     use xbar_core::{BarEdge, BarPlacement};
 
+    fn panel(edge: BarEdge, offset: usize) -> Panel {
+        Panel {
+            task_offset: offset,
+            edge,
+            window: 0,
+            sensor: 0,
+            sensor_rect: BarPlacement {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            mapped: true,
+            sensor_mapped: false,
+            applied_mode: None,
+            gc: 0,
+            back_buffer: None,
+            reveal: EdgeReveal::new(RevealMode::Always),
+            placement: BarPlacement {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 88,
+            },
+            hits: vec![],
+            hovered: None,
+            pressed: None,
+        }
+    }
+
+    #[test]
+    fn four_row_workspace_pages_keep_all_tags_reachable() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 84, 680).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        for count in [1, 4, 9, 32] {
+            let mut snapshot = xbar_core::model::BarModel::new(xbar_core::model::ModelConfig {
+                tag_count: count,
+                ..Default::default()
+            })
+            .unwrap()
+            .snapshot();
+            snapshot.active_tag = TagId::new(0);
+            let mut seen = std::collections::BTreeSet::new();
+            for _ in 0..32 {
+                let mut panel = panel(BarEdge::Left, 0);
+                Painter {
+                    ctx: &ctx,
+                    panel: &mut panel,
+                    snapshot: &snapshot,
+                    tasks: &[],
+                    dark: false,
+                }
+                .left(12.0, 0.0, 60.0, 680.0)
+                .unwrap();
+                let rows: Vec<_> = panel
+                    .hits
+                    .iter()
+                    .take(panel.hits.len() - 1)
+                    .filter_map(|hit| match &hit.action {
+                        Action::Model(UserAction::ViewTagOn { tag, .. }) => Some(tag.index()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(rows.len() <= 4);
+                seen.extend(rows);
+                if let Action::Model(UserAction::ViewTagOn { tag, .. }) =
+                    panel.hits.last().unwrap().action
+                {
+                    snapshot.active_tag = Some(tag);
+                } else {
+                    break;
+                }
+            }
+            assert_eq!(seen.len(), count);
+        }
+    }
+
+    #[test]
+    fn bottom_layout_has_real_transport_actions_and_fits_short_capsule() {
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1024, 64).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        let mut panel = panel(BarEdge::Bottom, 0);
+        Painter {
+            ctx: &ctx,
+            panel: &mut panel,
+            snapshot: &snapshot,
+            tasks: &[],
+            dark: false,
+        }
+        .bottom(0.0, 0.0, 1024.0, 64.0)
+        .unwrap();
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|hit| hit.action == Action::MediaPrevious)
+        );
+        assert!(panel.hits.iter().any(|hit| hit.action == Action::MediaNext));
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|hit| hit.action == Action::Model(UserAction::MediaPlayPause))
+        );
+        for hit in panel.hits {
+            let [x, y, w, h] = hit.rect;
+            assert!(x >= 0.0 && y >= 0.0 && x + w <= 1024.0 && y + h <= 64.0);
+        }
+    }
+
     #[test]
     fn overflow_keeps_every_task_reachable_without_overlapping_trailing_controls() {
         let snapshot = xbar_core::model::BarModel::default().snapshot();
@@ -646,6 +1075,7 @@ mod tests {
             .map(|id| crate::shell_ipc::Task {
                 id,
                 name: format!("Task {id}"),
+                class: String::new(),
                 monitor: 0,
                 is_focused: false,
                 is_minimized: false,
@@ -654,48 +1084,59 @@ mod tests {
                 is_swallowed: false,
             })
             .collect();
-        let mut seen = std::collections::BTreeSet::new();
-        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 800, 88).unwrap();
-        let ctx = Context::new(&surface).unwrap();
-        for offset in 0..tasks.len() {
-            let mut panel = Panel {
-                task_offset: offset,
-                edge: BarEdge::Bottom,
-                window: 0,
-                gc: 0,
-                reveal: EdgeReveal::new(RevealMode::Always),
-                placement: BarPlacement {
-                    x: 0,
-                    y: 0,
-                    width: 800,
-                    height: 88,
-                },
-                hits: vec![],
-                hovered: None,
-                pressed: None,
-            };
-            Painter {
-                ctx: &ctx,
-                panel: &mut panel,
-                snapshot: &snapshot,
-                tasks: &tasks,
-                dark: false,
-            }
-            .bottom(0.0, 0.0, 800.0, 76.0)
-            .unwrap();
-            assert!(
-                panel
-                    .hits
-                    .iter()
-                    .any(|hit| hit.action == Action::CycleTasks)
-            );
-            for hit in panel.hits {
-                if let Action::FocusWindow(id) = hit.action {
-                    seen.insert(id);
-                    assert!(hit.rect[0] + hit.rect[2] <= 800.0 - 152.0);
+        for width in [
+            80.0, 120.0, 200.0, 280.0, 384.0, 480.0, 640.0, 800.0, 1024.0,
+        ] {
+            let mut seen = std::collections::BTreeSet::new();
+            let surface =
+                cairo::ImageSurface::create(cairo::Format::ARgb32, width as i32, 64).unwrap();
+            let ctx = Context::new(&surface).unwrap();
+            for offset in 0..tasks.len() {
+                let mut panel = panel(BarEdge::Bottom, offset);
+                Painter {
+                    ctx: &ctx,
+                    panel: &mut panel,
+                    snapshot: &snapshot,
+                    tasks: &tasks,
+                    dark: false,
+                }
+                .bottom(0.0, 0.0, width, 64.0)
+                .unwrap();
+                if width >= 120.0 {
+                    assert!(
+                        panel
+                            .hits
+                            .iter()
+                            .any(|hit| hit.action == Action::CycleTasks),
+                        "{width}"
+                    );
+                }
+                for (i, hit) in panel.hits.iter().enumerate() {
+                    let [x, y, w, h] = hit.rect;
+                    assert!(
+                        x >= 0.0 && y >= 0.0 && x + w <= width && y + h <= 64.0,
+                        "{width}: {:?}",
+                        hit.rect
+                    );
+                    if let Action::FocusWindow(id) = hit.action {
+                        seen.insert(id);
+                    }
+                    for other in &panel.hits[i + 1..] {
+                        let [ox, oy, ow, oh] = other.rect;
+                        assert!(
+                            x + w <= ox || ox + ow <= x || y + h <= oy || oy + oh <= y,
+                            "{width}: overlapping {:?} and {:?}",
+                            hit.rect,
+                            other.rect
+                        );
+                    }
                 }
             }
+            assert_eq!(
+                seen.len(),
+                tasks.len(),
+                "{width}: compact task list lost reachability"
+            );
         }
-        assert_eq!(seen.len(), tasks.len());
     }
 }

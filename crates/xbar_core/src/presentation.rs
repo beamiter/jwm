@@ -19,6 +19,9 @@ use crate::model::{
 };
 use crate::tag_contrast::{TagContrastMode, TagPalette};
 
+#[path = "desktop_header.rs"]
+mod desktop_header;
+
 /// A point in logical (DPI-independent) coordinates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
@@ -950,6 +953,9 @@ pub fn logical_bar_height(physical_height: u32, scale_factor: f64) -> Option<f32
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PresentationConfig {
+    /// Official four-edge desktop header. Other frontends keep their own
+    /// generic bar layout unless they explicitly select this profile.
+    pub desktop_header: bool,
     /// Wheel/touchpad sensitivity shared by the native toolkit adapters.
     pub scroll: crate::ScrollPolicy,
     /// Output edge. Sidebars use upright, compact cells along the vertical axis.
@@ -1018,6 +1024,7 @@ pub struct PresentationConfig {
 impl Default for PresentationConfig {
     fn default() -> Self {
         Self {
+            desktop_header: false,
             edge: crate::placement::BarEdge::Top,
             scroll: crate::ScrollPolicy::default(),
             bar_height: 42.0,
@@ -1604,6 +1611,9 @@ pub(crate) fn build_scene<M: TextMeasurer>(
 
 impl<M: TextMeasurer> LayoutPass<'_, M> {
     fn build(&self, view: BarView<'_>, viewport: Size, interaction: &InteractionState) -> Scene {
+        if self.config.desktop_header && !self.config.edge.is_vertical() {
+            return self.build_desktop_header(view, viewport, interaction);
+        }
         let BarPresentation {
             theme,
             tags,

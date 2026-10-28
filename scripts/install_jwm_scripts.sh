@@ -111,7 +111,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="tao_pixels_bar"
+JWM_BAR_NAME="${JWM_BAR_NAME:-tao_glow_bar}"
 JWM_BAR_SET_BY_ARGS=false
 UPDATED_CONFIG_PATHS=()
 SKIP_BAR=false
@@ -142,9 +142,9 @@ usage() {
 
 说明:
   - 推荐日用会话是 Wayland（jwm-wayland.desktop / wayland-udev）；X11 会话条目仍会安装，作为兼容面。
-  - 官方推荐 status bar 是 tao_glow_bar；脚本默认安装 tao_pixels_bar，可通过 -b 选择其它 bar。
+  - 官方默认 status bar 是 tao_glow_bar；可通过 JWM_BAR_NAME 或 -b 选择其它 bar，-b 优先。
   - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
-  - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
+  - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数、环境变量或官方默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
     dioxus_bar 使用 dx；Tauri bar 会同时构建前端与 src-tauri 后端，再把可执行文件安装到同一目录。
   - jwm / jwm-tool / jwm-support / jwm-remote / jwm-player 通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
@@ -160,7 +160,7 @@ usage() {
     缺失的配置会自动生成；手动 jwm --gen-config 可主动强制重置。
 
 示例:
-  $(basename "$0")                           # 安装 jwm + 默认 bar（tao_pixels_bar）
+  $(basename "$0")                           # 安装 jwm + 官方默认 bar（tao_glow_bar）
   $(basename "$0") --gen-config              # 同上，并按字段变化更新配置
   $(basename "$0") -m debug                  # debug 模式编译安装
   $(basename "$0") -b xcb_bar                # 安装示例 bar（非官方默认）
@@ -278,6 +278,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$SKIP_BAR" == false ]] && ! is_valid_bar "$JWM_BAR_NAME"; then
+    err "未知的 bar: $JWM_BAR_NAME"
+    exit 2
+fi
 
 # ============================================================
 # 构建参数

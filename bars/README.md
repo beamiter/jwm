@@ -23,6 +23,11 @@ scripts/install_jwm_scripts.sh                  # installs tao_glow_bar
 scripts/install_jwm_scripts.sh -b tao_glow_bar  # explicit
 ```
 
+When upgrading an existing installation that names another bar, use the
+explicit `-b tao_glow_bar` form to update both JWM configuration files. A plain
+reinstall preserves the existing `status_bar.name`. `JWM_BAR_NAME` can select an
+alternative default for the installer; an explicit `-b` takes precedence.
+
 ## Example bars
 
 Every other crate in this directory is an **example** or experiment (toolkit

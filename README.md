@@ -122,7 +122,7 @@ hot-tunable changes that must become valid together; non-hot-tunable values must
 be edited in the configuration file.
 
 The installation helper builds JWM and the selected status bar
-(`tao_pixels_bar` by default; use `--bar` to choose another crate under `bars/`), installs
+(`tao_glow_bar` by default; use `--bar` to choose another crate under `bars/`), installs
 the session files (Wayland session recommended), and checks both configuration
 templates against their last installed versions. The records are stored beside
 each config as `.config_x11.toml.installed-defaults` and

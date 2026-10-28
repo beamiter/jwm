@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Exercise real edge sensors, independent reveal, hide cancellation and pinning.
 
-Build bars/tao_glow_bar first. Requires Xvfb, xdotool and a D-Bus session.
+Build bars/tao_glow_bar first. Requires Xvfb, xdotool, xev and a D-Bus session.
 No existing desktop or user configuration is touched.
 """
 import os
 import json
+import ctypes
+from contextlib import contextmanager
 from pathlib import Path
 import select
 import subprocess
@@ -19,25 +21,35 @@ BAR = Path(os.environ.get("JWM_EDGE_BAR_BIN", ROOT / "bars/tao_glow_bar/target/d
 def main():
     with tempfile.TemporaryDirectory(prefix="jwm-edge-test-") as directory:
         work = Path(directory)
+        width,height=map(int,os.environ.get("JWM_EDGE_TEST_SIZE","1280x800").split("x"))
+        assert width>=1000 and height>=700, "interaction test needs at least 1000x700"
         env = dict(os.environ, XDG_CONFIG_HOME=str(work / "config"), XDG_CACHE_HOME=str(work / "cache"),
-                   XDG_RUNTIME_DIR=str(work / "runtime"), LIBGL_ALWAYS_SOFTWARE="1", GDK_BACKEND="x11")
+                   XDG_RUNTIME_DIR=str(work / "runtime"), LIBGL_ALWAYS_SOFTWARE="1", GDK_BACKEND="x11", NO_AT_BRIDGE="1")
         (work / "runtime").mkdir(mode=0o700)
         config = work / "xbar.toml"
         env["XBAR_CONFIG"] = str(config)
         env.pop("EGL_PLATFORM", None)
+        if os.environ.get("JWM_EDGE_TEST_WAYLAND_TRIGGER") == "1":
+            # Exercise the mapped transparent trigger representation while
+            # keeping the harness itself on its isolated X11 server.
+            env["WAYLAND_DISPLAY"]="wayland-edge-trigger-test"
         env["PATH"] = str(BAR.parent) + os.pathsep + env["PATH"]
         children = []
         log = (work / "session.log").open("w+")
 
+        event_files = []
+
         def spawn(*args, **kwargs):
-            child = subprocess.Popen(args, env=env, stdout=log, stderr=log, **kwargs)
+            kwargs.setdefault("stdout", log)
+            kwargs.setdefault("stderr", log)
+            child = subprocess.Popen(args, env=env, **kwargs)
             children.append(child)
             return child
 
         def run(*args):
             return subprocess.check_output(args, env=env, text=True, stderr=subprocess.STDOUT, timeout=10)
 
-        def wait_for(predicate):
+        def wait_for(predicate, label="edge shell readiness/interaction timeout"):
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
@@ -47,7 +59,7 @@ def main():
                 except (OSError, ValueError, subprocess.CalledProcessError):
                     pass
                 time.sleep(0.03)
-            raise AssertionError("edge shell readiness/interaction timeout")
+            raise AssertionError(label)
 
         def find(edge):
             return run("xdotool", "search", "--name", "^jwm-edge-" + edge + "$").strip().splitlines()[0]
@@ -57,11 +69,142 @@ def main():
             return {key: int(values[key]) for key in ["X", "Y", "WIDTH", "HEIGHT"]}
 
         def move(x, y):
-            run("xdotool", "mousemove", "--sync", str(x), str(y))
+            # --sync waits for a motion event even if already at this point;
+            # repeated task restore clicks intentionally reuse their position.
+            run("xdotool", "mousemove", str(x), str(y))
+
+        def struts(window):
+            raw = run("xprop","-id",window,"_NET_WM_STRUT_PARTIAL").split("=",1)[1]
+            return [int(value.strip()) for value in raw.split(",")]
+
+        def click_control(window, kind, **identity):
+            def ready_control():
+                raw=run("xprop","-id",window,"-notype","_JWM_EDGE_CONTROLS")
+                if "=" not in raw:
+                    return None
+                controls=json.loads(json.loads(raw.split("=",1)[1].strip()))
+                return next((c for c in controls if c["kind"]==kind and all(c.get(k)==v for k,v in identity.items())),None)
+            hit=wait_for(ready_control)
+            x,y,w,h=hit["rect"]
+            origin=geometry(window)
+            move(origin["X"]+int(x+w/2),origin["Y"]+int(y+h/2))
+            run("xdotool","click","1")
+
+        @contextmanager
+        def pointer_grab(owner_events):
+            # A compositor popup or application menu can temporarily grab the
+            # pointer without moving it. X11 reports Grab/Ungrab crossing events;
+            # they are not a physical exit from the edge panel.
+            xlib = ctypes.CDLL("libX11.so.6")
+            xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            xlib.XOpenDisplay.restype = ctypes.c_void_p
+            xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            xlib.XDefaultRootWindow.restype = ctypes.c_ulong
+            xlib.XGrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                                         ctypes.c_uint, ctypes.c_int, ctypes.c_int,
+                                         ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            xlib.XUngrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            xlib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            display = xlib.XOpenDisplay(env["DISPLAY"].encode())
+            assert display, "cannot open isolated X display for grab regression"
+            try:
+                root = xlib.XDefaultRootWindow(display)
+                assert xlib.XGrabPointer(display, root, int(owner_events), 0, 1, 1, 0, 0, 0) == 0, "external pointer grab failed"
+                xlib.XSync(display, 0)
+                yield
+            finally:
+                xlib.XUngrabPointer(display, 0)
+                xlib.XSync(display, 0)
+                xlib.XCloseDisplay(display)
+
+        def observe_structure(window, label):
+            trace = work / f"structure-{label}.log"
+            stream = trace.open("w")
+            event_files.append(stream)
+            watcher = spawn("stdbuf", "-oL", "xev", "-id", window, "-event", "structure", stdout=stream)
+            time.sleep(0.08)
+            assert watcher.poll() is None, "structure observer failed to attach"
+            return lambda: trace.read_text().count("UnmapNotify")
+
+        def stay_visible(window, unmaps, baseline, label, duration):
+            deadline = time.monotonic() + duration
+            while time.monotonic() < deadline:
+                assert mapped(window), f"{label}: panel closed while pointer remained inside"
+                assert unmaps() == baseline, f"{label}: transient unmap/remap flicker"
+                time.sleep(0.01)
+
+        def cross_point(edge, inset, panel):
+            if edge == "left":
+                return inset, panel["Y"] + panel["HEIGHT"] // 2
+            if edge == "right":
+                return width - 1 - inset, panel["Y"] + panel["HEIGHT"] // 2
+            return panel["X"] + panel["WIDTH"] // 2, height - 1 - inset
+
+        def exercise_handoffs(panels, sensors):
+            traces = {edge: observe_structure(window, edge) for edge, window in panels.items()}
+            # Signal each live configuration update by changing the mode too;
+            # a sleep alone would not establish which hide timeout was tested.
+            for hide_ms in [0, 40]:
+                move(width//2, height//2)
+                config.write_text('[edge_shell]\nleft="always"\nright="disabled"\nbottom="disabled"\n')
+                wait_for(lambda: mapped(panels["left"]) and not mapped(panels["right"]) and not mapped(panels["bottom"]))
+                config.write_text(f'[edge_shell]\nreveal_delay_ms=0\nhide_delay_ms={hide_ms}\n')
+                wait_for(lambda: all(not mapped(window) for window in panels.values()) and all(mapped(sensor) for sensor in sensors))
+                hold = hide_ms/1000 + 0.08
+                for edge, window in panels.items():
+                    for attempt in range(2):
+                        # Enter the physical sensor before using the actual
+                        # expanded geometry for the slow crossing path.
+                        approach = (0, height//2) if edge == "left" else (width-1,height//2) if edge == "right" else (width//2,height-1)
+                        move(*approach)
+                        wait_for(lambda: mapped(window))
+                        panel = geometry(window)
+                        time.sleep(0.04)  # Let the observer consume the preceding intentional hide/map.
+                        baseline = traces[edge]()
+                        for inset in [1, 2, 3, 6, 10, 14, 22, 36]:
+                            move(*cross_point(edge, inset, panel))
+                            stay_visible(window, traces[edge], baseline, f"{edge}/{hide_ms}ms/entry-{attempt}/inset-{inset}", hold)
+                        for owner_events in [False, True]:
+                            with pointer_grab(owner_events):
+                                stay_visible(window, traces[edge], baseline, f"{edge}/{hide_ms}ms/external-grab-{owner_events}", hold)
+                            stay_visible(window, traces[edge], baseline, f"{edge}/{hide_ms}ms/ungrab-{owner_events}", hold)
+                        for owner_events in [False, True]:
+                            # Conversely, physical motion while another client
+                            # owns the grab must be reconciled when it releases
+                            # the pointer. Ignoring every Ungrab would leave a
+                            # stale inside flag and make the panel stay open.
+                            with pointer_grab(owner_events):
+                                move(width//2, height//2)
+                                time.sleep(hold)
+                            wait_for(lambda: not mapped(window), f"{edge}/{hide_ms}ms/grab-move-out-{owner_events}: panel did not hide after Ungrab")
+                            move(*approach)
+                            wait_for(lambda: mapped(window))
+                            panel = geometry(window)
+                            move(*cross_point(edge,36,panel))
+                            time.sleep(0.04)
+                            baseline = traces[edge]()
+                            stay_visible(window, traces[edge], baseline, f"{edge}/{hide_ms}ms/reenter-after-grab-{owner_events}", hold)
+                        # Implicit button grabs must hold the panel open while
+                        # dragging out; release outside must then permit hiding.
+                        controls_raw = run("xprop", "-id", window, "-notype", "_JWM_EDGE_CONTROLS")
+                        controls = json.loads(json.loads(controls_raw.split("=",1)[1].strip()))
+                        assert controls, f"{edge}: no real controls were rendered"
+                        x,y,w,h = controls[0]["rect"]
+                        move(panel["X"]+int(x+w/2), panel["Y"]+int(y+h/2))
+                        run("xdotool", "mousedown", "1")
+                        try:
+                            move(width//2, height//2)
+                            stay_visible(window, traces[edge], baseline, f"{edge}/{hide_ms}ms/button-grab", hold)
+                        finally:
+                            run("xdotool", "mouseup", "1")
+                        wait_for(lambda: not mapped(window), f"{edge}/{hide_ms}ms/button-grab: panel did not hide after release outside")
+                        assert all(not mapped(other) for other in panels.values())
+                    print(f"PASS: {edge} sensor/passage/panel handoff, external and button grabs, {hide_ms}ms hide delay")
 
         try:
             read_fd, write_fd = os.pipe()
-            spawn("Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x800x24", "-nolisten", "tcp", pass_fds=(write_fd,))
+            spawn("Xvfb", "-displayfd", str(write_fd), "-screen", "0", f"{width}x{height}x24", "-nolisten", "tcp", pass_fds=(write_fd,))
             os.close(write_fd)
             # Xvfb can write the display number and newline separately. Keep
             # the read end alive until both arrive, or its final write can
@@ -77,51 +220,72 @@ def main():
             assert display.isdigit(), display
             env["DISPLAY"] = ":" + display
             os.close(read_fd)
+            def mapped(window):
+                return "Map State: IsViewable" in run("xwininfo", "-id", window)
+
             config.write_text('[edge_shell]\nreveal_delay_ms = 40\nhide_delay_ms = 300\n')
             bar = spawn(str(BAR))
             left, right, bottom = [wait_for(lambda edge=edge: find(edge)) for edge in ["left", "right", "bottom"]]
-            assert geometry(left)["WIDTH"] == geometry(right)["WIDTH"] == 2
-            assert geometry(bottom)["HEIGHT"] == 2
-            move(0, 400)
-            wait_for(lambda: geometry(left)["WIDTH"] == 84)
-            assert geometry(right)["WIDTH"] == 2 and geometry(bottom)["HEIGHT"] == 2
-            move(40, 400)  # Passage into the floating capsule must not close it.
+            triggers = [find("trigger-" + edge) for edge in ["left", "right", "bottom"]]
+            if os.environ.get("JWM_EDGE_TEST_WAYLAND_TRIGGER") == "1":
+                assert "Depth: 32" in run("xwininfo","-id",triggers[0])
+            assert all(not mapped(window) for window in [left,right,bottom])
+            assert geometry(triggers[0])["HEIGHT"] >= height-10
+            assert geometry(triggers[2])["WIDTH"] >= width-10
+            # Approach outside the old center-only sensor, then cross into
+            # the floating capsule. Each physical edge owns its own state.
+            move(0, 30)
+            wait_for(lambda: mapped(left))
+            assert not mapped(right) and not mapped(bottom)
+            move(40,height//2)
             time.sleep(0.4)
-            assert geometry(left)["WIDTH"] == 84
-            move(640, 400)
+            assert mapped(left)
+            move(width//2, height//2)
             time.sleep(0.10)
-            assert geometry(left)["WIDTH"] == 84
-            move(40, 400)  # Re-entry cancels the pending hide.
+            assert mapped(left)
+            move(40,height//2)
             time.sleep(0.35)
-            assert geometry(left)["WIDTH"] == 84
-            move(640, 400)
-            wait_for(lambda: geometry(left)["WIDTH"] == 2)
-            move(1279, 400)
-            wait_for(lambda: geometry(right)["WIDTH"] == 84)
-            assert geometry(left)["WIDTH"] == 2
-            move(640, 799)
-            wait_for(lambda: geometry(bottom)["HEIGHT"] == 88)
-            wait_for(lambda: geometry(right)["WIDTH"] == 2)
-            move(640, 400)
-            wait_for(lambda: geometry(bottom)["HEIGHT"] == 2)
-            bar.terminate()
-            bar.wait(timeout=10)
+            assert mapped(left)
+            move(width//2, height//2)
+            wait_for(lambda: not mapped(left))
+            move(width-1,height-35)
+            wait_for(lambda: mapped(right))
+            assert not mapped(left)
+            move(30,height-1)
+            wait_for(lambda: mapped(bottom))
+            wait_for(lambda: not mapped(right))
+            move(width//2,height-50)
+            time.sleep(0.4)
+            assert mapped(bottom)
+            move(width//2, height//2)
+            wait_for(lambda: not mapped(bottom))
+            exercise_handoffs({"left":left,"right":right,"bottom":bottom}, triggers)
+            # Later application windows must not bury the input-only trigger.
+            blocker = spawn("xmessage", "-geometry", f"{width}x{height}+0+0", "edge stacking regression")
+            time.sleep(0.3)
+            move(0, 30)
+            wait_for(lambda: mapped(left))
+            move(width//2,height//2)
+            wait_for(lambda: not mapped(left))
+            blocker.terminate()
+            blocker.wait(timeout=5)
+            # Same process: pinned/disabled settings must apply without a restart.
             config.write_text('[edge_shell]\nleft = "always"\nright = "disabled"\nbottom = "always"\n')
-            bar = spawn(str(BAR))
-            left = wait_for(lambda: find("left"))
-            bottom = wait_for(lambda: find("bottom"))
-            wait_for(lambda: geometry(left)["WIDTH"] == 84 and geometry(bottom)["HEIGHT"] == 88)
+            wait_for(lambda: mapped(left) and mapped(bottom) and not mapped(right))
             time.sleep(0.6)
-            assert geometry(left)["WIDTH"] == 84 and geometry(bottom)["HEIGHT"] == 88
-            try:
-                find("right")
-                raise AssertionError("disabled right panel was mapped")
-            except subprocess.CalledProcessError:
-                pass
-            capture = os.environ.get("JWM_EDGE_SCREENSHOT")
-            if capture:
-                run("import", "-window", "root", capture)
+            assert mapped(left) and mapped(bottom)
+            assert all(not mapped(trigger) for trigger in triggers)
+            assert struts(left)[0] == 90 and struts(bottom)[3] == 76
+            config.write_text('[edge_shell]\nleft = "hover"\nright = "always"\nbottom = "disabled"\n')
+            wait_for(lambda: not mapped(left) and mapped(right) and not mapped(bottom))
+            assert struts(left)[0] == 0 and struts(bottom)[3] == 0
+            assert struts(right)[1] == 90
+            # A malformed edit must retain the last valid live modes.
+            config.write_text('[edge_shell]\nleft = "invalid"\n')
+            time.sleep(1.2)
+            assert mapped(right) and not mapped(bottom)
             assert bar.poll() is None
+            capture = os.environ.get("JWM_EDGE_SCREENSHOT")
             bar.terminate()
             bar.wait(timeout=10)
             jwm = ROOT / "target/debug/jwm"
@@ -135,6 +299,9 @@ def main():
             content = jwm_config.read_text()
             content = re.sub(r'^wallpaper = .*$', 'wallpaper = ' + json.dumps(str(wallpaper)), content, flags=re.M)
             content = re.sub(r'^wallpaper_effect = .*$', 'wallpaper_effect = "off"', content, flags=re.M)
+            if os.environ.get("JWM_EDGE_TEST_REFERENCE") == "1":
+                content = re.sub(r'^status_bar_height = .*$', 'status_bar_height = 52', content, flags=re.M)
+                content = re.sub(r'^status_bar_padding = .*$', 'status_bar_padding = 12', content, flags=re.M)
             jwm_config.write_text(content)
             config.write_text('[edge_shell]\nleft = "always"\nright = "always"\nbottom = "always"\n[glass]\nwallpaper = ' + json.dumps(str(wallpaper)) + '\n')
             spawn(str(jwm), "--backend", "x11rb")
@@ -149,11 +316,9 @@ def main():
 
             left = wait_for(lambda: find("left"))
             bottom = wait_for(lambda: find("bottom"))
-            wait_for(lambda: geometry(left)["WIDTH"] == 84)
+            wait_for(lambda: mapped(left))
             before = wait_for(lambda: next((w for w in msg("get_workspaces") if w["focused"]), None))["tag_index"]
-            rect = geometry(left)
-            move(rect["X"] + 42, rect["Y"] + 14 + 5 * 52 + 16 + 52 + 22)
-            run("xdotool", "click", "1")
+            click_control(left,"workspace",index=1)
             wait_for(lambda: next(w["tag_index"] for w in msg("get_workspaces") if w["focused"]) != before)
             spawn("xmessage", "-name", "EdgeDockFirst", "-geometry", "320x180+200+180", "JWM four-edge dock")
             spawn("xmessage", "-name", "EdgeDockSecond", "-geometry", "320x180+600+180", "Live window focus")
@@ -165,16 +330,13 @@ def main():
             rect = geometry(bottom)
             if capture:
                 run("import", "-window", "root", capture)
-            move(rect["X"] + 18 + 172 + 60 + 71, rect["Y"] + 38)
-            run("xdotool", "click", "1")
+            click_control(bottom,"task",id=tasks[0]["id"])
             wait_for(lambda: any(w["id"] == tasks[0]["id"] and w["is_focused"] for w in msg("get_windows")))
             msg("minimize")
             wait_for(lambda: any(w["id"] == tasks[0]["id"] and w["is_minimized"] for w in msg("get_windows")))
             time.sleep(1.2)
-            run("xdotool", "click", "1")
+            click_control(bottom,"task",id=tasks[0]["id"])
             wait_for(lambda: any(w["id"] == tasks[0]["id"] and w["is_focused"] and not w["is_minimized"] for w in msg("get_windows")))
-            def mapped(window):
-                return "Map State: IsViewable" in run("xwininfo", "-id", window)
             msg("toggle_bar")
             wait_for(lambda: not mapped(left) and not mapped(bottom))
             msg("toggle_bar")
@@ -183,14 +345,24 @@ def main():
                 for task in tasks:
                     msg("focus_window", {"id": task["id"]})
                     msg("minimize")
-                move(640, 400)
+                move(width//2, height//2)
                 time.sleep(1.2)
                 run("import", "-window", "root", capture)
+                if os.environ.get("JWM_EDGE_CAPTURE_WINDOWS") == "1":
+                    for name,window in [("left",left),("right",find("right")),("bottom",bottom)]:
+                        run("import","-window",window,str(Path(capture).with_suffix("."+name+".png")))
             print("PASS: independent hover, delayed hide/cancellation, pinned/disabled edges, workspace switching, task focus/restore and bar visibility through JWM IPC")
         except BaseException:
             log.flush()
             log.seek(0)
             print(log.read())
+            for trace in work.glob("structure-*.log"):
+                print(trace.name, trace.read_text()[-2000:])
+            for command in [("xwininfo","-root","-tree"),("xdotool","getmouselocation","--shell")]:
+                try:
+                    print(run(*command))
+                except (OSError,subprocess.SubprocessError):
+                    pass
             raise
         finally:
             for child in reversed(children):
@@ -202,6 +374,8 @@ def main():
                         child.kill()
                         child.wait()
             log.close()
+            for stream in event_files:
+                stream.close()
 
 
 if __name__ == "__main__":
