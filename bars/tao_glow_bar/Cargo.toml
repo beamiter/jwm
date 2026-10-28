@@ -9,17 +9,18 @@ bytemuck = "1.25.2"
 cairo-rs = "0.22.9"
 glow = "0.18.0"
 glutin = "0.32.3"
+gtk = "0.18.2"
 log = "0.4.34"
 libc = "0.2"
 jwm_ipc_transport = { path = "../../crates/jwm_ipc_transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pango = "0.22.9"
-pangocairo = "0.22.8"
+pangocairo = "0.22.9"
 raw-window-handle = "0.6"
 softbuffer = "0.4.8"
 tao = "0.37.0"
-x11rb = "0.14"
+x11rb = { version = "0.14", features = ["shape"] }
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",

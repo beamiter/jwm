@@ -2461,6 +2461,7 @@ dependencies = [
  "cairo-rs 0.22.9",
  "glow",
  "glutin",
+ "gtk",
  "jwm_ipc_transport",
  "libc",
  "log",

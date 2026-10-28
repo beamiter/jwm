@@ -4891,6 +4891,7 @@ impl Jwm {
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "bar_position": serde_json::Value::Null,
+                "bar_layout": serde_json::Value::Null,
                 "bar_thickness": serde_json::Value::Null,
                 "bar_padding": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -5303,6 +5304,7 @@ impl Jwm {
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "bar_position": CONFIG.load().status_bar_position_for_monitor(mon.num).as_str(),
+            "bar_layout": CONFIG.load().status_bar_layout().as_str(),
             "bar_thickness": CONFIG.load().status_bar_height(),
             "bar_padding": CONFIG.load().status_bar_padding(),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -6479,6 +6481,7 @@ impl Jwm {
             "wallpaper_mode": cfg.behavior().wallpaper_mode,
             "persist_tags": cfg.layout_persist_tags(),
             "status_bar_name": cfg.status_bar_name(),
+            "status_bar_layout": cfg.status_bar_layout().as_str(),
             "status_bar_position": cfg.status_bar_position().as_str(),
             "status_bar_monitors": cfg.status_bar_config().monitors,
             "status_bar_height": cfg.status_bar_height(),
@@ -6698,6 +6701,7 @@ impl Jwm {
         };
         let polish6 = serde_json::json!({
             "status_bar_name": cfg.status_bar_name(),
+            "status_bar_layout": cfg.status_bar_layout().as_str(),
             "status_bar_position": cfg.status_bar_position().as_str(),
             "status_bar_monitors": cfg.status_bar_config().monitors,
             "status_bar_height": cfg.status_bar_height(),

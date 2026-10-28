@@ -45,6 +45,21 @@ pub(super) fn status_bar_steady_blur_quality() -> BlurQuality {
     frosted_steady_blur_quality()
 }
 
+/// The four-panel frontend paints its own frosted sheet and rounded ARGB
+/// silhouette. A second compositor-owned status-bar sheet is rectangular for
+/// override-redirect panels and would fill their transparent corners.
+fn shell_owns_backdrop(
+    four_edge: bool,
+    has_rgba: bool,
+    class_name: &str,
+    status_bar_name: &str,
+) -> bool {
+    four_edge
+        && has_rgba
+        && !status_bar_name.is_empty()
+        && (class_name == status_bar_name || class_name.contains(status_bar_name))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn blur_status_snapshot(
     current_strength: u32,
@@ -307,7 +322,8 @@ impl<C: CompositorConnection> Compositor<C> {
         )
     }
 
-    /// Whether the configured status bar is currently in the frost path.
+    /// Whether the configured status bar is currently in the compositor's
+    /// frost path. The four-panel ARGB shell owns its own frosted backdrop.
     ///
     /// The bar gets its backdrop from `blur_status_bar` rather than a
     /// frosted-glass rule, so an explicit rule match counts too.
@@ -319,6 +335,12 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.windows.values().any(|wt| {
             (wt.class_name == bar_name || wt.class_name.contains(bar_name))
+                && !shell_owns_backdrop(
+                    cfg.status_bar_four_edge(),
+                    wt.has_rgba,
+                    &wt.class_name,
+                    bar_name,
+                )
                 && (self.blur_status_bar || wt.is_frosted)
                 && !class_matches_exclude(&wt.class_name, &self.blur_exclude)
         })
@@ -812,6 +834,14 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Whether a window should receive per-frame backdrop blur compositing.
     pub(super) fn needs_backdrop_blur(&self, wt: &WindowTexture, status_bar_name: &str) -> bool {
+        if shell_owns_backdrop(
+            crate::config::CONFIG.load().status_bar_four_edge(),
+            wt.has_rgba,
+            &wt.class_name,
+            status_bar_name,
+        ) {
+            return false;
+        }
         // The bar is the one window that always sits directly over the
         // wallpaper, so by default it is blurred behind like anything else
         // translucent. Opting out leaves the frosting to the bar itself, which
@@ -858,7 +888,24 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blur_cache_matches, blur_status_snapshot, temporal_cache_matches};
+    use super::{
+        blur_cache_matches, blur_status_snapshot, shell_owns_backdrop, temporal_cache_matches,
+    };
+
+    #[test]
+    fn four_panel_argb_sheets_keep_ownership_of_their_rounded_backdrop() {
+        for class in [
+            "tao_glow_bar",
+            "tao_glow_bar-aux-left",
+            "Tao_glow_bar tao_glow_bar",
+        ] {
+            assert!(shell_owns_backdrop(true, true, class, "tao_glow_bar"));
+            assert!(!shell_owns_backdrop(false, true, class, "tao_glow_bar"));
+            assert!(!shell_owns_backdrop(true, false, class, "tao_glow_bar"));
+        }
+        assert!(!shell_owns_backdrop(true, true, "terminal", "tao_glow_bar"));
+        assert!(!shell_owns_backdrop(true, true, "tao_glow_bar", ""));
+    }
 
     #[test]
     fn empty_below_scene_is_cacheable() {

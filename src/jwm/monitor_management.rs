@@ -645,6 +645,17 @@ impl Jwm {
         let launch_config = self.secondary_bar_launch_config(&cfg, monitor_id);
         command.env("JWM_BAR_POSITION", launch_config.edge.as_str());
         command.env("JWM_BAR_THICKNESS", launch_config.thickness.to_string());
+        command.env("JWM_BAR_LAYOUT", launch_config.layout.as_str());
+        command.env(
+            "JWM_BAR_PADDING",
+            cfg.status_bar_padding().max(0).to_string(),
+        );
+        if let Some(output) = launch_config.output {
+            command.env("JWM_BAR_OUTPUT_X", output.x.to_string());
+            command.env("JWM_BAR_OUTPUT_Y", output.y.to_string());
+            command.env("JWM_BAR_OUTPUT_WIDTH", output.w.max(1).to_string());
+            command.env("JWM_BAR_OUTPUT_HEIGHT", output.h.max(1).to_string());
+        }
 
         // Spawn the process
         match command.spawn() {

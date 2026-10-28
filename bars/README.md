@@ -28,6 +28,24 @@ explicit `-b tao_glow_bar` form to update both JWM configuration files. A plain
 reinstall preserves the existing `status_bar.name`. `JWM_BAR_NAME` can select an
 alternative default for the installer; an explicit `-b` takes precedence.
 
+### Four-panel desktop shell
+
+On native X11 (`xcb` / `x11rb`), `tao_glow_bar` also offers a coordinated
+four-panel layout: top status, left launchers/workspaces, right audio/display
+controls, and a bottom media/window Dock. Add `layout = "four-edge"` to JWM's
+existing `[status_bar]` table with `name = "tao_glow_bar"`. JWM and the frontend
+share the four physical panel rectangles and reserve all four workspace edges.
+This mode shows the panels together and takes precedence over xbar's
+`[edge_shell]` reveal settings.
+
+The default `layout = "single"` keeps the configured primary bar and the
+independent companion workflow described above, including per-edge hover,
+always-visible and disabled modes. For one bar without companions, use
+`layout = "single"` in JWM and `[edge_shell] enabled = false` in xbar, then
+restart the bar.
+See [Four panels at once](../docs/bars-four-edges.md#four-panels-at-once) for
+configuration, sizing, backend support and lifecycle details.
+
 ## Example bars
 
 Every other crate in this directory is an **example** or experiment (toolkit

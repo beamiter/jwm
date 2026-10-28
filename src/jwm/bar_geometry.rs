@@ -4,10 +4,36 @@
 //! derived together. Frontends receive that origin verbatim, including on
 //! bottom/right bars and outputs with negative coordinates.
 
+use crate::backend::api::CompositorRect;
 use crate::config::Config;
 use crate::core::models::WMMonitor;
 use crate::core::types::Rect;
 use xbar_core::placement::BarEdge;
+
+/// A four-panel shell has restore controls at both horizontal edges. The
+/// top surface still owns its WM transport, so its configured edge cannot
+/// identify which control supplied a hover anchor. Open toward the output's
+/// interior using that anchor; classic sidebars retain their configured edge.
+pub(crate) fn minimized_preview_edge(
+    four_edge: bool,
+    configured: BarEdge,
+    output: Option<Rect>,
+    anchor: CompositorRect,
+) -> BarEdge {
+    if !four_edge || !anchor.y.is_finite() || !anchor.height.is_finite() || anchor.height <= 0.0 {
+        return configured;
+    }
+    let Some(output) = output.filter(|output| output.h > 0) else {
+        return configured;
+    };
+    let anchor_center = f64::from(anchor.y) + f64::from(anchor.height) * 0.5;
+    let output_center = f64::from(output.y) + f64::from(output.h) * 0.5;
+    if anchor_center < output_center {
+        BarEdge::Top
+    } else {
+        BarEdge::Bottom
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BarGeometry {
@@ -17,6 +43,42 @@ pub(crate) struct BarGeometry {
 }
 
 impl BarGeometry {
+    /// Physical workspace reservations, ordered left, right, top, bottom.
+    /// Four-panel geometry is shared with the frontend rather than inferred
+    /// from transient native windows as they are created or hidden.
+    pub(crate) fn reservation_depths(output: Rect, edge: BarEdge, config: &Config) -> [i32; 4] {
+        if config.status_bar_four_edge() {
+            let shell = xbar_core::placement::FourEdgeGeometry::new(
+                xbar_core::MonitorGeometry {
+                    x: output.x,
+                    y: output.y,
+                    width: output.w.max(1) as u32,
+                    height: output.h.max(1) as u32,
+                },
+                config.status_bar_height().max(1) as u32,
+                config.status_bar_padding().max(0) as u32,
+            );
+            return shell
+                .reserved
+                .map(|depth| depth.min(i32::MAX as u32) as i32);
+        }
+        let bar = Self::new(
+            output,
+            edge,
+            config.status_bar_height(),
+            config.status_bar_padding(),
+        );
+        let mut depths = [0; 4];
+        let index = match edge {
+            BarEdge::Left => 0,
+            BarEdge::Right => 1,
+            BarEdge::Top => 2,
+            BarEdge::Bottom => 3,
+        };
+        depths[index] = bar.reservation;
+        depths
+    }
+
     pub(crate) fn for_monitor(monitor: &WMMonitor, config: &Config) -> Self {
         let geometry = &monitor.geometry;
         Self::new(
@@ -117,6 +179,106 @@ pub(crate) fn bar_strut(bar: BarGeometry, output: Rect, root: Rect) -> [u32; 12]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn four_panel_preview_opens_inward_from_top_and_bottom_restore_controls() {
+        for (output, anchor, expected) in [
+            (
+                Rect::new(0, 0, 1280, 800),
+                CompositorRect::new(550.0, 17.0, 30.0, 18.0),
+                BarEdge::Top,
+            ),
+            (
+                Rect::new(0, 0, 1280, 800),
+                CompositorRect::new(380.0, 724.0, 144.0, 52.0),
+                BarEdge::Bottom,
+            ),
+            (
+                Rect::new(-1280, -800, 1280, 800),
+                CompositorRect::new(-730.0, -783.0, 30.0, 18.0),
+                BarEdge::Top,
+            ),
+            (
+                Rect::new(-1280, -800, 1280, 800),
+                CompositorRect::new(-900.0, -76.0, 144.0, 52.0),
+                BarEdge::Bottom,
+            ),
+        ] {
+            let edge = minimized_preview_edge(true, BarEdge::Top, Some(output), anchor);
+            assert_eq!(edge, expected);
+            let bounds = CompositorRect::new(
+                output.x as f32,
+                output.y as f32,
+                output.w as f32,
+                output.h as f32,
+            );
+            let preview = crate::backend::compositor_common::genie::preview_rect_at_edge(
+                anchor, 1280.0, 720.0, bounds, 1.0, edge,
+            )
+            .unwrap();
+            match edge {
+                BarEdge::Top => assert!(preview.y >= anchor.y + anchor.height),
+                BarEdge::Bottom => assert!(preview.y + preview.height <= anchor.y),
+                _ => unreachable!(),
+            }
+        }
+        let top = CompositorRect::new(550.0, 17.0, 30.0, 18.0);
+        for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+            assert_eq!(
+                minimized_preview_edge(false, edge, Some(Rect::new(0, 0, 1280, 800)), top),
+                edge
+            );
+        }
+        assert_eq!(
+            minimized_preview_edge(true, BarEdge::Top, None, top),
+            BarEdge::Top
+        );
+    }
+
+    #[test]
+    fn four_panel_shell_reserves_all_edges_and_restarts_after_output_changes() {
+        let config = Config::default()
+            .with_validated_value("status_bar.layout", &serde_json::json!("four-edge"))
+            .unwrap();
+        let output = Rect::new(-1280, 100, 1280, 800);
+        assert_eq!(
+            BarGeometry::reservation_depths(output, BarEdge::Top, &config),
+            [84, 84, 52, 100]
+        );
+        let original = crate::jwm::types::BarLaunchConfig::for_output(&config, 0, output);
+        assert_eq!(original.output, Some(output));
+        for next in [
+            Rect::new(0, 100, 1280, 800),
+            Rect::new(-1280, 100, 1024, 768),
+        ] {
+            assert_ne!(
+                original,
+                crate::jwm::types::BarLaunchConfig::for_output(&config, 0, next)
+            );
+        }
+        let next = config
+            .with_validated_value("appearance.status_bar_padding", &serde_json::json!(10))
+            .unwrap();
+        assert_ne!(
+            original,
+            crate::jwm::types::BarLaunchConfig::for_output(&next, 0, output)
+        );
+    }
+
+    #[test]
+    fn single_panel_reservations_remain_single_edged() {
+        let config = Config::default();
+        assert_eq!(
+            BarGeometry::reservation_depths(Rect::new(0, 0, 1280, 800), BarEdge::Left, &config),
+            [52, 0, 0, 0]
+        );
+        let output = Rect::new(0, 0, 1280, 800);
+        let moved = Rect::new(1280, 0, 1280, 800);
+        assert_eq!(
+            crate::jwm::types::BarLaunchConfig::for_output(&config, 0, output),
+            crate::jwm::types::BarLaunchConfig::for_output(&config, 0, moved)
+        );
+    }
 
     #[test]
     fn four_edges_share_one_padding_and_physical_thickness_policy() {

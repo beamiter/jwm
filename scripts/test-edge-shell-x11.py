@@ -3,6 +3,7 @@
 
 Build bars/tao_glow_bar first. Requires Xvfb, xdotool, xev and a D-Bus session.
 No existing desktop or user configuration is touched.
+JWM_TEST_BIN_DIR selects JWM/tool binaries (default target/debug).
 """
 import os
 import json
@@ -16,6 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BAR = Path(os.environ.get("JWM_EDGE_BAR_BIN", ROOT / "bars/tao_glow_bar/target/debug/tao_glow_bar"))
+BIN = Path(os.environ.get("JWM_TEST_BIN_DIR", ROOT / "target/debug"))
 
 
 def main():
@@ -288,8 +290,8 @@ def main():
             capture = os.environ.get("JWM_EDGE_SCREENSHOT")
             bar.terminate()
             bar.wait(timeout=10)
-            jwm = ROOT / "target/debug/jwm"
-            tool = ROOT / "target/debug/jwm-tool"
+            jwm = BIN / "jwm"
+            tool = BIN / "jwm-tool"
             run(str(jwm), "--backend", "x11rb", "--gen-config")
             jwm_config = work / "config/jwm/config_x11.toml"
             # Keep native rendering deterministic and use a real bundled

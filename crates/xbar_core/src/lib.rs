@@ -100,7 +100,7 @@ pub use model::{
 };
 pub use placement::{
     BarEdge, BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut,
-    LayerShellAnchors, LayerShellLayer, LayerShellPlacement, PlacementError,
+    FourEdgeGeometry, LayerShellAnchors, LayerShellLayer, LayerShellPlacement, PlacementError,
 };
 pub use runtime::{
     BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, PlatformEffectFailure, PlatformEffectHandler,

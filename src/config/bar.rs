@@ -28,6 +28,7 @@ impl Config {
         changed_monitor: Option<i32>,
     ) -> Result<std::time::SystemTime, ConfigError> {
         let (section, field) = match key {
+            "status_bar.layout" => ("status_bar", "layout"),
             "status_bar.position" => ("status_bar", "position"),
             "status_bar.monitors" => ("status_bar", "monitors"),
             "appearance.status_bar_height" => ("appearance", "status_bar_height"),

@@ -2404,10 +2404,26 @@ impl Jwm {
                         // positions the floating preview only; the resting
                         // Genie/static-thumbnail target remains the stable
                         // geometry last published by SetMinimizedGeometry.
+                        let config = CONFIG.load();
+                        let output = self
+                            .get_monitor_by_id(source_monitor)
+                            .and_then(|key| self.state.monitors.get(key))
+                            .map(|monitor| {
+                                let geometry = &monitor.geometry;
+                                crate::core::types::Rect::new(
+                                    geometry.m_x,
+                                    geometry.m_y,
+                                    geometry.m_w,
+                                    geometry.m_h,
+                                )
+                            });
                         backend.compositor_set_minimized_preview_edge(
-                            CONFIG
-                                .load()
-                                .status_bar_position_for_monitor(source_monitor),
+                            bar_geometry::minimized_preview_edge(
+                                config.status_bar_four_edge(),
+                                config.status_bar_position_for_monitor(source_monitor),
+                                output,
+                                anchor,
+                            ),
                         );
                         backend.compositor_set_minimized_window_preview(Some(window), Some(anchor));
                         self.active_minimized_preview = Some((source_monitor, window));

@@ -10,8 +10,15 @@ controls and a blue active workspace. Dark themes and explicit font/label
 overrides remain supported. Symbols are drawn as vectors or use a portable
 text fallback when a Nerd Font is unavailable.
 
-Keep JWM's `[status_bar] name = "tao_glow_bar"` and `position = "top"` for the
-complete desktop. Merge this into `~/.config/xbar/config.toml`:
+This independent companion workflow uses JWM's `status_bar.layout = "single"`,
+the default. The primary bar keeps its configured position, while xbar's
+`[edge_shell]` controls each additional panel. The separate
+[coordinated four-panel mode](#four-panels-at-once) pins the whole group and
+reserves all four workspace edges on native X11.
+
+Keep JWM's `[status_bar] name = "tao_glow_bar"`, `position = "top"` and
+`layout = "single"` for the hover desktop. Merge this into
+`~/.config/xbar/config.toml`:
 
 ```toml
 theme = "light"
@@ -46,8 +53,9 @@ Each edge accepts `hover`, `always` or `disabled`. For example, changing only
 The running companions reload per-edge modes and hover timing after a file
 edit, within the next status update (normally one second). Invalid edits keep
 the last valid modes. Changing the global `enabled` switch, fonts or the header
-style still requires restarting the bar. `enabled = false` restores
-the single-bar workflow after restart. Existing single-edge placements remain available;
+style still requires restarting the bar. `enabled = false` turns off the
+companions after restart when JWM uses `layout = "single"`.
+Existing single-edge placements remain available;
 companions are omitted when the main bar is placed on another edge.
 
 Invisible sensors occupy two physical pixels along their entire
@@ -107,12 +115,114 @@ For a like-sized reference capture, set `JWM_EDGE_TEST_SIZE=1672x941` and
 `JWM_EDGE_TEST_REFERENCE=1`; the latter applies the 52/12 geometry only to the
 test's temporary JWM configuration.
 
+### One bar without companion panels
+
+Use `layout = "single"` in JWM's existing `[status_bar]` table, and disable
+the companions in `~/.config/xbar/config.toml`:
+
+```toml
+[edge_shell]
+enabled = false
+```
+
+Restart the bar after changing `enabled`. The primary bar can still use any
+of the four single-edge placements. Disabling `[edge_shell]` alone does not
+override JWM's explicit coordinated `layout = "four-edge"` mode.
+
+## Four panels at once
+
+The native X11 `tao_glow_bar` frontend can display a coordinated shell with
+four panels on every output: a top status bar, left application/workspace
+rail, right audio/display controls, and a bottom media/minimized-window Dock.
+Enable it in the active X11 configuration:
+
+```toml
+[appearance]
+status_bar_height = 42
+status_bar_padding = 5
+
+[status_bar]
+name = "tao_glow_bar"
+show_bar = true
+layout = "four-edge"
+```
+
+Existing configurations keep `layout = "single"`: the primary bar uses its
+configured `position` and xbar may still create independent hover/pinned
+companions as described above. `layout = "four-edge"` selects a coordinated
+host instead. Its four surfaces stay visible together, and the mode takes
+precedence over xbar's `[edge_shell]` reveal settings; it does not start a
+second set of companion panels. The top panel owns the managed bar window,
+and its process creates the other three surfaces. The saved global
+and per-output `position` preferences are retained and take effect again when
+switching back to `single`. The four-panel mode currently requires the native
+`x11rb` or `xcb` backend; configuration validation rejects it for Wayland or
+for a different frontend.
+
+At 1280×800 with the settings above, the panels occupy these physical rectangles:
+
+| Panel | x | y | Width | Height |
+|---|---:|---:|---:|---:|
+| Top | 5 | 5 | 1270 | 42 |
+| Left | 12 | 72 | 60 | 656 |
+| Right | 1208 | 72 | 60 | 656 |
+| Bottom | 128 | 712 | 1024 | 76 |
+
+`FourEdgeGeometry` is shared by JWM and the frontend. It scales the rails and
+Dock with the configured physical top-bar thickness, bounds tiny outputs,
+and preserves negative output origins. The workspace reserves all four sides,
+so tiled, maximized and newly placed windows avoid the complete shell. At the
+size above it reserves 84 px left/right, 52 px above and 100 px below.
+Existing external struts count toward those depths rather than being charged
+twice. Fullscreen and the per-tag bar visibility preference apply to the whole
+group.
+
+For the reference's light glass, merge `theme = "light"` into
+`~/.config/xbar/config.toml`, or select the supplied
+[`four-edge.toml`](../bars/tao_glow_bar/four-edge.toml) with `XBAR_CONFIG` when
+launching JWM. The bottom Dock uses window-title buttons; hovering a button
+still opens the compositor's live preview. Unavailable battery or brightness
+readings remain `--`, and an unavailable slider has no adjustment target.
+JWM publishes a wallpaper-only root pixmap for this mode even with its GPU
+compositor enabled, so each panel samples the correct per-output/tag wallpaper
+without a second path in the bar configuration. Procedural wallpapers use the
+configured static fallback for this sampled material.
+
+Changing `status_bar.layout`, thickness, shell padding or the output rectangle
+restarts that output's bar process and all its surfaces together. JWM supplies
+`JWM_BAR_LAYOUT`, `JWM_BAR_PADDING`, and `JWM_BAR_OUTPUT_X`, `_Y`, `_WIDTH`,
+`_HEIGHT` alongside the existing managed-bar environment. These values are
+physical output pixels. `jwm-tool msg get_show_bar` reports `bar_layout`, and
+`get_config` reports `status_bar_layout`.
+
+To switch temporarily without editing the file:
+
+```sh
+jwm-tool msg set_config --args '{"key":"status_bar.layout","value":"four-edge"}'
+jwm-tool msg set_config --args '{"key":"status_bar.layout","value":"single"}'
+```
+
+After building JWM and `bars/tao_glow_bar`, exercise the real native windows,
+pointer actions, fullscreen behavior, process replacement and work areas in
+private display sessions:
+
+```sh
+JWM_TEST_BACKEND=xcb python3 scripts/test-four-edge-shell-x11.py
+JWM_TEST_BACKEND=x11rb python3 scripts/test-four-edge-shell-x11.py
+```
+
+`JWM_FOUR_EDGE_SCREENSHOT=/absolute/path/shell.png` additionally saves a PNG
+from JWM's compositor. A root-window `xwd` readback omits the composited overlay
+and cannot verify the alpha corners of these panels.
+
 ## Single-edge placement
 
-JWM can place each output's bar at the top, bottom, left or right. The window
-manager owns the physical bar rectangle and the workspace it reserves;
-frontends lay out readable controls inside that rectangle. Sidebars keep text,
-icons and minimized-window cards upright.
+JWM can place each output's primary bar at the top, bottom, left or right.
+The window manager owns the physical bar rectangle and the workspace it
+reserves; frontends lay out readable controls inside that rectangle. Sidebars
+keep text, icons and minimized-window cards upright. These placement settings
+apply to `layout = "single"`; coordinated mode keeps its primary surface at
+the top and retains the single-edge preference for a later switch back.
 
 `tao_glow_bar` remains the supported daily-drive bar installed by
 `scripts/install_jwm_scripts.sh`. The other bundled bars are examples for

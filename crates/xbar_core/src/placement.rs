@@ -96,6 +96,163 @@ pub struct BarPlacement {
     pub height: u32,
 }
 
+/// The four coordinated panels of the desktop shell, in physical output pixels.
+/// The frontend and the WM share these rectangles and reservations so a tiled
+/// window cannot end up underneath a sidebar or the floating bottom Dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourEdgeGeometry {
+    pub top: BarPlacement,
+    pub left: BarPlacement,
+    pub right: BarPlacement,
+    pub bottom: BarPlacement,
+    /// Workspace depths in left, right, top, bottom order.
+    pub reserved: [u32; 4],
+}
+
+impl FourEdgeGeometry {
+    #[must_use]
+    pub fn new(output: MonitorGeometry, top_thickness: u32, padding: u32) -> Self {
+        let w = output.width.max(1).min(i32::MAX as u32);
+        let h = output.height.max(1).min(i32::MAX as u32);
+        let pad = padding.min((w.min(h) - 1) / 2);
+        let top_height = top_thickness.max(1).min(h - 2 * pad);
+        let unit = f64::from(top_height) / 42.0;
+        let scaled = |value: f64| (value * unit).round().clamp(1.0, f64::from(u32::MAX)) as u32;
+        let margin = scaled(12.0).min((w.min(h) - 1) / 6);
+        let side_width = scaled(60.0).min(w.saturating_sub(2 * margin).max(1));
+        let side_inset = scaled(72.0).min((h - 1) / 2);
+        let bottom_height = scaled(76.0).min(h.saturating_sub(2 * margin).max(1));
+        let bottom_inset = (w / 10).max(margin).min((w - 1) / 2);
+        let place = |x, y, width, height| BarPlacement {
+            x: bounded_offset(output.x, x),
+            y: bounded_offset(output.y, y),
+            width,
+            height,
+        };
+        let top = place(pad, pad, w - 2 * pad, top_height);
+        let left = place(margin, side_inset, side_width, h - 2 * side_inset);
+        let right = place(
+            w - margin - side_width,
+            side_inset,
+            side_width,
+            h - 2 * side_inset,
+        );
+        let bottom = place(
+            bottom_inset,
+            h - margin - bottom_height,
+            w - 2 * bottom_inset,
+            bottom_height,
+        );
+        let horizontal = side_width.saturating_add(2 * margin).min((w - 1) / 2);
+        let top_depth = top_height.saturating_add(2 * pad).min(h - 1);
+        let bottom_depth = bottom_height
+            .saturating_add(2 * margin)
+            .min(h - 1 - top_depth);
+        Self {
+            top,
+            left,
+            right,
+            bottom,
+            reserved: [horizontal, horizontal, top_depth, bottom_depth],
+        }
+    }
+
+    #[must_use]
+    pub const fn panel(self, edge: BarEdge) -> BarPlacement {
+        match edge {
+            BarEdge::Top => self.top,
+            BarEdge::Bottom => self.bottom,
+            BarEdge::Left => self.left,
+            BarEdge::Right => self.right,
+        }
+    }
+}
+
+#[cfg(test)]
+mod four_edge_tests {
+    use super::*;
+
+    #[test]
+    fn reference_panels_and_work_area_share_one_geometry() {
+        let geometry = FourEdgeGeometry::new(
+            MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 800,
+            },
+            42,
+            5,
+        );
+        assert_eq!(
+            geometry.top,
+            BarPlacement {
+                x: 5,
+                y: 5,
+                width: 1270,
+                height: 42
+            }
+        );
+        assert_eq!(
+            geometry.left,
+            BarPlacement {
+                x: 12,
+                y: 72,
+                width: 60,
+                height: 656
+            }
+        );
+        assert_eq!(
+            geometry.right,
+            BarPlacement {
+                x: 1208,
+                y: 72,
+                width: 60,
+                height: 656
+            }
+        );
+        assert_eq!(
+            geometry.bottom,
+            BarPlacement {
+                x: 128,
+                y: 712,
+                width: 1024,
+                height: 76
+            }
+        );
+        assert_eq!(geometry.reserved, [84, 84, 52, 100]);
+    }
+
+    #[test]
+    fn tiny_and_negative_origin_outputs_keep_panels_inside_and_a_usable_pixel() {
+        for (width, height) in [(1, 1), (20, 13), (320, 200), (1280, 800), (3840, 2160)] {
+            for thickness in [1, 42, 128, u32::MAX] {
+                let output = MonitorGeometry {
+                    x: -1920,
+                    y: -800,
+                    width,
+                    height,
+                };
+                let geometry = FourEdgeGeometry::new(output, thickness, 5);
+                for panel in [geometry.top, geometry.left, geometry.right, geometry.bottom] {
+                    assert!(panel.width > 0 && panel.height > 0);
+                    assert!(panel.x >= output.x && panel.y >= output.y);
+                    assert!(
+                        i64::from(panel.x) + i64::from(panel.width)
+                            <= i64::from(output.x) + i64::from(width)
+                    );
+                    assert!(
+                        i64::from(panel.y) + i64::from(panel.height)
+                            <= i64::from(output.y) + i64::from(height)
+                    );
+                }
+                let [left, right, top, bottom] = geometry.reserved;
+                assert!(left + right < width && top + bottom < height);
+            }
+        }
+    }
+}
+
 impl BarPlacement {
     /// Place a logical-height bar on the top edge of `monitor`.
     pub fn top(

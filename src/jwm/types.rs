@@ -218,16 +218,26 @@ pub struct SecondaryBarInstance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BarLaunchConfig {
     pub executable: String,
+    pub layout: crate::config::StatusBarLayout,
     pub edge: xbar_core::placement::BarEdge,
     pub thickness: i32,
+    /// Four-panel placement is process-scoped; output moves/resizes must
+    /// restart the shell with a fresh authoritative physical rectangle.
+    pub output: Option<crate::core::types::Rect>,
+    pub shell_padding: Option<i32>,
 }
 
 impl BarLaunchConfig {
     pub(crate) fn for_monitor(config: &crate::config::Config, monitor: i32) -> Self {
         Self {
             executable: config.status_bar_name().to_owned(),
+            layout: config.status_bar_layout(),
             edge: config.status_bar_position_for_monitor(monitor),
             thickness: config.status_bar_height().max(1),
+            output: None,
+            shell_padding: config
+                .status_bar_four_edge()
+                .then(|| config.status_bar_padding()),
         }
     }
 
@@ -237,6 +247,9 @@ impl BarLaunchConfig {
         output: crate::core::types::Rect,
     ) -> Self {
         let mut launch = Self::for_monitor(config, monitor);
+        if config.status_bar_four_edge() {
+            launch.output = Some(output);
+        }
         let placement = super::bar_geometry::BarGeometry::new(
             output,
             launch.edge,

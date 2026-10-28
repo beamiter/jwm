@@ -2059,12 +2059,32 @@ fn default_tab_bar_height() -> f32 {
 pub struct StatusBarConfig {
     pub name: String,
     pub show_bar: bool,
+    /// A single movable bar, or the native four-panel desktop shell.
+    #[serde(default)]
+    pub layout: StatusBarLayout,
     /// Physical output edge. Existing configurations retain the top bar.
     #[serde(default)]
     pub position: BarEdge,
     /// Optional per-output placements, using the IDs reported by get_monitors.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub monitors: Vec<StatusBarMonitorConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusBarLayout {
+    #[default]
+    Single,
+    FourEdge,
+}
+
+impl StatusBarLayout {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::FourEdge => "four-edge",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2611,6 +2631,7 @@ impl Default for Config {
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
                     show_bar: true,
+                    layout: StatusBarLayout::Single,
                     position: BarEdge::Top,
                     monitors: Vec::new(),
                 },
@@ -3546,11 +3567,25 @@ impl Config {
         &self.inner.status_bar
     }
 
+    pub fn status_bar_layout(&self) -> StatusBarLayout {
+        self.inner.status_bar.layout
+    }
+
+    pub fn status_bar_four_edge(&self) -> bool {
+        self.status_bar_layout() == StatusBarLayout::FourEdge
+    }
+
     pub fn status_bar_position(&self) -> BarEdge {
         self.inner.status_bar.position
     }
 
     pub fn status_bar_position_for_monitor(&self, monitor: i32) -> BarEdge {
+        // The top surface owns the WM transport and the native auxiliary
+        // panels follow it. The single-bar edge preference is retained so
+        // returning to the single layout restores the user's placement.
+        if self.status_bar_four_edge() {
+            return BarEdge::Top;
+        }
         self.inner
             .status_bar
             .monitors
@@ -5557,6 +5592,10 @@ impl Config {
                 self.inner.layout.n_master = v;
             }
             "status_bar.show_bar" => self.inner.status_bar.show_bar = as_bool()?,
+            "status_bar.layout" => {
+                self.inner.status_bar.layout = serde_json::from_value(value.clone())
+                    .map_err(|_| "status_bar.layout must be single or four-edge".to_string())?;
+            }
             "status_bar.position" => {
                 let position = as_string()?.trim().to_ascii_lowercase();
                 self.inner.status_bar.position =
@@ -11125,6 +11164,59 @@ border_px = 3
         let serialized = toml::to_string(&config.inner).unwrap();
         let loaded: TomlConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(loaded.status_bar.monitors, config.inner.status_bar.monitors);
+    }
+
+    #[test]
+    fn four_edge_bar_layout_is_opt_in_and_keeps_the_single_edge_preference() {
+        use super::StatusBarLayout;
+        use xbar_core::placement::BarEdge;
+        let mut config = validated_value_fixture(42);
+        config.inner.status_bar.name = STATUS_BAR_NAME.into();
+        assert_eq!(config.status_bar_layout(), StatusBarLayout::Single);
+        config
+            .set_values(&[("status_bar.position".into(), serde_json::json!("right"))])
+            .unwrap();
+        config
+            .set_values(&[("status_bar.layout".into(), serde_json::json!("four-edge"))])
+            .unwrap();
+        assert!(config.status_bar_four_edge());
+        assert_eq!(config.status_bar_position(), BarEdge::Right);
+        assert_eq!(config.status_bar_position_for_monitor(0), BarEdge::Top);
+        let serialized = toml::to_string(&config.inner).unwrap();
+        let loaded: TomlConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(loaded.status_bar.layout, StatusBarLayout::FourEdge);
+        config
+            .set_values(&[("status_bar.layout".into(), serde_json::json!("single"))])
+            .unwrap();
+        assert_eq!(config.status_bar_position_for_monitor(0), BarEdge::Right);
+        let before = serde_json::to_value(&config.inner).unwrap();
+        assert!(
+            config
+                .set_values(&[("status_bar.layout".into(), serde_json::json!("four"))])
+                .is_err()
+        );
+        assert_eq!(serde_json::to_value(&config.inner).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_status_bar_toml_defaults_to_a_single_panel() {
+        use super::{StatusBarConfig, StatusBarLayout};
+        use xbar_core::placement::BarEdge;
+        let bar: StatusBarConfig =
+            toml::from_str("name = 'tao_glow_bar'\nshow_bar = true\nposition = 'left'\n").unwrap();
+        assert_eq!(bar.layout, StatusBarLayout::Single);
+        assert_eq!(bar.position, BarEdge::Left);
+    }
+
+    #[test]
+    fn four_edge_layout_rejects_a_frontend_that_cannot_create_auxiliary_panels() {
+        let mut config = validated_value_fixture(42);
+        config.inner.status_bar.name = "tao_pixels_bar".into();
+        assert!(
+            config
+                .with_validated_value("status_bar.layout", &serde_json::json!("four-edge"))
+                .is_err()
+        );
     }
 
     #[test]

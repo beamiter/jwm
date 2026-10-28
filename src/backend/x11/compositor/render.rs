@@ -4962,6 +4962,12 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     fn render_minimized_dock_items(&mut self, projection: &[f32; 16]) {
+        // The four-panel Dock paints title buttons rather than thumbnail
+        // slots. Keep these targets for Genie/restore and hover previews,
+        // without drawing a second window image over the native button text.
+        if crate::config::CONFIG.load().status_bar_four_edge() {
+            return;
+        }
         let preview = self
             .dock_preview
             .map(|preview| (u64::from(preview.x11_win), preview.anchor, preview.opacity));

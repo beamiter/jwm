@@ -173,14 +173,23 @@ impl Jwm {
         // _NET_WORKAREA: EWMH expects one rect per desktop. We publish the
         // bounding box of every monitor's strut-adjusted workarea (w_*),
         // repeated for each desktop, so maximizing clients avoid the bar.
+        // The four-panel shell also owns side/bottom reservations which
+        // are configured before its auxiliary surfaces map.
         if total > 0 {
             let mut bounds: Option<(i32, i32, i32, i32)> = None; // x0,y0,x1,y1
-            for monitor in self.state.monitors.values() {
+            let shell = CONFIG.load().status_bar_four_edge();
+            for (key, monitor) in &self.state.monitors {
                 let g = &monitor.geometry;
                 if g.w_w <= 0 || g.w_h <= 0 {
                     continue;
                 }
-                let (x0, y0, x1, y1) = (g.w_x, g.w_y, g.w_x + g.w_w, g.w_y + g.w_h);
+                let area = shell
+                    .then(|| self.monitor_work_area_untabbed(key))
+                    .flatten();
+                let (x, y, width, height) = area.map_or((g.w_x, g.w_y, g.w_w, g.w_h), |area| {
+                    (area.x, area.y, area.w, area.h)
+                });
+                let (x0, y0, x1, y1) = (x, y, x.saturating_add(width), y.saturating_add(height));
                 bounds = Some(match bounds {
                     Some((bx0, by0, bx1, by1)) => {
                         (bx0.min(x0), by0.min(y0), bx1.max(x1), by1.max(y1))

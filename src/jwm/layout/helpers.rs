@@ -568,12 +568,28 @@ impl Jwm {
                 monitor.geometry.m_w,
                 monitor.geometry.m_h,
             );
-            let depth = bar.unreserved_depth(physical, Rect::new(wx, wy, ww, wh));
-            match bar.edge {
-                BarEdge::Top => top = top.max(depth),
-                BarEdge::Bottom => bottom = bottom.max(depth),
-                BarEdge::Left => left = left.max(depth),
-                BarEdge::Right => right = right.max(depth),
+            let depths = crate::jwm::bar_geometry::BarGeometry::reservation_depths(
+                physical,
+                bar.edge,
+                &configured,
+            );
+            for (edge, reservation) in
+                [BarEdge::Left, BarEdge::Right, BarEdge::Top, BarEdge::Bottom]
+                    .into_iter()
+                    .zip(depths)
+            {
+                let depth = crate::jwm::bar_geometry::BarGeometry {
+                    edge,
+                    reservation,
+                    ..bar
+                }
+                .unreserved_depth(physical, Rect::new(wx, wy, ww, wh));
+                match edge {
+                    BarEdge::Top => top = top.max(depth),
+                    BarEdge::Bottom => bottom = bottom.max(depth),
+                    BarEdge::Left => left = left.max(depth),
+                    BarEdge::Right => right = right.max(depth),
+                }
             }
         }
 

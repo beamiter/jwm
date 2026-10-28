@@ -37,6 +37,18 @@ monorepo use independent Semantic Versions.
   process created in the meantime, and leaves dangling configuration links
   intact. Explicit configuration resets remain available through `--gen-config`.
 
+### Four-panel desktop shell
+
+- X11 `tao_glow_bar` can show a coordinated top status bar, left launcher and
+  workspace rail, right volume/display controls, and bottom media/window Dock
+  with rounded frosted glass. Enable `status_bar.layout = "four-edge"`;
+  existing configurations keep `layout = "single"` and the independent
+  companion-panel workflow controlled by xbar's `[edge_shell]` settings.
+- JWM reserves space for all four panels, hides them together for fullscreen
+  or bar toggles, and rebuilds the group after output or size changes. Dock
+  title buttons restore real windows and open previews toward the screen's
+  interior. Wallpaper-only sampling follows per-output and per-tag pictures.
+
 ### Music and video playback
 
 - Shell Hub has searchable Music (`U`) and Video (`V`) libraries, including

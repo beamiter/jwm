@@ -1,0 +1,19 @@
+# Select with XBAR_CONFIG, or merge into ~/.config/xbar/config.toml.
+# In JWM's config_x11.toml also set:
+# [status_bar]
+# name = "tao_glow_bar"
+# layout = "four-edge"
+font = "DejaVu Sans 10"
+theme = "light"
+
+# This profile selects the coordinated JWM four-edge layout. Keep the separate
+# hover-reveal companion shell off when falling back to the classic bar.
+[edge_shell]
+enabled = false
+
+# Match the reference's soft, neutral glass. The live root wallpaper is sampled
+# automatically, including after changing it in JWM's wallpaper picker.
+[glass]
+blur_radius = 6
+blur_passes = 3
+saturation = 1.8

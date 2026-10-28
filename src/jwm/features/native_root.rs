@@ -1,10 +1,11 @@
-//! Compositor-off root wallpaper.
+//! Static root wallpaper shared with compositor-off and four-panel sessions.
 //!
 //! The GPU compositor owns `behavior.wallpaper` while it is running. When it
 //! is off the same picture is decoded off-thread, laid out per output with
 //! the same Fill/Fit/Stretch/Center rules, and installed as the X11 root
 //! pixmap (`_XROOTPMAP_ID`) so gaps and bars see the desktop instead of a
-//! solid black root.
+//! solid black root. The four-panel shell also samples this wallpaper-only
+//! pixmap while the GPU compositor runs, without capturing application pixels.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -25,6 +26,24 @@ use crate::config::CONFIG;
 use crate::jwm::Jwm;
 use crate::jwm::features::connectivity::BackgroundJob;
 use crate::jwm::features::wallpaper::expand_home;
+
+fn root_wallpaper_needed(composited: bool, supported: bool, four_panel: bool) -> bool {
+    supported && (!composited || four_panel)
+}
+
+#[cfg(test)]
+mod shell_wallpaper_tests {
+    use super::root_wallpaper_needed;
+
+    #[test]
+    fn four_panel_glass_gets_a_wallpaper_source_even_with_a_gpu_compositor() {
+        assert!(root_wallpaper_needed(true, true, true));
+        assert!(!root_wallpaper_needed(true, true, false));
+        assert!(root_wallpaper_needed(false, true, false));
+        assert!(!root_wallpaper_needed(true, false, true));
+        assert!(!root_wallpaper_needed(false, false, true));
+    }
+}
 
 /// RGBA8 canvas ready to upload as a native root pixmap.
 #[derive(Debug)]
@@ -139,9 +158,13 @@ impl NativeRootSchedule {
 }
 
 impl Jwm {
-    /// Start or skip a native wallpaper decode when the compositor is off.
+    /// Publish the wallpaper for the native root or the shell's glass sampler.
     pub(crate) fn ensure_native_root_wallpaper(&mut self, backend: &mut dyn Backend) {
-        if backend.has_compositor() || !backend.native_root_wallpaper_supported() {
+        if !root_wallpaper_needed(
+            backend.has_compositor(),
+            backend.native_root_wallpaper_supported(),
+            CONFIG.load().status_bar_four_edge(),
+        ) {
             return;
         }
         let Some(fingerprint) = self.native_root_fingerprint() else {
@@ -230,7 +253,7 @@ impl Jwm {
             return;
         };
         self.features.native_root_job = None;
-        if backend.has_compositor() {
+        if backend.has_compositor() && !CONFIG.load().status_bar_four_edge() {
             return;
         }
         if let Some(pixels) = result {

@@ -3,6 +3,9 @@ mod edge_shell;
 mod native_x11;
 mod redraw;
 mod shell_ipc;
+mod shell_actions;
+mod shell_host;
+mod shell_scene;
 #[path = "../../tao_scroll.rs"]
 mod tao_scroll;
 mod texture_upload;
@@ -1299,6 +1302,9 @@ fn main() -> Result<()> {
     initialize_logging("tao_glow_bar", &shared_path)?;
 
     let app_config = xbar_core::config::BarConfig::load_default()?;
+    if shell_host::requested() {
+        return shell_host::run(app_config, shared_path);
+    }
     let runtime = if shared_path.is_empty() {
         BarRuntime::new(app_config.model_config())?
     } else {
