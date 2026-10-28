@@ -1,9 +1,10 @@
 [Desktop Entry]
 Name=JWM (X11 / x11rb)
 Comment=JWM X11 compatibility session (x11rb) — prefer the Wayland session for daily use
-Exec=env JWM_BACKEND=x11rb JWM_DEBUG_KEYS=0 JWM_DEBUG_DRAG=0 RUST_LOG=info /usr/local/bin/jwm-tool daemon
+Exec=env JWM_BACKEND=x11rb JWM_DEBUG_KEYS=0 JWM_DEBUG_DRAG=0 RUST_LOG=info XDG_CURRENT_DESKTOP=jwm XDG_SESSION_DESKTOP=jwm DESKTOP_SESSION=jwm /usr/local/bin/jwm-tool daemon
 TryExec=/usr/local/bin/jwm-tool
 Type=Application
+DesktopNames=JWM
 Categories=System;
 StartupNotify=false
 NoDisplay=false

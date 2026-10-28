@@ -117,9 +117,12 @@ run_case() {
     done
     printf '[status_bar]\nname = "old"\n' > "$CASE_DIR/config/jwm/config_x11.toml"
     cp "$CASE_DIR/config/jwm/config_x11.toml" "$CASE_DIR/config/jwm/config_wayland.toml"
+    printf '[Default Applications]\naudio/mpeg=original.desktop;\nvideo/mp4=original.desktop;\n' > "$CASE_DIR/config/mimeapps.list"
+    cp "$CASE_DIR/config/mimeapps.list" "$CASE_DIR/original-mimeapps.list"
     TMPDIR="$CASE_DIR" SUDO_USER="$sudo_user" XDG_DATA_HOME="$data_home" PATH="$TEST_ROOT/bin:$PATH" HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" CARGO_TARGET_DIR="$target" \
         bash "$REPO/scripts/install_jwm_scripts.sh" --mode "$mode" --jobs 2 --bar tao_glow_bar > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $status == "$expected" ]] || fail "$scenario/$mode status $status, expected $expected"
+    cmp "$CASE_DIR/config/mimeapps.list" "$CASE_DIR/original-mimeapps.list" || fail 'installer changed shared MIME defaults'
     for binary in jwm jwm-tool jwm-support jwm-remote jwm-player; do
         if [[ $expected == 0 ]]; then
             [[ ! -e $CASE_DIR/home/.cargo/bin/$binary ]] || fail "successful migration retained $binary"
@@ -142,10 +145,13 @@ run_case() {
         for desktop in jwm-player.desktop jwm-video.desktop; do
             grep -Fq "install -Dm644 $REPO/bridge/dist/$desktop /usr/local/share/applications/$desktop" "$CASE_DIR/system.log" || fail "player desktop entry missing: $desktop"
         done
-        ! grep -Eq 'xdg-mime|mimeapps.list' "$CASE_DIR/system.log" || fail 'installer changed default MIME associations'
+        ! grep -Eq 'xdg-mime|/mimeapps\.list' "$CASE_DIR/system.log" || fail 'installer changed shared MIME defaults'
         if [[ $scenario == sudo-target ]]; then
+            grep -Fq -- "-u fixture-user python3 - $CASE_DIR/config/jwm-mimeapps.list $REPO/bridge/dist" "$CASE_DIR/system.log" || fail 'MIME defaults did not run as login user'
             grep -Fq -- '-u fixture-user timeout 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'bridge reload did not run as login user'
         else
+            grep -Fxq 'audio/mpeg=jwm-player.desktop;' "$CASE_DIR/config/jwm-mimeapps.list" || fail 'JWM music default missing'
+            grep -Fxq 'video/mp4=jwm-video.desktop;' "$CASE_DIR/config/jwm-mimeapps.list" || fail 'JWM video default missing'
             grep -Fq 'bridge-reload 8s /usr/local/bin/jwm-bridge reload' "$CASE_DIR/system.log" || fail 'installed bridge did not reload its replaced D-Bus owner'
         fi
         if [[ $scenario == sudo-target ]]; then

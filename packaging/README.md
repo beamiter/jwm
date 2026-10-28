@@ -20,8 +20,11 @@ before calling a package "stable".
 Music/video playback ships as `jwm-player`, built with the `jwm-bridge`
 package. It requires the `mpv` executable at runtime; the compositor and
 installer continue to work when mpv is absent. Both source and release installs
-register `jwm-player.desktop` / `jwm-video.desktop` as **Open With** choices,
-without changing a user's default MIME associations.
+register `jwm-player.desktop` / `jwm-video.desktop` as **Open With** choices.
+The source installer also sets them as the defaults in the target user's
+`jwm-mimeapps.list`, which applies only to JWM sessions; Ubuntu/GNOME and shared
+MIME defaults are unchanged. Release bundles only register the applications and
+leave the user's MIME configuration untouched.
 
 The release installer accepts additional stable helper paths while preserving
 every existing destination's target. Use the newer bundle's installer for

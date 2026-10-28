@@ -123,13 +123,25 @@ be edited in the configuration file.
 
 The installation helper builds JWM and the selected status bar
 (`tao_pixels_bar` by default; use `--bar` to choose another crate under `bars/`), installs
-the session files (Wayland session recommended), and compares both configuration
-files with the new defaults. Values, comments, and ordering changes keep the
-existing configuration. Added, removed, or renamed fields trigger a backup and
-replacement; missing files are created. The installer's `--gen-config` option
-uses this same policy. To explicitly reset both files, run `jwm --gen-config`.
+the session files (Wayland session recommended), and checks both configuration
+templates against their last installed versions. The records are stored beside
+each config as `.config_x11.toml.installed-defaults` and
+`.config_wayland.toml.installed-defaults`. Existing configs without a record are
+adopted unchanged. Values, comments, ordering, and user-added optional settings
+keep the existing configuration. Added, removed, or renamed template fields
+trigger a backup and replacement unless the config already has the new fields;
+missing configs are created. The installer's `--gen-config` option uses this
+same policy. To explicitly reset both files, run `jwm --gen-config`.
 An ordinary reinstall keeps a customized `status_bar.name`; an explicit
 `--bar NAME` also updates that setting in both files.
+
+The source installer makes JWM Music and JWM Video the default audio/video
+players only in JWM sessions. It writes `~/.config/jwm-mimeapps.list` (or
+`$XDG_CONFIG_HOME/jwm-mimeapps.list`), leaving the shared `mimeapps.list` and
+Ubuntu/GNOME defaults unchanged. Existing unrelated JWM associations are kept;
+a changed JWM-specific file is backed up as `jwm-mimeapps.list.bak`. Both X11
+and Wayland session entries set `XDG_CURRENT_DESKTOP=jwm`; log out and select
+the updated JWM session after installing if your current session lacks it.
 
 ```bash
 scripts/install_jwm_scripts.sh --help

@@ -134,7 +134,7 @@ usage() {
                               不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
-  --gen-config                检查配置字段，仅字段变化时备份旧配置并生成默认配置
+  --gen-config                比较新旧默认模板字段，仅字段变化时备份并更新配置
   --skip-bar                  跳过 bar 安装
   --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
   单独安装/更新内置壁纸（无需编译）: bash scripts/install-wallpapers.sh
@@ -149,12 +149,14 @@ usage() {
     dioxus_bar 使用 dx；Tauri bar 会同时构建前端与 src-tauri 后端，再把可执行文件安装到同一目录。
   - jwm / jwm-tool / jwm-support / jwm-remote / jwm-player 通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - 音乐和视频播放运行时需要 mpv；缺少它不影响 JWM 的构建与安装。
+  - 通过用户配置目录中的 jwm-mimeapps.list 设置 JWM 会话的默认音视频播放器；Ubuntu/GNOME 的默认设置不变。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
   - 完整安装还将内置静态壁纸复制到 ~/.config/jwm/wallpapers/（支持 XDG_CONFIG_HOME）；
     重装只更新原样保留的受管文件，不覆盖用户修改或同名自定义文件。
   - 显式指定 -b/--bar 后同步两份配置的 bar；默认安装仅同步新建或字段变化后重建的配置，保留原配置的 bar。
-    每次完整安装比较配置字段，仅字段结构变化时备份并替换；仅默认值变化保留现有配置。
+    每次完整安装比较已记录和新版默认模板的字段；仅默认值变化保留现有配置。
+    首次接管已有配置时保留原文件并记录模板；字段增删时才备份并更新。
     缺失的配置会自动生成；手动 jwm --gen-config 可主动强制重置。
 
 示例:
@@ -351,6 +353,74 @@ jwm_config_dir() {
     else
         echo "$(target_user_home)/.config/jwm"
     fi
+}
+
+install_jwm_media_defaults() {
+    local config_dir destination
+    config_dir=$(jwm_config_dir)
+    destination="${config_dir%/jwm}/jwm-mimeapps.list"
+    local -a command=(python3 - "$destination" "$PROJECT_ROOT/bridge/dist")
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        command=(sudo -u "$SUDO_USER" "${command[@]}")
+    fi
+
+    # Desktop-specific defaults take precedence over mimeapps.list only when
+    # XDG_CURRENT_DESKTOP includes jwm. Never rewrite the shared user defaults.
+    "${command[@]}" <<'PY'
+import configparser
+import io
+import os
+from pathlib import Path
+import shutil
+import stat
+import sys
+import tempfile
+
+destination = Path(os.path.normpath(sys.argv[1]))
+desktop_dir = Path(sys.argv[2])
+
+def read_config(text):
+    config = configparser.ConfigParser(interpolation=None, delimiters=("=",))
+    config.optionxform = str
+    config.read_string(text)
+    return config
+
+if destination.is_symlink():
+    raise SystemExit(f"Refusing to replace symlink: {destination}")
+previous = destination.read_bytes() if destination.exists() else None
+config = read_config(previous.decode("utf-8") if previous is not None else "")
+section = "Default Applications"
+if not config.has_section(section):
+    config.add_section(section)
+changed = previous is None
+for desktop_id in ("jwm-player.desktop", "jwm-video.desktop"):
+    desktop = read_config((desktop_dir / desktop_id).read_text(encoding="utf-8"))
+    for mime in desktop["Desktop Entry"]["MimeType"].split(";"):
+        if not mime:
+            continue
+        value = desktop_id + ";"
+        if config.get(section, mime, fallback=None) != value:
+            config.set(section, mime, value)
+            changed = True
+
+if changed:
+    output = io.StringIO()
+    config.write(output, space_around_delimiters=False)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(destination.stat().st_mode) if previous is not None else 0o644
+    fd, temporary = tempfile.mkstemp(prefix=".jwm-mimeapps-", dir=destination.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(output.getvalue())
+        os.chmod(temporary, mode)
+        if previous is not None:
+            shutil.copy2(destination, str(destination) + ".bak")
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+PY
+    ok "已设置 JWM 会话的默认音视频播放器（其他桌面不变）: $destination"
 }
 
 install_bundled_wallpapers() {
@@ -701,7 +771,7 @@ build_and_install_bridge() {
     install_system_binary "$bridge_target/jwm-bridge" /usr/local/bin
     install_system_binary "$bridge_target/jwm-player" /usr/local/bin
 
-    # Register Open With choices without touching the user's MIME defaults.
+    # Register Open With choices, then set defaults for JWM sessions only.
     local desktop
     for desktop in jwm-player.desktop jwm-video.desktop; do
         sudo install -Dm644 "$bridge_dir/dist/$desktop" "/usr/local/share/applications/$desktop"
@@ -710,6 +780,7 @@ build_and_install_bridge() {
         sudo update-desktop-database /usr/local/share/applications || \
             warn "播放器已安装，桌面应用缓存更新失败；可稍后运行 update-desktop-database"
     fi
+    install_jwm_media_defaults
     if ! command -v mpv >/dev/null 2>&1; then
         warn "音乐/视频播放需要 mpv；Debian/Ubuntu: sudo apt-get install mpv（JWM 已正常安装）"
     fi
@@ -816,7 +887,7 @@ build_and_install_jwm() {
 # 更新 JWM 配置文件（按字段比较；字段相同时保留自定义值）
 # ============================================================
 regenerate_config() {
-    info "检查 JWM 配置字段并按需更新..."
+    info "比较 JWM 新旧默认模板字段并按需更新配置..."
     local jwm_bin="/usr/local/bin/jwm"
     if [[ ! -x "$jwm_bin" ]]; then
         jwm_bin="$JWM_TARGET_DIR/$BUILD_MODE/jwm"

@@ -5232,62 +5232,14 @@ impl Config {
         default_config.save_to_file(path)
     }
 
-    /// Install defaults only when the existing configuration has different fields.
+    /// Install defaults only when fields changed since the last installed template.
     /// `None` means the existing bytes were kept; `Some` contains an optional backup.
     pub fn update_template<P: AsRef<Path>>(
         path: P,
     ) -> Result<Option<Option<std::path::PathBuf>>, ConfigError> {
-        let path = path.as_ref();
         let default_config = Self::default();
         let template = Self::add_option_comments(&toml::to_string_pretty(&default_config.inner)?);
-        let original = match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(None),
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let Some(original) = original else {
-            atomic_write_with_sequence_and_guard(
-                path,
-                template.as_bytes(),
-                || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
-                || match fs::symlink_metadata(path) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(error),
-                    Ok(_) => Err(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "config was concurrently created; keeping it",
-                    )),
-                },
-                true,
-            )?;
-            return Ok(Some(None));
-        };
-        let (bytes, _) = read_config_bytes(path)?;
-        let verify = || verify_config_snapshot(path, &original, &bytes);
-        verify()?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let current: toml::Value = toml::from_str(text)?;
-        let defaults = toml::Value::try_from(&default_config.inner)?;
-        if !config_fields_changed(&defaults, &current) {
-            return Ok(None);
-        }
-        let backup = Self::backup_config(path)?;
-        if read_config_bytes(&backup)?.0 != bytes {
-            return Err(
-                std::io::Error::other("config changed while backing up; backup retained").into(),
-            );
-        }
-        verify()?;
-        atomic_write_with_sequence_and_guard(
-            path,
-            template.as_bytes(),
-            || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
-            verify,
-            false,
-        )?;
-        Ok(Some(Some(backup)))
+        update_config_template(path.as_ref(), &template)
     }
 
     pub fn backup_config<P: AsRef<Path>>(
@@ -6144,6 +6096,127 @@ fn verify_config_snapshot(
         ));
     }
     Ok(())
+}
+
+fn installed_config_template_path(path: &Path) -> std::path::PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(
+        path.file_name()
+            .unwrap_or_else(|| OsStr::new("config.toml")),
+    );
+    name.push(".installed-defaults");
+    path.with_file_name(name)
+}
+
+type ConfigSnapshot = (fs::Metadata, Vec<u8>);
+
+fn read_optional_config_snapshot(path: &Path) -> Result<Option<ConfigSnapshot>, ConfigError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => {
+            return Err(std::io::Error::other("config template is not a regular file").into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let (bytes, _) = read_config_bytes(path)?;
+    verify_config_snapshot(path, &metadata, &bytes)?;
+    Ok(Some((metadata, bytes)))
+}
+
+fn verify_optional_config_snapshot(
+    path: &Path,
+    snapshot: Option<&ConfigSnapshot>,
+) -> std::io::Result<()> {
+    if let Some((metadata, bytes)) = snapshot {
+        return verify_config_snapshot(path, metadata, bytes);
+    }
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "config template was concurrently created; keeping it",
+        )),
+    }
+}
+
+fn parse_config_snapshot(bytes: &[u8]) -> Result<toml::Value, ConfigError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(toml::from_str(text)?)
+}
+
+fn update_config_template(
+    path: &Path,
+    template: &str,
+) -> Result<Option<Option<std::path::PathBuf>>, ConfigError> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Ok(None);
+    }
+    let current = read_optional_config_snapshot(path)?;
+    let installed_path = installed_config_template_path(path);
+    let installed = read_optional_config_snapshot(&installed_path)?;
+    let defaults: toml::Value = toml::from_str(template)?;
+    let previous_defaults = installed
+        .as_ref()
+        .map(|(_, bytes)| parse_config_snapshot(bytes))
+        .transpose()?;
+    let fields_changed = previous_defaults
+        .as_ref()
+        .is_some_and(|previous| config_fields_changed(previous, &defaults));
+    let verify = || {
+        verify_optional_config_snapshot(path, current.as_ref())?;
+        verify_optional_config_snapshot(&installed_path, installed.as_ref())
+    };
+    let mut result = None;
+    if let Some((_, bytes)) = &current {
+        let value = parse_config_snapshot(bytes)?;
+        // The first install adopts existing preferences. Later comparisons use
+        // the installed template, never user-added optional tables or map keys.
+        if fields_changed && config_fields_changed(&defaults, &value) {
+            let backup = Config::backup_config(path)?;
+            if read_config_bytes(&backup)?.0 != *bytes {
+                return Err(std::io::Error::other(
+                    "config changed while backing up; backup retained",
+                )
+                .into());
+            }
+            atomic_write_with_sequence_and_guard(
+                path,
+                template.as_bytes(),
+                || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+                verify,
+                false,
+            )?;
+            result = Some(Some(backup));
+        }
+    } else {
+        atomic_write_with_sequence_and_guard(
+            path,
+            template.as_bytes(),
+            || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            verify,
+            true,
+        )?;
+        result = Some(None);
+    }
+    // Publish the baseline last. A failed comparison/publication must not hide
+    // an outstanding schema upgrade from the next installer invocation.
+    if installed.is_none() || fields_changed {
+        let published = read_optional_config_snapshot(path)?;
+        atomic_write_with_sequence_and_guard(
+            &installed_path,
+            template.as_bytes(),
+            || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            || {
+                verify_optional_config_snapshot(path, published.as_ref())?;
+                verify_optional_config_snapshot(&installed_path, installed.as_ref())
+            },
+            installed.is_none(),
+        )?;
+    }
+    Ok(result)
 }
 
 // Scalars and scalar-list contents are settings, not field definitions. For
@@ -9441,23 +9514,32 @@ border_px = 3
     #[test]
     fn installer_config_update_preserves_values_and_backs_up_schema_changes() {
         let path = temporary_config_path("installer-field-update");
+        let installed_path = super::installed_config_template_path(&path);
         assert_eq!(Config::update_template(&path).unwrap(), Some(None));
         let defaults = std::fs::read_to_string(&path).unwrap();
         let changed_values = defaults
             .replacen("border_px = 3", "border_px = 7", 1)
             .replacen("name = \"tao_glow_bar\"", "name = \"custom_bar\"", 1);
         assert_ne!(changed_values, defaults);
-        let parsed: toml::Value = toml::from_str(&changed_values).unwrap();
+        let mut parsed: toml::Value = toml::from_str(&changed_values).unwrap();
         assert_eq!(parsed["status_bar"]["name"].as_str(), Some("custom_bar"));
-        let custom = format!("# custom user configuration\n{changed_values}");
+        parsed["behavior"]["wallpaper_astronomy_bodies"]
+            .as_table_mut()
+            .unwrap()
+            .insert("DP-1".into(), toml::Value::String("earth".into()));
+        let custom = format!(
+            "# custom user configuration\n{}",
+            toml::to_string_pretty(&parsed).unwrap()
+        );
         std::fs::write(&path, &custom).unwrap();
         assert_eq!(Config::update_template(&path).unwrap(), None);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
-        // Removing one known field models an older configuration missing a new field.
+        // An older installed template models an actual application schema upgrade.
         let mut old: toml::Value = toml::from_str(&custom).unwrap();
         old.as_table_mut().unwrap().remove("behavior");
         let old = toml::to_string(&old).unwrap();
         std::fs::write(&path, &old).unwrap();
+        std::fs::write(&installed_path, &old).unwrap();
         let backup = Config::update_template(&path).unwrap().unwrap().unwrap();
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), defaults);
@@ -9477,6 +9559,52 @@ border_px = 3
                 .is_symlink()
         );
         assert!(!external.exists());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&installed_path).unwrap();
+    }
+
+    #[test]
+    fn installer_config_adopts_existing_files_and_tracks_template_fields() {
+        let path = temporary_config_path("installer-template-baseline");
+        let installed = super::installed_config_template_path(&path);
+        let first = "font = 'default'\n[ui]\nsize = 14\n";
+        let custom = "# user preferences\nfont = 'custom'\n[ui]\nsize = 20\n[colors]\nbackground = '#123456'\n";
+        std::fs::write(&path, custom).unwrap();
+        assert_eq!(super::update_config_template(&path, first).unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), first);
+        // New default values and local extra/omitted fields never reset a file.
+        let same_fields = "font = 'another default'\n[ui]\nsize = 16\n";
+        assert_eq!(
+            super::update_config_template(&path, same_fields).unwrap(),
+            None
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+
+        for next in [
+            "font = 'default'\n[ui]\nsize = 14\ncursor = true\n",
+            first,
+            "font = 'default'\n[ui]\nfont_size = 14\n",
+        ] {
+            let before = std::fs::read_to_string(&path).unwrap();
+            let backup = super::update_config_template(&path, next)
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), next);
+            assert_eq!(std::fs::read_to_string(&installed).unwrap(), next);
+            std::fs::remove_file(backup).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        std::fs::write(&installed, "[invalid").unwrap();
+        assert!(super::update_config_template(&path, first).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_file(&installed).unwrap();
+        std::os::unix::fs::symlink(&path, &installed).unwrap();
+        assert!(super::update_config_template(&path, first).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_file(&installed).unwrap();
         std::fs::remove_file(&path).unwrap();
     }
 

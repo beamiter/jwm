@@ -45,10 +45,16 @@ jwm --gen-config
 ```
 
 `--update-config` checks both templates and is used by the source installer.
-It keeps the existing bytes when only values, comments, ordering, or array
-lengths differ. Changed fields, including nested fields, cause a backup and
-replacement with defaults. Missing files are created; invalid TOML and symbolic
-links are kept. A concurrent edit detected before publication stops the update.
+It records installed defaults beside each config in
+`.config_x11.toml.installed-defaults` / `.config_wayland.toml.installed-defaults`.
+An existing config without a record is adopted unchanged. Later updates compare
+old and new template fields, keeping the config bytes when only values,
+comments, ordering, or array lengths differ. User-added optional settings and
+output names are preserved. Changed template fields, including nested fields,
+cause a backup and replacement with defaults unless the config already has the
+new fields. Missing configs are created; invalid TOML and symbolic links are
+kept. Records are advanced after successful updates. A concurrent edit detected
+before publication stops the update.
 
 `--gen-config` explicitly resets both templates. An existing file is backed up to the matching
 `*.toml.backup` path before replacement, with numbered suffixes when earlier

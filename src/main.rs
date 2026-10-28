@@ -42,7 +42,7 @@ struct Cli {
     )]
     gen_config: bool,
 
-    /// Update configuration templates only when their field structure changes.
+    /// Update configuration only when installed template fields change.
     #[arg(long, conflicts_with_all = ["gen_config", "check_config", "print_config_path", "doctor"])]
     update_config: bool,
 
