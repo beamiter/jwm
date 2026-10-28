@@ -377,6 +377,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Shift+Escape | Session menu; logging out requires confirmation |
 | Alt+Control+O | Display layout |
 | Alt+F10 / Alt+Shift+F10 | Control center / Bluetooth picker |
+| Alt+Control+Shift+M / V | Open the music / video library |
 | Ctrl+Super+F12 | Toggle keyboard shortcut passthrough for the focused remote desktop window |
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |
 | Alt+Control+R | Interactively choose a source and start/stop screen recording |

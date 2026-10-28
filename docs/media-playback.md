@@ -23,9 +23,17 @@ and no following of directory symlinks.
 | Refresh the library | F5 |
 | Return / close | Escape |
 
-The bindable functions `music_player` and `video_player` open these pickers.
-They have no additional global shortcut by default, so existing user bindings
-and **Alt+Ctrl+M** audio recording remain available.
+The bindable functions `music_player` and `video_player` open these pickers:
+
+| Global shortcut | Opens |
+| --- | --- |
+| Alt+Ctrl+Shift+M | Music library |
+| Alt+Ctrl+Shift+V | Video library |
+
+Older configurations gain these defaults in memory when the action has no
+existing shortcut and the key is free. Custom bindings and chord leaders take
+priority; the shortcut viewer shows the effective fallback bindings. Existing
+**Alt+Ctrl+M** audio recording and **Alt+Ctrl+V** clipboard bindings remain available.
 
 The installer also registers **JWM Music** and **JWM Video** in application
 menus and file-manager **Open With** lists. The source installer sets them as
@@ -53,19 +61,48 @@ minimized, moved between tags, or made fullscreen like other applications.
 On first launch, Music opens a compact window and Video fits within 80% of the
 screen. Music shows embedded artwork when available. Later opens reuse the
 existing window size, preserving any resizing, tiling, or fullscreen choice.
-Move the pointer over the window to show the bottom transport bar, draggable
-seek bar, and volume control. A JWM companion panel at the top right provides
-clickable **Queue**, **Subtitles**, and **HW: Auto / Off** controls. Queue entries
-can be selected directly, with paging for large queues; arrow keys and Enter
-work while a panel is open, and Escape closes it. The panel only captures clicks
-inside its buttons, leaving the transport bar available. In fullscreen, the
-header hides after three seconds without pointer movement unless paused or a
-panel is open. The bundled Lua UI is embedded in `jwm-player`, so installing or
-packaging the binary also installs its UI; no third-party scripts are loaded.
+The embedded JWM interface uses a dark canvas, a blue/violet light ribbon on
+the empty screen, and compact controls over the picture. Drop local files onto
+the window, click the central play button or folder icon, or press **Ctrl+O**
+to choose files. The optional native chooser uses **zenity**, falling back to
+**kdialog** when zenity is unavailable. If neither is installed, use drag and
+drop, the file manager, or the library picker. The chooser runs asynchronously
+and passes local filenames as arguments without a shell. Network playback is
+not added by this interface.
+
+The bottom bar provides play/pause, mute, draggable volume and seek controls,
+elapsed/total time, subtitles, always-on-top, speed selection (**0.5×–2×**),
+and fullscreen. Seek hover shows the target time; dragging keeps control even
+when the pointer leaves the slider. The top bar provides **Open files**,
+**Queue**, **Subtitles**, **Settings**, and minimize/maximize/close controls.
+Drag the unused header area to move the borderless window, subject to the
+compositor's normal window policy.
+
+Queue entries can be selected directly, with paging for large queues; arrow
+keys and Enter work while a panel is open, Page Up/Down change pages, and Escape
+closes it. Settings includes hardware decoding, subtitle visibility/delay,
+always-on-top, and playback statistics. **Top bar** and **Bottom bar** each offer
+**Auto**, **Always**, and **Hidden** modes in Settings. Auto is the default in
+both windowed and fullscreen playback: after three seconds the bars hide
+independently, and moving to the top or bottom edge reveals the corresponding
+bar. Hovering a bar, dragging a slider, or using its panel keeps it available.
+Paused playback and the empty screen keep automatic controls visible.
+
+Press **H** or click the crossed-eye header button to hide both bars manually;
+**H** again restores their last visible modes. Manual hiding takes priority
+over pause, the empty screen, and edge hover, and removes the hidden controls'
+click targets. **Ctrl+H** cycles both bars through Auto → Always → Hidden.
+These window shortcuts work in both JWM Music and JWM Video, including while
+the controls are hidden. The Lua UI and vector artwork
+are embedded in `jwm-player`, so installing or packaging the binary also
+installs its UI; no third-party scripts or downloaded artwork are loaded.
 
 | In the player window | Key |
 | --- | --- |
 | Play / pause | Space |
+| Open local files | Ctrl+O |
+| Hide / restore both control bars | H |
+| Cycle bars: Auto / Always / Hidden | Ctrl+H |
 | Seek | Left / Right arrows |
 | Volume down / up | 9 / 0 |
 | Mute | M |
@@ -153,9 +190,10 @@ matching uses mpv's `sub-auto=fuzzy` in the media directory. No subtitle downloa
 service is contacted.
 
 Hardware decode starts with `hwdec=auto-safe`; mpv falls back to software when
-no compatible decoder is available. **HW: Off** forces software decoding for
-troubleshooting, and **HW: Auto** retries automatic selection. This label is the
-requested policy, **not proof that hardware decoding is active**. Use mpv's
+no compatible decoder is available. In Settings, **Hardware decoding · Off**
+forces software decoding for troubleshooting, and **Auto** retries automatic
+selection. This label is the requested policy, **not proof that hardware
+decoding is active**. Use mpv's
 statistics (`I`) to inspect the active decoder and frame statistics. Decode and
 all player UI rendering remain in the mpv child, outside JWM's compositor.
 
@@ -167,11 +205,17 @@ mpv --no-config --vo=null --ao=null --idle=yes --script=bridge/src/player/ui_tes
 python3 scripts/test_player_ui.py
 ```
 
-The Lua test checks paging, keyboard/mouse routing, subtitle selection, decoder
-policy switching, UTF-8 labels, and ASS escaping. The Python test starts a
-private Xvfb, a generated local video and SRT, and real mpv; it checks queue
-selection, subtitles, fullscreen, and continued playback after decoder-policy
-changes. It requires permission to create Unix sockets, plus Xvfb, ffmpeg,
+The Lua test checks paging, scaled hit regions, transport controls, slider
+capture, speed selection, independent bar modes, automatic deadlines, edge
+reveal, manual hide/restore, file chooser fallback/validation,
+subtitle selection, decoder switching, UTF-8 labels, and ASS escaping.
+The Python test starts a private Xvfb, a generated local video and SRT, and real
+mpv; it checks queue
+selection, subtitles, seeking/volume dragging, pause/mute, speed, fullscreen,
+automatic/manual bar visibility in the real framebuffer, async file chooser
+fallback, and continued playback after decoder-policy
+changes. Chooser stand-ins run on a private PATH; no desktop dialog is opened.
+It requires permission to create Unix sockets, plus Xvfb, ffmpeg,
 libX11, and libXtst. It never connects to the user's display or sound output.
 The Rust decoder tests cover play/pause, seek, volume, stop/resume, queue advance,
 MPRIS ownership, and crash cleanup. Null sinks and Xvfb cannot establish GPU

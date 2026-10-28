@@ -2528,6 +2528,7 @@ impl Jwm {
         if let Some(fallback) = cfg.spawn_placement_fallback_key() {
             key_configs.push(fallback);
         }
+        key_configs.extend(cfg.media_player_fallback_keys());
         let lines = keybinding_viewer_lines(
             &key_configs,
             cfg.tags_length(),
