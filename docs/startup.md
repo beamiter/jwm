@@ -35,6 +35,10 @@ Each backend family has a separate configuration file:
 - X11 (`x11rb`, `xcb`): `~/.config/jwm/config_x11.toml`
 - Wayland: `~/.config/jwm/config_wayland.toml`
 
+First launch creates a default file only if the path is still absent when it
+is published. Existing files and configuration symlinks, including dangling
+ones, are preserved; an explicit reset uses `--gen-config` below.
+
 Use the process-safe maintenance commands instead of starting a display server:
 
 ```bash

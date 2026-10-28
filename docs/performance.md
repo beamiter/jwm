@@ -57,6 +57,9 @@ does not restart the budget.
 Responses must have a newline, a boolean `success`, and fit within 4 MiB
 including the newline.
 Idle process samples are limited to 64 KiB per `/proc` input.
+Each sample reads through the same process-directory handle and records the
+process start time. A process restart or reused PID invalidates the sampling
+window instead of mixing counters from different processes.
 
 Host-label inputs are limited to 1 MiB; unavailable or blank labels remain
 unknown. Monitor-based resolution fallbacks use the min/max bounding box, so
@@ -230,6 +233,10 @@ sides, or a scenario the candidate gained.
 ## Baselines
 
 Committed baselines live in `perf/baselines/`, one file per system label.
+New recordings use a synced temporary file followed by atomic replacement;
+a write failure keeps the previous complete baseline. Valid destination
+symlinks keep their link and update the target atomically; directories and
+special files are rejected.
 They are reference points for *that machine*: refresh them deliberately (a
 new driver, kernel, or config is a new fingerprint and a new file), and never
 edit the JSON by hand. The `allocation_steady` scenario stays skipped unless

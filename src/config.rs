@@ -5232,6 +5232,28 @@ impl Config {
         default_config.save_to_file(path)
     }
 
+    /// First-launch initialization must never replace an existing configuration,
+    /// including one published after the initial existence check.
+    fn ensure_template(path: &Path) -> Result<bool, ConfigError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let template = Self::add_option_comments(&toml::to_string_pretty(&Self::default().inner)?);
+        match atomic_write_with_sequence_and_guard(
+            path,
+            template.as_bytes(),
+            || CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            || verify_optional_config_snapshot(path, None),
+            true,
+        ) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Install defaults only when fields changed since the last installed template.
     /// `None` means the existing bytes were kept; `Some` contains an optional backup.
     pub fn update_template<P: AsRef<Path>>(
@@ -6042,18 +6064,14 @@ pub static CONFIG: LazyLock<ArcSwap<Config>> = LazyLock::new(|| {
     let config = if !LOAD_LOCAL_CONFIG {
         Config::default()
     } else {
-        if !Config::config_exists() {
-            let path = Config::get_default_config_path();
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match Config::generate_template(&path) {
-                Ok(()) => println!("Generated default config file at: {}", path.display()),
-                Err(e) => eprintln!(
-                    "Failed to write default config at {}: {e}; using built-in defaults",
-                    path.display()
-                ),
-            }
+        let path = Config::get_default_config_path();
+        match Config::ensure_template(&path) {
+            Ok(true) => println!("Generated default config file at: {}", path.display()),
+            Ok(false) => {}
+            Err(e) => eprintln!(
+                "Failed to write default config at {}: {e}; using built-in defaults",
+                path.display()
+            ),
         }
         Config::load_default()
     };
@@ -9481,6 +9499,39 @@ border_px = 3
             "concurrent user edit"
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_config_initialization_preserves_existing_files_and_links() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temporary_config_path("startup-create-only");
+        assert!(Config::ensure_template(&path).unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(Config::load_from_file(&path).is_ok());
+
+        // Even invalid user edits belong to the user; startup only creates.
+        let personal = b"# unfinished edit\n[appearance\n";
+        std::fs::write(&path, personal).unwrap();
+        assert!(!Config::ensure_template(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), personal);
+        std::fs::remove_file(&path).unwrap();
+
+        let external = path.with_extension("external");
+        std::os::unix::fs::symlink(&external, &path).unwrap();
+        assert!(!Config::ensure_template(&path).unwrap());
+        assert!(
+            !external.exists(),
+            "startup must not create a dangling link's target"
+        );
+        std::fs::write(&external, personal).unwrap();
+        assert!(!Config::ensure_template(&path).unwrap());
+        assert_eq!(std::fs::read(&external).unwrap(), personal);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(external).unwrap();
     }
 
     #[test]

@@ -165,7 +165,7 @@ impl Jwm {
             return Ok(());
         }
         let delta = match *arg {
-            WMArgEnum::Float(f) => f,
+            WMArgEnum::Float(f) if f.is_finite() => f,
             _ => return Ok(()),
         };
 
@@ -197,6 +197,7 @@ impl Jwm {
 
         if (new_factor - current).abs() > 0.0001 {
             state.column_width_factors[cur_col] = new_factor;
+            self.clear_current_layout_resize();
             self.arrange(backend, Some(mon_key));
             self.broadcast_visible_window_states_on_monitor(backend, mon_key);
             self.broadcast_monitor_bar_ipc(backend, mon_key);
@@ -461,6 +462,7 @@ mod tests {
     use super::scrolling_column_width_rule_for_window;
     use crate::backend::common_define::WindowId;
     use crate::core::layout::LayoutEnum;
+    use crate::core::master_resize::ResizeContext;
     use crate::core::models::{MonitorKey, ScrollingState, WMClient};
     use crate::jwm::Jwm;
     use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
@@ -551,6 +553,65 @@ mod tests {
         ] {
             assert_scrolling_command_is_noop(command, WMArgEnum::Int(0), LayoutEnum::SCROLLING);
         }
+    }
+
+    #[test]
+    fn unchanged_column_width_keeps_manual_size_even_through_setmfact() {
+        for (factor, argument) in [
+            (1.0, WMArgEnum::Float(0.0)),
+            (2.5, WMArgEnum::Float(1.0)),
+            (0.25, WMArgEnum::Float(-1.0)),
+            (1.25, WMArgEnum::Float(f32::NAN)),
+            (1.25, WMArgEnum::Float(f32::INFINITY)),
+            (1.25, WMArgEnum::Int(0)),
+        ] {
+            let (mut jwm, mut backend, monitor) = scrolling_command_fixture();
+            let state = jwm.scrolling_state_for_monitor_mut(monitor).unwrap();
+            state.column_width_factors[1] = factor;
+            let before = state.clone();
+            let scope = jwm.layout_resize_scope(monitor).unwrap();
+            let resize = ResizeContext {
+                preparing: true,
+                ..ResizeContext::default()
+            };
+            jwm.state.monitors[monitor]
+                .layout_resizes
+                .insert(scope, resize.clone());
+
+            jwm.setmfact(&mut backend, &argument)
+                .expect("unchanged column width");
+
+            let after = jwm.scrolling_state_for_monitor(monitor).unwrap();
+            assert_eq!(after.columns, before.columns);
+            assert_eq!(after.column_width_factors, before.column_width_factors);
+            assert_eq!(after.viewport_x, before.viewport_x);
+            assert_eq!(
+                jwm.state.monitors[monitor].layout_resizes.get(&scope),
+                Some(&resize)
+            );
+        }
+    }
+
+    #[test]
+    fn changed_column_width_replaces_manual_size() {
+        let (mut jwm, mut backend, monitor) = scrolling_command_fixture();
+        let scope = jwm.layout_resize_scope(monitor).unwrap();
+        jwm.state.monitors[monitor]
+            .layout_resizes
+            .insert(scope, ResizeContext::default());
+        jwm.setmfact(&mut backend, &WMArgEnum::Float(0.25))
+            .expect("change width");
+        assert!(
+            !jwm.state.monitors[monitor]
+                .layout_resizes
+                .contains_key(&scope)
+        );
+        assert_eq!(
+            jwm.scrolling_state_for_monitor(monitor)
+                .unwrap()
+                .column_width_factors[1],
+            1.5
+        );
     }
 
     #[test]

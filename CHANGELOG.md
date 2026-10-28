@@ -5,6 +5,23 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Layout, media control and configuration reliability
+
+- Layout requests that leave their parameter unchanged, including repeated
+  settings and clamped adjustments, now keep manually resized tiles intact. They
+  avoid unnecessary layout passes, persistence updates and status broadcasts.
+  Scrolling column widths reject non-finite values before changing state.
+- Media-player discovery runs concurrently with per-player and whole-scan
+  deadlines, so an unresponsive MPRIS player no longer holds up healthy players.
+  Media transport calls are bounded too; a temporarily unresponsive pinned
+  player is not silently replaced by another application.
+- Performance recordings reject idle samples that span a process restart or
+  reused PID. Baselines are published atomically, preserving the previous
+  complete report if writing the replacement fails.
+- First-launch configuration creation no longer overwrites a file another
+  process created in the meantime, and leaves dangling configuration links
+  intact. Explicit configuration resets remain available through `--gen-config`.
+
 ### Music and video playback
 
 - Shell Hub has searchable Music (`U`) and Video (`V`) libraries, including

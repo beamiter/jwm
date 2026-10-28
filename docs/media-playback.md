@@ -28,8 +28,10 @@ They have no additional global shortcut by default, so existing user bindings
 and **Alt+Ctrl+M** audio recording remain available.
 
 The installer also registers **JWM Music** and **JWM Video** in application
-menus and file-manager **Open With** lists. It does not change the default
-application for any audio or video format.
+menus and file-manager **Open With** lists. The source installer sets them as
+the defaults only in JWM sessions through `jwm-mimeapps.list`; Ubuntu/GNOME
+keeps its existing associations. Release bundles register the applications
+without changing the user's MIME configuration.
 
 For files outside the library, use the file manager or the command line:
 
@@ -79,6 +81,10 @@ The keyboard's media keys and the Shell Hub's current-track row work through
 MPRIS. The player is exposed as `org.mpris.MediaPlayer2.jwm`; when another
 application is also playing, use the existing Players picker to select **JWM
 Player**. The bridge's normal active-player ranking and pinning still apply.
+Discovery queries at most eight players concurrently, with a one-second budget
+per player and a three-second budget for the scan. An unresponsive pinned
+player keeps its pin, so a delayed media-key request is not sent to another
+application. Transport calls also stop waiting after one second.
 
 IPC can open files without constructing a command string:
 

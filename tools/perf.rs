@@ -13,6 +13,7 @@ use crate::perf_contract::{
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -398,6 +399,7 @@ fn config_fingerprint_path(path: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 struct ProcSample {
+    start_time: u64,
     cpu_ticks: u64,
     voluntary_switches: u64,
     rss_kb: u64,
@@ -426,14 +428,32 @@ fn read_proc_sample_path(path: impl AsRef<Path>) -> io::Result<String> {
 }
 
 fn sample_proc(pid: u32) -> Result<ProcSample, String> {
-    let stat = read_proc_sample_path(format!("/proc/{pid}/stat"))
+    // Pin one procfs process directory while reading both files. If the PID
+    // exits and is reused between reads, the second open must not switch to
+    // the new process's status file.
+    let process = std::fs::File::open(format!("/proc/{pid}"))
+        .map_err(|error| format!("/proc/{pid}: {error}"))?;
+    let directory = format!("/proc/self/fd/{}", process.as_raw_fd());
+    let stat = read_proc_sample_path(format!("{directory}/stat"))
         .map_err(|error| format!("/proc/{pid}/stat: {error}"))?;
+    let status = read_proc_sample_path(format!("{directory}/status"))
+        .map_err(|error| format!("/proc/{pid}/status: {error}"))?;
+    parse_proc_sample(&stat, &status)
+}
+
+fn parse_proc_sample(stat: &str, status: &str) -> Result<ProcSample, String> {
     // Fields after the parenthesised comm, which may itself contain spaces.
     let after_comm = stat
         .rsplit_once(')')
         .map(|(_, rest)| rest.trim_start())
         .ok_or("malformed /proc stat")?;
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    if fields
+        .first()
+        .is_some_and(|state| matches!(*state, "Z" | "X" | "x"))
+    {
+        return Err("compositor process exited during idle sampling".into());
+    }
     // Post-comm index: state=0, ..., utime=11, stime=12.
     let utime: u64 = fields
         .get(11)
@@ -443,9 +463,10 @@ fn sample_proc(pid: u32) -> Result<ProcSample, String> {
         .get(12)
         .and_then(|value| value.parse().ok())
         .ok_or("missing stime")?;
-
-    let status = read_proc_sample_path(format!("/proc/{pid}/status"))
-        .map_err(|error| format!("/proc/{pid}/status: {error}"))?;
+    let start_time = fields
+        .get(19)
+        .and_then(|value| value.parse().ok())
+        .ok_or("missing process start time")?;
     let field = |name: &str| {
         status.lines().find_map(|line| {
             line.strip_prefix(name)?
@@ -457,7 +478,8 @@ fn sample_proc(pid: u32) -> Result<ProcSample, String> {
         })
     };
     Ok(ProcSample {
-        cpu_ticks: utime + stime,
+        start_time,
+        cpu_ticks: utime.checked_add(stime).ok_or("CPU counter overflow")?,
         voluntary_switches: field("voluntary_ctxt_switches").unwrap_or(0),
         rss_kb: field("VmRSS").unwrap_or(0),
     })
@@ -1069,12 +1091,10 @@ fn write_baseline(options: &RecordOptions, baseline: &PerfBaselineV1) -> Result<
     let out = options.out.clone().unwrap_or_else(|| {
         PathBuf::from("perf/baselines").join(format!("{}.json", baseline.label.slug()))
     });
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
     let mut encoded = serde_json::to_string_pretty(baseline).map_err(|error| error.to_string())?;
     encoded.push('\n');
-    std::fs::write(&out, encoded).map_err(|error| error.to_string())?;
+    write_report_atomic(&out, |file| file.write_all(encoded.as_bytes()))
+        .map_err(|error| error.to_string())?;
 
     println!("perf baseline written to {}", out.display());
     let incomplete = baseline.label.incomplete_fields();
@@ -1102,6 +1122,72 @@ fn write_baseline(options: &RecordOptions, baseline: &PerfBaselineV1) -> Result<
     Ok(())
 }
 
+/// Publish only a complete, synced report. A failed write must leave the last
+/// baseline usable for comparisons, and a substituted FIFO must not block.
+fn write_report_atomic(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // Keep --out symlink semantics: replace the target atomically, not the
+    // user's link. canonicalize also rejects cycles and dangling links.
+    if path.is_symlink() {
+        return write_report_atomic(&std::fs::canonicalize(path)?, write);
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let permissions = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "baseline destination is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    for _ in 0..128 {
+        let temporary = parent.join(format!(
+            ".jwm-perf-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let published = (|| {
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions)?;
+            }
+            write(&mut file)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)
+        })();
+        if published.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            return published;
+        }
+        // Rename released the temporary name; do not remove it if a later
+        // directory-sync error occurs after another writer reused the name.
+        return std::fs::File::open(parent)?.sync_all();
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "baseline temporary namespace is exhausted",
+    ))
+}
+
 fn record_idle(pid: u32, seconds: u32) -> Result<BTreeMap<String, f64>, String> {
     let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     let clk_tck = if clk_tck > 0 { clk_tck as f64 } else { 100.0 };
@@ -1122,6 +1208,9 @@ fn idle_metrics(
 ) -> Result<BTreeMap<String, f64>, String> {
     if !elapsed.is_finite() || elapsed <= 0.0 || !clk_tck.is_finite() || clk_tck <= 0.0 {
         return Err("invalid idle sampling interval or clock frequency".into());
+    }
+    if first.start_time != second.start_time {
+        return Err("compositor process changed during idle sampling".into());
     }
     let cpu_ticks = second
         .cpu_ticks
@@ -1395,6 +1484,60 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn baseline_publication_preserves_previous_report_on_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = InputDir::new();
+        let path = dir.path("baseline.json");
+        std::fs::write(&path, b"previous complete baseline\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let error = write_report_atomic(&path, |file| {
+            file.write_all(b"partial replacement")?;
+            Err(io::Error::other("simulated full disk"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("full disk"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"previous complete baseline\n"
+        );
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+        write_report_atomic(&path, |file| file.write_all(b"new complete baseline\n")).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new complete baseline\n");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn baseline_publication_keeps_links_and_rejects_special_files() {
+        let dir = InputDir::new();
+        let target = dir.path("user-file");
+        let link = dir.path("baseline-link.json");
+        std::fs::write(&target, b"user data").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_report_atomic(&link, |file| file.write_all(b"new baseline")).unwrap();
+        assert!(link.is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"new baseline");
+        let fifo = dir.path("baseline-fifo.json");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        assert_eq!(
+            write_report_atomic(&fifo, |_| panic!("must not open a FIFO"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            write_report_atomic(&dir.0, |_| panic!("must not overwrite a directory"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 3);
     }
 
     #[test]
@@ -2071,11 +2214,13 @@ mod tests {
     #[test]
     fn idle_metrics_reject_counter_resets_instead_of_recording_zero() {
         let first = ProcSample {
+            start_time: 42,
             cpu_ticks: 100,
             voluntary_switches: 50,
             rss_kb: 1024,
         };
         let mut second = ProcSample {
+            start_time: 42,
             cpu_ticks: 120,
             voluntary_switches: 54,
             rss_kb: 2048,
@@ -2100,6 +2245,28 @@ mod tests {
         for elapsed in [0.0, f64::NAN, f64::INFINITY] {
             assert!(idle_metrics(&first, &first, 100.0, elapsed).is_err());
         }
+        second.cpu_ticks = 120;
+        second.voluntary_switches = 54;
+        second.start_time += 1;
+        assert!(
+            idle_metrics(&first, &second, 100.0, 2.0)
+                .unwrap_err()
+                .contains("process changed")
+        );
+    }
+
+    #[test]
+    fn proc_sample_parses_identity_after_a_parenthesized_process_name() {
+        let stat = "123 (jwm (test)) S 1 2 3 4 5 6 7 8 9 10 12 13 14 15 16 17 18 19 456";
+        let sample =
+            parse_proc_sample(stat, "VmRSS:\t1024 kB\nvoluntary_ctxt_switches:\t50\n").unwrap();
+        assert_eq!(sample.start_time, 456);
+        assert_eq!(sample.cpu_ticks, 25);
+        assert_eq!(sample.voluntary_switches, 50);
+        assert_eq!(sample.rss_kb, 1024);
+        assert!(parse_proc_sample("123 (jwm) S", "").is_err());
+        assert!(parse_proc_sample(&stat.replacen(") S ", ") Z ", 1), "").is_err());
+        assert!(sample_proc(std::process::id()).is_ok());
     }
 
     #[test]

@@ -28,12 +28,18 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.clear_current_layout_resize();
         if let WMArgEnum::Int(i) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+            let Some(monitor) = self.state.monitors.get(sel_mon_key) else {
+                return Ok(());
+            };
+            let new_n = adjusted_n_master(monitor.layout.n_master, i);
+            if new_n == monitor.layout.n_master {
+                return Ok(());
+            }
 
+            self.clear_current_layout_resize();
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_n = adjusted_n_master(monitor.layout.n_master, i);
                 monitor.layout.n_master = new_n;
                 // 关键：调用新方法同步状态
                 monitor.update_current_tag_layout_params();
@@ -54,11 +60,17 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.clear_current_layout_resize();
         if let WMArgEnum::Int(i) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+            let new_n = adjusted_n_master(0, i);
+            let Some(monitor) = self.state.monitors.get(sel_mon_key) else {
+                return Ok(());
+            };
+            if new_n == monitor.layout.n_master {
+                return Ok(());
+            }
+            self.clear_current_layout_resize();
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_n = adjusted_n_master(0, i);
                 monitor.layout.n_master = new_n;
                 monitor.update_current_tag_layout_params();
                 info!("[setnmaster] Updated n_master to {new_n}");
@@ -116,24 +128,30 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.clear_current_layout_resize();
         if self.is_scrolling_layout() {
             return self.scrolling_set_column_width(backend, arg);
         }
 
         if let WMArgEnum::Float(f) = arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+            let Some(monitor) = self.state.monitors.get(sel_mon_key) else {
+                return Ok(());
+            };
+            let new_mfact = if f < &1.0 {
+                f + monitor.layout.m_fact
+            } else {
+                f - 1.0
+            };
+            // A rejected or repeated IPC/slider value must not erase a
+            // physical resize intention or keep postponing its persistence.
+            if !(0.05..=0.95).contains(&new_mfact) || new_mfact == monitor.layout.m_fact {
+                return Ok(());
+            }
+            self.clear_current_layout_resize();
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_mfact = if f < &1.0 {
-                    f + monitor.layout.m_fact
-                } else {
-                    f - 1.0
-                };
-                if new_mfact >= 0.05 && new_mfact <= 0.95 {
-                    monitor.layout.m_fact = new_mfact;
-                    // 关键：调用新方法同步状态
-                    monitor.update_current_tag_layout_params();
-                }
+                monitor.layout.m_fact = new_mfact;
+                // 关键：调用新方法同步状态
+                monitor.update_current_tag_layout_params();
             }
             self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
@@ -151,13 +169,17 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let WMArgEnum::Int(delta) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+            let Some(monitor) = self.state.monitors.get(sel_mon_key) else {
+                return Ok(());
+            };
+            let new_gap = adjusted_gap(monitor.layout.gap, delta);
+            if new_gap == monitor.layout.gap {
+                return Ok(());
+            }
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_gap = adjusted_gap(monitor.layout.gap, delta);
-                if new_gap != monitor.layout.gap {
-                    monitor.layout.gap = new_gap;
-                    monitor.update_current_tag_layout_params();
-                    info!("[setgaps] Updated gap to {}", new_gap);
-                }
+                monitor.layout.gap = new_gap;
+                monitor.update_current_tag_layout_params();
+                info!("[setgaps] Updated gap to {}", new_gap);
             }
             self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
@@ -491,11 +513,96 @@ mod tests {
     use crate::backend::common_define::WindowId;
     use crate::config::MAX_N_MASTER;
     use crate::core::layout::LayoutEnum;
+    use crate::core::master_resize::ResizeContext;
     use crate::core::models::WMClient;
     use crate::jwm::Jwm;
     use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
-    use crate::jwm::types::WMArgEnum;
+    use crate::jwm::types::{WMArgEnum, WMFuncType};
     use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn no_op_layout_parameters_keep_manual_sizes_and_pending_persistence() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test JWM");
+        let monitor = jwm.state.monitor_order[0];
+        let scope = jwm.layout_resize_scope(monitor).unwrap();
+        let resize = ResizeContext {
+            preparing: true,
+            ..ResizeContext::default()
+        };
+        let dirty_since = Instant::now() - Duration::from_secs(2);
+
+        let cases: [(WMFuncType, WMArgEnum, u32, f32, i32); 13] = [
+            (Jwm::incnmaster, WMArgEnum::Int(0), 1, 0.5, 8),
+            (Jwm::incnmaster, WMArgEnum::Int(1), MAX_N_MASTER, 0.5, 8),
+            (Jwm::incnmaster, WMArgEnum::Int(-1), 0, 0.5, 8),
+            (Jwm::incnmaster, WMArgEnum::Float(1.0), 1, 0.5, 8),
+            (Jwm::setnmaster, WMArgEnum::Int(1), 1, 0.5, 8),
+            (
+                Jwm::setnmaster,
+                WMArgEnum::Int(i32::MAX),
+                MAX_N_MASTER,
+                0.5,
+                8,
+            ),
+            (Jwm::setnmaster, WMArgEnum::Float(1.0), 1, 0.5, 8),
+            (Jwm::setmfact, WMArgEnum::Float(0.0), 1, 0.5, 8),
+            (Jwm::setmfact, WMArgEnum::Float(1.5), 1, 0.5, 8),
+            (Jwm::setmfact, WMArgEnum::Float(f32::NAN), 1, 0.5, 8),
+            (Jwm::setmfact, WMArgEnum::Float(-2.0), 1, 0.5, 8),
+            (Jwm::setgaps, WMArgEnum::Int(0), 1, 0.5, 8),
+            (Jwm::setgaps, WMArgEnum::Int(-1), 1, 0.5, 0),
+        ];
+        for (command, argument, masters, factor, gap) in cases {
+            let layout = &mut jwm.state.monitors[monitor].layout;
+            layout.n_master = masters;
+            layout.m_fact = factor;
+            layout.gap = gap;
+            jwm.state.monitors[monitor]
+                .layout_resizes
+                .insert(scope, resize.clone());
+            jwm.layout_persist_dirty = Some(dirty_since);
+
+            command(&mut jwm, &mut backend, &argument).expect("unchanged layout command");
+
+            let layout = &jwm.state.monitors[monitor].layout;
+            assert_eq!(
+                (layout.n_master, layout.m_fact, layout.gap),
+                (masters, factor, gap)
+            );
+            assert_eq!(
+                jwm.state.monitors[monitor].layout_resizes.get(&scope),
+                Some(&resize)
+            );
+            assert_eq!(jwm.layout_persist_dirty, Some(dirty_since));
+        }
+    }
+
+    #[test]
+    fn changed_layout_parameters_still_clear_manual_sizes() {
+        for (command, argument) in [
+            (Jwm::incnmaster as WMFuncType, WMArgEnum::Int(1)),
+            (Jwm::setnmaster, WMArgEnum::Int(3)),
+            (Jwm::setmfact, WMArgEnum::Float(0.1)),
+        ] {
+            let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test JWM");
+            let monitor = jwm.state.monitor_order[0];
+            let scope = jwm.layout_resize_scope(monitor).unwrap();
+            jwm.state.monitors[monitor].layout.n_master = 1;
+            jwm.state.monitors[monitor].layout.m_fact = 0.5;
+            jwm.state.monitors[monitor]
+                .layout_resizes
+                .insert(scope, ResizeContext::default());
+            command(&mut jwm, &mut backend, &argument).expect("changed layout command");
+            assert!(
+                !jwm.state.monitors[monitor]
+                    .layout_resizes
+                    .contains_key(&scope)
+            );
+        }
+    }
 
     #[test]
     fn absolute_master_count_preserves_zero_and_caps_extreme_inputs() {

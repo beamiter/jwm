@@ -23,7 +23,9 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use futures_util::{StreamExt, stream};
 use serde_json::Value;
 use zbus::Connection;
 use zbus::fdo::DBusProxy;
@@ -36,6 +38,9 @@ const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PLAYER_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER_INTERFACE: &str = "org.mpris.MediaPlayer2.Player";
 const ROOT_INTERFACE: &str = "org.mpris.MediaPlayer2";
+const PLAYER_CALL_TIMEOUT: Duration = Duration::from_secs(1);
+const SWEEP_TIMEOUT: Duration = Duration::from_secs(3);
+const SNAPSHOT_CONCURRENCY: usize = 8;
 
 /// One player's state as read off the bus.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -278,6 +283,92 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
     })
 }
 
+struct PlayerSweep {
+    players: Vec<PlayerSnapshot>,
+    live: Vec<String>,
+}
+
+impl PlayerSweep {
+    fn resolve<'a>(&'a self, pinned: Option<&str>) -> (Option<&'a PlayerSnapshot>, Option<String>) {
+        // A slow player still owns its bus name. Do not forget the user's
+        // selection, or send their next transport command to a different app.
+        if let Some(pin) = pinned
+            && self.live.iter().any(|name| name == pin)
+        {
+            return (
+                self.players.iter().find(|player| player.player == pin),
+                Some(pin.to_string()),
+            );
+        }
+        resolve_active(&self.players, pinned)
+    }
+
+    fn publication(&self, pinned: Option<&str>) -> (Value, Option<String>) {
+        let (active, pin) = self.resolve(pinned);
+        let mut args = match active {
+            Some(active) => publish_args(&self.players, Some(&active.player)).0,
+            None if pin.as_ref().is_some_and(|pin| self.live.contains(pin)) => {
+                // A null active player would erase the Players picker too.
+                // Publish a disabled placeholder so the user can still select
+                // another healthy player, without showing stale track data.
+                let mut players = self.players.clone();
+                players.push(PlayerSnapshot {
+                    player: pinned.unwrap_or_default().to_string(),
+                    status: "Stopped".into(),
+                    ..PlayerSnapshot::default()
+                });
+                publish_args(&players, pin.as_deref()).0
+            }
+            None => serde_json::json!({"player": Value::Null}),
+        };
+        if !args["player"].is_null() {
+            args["players"] = serde_json::json!(self.live);
+        }
+        (args, pin)
+    }
+}
+
+/// A hung player cannot serialize all of the healthy players behind its bus
+/// timeout. Bound both concurrent requests and the complete sweep; dropping
+/// unfinished futures also cancels their local reply waiters.
+async fn collect_players(connection: &Connection) -> Option<PlayerSweep> {
+    let deadline = tokio::time::Instant::now() + SWEEP_TIMEOUT;
+    let names = tokio::time::timeout_at(deadline, async {
+        let dbus = DBusProxy::new(connection).await.ok()?;
+        dbus.list_names().await.ok()
+    })
+    .await
+    .ok()??;
+    let mut names: Vec<_> = names
+        .into_iter()
+        .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
+        .collect();
+    // ListNames ordering is not stable. Preserve a deterministic tie-break
+    // regardless of bus enumeration order or which concurrent reply wins.
+    names.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    let live = names
+        .iter()
+        .filter_map(|name| name.as_str().strip_prefix(MPRIS_PREFIX).map(str::to_owned))
+        .collect();
+    let snapshots = stream::iter(names)
+        .map(|name| async move {
+            tokio::time::timeout(PLAYER_CALL_TIMEOUT, snapshot(connection, &name))
+                .await
+                .ok()
+                .flatten()
+        })
+        .buffer_unordered(SNAPSHOT_CONCURRENCY);
+    futures_util::pin_mut!(snapshots);
+    let mut players = Vec::new();
+    while let Ok(Some(snapshot)) = tokio::time::timeout_at(deadline, snapshots.next()).await {
+        if let Some(snapshot) = snapshot {
+            players.push(snapshot);
+        }
+    }
+    players.sort_unstable_by(|left, right| left.player.cmp(&right.player));
+    Some(PlayerSweep { players, live })
+}
+
 /// Sweep every MPRIS player currently on the bus and push the resolved one
 /// to jwm, with the sweep's full suffix list alongside. Pushing
 /// `player: null` is how "every player went away" is reported. Returns the
@@ -286,24 +377,10 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
 /// sweep that could not run at all (the bus daemon unreachable) validates
 /// nothing, so the pin passes through untouched.
 async fn publish(connection: &Connection, ipc: &JwmIpc, pinned: Option<&str>) -> Option<String> {
-    let Ok(dbus) = DBusProxy::new(connection).await else {
+    let Some(sweep) = collect_players(connection).await else {
         return pinned.map(str::to_string);
     };
-    let Ok(names) = dbus.list_names().await else {
-        return pinned.map(str::to_string);
-    };
-
-    let mut players = Vec::new();
-    for name in names
-        .into_iter()
-        .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
-    {
-        if let Some(snapshot) = snapshot(connection, &name).await {
-            players.push(snapshot);
-        }
-    }
-
-    let (args, pin) = publish_args(&players, pinned);
+    let (args, pin) = sweep.publication(pinned);
     let ipc = ipc.clone();
     let _ = tokio::task::spawn_blocking(move || ipc.command("set_media_status", args)).await;
     pin
@@ -361,18 +438,21 @@ async fn call_active(connection: &Connection, player: &str, method: &'static str
     let Ok(bus_name) = BusName::try_from(destination.clone()) else {
         return;
     };
-    match connection
-        .call_method(
+    match tokio::time::timeout(
+        PLAYER_CALL_TIMEOUT,
+        connection.call_method(
             Some(bus_name),
             PLAYER_PATH,
             Some(PLAYER_INTERFACE),
             method,
             &(),
-        )
-        .await
+        ),
+    )
+    .await
     {
-        Ok(_) => log::debug!("{method} on {destination}"),
-        Err(error) => log::warn!("{method} on {destination} failed: {error}"),
+        Ok(Ok(_)) => log::debug!("{method} on {destination}"),
+        Ok(Err(error)) => log::warn!("{method} on {destination} failed: {error}"),
+        Err(_) => log::warn!("{method} on {destination} timed out"),
     }
 }
 
@@ -391,35 +471,41 @@ async fn seek_active(connection: &Connection, player: &PlayerSnapshot, position_
     if let Some(track_id) = player.track_id.as_deref()
         && let Ok(path) = zvariant::ObjectPath::try_from(track_id)
     {
-        match connection
-            .call_method(
+        match tokio::time::timeout(
+            PLAYER_CALL_TIMEOUT,
+            connection.call_method(
                 Some(bus_name.clone()),
                 PLAYER_PATH,
                 Some(PLAYER_INTERFACE),
                 "SetPosition",
                 &(path, position_us),
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(_) => log::debug!("SetPosition {position_us} on {destination}"),
-            Err(error) => log::warn!("SetPosition on {destination} failed: {error}"),
+            Ok(Ok(_)) => log::debug!("SetPosition {position_us} on {destination}"),
+            Ok(Err(error)) => log::warn!("SetPosition on {destination} failed: {error}"),
+            Err(_) => log::warn!("SetPosition on {destination} timed out"),
         }
         return;
     }
     // No track id: fall back to a relative Seek from the last Position.
     let offset = position_us.saturating_sub(player.position_us.unwrap_or(0));
-    match connection
-        .call_method(
+    match tokio::time::timeout(
+        PLAYER_CALL_TIMEOUT,
+        connection.call_method(
             Some(bus_name),
             PLAYER_PATH,
             Some(PLAYER_INTERFACE),
             "Seek",
             &(offset,),
-        )
-        .await
+        ),
+    )
+    .await
     {
-        Ok(_) => log::debug!("Seek {offset} on {destination}"),
-        Err(error) => log::warn!("Seek on {destination} failed: {error}"),
+        Ok(Ok(_)) => log::debug!("Seek {offset} on {destination}"),
+        Ok(Err(error)) => log::warn!("Seek on {destination} failed: {error}"),
+        Err(_) => log::warn!("Seek on {destination} timed out"),
     }
 }
 
@@ -610,19 +696,8 @@ pub async fn run(
                         sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
                     }
                     MediaRequest::Seek(position_us) => {
-                        if let Ok(dbus) = DBusProxy::new(&connection).await
-                            && let Ok(names) = dbus.list_names().await
-                        {
-                            let mut players = Vec::new();
-                            for name in names
-                                .into_iter()
-                                .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
-                            {
-                                if let Some(snapshot) = snapshot(&connection, &name).await {
-                                    players.push(snapshot);
-                                }
-                            }
-                            let (active, keep) = resolve_active(&players, pinned.as_deref());
+                        if let Some(sweep) = collect_players(&connection).await {
+                            let (active, keep) = sweep.resolve(pinned.as_deref());
                             pinned = keep;
                             if let Some(active) = active {
                                 seek_active(&connection, active, position_us).await;
@@ -635,19 +710,8 @@ pub async fn run(
                         // Re-resolve the active player instead of trusting a
                         // cached one: the user may have switched players since
                         // the last push.
-                        if let Ok(dbus) = DBusProxy::new(&connection).await
-                            && let Ok(names) = dbus.list_names().await
-                        {
-                            let mut players = Vec::new();
-                            for name in names
-                                .into_iter()
-                                .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
-                            {
-                                if let Some(snapshot) = snapshot(&connection, &name).await {
-                                    players.push(snapshot);
-                                }
-                            }
-                            let (active, keep) = resolve_active(&players, pinned.as_deref());
+                        if let Some(sweep) = collect_players(&connection).await {
+                            let (active, keep) = sweep.resolve(pinned.as_deref());
                             pinned = keep;
                             if let Some(active) = active {
                                 call_active(&connection, &active.player, method).await;
@@ -687,6 +751,147 @@ async fn next_owner_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestPlayer {
+        stalled: bool,
+    }
+
+    #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+    impl TestPlayer {
+        #[zbus(property)]
+        async fn playback_status(&self) -> &str {
+            if self.stalled {
+                std::future::pending::<()>().await;
+            }
+            "Playing"
+        }
+
+        async fn pause(&self) {
+            if self.stalled {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    struct TestRoot;
+
+    #[zbus::interface(name = "org.mpris.MediaPlayer2")]
+    impl TestRoot {
+        #[zbus(property)]
+        fn identity(&self) -> &str {
+            "Test player"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_players_do_not_serialize_scans_or_hold_media_commands() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Child, Command, Stdio};
+
+        struct PrivateBus(Child);
+        impl Drop for PrivateBus {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let child = match Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                assert!(
+                    std::env::var_os("JWM_REQUIRE_DBUS_DAEMON").is_none(),
+                    "dbus-daemon required: {error}"
+                );
+                return;
+            }
+        };
+        let mut bus = PrivateBus(child);
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let address = address.trim();
+        assert!(!address.is_empty());
+        let mut servers = Vec::new();
+        // Register the healthy players in reverse order to catch dependence
+        // on bus enumeration or concurrent completion order.
+        for (suffix, stalled) in [
+            ("zslow", true),
+            ("aslow", true),
+            ("mslow", true),
+            ("bb", false),
+            ("aa", false),
+        ] {
+            servers.push(
+                zbus::connection::Builder::address(address)
+                    .unwrap()
+                    .name(format!("{MPRIS_PREFIX}{suffix}"))
+                    .unwrap()
+                    .serve_at(PLAYER_PATH, TestPlayer { stalled })
+                    .unwrap()
+                    .serve_at(PLAYER_PATH, TestRoot)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+        }
+        let client = zbus::connection::Builder::address(address)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let sweep = tokio::time::timeout(Duration::from_secs(2), collect_players(&client))
+            .await
+            .expect("three stalled players must time out concurrently")
+            .unwrap();
+        assert_eq!(
+            sweep
+                .players
+                .iter()
+                .map(|p| p.player.as_str())
+                .collect::<Vec<_>>(),
+            ["aa", "bb"]
+        );
+        assert_eq!(sweep.resolve(None).0.unwrap().player, "aa");
+        let (active, pin) = sweep.resolve(Some("aslow"));
+        assert!(
+            active.is_none(),
+            "never retarget a pinned command to another player"
+        );
+        assert_eq!(pin.as_deref(), Some("aslow"));
+        let (args, pin) = sweep.publication(Some("aslow"));
+        assert_eq!(pin.as_deref(), Some("aslow"));
+        assert_eq!(args["player"], "aslow");
+        assert_eq!(args["status"], "Stopped");
+        assert_eq!(args["can_go_next"], false);
+        assert_eq!(args["can_seek"], false);
+        assert_eq!(
+            args["players"],
+            serde_json::json!(["aa", "aslow", "bb", "mslow", "zslow"])
+        );
+        assert!(
+            args["player_details"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|player| player["player"] == "aa")
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            call_active(&client, "aslow", "Pause"),
+        )
+        .await
+        .expect("a stalled transport command must release the media loop");
+        drop(servers);
+    }
 
     fn player(name: &str, status: &str) -> PlayerSnapshot {
         PlayerSnapshot {
