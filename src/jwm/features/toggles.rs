@@ -2905,6 +2905,9 @@ impl Jwm {
             return Err(format!("{label} cannot open on a locked monitor").into());
         }
 
+        self.cancel_pointer_scroll(backend);
+        self.cancel_touchpad_gesture(backend, false);
+
         // A drag in flight holds a real pointer grab that carries motion
         // events; the grab a panel takes below silently replaces it and drops
         // them. Both `on_motion_notify` and `on_button_release` then bail on
@@ -3105,6 +3108,8 @@ impl Jwm {
     /// Drop the panel, release its grabs, and restore a temporarily enabled
     /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.cancel_pointer_scroll(backend);
+        self.cancel_touchpad_gesture(backend, false);
         // Whatever a rebuild had queued is moot, and leaving the flag set would
         // send the next frame through `flush_system_ui`'s aborted-hand-over
         // backstop for a panel that closed on purpose.
@@ -3176,6 +3181,8 @@ impl Jwm {
     /// parking every hidden window twice for a swap the user sees as one
     /// motion. What it does still do is run the teardown each panel owns.
     fn hand_over_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.cancel_pointer_scroll(backend);
+        self.cancel_touchpad_gesture(backend, false);
         // The film strip applies each layout as it is browsed. Leaving through
         // the side door must still put back the one the user started on.
         self.restore_layout_picker_origin(backend);
@@ -3637,6 +3644,8 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.cancel_pointer_scroll(backend);
+        self.cancel_touchpad_gesture(backend, false);
         let mut closed = false;
         if self.features.overview.active {
             self.features.overview.deactivate();

@@ -2213,6 +2213,7 @@ dependencies = [
  "glob",
  "glow",
  "image",
+ "input",
  "jwm_ipc_transport",
  "lazy_static",
  "libc 0.2.191",

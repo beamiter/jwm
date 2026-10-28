@@ -1213,6 +1213,19 @@ pub struct SystemUiOverlay {
     /// While the pointer is dragging the list scroll track, the thumb sits
     /// at this `0..=1` fraction instead of at the windowed-list position.
     pub scroll_drag_t: Option<f32>,
+    /// A fractional first row plus one guard row for continuous list scrolling.
+    /// Appended status/prompt rows stay below this scrolling region.
+    pub list_viewport: Option<SystemUiListViewport>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SystemUiListViewport {
+    /// Number of rows from `items` in the scrolling texture region, including a guard.
+    pub rows: usize,
+    /// Height of that region in whole row units; the guard is clipped to it.
+    pub visible_rows: usize,
+    /// Part of the first payload row already scrolled above the viewport.
+    pub fraction: f32,
 }
 
 /// What is under the pointer on the compositor-drawn system-UI card.
@@ -2166,6 +2179,14 @@ pub enum BackendEvent {
         border_width: u32,
     },
 
+    /// Precision scroll retains axes, source, device and physical boundaries.
+    PointerScroll {
+        target: HitTarget,
+        state: u16,
+        root_x: f64,
+        root_y: f64,
+        scroll: crate::backend::scroll::PointerScroll,
+    },
     ButtonPress {
         target: HitTarget,
         state: u16,
@@ -2295,6 +2316,9 @@ pub enum BackendEvent {
     },
 
     // === Native touchpad gesture events ===
+    /// A device-owned sequence; policy fixes its target at Begin and commits
+    /// only on End. Update is also used for compositor-only workspace previews.
+    GestureSwipe(crate::backend::gesture_swipe::SwipeInput),
     /// A configured 3+ finger swipe gesture has completed and was intercepted
     /// by the compositor (not forwarded to clients).
     GestureSwipeAction {
@@ -3702,6 +3726,14 @@ mod mic_indicator_api_tests {
 pub trait CompositorWorkspaceEffects: Send {
     fn compositor_set_system_ui(&mut self, _overlay: Option<SystemUiOverlay>) {}
 
+    /// Queued scroll packets must belong to the current modal owner.
+    fn compositor_scroll_epoch(&self) -> u64 {
+        0
+    }
+
+    /// Revoke the current sequence even when the next panel uses the same mode.
+    fn compositor_cancel_scroll(&mut self) {}
+
     /// Show a quiet hover cue on an interactive visible row. `None` clears it;
     /// the keyboard selection remains independently visible.
     fn compositor_set_system_ui_hover(&mut self, _row: Option<usize>) {}
@@ -3715,6 +3747,11 @@ pub trait CompositorWorkspaceEffects: Send {
     /// `0..=1` even when the pointer has left the track. `None` when the
     /// painted card has no overflowing list.
     fn compositor_system_ui_scroll_t(&self, _y: f64) -> Option<f32> {
+        None
+    }
+
+    /// Actual line height from the last painted system-UI frame.
+    fn compositor_system_ui_row_height(&self) -> Option<f64> {
         None
     }
 
@@ -3737,6 +3774,17 @@ pub trait CompositorWorkspaceEffects: Send {
         _exclude_top: u32,
         _monitor_rect: (i32, i32, u32, u32),
     ) {
+    }
+
+    /// Capture the source workspace without changing window/tag ownership.
+    fn compositor_begin_workspace_swipe(&mut self, _monitor_rect: (i32, i32, u32, u32)) -> bool {
+        false
+    }
+    fn compositor_update_workspace_swipe(&mut self, _progress: f32, _direction: i32) {}
+    /// Animate to the destination (commit) or back to the captured source.
+    fn compositor_end_workspace_swipe(&mut self, _commit: bool, _animate: bool) {}
+    fn compositor_workspace_swipe_active(&self) -> bool {
+        false
     }
 
     fn compositor_set_magnifier(&mut self, _enabled: bool) {}

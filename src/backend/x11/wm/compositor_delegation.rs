@@ -811,6 +811,10 @@ macro_rules! delegate_compositor_capabilities {
                     .and_then(|compositor| compositor.system_ui_scroll_t(y))
             }
 
+            fn compositor_system_ui_row_height(&self) -> Option<f64> {
+                self.compositor.as_ref().and_then(|compositor| compositor.system_ui_row_height())
+            }
+
             fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.push_toast(toast);
@@ -853,6 +857,19 @@ macro_rules! delegate_compositor_capabilities {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_magnifier(enabled);
                 }
+            }
+
+            fn compositor_begin_workspace_swipe(&mut self, rect: (i32, i32, u32, u32)) -> bool {
+                self.compositor.as_mut().is_some_and(|c| c.begin_workspace_swipe(rect))
+            }
+            fn compositor_update_workspace_swipe(&mut self, progress: f32, direction: i32) {
+                if let Some(c) = self.compositor.as_mut() { c.update_workspace_swipe(progress, direction); }
+            }
+            fn compositor_end_workspace_swipe(&mut self, commit: bool, animate: bool) {
+                if let Some(c) = self.compositor.as_mut() { c.end_workspace_swipe(commit, animate); }
+            }
+            fn compositor_workspace_swipe_active(&self) -> bool {
+                self.compositor.as_ref().is_some_and(|c| c.workspace_swipe_active())
             }
 
             fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {

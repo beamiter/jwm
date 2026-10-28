@@ -6,6 +6,9 @@
 
 use std::time::{Duration, Instant};
 
+use crate::BarEdge;
+use crate::presentation::{NodeId, PointerAction};
+
 /// Backends such as X11 do not report gesture boundaries. An idle interval is
 /// the boundary for those streams; explicit start/end events take precedence.
 pub const SCROLL_GESTURE_IDLE: Duration = Duration::from_millis(250);
@@ -13,6 +16,51 @@ pub const SCROLL_GESTURE_IDLE: Duration = Duration::from_millis(250);
 pub const NAVIGATION_SCROLL_PIXELS: f64 = 40.0;
 /// Logical distance needed for one existing volume/brightness adjustment.
 pub const ADJUSTMENT_SCROLL_PIXELS: f64 = 16.0;
+
+/// Shared sensitivity policy. Frontends can expose these values without
+/// changing wheel-notch semantics or inventing another gesture recognizer.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ScrollPolicy {
+    pub navigation_pixels: f64,
+    pub adjustment_pixels: f64,
+    pub idle: Duration,
+}
+
+impl Default for ScrollPolicy {
+    fn default() -> Self {
+        Self {
+            navigation_pixels: NAVIGATION_SCROLL_PIXELS,
+            adjustment_pixels: ADJUSTMENT_SCROLL_PIXELS,
+            idle: SCROLL_GESTURE_IDLE,
+        }
+    }
+}
+
+impl ScrollPolicy {
+    pub(crate) fn valid(self) -> Self {
+        let defaults = Self::default();
+        Self {
+            navigation_pixels: if self.navigation_pixels.is_finite() && self.navigation_pixels > 0.0
+            {
+                self.navigation_pixels
+            } else {
+                defaults.navigation_pixels
+            },
+            adjustment_pixels: if self.adjustment_pixels.is_finite() && self.adjustment_pixels > 0.0
+            {
+                self.adjustment_pixels
+            } else {
+                defaults.adjustment_pixels
+            },
+            idle: if self.idle.is_zero() {
+                defaults.idle
+            } else {
+                self.idle
+            },
+        }
+    }
+}
 
 /// Positive deltas follow the native convention: up/left, toward the previous
 /// item. Pixel values are logical pixels, independent of the output's DPI.
@@ -73,6 +121,7 @@ enum Axis {
 /// including its output/placement identity also isolates live bar relocation.
 #[derive(Debug, Clone)]
 pub struct ScrollAccumulator<T> {
+    policy: ScrollPolicy,
     target: Option<T>,
     mode: Option<ScrollMode>,
     last_update: Option<Instant>,
@@ -82,11 +131,13 @@ pub struct ScrollAccumulator<T> {
     precise: bool,
     navigation_fired: bool,
     finished: bool,
+    explicit_active: bool,
 }
 
 impl<T> Default for ScrollAccumulator<T> {
     fn default() -> Self {
         Self {
+            policy: ScrollPolicy::default(),
             target: None,
             mode: None,
             last_update: None,
@@ -96,14 +147,31 @@ impl<T> Default for ScrollAccumulator<T> {
             precise: false,
             navigation_fired: false,
             finished: false,
+            explicit_active: false,
         }
     }
 }
 
 impl<T: Copy + Eq> ScrollAccumulator<T> {
+    #[must_use]
+    pub fn with_policy(policy: ScrollPolicy) -> Self {
+        Self {
+            policy: policy.valid(),
+            ..Self::default()
+        }
+    }
+
+    pub fn set_policy(&mut self, policy: ScrollPolicy) {
+        let policy = policy.valid();
+        if self.policy != policy {
+            self.policy = policy;
+            self.reset();
+        }
+    }
+
     /// Call on pointer leave, target changes, DPI changes or a fresh press.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::with_policy(self.policy);
     }
 
     /// Moving between cells in one navigation group must discard unfinished
@@ -119,6 +187,7 @@ impl<T: Copy + Eq> ScrollAccumulator<T> {
     pub fn cancel(&mut self, now: Instant) {
         self.residual = 0.0;
         self.finished = true;
+        self.explicit_active = false;
         self.last_update = Some(now);
     }
 
@@ -142,10 +211,11 @@ impl<T: Copy + Eq> ScrollAccumulator<T> {
             ScrollDelta::Lines { x, y } => (x, y, false),
             ScrollDelta::Pixels { x, y } => (x, y, true),
         };
-        let expired = self.last_update.is_none_or(|last| {
-            now.checked_duration_since(last)
-                .is_none_or(|idle| idle >= SCROLL_GESTURE_IDLE)
-        });
+        let expired = !self.explicit_active
+            && self.last_update.is_none_or(|last| {
+                now.checked_duration_since(last)
+                    .is_none_or(|idle| idle >= self.policy.idle)
+            });
         if phase == ScrollPhase::Started
             || expired
             || self.target != Some(target)
@@ -158,10 +228,14 @@ impl<T: Copy + Eq> ScrollAccumulator<T> {
         self.mode = Some(mode);
         self.pixel_units = Some(pixels);
         self.last_update = Some(now);
+        self.explicit_active |= phase == ScrollPhase::Started;
         if phase == ScrollPhase::Cancelled {
             self.cancel(now);
             return None;
         }
+        // An explicitly begun gesture is precision input even if its
+        // toolkit coalesced or rounded the current line delta to an integer.
+        self.precise |= self.explicit_active;
         let step = self.accumulate(x, y, pixels, mode, allow_horizontal);
         if phase == ScrollPhase::Ended {
             // Wayland can include the last actual displacement in the stop
@@ -211,8 +285,8 @@ impl<T: Copy + Eq> ScrollAccumulator<T> {
             Axis::Vertical => y,
         } / if pixels {
             match mode {
-                ScrollMode::Navigation => NAVIGATION_SCROLL_PIXELS,
-                ScrollMode::Adjustment => ADJUSTMENT_SCROLL_PIXELS,
+                ScrollMode::Navigation => self.policy.navigation_pixels,
+                ScrollMode::Adjustment => self.policy.adjustment_pixels,
             }
         } else {
             1.0
@@ -241,9 +315,436 @@ impl<T: Copy + Eq> ScrollAccumulator<T> {
     }
 }
 
+/// One shared scroll owner for a toolkit bar, rather than one accumulator per
+/// widget. Rebuilding/replacing the active workspace must not rearm momentum.
+#[derive(Debug, Clone, Default)]
+pub struct ControlScroll {
+    accumulator: ScrollAccumulator<(NodeId, BarEdge)>,
+    owner: Option<(NodeId, BarEdge)>,
+    hovered: Option<(NodeId, BarEdge)>,
+    last_update: Option<Instant>,
+    precise: bool,
+    pixel_units: Option<bool>,
+    explicit_active: bool,
+}
+
+impl ControlScroll {
+    #[must_use]
+    pub fn with_policy(policy: ScrollPolicy) -> Self {
+        Self {
+            accumulator: ScrollAccumulator::with_policy(policy),
+            ..Self::default()
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.accumulator.reset();
+        self.owner = None;
+        self.hovered = None;
+        self.last_update = None;
+        self.precise = false;
+        self.pixel_units = None;
+        self.explicit_active = false;
+    }
+
+    pub fn cancel(&mut self, now: Instant) {
+        self.accumulator.cancel(now);
+        self.explicit_active = false;
+        self.last_update = Some(now);
+    }
+
+    pub fn set_policy(&mut self, policy: ScrollPolicy) {
+        if self.accumulator.policy != policy.valid() {
+            self.accumulator.set_policy(policy);
+            self.reset();
+        }
+    }
+
+    /// Call for actual pointer movement, not for layout changes underneath it.
+    pub fn hover(&mut self, id: Option<NodeId>, edge: BarEdge, now: Instant) {
+        let next = id.map(|id| (id, edge));
+        if self.hovered != next || next.is_none() {
+            self.accumulator.discard_partial();
+            if self.precise && next.map(|(id, edge)| (scroll_group(id), edge)) != self.owner {
+                self.cancel(now);
+            }
+            self.hovered = next;
+        }
+    }
+
+    pub fn step(
+        &mut self,
+        id: NodeId,
+        edge: BarEdge,
+        delta: ScrollDelta,
+        phase: ScrollPhase,
+        now: Instant,
+    ) -> Option<PointerAction> {
+        let target = (scroll_group(id), edge);
+        let (x, y, pixels) = match delta {
+            ScrollDelta::Pixels { x, y } => (x, y, true),
+            ScrollDelta::Lines { x, y } => (x, y, false),
+        };
+        if !x.is_finite() || !y.is_finite() {
+            self.reset();
+            return None;
+        }
+        let expired = !self.explicit_active
+            && self.last_update.is_none_or(|last| {
+                now.checked_duration_since(last)
+                    .is_none_or(|idle| idle >= self.accumulator.policy.idle)
+            });
+        if phase == ScrollPhase::Started || expired || self.pixel_units != Some(pixels) {
+            self.reset();
+        }
+        self.pixel_units = Some(pixels);
+        self.explicit_active |= phase == ScrollPhase::Started;
+        self.last_update = Some(now);
+        self.precise |= self.explicit_active
+            || match delta {
+                ScrollDelta::Pixels { .. } => true,
+                ScrollDelta::Lines { x, y } => x.fract().abs() > 1e-6 || y.fract().abs() > 1e-6,
+            };
+        if matches!(phase, ScrollPhase::Ended | ScrollPhase::Cancelled) {
+            self.explicit_active = false;
+        }
+        // The wrapper owns gesture lifetime. Once fenced, do not let the
+        // inner accumulator's idle fallback rearm a paused explicit stream.
+        if self.accumulator.finished {
+            return None;
+        }
+        if self.precise && self.owner.is_some_and(|owner| owner != target) {
+            // A precision gesture belongs to its initial control even if a
+            // popup, reflow or pointer movement puts another control below it.
+            self.accumulator.cancel(now);
+            return None;
+        }
+        self.owner = Some(target);
+        self.accumulator
+            .step(
+                target,
+                delta,
+                phase,
+                match id {
+                    NodeId::Audio | NodeId::Brightness => ScrollMode::Adjustment,
+                    _ => ScrollMode::Navigation,
+                },
+                !edge.is_vertical(),
+                now,
+            )
+            .map(|step| match step {
+                ScrollStep::Up => PointerAction::ScrollUp,
+                ScrollStep::Down => PointerAction::ScrollDown,
+            })
+    }
+}
+
+fn scroll_group(id: NodeId) -> NodeId {
+    match id {
+        NodeId::Tag(_) | NodeId::WorkspaceOverflow => NodeId::WorkspaceOverflow,
+        id => id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolkit_navigation_survives_reflow_without_momentum_changing_another_control() {
+        let now = Instant::now();
+        let mut scroll = ControlScroll::default();
+        let tag = |index| NodeId::Tag(crate::TagId::new(index).unwrap());
+        let half = ScrollDelta::Pixels { x: 0.0, y: 20.0 };
+        assert_eq!(
+            scroll.step(tag(0), BarEdge::Top, half, ScrollPhase::Started, now),
+            None
+        );
+        assert_eq!(
+            scroll.step(tag(0), BarEdge::Top, half, ScrollPhase::Moved, now),
+            Some(PointerAction::ScrollUp)
+        );
+        // The WM snapshot replaces the tag under a stationary cursor.
+        assert_eq!(
+            scroll.step(tag(1), BarEdge::Top, half, ScrollPhase::Moved, now),
+            None
+        );
+        // A layout change exposes brightness; remaining momentum cannot dim it.
+        let adjustment = ScrollDelta::Pixels { x: 0.0, y: -16.0 };
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Top,
+                adjustment,
+                ScrollPhase::Moved,
+                now
+            ),
+            None
+        );
+        let paused = now + Duration::from_secs(2);
+        assert_eq!(
+            scroll.step(tag(0), BarEdge::Top, half, ScrollPhase::Moved, paused),
+            None
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Top,
+                adjustment,
+                ScrollPhase::Started,
+                paused
+            ),
+            Some(PointerAction::ScrollDown)
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Top,
+                adjustment,
+                ScrollPhase::Moved,
+                paused
+            ),
+            Some(PointerAction::ScrollDown)
+        );
+    }
+
+    #[test]
+    fn toolkit_zero_cancel_and_pointer_leave_do_not_adjust_settings() {
+        let now = Instant::now();
+        let mut scroll = ControlScroll::default();
+        let partial = ScrollDelta::Pixels { x: 0.0, y: 12.0 };
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Right,
+                partial,
+                ScrollPhase::Moved,
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Right,
+                ScrollDelta::Pixels { x: 0.0, y: 0.0 },
+                ScrollPhase::Moved,
+                now
+            ),
+            None
+        );
+        scroll.hover(None, BarEdge::Right, now);
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Right,
+                partial,
+                ScrollPhase::Moved,
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Right,
+                partial,
+                ScrollPhase::Started,
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Right,
+                partial,
+                ScrollPhase::Cancelled,
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Right,
+                partial,
+                ScrollPhase::Moved,
+                now
+            ),
+            None
+        );
+        // Switching back to a real mouse wheel starts its own unit stream.
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Right,
+                ScrollDelta::Lines { x: 0.0, y: 1.0 },
+                ScrollPhase::Moved,
+                now
+            ),
+            Some(PointerAction::ScrollUp)
+        );
+    }
+
+    #[test]
+    fn custom_sensitivity_survives_resets_and_rearms_at_its_own_idle_boundary() {
+        let policy = ScrollPolicy {
+            navigation_pixels: 60.0,
+            adjustment_pixels: 24.0,
+            idle: Duration::from_millis(400),
+        };
+        let mut scroll = ScrollAccumulator::with_policy(policy);
+        let now = Instant::now();
+        let half = ScrollDelta::Pixels { x: 0.0, y: 30.0 };
+        assert_eq!(nav(&mut scroll, half, ScrollPhase::Moved, now), None);
+        assert_eq!(
+            nav(&mut scroll, half, ScrollPhase::Moved, now),
+            Some(ScrollStep::Up)
+        );
+        assert_eq!(
+            nav(
+                &mut scroll,
+                half,
+                ScrollPhase::Moved,
+                now + Duration::from_millis(300)
+            ),
+            None
+        );
+        assert_eq!(
+            nav(
+                &mut scroll,
+                half,
+                ScrollPhase::Moved,
+                now + Duration::from_millis(700)
+            ),
+            None
+        );
+        assert_eq!(
+            nav(
+                &mut scroll,
+                half,
+                ScrollPhase::Moved,
+                now + Duration::from_millis(700)
+            ),
+            Some(ScrollStep::Up)
+        );
+        scroll.reset();
+        assert_eq!(nav(&mut scroll, half, ScrollPhase::Moved, now), None);
+        scroll.set_policy(ScrollPolicy {
+            navigation_pixels: f64::NAN,
+            adjustment_pixels: 0.0,
+            idle: Duration::ZERO,
+        });
+        assert_eq!(
+            nav(
+                &mut scroll,
+                ScrollDelta::Pixels { x: 0.0, y: 40.0 },
+                ScrollPhase::Moved,
+                now
+            ),
+            Some(ScrollStep::Up)
+        );
+    }
+
+    #[test]
+    fn an_explicit_gesture_can_pause_without_navigating_twice() {
+        let now = Instant::now();
+        let paused = now + Duration::from_secs(2);
+        let delta = ScrollDelta::Pixels { x: 0.0, y: 40.0 };
+        for end in [ScrollPhase::Ended, ScrollPhase::Cancelled] {
+            let mut scroll = ScrollAccumulator::default();
+            assert_eq!(
+                nav(&mut scroll, delta, ScrollPhase::Started, now),
+                Some(ScrollStep::Up)
+            );
+            assert_eq!(nav(&mut scroll, delta, ScrollPhase::Moved, paused), None);
+            assert_eq!(nav(&mut scroll, delta, end, paused), None);
+            assert_eq!(nav(&mut scroll, delta, ScrollPhase::Moved, paused), None);
+            assert_eq!(
+                nav(
+                    &mut scroll,
+                    delta,
+                    ScrollPhase::Moved,
+                    paused + SCROLL_GESTURE_IDLE
+                ),
+                Some(ScrollStep::Up)
+            );
+
+            let mut controls = ControlScroll::default();
+            let id = NodeId::WorkspaceOverflow;
+            assert_eq!(
+                controls.step(id, BarEdge::Top, delta, ScrollPhase::Started, now),
+                Some(PointerAction::ScrollUp)
+            );
+            assert_eq!(
+                controls.step(id, BarEdge::Top, delta, ScrollPhase::Moved, paused),
+                None
+            );
+            assert_eq!(controls.step(id, BarEdge::Top, delta, end, paused), None);
+            assert_eq!(
+                controls.step(
+                    id,
+                    BarEdge::Top,
+                    delta,
+                    ScrollPhase::Moved,
+                    paused + SCROLL_GESTURE_IDLE
+                ),
+                Some(PointerAction::ScrollUp)
+            );
+        }
+    }
+
+    #[test]
+    fn a_terminal_packet_after_reflow_releases_the_explicit_owner() {
+        let now = Instant::now();
+        let delta = ScrollDelta::Pixels { x: 0.0, y: 40.0 };
+        for end in [ScrollPhase::Ended, ScrollPhase::Cancelled] {
+            let mut controls = ControlScroll::default();
+            assert_eq!(
+                controls.step(
+                    NodeId::WorkspaceOverflow,
+                    BarEdge::Top,
+                    delta,
+                    ScrollPhase::Started,
+                    now,
+                ),
+                Some(PointerAction::ScrollUp)
+            );
+            // Reflow delivers the stop to a different control, which must
+            // neither inherit the gesture nor retain its explicit phase lock.
+            assert_eq!(
+                controls.step(NodeId::Audio, BarEdge::Top, delta, end, now),
+                None
+            );
+            assert_eq!(
+                controls.step(
+                    NodeId::Audio,
+                    BarEdge::Top,
+                    delta,
+                    ScrollPhase::Moved,
+                    now + SCROLL_GESTURE_IDLE,
+                ),
+                Some(PointerAction::ScrollUp)
+            );
+        }
+    }
+
+    #[test]
+    fn explicitly_begun_line_gestures_do_not_become_repeated_wheel_notches() {
+        let now = Instant::now();
+        let mut scroll = ScrollAccumulator::default();
+        let delta = ScrollDelta::Lines { x: 0.0, y: 1.0 };
+        assert_eq!(
+            nav(&mut scroll, delta, ScrollPhase::Started, now),
+            Some(ScrollStep::Up)
+        );
+        assert_eq!(nav(&mut scroll, delta, ScrollPhase::Moved, now), None);
+        assert_eq!(
+            nav(&mut scroll, delta, ScrollPhase::Started, now),
+            Some(ScrollStep::Up)
+        );
+    }
 
     fn nav(
         scroll: &mut ScrollAccumulator<u8>,

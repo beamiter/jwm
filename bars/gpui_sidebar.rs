@@ -7,12 +7,51 @@ use gpui::{
     Context, MouseButton, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Window, div,
     px,
 };
-use xbar_core::presentation::{NodeId, Palette, PresentationConfig, VisualState};
+use xbar_core::presentation::{NodeId, Palette, PointerAction, PresentationConfig, VisualState};
 use xbar_core::tag_contrast::TagPalette;
 use xbar_core::{
-    BarSnapshot, ControlSpec, DockBridge, DockItemBinding, PresentationProjector, ThemeMode,
-    UserAction,
+    BarEdge, BarSnapshot, ControlScroll, ControlSpec, DockBridge, DockItemBinding,
+    PresentationProjector, ScrollPhase, ThemeMode, UserAction,
 };
+
+pub trait ScrollOwner {
+    fn control_scroll(&mut self) -> &mut ControlScroll;
+    fn scroll_edge(&self) -> BarEdge;
+}
+
+pub fn hover_control<T: ScrollOwner>(this: &mut T, id: NodeId, hovered: bool) {
+    let edge = this.scroll_edge();
+    this.control_scroll()
+        .hover(hovered.then_some(id), edge, std::time::Instant::now());
+}
+
+/// GPUI deltas are already logical pixels. Preserve their units and both axes.
+pub fn scroll_action<T: ScrollOwner>(
+    this: &mut T,
+    id: NodeId,
+    event: &ScrollWheelEvent,
+) -> Option<PointerAction> {
+    let delta = match event.delta {
+        ScrollDelta::Pixels(delta) => xbar_core::ScrollDelta::Pixels {
+            x: f64::from(f32::from(delta.x)),
+            y: f64::from(f32::from(delta.y)),
+        },
+        ScrollDelta::Lines(delta) => xbar_core::ScrollDelta::Lines {
+            x: f64::from(delta.x),
+            y: f64::from(delta.y),
+        },
+    };
+    #[allow(unreachable_patterns)]
+    let phase = match event.touch_phase {
+        gpui::TouchPhase::Started => ScrollPhase::Started,
+        gpui::TouchPhase::Moved => ScrollPhase::Moved,
+        gpui::TouchPhase::Ended => ScrollPhase::Ended,
+        _ => ScrollPhase::Cancelled,
+    };
+    let edge = this.scroll_edge();
+    this.control_scroll()
+        .step(id, edge, delta, phase, std::time::Instant::now())
+}
 
 struct ControlTooltip(SharedString);
 
@@ -38,7 +77,7 @@ fn color(value: xbar_core::presentation::Rgba) -> Rgba {
     }
 }
 
-fn cell<T: 'static>(
+fn cell<T: ScrollOwner + 'static>(
     spec: ControlSpec,
     tags: TagPalette,
     palette: Palette,
@@ -91,7 +130,15 @@ fn cell<T: 'static>(
         .overflow_hidden()
         .child(label)
         .tooltip(move |_, cx| cx.new(|_| ControlTooltip(title.clone())).into())
-        .hover(move |style| style.bg(hovered));
+        .hover(move |style| style.bg(hovered))
+        .on_hover(cx.listener(move |this, hovered: &bool, _, _| {
+            let edge = this.scroll_edge();
+            this.control_scroll().hover(
+                hovered.then_some(spec.id),
+                edge,
+                std::time::Instant::now(),
+            );
+        }));
     if is_tag && spec.state.occupied {
         item = item.child(
             div()
@@ -110,6 +157,7 @@ fn cell<T: 'static>(
                 .tab_index(0)
                 .focus(|style| style.border_color(gpui::rgb(0x66b3ff)))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    this.control_scroll().reset();
                     dispatch(this, action);
                     cx.notify();
                 }))
@@ -131,23 +179,22 @@ fn cell<T: 'static>(
             item = item.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, _, _, cx| {
+                    this.control_scroll().reset();
                     dispatch(this, action);
                     cx.notify();
                 }),
             );
         }
         item = item.on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
-            let delta = match event.delta {
-                ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                ScrollDelta::Lines(delta) => delta.y,
-            };
-            let action = if delta > 0. {
-                bindings.scroll_up
-            } else if delta < 0. {
-                bindings.scroll_down
-            } else {
-                None
-            };
+            if bindings.scroll_up.is_none() && bindings.scroll_down.is_none() {
+                return;
+            }
+            cx.stop_propagation();
+            let action = scroll_action(this, spec.id, event).and_then(|input| match input {
+                PointerAction::ScrollUp => bindings.scroll_up,
+                PointerAction::ScrollDown => bindings.scroll_down,
+                _ => None,
+            });
             if let Some(action) = action {
                 dispatch(this, action);
                 cx.stop_propagation();
@@ -158,7 +205,7 @@ fn cell<T: 'static>(
     item
 }
 
-pub fn render<T: 'static, D: IntoElement>(
+pub fn render<T: ScrollOwner + 'static, D: IntoElement>(
     snapshot: &BarSnapshot,
     config: &PresentationConfig,
     background: Rgba,

@@ -455,6 +455,9 @@ impl Jwm {
                     .map(str::to_string),
                 query_selected: self.system_ui_query_replace,
                 scroll_drag_t: self.system_ui_scroll_drag_t,
+                list_viewport: parts
+                    .scroll
+                    .and_then(|_| self.features.system_ui.list_viewport()),
             }
         }));
         backend.compositor_force_full_redraw();
@@ -6283,6 +6286,7 @@ mod tests {
 
     fn repeat_test_launcher() -> crate::jwm::features::SystemUiState {
         crate::jwm::features::SystemUiState::Launcher {
+            list_scroll: None,
             query: String::new(),
             entries: std::sync::Arc::from([]),
             windows: Vec::new(),
@@ -6596,6 +6600,7 @@ mod tests {
 
         jwm.features.system_ui = SystemUiState::Info {
             title: "Repeat navigation".into(),
+            list_scroll: None,
             lines: (0..40).map(|index| format!("Row {index}")).collect(),
             query: String::new(),
             matches: (0..40).collect(),

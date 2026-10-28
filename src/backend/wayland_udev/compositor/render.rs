@@ -3311,7 +3311,11 @@ impl WaylandCompositor {
 
         // Determine if anything needs rendering
         let any_animating = self.has_active_animations()
-            || self.transition_active
+            || (self.transition_active
+                && self
+                    .workspace_swipe
+                    .as_ref()
+                    .is_none_or(|swipe| swipe.is_settling()))
             || focus_highlight_active
             || motion_trail_active
             || attention_active
@@ -5283,6 +5287,7 @@ impl WaylandCompositor {
         self.dirty_region_tracker.clear();
         self.content_dirty_ids.clear();
         self.prev_focused = focused;
+        self.workspace_swipe_source_valid = !self.transition_active;
         // Publish what this frame actually drew into the persistent FBO chain:
         // the KMS assembly skips re-drawing exactly these classes, and direct
         // scanout stays blocked while the output texture carries them. A frame
@@ -6449,6 +6454,34 @@ impl WaylandCompositor {
         }
     }
 
+    unsafe fn sysui_apply_list_clip(
+        &self,
+        gl: &ffi::Gles2,
+        clip: Option<[f32; 4]>,
+        previous: [i32; 4],
+        previous_enabled: bool,
+    ) {
+        unsafe {
+            if let Some(clip) = clip {
+                let [x, y, w, h] = panel::list_scissor(
+                    clip,
+                    self.screen_w,
+                    self.screen_h,
+                    previous_enabled.then_some(previous),
+                );
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(x, y, w, h);
+            } else {
+                gl.Scissor(previous[0], previous[1], previous[2], previous[3]);
+                if previous_enabled {
+                    gl.Enable(ffi::SCISSOR_TEST);
+                } else {
+                    gl.Disable(ffi::SCISSOR_TEST);
+                }
+            }
+        }
+    }
+
     pub(super) unsafe fn sysui_fill_rounded(
         &self,
         gl: &ffi::Gles2,
@@ -7517,7 +7550,7 @@ impl WaylandCompositor {
         let radius = ui.panel_radius;
         let [viewport_x, viewport_y, viewport_w, viewport_h] = viewport;
 
-        let sizes = panel::SectionSizes {
+        let raw_sizes = panel::SectionSizes {
             title: (title_w, title_h),
             query: (query_w, query_h),
             items: (items_w, items_h),
@@ -7530,6 +7563,8 @@ impl WaylandCompositor {
                 0.0
             },
         };
+        let sizes =
+            panel::visible_section_sizes(raw_sizes, overlay.items.len(), overlay.list_viewport);
         // The lock card centres on its own backdrop and has nothing to jitter
         // against, so it hugs its content instead of carrying a floor.
         let width_floor = if overlay.locked {
@@ -7691,9 +7726,9 @@ impl WaylandCompositor {
                 scene_linear,
             );
 
-            let layout = panel::contents(
+            let layout = panel::contents_scrolled(
                 [x, y, panel_w, panel_h],
-                &sizes,
+                &raw_sizes,
                 overlay.items.len(),
                 overlay.selected,
                 overlay.scroll.map(|s| panel::Scroll {
@@ -7701,18 +7736,20 @@ impl WaylandCompositor {
                     visible: s.visible,
                     total: s.total,
                 }),
+                overlay.list_viewport,
             )
             .with_scroll_drag_t(overlay.scroll_drag_t);
             let hover_row = self
                 .system_ui_hovered
                 .filter(|row| overlay.selected != Some(*row));
             let hover_selection = hover_row.and_then(|row| {
-                panel::contents(
+                panel::contents_scrolled(
                     [x, y, panel_w, panel_h],
-                    &sizes,
+                    &raw_sizes,
                     overlay.items.len(),
                     Some(row),
                     None,
+                    overlay.list_viewport,
                 )
                 .selection
             });
@@ -7754,6 +7791,17 @@ impl WaylandCompositor {
                     ),
                 );
             }
+            // A spring may cross the viewport edge between two clipped row
+            // targets. Clip the actual highlight draw as well as its target.
+            let highlight_scissor_enabled = gl.IsEnabled(ffi::SCISSOR_TEST) != ffi::FALSE as u8;
+            let mut highlight_scissor = [0; 4];
+            gl.GetIntegerv(ffi::SCISSOR_BOX, highlight_scissor.as_mut_ptr());
+            self.sysui_apply_list_clip(
+                gl,
+                layout.list_clip,
+                highlight_scissor,
+                highlight_scissor_enabled,
+            );
             // The quiet cue eases in where the pointer lands instead of
             // popping on beside the springing keyboard pill; the hover
             // leaving clears it the same frame (JWM draws no fade-outs).
@@ -7791,7 +7839,10 @@ impl WaylandCompositor {
                 let pill = self.system_ui_highlight.advance_with_motion(
                     std::time::Instant::now(),
                     target,
-                    motion_enabled,
+                    motion_enabled
+                        && overlay
+                            .list_viewport
+                            .is_none_or(|view| view.fraction == 0.0),
                 );
                 if self.system_ui_highlight.animating(target) {
                     self.needs_render = true;
@@ -7811,6 +7862,7 @@ impl WaylandCompositor {
                     ],
                 );
             }
+            self.sysui_apply_list_clip(gl, None, highlight_scissor, highlight_scissor_enabled);
             if let Some([dx, dy, dw, dh]) = layout.divider {
                 // A hairline is all the footer needs to stop reading as one
                 // more row of the list.
@@ -7923,6 +7975,9 @@ impl WaylandCompositor {
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, content_a);
             gl.ActiveTexture(ffi::TEXTURE0);
+            let previous_scissor_enabled = gl.IsEnabled(ffi::SCISSOR_TEST) != ffi::FALSE as u8;
+            let mut previous_scissor = [0; 4];
+            gl.GetIntegerv(ffi::SCISSOR_BOX, previous_scissor.as_mut_ptr());
             let positions = [
                 Some((layout.title[0], layout.title[1])),
                 query_text_pos,
@@ -7933,17 +7988,31 @@ impl WaylandCompositor {
                 let (Some((tex, w, h)), Some((tx, ty))) = (self.sysui_textures[slot], pos) else {
                     continue;
                 };
-                gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
-                gl.BindTexture(ffi::TEXTURE_2D, tex);
-                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+                let passes = if slot == 2 {
+                    layout.texture_passes()
+                } else {
+                    vec![([tx, ty], None)]
+                };
+                for ([px, py], clip) in passes {
+                    self.sysui_apply_list_clip(
+                        gl,
+                        clip,
+                        previous_scissor,
+                        previous_scissor_enabled,
+                    );
+                    gl.Uniform4f(text_rect, px, py, w as f32, h as f32);
+                    gl.BindTexture(ffi::TEXTURE_2D, tex);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+                }
             }
+            self.sysui_apply_list_clip(gl, None, previous_scissor, previous_scissor_enabled);
             // Row icons of the launcher and the switcher, in the same pass:
             // same program, same content alpha as the text. A row drawn here
             // has already lost its generic glyph from the rasterized text
             // (the poll re-rasterized it when the texture landed), so glyph
             // and icon never show side by side; a row still decoding — or
             // one that will never resolve — keeps the glyph placeholder.
-            if let (Some(icons), Some(items_pos)) =
+            if let (Some(icons), Some(_items_pos)) =
                 (self.system_ui_row_icons.as_deref(), layout.items)
                 && layout.row_height > 0.0
             {
@@ -7954,8 +8023,17 @@ impl WaylandCompositor {
                     let Some(&(tex, img_w, img_h)) = self.system_ui_row_icon_cache.get(path) else {
                         continue;
                     };
+                    let Some((origin, clip)) = layout.row_origin(row) else {
+                        continue;
+                    };
+                    self.sysui_apply_list_clip(
+                        gl,
+                        clip,
+                        previous_scissor,
+                        previous_scissor_enabled,
+                    );
                     let frame =
-                        panel::row_icon_frame(items_pos, layout.row_height, row, layout.row_icons);
+                        panel::row_icon_frame(origin, layout.row_height, row, layout.row_icons);
                     let Some([ix, iy, iw, ih]) =
                         panel::letterbox(frame, img_w as f32, img_h as f32)
                     else {
@@ -7966,6 +8044,7 @@ impl WaylandCompositor {
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
+            self.sysui_apply_list_clip(gl, None, previous_scissor, previous_scissor_enabled);
             if overlay.query.is_some() {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

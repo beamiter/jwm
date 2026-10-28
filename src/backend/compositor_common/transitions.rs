@@ -1,5 +1,53 @@
 use std::time::{Duration, Instant};
 
+pub const WORKSPACE_SWIPE_SETTLE: Duration = Duration::from_millis(180);
+
+/// Interactive progress has no wall-clock animation while fingers are down.
+/// Only release starts a bounded ease-out, including a reversible return to 0.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceSwipeAnimation {
+    progress: f32,
+    settle: Option<(Instant, f32)>,
+}
+
+impl Default for WorkspaceSwipeAnimation {
+    fn default() -> Self {
+        Self {
+            progress: 0.0,
+            settle: None,
+        }
+    }
+}
+
+impl WorkspaceSwipeAnimation {
+    pub fn is_settling(&self) -> bool {
+        self.settle.is_some()
+    }
+
+    pub fn update(&mut self, progress: f32) {
+        if progress.is_finite() && self.settle.is_none() {
+            self.progress = progress.clamp(0.0, 0.98);
+        }
+    }
+
+    pub fn release(&mut self, commit: bool, now: Instant) {
+        self.settle = Some((now, if commit { 1.0 } else { 0.0 }));
+    }
+
+    pub fn sample(&self, now: Instant) -> Option<f32> {
+        let Some((start, target)) = self.settle else {
+            return Some(self.progress);
+        };
+        let t = now.saturating_duration_since(start).as_secs_f32()
+            / WORKSPACE_SWIPE_SETTLE.as_secs_f32();
+        if t >= 1.0 {
+            return None;
+        }
+        let eased = 1.0 - (1.0 - t).powi(3);
+        Some(self.progress + (target - self.progress) * eased)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransitionMode {
     None,
@@ -162,6 +210,24 @@ fn smootherstep(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_workspace_progress_waits_for_fingers_then_settles_in_either_direction() {
+        let now = Instant::now();
+        let mut swipe = WorkspaceSwipeAnimation::default();
+        swipe.update(0.6);
+        assert_eq!(swipe.sample(now + Duration::from_secs(30)), Some(0.6));
+        swipe.update(f32::NAN);
+        assert_eq!(swipe.sample(now), Some(0.6));
+        let mut commit = swipe;
+        commit.release(true, now);
+        swipe.release(false, now);
+        assert_eq!(commit.sample(now), Some(0.6));
+        assert!(commit.sample(now + WORKSPACE_SWIPE_SETTLE / 2).unwrap() > 0.6);
+        assert!(swipe.sample(now + WORKSPACE_SWIPE_SETTLE / 2).unwrap() < 0.6);
+        assert_eq!(commit.sample(now + WORKSPACE_SWIPE_SETTLE), None);
+        assert_eq!(swipe.sample(now + WORKSPACE_SWIPE_SETTLE), None);
+    }
 
     const MODES: [TransitionMode; 12] = [
         TransitionMode::None,

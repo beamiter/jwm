@@ -48,6 +48,7 @@ pub mod system_controls;
 pub mod system_ui;
 pub mod tags_overview;
 pub mod toggles;
+pub(crate) mod touchpad;
 pub mod wallpaper;
 pub mod wallpaper_colors;
 pub(crate) mod wallpaper_controls;
@@ -130,6 +131,8 @@ pub(crate) struct PendingRecordingStart {
 /// 所有特性的组合状态
 #[derive(Debug, Default)]
 pub struct FeatureStates {
+    pub(crate) pointer_scroll: crate::jwm::scroll_input::WmScrollState,
+    pub touchpad: touchpad::TouchpadGestures,
     /// Runtime compositor hand-off diagnostics retained even while the
     /// renderer is absent.
     pub compositor_transition: CompositorTransitionState,

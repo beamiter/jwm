@@ -188,6 +188,11 @@ bridge are left alone; staged release installs never touch the live session.
 
 ## Control JWM
 
+Native Wayland touchpad settings and per-device diagnostics are documented in
+[touchpad input](docs/touchpad-input.md); use `jwm-tool msg get_inputs` to see
+requested, supported and effective settings. Workspace swipe behavior is
+documented in [touchpad gestures](docs/touchpad-gestures.md).
+
 `jwm-tool` sends typed JSON commands and queries over JWM's private Unix socket:
 
 ```bash

@@ -23,6 +23,7 @@ pub mod rules;
 pub(crate) mod scratchpad_animation;
 pub(crate) mod scratchpad_handoff;
 pub(crate) mod scratchpad_pending;
+pub(crate) mod scroll_input;
 pub mod session;
 pub(crate) mod shortcut_passthrough;
 pub mod stacking;

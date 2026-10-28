@@ -626,6 +626,8 @@ where
     presented_scene_status: PresentedSceneStatus,
     /// When Some, a slide transition is in progress.
     transition_start: Option<std::time::Instant>,
+    workspace_swipe:
+        Option<crate::backend::compositor_common::transitions::WorkspaceSwipeAnimation>,
     /// Duration of the slide transition.
     transition_duration: std::time::Duration,
     /// +1 = forward (old scene slides left), -1 = backward (old scene slides right).

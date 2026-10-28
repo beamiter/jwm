@@ -19,7 +19,7 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::backend::api::BackendEvent;
 use crate::backend::gesture_status::{RuntimeStatus, change_status};
-use crate::backend::gesture_swipe::GestureSwipeTracker;
+use crate::backend::gesture_swipe::{GestureSwipeTracker, SwipeInput, next_swipe_id};
 #[cfg(test)]
 use crate::config::gesture_swipe_signature as config_signature;
 use crate::config::{CONFIG, GestureSwipeConfig};
@@ -35,6 +35,7 @@ const POLL_BUDGET: usize = 128;
 type GestureResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct ActiveSwipe {
+    id: u64,
     source: u16,
     begin_time: u32,
     config_signature: String,
@@ -146,8 +147,8 @@ impl GestureEventSource {
             return Ok(());
         }
         self.config_signature = signature;
-        self.active.clear();
         self.pending.clear();
+        self.cancel_active();
         let enabled = counts.iter().any(|enabled| *enabled);
         if enabled && !self.grabbed {
             let reply = self
@@ -284,17 +285,39 @@ impl GestureEventSource {
                     }
                     let mut tracker = GestureSwipeTracker::default();
                     tracker.begin(event.detail, true);
+                    let id = next_swipe_id();
+                    let signature = config.gesture_swipe_signature();
+                    if let Some(old) = self.active.remove(&event.deviceid) {
+                        self.pending
+                            .push_back(BackendEvent::GestureSwipe(SwipeInput::End {
+                                id: old.id,
+                                cancelled: true,
+                                time: event.time,
+                            }));
+                    }
                     self.active.insert(
                         event.deviceid,
                         ActiveSwipe {
+                            id,
                             source: event.sourceid,
                             begin_time: event.time,
-                            config_signature: config.gesture_swipe_signature(),
+                            config_signature: signature.clone(),
                             tracker,
                         },
                     );
+                    return Ok(Some(BackendEvent::GestureSwipe(SwipeInput::Begin {
+                        id,
+                        fingers: event.detail,
+                        config_signature: signature,
+                    })));
                 } else {
-                    self.active.remove(&event.deviceid);
+                    if let Some(old) = self.active.remove(&event.deviceid) {
+                        return Ok(Some(BackendEvent::GestureSwipe(SwipeInput::End {
+                            id: old.id,
+                            cancelled: true,
+                            time: event.time,
+                        })));
+                    }
                 }
             }
             Event::XinputGestureSwipeUpdate(event) => {
@@ -305,9 +328,12 @@ impl GestureEventSource {
                     && active.source == event.sourceid
                     && active.tracker.fingers == event.detail
                 {
-                    active
-                        .tracker
-                        .update(fixed_to_f64(event.delta_x), fixed_to_f64(event.delta_y));
+                    return Ok(Some(BackendEvent::GestureSwipe(SwipeInput::Update {
+                        id: active.id,
+                        dx: fixed_to_f64(event.delta_x),
+                        dy: fixed_to_f64(event.delta_y),
+                        time: event.time,
+                    })));
                 }
             }
             Event::XinputGestureSwipeEnd(event) => {
@@ -317,32 +343,22 @@ impl GestureEventSource {
                 // A replayed Begin produces an End but owns no tracker.
                 if self.active.get(&event.deviceid).is_some_and(|active| {
                     active.source == event.sourceid && active.tracker.fingers == event.detail
-                }) && let Some(mut active) = self.active.remove(&event.deviceid)
+                }) && let Some(active) = self.active.remove(&event.deviceid)
                 {
                     let config = CONFIG.load();
-                    let behavior = config.behavior();
                     let cancelled = u32::from(event.flags) & 1 != 0
                         || active.config_signature != config.gesture_swipe_signature();
-                    if let Some((fingers, direction)) = active
-                        .tracker
-                        .finish(cancelled, behavior.gesture_swipe_threshold)
-                        && behavior.gesture_swipe.iter().any(|binding| {
-                            binding.fingers == fingers
-                                && binding.direction.eq_ignore_ascii_case(direction)
-                        })
-                    {
-                        return Ok(Some(BackendEvent::GestureSwipeAction {
-                            fingers,
-                            direction,
-                            config_signature: active.config_signature.clone(),
-                        }));
-                    }
+                    return Ok(Some(BackendEvent::GestureSwipe(SwipeInput::End {
+                        id: active.id,
+                        cancelled,
+                        time: event.time,
+                    })));
                 }
             }
             // Device removal, reassignment and capability changes invalidate
             // an in-progress sequence. A subsequent Begin establishes new state.
             Event::XinputHierarchy(_) | Event::XinputDeviceChanged(_) => {
-                self.active.clear();
+                self.cancel_active();
                 self.devices_dirty = true;
             }
             Event::Error(error) => {
@@ -384,8 +400,8 @@ impl GestureEventSource {
             return;
         }
         self.failed = true;
-        self.active.clear();
         self.pending.clear();
+        self.cancel_active();
         // Disconnect the server immediately to release a possibly frozen grab,
         // but retain ownership of the fd until calloop has unregistered it.
         // SAFETY: the connection owns this live socket throughout this call.
@@ -398,6 +414,17 @@ impl GestureEventSource {
             status.reason = Some(error.to_string());
         });
         log::warn!("Disabling X11 touchpad swipe input: {error}");
+    }
+
+    fn cancel_active(&mut self) {
+        for (_, active) in self.active.drain() {
+            self.pending
+                .push_back(BackendEvent::GestureSwipe(SwipeInput::End {
+                    id: active.id,
+                    cancelled: true,
+                    time: 0,
+                }));
+        }
     }
 }
 
@@ -453,11 +480,14 @@ impl EventSource for GestureEventSource {
         F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
     {
         if self.failed {
+            while let Some(event) = self.pending.pop_front() {
+                callback(event, &mut ());
+            }
             return Ok(PostAction::Remove);
         }
         if let Err(error) = self.sync_config() {
             self.fail_open(error);
-            return Ok(PostAction::Remove);
+            return Ok(PostAction::Continue);
         }
         for _ in 0..POLL_BUDGET {
             if let Some(event) = self.pending.pop_front() {
@@ -470,19 +500,19 @@ impl EventSource for GestureEventSource {
                     Ok(None) => {}
                     Err(error) => {
                         self.fail_open(error);
-                        return Ok(PostAction::Remove);
+                        return Ok(PostAction::Continue);
                     }
                 },
                 Ok(None) => {
                     if let Err(error) = self.refresh_devices() {
                         self.fail_open(error);
-                        return Ok(PostAction::Remove);
+                        return Ok(PostAction::Continue);
                     }
                     break;
                 }
                 Err(error) => {
                     self.fail_open(error);
-                    return Ok(PostAction::Remove);
+                    return Ok(PostAction::Continue);
                 }
             }
         }

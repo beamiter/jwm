@@ -950,6 +950,8 @@ pub fn logical_bar_height(physical_height: u32, scale_factor: f64) -> Option<f32
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PresentationConfig {
+    /// Wheel/touchpad sensitivity shared by the native toolkit adapters.
+    pub scroll: crate::ScrollPolicy,
     /// Output edge. Sidebars use upright, compact cells along the vertical axis.
     pub edge: crate::placement::BarEdge,
     /// Logical thickness: height on top/bottom, width on left/right.
@@ -1017,6 +1019,7 @@ impl Default for PresentationConfig {
     fn default() -> Self {
         Self {
             edge: crate::placement::BarEdge::Top,
+            scroll: crate::ScrollPolicy::default(),
             bar_height: 42.0,
             physical_thickness: None,
             horizontal_padding: 10.0,

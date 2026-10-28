@@ -6,6 +6,7 @@ const root = document.documentElement;
 root.dataset.barEdge = edge;
 root.style.setProperty('--xbar-thickness', `${thickness}px`);
 const vertical = edge === 'left' || edge === 'right';
+const scrollPolicy = typeof configuredScroll === 'object' ? configuredScroll : { adjustment_pixels: 16, idle_ms: 250 };
 const legacyButtons = '.emoji-button, .layout-toggle, .layout-option, .volume-pill, .brightness-pill, ' +
   '.shell-pill, .shell-hub-pill, .shell-route, .screenshot-pill, .time-pill, [data-window-id]';
 const controlSelector = 'button, [role="button"]';
@@ -320,19 +321,19 @@ const wheel = event => {
     return;
   }
   const now = performance.now();
-  let scroller = wheelGesture && now - wheelGesture.time < 250 &&
+  let scroller = wheelGesture && now - wheelGesture.time < scrollPolicy.idle_ms &&
     wheelGesture.scroller.isConnected && bar.contains(wheelGesture.scroller) ? wheelGesture.scroller : null;
   if (!scroller && metricGesture && available(metric)) {
     event.preventDefault();
     const sign = Math.sign(event.deltaY);
     const unit = event.deltaMode;
-    if (!metricWheelGesture || metricWheelGesture.target !== metric || now - metricWheelGesture.time >= 250 ||
+    if (!metricWheelGesture || metricWheelGesture.target !== metric || now - metricWheelGesture.time >= scrollPolicy.idle_ms ||
         metricWheelGesture.sign !== sign || metricWheelGesture.unit !== unit) {
       metricWheelGesture = { target: metric, delta: 0, sign, unit, time: now };
     }
     metricWheelGesture.delta += event.deltaY;
     metricWheelGesture.time = now;
-    const threshold = unit === 0 ? 16 : 1;
+    const threshold = unit === 0 ? scrollPolicy.adjustment_pixels : 1;
     if (Math.abs(metricWheelGesture.delta) < threshold) event.stopImmediatePropagation();
     else {
       // Chromium commonly reports a mouse notch as 100px. At most one

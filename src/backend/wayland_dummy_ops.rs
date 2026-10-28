@@ -469,11 +469,11 @@ mod tests {
             // as an axis event: without this arm it reached neither the
             // clients nor, during a panel grab, the WM.
             let axis_arm = format!("InputEvent::Pointer{}", "Axis");
-            let steps = format!("wheel_{}", "steps");
+            let precision_router = format!("wayland_{}::axis(", "scroll");
             assert!(
-                handler.contains(&axis_arm) && handler.contains(&steps),
-                "{name}: the wheel reaches nobody — the client gets no axis \
-                 frame and a panel grab gets no button 4/5"
+                handler.contains(&axis_arm) && handler.contains(&precision_router),
+                "{name}: host axes must reach the common precision router, \
+                 which preserves client frames and compositor UI scroll packets"
             );
         }
     }

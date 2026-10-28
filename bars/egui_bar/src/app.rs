@@ -17,9 +17,9 @@ use xbar_core::presentation::{
     InteractionState, LayoutEngine, Point, PointerAction, PresentationConfig, Scene, Size,
 };
 use xbar_core::{
-    BarEffect, BarPlacement, BarRuntime, DockReporter, DockReporterInput, DockWindowSpec,
-    ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate,
-    TransportRecoveryConfig, UserAction, dock_wake_delay,
+    BarEffect, BarPlacement, BarRuntime, ControlScroll, DockReporter, DockReporterInput,
+    DockWindowSpec, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeSchedule,
+    RuntimeUpdate, ScrollDelta, ScrollPhase, TransportRecoveryConfig, UserAction, dock_wake_delay,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -46,6 +46,7 @@ pub struct EguiBarApp {
     last_strut_placement: Option<BarPlacement>,
     interaction: InteractionState,
     pressed_pointer_button: Option<egui::PointerButton>,
+    scroll: ControlScroll,
     scene: Scene,
     style: SceneStyle,
     background_opacity: Option<f64>,
@@ -137,6 +138,7 @@ impl EguiBarApp {
             last_strut_placement: Some(initial_placement),
             interaction: InteractionState::default(),
             pressed_pointer_button: None,
+            scroll: ControlScroll::with_policy(config.presentation.scroll),
             scene: Scene {
                 viewport: Size::new(0.0, 0.0),
                 clip: xbar_core::presentation::Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -236,6 +238,9 @@ impl EguiBarApp {
                     pressed,
                     ..
                 } => {
+                    if pressed {
+                        self.scroll.reset();
+                    }
                     let point = Point::new(pos.x - origin.x, pos.y - origin.y);
                     let (button_changed, action) = update_pointer_button(
                         &self.scene,
@@ -248,12 +253,47 @@ impl EguiBarApp {
                     changed |= button_changed;
                     actions.extend(action);
                 }
-                egui::Event::MouseWheel { delta, .. } => {
-                    if let (Some(point), Some(input)) = (
-                        logical,
-                        PointerAction::from_vertical_delta(f64::from(delta.y)),
-                    ) {
-                        actions.extend(self.scene.action_at(point, input));
+                egui::Event::PointerMoved(pos) => {
+                    let point = Point::new(pos.x - origin.x, pos.y - origin.y);
+                    self.scroll.hover(
+                        self.scene.hit_test(point).map(|hit| hit.id),
+                        self.presentation.edge,
+                        Instant::now(),
+                    );
+                }
+                egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
+                    self.scroll.cancel(Instant::now());
+                }
+                egui::Event::MouseWheel { unit, delta, .. } => {
+                    if let Some(hit) = logical
+                        .and_then(|point| self.scene.hit_test(point))
+                        .filter(|hit| hit.scroll_up.is_some() || hit.scroll_down.is_some())
+                    {
+                        let delta = match unit {
+                            egui::MouseWheelUnit::Point => ScrollDelta::Pixels {
+                                x: f64::from(delta.x),
+                                y: f64::from(delta.y),
+                            },
+                            egui::MouseWheelUnit::Line => ScrollDelta::Lines {
+                                x: f64::from(delta.x),
+                                y: f64::from(delta.y),
+                            },
+                            egui::MouseWheelUnit::Page => ScrollDelta::Pixels {
+                                x: f64::from(delta.x * self.scene.viewport.width),
+                                y: f64::from(delta.y * self.scene.viewport.height),
+                            },
+                        };
+                        if let Some(input) = self.scroll.step(
+                            hit.id,
+                            self.presentation.edge,
+                            delta,
+                            ScrollPhase::Moved,
+                            Instant::now(),
+                        ) {
+                            actions.extend(hit.action(input));
+                        }
+                    } else {
+                        self.scroll.cancel(Instant::now());
                     }
                 }
                 _ => {}
@@ -479,6 +519,7 @@ impl eframe::App for EguiBarApp {
 
         let pixels_per_point = ctx.pixels_per_point();
         if pixels_per_point.to_bits() != self.last_pixels_per_point.to_bits() {
+            self.scroll.reset();
             self.last_pixels_per_point = pixels_per_point;
             if let Some(geometry) = self.active_monitor_geometry {
                 self.apply_monitor_geometry(&ctx, geometry);

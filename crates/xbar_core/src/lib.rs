@@ -85,8 +85,8 @@ pub use frontend::{
     SessionOutput, SnapshotCursor, snapshot_changes,
 };
 pub use input::{
-    ADJUSTMENT_SCROLL_PIXELS, NAVIGATION_SCROLL_PIXELS, SCROLL_GESTURE_IDLE, ScrollAccumulator,
-    ScrollDelta, ScrollMode, ScrollPhase, ScrollStep,
+    ADJUSTMENT_SCROLL_PIXELS, ControlScroll, NAVIGATION_SCROLL_PIXELS, SCROLL_GESTURE_IDLE,
+    ScrollAccumulator, ScrollDelta, ScrollMode, ScrollPhase, ScrollPolicy, ScrollStep,
 };
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,

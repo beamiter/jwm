@@ -19,8 +19,11 @@ pub fn install_script(config: &PresentationConfig, scale_factor: f64) -> String 
     } else {
         42.0
     };
+    let policy = config.scroll.valid();
+    let adjustment = policy.adjustment_pixels;
+    let idle_ms = policy.idle.as_millis().clamp(1, 10_000);
     format!(
-        "(function() {{ const edge = '{}'; const thickness = {thickness};\n{INSTALLER}\n}})()",
+        "(function() {{ const edge = '{}'; const thickness = {thickness}; const configuredScroll = {{ adjustment_pixels: {adjustment}, idle_ms: {idle_ms} }};\n{INSTALLER}\n}})()",
         config.edge.as_str()
     )
 }
@@ -41,5 +44,18 @@ mod tests {
         assert!(script.contains("const edge = 'right'"));
         assert!(script.contains("const thickness = 40;"));
         assert!(script.contains("previous.dispose()"));
+    }
+
+    #[test]
+    fn host_installer_transmits_the_same_adjustment_policy_to_html_bars() {
+        let mut config = PresentationConfig::default();
+        config.scroll.adjustment_pixels = 24.0;
+        config.scroll.idle = std::time::Duration::from_millis(400);
+        let script = install_script(&config, 2.0);
+        assert!(script.contains("adjustment_pixels: 24, idle_ms: 400"));
+        // Programmatic/serialized configuration gets the same finite fallback
+        // as native input and cannot inject invalid JavaScript numbers.
+        config.scroll.adjustment_pixels = f64::NAN;
+        assert!(install_script(&config, 1.0).contains("adjustment_pixels: 16"));
     }
 }

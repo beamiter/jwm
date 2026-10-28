@@ -2960,6 +2960,7 @@ impl Jwm {
             "get_gesture_status" | "get_gesture" | "get_gest" => {
                 IpcResponse::ok(Some(self.query_gesture_status()))
             }
+            "get_inputs" | "get_input_status" => IpcResponse::ok(Some(self.query_inputs())),
             "get_wayland_status" | "get_wayland" | "get_wl" => {
                 IpcResponse::ok(Some(self.query_wayland_status(backend)))
             }
@@ -6248,6 +6249,31 @@ impl Jwm {
         })
     }
 
+    pub(crate) fn query_inputs(&self) -> serde_json::Value {
+        let runtime = if self.runtime_backend == "wayland-udev" {
+            #[cfg(feature = "backend-wayland-udev")]
+            {
+                crate::backend::wayland_udev::input_config::status()
+            }
+            #[cfg(not(feature = "backend-wayland-udev"))]
+            {
+                serde_json::json!({"available": false, "state": "not_compiled", "devices": []})
+            }
+        } else {
+            serde_json::json!({
+                "available": false,
+                "state": "host_managed",
+                "devices": [],
+                "reason": "Touchpad device settings are managed by the X server or host compositor on this backend",
+            })
+        };
+        serde_json::json!({
+            "backend": self.runtime_backend,
+            "config": CONFIG.load().input(),
+            "runtime": runtime,
+        })
+    }
+
     pub(crate) fn query_gesture_status(&self) -> serde_json::Value {
         let cfg = CONFIG.load();
         let bindings = &cfg.behavior().gesture_swipe;
@@ -6262,12 +6288,16 @@ impl Jwm {
                     serde_json::json!({"operational": false, "state": "not_compiled"})
                 }
             }
-            "wayland-udev" => serde_json::json!({
-                "operational": cfg!(feature = "backend-wayland-udev"),
-                "state": "native_libinput",
-                "device_supported": null,
-                "reason": "Requires a gesture-capable libinput touchpad",
-            }),
+            "wayland-udev" => {
+                #[cfg(feature = "backend-wayland-udev")]
+                {
+                    crate::backend::wayland_udev::input_config::gesture_status()
+                }
+                #[cfg(not(feature = "backend-wayland-udev"))]
+                {
+                    serde_json::json!({"operational": false, "state": "not_compiled"})
+                }
+            }
             _ => serde_json::json!({
                 "operational": false,
                 "state": "unsupported_backend",

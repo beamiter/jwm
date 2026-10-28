@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
+    ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, Selectable, Sizable, Size, Theme, black, blue_400, blue_500, cyan_500, emerald_500,
@@ -82,6 +82,7 @@ impl ClickLatch {
 
 struct GpuiComponentBar {
     runtime: BarRuntime,
+    scroll: xbar_core::ControlScroll,
     presentation: xbar_core::presentation::PresentationConfig,
     process_actions: ProcessActionHandler,
     active_geometry: Option<MonitorGeometry>,
@@ -100,6 +101,15 @@ struct GpuiComponentBar {
     panel_background: Rgba,
     background_opacity: Option<f64>,
     translucent: bool,
+}
+
+impl gpui_sidebar::ScrollOwner for GpuiComponentBar {
+    fn control_scroll(&mut self) -> &mut xbar_core::ControlScroll {
+        &mut self.scroll
+    }
+    fn scroll_edge(&self) -> xbar_core::BarEdge {
+        self.presentation.edge
+    }
 }
 
 impl GpuiComponentBar {
@@ -131,6 +141,7 @@ impl GpuiComponentBar {
         dock.set_edge(bar_config.presentation.edge);
         let mut this = Self {
             runtime,
+            scroll: xbar_core::ControlScroll::with_policy(bar_config.presentation.scroll),
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
             panel_background,
@@ -510,13 +521,39 @@ impl GpuiComponentBar {
 
         let brightness_chip = div()
             .id("brightness-actions")
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                gpui_sidebar::hover_control(
+                    this,
+                    xbar_core::presentation::NodeId::Brightness,
+                    *hovered,
+                )
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                if let Some(input) = gpui_sidebar::scroll_action(
+                    this,
+                    xbar_core::presentation::NodeId::Brightness,
+                    event,
+                ) {
+                    this.dispatch(
+                        if input == xbar_core::presentation::PointerAction::ScrollUp {
+                            UserAction::BrightnessUp
+                        } else {
+                            UserAction::BrightnessDown
+                        },
+                    );
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(|this, _, _, cx| {
+                this.scroll.reset();
                 this.dispatch(UserAction::BrightnessUp);
                 cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, _, _| {
+                    this.scroll.reset();
                     this.brightness_secondary_click.press();
                 }),
             )
@@ -546,28 +583,28 @@ impl GpuiComponentBar {
 
         let volume_chip = div()
             .id("volume-actions")
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                gpui_sidebar::hover_control(this, xbar_core::presentation::NodeId::Audio, *hovered)
+            }))
             .on_click(cx.listener(|this, _, _, cx| {
+                this.scroll.reset();
                 this.dispatch(UserAction::ToggleMute);
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                let delta_y = match event.delta {
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                    ScrollDelta::Lines(delta) => delta.y,
-                };
-
-                if delta_y == 0.0 {
-                    return;
+                cx.stop_propagation();
+                if let Some(input) =
+                    gpui_sidebar::scroll_action(this, xbar_core::presentation::NodeId::Audio, event)
+                {
+                    this.dispatch(
+                        if input == xbar_core::presentation::PointerAction::ScrollUp {
+                            UserAction::VolumeUp
+                        } else {
+                            UserAction::VolumeDown
+                        },
+                    );
+                    cx.notify();
                 }
-
-                let action = if delta_y > 0.0 {
-                    UserAction::VolumeUp
-                } else {
-                    UserAction::VolumeDown
-                };
-                this.dispatch(action);
-
-                cx.notify();
             }))
             .child(Self::chip_button(
                 "volume",
@@ -669,6 +706,7 @@ impl Render for GpuiComponentBar {
             .last_scale_factor
             .is_none_or(|previous| previous.to_bits() != scale_factor.to_bits());
         if self.geometry_dirty || scale_changed {
+            self.scroll.reset();
             let default_size = self.default_size.expect("default size is initialized");
             let target_size = self.active_geometry.map_or(default_size, |geometry| {
                 xbar_core::BarPlacement::from_bar_geometry(

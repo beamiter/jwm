@@ -8,18 +8,19 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use gtk4::pango::FontDescription;
 use gtk4::prelude::*;
 use gtk4::{
-    Button, DrawingArea, EventControllerScroll, EventControllerScrollFlags, GestureClick, Label,
-    Overlay, glib,
+    Button, DrawingArea, EventControllerMotion, EventControllerScroll, EventControllerScrollFlags,
+    GestureClick, Label, Overlay, glib,
 };
 use xbar_core::controls::ControlSpec;
 use xbar_core::presentation::{
     NetworkTextMetrics, NodeId, PercentTextMetrics, PointerAction, Rgba,
 };
-use xbar_core::{BarEdge, ShellRoute, UserAction};
+use xbar_core::{BarEdge, ControlScroll, ScrollDelta, ScrollPhase, ShellRoute, UserAction};
 
 use crate::theme::Metrics;
 
@@ -41,6 +42,8 @@ pub type Dispatch = Rc<dyn Fn(UserAction, Option<DispatchCompletion>)>;
 #[derive(Clone)]
 pub struct PillStyle {
     pub edge: BarEdge,
+    /// Shared across pills: a precision gesture cannot migrate with layout.
+    pub scroll: Rc<RefCell<ControlScroll>>,
     pub metrics: Metrics,
     pub accent: Rgba,
     /// The font the Cairo bars measure and draw with, already carrying the
@@ -221,7 +224,7 @@ impl SidebarMetric {
 
 /// The actions a pill currently answers to. Cleared while the control is
 /// disabled, which is how `PillSpec` drops bindings for the Cairo bars.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Bindings {
     primary: Option<UserAction>,
     secondary: Option<UserAction>,
@@ -261,6 +264,7 @@ impl Pill {
             font,
             network_icons,
             metric_icons,
+            scroll: scroll_state,
         } = style;
         let accent = *accent;
         let minimum_height = metrics.pill_height.round().max(1.0) as i32;
@@ -385,9 +389,11 @@ impl Pill {
         button.connect_clicked({
             let bindings = bindings.clone();
             let dispatch = dispatch.clone();
+            let scroll_state = scroll_state.clone();
             // Read the binding out before dispatching: dispatching re-enters
             // `update`, and a borrow still held here would abort the process.
             move |_| {
+                scroll_state.borrow_mut().reset();
                 let action = bindings.borrow().action(PointerAction::Primary);
                 if let Some(action) = action {
                     dispatch(action, None);
@@ -400,7 +406,9 @@ impl Pill {
         secondary.connect_pressed({
             let bindings = bindings.clone();
             let dispatch = dispatch.clone();
+            let scroll_state = scroll_state.clone();
             move |_, _, _, _| {
+                scroll_state.borrow_mut().reset();
                 let action = bindings.borrow().action(PointerAction::Secondary);
                 if let Some(action) = action {
                     dispatch(action, None);
@@ -409,23 +417,75 @@ impl Pill {
         });
         button.add_controller(secondary);
 
-        let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        let id = spec.id;
+        let edge = *edge;
+        let motion = EventControllerMotion::new();
+        motion.connect_enter({
+            let state = scroll_state.clone();
+            move |_, _, _| state.borrow_mut().hover(Some(id), edge, Instant::now())
+        });
+        motion.connect_leave({
+            let state = scroll_state.clone();
+            move |_| state.borrow_mut().hover(None, edge, Instant::now())
+        });
+        button.add_controller(motion);
+        button.connect_scale_factor_notify({
+            let state = scroll_state.clone();
+            move |_| state.borrow_mut().reset()
+        });
+        let scroll = EventControllerScroll::new(EventControllerScrollFlags::BOTH_AXES);
+        let pending_start = Rc::new(Cell::new(false));
+        scroll.connect_scroll_begin({
+            let state = scroll_state.clone();
+            let pending_start = pending_start.clone();
+            move |_| {
+                state.borrow_mut().reset();
+                pending_start.set(true);
+            }
+        });
+        scroll.connect_scroll_end({
+            let state = scroll_state.clone();
+            let pending_start = pending_start.clone();
+            move |_| {
+                pending_start.set(false);
+                state.borrow_mut().cancel(Instant::now());
+            }
+        });
         scroll.connect_scroll({
             let bindings = bindings.clone();
-            move |_, _, delta_y| {
-                // The core owns the direction convention; a GTK wheel delta is
-                // positive downwards, which is the opposite sign.
-                let Some(input) = PointerAction::from_vertical_delta(-delta_y) else {
+            let state = scroll_state.clone();
+            move |controller, delta_x, delta_y| {
+                let bindings = *bindings.borrow();
+                if bindings.scroll_up.is_none() && bindings.scroll_down.is_none() {
                     return glib::Propagation::Proceed;
-                };
-                let action = bindings.borrow().action(input);
-                match action {
-                    Some(action) => {
-                        dispatch(action, None);
-                        glib::Propagation::Stop
-                    }
-                    None => glib::Propagation::Proceed,
                 }
+                // GDK surface deltas are logical pixels; wheel deltas are
+                // lines. GDK's positive-down/right convention is inverted once.
+                let delta = match controller.unit() {
+                    gtk4::gdk::ScrollUnit::Surface => ScrollDelta::Pixels {
+                        x: -delta_x,
+                        y: -delta_y,
+                    },
+                    _ => ScrollDelta::Lines {
+                        x: -delta_x,
+                        y: -delta_y,
+                    },
+                };
+                let phase = if pending_start.replace(false) {
+                    ScrollPhase::Started
+                } else {
+                    ScrollPhase::Moved
+                };
+                let action = state
+                    .borrow_mut()
+                    .step(id, edge, delta, phase, Instant::now())
+                    .and_then(|input| bindings.action(input));
+                if let Some(action) = action {
+                    dispatch(action, None);
+                }
+                // Own the entire gesture, including subthreshold packets,
+                // instead of also scrolling a parent container underneath it.
+                glib::Propagation::Stop
             }
         });
         button.add_controller(scroll);

@@ -193,7 +193,12 @@ impl WaylandCompositor {
         if self.blur_enabled && self.windows.values().any(|win| win.is_frosted) {
             return Some("window blur requires composition");
         }
-        if self.transition_active {
+        if self.transition_active
+            && self
+                .workspace_swipe
+                .as_ref()
+                .is_none_or(|swipe| swipe.is_settling())
+        {
             return Some("workspace transition requires composition");
         }
 

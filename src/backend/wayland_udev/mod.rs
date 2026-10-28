@@ -6,6 +6,9 @@
 pub mod backend;
 
 #[cfg(feature = "backend-wayland-udev")]
+pub(crate) mod input_config;
+
+#[cfg(feature = "backend-wayland-udev")]
 pub mod compositor;
 
 pub mod output_management;

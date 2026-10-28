@@ -2488,6 +2488,83 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
 }
 
 #[test]
+fn wayland_workspace_swipe_moves_both_images_and_clips_to_the_owner_monitor() {
+    use smithay::backend::renderer::gles::ffi;
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping interactive workspace render test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.set_transition_mode("slide");
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, 64, 32);
+        gl.Disable(ffi::SCISSOR_TEST);
+        gl.ClearColor(1.0, 0.0, 0.0, 1.0);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        compositor.workspace_swipe_source_valid = true;
+        assert!(compositor.begin_workspace_swipe((16, 0, 32, 32)));
+        compositor.capture_transition_snapshot(&gl);
+        compositor.transition_snapshot_pending = false;
+        let projection = super::ortho(0.0, 64.0, 32.0, 0.0);
+        let pixel = |x| {
+            let mut rgba = [0_u8; 4];
+            gl.ReadPixels(
+                x,
+                16,
+                1,
+                1,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                rgba.as_mut_ptr().cast(),
+            );
+            rgba
+        };
+        for (direction, source_x, destination_x) in [(1, 24, 44), (-1, 40, 20)] {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+            gl.ClearColor(0.0, 0.0, 1.0, 1.0);
+            gl.Clear(ffi::COLOR_BUFFER_BIT);
+            compositor.update_workspace_swipe(0.25, direction);
+            compositor.render_transition(&gl, &projection, false);
+            assert_pixel(
+                pixel(source_x),
+                [255, 0, 0, 255],
+                1,
+                "outgoing workspace follows fingers",
+            );
+            assert_pixel(
+                pixel(destination_x),
+                [0, 0, 255, 255],
+                1,
+                "incoming workspace follows fingers",
+            );
+            assert_pixel(
+                pixel(8),
+                [0, 0, 255, 255],
+                1,
+                "left adjacent monitor remains untouched",
+            );
+            assert_pixel(
+                pixel(56),
+                [0, 0, 255, 255],
+                1,
+                "right adjacent monitor remains untouched",
+            );
+            assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        }
+        compositor.end_workspace_swipe(false, false);
+        assert!(!compositor.workspace_swipe_active());
+        assert!(compositor.release_gpu_resources(
+            &gl, super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+#[test]
 fn wayland_transition_shader_decodes_the_encoded_snapshot_for_a_linear_target() {
     let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping transition domain test");
@@ -9219,6 +9296,135 @@ fn wayland_debug_hud_rides_the_deferred_linear_route() {
             &gl,
             super::CompositorOutputTextureOwnership::RawCompositor,
         ));
+    }
+}
+
+/// Fractional list motion reuses the text bitmap, clips the moving rows, and
+/// leaves the query, status row and footer at exactly the same screen pixels.
+#[test]
+fn wayland_fractional_list_moves_pixels_inside_its_viewport_only() {
+    use crate::backend::api::{ScrollWindow, SystemUiListViewport, SystemUiOverlay};
+    use crate::backend::compositor_common::{dynamic_island::IslandDock, system_ui_panel as panel};
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping fractional list render test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 640;
+    const H: i32 = 480;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        let mut overlay = SystemUiOverlay {
+            title: "Fractional scrolling".into(),
+            query: Some("Query stays still".into()),
+            query_selected: true,
+            items: vec![
+                "AAA first row".into(),
+                "BBB second row".into(),
+                "CCC third row".into(),
+                "DDD guard row".into(),
+                "Pinned status".into(),
+            ],
+            selected: Some(0),
+            hint: "Footer stays still".into(),
+            scroll: Some(ScrollWindow {
+                first: 0,
+                visible: 3,
+                total: 20,
+            }),
+            list_viewport: Some(SystemUiListViewport {
+                rows: 4,
+                visible_rows: 3,
+                fraction: 0.25,
+            }),
+            ..Default::default()
+        };
+        compositor.set_system_ui(Some(overlay.clone()));
+        let render = |compositor: &mut super::WaylandCompositor| {
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+            read_fbo_frame(&gl, compositor.output_fbo, W, H)
+        };
+        // Populate real font textures, then settle the opening spring without
+        // sleeping or changing process-global animation configuration.
+        let _ = render(&mut compositor);
+        let dims = |slot: usize| {
+            compositor.sysui_textures[slot]
+                .map(|(_, w, h)| (w as f32, h as f32))
+                .unwrap_or((0.0, 0.0))
+        };
+        let raw = panel::SectionSizes {
+            title: dims(0),
+            query: dims(1),
+            items: dims(2),
+            hint: dims(3),
+            row_icons: 0.0,
+        };
+        let visible = panel::visible_section_sizes(raw, overlay.items.len(), overlay.list_viewport);
+        let (width, height) = panel::target_size(&visible, W as f32, 0.0);
+        compositor.system_ui_island.advance_with_motion(
+            std::time::Instant::now(),
+            width,
+            height,
+            false,
+        );
+        let viewport = [0.0, 0.0, W as f32, H as f32];
+        let rect = IslandDock::for_bar(None, viewport).contained_rect(width, height, 0.0);
+        let layout = panel::contents_scrolled(
+            rect,
+            &raw,
+            overlay.items.len(),
+            overlay.selected,
+            Some(panel::Scroll {
+                first: 0,
+                visible: 3,
+                total: 20,
+            }),
+            overlay.list_viewport,
+        );
+        let clip = layout.list_clip.expect("fractional list has a clip");
+        let first = render(&mut compositor);
+        let text_texture = compositor.sysui_textures[2];
+        overlay.list_viewport.as_mut().unwrap().fraction = 0.75;
+        compositor.set_system_ui(Some(overlay));
+        assert!(
+            !compositor.sysui_text_dirty,
+            "fraction-only motion reuses rasterized text"
+        );
+        let second = render(&mut compositor);
+        assert_eq!(compositor.sysui_textures[2], text_texture);
+        let mut changed_inside = 0;
+        let mut changed_outside = 0;
+        for y in 0..H as usize {
+            for x in clip[0].ceil() as usize..(clip[0] + clip[2]).floor() as usize {
+                let changed = frame_pixel(&first, W as usize, H as usize, x, y)
+                    != frame_pixel(&second, W as usize, H as usize, x, y);
+                if y >= clip[1].floor() as usize && y < (clip[1] + clip[3]).ceil() as usize {
+                    // The first row also carries a highlight. Require actual
+                    // text motion below it, not only a changing pill height.
+                    if y >= (clip[1] + layout.row_height + 2.0).ceil() as usize {
+                        changed_inside += usize::from(changed);
+                    }
+                } else {
+                    changed_outside += usize::from(changed);
+                }
+            }
+        }
+        assert!(
+            changed_inside > 50,
+            "fractional scrolling did not move the rendered list ({changed_inside} pixels)"
+        );
+        assert_eq!(
+            changed_outside, 0,
+            "scrolling escaped its clip or moved fixed panel sections"
+        );
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
     }
 }
 

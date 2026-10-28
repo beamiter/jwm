@@ -1274,6 +1274,12 @@ pub(crate) struct WaylandCompositor {
     /// workspace. Set by the workspace notification, consumed at frame start.
     transition_snapshot_pending: bool,
     transition_start: Option<Instant>,
+    workspace_swipe:
+        Option<crate::backend::compositor_common::transitions::WorkspaceSwipeAnimation>,
+    workspace_swipe_source_valid: bool,
+    /// Bounded, lazily allocated incoming-workspace snapshot: FBO, texture,
+    /// width, height and whether its pixels are already scene-linear.
+    workspace_swipe_destination: Option<(u32, u32, u32, u32, bool)>,
     transition_duration: Duration,
     transition_mode: TransitionMode,
     transition_direction: i32,
@@ -2879,6 +2885,9 @@ impl WaylandCompositor {
                 transition_active: false,
                 transition_snapshot_pending: false,
                 transition_start: None,
+                workspace_swipe: None,
+                workspace_swipe_source_valid: false,
+                workspace_swipe_destination: None,
                 transition_duration: Duration::from_millis(300),
                 transition_mode: TransitionMode::None,
                 transition_direction: 0,
@@ -3515,6 +3524,10 @@ impl WaylandCompositor {
             delete_texture_name(gl, &mut self.scene_texture);
             delete_texture_name(gl, &mut self.postprocess_texture);
             delete_texture_name(gl, &mut self.transition_texture);
+            if let Some((mut fbo, mut texture, _, _, _)) = self.workspace_swipe_destination.take() {
+                delete_framebuffer_name(gl, &mut fbo);
+                delete_texture_name(gl, &mut texture);
+            }
             delete_texture_name(gl, &mut self.capture_view_texture);
 
             delete_buffer_name(gl, &mut self.particle_vbo);
@@ -5229,6 +5242,12 @@ impl WaylandCompositor {
             self.transition_snapshot_pending = false;
             self.transition_start = None;
             self.transition_mon = None;
+            self.workspace_swipe = None;
+            self.workspace_swipe_source_valid = false;
+            if let Some((fbo, texture, _, _, _)) = self.workspace_swipe_destination.take() {
+                gl.DeleteFramebuffers(1, &fbo);
+                gl.DeleteTextures(1, &texture);
+            }
 
             // Temporal-blur scratch buffers are half-res and lazily allocated;
             // drop them so they are recreated at the new size on next use.

@@ -1302,6 +1302,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         screenshot_path: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.cancel_pointer_scroll(backend);
+        self.cancel_touchpad_gesture(backend, false);
         self.cancel_wallpaper_drag(backend);
         // End the old pointer owner before this selector acquires its grabs.
         self.cancel_pointer_drag(backend);

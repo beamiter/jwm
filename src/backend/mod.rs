@@ -22,6 +22,7 @@ pub mod gesture_swipe;
 pub mod hdr_metadata;
 pub mod recording_admission;
 pub mod recording_completion;
+pub mod scroll;
 
 // Protocol-independent compositor helpers shared by Wayland and X11 backends.
 // Slim build profiles compile only a subset of the consumers, so dead-code
@@ -85,6 +86,9 @@ pub mod wayland;
 
 #[cfg(feature = "wayland-backends")]
 pub(crate) mod wayland_axis;
+
+#[cfg(feature = "wayland-backends")]
+pub(crate) mod wayland_scroll;
 
 // Shared xkbcommon-based key mapping used by Smithay-backed backends.
 #[cfg(feature = "wayland-backends")]
