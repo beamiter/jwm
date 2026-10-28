@@ -14,6 +14,7 @@ pub mod layout;
 pub mod lifecycle;
 pub mod maximize;
 pub mod monitor;
+pub(crate) mod monitor_swap;
 pub mod mouse_handler;
 pub mod navigation;
 pub mod property_handler;
@@ -1048,6 +1049,8 @@ impl Jwm {
             "focusstack"
         } else if eq!(Jwm::focusmon) {
             "focusmon"
+        } else if eq!(Jwm::swapmon) {
+            "swapmon"
         } else if eq!(Jwm::take_screenshot) {
             "take_screenshot"
         } else if eq!(Jwm::quit) {
@@ -2530,6 +2533,7 @@ impl Jwm {
             key_configs.push(fallback);
         }
         key_configs.extend(cfg.media_player_fallback_keys());
+        key_configs.extend(cfg.monitor_swap_fallback_keys());
         let lines = keybinding_viewer_lines(
             &key_configs,
             cfg.tags_length(),
@@ -2892,6 +2896,7 @@ fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConf
         },
         "lastlayout" => "previous layout".to_string(),
         "restore_preview" => "restore minimized window".to_string(),
+        "swapmon" => "exchange all monitor workspaces".to_string(),
         "toggle_shortcut_passthrough" => "toggle remote window shortcuts".to_string(),
         "focusstack" => match argument {
             crate::config::ArgumentConfig::Int(i) => {

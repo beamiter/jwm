@@ -302,6 +302,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "stop",
         "swin",
         "switcher",
+        "swapmon",
+        "swap_monitors",
         "tag",
         "tag_mon",
         "tagmon",
@@ -1659,6 +1661,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // --- Monitor ---
         "focusmon" | "focus_mon" => Ok((Jwm::focusmon, parse_int_arg(args, 1)?)),
         "tagmon" | "tag_mon" => Ok((Jwm::tagmon, parse_int_arg(args, 1)?)),
+        "swapmon" | "swap_monitors" => Ok((Jwm::swapmon, parse_monitor_swap_arg(args)?)),
 
         // --- Spawn ---
         "spawn" => {
@@ -1789,6 +1792,30 @@ fn scalar_arg_value<'a>(
             }
         }
         value => Ok(Some(value)),
+    }
+}
+
+fn parse_monitor_swap_arg(args: &Value) -> Result<WMArgEnum, String> {
+    if args.as_object().is_some_and(|values| values.len() > 1) {
+        return Err("swapmon: specify one monitor or direction argument".into());
+    }
+    if let Some(values) = args.as_object()
+        && let Some(target) = values.get("monitor")
+    {
+        if values.len() != 1 {
+            return Err("swapmon: specify either 'monitor' or a direction".into());
+        }
+        let id = target
+            .as_u64()
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or("swapmon: monitor must be a non-negative i32 monitor id")?;
+        return Ok(WMArgEnum::UInt(id as u32));
+    }
+    let value = scalar_arg_value(args, &["direction", "value", "v"], "direction -1, 0 or 1")?;
+    let parsed = parse_int_arg(value.unwrap_or(&Value::Null), 1)?;
+    match parsed {
+        WMArgEnum::Int(-1..=1) => Ok(parsed),
+        _ => Err("swapmon: direction must be -1, 0 or 1".into()),
     }
 }
 
@@ -2007,6 +2034,38 @@ mod tests {
         let json = r#"{"query": "get_windows"}"#;
         let msg: IpcMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, IpcMessage::Query(IpcQuery { query, .. }) if query == "get_windows"));
+    }
+
+    #[test]
+    fn monitor_swap_ipc_distinguishes_direction_from_monitor_id() {
+        for (input, expected) in [
+            (serde_json::json!(null), WMArgEnum::Int(1)),
+            (serde_json::json!({}), WMArgEnum::Int(1)),
+            (serde_json::json!(-1), WMArgEnum::Int(-1)),
+            (serde_json::json!({"direction": 1}), WMArgEnum::Int(1)),
+            (serde_json::json!({"value": 0}), WMArgEnum::Int(0)),
+            (serde_json::json!({"monitor": 0}), WMArgEnum::UInt(0)),
+            (serde_json::json!({"monitor": 7}), WMArgEnum::UInt(7)),
+        ] {
+            for command in ["swapmon", "swap_monitors"] {
+                let (function, argument) = dispatch_command(command, &input).unwrap();
+                assert!(std::ptr::fn_addr_eq(function, Jwm::swapmon as WMFuncType));
+                assert_eq!(argument, expected);
+            }
+        }
+        for input in [
+            serde_json::json!(2),
+            serde_json::json!(-2),
+            serde_json::json!(1.5),
+            serde_json::json!({"monitor":-1}),
+            serde_json::json!({"monitor":null}),
+            serde_json::json!({"monitor":2147483648_u64}),
+            serde_json::json!({"monitor":1,"direction":-1}),
+            serde_json::json!({"value":1,"direction":-1}),
+            serde_json::json!({"unknown":1}),
+        ] {
+            assert!(parse_monitor_swap_arg(&input).is_err(), "{input}");
+        }
     }
 
     #[test]

@@ -2679,6 +2679,15 @@ impl Config {
         })
     }
 
+    fn default_monitor_swap_keys() -> [KeyConfig; 2] {
+        [("comma", -1), ("period", 1)].map(|(key, direction)| KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into(), "Shift".into()],
+            key: key.into(),
+            function: "swapmon".into(),
+            argument: ArgumentConfig::Int(direction),
+        })
+    }
+
     fn get_default_keys() -> Vec<KeyConfig> {
         let mut keys = vec![
             KeyConfig {
@@ -3356,6 +3365,7 @@ impl Config {
             },
         ];
         keys.extend(Self::default_media_player_keys());
+        keys.extend(Self::default_monitor_swap_keys());
         keys
     }
 
@@ -3804,16 +3814,32 @@ impl Config {
     /// Older key lists gain the media entry points without taking an existing
     /// binding or chord leader. Share this decision with the shortcut viewer.
     pub fn media_player_fallback_keys(&self) -> Vec<KeyConfig> {
+        self.available_fallback_keys(Self::default_media_player_keys())
+    }
+
+    pub fn monitor_swap_fallback_keys(&self) -> Vec<KeyConfig> {
+        self.available_fallback_keys(Self::default_monitor_swap_keys())
+    }
+
+    fn available_fallback_keys(
+        &self,
+        defaults: impl IntoIterator<Item = KeyConfig>,
+    ) -> Vec<KeyConfig> {
         let chord = self.chord_config();
         let chord_enabled = self.compile_chord().is_some();
-        Self::default_media_player_keys()
+        defaults
             .into_iter()
             .filter(|fallback| {
                 let modifiers = self.parse_modifiers(&fallback.modifier);
                 let keysym = self.parse_keysym(&fallback.key);
+                let same_action = |key: &KeyConfig| {
+                    self.parse_function(&key.function)
+                        .zip(self.parse_function(&fallback.function))
+                        .is_some_and(|(a, b)| std::ptr::fn_addr_eq(a, b))
+                };
                 let occupied = self.key_configs().iter().any(|key| {
                     self.convert_key_config(key).is_some()
-                        && (key.function == fallback.function
+                        && (same_action(key)
                             || ((self.parse_modifiers(&key.modifier)
                                 & !(Mods::CAPS | Mods::NUMLOCK))
                                 == modifiers
@@ -3822,9 +3848,10 @@ impl Config {
                 let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
                     && self.parse_keysym(&chord.leader_key) == keysym;
                 let in_chord = chord_enabled
-                    && chord.bindings.iter().any(|key| {
-                        key.function == fallback.function && self.convert_key_config(key).is_some()
-                    });
+                    && chord
+                        .bindings
+                        .iter()
+                        .any(|key| same_action(key) && self.convert_key_config(key).is_some());
                 !occupied && !leader_occupied && !in_chord
             })
             .collect()
@@ -4040,6 +4067,11 @@ impl Config {
                 keys.push(binding);
             }
         }
+        for fallback in self.monitor_swap_fallback_keys() {
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                keys.push(binding);
+            }
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -4198,6 +4230,7 @@ impl Config {
             "toggleview" => Some(Jwm::toggleview),
             "toggletag" => Some(Jwm::toggletag),
             "tagmon" => Some(Jwm::tagmon),
+            "swapmon" | "swap_monitors" => Some(Jwm::swapmon),
             "loopview" => Some(Jwm::loopview),
             "window_switcher" => Some(Jwm::window_switcher),
 
@@ -8011,6 +8044,16 @@ mod tests {
             ("Return", Mods::ALT | Mods::CONTROL, Jwm::togglemaximize),
             ("F10", Mods::ALT | Mods::SHIFT, Jwm::bluetooth_picker),
             (
+                "comma",
+                Mods::ALT | Mods::CONTROL | Mods::SHIFT,
+                Jwm::swapmon,
+            ),
+            (
+                "period",
+                Mods::ALT | Mods::CONTROL | Mods::SHIFT,
+                Jwm::swapmon,
+            ),
+            (
                 "m",
                 Mods::ALT | Mods::CONTROL | Mods::SHIFT,
                 Jwm::music_player,
@@ -10463,6 +10506,53 @@ border_px = 3
                 "disabled chords do not suppress defaults"
             );
         }
+    }
+
+    #[test]
+    fn monitor_swap_defaults_and_legacy_fallbacks_preserve_custom_keys() {
+        use crate::jwm::WMArgEnum;
+        let mut cfg = Config::default();
+        assert!(cfg.monitor_swap_fallback_keys().is_empty());
+        for key in Config::default_monitor_swap_keys() {
+            let binding = cfg.convert_key_config(&key).unwrap();
+            assert!(!binding.repeatable);
+            assert_eq!(
+                cfg.get_keys()
+                    .iter()
+                    .filter(|k| k.mask == binding.mask && k.key_sym == binding.key_sym)
+                    .count(),
+                1
+            );
+            assert!(matches!(
+                (&*key.key, binding.arg),
+                ("comma", WMArgEnum::Int(-1)) | ("period", WMArgEnum::Int(1))
+            ));
+        }
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "swapmon");
+        assert_eq!(cfg.monitor_swap_fallback_keys().len(), 2);
+        let mut occupied = Config::default_monitor_swap_keys()[0].clone();
+        occupied.function = "minimize".into();
+        cfg.inner.keybindings.keys.push(occupied);
+        assert_eq!(cfg.monitor_swap_fallback_keys().len(), 1);
+        assert_eq!(cfg.monitor_swap_fallback_keys()[0].key, "period");
+        cfg.inner.keybindings.keys.pop();
+        let mut explicit = Config::default_monitor_swap_keys()[0].clone();
+        explicit.key = "F8".into();
+        explicit.function = "swap_monitors".into();
+        cfg.inner.keybindings.keys.push(explicit);
+        assert!(
+            cfg.monitor_swap_fallback_keys().is_empty(),
+            "aliases count as an explicit action binding"
+        );
+        cfg.inner.keybindings.keys.pop();
+        let fallback = Config::default_monitor_swap_keys()[1].clone();
+        cfg.inner.keybindings.chord.leader_modifier = fallback.modifier;
+        cfg.inner.keybindings.chord.leader_key = fallback.key;
+        assert_eq!(cfg.monitor_swap_fallback_keys().len(), 1);
+        assert_eq!(cfg.monitor_swap_fallback_keys()[0].key, "comma");
     }
 
     #[test]

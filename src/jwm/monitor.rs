@@ -263,6 +263,16 @@ fn migrate_visible_geometry(
     target_monitor: Rect,
     target_work: Rect,
 ) -> VisibleMigration {
+    migrate_visible_geometry_with_policy(client, source_work, target_monitor, target_work, false)
+}
+
+fn migrate_visible_geometry_with_policy(
+    client: &mut WMClient,
+    source_work: Option<Rect>,
+    target_monitor: Rect,
+    target_work: Rect,
+    workspace_swap: bool,
+) -> VisibleMigration {
     if client.state.is_hidden || client.state.is_dock {
         return VisibleMigration::Unchanged;
     }
@@ -302,7 +312,7 @@ fn migrate_visible_geometry(
     if client.state.is_pip {
         translate_floating_restore(client, source_work, target_work);
     }
-    if !parked && already_placed {
+    if !workspace_swap && !parked && already_placed {
         return VisibleMigration::Unchanged;
     }
 
@@ -348,14 +358,14 @@ fn migrate_visible_geometry(
             client.geometry.floating_h = restore.h;
         }
         maximize_target(restore, target_work, axes, border_width)
-    } else if client.state.is_floating || client.state.is_pip {
+    } else if client.state.is_floating || client.state.is_pip || workspace_swap {
         let Some(current) = current else {
             return VisibleMigration::Unchanged;
         };
         let moved = translate(current);
         // PiP owns `floating_*` as its return slot (the pre-PiP rect),
         // already translated above; the corner rect must not replace it.
-        if !client.state.is_pip {
+        if !client.state.is_pip && client.state.is_floating {
             client.geometry.floating_x = moved.x;
             client.geometry.floating_y = moved.y;
             client.geometry.floating_w = moved.w;
@@ -1001,8 +1011,57 @@ impl Jwm {
         target_monitor: Rect,
         target_work: Rect,
     ) -> bool {
+        self.apply_visible_client_migration(
+            backend,
+            client_key,
+            source_work,
+            target_monitor,
+            target_work,
+            false,
+        )
+    }
+
+    /// Workspace exchanges translate every ordinary client, including the
+    /// non-floating clients of FLOAT layouts and windows spanning outputs.
+    pub(super) fn migrate_swapped_client(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        source_work: Option<Rect>,
+        target_monitor: Rect,
+        target_work: Rect,
+    ) -> bool {
+        self.apply_visible_client_migration(
+            backend,
+            client_key,
+            source_work,
+            target_monitor,
+            target_work,
+            true,
+        )
+    }
+
+    fn apply_visible_client_migration(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        source_work: Option<Rect>,
+        target_monitor: Rect,
+        target_work: Rect,
+        workspace_swap: bool,
+    ) -> bool {
         let outcome = self.state.clients.get_mut(client_key).map(|client| {
-            migrate_visible_geometry(client, source_work, target_monitor, target_work)
+            if workspace_swap {
+                migrate_visible_geometry_with_policy(
+                    client,
+                    source_work,
+                    target_monitor,
+                    target_work,
+                    true,
+                )
+            } else {
+                migrate_visible_geometry(client, source_work, target_monitor, target_work)
+            }
         });
         match outcome {
             Some(VisibleMigration::Live) => {}
