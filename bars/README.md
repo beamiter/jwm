@@ -8,6 +8,12 @@ configuration, interaction and geometry contract is in
 
 ## Official bar
 
+The official bar includes an ice-blue frosted desktop shell: a top information
+bar and independent left, right and bottom panels. Each companion can reveal
+on edge hover, stay visible, or be disabled. See
+[Frosted four-edge desktop](../docs/bars-four-edges.md#frosted-four-edge-desktop)
+for configuration and the live interaction test.
+
 **`tao_glow_bar`** is the supported daily-drive bar. `scripts/install_jwm_scripts.sh`
 installs it by default. Release packaging and the maintainer checklist exercise
 this crate.

@@ -16,6 +16,8 @@ pub enum TagContrastMode {
     Theme,
     Dark,
     Light,
+    /// Frosted shell material with a soft rim and high-contrast blue selection.
+    Glass,
 }
 
 /// Ready-to-paint colors shared by Scene and native toolkit renderers.
@@ -41,10 +43,46 @@ impl TagPalette {
     /// Missing or stale samples fall back to the application theme.
     #[must_use]
     pub fn for_wallpaper(theme: ThemeMode, luminance: Option<u8>, mode: TagContrastMode) -> Self {
+        if mode == TagContrastMode::Glass {
+            let dark = theme == ThemeMode::Dark;
+            let neutral = |hovered: bool, occupied: bool| {
+                let mut fill = if dark {
+                    Rgba::rgb8(30, 46, 66)
+                } else if hovered {
+                    Rgba::rgb8(240, 248, 255)
+                } else if occupied {
+                    Rgba::rgb8(228, 242, 255)
+                } else {
+                    Rgba::rgb8(216, 235, 253)
+                };
+                fill.alpha = 0.94;
+                TagColors {
+                    fill,
+                    foreground: if dark {
+                        Rgba::rgb8(255, 255, 255)
+                    } else {
+                        Rgba::rgb8(18, 43, 73)
+                    },
+                    stroke: None,
+                }
+            };
+            let accent = |fill| TagColors {
+                fill,
+                foreground: Rgba::rgb8(255, 255, 255),
+                stroke: None,
+            };
+            return Self {
+                empty: neutral(false, false),
+                occupied: neutral(false, true),
+                hovered: neutral(true, true),
+                selected: accent(Rgba::rgb8(10, 103, 227)),
+                urgent: accent(Rgba::rgb8(185, 35, 45)),
+            };
+        }
         let material = match mode {
             TagContrastMode::Dark => ThemeMode::Dark,
             TagContrastMode::Light => ThemeMode::Light,
-            TagContrastMode::Theme => theme,
+            TagContrastMode::Theme | TagContrastMode::Glass => theme,
             TagContrastMode::Auto => crate::background::wallpaper_theme(theme, luminance),
         };
         let (empty, occupied, hovered, foreground) = match material {
@@ -139,6 +177,7 @@ mod tests {
                     TagContrastMode::Theme,
                     TagContrastMode::Dark,
                     TagContrastMode::Light,
+                    TagContrastMode::Glass,
                 ] {
                     let p = TagPalette::for_wallpaper(theme, sample, mode);
                     for colors in [p.empty, p.occupied, p.hovered, p.selected, p.urgent] {

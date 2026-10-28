@@ -392,10 +392,11 @@ mod tests {
                     }));
                     assert!(update.issues.is_empty());
                     let frame = canvas.render(&mut bar, width, height, scale).unwrap();
-                    if let Some(damage) = frame.damage {
-                        if !damage.is_empty() && damage.width * damage.height < width * height {
-                            partial_frames += 1;
-                        }
+                    if let Some(damage) = frame.damage
+                        && !damage.is_empty()
+                        && damage.width * damage.height < width * height
+                    {
+                        partial_frames += 1;
                     }
                     upload.upload(&gl, texture, &frame).unwrap();
                     readback(&frame);

@@ -16,7 +16,7 @@ use crate::model::{MAX_MODEL_TAGS, ShellRoute};
 use crate::presentation::{PresentationConfig, PresentationVisibility};
 
 /// Default font when neither the config file nor `XBAR_FONT` specifies one.
-pub const DEFAULT_FONT: &str = "monospace 11";
+pub const DEFAULT_FONT: &str = "Sans 11";
 
 /// Configuration is hand-written and should never need an allocation large
 /// enough to disrupt every bar frontend during startup.
@@ -30,6 +30,7 @@ const MAX_WALLPAPER_MODE_BYTES: usize = 32;
 /// Resolved bar configuration ready for a frontend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BarConfig {
+    pub edge_shell: crate::edge_shell::EdgeShellConfig,
     /// Pango font description string.
     pub font: String,
     pub theme: ThemeMode,
@@ -42,8 +43,9 @@ pub struct BarConfig {
 impl Default for BarConfig {
     fn default() -> Self {
         Self {
+            edge_shell: crate::edge_shell::EdgeShellConfig::default(),
             font: DEFAULT_FONT.to_owned(),
-            theme: ThemeMode::Dark,
+            theme: ThemeMode::Light,
             background_opacity: None,
             presentation: PresentationConfig::default(),
             glass: GlassConfig::default(),
@@ -215,6 +217,8 @@ impl std::error::Error for ConfigError {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
+    #[serde(default)]
+    edge_shell: crate::edge_shell::EdgeShellConfig,
     font: Option<String>,
     theme: Option<FileTheme>,
     background_opacity: Option<f64>,
@@ -611,6 +615,13 @@ impl BarConfig {
         apply_visibility(&mut presentation.visibility, file.presentation.visibility);
 
         config.glass = glass_from_file(file.glass)?;
+        file.edge_shell
+            .validate()
+            .map_err(|reason| ConfigError::InvalidValue {
+                field: "edge_shell",
+                reason,
+            })?;
+        config.edge_shell = file.edge_shell;
         Ok(config)
     }
 }
@@ -852,6 +863,36 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn edge_shell_modes_are_independent_and_reject_invalid_timing() {
+        use crate::edge_shell::RevealMode;
+        let config = BarConfig::from_toml(
+            "[edge_shell]\nleft='always'\nright='disabled'\nbottom='hover'\nreveal_delay_ms=0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                config.edge_shell.left,
+                config.edge_shell.right,
+                config.edge_shell.bottom
+            ),
+            (RevealMode::Always, RevealMode::Disabled, RevealMode::Hover)
+        );
+        for text in [
+            "left='auto'",
+            "trigger_pixels=0",
+            "trigger_pixels=9",
+            "reveal_delay_ms=2001",
+            "hide_delay_ms=5001",
+            "unknown=true",
+        ] {
+            assert!(
+                BarConfig::from_toml(&format!("[edge_shell]\n{text}")).is_err(),
+                "{text}"
+            );
+        }
+    }
 
     fn test_path(name: &str) -> PathBuf {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);

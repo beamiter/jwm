@@ -28,6 +28,7 @@ pub mod config;
 pub mod controls;
 pub mod display;
 pub mod dock;
+pub mod edge_shell;
 pub mod frontend;
 #[cfg(feature = "glass")]
 pub mod glass;

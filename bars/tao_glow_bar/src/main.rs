@@ -1,6 +1,8 @@
+mod edge_shell;
 #[path = "../../native_x11.rs"]
 mod native_x11;
 mod redraw;
+mod shell_ipc;
 #[path = "../../tao_scroll.rs"]
 mod tao_scroll;
 mod texture_upload;
@@ -66,6 +68,7 @@ fn bgra_frame_len(width: u32, height: u32) -> Result<usize> {
 enum UserEvent {
     Tick,
     SharedUpdated(WakeAck),
+    EdgeAction(edge_shell::Action),
 }
 
 struct GlPresenter {
@@ -249,6 +252,7 @@ impl Presenter {
 }
 
 struct App {
+    edge_shell: Option<edge_shell::EdgeShell>,
     window: Rc<Window>,
     presenter: Presenter,
     bar: CairoBar,
@@ -287,10 +291,10 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
-        x11: Option<Rc<RustConnection>>,
-        compositor_active: bool,
+        native: (Option<Rc<RustConnection>>, bool),
         mut glass: Option<GlassBackdrop<OpaqueWallpaper>>,
     ) -> Result<Self> {
+        let (x11, compositor_active) = native;
         let frosted_params = glass
             .as_mut()
             .map(|glass| *glass.cache_mut().params())
@@ -310,6 +314,7 @@ impl App {
         };
 
         Ok(Self {
+            edge_shell: None,
             window,
             presenter,
             bar,
@@ -466,7 +471,98 @@ impl App {
             })
             .expect("geometry closure is infallible");
         self.effects = effects;
+        self.sync_edge_shell();
         needs_redraw
+    }
+
+    fn sync_edge_shell(&mut self) {
+        let geometry = self.bar.runtime().view().geometry;
+        // A managed bar's geometry is a strip, not a full output. Match that
+        // strip to the native monitor instead of treating its width as a
+        // desktop height (especially on secondary/scaled outputs).
+        let output = geometry
+            .and_then(|geometry| {
+                self.window.available_monitors().find_map(|monitor| {
+                    let origin = monitor.position();
+                    let size = monitor.size();
+                    (geometry.x >= origin.x
+                        && geometry.y >= origin.y
+                        && i64::from(geometry.x) < i64::from(origin.x) + i64::from(size.width)
+                        && i64::from(geometry.y) < i64::from(origin.y) + i64::from(size.height))
+                    .then_some(MonitorGeometry {
+                        x: origin.x,
+                        y: origin.y,
+                        width: size.width,
+                        height: size.height,
+                    })
+                })
+            })
+            .unwrap_or(self.default_monitor);
+        if let Some(shell) = self.edge_shell.as_mut() {
+            shell.update(output, self.bar.runtime().snapshot());
+        }
+    }
+
+    fn handle_edge_action(&mut self, action: edge_shell::Action) {
+        use edge_shell::Action;
+        let command = match action {
+            Action::Model(action) => {
+                let update = self.bar.runtime_mut().dispatch(action);
+                self.handle_runtime_update(update);
+                return;
+            }
+            Action::Level { audio, percent } => {
+                let view = self.bar.runtime().view();
+                let current = if audio {
+                    view.audio.volume_percent
+                } else {
+                    view.brightness.percent
+                };
+                if let Some(current) = current {
+                    let delta = percent.clamp(0, 100) - i32::from(current.rounded());
+                    let action = if audio {
+                        xbar_core::model::UserAction::AdjustVolume(delta)
+                    } else {
+                        xbar_core::model::UserAction::AdjustBrightness(delta)
+                    };
+                    let update = self.bar.runtime_mut().dispatch(action);
+                    self.handle_runtime_update(update);
+                }
+                return;
+            }
+            Action::FocusWindow(id) => {
+                std::thread::spawn(move || {
+                    if let Err(error) =
+                        shell_ipc::request("focus_window", serde_json::json!({"id": id}))
+                    {
+                        warn!("cannot focus taskbar window: {error:#}");
+                    }
+                });
+                return;
+            }
+            Action::CycleTasks => return,
+            Action::Files => std::env::var_os("HOME").map(|home| ("xdg-open", vec![home])),
+            Action::Terminal => Some(("x-terminal-emulator", Vec::new())),
+            Action::Browser => Some(("x-www-browser", Vec::new())),
+        };
+        if let Some((program, args)) = command {
+            match std::process::Command::new(program).args(args).spawn() {
+                Ok(mut child) => {
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
+                Err(error) => {
+                    warn!("cannot launch {program}: {error}");
+                    let update = self.bar.runtime_mut().dispatch(
+                        xbar_core::model::UserAction::OpenShellHub(
+                            xbar_core::model::ShellRoute::Applications,
+                        ),
+                    );
+                    self.handle_runtime_update(update);
+                }
+            }
+        }
     }
 
     fn handle_shared_update(&mut self, ack: WakeAck) {
@@ -1160,7 +1256,7 @@ impl WallpaperSource for RootPixmapSource {
             ));
         }
         let mut image = GlassImage::from_bgra(width, height, stride, &reply.data)?;
-        for pixel in image.data_mut().chunks_exact_mut(4) {
+        for pixel in image.data_mut().as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
         Ok(image)
@@ -1197,9 +1293,57 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
-    presentation.apply_nerd_font_icons_if_stock();
+    if app_config.edge_shell.enabled
+        && presentation.tag_contrast == xbar_core::tag_contrast::TagContrastMode::Auto
+    {
+        presentation.tag_contrast = xbar_core::tag_contrast::TagContrastMode::Glass;
+    }
+    let families = xbar_core::icon_font::installed_families();
+    let nerd = xbar_core::icon_font::select_installed_nerd_font_family(
+        families.iter().map(String::as_str),
+        presentation.icon_font.as_deref(),
+    );
+    if nerd.is_some() {
+        presentation.apply_nerd_font_icons_if_stock();
+    } else if app_config.edge_shell.enabled {
+        // A fresh Linux installation should remain readable without a patched
+        // icon font. Explicit user labels are preserved.
+        let stock = xbar_core::presentation::PresentationConfig::default();
+        if presentation.tag_labels == stock.tag_labels {
+            presentation.tag_labels = [
+                "1 Dev", "2 Web", "3 Media", "4 Chat", "5", "6", "7", "8", "9",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        }
+        if presentation.labels == stock.labels && presentation.icon_set.is_none() {
+            presentation.labels = xbar_core::presentation::PresentationLabels {
+                clock: String::new(),
+                screenshot: "▣".into(),
+                theme_dark: "◐".into(),
+                theme_light: "☼".into(),
+                monitor: "▣".into(),
+                cpu: "CPU".into(),
+                memory: "MEM".into(),
+                audio: "♪".into(),
+                muted: "×".into(),
+                brightness: "☼".into(),
+                battery: "BAT".into(),
+                charging: "+".into(),
+                network: "NET".into(),
+                network_offline: "×".into(),
+                media_playing: "▶".into(),
+                media_paused: "Ⅱ".into(),
+                shell_routes: ["▦", "⌕", "♧", "▤", "▣", "▱", "◐"].map(str::to_owned),
+            };
+        }
+    }
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
+    if app_config.edge_shell.enabled {
+        bar.renderer_mut().set_capsule(true);
+    }
 
     let (x11, compositor_active, screen_num) = match x11rb::connect(None) {
         Ok((conn, screen_num)) => {
@@ -1208,7 +1352,12 @@ fn main() -> Result<()> {
         }
         Err(_) => (None, false, 0),
     };
-    bar.follow_wm_background(app_config.background_opacity, compositor_active);
+    bar.follow_wm_background(
+        app_config
+            .background_opacity
+            .or(app_config.edge_shell.enabled.then_some(0.58)),
+        compositor_active,
+    );
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -1303,8 +1452,7 @@ fn main() -> Result<()> {
         logical_size,
         scale_factor,
         proxy,
-        x11,
-        compositor_active,
+        (x11, compositor_active),
         glass,
     )?;
     app.default_monitor = initial_monitor;
@@ -1315,6 +1463,13 @@ fn main() -> Result<()> {
     let update = app.bar.poll_transport();
     app.handle_runtime_update(update);
     app.sync_transport_wake();
+    app.edge_shell = edge_shell::EdgeShell::start(
+        app_config.clone(),
+        initial_monitor,
+        app.bar.runtime().snapshot(),
+        app.proxy.clone(),
+    )?;
+    app.sync_edge_shell();
     app.request_redraw();
 
     let exit_code = event_loop.run_return(move |event, _, control_flow| {
@@ -1325,6 +1480,7 @@ fn main() -> Result<()> {
                 app.tick_and_poll();
             }
             Event::UserEvent(UserEvent::SharedUpdated(ack)) => app.handle_shared_update(ack),
+            Event::UserEvent(UserEvent::EdgeAction(action)) => app.handle_edge_action(action),
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                     *control_flow = ControlFlow::Exit;

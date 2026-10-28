@@ -120,6 +120,7 @@ pub struct CairoRenderer {
     font: FontDescription,
     applied_icon_font: AppliedIconFont,
     background_opacity: Option<f64>,
+    capsule: bool,
     /// Decoded scene images, keyed by [`ImageSource::key`].
     ///
     /// Rendering takes `&self`, and an icon is drawn on every frame while the
@@ -132,6 +133,10 @@ pub struct CairoRenderer {
 }
 
 impl CairoRenderer {
+    /// Rounded, outlined glass frame used by the official desktop shell.
+    pub fn set_capsule(&mut self, enabled: bool) {
+        self.capsule = enabled;
+    }
     #[must_use]
     pub fn new(font: FontDescription) -> Self {
         Self::with_fonts(font.clone(), font, AppliedIconFont::Unsynchronized)
@@ -147,6 +152,7 @@ impl CairoRenderer {
             font,
             applied_icon_font,
             background_opacity: None,
+            capsule: false,
             images: RefCell::new(SceneImageCache::default()),
         }
     }
@@ -265,7 +271,19 @@ impl CairoRenderer {
         with_preserved_path(context, || {
             with_saved(context, || {
                 clip_to_rect(context, scene_clip)?;
-                if let Some(backdrop) = backdrop {
+                if self.capsule {
+                    context.set_operator(Operator::Clear);
+                    context.paint()?;
+                    context.set_operator(Operator::Over);
+                    if let Some(backdrop) = backdrop {
+                        // Opaque native windows must keep the sampled desktop
+                        // in their corners instead of turning transparency black.
+                        paint_backdrop(context, backdrop, scene_clip)?;
+                    }
+                    rounded_rect_path(context, viewport, viewport.height.min(viewport.width) * 0.5);
+                    context.clip();
+                }
+                if let Some(backdrop) = backdrop.filter(|_| !self.capsule) {
                     paint_backdrop(context, backdrop, scene_clip)?;
                 }
                 let layout = pangocairo::functions::create_layout(context);
@@ -273,6 +291,17 @@ impl CairoRenderer {
 
                 for node in &scene.nodes {
                     self.draw_node(context, &layout, node, background_operator)?;
+                }
+                if self.capsule {
+                    context.set_operator(Operator::Over);
+                    rounded_rect_path(
+                        context,
+                        viewport.inset(0.5, 0.5),
+                        viewport.height.min(viewport.width) * 0.5,
+                    );
+                    context.set_source_rgba(1.0, 1.0, 1.0, 0.65);
+                    context.set_line_width(1.0);
+                    context.stroke()?;
                 }
                 context.status()?;
                 Ok(())
@@ -1813,6 +1842,49 @@ fn with_preserved_path<T>(context: &Context, draw: impl FnOnce() -> Result<T>) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capsule_corners_preserve_opaque_wallpaper_and_clear_with_native_alpha() {
+        use super::*;
+        let size = Size::new(100.0, 40.0);
+        let scene = Scene {
+            viewport: size,
+            clip: Rect::from_size(size),
+            hits: vec![],
+            nodes: vec![SceneNode::Background {
+                id: NodeId::Background,
+                bounds: Rect::from_size(size),
+                fill: Rgba::rgb8(204, 231, 255),
+            }],
+        };
+        let backdrop = ImageSurface::create(Format::ARgb32, 100, 40).unwrap();
+        let bg = Context::new(&backdrop).unwrap();
+        bg.set_source_rgb(1.0, 0.0, 0.0);
+        bg.paint().unwrap();
+        drop(bg);
+        let mut renderer = CairoRenderer::new(FontDescription::from_string("Sans 11"))
+            .with_background_opacity(0.58);
+        renderer.set_capsule(true);
+        let mut surface = ImageSurface::create(Format::ARgb32, 100, 40).unwrap();
+        {
+            let ctx = Context::new(&surface).unwrap();
+            renderer.render_over(&ctx, &scene, Some(&backdrop)).unwrap();
+            renderer.render_over(&ctx, &scene, Some(&backdrop)).unwrap();
+        }
+        surface.flush();
+        assert_eq!(
+            u32::from_ne_bytes(surface.data().unwrap()[..4].try_into().unwrap()),
+            0xffff0000
+        );
+        {
+            let ctx = Context::new(&surface).unwrap();
+            renderer.render(&ctx, &scene).unwrap();
+        }
+        surface.flush();
+        assert_eq!(
+            u32::from_ne_bytes(surface.data().unwrap()[..4].try_into().unwrap()),
+            0
+        );
+    }
     use super::*;
     #[cfg(feature = "transport-shared")]
     use crate::WindowToken;
@@ -2594,7 +2666,8 @@ mod tests {
         let data = surface.data().unwrap();
         let pixel = u32::from_ne_bytes(data[stride + 4..stride + 8].try_into().unwrap());
         assert_eq!((pixel >> 24) as u8, 255);
-        assert!((pixel >> 16) as u8 > 240);
+        let expected = crate::presentation::Palette::for_theme(ThemeMode::Light).background;
+        assert_eq!((pixel >> 16) as u8, (expected.red * 255.0).round() as u8);
     }
 
     #[test]

@@ -1,5 +1,79 @@
 # Four-edge bars
 
+## Frosted four-edge desktop
+
+The official `tao_glow_bar` now combines a rounded information bar at the top
+with three independent floating panels: launchers and workspaces on the left,
+sound/display and Shell Hub shortcuts on the right, and media plus a live task
+dock at the bottom. The shared light palette uses ice-blue glass, soft white
+controls and a blue active workspace. Dark themes and explicit font/label
+overrides remain supported. Symbols are drawn as vectors or use a portable
+text fallback when a Nerd Font is unavailable.
+
+Keep JWM's `[status_bar] name = "tao_glow_bar"` and `position = "top"` for the
+complete desktop. Merge this into `~/.config/xbar/config.toml`:
+
+```toml
+theme = "light"
+font = "Sans 11"
+background_opacity = 0.58
+
+[edge_shell]
+enabled = true
+left = "hover"
+right = "hover"
+bottom = "hover"
+reveal_delay_ms = 80
+hide_delay_ms = 400
+trigger_pixels = 2
+```
+
+Each edge accepts `hover`, `always` or `disabled`. For example, changing only
+`bottom = "always"` pins the dock while the side panels continue to auto-hide.
+Restart the bar after editing its configuration. `enabled = false` restores
+the single-bar workflow. Existing single-edge placements remain available;
+companions are omitted when the main bar is placed on another edge.
+
+Hover sensors occupy two physical pixels along the middle of their own edge,
+leaving corners free. Entering one sensor reveals only its panel. A transparent
+passage connects the sensor to its floating capsule; leaving schedules a hide
+which re-entry cancels. Dragging a slider holds the panel open. Pinned panels
+publish EWMH reservations at outer desktop edges; auto-hidden panels overlay
+the workspace without changing its layout. Panels follow their monitor and
+hide when JWM hides the bar, a fullscreen window owns the output, or the
+monitor is locked.
+
+The task dock obtains the real window inventory from JWM's bounded Unix IPC,
+including native Wayland clients. Clicking a task reveals and focuses it;
+`+N` cycles through overflow tasks. Available audio/brightness sliders accept
+click, drag and wheel input. Missing hardware displays an unavailable reading.
+The launchers use `xdg-open`, `x-terminal-emulator` and `x-www-browser`; a
+missing executable opens JWM's application launcher instead.
+
+The companion surfaces require X11 or XWayland, Cairo/Pango and GTK3 (the same
+toolchain as the official bar). A compositor provides native translucency;
+without one, the bar samples and frosts the wallpaper. As with the existing
+glass fallback, this samples the wallpaper rather than live application
+content. For an exact sampled background, set `[glass] wallpaper` and
+`wallpaper_mode` to match JWM. This companion host belongs to the official
+bar; the toolkit examples retain their individual single-edge window hosts
+and inherit the shared light palette.
+
+Build and exercise the real interaction regression in an isolated display:
+
+```sh
+cargo build --locked --bins
+cargo build --locked --manifest-path bars/tao_glow_bar/Cargo.toml
+dbus-run-session -- python3 scripts/test-edge-shell-x11.py
+```
+
+The test starts and stops its own Xvfb, uses temporary configuration, exercises
+all three reveal modes, switches a live JWM workspace and activates a task.
+Set `JWM_EDGE_SCREENSHOT=/absolute/path/desktop.png` to capture the test desktop
+when ImageMagick's `import` is installed.
+
+## Single-edge placement
+
 JWM can place each output's bar at the top, bottom, left or right. The window
 manager owns the physical bar rectangle and the workspace it reserves;
 frontends lay out readable controls inside that rectangle. Sidebars keep text,
