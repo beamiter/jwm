@@ -289,9 +289,41 @@ pub(crate) struct PanelContents {
     /// Full travel of the scroll indicator, and the thumb inside it.
     pub(crate) scroll_track: Option<Rect>,
     pub(crate) scroll_thumb: Option<Rect>,
+    pub(crate) list_viewport: Option<crate::backend::api::SystemUiListViewport>,
+    pub(crate) list_clip: Option<Rect>,
+    pub(crate) fixed_items_clip: Option<Rect>,
 }
 
 impl PanelContents {
+    /// Origin/clip for a texture row; status rows follow the clipped list.
+    pub(crate) fn row_origin(&self, row: usize) -> Option<([f32; 2], Option<Rect>)> {
+        let mut origin = self.items?;
+        let Some(view) = self.list_viewport else {
+            return Some((origin, None));
+        };
+        if row < view.rows {
+            origin[1] -= view.fraction * self.row_height;
+            Some((origin, self.list_clip))
+        } else {
+            origin[1] -= view.rows.saturating_sub(view.visible_rows) as f32 * self.row_height;
+            Some((origin, self.fixed_items_clip))
+        }
+    }
+
+    pub(crate) fn texture_passes(&self) -> Vec<([f32; 2], Option<Rect>)> {
+        let Some(first) = self.row_origin(0) else {
+            return Vec::new();
+        };
+        let mut passes = vec![first];
+        if let Some(view) = self.list_viewport
+            && self.fixed_items_clip.is_some()
+            && let Some(tail) = self.row_origin(view.rows)
+        {
+            passes.push(tail);
+        }
+        passes
+    }
+
     /// Place the scroll thumb at fraction `t` of the track (pointer drag).
     /// `None` keeps the windowed-list position from [`contents`].
     #[must_use]
@@ -393,6 +425,8 @@ pub(crate) struct HitGeometry {
     side_preview: Option<Rect>,
     query_field: Option<Rect>,
     scroll_track: Option<Rect>,
+    list_viewport: Option<crate::backend::api::SystemUiListViewport>,
+    list_clip: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -423,7 +457,13 @@ impl HitGeometry {
                 panel[0] + pad - bleed,
                 y,
                 (panel[2] - 2.0 * pad + 2.0 * bleed).max(0.0),
-                contents.row_height * rows as f32 + 2.0 * TEXT_PAD,
+                contents.row_height
+                    * (rows
+                        - contents
+                            .list_viewport
+                            .map_or(0, |view| view.rows.saturating_sub(view.visible_rows))
+                            .min(rows)) as f32
+                    + 2.0 * TEXT_PAD,
             ])
         });
         Self {
@@ -435,6 +475,8 @@ impl HitGeometry {
             side_preview: None,
             query_field: contents.query_field,
             scroll_track: contents.scroll_track,
+            list_viewport: contents.list_viewport,
+            list_clip: contents.list_clip,
         }
     }
 
@@ -479,12 +521,28 @@ impl HitGeometry {
         if !contains(items, x, y) {
             return Hit::Panel;
         }
-        let row = ((y - items[1]) / self.row_height).floor().max(0.0) as usize;
+        let row = if let (Some(view), Some(clip)) = (self.list_viewport, self.list_clip) {
+            if y < clip[1] {
+                return Hit::Panel;
+            }
+            if y < clip[1] + clip[3] {
+                (((y - clip[1]) / self.row_height) + view.fraction)
+                    .floor()
+                    .max(0.0) as usize
+            } else {
+                view.rows + ((y - clip[1] - clip[3]) / self.row_height).floor().max(0.0) as usize
+            }
+        } else {
+            ((y - items[1]) / self.row_height).floor().max(0.0) as usize
+        };
         // The list texture is drawn at panel_x + PAD plus the icon column; the
         // offset into it is what a row consumer (a slider bar at a known text
         // position) wants. Text-only panels reserve no column, so their offset
         // is unchanged.
         let text_x = x - self.panel[0] - card_pad(self.panel[2]) - self.row_icons;
+        if self.list_viewport.is_some() && row >= self.rows {
+            return Hit::Panel;
+        }
         Hit::Item(row.min(self.rows.saturating_sub(1)), text_x)
     }
 
@@ -498,6 +556,10 @@ impl HitGeometry {
             return None;
         }
         Some(((y as f32 - track[1]) / track[3]).clamp(0.0, 1.0))
+    }
+
+    pub(crate) fn row_height(self) -> Option<f64> {
+        (self.row_height.is_finite() && self.row_height > 0.0).then_some(self.row_height as f64)
     }
 }
 
@@ -573,6 +635,145 @@ pub(crate) fn target_size(sizes: &SectionSizes, screen_w: f32, width_floor: f32)
 /// than [`target_size`] asked for — the contents follow the card as it opens
 /// rather than being clipped by it.
 #[must_use]
+pub(crate) fn visible_section_sizes(
+    mut sizes: SectionSizes,
+    rows: usize,
+    viewport: Option<crate::backend::api::SystemUiListViewport>,
+) -> SectionSizes {
+    if let Some(view) = viewport.filter(|view| view.rows <= rows && view.visible_rows <= view.rows)
+        && rows > 0
+    {
+        let row_height = ((sizes.items.1 - 2.0 * TEXT_PAD) / rows as f32).max(0.0);
+        sizes.items.1 -= view.rows.saturating_sub(view.visible_rows) as f32 * row_height;
+    }
+    sizes
+}
+
+pub(crate) fn clip_rect(rect: Rect, clip: Rect) -> Option<Rect> {
+    let x = rect[0].max(clip[0]);
+    let y = rect[1].max(clip[1]);
+    let w = (rect[0] + rect[2]).min(clip[0] + clip[2]) - x;
+    let h = (rect[1] + rect[3]).min(clip[1] + clip[3]) - y;
+    (w > 0.0 && h > 0.0).then_some([x, y, w, h])
+}
+
+/// Convert the shared top-left geometry into a framebuffer scissor, preserving
+/// a caller's damage scissor when one is already active.
+pub(crate) fn list_scissor(
+    clip: Rect,
+    width: u32,
+    height: u32,
+    previous: Option<[i32; 4]>,
+) -> [i32; 4] {
+    let x0 = clip[0].floor().max(0.0).min(width as f32) as i32;
+    let y0 = clip[1].floor().max(0.0).min(height as f32) as i32;
+    let x1 = (clip[0] + clip[2]).ceil().max(x0 as f32).min(width as f32) as i32;
+    let y1 = (clip[1] + clip[3]).ceil().max(y0 as f32).min(height as f32) as i32;
+    let rect = [
+        x0,
+        height.min(i32::MAX as u32) as i32 - y1,
+        x1 - x0,
+        y1 - y0,
+    ];
+    let Some(prev) = previous else {
+        return rect;
+    };
+    let x = rect[0].max(prev[0]);
+    let y = rect[1].max(prev[1]);
+    [
+        x,
+        y,
+        (rect[0] + rect[2])
+            .min(prev[0] + prev[2])
+            .saturating_sub(x)
+            .max(0),
+        (rect[1] + rect[3])
+            .min(prev[1] + prev[3])
+            .saturating_sub(y)
+            .max(0),
+    ]
+}
+
+pub(crate) fn contents_scrolled(
+    panel: Rect,
+    sizes: &SectionSizes,
+    rows: usize,
+    selected: Option<usize>,
+    scroll: Option<Scroll>,
+    viewport: Option<crate::backend::api::SystemUiListViewport>,
+) -> PanelContents {
+    let Some(mut view) =
+        viewport.filter(|view| view.rows <= rows && view.visible_rows <= view.rows && rows > 0)
+    else {
+        return contents(panel, sizes, rows, selected, scroll);
+    };
+    view.fraction = if view.fraction.is_finite() {
+        view.fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let visible_sizes = visible_section_sizes(*sizes, rows, Some(view));
+    let physical_rows = rows - view.rows.saturating_sub(view.visible_rows);
+    let mut out = contents(panel, &visible_sizes, physical_rows, None, scroll);
+    let Some(origin) = out.items else {
+        return out;
+    };
+    let row_h = ((sizes.items.1 - 2.0 * TEXT_PAD) / rows as f32).max(0.0);
+    out.row_height = row_h;
+    out.list_viewport = Some(view);
+    let pad = card_pad(panel[2]);
+    let bleed = SELECTION_BLEED.min(pad);
+    let list_clip = [
+        panel[0] + pad - bleed,
+        origin[1] + TEXT_PAD,
+        (panel[2] - 2.0 * pad + 2.0 * bleed).max(0.0),
+        view.visible_rows as f32 * row_h,
+    ];
+    out.list_clip = Some(clip_rect(list_clip, panel).unwrap_or([0.0; 4]));
+    let fixed_rows = rows - view.rows;
+    if fixed_rows > 0 {
+        out.fixed_items_clip = Some(
+            clip_rect(
+                [
+                    list_clip[0],
+                    list_clip[1] + list_clip[3],
+                    list_clip[2],
+                    fixed_rows as f32 * row_h + TEXT_PAD,
+                ],
+                panel,
+            )
+            .unwrap_or([0.0; 4]),
+        );
+    }
+    if let Some(row) = selected.filter(|row| *row < rows)
+        && let Some((item_origin, clip)) = out.row_origin(row)
+    {
+        let rect = [
+            list_clip[0],
+            item_origin[1] + row as f32 * row_h,
+            list_clip[2],
+            row_h + 2.0 * TEXT_PAD,
+        ];
+        out.selection = clip.and_then(|clip| clip_rect(rect, clip));
+    }
+    if let (Some(scroll), Some(mut track)) = (scroll, out.scroll_track) {
+        track[1] = list_clip[1];
+        track[3] = list_clip[3];
+        let thumb_h = ((scroll.visible as f32 / scroll.total.max(1) as f32) * track[3])
+            .max(SCROLLBAR_MIN_THUMB.min(track[3]))
+            .min(track[3]);
+        let last = scroll.total.saturating_sub(scroll.visible).max(1) as f32;
+        let position = (scroll.first as f32 + view.fraction) / last;
+        out.scroll_track = Some(track);
+        out.scroll_thumb = Some(scroll_thumb_at(
+            track,
+            [track[0], track[1], track[2], thumb_h],
+            position,
+        ));
+    }
+    out
+}
+
 pub(crate) fn contents(
     panel: Rect,
     sizes: &SectionSizes,
@@ -791,6 +992,75 @@ pub(crate) fn letterbox(frame: Rect, img_w: f32, img_h: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractional_lists_clip_guard_rows_and_keep_status_rows_fixed() {
+        let view = crate::backend::api::SystemUiListViewport {
+            rows: 4,
+            visible_rows: 3,
+            fraction: 0.25,
+        };
+        let sizes = sizes((160.0, 30.0), (100.0, 20.0), (220.0, 124.0), (150.0, 20.0));
+        let visible = visible_section_sizes(sizes, 6, Some(view));
+        assert_eq!(visible.items.1, 104.0);
+        let rect = [100.0, 100.0, 400.0, 500.0];
+        let layout = contents_scrolled(
+            rect,
+            &sizes,
+            6,
+            Some(0),
+            Some(Scroll {
+                first: 5,
+                visible: 3,
+                total: 20,
+            }),
+            Some(view),
+        );
+        assert_eq!(layout.row_height, 20.0);
+        let base = layout.items.unwrap();
+        let clip = layout.list_clip.unwrap();
+        let passes = layout.texture_passes();
+        assert_eq!(passes.len(), 2);
+        assert_eq!(passes[0].0[1], base[1] - 5.0);
+        assert_eq!(passes[1].0[1], base[1] - 20.0);
+        assert_eq!(clip[3], 60.0);
+        assert_eq!(layout.fixed_items_clip.unwrap()[1], clip[1] + clip[3]);
+        let selection = layout.selection.unwrap();
+        assert!(selection[1] >= clip[1] && selection[1] + selection[3] <= clip[1] + clip[3]);
+        let hit = HitGeometry::new(rect, &layout, 6);
+        let x = (base[0] + 8.0) as f64;
+        assert!(matches!(
+            hit.hit_test(x, (clip[1] + 1.0) as f64),
+            Hit::Item(0, _)
+        ));
+        assert!(matches!(
+            hit.hit_test(x, (clip[1] + 16.0) as f64),
+            Hit::Item(1, _)
+        ));
+        assert!(matches!(
+            hit.hit_test(x, (clip[1] + 59.0) as f64),
+            Hit::Item(3, _)
+        ));
+        assert!(matches!(
+            hit.hit_test(x, (clip[1] + 61.0) as f64),
+            Hit::Item(4, _)
+        ));
+        assert_eq!(hit.row_height(), Some(20.0));
+    }
+
+    #[test]
+    fn fractional_list_scissor_preserves_the_existing_damage_clip() {
+        assert_eq!(
+            list_scissor([10.0, 20.0, 100.0, 40.0], 200, 100, None),
+            [10, 40, 100, 40]
+        );
+        assert_eq!(
+            list_scissor([10.0, 20.0, 100.0, 40.0], 200, 100, Some([20, 45, 60, 20])),
+            [20, 45, 60, 20]
+        );
+        let outside = list_scissor([-100.0, -100.0, 20.0, 20.0], 200, 100, None);
+        assert_eq!(outside[2] * outside[3], 0);
+    }
 
     fn sizes(title: Size, query: Size, items: Size, hint: Size) -> SectionSizes {
         SectionSizes {

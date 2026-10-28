@@ -27,12 +27,117 @@ impl<C: CompositorConnection> Compositor<C> {
         self.transition_start.is_some()
     }
 
+    pub(crate) fn transition_animating(&self) -> bool {
+        self.transition_active()
+            && self
+                .workspace_swipe
+                .as_ref()
+                .is_none_or(|swipe| swipe.is_settling())
+    }
+
     /// Compute eased transition progress (0.0 → 1.0).
     /// Returns None when there is no active transition or it has completed.
     pub(crate) fn transition_progress(&self, now: std::time::Instant) -> Option<f32> {
+        if let Some(swipe) = &self.workspace_swipe {
+            return swipe.sample(now);
+        }
         let start = self.transition_start?;
         let progress = normalized_transition_progress(start, now, self.transition_duration)?;
         Some(self.transition_mode.eased_progress(progress))
+    }
+
+    pub(crate) fn begin_workspace_swipe(&mut self, rect: (i32, i32, u32, u32)) -> bool {
+        if matches!(
+            self.transition_mode,
+            crate::backend::compositor_common::transitions::TransitionMode::None
+        ) {
+            return false;
+        }
+        if self.transition_start.is_some() && self.workspace_swipe.is_none() {
+            return false;
+        }
+        self.notify_tag_switch(std::time::Duration::from_secs(1), 1, 0, rect);
+        if self.transition_start.is_none() {
+            return false;
+        }
+        if self.transition_new_fbo.is_none() {
+            match unsafe {
+                Self::create_scene_fbo(&self.gl, self.transition_mon_w, self.transition_mon_h)
+            } {
+                Ok(target) => self.transition_new_fbo = Some(target),
+                Err(error) => {
+                    log::warn!("workspace swipe destination allocation failed: {error}");
+                    self.retire_transition_targets();
+                    return false;
+                }
+            }
+        }
+        self.workspace_swipe = Some(Default::default());
+        true
+    }
+
+    pub(crate) fn update_workspace_swipe(&mut self, progress: f32, direction: i32) {
+        if let Some(swipe) = &mut self.workspace_swipe {
+            swipe.update(progress);
+            self.transition_direction = if direction < 0 { -1.0 } else { 1.0 };
+            self.force_full_redraw();
+        }
+    }
+
+    pub(crate) fn end_workspace_swipe(&mut self, commit: bool, animate: bool) {
+        if let Some(swipe) = &mut self.workspace_swipe {
+            if animate {
+                swipe.release(commit, std::time::Instant::now());
+            } else {
+                self.workspace_swipe = None;
+                self.transition_start = None;
+                // A new Begin waits for a restored source frame instead of
+                // capturing the two-workspace image that was last presented.
+                self.presented_scene_status.invalidate();
+                if self.context_current || self.graphics.make_current().is_ok() {
+                    self.context_current = true;
+                    self.retire_transition_targets();
+                }
+            }
+            self.force_full_redraw();
+        }
+    }
+
+    pub(crate) fn workspace_swipe_active(&self) -> bool {
+        self.workspace_swipe.is_some()
+    }
+
+    pub(crate) fn render_workspace_swipe(&mut self, progress: f32, projection: &[f32; 16]) {
+        let Some(texture) = self.old_transition_texture() else {
+            return;
+        };
+        let Some(workspace) = self.transition_workspace() else {
+            return;
+        };
+        // The WM supplied the destination as a visual-only scene. Capture the
+        // fresh frame before drawing either half so both workspaces translate
+        // with the fingers; never sample from the currently bound draw target.
+        if let Some((fbo, destination)) = self.transition_new_fbo {
+            if self.capture_transition_scene_from(
+                None,
+                fbo,
+                self.transition_mon_x,
+                self.transition_mon_y,
+                self.transition_mon_w,
+                self.transition_mon_h,
+            ) {
+                self.begin_flat_transition(projection, workspace, destination);
+                let mut incoming = workspace.draw_rect;
+                incoming[0] +=
+                    self.transition_direction * (1.0 - progress) * workspace.mon_w as f32;
+                self.draw_flat_transition_quad(incoming, workspace.uv_rect, 1.0);
+            }
+        }
+        self.begin_flat_transition(projection, workspace, texture);
+        let mut rect = workspace.draw_rect;
+        rect[0] -= self.transition_direction * progress * workspace.mon_w as f32;
+        self.draw_flat_transition_quad(rect, workspace.uv_rect, 1.0);
+        self.end_flat_transition();
     }
 
     fn old_transition_texture(&self) -> Option<glow::Texture> {

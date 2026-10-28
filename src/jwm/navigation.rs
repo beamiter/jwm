@@ -937,6 +937,11 @@ impl Jwm {
             self.features.system_ui.is_active(),
             self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask),
         );
+        // The gesture already owns a source snapshot and its release easing.
+        // Commit the real view exactly once without restarting either animation.
+        if backend.compositor_workspace_swipe_active() {
+            motion = TagSwitchMotion::Instant;
+        }
         if motion == TagSwitchMotion::Transition {
             let direction =
                 Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());

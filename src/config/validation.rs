@@ -596,6 +596,54 @@ fn window_rule_covers(earlier: &RuleConfig, later: &RuleConfig) -> bool {
         && window_rule_field_covers(&earlier.name, &later.name)
 }
 
+fn validate_touchpad_options(
+    diagnostics: &mut ConfigDiagnostics,
+    path: &str,
+    options: &super::input::TouchpadOptions,
+) {
+    if let Some(speed) = options.accel_speed {
+        require_f64_range(
+            diagnostics,
+            &format!("{path}.accel_speed"),
+            speed,
+            -1.0,
+            1.0,
+        );
+    }
+    for (field, value, choices) in [
+        (
+            "click_method",
+            &options.click_method,
+            &["button_areas", "clickfinger"][..],
+        ),
+        (
+            "scroll_method",
+            &options.scroll_method,
+            &["two_finger", "edge", "none"][..],
+        ),
+        (
+            "accel_profile",
+            &options.accel_profile,
+            &["adaptive", "flat"][..],
+        ),
+        (
+            "send_events",
+            &options.send_events,
+            &["enabled", "disabled", "disabled_on_external_mouse"][..],
+        ),
+    ] {
+        if let Some(value) = value
+            && !choices.contains(&value.as_str())
+        {
+            diagnostics.error(
+                format!("{path}.{field}"),
+                format!("unknown value {value:?}"),
+                Some(format!("use one of: {}", choices.join(", "))),
+            );
+        }
+    }
+}
+
 impl Config {
     #[must_use]
     #[allow(clippy::too_many_lines)]
@@ -603,6 +651,21 @@ impl Config {
         let mut diagnostics = ConfigDiagnostics::default();
         let behavior = &self.inner.behavior;
         let layout = &self.inner.layout;
+
+        validate_touchpad_options(
+            &mut diagnostics,
+            "input.touchpad",
+            &self.inner.input.touchpad,
+        );
+        for (index, rule) in self.inner.input.touchpad_rules.iter().enumerate() {
+            let path = format!("input.touchpad_rules[{index}]");
+            validate_touchpad_options(&mut diagnostics, &path, &rule.settings);
+            for (field, value) in [("name", &rule.name), ("identifier", &rule.identifier)] {
+                if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                    diagnostics.error(format!("{path}.{field}"), "device selector is empty", None);
+                }
+            }
+        }
 
         if !(1..=31).contains(&layout.tags_length) {
             diagnostics.error(
@@ -1904,6 +1967,39 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn touchpad_policy_rejects_invalid_ranges_and_modes() {
+        let mut config = Config::default();
+        config.inner.input.touchpad.accel_speed = Some(f64::NAN);
+        config.inner.input.touchpad.click_method = Some("typo".into());
+        config
+            .inner
+            .input
+            .touchpad_rules
+            .push(super::super::input::TouchpadRule {
+                name: Some(" ".into()),
+                settings: super::super::input::TouchpadOptions {
+                    send_events: Some("off".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let diagnostics = config.diagnostics();
+        for expected in [
+            "input.touchpad.accel_speed",
+            "input.touchpad.click_method",
+            "input.touchpad_rules[0].name",
+            "input.touchpad_rules[0].send_events",
+        ] {
+            assert!(
+                diagnostics.issues().iter().any(|issue| {
+                    issue.path == expected && issue.level == ConfigDiagnosticLevel::Error
+                }),
+                "missing {expected}: {diagnostics}"
+            );
+        }
+    }
 
     fn binding(modifiers: &[&str], key: &str, function: &str) -> KeyConfig {
         KeyConfig {

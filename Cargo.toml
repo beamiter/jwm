@@ -119,6 +119,9 @@ backend-wayland-udev = [
     "smithay/backend_session_libseat",
     "smithay/backend_udev",
 ]
+# Optional newer libinput API for disable-while-trackpointing. The default
+# native backend keeps Smithay's libinput 1.19 baseline.
+libinput-1-21 = ["backend-wayland-udev", "dep:input"]
 # ALSA audio capture: standalone audio recording and the screen-recording
 # audio track. Without it recording is video-only and audio capture reports
 # that it is not compiled in.
@@ -151,6 +154,7 @@ path = "tools/jwm_remote.rs"
 required-features = ["remote-x11"]
 
 [dependencies]
+input = { version = "0.10.0", default-features = false, features = ["libinput_1_21"], optional = true }
 jwm_ipc_transport = { path = "crates/jwm_ipc_transport" }
 clap = { version = "4.6.2", features = ["derive", "env"] }
 dirs = "7.0.0"

@@ -1332,16 +1332,9 @@ impl crate::jwm::Jwm {
         if !self.features.system_ui.is_notification_center() {
             return;
         }
-        let held = self.features.system_ui.selected_notification_cursor();
-        self.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
-            &self.features.notifications,
-            now_unix_ms(),
-        );
-        if let Some((id, cursor)) = held {
-            self.features
-                .system_ui
-                .restore_notification_cursor(id, cursor);
-        }
+        self.features
+            .system_ui
+            .refresh_notification_center(&self.features.notifications, now_unix_ms());
         // As with the control center: rebuilt here, pushed by the tick. A
         // notification arriving while the center is open was otherwise
         // invisible until the user pressed a key.

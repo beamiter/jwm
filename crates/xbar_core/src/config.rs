@@ -234,6 +234,8 @@ enum FileTheme {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FilePresentation {
+    #[serde(default)]
+    scroll: FileScroll,
     position: Option<crate::placement::BarEdge>,
     #[serde(alias = "thickness")]
     bar_height: Option<f32>,
@@ -258,6 +260,14 @@ struct FilePresentation {
     shell_routes: Option<Vec<String>>,
     #[serde(default)]
     visibility: FileVisibility,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileScroll {
+    navigation_pixels: Option<f64>,
+    adjustment_pixels: Option<f64>,
+    idle_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -430,6 +440,37 @@ impl BarConfig {
         }
 
         let presentation = &mut config.presentation;
+        for (field, value, target) in [
+            (
+                "presentation.scroll.navigation_pixels",
+                file.presentation.scroll.navigation_pixels,
+                &mut presentation.scroll.navigation_pixels,
+            ),
+            (
+                "presentation.scroll.adjustment_pixels",
+                file.presentation.scroll.adjustment_pixels,
+                &mut presentation.scroll.adjustment_pixels,
+            ),
+        ] {
+            if let Some(value) = value {
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(ConfigError::InvalidValue {
+                        field,
+                        reason: "must be a finite positive number",
+                    });
+                }
+                *target = value;
+            }
+        }
+        if let Some(idle_ms) = file.presentation.scroll.idle_ms {
+            if !(1..=10_000).contains(&idle_ms) {
+                return Err(ConfigError::InvalidValue {
+                    field: "presentation.scroll.idle_ms",
+                    reason: "must be between 1 and 10000 milliseconds",
+                });
+            }
+            presentation.scroll.idle = std::time::Duration::from_millis(idle_ms);
+        }
         if let Some(edge) = file.presentation.position {
             presentation.edge = edge;
         }
@@ -925,6 +966,42 @@ tag_labels = ["a", "b", "c"]
         assert!(BarConfig::from_toml("[presentation]\ntag_contrast = \"invalid\"").is_err());
         let legacy: PresentationConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.tag_contrast, TagContrastMode::Auto);
+    }
+
+    #[test]
+    fn scroll_policy_is_backward_compatible_and_rejects_invalid_sensitivity() {
+        let default = crate::ScrollPolicy::default();
+        assert_eq!(
+            BarConfig::from_toml("").unwrap().presentation.scroll,
+            default
+        );
+        let old_snapshot: PresentationConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(old_snapshot.scroll, default);
+        let config = BarConfig::from_toml(
+            "[presentation.scroll]\nnavigation_pixels = 60\nadjustment_pixels = 24\nidle_ms = 400",
+        )
+        .unwrap();
+        assert_eq!(
+            config.presentation.scroll,
+            crate::ScrollPolicy {
+                navigation_pixels: 60.0,
+                adjustment_pixels: 24.0,
+                idle: std::time::Duration::from_millis(400),
+            }
+        );
+        for entry in [
+            "navigation_pixels = nan",
+            "navigation_pixels = 0",
+            "adjustment_pixels = -1",
+            "idle_ms = 0",
+            "idle_ms = 10001",
+            "unknown = 1",
+        ] {
+            assert!(
+                BarConfig::from_toml(&format!("[presentation.scroll]\n{entry}")).is_err(),
+                "accepted {entry}"
+            );
+        }
     }
 
     #[test]

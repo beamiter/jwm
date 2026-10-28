@@ -1,6 +1,47 @@
 //! Backend-independent swipe recognition. Commit only on a completed gesture,
 //! never on updates, so cancellation and a long swipe cannot switch twice.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// One physical sequence, before policy turns it into a workspace preview or
+/// an ordinary command. IDs survive queuing and never identify another device.
+#[derive(Debug, Clone)]
+pub enum SwipeInput {
+    Begin {
+        id: u64,
+        fingers: u32,
+        config_signature: String,
+    },
+    Update {
+        id: u64,
+        dx: f64,
+        dy: f64,
+        time: u32,
+    },
+    End {
+        id: u64,
+        cancelled: bool,
+        time: u32,
+    },
+}
+
+static NEXT_SWIPE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_swipe_id() -> u64 {
+    NEXT_SWIPE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Physical Begins already observed by a backend, including queued ones.
+pub fn latest_swipe_id() -> u64 {
+    NEXT_SWIPE_ID.load(Ordering::Relaxed).saturating_sub(1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeAxis {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct GestureSwipeTracker {
     pub fingers: u32,
@@ -8,6 +49,9 @@ pub struct GestureSwipeTracker {
     pub config_signature: String,
     pub dx: f64,
     pub dy: f64,
+    pub axis: Option<SwipeAxis>,
+    last_time: Option<u32>,
+    velocity: (f64, f64),
 }
 
 impl GestureSwipeTracker {
@@ -18,6 +62,9 @@ impl GestureSwipeTracker {
             config_signature: String::new(),
             dx: 0.0,
             dy: 0.0,
+            axis: None,
+            last_time: None,
+            velocity: (0.0, 0.0),
         };
     }
 
@@ -25,7 +72,87 @@ impl GestureSwipeTracker {
         if self.intercept {
             self.dx += dx;
             self.dy += dy;
+            if self.axis.is_none() {
+                let (x, y) = (self.dx.abs(), self.dy.abs());
+                self.axis = if x >= 8.0 && x >= y * 1.5 {
+                    Some(SwipeAxis::Horizontal)
+                } else if y >= 8.0 && y >= x * 1.5 {
+                    Some(SwipeAxis::Vertical)
+                } else {
+                    None
+                };
+            }
         }
+    }
+
+    /// Device timestamps wrap at 2^32 ms. A long pause invalidates flick speed.
+    pub fn update_timed(&mut self, dx: f64, dy: f64, time: u32) {
+        if let Some(previous) = self.last_time {
+            let dt = time.wrapping_sub(previous);
+            if (1..=80).contains(&dt) {
+                let scale = 1000.0 / f64::from(dt);
+                self.velocity = (
+                    0.4 * self.velocity.0 + 0.6 * dx * scale,
+                    0.4 * self.velocity.1 + 0.6 * dy * scale,
+                );
+            } else if dt > 80 {
+                self.velocity = (0.0, 0.0);
+            }
+        }
+        self.last_time = Some(time);
+        self.update(dx, dy);
+    }
+
+    pub fn direction(&self) -> Option<&'static str> {
+        if !self.dx.is_finite() || !self.dy.is_finite() {
+            return None;
+        }
+        match self.axis {
+            Some(SwipeAxis::Horizontal) if self.dx != 0.0 => {
+                Some(if self.dx < 0.0 { "left" } else { "right" })
+            }
+            Some(SwipeAxis::Vertical) if self.dy != 0.0 => {
+                Some(if self.dy < 0.0 { "up" } else { "down" })
+            }
+            _ => None,
+        }
+    }
+
+    /// A quick short flick may commit, but tiny noise and a flick followed by
+    /// a pause/reversal cannot. Custom actions still execute once, at End.
+    pub fn finish_timed(
+        &mut self,
+        cancelled: bool,
+        threshold: f64,
+        time: u32,
+    ) -> Option<(u32, &'static str)> {
+        let direction = self.direction();
+        let (distance, velocity) = match self.axis {
+            Some(SwipeAxis::Horizontal) => (self.dx, self.velocity.0),
+            Some(SwipeAxis::Vertical) => (self.dy, self.velocity.1),
+            None => (0.0, 0.0),
+        };
+        let fresh = self
+            .last_time
+            .is_some_and(|last| time.wrapping_sub(last) <= 80);
+        let flick = fresh
+            && distance.abs() >= threshold * 0.35
+            && velocity.abs() >= 900.0
+            && distance.signum() == velocity.signum();
+        let reversing = fresh && velocity.abs() >= 900.0 && distance.signum() != velocity.signum();
+        let result = !cancelled
+            && !reversing
+            && self.intercept
+            && threshold.is_finite()
+            && threshold > 0.0
+            && distance.is_finite()
+            && (distance.abs() >= threshold || flick);
+        let fingers = self.fingers;
+        *self = Self::default();
+        result
+            .then_some(direction)
+            .flatten()
+            .map(|direction| (fingers, direction))
     }
 
     /// Consume ownership even on cancellation, invalid input or short swipes.
@@ -113,5 +240,59 @@ mod tests {
             tracker.update(100.0, 0.0);
             assert_eq!(tracker.finish(false, threshold), None);
         }
+    }
+
+    #[test]
+    fn timed_swipe_locks_an_axis_and_can_be_pulled_back_before_release() {
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-30.0, 1.0, 10);
+        tracker.update_timed(-60.0, 55.0, 110);
+        assert_eq!(tracker.axis, Some(SwipeAxis::Horizontal));
+        assert_eq!(tracker.direction(), Some("left"));
+        tracker.update_timed(80.0, 0.0, 210);
+        assert_eq!(tracker.finish_timed(false, 80.0, 220), None);
+        assert_eq!(tracker.finish_timed(false, 80.0, 220), None);
+    }
+
+    #[test]
+    fn a_short_fast_flick_needs_distance_freshness_and_matching_velocity() {
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-15.0, 0.0, 100);
+        tracker.update_timed(-20.0, 0.0, 108);
+        assert_eq!(
+            tracker.clone().finish_timed(false, 80.0, 110),
+            Some((3, "left"))
+        );
+        assert_eq!(tracker.clone().finish_timed(true, 80.0, 110), None);
+        assert_eq!(tracker.finish_timed(false, 80.0, 200), None);
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-15.0, 0.0, u32::MAX - 5);
+        tracker.update_timed(-20.0, 0.0, 2);
+        assert_eq!(tracker.finish_timed(false, 80.0, 4), Some((3, "left")));
+    }
+
+    #[test]
+    fn a_fast_tiny_twitch_or_invalid_delta_cannot_commit() {
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-9.0, 0.0, 10);
+        tracker.update_timed(-9.0, 0.0, 11);
+        assert_eq!(tracker.finish_timed(false, 80.0, 12), None);
+        tracker.begin(3, true);
+        tracker.update_timed(-100.0, f64::NAN, 20);
+        assert_eq!(tracker.finish_timed(false, 80.0, 21), None);
+    }
+
+    #[test]
+    fn a_deliberate_fast_reversal_cancels_even_past_the_distance_threshold() {
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-110.0, 0.0, 10);
+        tracker.update_timed(20.0, 0.0, 20);
+        assert_eq!(tracker.dx, -90.0);
+        assert_eq!(tracker.finish_timed(false, 80.0, 21), None);
     }
 }

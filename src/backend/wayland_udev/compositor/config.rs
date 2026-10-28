@@ -495,6 +495,11 @@ impl WaylandCompositor {
             .and_then(|geometry| geometry.scroll_t_at(y))
     }
 
+    pub(crate) fn system_ui_row_height(&self) -> Option<f64> {
+        self.system_ui_hit_geometry
+            .and_then(|geometry| geometry.row_height())
+    }
+
     pub(crate) fn push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
         let removed = self.toast_stack.push(toast, std::time::Instant::now());
         self.toast_retired.extend(removed);
@@ -678,6 +683,7 @@ impl WaylandCompositor {
             self.transition_active = false;
             self.transition_snapshot_pending = false;
             self.transition_start = None;
+            self.workspace_swipe = None;
         }
 
         // --- Border config ---
@@ -988,6 +994,7 @@ impl WaylandCompositor {
                 self.transition_active = false;
                 self.transition_snapshot_pending = false;
                 self.transition_start = None;
+                self.workspace_swipe = None;
             }
             self.needs_render = true;
         }
@@ -2843,6 +2850,7 @@ impl WaylandCompositor {
         exclude_top: u32,
         mon_rect: (i32, i32, u32, u32),
     ) {
+        self.workspace_swipe = None;
         let exclude_top = exclude_top.min(mon_rect.3);
         if matches!(self.transition_mode, TransitionMode::None)
             || duration.is_zero()

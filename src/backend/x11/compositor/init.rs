@@ -1107,6 +1107,7 @@ impl<C: CompositorConnection> Compositor<C> {
             presented_scene_fbo: None,
             presented_scene_status: PresentedSceneStatus::default(),
             transition_start: None,
+            workspace_swipe: None,
             transition_duration: std::time::Duration::from_millis(anim_speed.apply_duration(150)),
             transition_direction: 1.0,
             transition_exclude_top: 0,

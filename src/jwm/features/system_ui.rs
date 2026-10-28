@@ -199,11 +199,59 @@ impl LockScope {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ListSlice {
+    first: usize,
+    visible: usize,
+    rendered: usize,
+    total: usize,
+    fraction: f32,
+    position: f64,
+}
+
+/// A pointer viewport follows its first displayed item across asynchronous
+/// refreshes, including the selected notification's inserted action strip.
+struct ListViewportAnchor {
+    key: Option<String>,
+    strip: bool,
+    position: f64,
+}
+
+impl ListSlice {
+    fn new(position: Option<f64>, fallback: usize, total: usize, window: usize) -> Self {
+        let visible = total.min(window);
+        let last = total.saturating_sub(visible) as f64;
+        let position = position
+            .filter(|value| value.is_finite())
+            .unwrap_or(fallback as f64)
+            .clamp(0.0, last);
+        let first = position.floor() as usize;
+        let fraction = (position - first as f64) as f32;
+        let rendered = (visible + usize::from(fraction > 0.0)).min(total.saturating_sub(first));
+        Self {
+            first,
+            visible,
+            rendered,
+            total,
+            fraction,
+            position,
+        }
+    }
+
+    fn selected(self, selected: usize) -> Option<usize> {
+        selected
+            .checked_sub(self.first)
+            .filter(|row| *row < self.rendered)
+    }
+}
+
 #[derive(Debug, Default)]
 pub enum SystemUiState {
     #[default]
     Inactive,
     Launcher {
+        /// Independent pointer viewport; keyboard navigation restores follow-selection.
+        list_scroll: Option<f64>,
         query: String,
         entries: Arc<[LaunchEntry]>,
         /// Windows open when the panel was opened. A snapshot: a window can
@@ -223,6 +271,7 @@ pub enum SystemUiState {
         restore_targets: Option<Vec<(u64, crate::core::models::ClientKey)>>,
     },
     Info {
+        list_scroll: Option<f64>,
         title: String,
         lines: Vec<String>,
         query: String,
@@ -294,6 +343,7 @@ pub enum SystemUiState {
     /// optional prompt. Only what a row *means* differs, which is
     /// what [`ListKind`] and [`RowData`] carry.
     ListPanel {
+        list_scroll: Option<f64>,
         kind: ListKind,
         rows: Vec<ListRow>,
         /// Immutable wallpaper catalog; `rows` is its current filtered view.
@@ -1145,6 +1195,7 @@ impl Clone for SystemUiState {
             Self::LayoutPicker(picker) => Self::LayoutPicker(picker.clone()),
             Self::TagsOverview(overview) => Self::TagsOverview(overview.clone()),
             Self::Launcher {
+                list_scroll,
                 query,
                 entries,
                 windows,
@@ -1155,6 +1206,7 @@ impl Clone for SystemUiState {
                 indexing,
                 restore_targets,
             } => Self::Launcher {
+                list_scroll: *list_scroll,
                 query: query.clone(),
                 entries: Arc::clone(entries),
                 windows: windows.clone(),
@@ -1166,12 +1218,14 @@ impl Clone for SystemUiState {
                 restore_targets: restore_targets.clone(),
             },
             Self::Info {
+                list_scroll,
                 title,
                 lines,
                 query,
                 matches,
                 offset,
             } => Self::Info {
+                list_scroll: *list_scroll,
                 title: title.clone(),
                 lines: lines.clone(),
                 query: query.clone(),
@@ -1224,6 +1278,7 @@ impl Clone for SystemUiState {
                 shell_hub: *shell_hub,
             },
             Self::ListPanel {
+                list_scroll,
                 kind,
                 rows,
                 source_rows,
@@ -1234,6 +1289,7 @@ impl Clone for SystemUiState {
                 query,
                 empty,
             } => Self::ListPanel {
+                list_scroll: *list_scroll,
                 kind: *kind,
                 rows: rows.clone(),
                 source_rows: source_rows.clone(),
@@ -1409,6 +1465,7 @@ impl SystemUiState {
     ) -> Self {
         let usage = crate::jwm::features::launcher::UsageStore::load();
         let mut state = Self::Launcher {
+            list_scroll: None,
             query: String::new(),
             entries,
             windows,
@@ -1431,6 +1488,7 @@ impl SystemUiState {
         targets: Vec<(u64, crate::core::models::ClientKey)>,
     ) -> Self {
         let mut state = Self::Launcher {
+            list_scroll: None,
             query: String::new(),
             entries: Arc::from([]),
             windows: windows
@@ -1922,6 +1980,7 @@ impl SystemUiState {
     /// Replace a panel's rows, holding the selection on the same key when it
     /// survived the refresh.
     fn set_rows(&mut self, wanted: ListKind, next: Vec<ListRow>) {
+        let viewport = self.list_viewport_anchor();
         let Self::ListPanel {
             kind,
             rows,
@@ -1941,6 +2000,7 @@ impl SystemUiState {
             .and_then(|key| rows.iter().position(|row| row.key == key))
             .unwrap_or(0);
         message.clear();
+        self.restore_list_viewport_anchor(viewport);
     }
 
     fn set_list_message(&mut self, wanted: ListKind, text: impl Into<String>) {
@@ -1953,6 +2013,7 @@ impl SystemUiState {
 
     fn open_list(kind: ListKind, message: impl Into<String>, empty: impl Into<String>) -> Self {
         Self::ListPanel {
+            list_scroll: None,
             kind,
             rows: Vec::new(),
             row_icons: Vec::new(),
@@ -1995,6 +2056,7 @@ impl SystemUiState {
             })
             .collect();
         Self::ListPanel {
+            list_scroll: None,
             kind: ListKind::Notifications,
             rows,
             row_icons,
@@ -2009,6 +2071,24 @@ impl SystemUiState {
 
     pub fn is_notification_center(&self) -> bool {
         self.is_list(ListKind::Notifications)
+    }
+
+    pub fn refresh_notification_center(
+        &mut self,
+        center: &crate::jwm::features::NotificationCenter,
+        now_unix_ms: u64,
+    ) {
+        if !self.is_notification_center() {
+            return;
+        }
+        let viewport = self.list_viewport_anchor();
+        let selected = self.selected_notification_cursor();
+        let mut next = Self::notification_center(center, now_unix_ms);
+        if let Some((id, cursor)) = selected {
+            next.restore_notification_cursor(id, cursor);
+        }
+        next.restore_list_viewport_anchor(viewport);
+        *self = next;
     }
 
     /// The selected notification: its identifier and the action under its
@@ -2137,6 +2217,7 @@ impl SystemUiState {
     /// when the selected row itself goes does the row that slid into its
     /// place take the highlight.
     pub fn remove_notification(&mut self, id: u32) {
+        let viewport = self.list_viewport_anchor();
         let Self::ListPanel {
             kind,
             rows,
@@ -2167,6 +2248,7 @@ impl SystemUiState {
             *selected -= 1;
         }
         *selected = (*selected).min(rows.len().saturating_sub(1));
+        self.restore_list_viewport_anchor(viewport);
     }
 
     /// Empty the open notification center after a clear-all.
@@ -2176,6 +2258,7 @@ impl SystemUiState {
             rows,
             row_icons,
             selected,
+            list_scroll,
             ..
         } = self
             && *kind == ListKind::Notifications
@@ -2183,6 +2266,7 @@ impl SystemUiState {
             rows.clear();
             row_icons.clear();
             *selected = 0;
+            *list_scroll = None;
         }
     }
 
@@ -2227,6 +2311,7 @@ impl SystemUiState {
     /// Rebuild the open clipboard picker's rows and icons from `history`,
     /// holding the selection on the same history index when it still matches.
     fn rebuild_clipboard_rows(&mut self, history: &crate::jwm::features::ClipboardHistory) {
+        let viewport = self.list_viewport_anchor();
         let Self::ListPanel {
             kind,
             rows,
@@ -2254,6 +2339,7 @@ impl SystemUiState {
         // A changed history must not be deleted using a confirmation shown
         // for an older set of entries, even if its count happened to match.
         *prompt = None;
+        self.restore_list_viewport_anchor(viewport);
     }
 
     /// Build the clipboard picker from the live history, newest first. The
@@ -2261,6 +2347,7 @@ impl SystemUiState {
     pub fn clipboard_picker(history: &crate::jwm::features::ClipboardHistory) -> Self {
         let (rows, row_icons) = Self::clipboard_rows(history, "");
         Self::ListPanel {
+            list_scroll: None,
             kind: ListKind::Clipboard,
             rows,
             row_icons,
@@ -2356,6 +2443,7 @@ impl SystemUiState {
                 return;
             }
         }
+        self.resume_keyboard_viewport();
         self.rebuild_clipboard_rows(history);
     }
 
@@ -2371,6 +2459,7 @@ impl SystemUiState {
             }
             query.pop();
         }
+        self.resume_keyboard_viewport();
         self.rebuild_clipboard_rows(history);
     }
 
@@ -2422,6 +2511,7 @@ impl SystemUiState {
             }
             query.clear();
         }
+        self.resume_keyboard_viewport();
         self.rebuild_clipboard_rows(history);
     }
 
@@ -2793,6 +2883,7 @@ impl SystemUiState {
             .collect();
         let source_rows = Some(rows.clone().into());
         Self::ListPanel {
+            list_scroll: None,
             kind: if kind == MediaKind::Music {
                 ListKind::Music
             } else {
@@ -2846,6 +2937,7 @@ impl SystemUiState {
         {
             return;
         }
+        let viewport = self.list_viewport_anchor();
         let Self::ListPanel {
             rows,
             selected,
@@ -2868,6 +2960,7 @@ impl SystemUiState {
                 .and_then(|key| rows.iter().position(|row| row.key == key))
                 .unwrap_or(0);
         }
+        next.restore_list_viewport_anchor(viewport);
         *self = next;
     }
 
@@ -2925,6 +3018,7 @@ impl SystemUiState {
         let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
         let source_rows = Some(rows.clone().into());
         Self::ListPanel {
+            list_scroll: None,
             kind: ListKind::Wallpaper,
             rows,
             row_icons: Vec::new(),
@@ -2987,6 +3081,7 @@ impl SystemUiState {
 
     fn replace_wallpaper_controls(&mut self, controls: Vec<ListRow>, current: &str) {
         use crate::jwm::features::wallpaper;
+        let viewport = self.list_viewport_anchor();
         let Self::ListPanel {
             kind: ListKind::Wallpaper,
             source_rows,
@@ -3037,6 +3132,7 @@ impl SystemUiState {
             .and_then(|key| rows.iter().position(|row| &row.key == key))
             .unwrap_or(0);
         self.refresh_matches();
+        self.restore_list_viewport_anchor(viewport);
     }
 
     /// Adopt an asynchronous scan without discarding a filter typed while the
@@ -3049,6 +3145,7 @@ impl SystemUiState {
         directory: &str,
         status: String,
     ) {
+        let viewport = self.list_viewport_anchor();
         let (controls, scene_marker) = if let Self::ListPanel {
             source_rows, rows, ..
         } = self
@@ -3105,6 +3202,7 @@ impl SystemUiState {
         {
             *selected = index;
         }
+        next.restore_list_viewport_anchor(viewport);
         *self = next;
     }
 
@@ -3160,6 +3258,7 @@ impl SystemUiState {
             .collect();
         let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
         Self::ListPanel {
+            list_scroll: None,
             kind: ListKind::Theme,
             rows,
             row_icons: Vec::new(),
@@ -3203,6 +3302,7 @@ impl SystemUiState {
             .position(|device| device.is_default)
             .unwrap_or(0);
         Self::ListPanel {
+            list_scroll: None,
             kind: Self::audio_kind(direction),
             rows,
             row_icons: Vec::new(),
@@ -3298,6 +3398,7 @@ impl SystemUiState {
             .position(|row| row.key == state.player)
             .unwrap_or(0);
         Self::ListPanel {
+            list_scroll: None,
             kind: ListKind::MediaPlayers,
             rows,
             row_icons: Vec::new(),
@@ -3362,6 +3463,7 @@ impl SystemUiState {
             "switcher row icons align with the rows or are absent"
         );
         Self::ListPanel {
+            list_scroll: None,
             kind: ListKind::WindowSwitcher,
             rows,
             row_icons,
@@ -3660,6 +3762,7 @@ impl SystemUiState {
     pub fn info(title: impl Into<String>, lines: Vec<String>) -> Self {
         let matches = (0..lines.len()).collect();
         Self::Info {
+            list_scroll: None,
             title: title.into(),
             lines,
             query: String::new(),
@@ -3980,7 +4083,157 @@ impl SystemUiState {
         self.refresh_matches();
     }
 
+    fn pointer_list_slice(&self) -> Option<ListSlice> {
+        match self {
+            Self::Launcher {
+                list_scroll,
+                matches,
+                selected,
+                computed: None,
+                ..
+            } => Some(ListSlice::new(
+                *list_scroll,
+                selected.saturating_sub(11),
+                matches.len(),
+                12,
+            )),
+            Self::Info {
+                list_scroll,
+                matches,
+                offset,
+                ..
+            } => Some(ListSlice::new(*list_scroll, *offset, matches.len(), 28)),
+            Self::ListPanel {
+                list_scroll,
+                kind,
+                rows,
+                selected,
+                prompt: None,
+                ..
+            } => {
+                let strip = usize::from(self.selected_action_strip().is_some());
+                Some(ListSlice::new(
+                    *list_scroll,
+                    selected.saturating_sub(kind.window().saturating_sub(1)),
+                    rows.len() + strip,
+                    kind.window() + strip,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn list_viewport_anchor(&self) -> Option<ListViewportAnchor> {
+        let Self::ListPanel {
+            list_scroll: Some(_),
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let slice = self.pointer_list_slice()?;
+        let strip = self.notification_strip_visible_row() == Some(0);
+        let index = if strip {
+            Some(*selected)
+        } else {
+            self.visible_row_target(0)
+        };
+        Some(ListViewportAnchor {
+            key: index
+                .and_then(|index| rows.get(index))
+                .map(|row| row.key.clone()),
+            strip,
+            position: slice.position,
+        })
+    }
+
+    fn restore_list_viewport_anchor(&mut self, anchor: Option<ListViewportAnchor>) {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let Some(slice) = self.pointer_list_slice() else {
+            return;
+        };
+        let strip = self.selected_action_strip().is_some();
+        let Self::ListPanel {
+            rows,
+            selected,
+            list_scroll,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let position = anchor
+            .key
+            .as_ref()
+            .and_then(|key| rows.iter().position(|row| &row.key == key))
+            .map(|index| {
+                let virtual_row = index
+                    + usize::from(
+                        strip && (index > *selected || (index == *selected && anchor.strip)),
+                    );
+                virtual_row as f64 + anchor.position.fract()
+            })
+            .unwrap_or(anchor.position);
+        *list_scroll = Some(position.clamp(0.0, slice.total.saturating_sub(slice.visible) as f64));
+    }
+
+    /// Move the viewport without changing the keyboard selection or its action.
+    /// None denotes a panel whose scrolling has a different meaning.
+    pub fn scroll_list(&mut self, delta_rows: f64) -> Option<bool> {
+        let slice = self.pointer_list_slice()?;
+        if !delta_rows.is_finite() || slice.visible == 0 {
+            return Some(false);
+        }
+        let next = (slice.position + delta_rows)
+            .clamp(0.0, slice.total.saturating_sub(slice.visible) as f64);
+        let changed = (next - slice.position).abs() > f64::EPSILON;
+        match self {
+            Self::Launcher { list_scroll, .. }
+            | Self::Info { list_scroll, .. }
+            | Self::ListPanel { list_scroll, .. } => *list_scroll = Some(next),
+            _ => unreachable!("only list panels have a pointer list slice"),
+        }
+        Some(changed)
+    }
+
+    pub fn pointer_scroll_fraction(&self) -> f32 {
+        self.pointer_list_slice()
+            .map_or(0.0, |slice| slice.fraction)
+    }
+
+    pub fn list_viewport(&self) -> Option<crate::backend::api::SystemUiListViewport> {
+        let slice = self.pointer_list_slice()?;
+        (slice.visible > 0).then_some(crate::backend::api::SystemUiListViewport {
+            rows: slice.rendered,
+            visible_rows: slice.visible,
+            fraction: slice.fraction,
+        })
+    }
+
+    fn resume_keyboard_viewport(&mut self) {
+        match self {
+            Self::Info {
+                list_scroll,
+                offset,
+                ..
+            } => {
+                if let Some(position) = list_scroll.take() {
+                    *offset = position.floor().max(0.0) as usize;
+                }
+            }
+            Self::Launcher { list_scroll, .. } | Self::ListPanel { list_scroll, .. } => {
+                *list_scroll = None
+            }
+            _ => {}
+        }
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
+        self.resume_keyboard_viewport();
         if let Self::Launcher {
             matches, selected, ..
         } = self
@@ -4045,10 +4298,7 @@ impl SystemUiState {
     pub fn visible_row_target(&self, visual_row: usize) -> Option<usize> {
         match self {
             Self::Launcher {
-                matches,
-                selected,
-                computed,
-                ..
+                matches, computed, ..
             } => {
                 if computed.is_some() && visual_row == 0 {
                     return Some(0);
@@ -4056,9 +4306,9 @@ impl SystemUiState {
                 if matches.is_empty() {
                     return None;
                 }
-                let start = selected.saturating_sub(11);
-                let target = start.checked_add(visual_row)?;
-                (target < matches.len() && target < start + 12).then_some(target)
+                let slice = self.pointer_list_slice()?;
+                let target = slice.first.checked_add(visual_row)?;
+                (visual_row < slice.rendered && target < matches.len()).then_some(target)
             }
             Self::ControlCenter {
                 entries,
@@ -4082,27 +4332,28 @@ impl SystemUiState {
                 if prompt.is_some() || rows.is_empty() {
                     return None;
                 }
-                let window = kind.window();
-                let start = selected.saturating_sub(window.saturating_sub(1));
-                let shown = rows.len().saturating_sub(start).min(window);
-                let selected_local = *selected - start;
+                let slice = self.pointer_list_slice()?;
+                if visual_row >= slice.rendered {
+                    return None;
+                }
+                let virtual_row = slice.first.checked_add(visual_row)?;
                 let has_action_strip = *kind == ListKind::Notifications
                     && matches!(
                         rows.get(*selected).map(|row| &row.data),
                         Some(RowData::Notification { actions, .. }) if !actions.is_empty()
                     );
                 let list_row = if has_action_strip {
-                    if visual_row == selected_local + 1 {
+                    if virtual_row == selected + 1 {
                         return None;
                     }
-                    visual_row - usize::from(visual_row > selected_local + 1)
+                    virtual_row - usize::from(virtual_row > selected + 1)
                 } else {
-                    visual_row
+                    virtual_row
                 };
-                if list_row >= shown {
+                if list_row >= rows.len() {
                     return None;
                 }
-                Some(start + list_row)
+                Some(list_row)
             }
             Self::SessionMenu { entries, .. } => (visual_row < entries.len()).then_some(visual_row),
             Self::Inactive
@@ -4141,9 +4392,10 @@ impl SystemUiState {
         ) {
             return None;
         }
-        let window = kind.window();
-        let start = selected.saturating_sub(window.saturating_sub(1));
-        Some(*selected - start + 1)
+        let slice = self.pointer_list_slice()?;
+        (*selected + 1)
+            .checked_sub(slice.first)
+            .filter(|row| *row < slice.rendered)
     }
 
     /// The chip a pointer at `text_x` hits on the action strip drawn at
@@ -4214,6 +4466,7 @@ impl SystemUiState {
     /// whose arrows mean something else (calendar) or which do not carry a
     /// selection.
     pub fn jump_selection(&mut self, to_end: bool) -> bool {
+        self.resume_keyboard_viewport();
         let edge = |len: usize| if to_end { len.saturating_sub(1) } else { 0 };
         match self {
             Self::Launcher {
@@ -4287,6 +4540,7 @@ impl SystemUiState {
         if self.is_prompting() || !t.is_finite() {
             return false;
         }
+        self.resume_keyboard_viewport();
         let t = t.clamp(0.0, 1.0);
         let pick = |len: usize| {
             if len == 0 {
@@ -4388,6 +4642,7 @@ impl SystemUiState {
     /// intentionally wraps for fast repeated use; Page Up/Down should instead
     /// make the first and last rows reliably reachable.
     pub fn page_selection(&mut self, direction: isize) -> bool {
+        self.resume_keyboard_viewport();
         fn stepped(index: usize, len: usize, rows: usize, direction: isize) -> usize {
             if direction < 0 {
                 index.saturating_sub(rows)
@@ -4836,7 +5091,8 @@ impl SystemUiState {
                     crate::jwm::features::launcher::parse_query(query),
                     crate::jwm::features::launcher::QueryMode::Windows(_)
                 );
-                let start = selected.saturating_sub(11);
+                let slice = self.pointer_list_slice().expect("launcher list");
+                let start = slice.first;
                 // Row icons are resolved here, one visible row at a time, never
                 // for the whole catalog: the resolver's cache makes a re-resolve
                 // per keystroke cheap, and a row whose icon resolves to nothing
@@ -4856,7 +5112,7 @@ impl SystemUiState {
                     matches
                         .iter()
                         .skip(start)
-                        .take(12)
+                        .take(slice.rendered)
                         .map(|row| match row {
                             LauncherRow::Window(index) => {
                                 let entry = &windows[*index];
@@ -4887,7 +5143,7 @@ impl SystemUiState {
                 let icons = row_icon_payload(row_icons, items.len());
                 let scroll = (!matches.is_empty()).then(|| crate::backend::api::ScrollWindow {
                     first: start,
-                    visible: items.len(),
+                    visible: slice.visible,
                     total: matches.len(),
                 });
                 OverlayParts {
@@ -4899,7 +5155,7 @@ impl SystemUiState {
                         "\u{f135}  APPLICATIONS".into()
                     },
                     query: Some(query.clone()),
-                    selected: (!matches.is_empty()).then(|| selected - start),
+                    selected: slice.selected(*selected),
                     items,
                     icons,
                     // `/` lists open windows; it cannot be arithmetic, so the
@@ -4914,25 +5170,27 @@ impl SystemUiState {
                 }
             }
             Self::Info {
+                list_scroll: _,
                 title,
                 lines,
                 query,
                 matches,
-                offset,
+                offset: _,
             } => {
+                let slice = self.pointer_list_slice().expect("info list");
                 let items: Vec<String> = if matches.is_empty() {
                     vec!["  No matching shortcuts".into()]
                 } else {
                     matches
                         .iter()
-                        .skip(*offset)
-                        .take(28)
+                        .skip(slice.first)
+                        .take(slice.rendered)
                         .map(|&index| lines[index].clone())
                         .collect()
                 };
                 let scroll = (!matches.is_empty()).then(|| crate::backend::api::ScrollWindow {
-                    first: *offset,
-                    visible: items.len(),
+                    first: slice.first,
+                    visible: slice.visible,
                     total: matches.len(),
                 });
                 OverlayParts {
@@ -5012,15 +5270,17 @@ impl SystemUiState {
                 // pickers: a scrolling window over the rows, then the status
                 // line or the masked prompt underneath.
                 let window = kind.window();
-                let start = selected.saturating_sub(window.saturating_sub(1));
-                // Counted before the status line, the passphrase prompt and
-                // the action strip are appended: the indicator describes the
-                // *list*, not everything drawn under it.
-                let shown = rows.len().saturating_sub(start).min(window);
+                let action_strip = prompt.is_none().then(|| self.selected_action_strip()).flatten();
+                let slice = self.pointer_list_slice().unwrap_or_else(|| ListSlice::new(
+                    None, selected.saturating_sub(window.saturating_sub(1)), rows.len(), window));
+                let row_at = |virtual_row: usize| -> Option<usize> {
+                    if action_strip.is_some() && virtual_row == selected + 1 { return None; }
+                    Some(virtual_row - usize::from(action_strip.is_some() && virtual_row > selected + 1))
+                };
                 let scroll = (!rows.is_empty()).then(|| crate::backend::api::ScrollWindow {
-                    first: start,
-                    visible: shown,
-                    total: rows.len(),
+                    first: slice.first,
+                    visible: slice.visible,
+                    total: slice.total,
                 });
                 let mut items: Vec<String> = if rows.is_empty() {
                     // A filter matching nothing differs from an empty source.
@@ -5038,10 +5298,12 @@ impl SystemUiState {
                     };
                     vec![format!("  {fallback}")]
                 } else {
-                    rows.iter()
-                        .skip(start)
-                        .take(window)
-                        .map(|row| {
+                    (slice.first..slice.first + slice.rendered)
+                        .map(|virtual_row| {
+                            let Some(index) = row_at(virtual_row) else {
+                                return action_strip.clone().unwrap_or_default();
+                            };
+                            let row = &rows[index];
                             // The armed forget names its confirm keys on the
                             // row, the way the control center's armed rows do.
                             if row.data.forget_armed() {
@@ -5065,11 +5327,9 @@ impl SystemUiState {
                         None
                     } else {
                         Some(
-                            row_icons
-                                .iter()
-                                .skip(start)
-                                .take(window)
-                                .cloned()
+                            (slice.first..slice.first + slice.rendered)
+                                .map(|virtual_row| row_at(virtual_row)
+                                    .and_then(|index| row_icons.get(index).cloned().flatten()))
                                 .collect(),
                         )
                     };
@@ -5136,20 +5396,6 @@ impl SystemUiState {
                         icons.push(None);
                     }
                 }
-                // The selected notification's buttons go on the line *after*
-                // its row, so `selected` still indexes the row itself and the
-                // compositor's highlight does not slide onto the strip.
-                if prompt.is_none()
-                    && let Some(strip) = self.selected_action_strip()
-                {
-                    let under = selected - start + 1;
-                    if under <= items.len() {
-                        items.insert(under, strip);
-                        if let Some(icons) = &mut icons {
-                            icons.insert(under.min(icons.len()), None);
-                        }
-                    }
-                }
                 let icons = icons.and_then(|icons| row_icon_payload(icons, items.len()));
                 // An armed forget swaps the key list for its own confirm
                 // hint, the way the control center's armed rows do; a prompt
@@ -5167,7 +5413,7 @@ impl SystemUiState {
                     // caret. Other kinds never collect a query.
                     query: matches!(kind, ListKind::Clipboard | ListKind::Wallpaper | ListKind::Music | ListKind::Video)
                         .then(|| query.clone()),
-                    selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
+                    selected: if prompt.is_none() { slice.selected(*selected) } else { None },
                     items,
                     icons,
                     hint: if forget_armed {
@@ -5291,6 +5537,7 @@ impl SystemUiState {
     }
 
     fn refresh_matches(&mut self) {
+        self.resume_keyboard_viewport();
         match self {
             Self::Launcher {
                 query,
@@ -6278,6 +6525,160 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
 mod tests {
     use super::*;
     use crate::jwm::features::system_controls::{AudioDevice, AudioDirection};
+
+    #[test]
+    fn fractional_launcher_scroll_moves_viewport_without_changing_selection() {
+        let names: Vec<_> = (0..30).map(|index| format!("App {index:02}")).collect();
+        let borrowed: Vec<_> = names.iter().map(|name| (name.as_str(), false)).collect();
+        let mut launcher = launcher_with(&borrowed, "");
+        assert_eq!(launcher.scroll_list(0.25), Some(true));
+        assert_eq!(launcher.pointer_scroll_fraction(), 0.25);
+        let parts = launcher.overlay_parts();
+        assert_eq!(
+            parts.items.len(),
+            13,
+            "one extra row covers the fractional bottom"
+        );
+        assert_eq!(parts.scroll.unwrap().visible, 12);
+        assert_eq!(launcher.scroll_list(12.0), Some(true));
+        assert!(matches!(
+            &launcher,
+            SystemUiState::Launcher { selected: 0, .. }
+        ));
+        assert_eq!(launcher.overlay_parts().selected, None);
+        assert_eq!(launcher.visible_row_target(0), Some(12));
+        launcher.move_selection(1);
+        assert_eq!(launcher.pointer_scroll_fraction(), 0.0);
+        assert_eq!(launcher.overlay_parts().selected, Some(1));
+        assert_eq!(launcher.overlay_parts().scroll.unwrap().first, 0);
+    }
+
+    #[test]
+    fn fractional_info_scroll_clamps_and_keyboard_continues_from_its_view() {
+        let mut panel = SystemUiState::info("Test", (0..60).map(|i| format!("Line {i}")).collect());
+        assert_eq!(panel.scroll_list(4.75), Some(true));
+        assert_eq!(panel.overlay_parts().scroll.unwrap().first, 4);
+        panel.move_selection(1);
+        assert_eq!(panel.overlay_parts().scroll.unwrap().first, 5);
+        assert_eq!(panel.pointer_scroll_fraction(), 0.0);
+        assert_eq!(panel.scroll_list(1e9), Some(true));
+        assert_eq!(panel.overlay_parts().scroll.unwrap().first, 32);
+        assert_eq!(panel.scroll_list(1.0), Some(false));
+        assert_eq!(panel.scroll_list(f64::NAN), Some(false));
+        panel.push_char('Z');
+        assert_eq!(panel.pointer_scroll_fraction(), 0.0);
+        assert_eq!(panel.scroll_list(1.0), Some(false));
+        assert_eq!(SystemUiState::lock().scroll_list(1.0), None);
+    }
+
+    #[test]
+    fn fractional_notifications_keep_strip_icons_and_targets_aligned() {
+        use crate::jwm::features::notifications::NotificationAction;
+        let rows: Vec<_> = (0..30)
+            .map(|id| ListRow {
+                key: id.to_string(),
+                text: format!("Notice {id}"),
+                data: RowData::Notification {
+                    id,
+                    cursor: 0,
+                    actions: vec![NotificationAction {
+                        key: "open".into(),
+                        label: "Open".into(),
+                    }],
+                },
+            })
+            .collect();
+        let mut panel = SystemUiState::ListPanel {
+            list_scroll: None,
+            kind: ListKind::Notifications,
+            rows,
+            source_rows: None,
+            row_icons: (0..30).map(|i| Some(format!("icon-{i}"))).collect(),
+            selected: 2,
+            message: "Status".into(),
+            prompt: None,
+            query: String::new(),
+            empty: String::new(),
+        };
+        assert_eq!(panel.scroll_list(3.5), Some(true));
+        assert_eq!(panel.notification_strip_visible_row(), Some(0));
+        assert_eq!(panel.visible_row_target(0), None);
+        assert_eq!(panel.visible_row_target(1), Some(3));
+        let parts = panel.overlay_parts();
+        assert_eq!(parts.selected, None);
+        let icons = parts.icons.unwrap();
+        assert_eq!(icons.len(), parts.items.len());
+        assert_eq!(icons[0], None);
+        assert_eq!(icons[1].as_deref(), Some("icon-3"));
+        assert_eq!(parts.items.last().map(String::as_str), Some("  Status"));
+        assert_eq!(panel.scroll_list(5.0), Some(true));
+        assert_eq!(panel.notification_strip_visible_row(), None);
+        assert_eq!(panel.visible_row_target(0), Some(7));
+        assert!(matches!(
+            &panel,
+            SystemUiState::ListPanel { selected: 2, .. }
+        ));
+        panel.move_selection(1);
+        assert_eq!(panel.overlay_parts().selected, Some(3));
+    }
+
+    #[test]
+    fn fractional_viewports_follow_items_when_async_lists_refresh() {
+        use crate::jwm::features::media_library::MediaKind;
+        use crate::jwm::features::notifications::NotificationRequest;
+        let names: Vec<_> = (0..30).map(|i| format!("Track {i:02}")).collect();
+        let borrowed: Vec<_> = names.iter().map(String::as_str).collect();
+        let mut media =
+            SystemUiState::media_library(MediaKind::Music, Some(&media_catalog(&borrowed)), false);
+        media.scroll_list(4.25);
+        let first_key = media.list_viewport_anchor().unwrap().key;
+        let mut next = vec!["New earlier track"];
+        next.extend(borrowed.iter().copied());
+        media.refresh_media_library(SystemUiState::media_library(
+            MediaKind::Music,
+            Some(&media_catalog(&next)),
+            false,
+        ));
+        assert_eq!(media.list_viewport_anchor().unwrap().key, first_key);
+        assert_eq!(media.pointer_scroll_fraction(), 0.25);
+        assert_eq!(media.overlay_parts().scroll.unwrap().first, 5);
+
+        let mut center = crate::jwm::features::NotificationCenter::new();
+        for id in 0..30 {
+            center.push(
+                &NotificationRequest {
+                    summary: format!("Notice {id}"),
+                    ..Default::default()
+                },
+                1_000,
+                false,
+            );
+        }
+        let mut notices = SystemUiState::notification_center(&center, 2_000);
+        notices.scroll_list(4.25);
+        let selected = notices.selected_notification_cursor();
+        let first_key = notices.list_viewport_anchor().unwrap().key;
+        center.push(
+            &NotificationRequest {
+                summary: "New incoming notice".into(),
+                ..Default::default()
+            },
+            2_000,
+            false,
+        );
+        notices.refresh_notification_center(&center, 2_000);
+        assert_eq!(notices.selected_notification_cursor(), selected);
+        assert_eq!(notices.list_viewport_anchor().unwrap().key, first_key);
+        assert_eq!(notices.overlay_parts().scroll.unwrap().first, 5);
+        assert_eq!(notices.pointer_scroll_fraction(), 0.25);
+
+        let history = clipboard_history(&borrowed);
+        let mut clipboard = SystemUiState::clipboard_picker(&history);
+        clipboard.scroll_list(4.25);
+        clipboard.push_clipboard_query('T', &history);
+        assert_eq!(clipboard.pointer_scroll_fraction(), 0.0);
+        assert_eq!(clipboard.overlay_parts().scroll.unwrap().first, 0);
+    }
 
     fn media_catalog(names: &[&str]) -> crate::jwm::features::media_library::MediaCatalog {
         use crate::jwm::features::media_library::{MediaCatalog, MediaEntry, MediaKind};
@@ -7350,6 +7751,7 @@ mod tests {
             },
         };
         let mut panel = SystemUiState::ListPanel {
+            list_scroll: None,
             kind: ListKind::Notifications,
             rows: vec![
                 row(
@@ -7416,6 +7818,7 @@ mod tests {
             })
             .collect();
         let mut panel = SystemUiState::ListPanel {
+            list_scroll: None,
             kind: ListKind::Notifications,
             rows,
             row_icons: Vec::new(),
@@ -9450,6 +9853,7 @@ mod tests {
             })
             .collect();
         let mut state = SystemUiState::Launcher {
+            list_scroll: None,
             query: String::new(),
             entries: entries.into(),
             windows: Vec::new(),
@@ -9513,6 +9917,7 @@ mod tests {
             })
             .collect();
         let mut state = SystemUiState::Launcher {
+            list_scroll: None,
             query: String::new(),
             entries: entries.into(),
             windows: windows.to_vec(),
@@ -9706,6 +10111,7 @@ mod tests {
             ),
         ];
         let mut state = SystemUiState::Launcher {
+            list_scroll: None,
             query: String::new(),
             entries: entries.into(),
             windows: Vec::new(),
@@ -9921,6 +10327,7 @@ mod tests {
             .map(|id| (id % 2 == 0).then(|| format!("/icons/app{id}.png")))
             .collect();
         let mut panel = SystemUiState::ListPanel {
+            list_scroll: None,
             kind: ListKind::Notifications,
             rows,
             row_icons: icons,
@@ -10013,6 +10420,7 @@ mod tests {
         };
         // Newest first: [N3, N2, N1], with N2 highlighted on its "Later" button.
         let mut panel = SystemUiState::ListPanel {
+            list_scroll: None,
             kind: ListKind::Notifications,
             rows: vec![row(3), row(2), row(1)],
             row_icons: vec![None, None, None],

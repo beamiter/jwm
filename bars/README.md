@@ -115,9 +115,12 @@ Horizontal and pinch gestures leave those settings alone.
 
 ## Wheel and touchpad input
 
-The default `tao_glow_bar` and the other Tao/Winit presenters retain scroll
-units, both axes and gesture phases. One ordinary mouse-wheel notch performs
-one existing action. Precision scrolling accumulates to **40 logical pixels**
+The Cairo/Tao/Winit, egui, GTK/Relm, GPUI/GPUI-component, Iced and Xilem
+adapters share scroll accumulation, units and control ownership. Native
+gesture phases are retained where the toolkit exposes them; egui, Iced and
+Xilem use the idle boundary where their widget API has no scroll phase.
+One ordinary mouse-wheel notch performs one existing action. Precision
+scrolling accumulates to **40 logical pixels**
 or one fractional-line unit before changing workspace, layout or Shell Hub
 page; the rest of that gesture cannot trigger more navigation. Volume and
 brightness accumulate to **16 logical pixels** or one line per adjustment and
@@ -129,15 +132,38 @@ fractional lines, start a new gesture after **250 ms** of inactivity. Partial
 distance does not carry across controls, axes, direction changes or bar edges.
 Workspace cells share one navigation gesture: changing the active cell during
 a redraw, or crossing into another workspace cell, cannot rearm its momentum.
-Leaving the bar clears it. Focus loss cancels any pressed control and fences
-the interrupted scroll, including momentum after a popup opens, while keeping
-the cursor usable for a new stationary click.
+Changing controls discards unfinished distance. Explicit end/cancel events
+fence remaining momentum.
+The Cairo presenters also cancel pressed controls and fence interrupted
+scrolls on focus loss, while keeping the cursor usable for a new stationary
+click; egui and Iced cancel their shared scroll state on focus loss too.
 
 Top/bottom bars also accept a predominantly horizontal gesture; left/right
 bars ignore predominantly horizontal input and its small vertical jitter.
 Vertical wheel input works on all four edges. The shared Cairo X11 button
 translator also recognizes horizontal wheel buttons 6/7 and ignores all wheel
-releases. GTK, GPUI, Iced and web frontends retain their toolkit input paths.
+releases. GTK and GPUI already supply logical pixels; Iced and Xilem's physical
+pixel events are divided by the output/event scale exactly once. GTK's
+positive-down scroll convention is converted at its adapter boundary.
+Zero-motion and cancelled packets never change brightness or volume. All
+scrollable toolkit controls consume subthreshold events too, so a parent
+scroll container cannot move while its child is accumulating an adjustment.
+
+Tune native sensitivity in the bar's `~/.config/xbar/config.toml` (or its
+`XBAR_CONFIG` override):
+
+```toml
+[presentation.scroll]
+navigation_pixels = 40.0
+adjustment_pixels = 16.0
+idle_ms = 250
+```
+
+Distances must be finite and positive; `idle_ms` accepts 1–10000. Defaults
+preserve existing behavior. The shared HTML adapter also receives the
+adjustment threshold and idle time; HTML workspace strips continue scrolling
+their content continuously. This is **xbar configuration**, separate from
+JWM's own input-device and system-panel configuration.
 
 ## Package boundaries and checks
 

@@ -16,6 +16,7 @@ pub mod theme;
 mod window;
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use gtk4::prelude::*;
 use gtk4::{Label, Orientation};
@@ -91,6 +92,9 @@ impl BarTheme {
             theme::stylesheet(&presentation, &config.font, background_opacity, translucent);
         let pill_style = PillStyle {
             edge: presentation.edge,
+            scroll: Rc::new(RefCell::new(xbar_core::ControlScroll::with_policy(
+                presentation.scroll,
+            ))),
             metrics,
             // Both themes use the same accent, so a progress line survives a
             // theme toggle without being rebuilt.

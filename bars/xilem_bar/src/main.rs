@@ -499,6 +499,8 @@ enum WorkerEvent {
 
 struct XilemBar {
     runtime: BarRuntime,
+    scroll: xbar_core::ControlScroll,
+    scroll_scale_factor: Option<f64>,
     presentation: xbar_core::presentation::PresentationConfig,
     tag_contrast: TagContrastMode,
     schedule: RuntimeSchedule,
@@ -546,6 +548,8 @@ impl XilemBar {
         dock.set_edge(app_config.presentation.edge);
         Self {
             runtime,
+            scroll: xbar_core::ControlScroll::with_policy(app_config.presentation.scroll),
+            scroll_scale_factor: None,
             tag_contrast: app_config.presentation.tag_contrast,
             schedule: RuntimeSchedule::default(),
             process_actions: ProcessActionHandler::default(),
@@ -1042,17 +1046,30 @@ fn brightness_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     )
     .gap(Length::px(3.0));
 
-    flat(button_any_pointer(
-        inner,
-        |s: &mut XilemBar, btn: Option<PointerButton>| {
-            let action = if matches!(btn, Some(PointerButton::Secondary)) {
-                UserAction::BrightnessDown
-            } else {
-                UserAction::BrightnessUp
-            };
-            s.dispatch(action);
-        },
-    ))
+    flat(
+        hover_sensor(
+            button_any_pointer(inner, |s: &mut XilemBar, btn: Option<PointerButton>| {
+                s.scroll.reset();
+                let action = if matches!(btn, Some(PointerButton::Secondary)) {
+                    UserAction::BrightnessDown
+                } else {
+                    UserAction::BrightnessUp
+                };
+                s.dispatch(action);
+            }),
+            "Brightness".into(),
+            |state: &mut XilemBar, event| {
+                handle_control_scroll(
+                    state,
+                    xbar_core::presentation::NodeId::Brightness,
+                    Some(UserAction::BrightnessUp),
+                    Some(UserAction::BrightnessDown),
+                    event,
+                );
+            },
+        )
+        .capture_wheel(true),
+    )
 }
 
 fn volume_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
@@ -1084,17 +1101,30 @@ fn volume_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     )
     .gap(Length::px(3.0));
     // Left-click +5, right-click −5, middle-click toggles mute.
-    flat(button_any_pointer(
-        inner,
-        |s: &mut XilemBar, btn: Option<PointerButton>| {
-            let action = match btn {
-                Some(PointerButton::Secondary) => UserAction::VolumeDown,
-                Some(PointerButton::Auxiliary) => UserAction::ToggleMute,
-                _ => UserAction::VolumeUp,
-            };
-            s.dispatch(action);
-        },
-    ))
+    flat(
+        hover_sensor(
+            button_any_pointer(inner, |s: &mut XilemBar, btn: Option<PointerButton>| {
+                s.scroll.reset();
+                let action = match btn {
+                    Some(PointerButton::Secondary) => UserAction::VolumeDown,
+                    Some(PointerButton::Auxiliary) => UserAction::ToggleMute,
+                    _ => UserAction::VolumeUp,
+                };
+                s.dispatch(action);
+            }),
+            "Volume".into(),
+            |state: &mut XilemBar, event| {
+                handle_control_scroll(
+                    state,
+                    xbar_core::presentation::NodeId::Audio,
+                    Some(UserAction::VolumeUp),
+                    Some(UserAction::VolumeDown),
+                    event,
+                );
+            },
+        )
+        .capture_wheel(true),
+    )
 }
 
 /// Entry point into JWM's own shell surface.
@@ -1221,7 +1251,54 @@ impl HoverSensorWidget {
 #[derive(Debug)]
 enum HoverInteraction {
     Hover(bool),
-    Scroll(i32),
+    Scroll(xbar_core::ScrollDelta),
+    Reset,
+    Cancel,
+}
+
+fn handle_control_scroll(
+    state: &mut XilemBar,
+    id: xbar_core::presentation::NodeId,
+    up: Option<UserAction>,
+    down: Option<UserAction>,
+    event: HoverInteraction,
+) {
+    let now = Instant::now();
+    match event {
+        HoverInteraction::Hover(hovered) => {
+            state
+                .scroll
+                .hover(hovered.then_some(id), state.presentation.edge, now)
+        }
+        HoverInteraction::Reset => state.scroll.reset(),
+        HoverInteraction::Cancel => state.scroll.cancel(now),
+        HoverInteraction::Scroll(delta) => {
+            let scale_factor = state.geometry_bridge.snapshot().scale_factor;
+            if state.scroll_scale_factor != Some(scale_factor) {
+                state.scroll.reset();
+                state.scroll_scale_factor = Some(scale_factor);
+            }
+            let action = state
+                .scroll
+                .step(
+                    id,
+                    state.presentation.edge,
+                    delta,
+                    xbar_core::ScrollPhase::Moved,
+                    now,
+                )
+                .and_then(|input| {
+                    if input == xbar_core::presentation::PointerAction::ScrollUp {
+                        up
+                    } else {
+                        down
+                    }
+                });
+            if let Some(action) = action {
+                state.dispatch(action);
+            }
+        }
+    }
 }
 
 impl Widget for HoverSensorWidget {
@@ -1233,25 +1310,40 @@ impl Widget for HoverSensorWidget {
         _: &mut PropertiesMut<'_>,
         event: &PointerEvent,
     ) {
+        if self.capture_wheel {
+            match event {
+                PointerEvent::Down(_) => ctx.submit_action::<Self::Action>(HoverInteraction::Reset),
+                PointerEvent::Cancel(_) | PointerEvent::Leave(_) => {
+                    ctx.submit_action::<Self::Action>(HoverInteraction::Cancel)
+                }
+                _ => {}
+            }
+        }
         if self.capture_wheel
             && !ctx.is_disabled()
             && let PointerEvent::Scroll(event) = event
         {
-            let delta = event
-                .delta
-                .to_pixel_delta(
-                    PhysicalPosition::new(1.0, 1.0),
-                    PhysicalPosition::new(1.0, 1.0),
-                )
-                .y;
-            if delta != 0.0 && delta.is_finite() {
-                ctx.submit_action::<Self::Action>(HoverInteraction::Scroll(if delta > 0.0 {
-                    1
-                } else {
-                    -1
-                }));
-                ctx.set_handled();
-            }
+            // ui-events-winit passes through winit's delta sign and physical
+            // pixel units. Normalize DPI once, without flattening lines.
+            let delta = match event.delta {
+                masonry::core::ScrollDelta::LineDelta(x, y) => xbar_core::ScrollDelta::Lines {
+                    x: f64::from(x),
+                    y: f64::from(y),
+                },
+                masonry::core::ScrollDelta::PageDelta(x, y) => xbar_core::ScrollDelta::Pixels {
+                    x: f64::from(x) * ctx.content_box().width(),
+                    y: f64::from(y) * ctx.content_box().height(),
+                },
+                masonry::core::ScrollDelta::PixelDelta(position) => {
+                    xbar_core::ScrollDelta::physical_pixels(
+                        position.x,
+                        position.y,
+                        event.state.scale_factor,
+                    )
+                }
+            };
+            ctx.submit_action::<Self::Action>(HoverInteraction::Scroll(delta));
+            ctx.set_handled();
         }
     }
 
@@ -1627,6 +1719,7 @@ fn sidebar_cell(
     let control = button_any_pointer(
         flex(Axis::Vertical, labels).gap(Length::ZERO),
         move |state: &mut XilemBar, pointer| {
+            state.scroll.reset();
             let action = if matches!(pointer, Some(PointerButton::Secondary)) {
                 bindings.secondary
             } else {
@@ -1643,16 +1736,13 @@ fn sidebar_cell(
     .dims(Dimensions::new(Dim::Stretch, Dim::Stretch));
     sized_box(
         hover_sensor(control, title, move |state: &mut XilemBar, event| {
-            if let HoverInteraction::Scroll(direction) = event {
-                let action = if direction > 0 {
-                    bindings.scroll_up
-                } else {
-                    bindings.scroll_down
-                };
-                if let Some(action) = action {
-                    state.dispatch(action);
-                }
-            }
+            handle_control_scroll(
+                state,
+                spec.id,
+                bindings.scroll_up,
+                bindings.scroll_down,
+                event,
+            );
         })
         .capture_wheel(
             spec.state.enabled && (bindings.scroll_up.is_some() || bindings.scroll_down.is_some()),

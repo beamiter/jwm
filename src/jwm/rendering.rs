@@ -763,6 +763,7 @@ impl Jwm {
             }
         }
 
+        self.apply_touchpad_preview_scene(&mut scene);
         scene
     }
 

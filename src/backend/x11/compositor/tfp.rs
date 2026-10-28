@@ -553,6 +553,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         self.transition_start = None;
+        self.workspace_swipe = None;
     }
 
     /// Retire a window after an ordinary UnmapNotify/DestroyNotify.

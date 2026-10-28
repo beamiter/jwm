@@ -24,9 +24,11 @@ use crate::backend::common_define::{KeySym, Mods, MouseButton};
 
 pub(crate) mod astronomy;
 mod bar;
+pub(crate) mod input;
 mod validation;
 
 pub use astronomy::AstronomyOutputConfig;
+pub use input::InputConfig;
 pub use validation::{ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDiagnostics};
 
 pub const LOAD_LOCAL_CONFIG: bool = true;
@@ -505,6 +507,9 @@ pub struct TomlConfig {
     pub layout: LayoutConfig,
     #[serde(default = "AnimationConfig::default_value")]
     pub animation: AnimationConfig,
+    /// Native Wayland input policy. Omitted options retain device defaults.
+    #[serde(default)]
+    pub input: InputConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1568,6 +1573,7 @@ fn default_gesture_swipe() -> Vec<GestureSwipeConfig> {
 /// Valid native swipe admission, shared by backends and status reporting.
 pub(crate) fn gesture_swipe_binding_is_valid(binding: &GestureSwipeConfig) -> bool {
     (3..=5).contains(&binding.fingers)
+        && crate::ipc::is_known_command(&binding.function)
         && ["left", "right", "up", "down"]
             .iter()
             .any(|direction| binding.direction.eq_ignore_ascii_case(direction))
@@ -2349,6 +2355,7 @@ impl Default for Config {
         Self {
             gesture_policy_generation: next_gesture_policy_generation(),
             inner: TomlConfig {
+                input: InputConfig::default(),
                 appearance: AppearanceConfig {
                     border_px: 3,
                     gap_px: 5,
@@ -3537,6 +3544,10 @@ impl Config {
 
     pub fn behavior(&self) -> &BehaviorConfig {
         &self.inner.behavior
+    }
+
+    pub fn input(&self) -> &InputConfig {
+        &self.inner.input
     }
 
     pub fn drag_threshold_px(&self) -> u32 {
@@ -8493,6 +8504,9 @@ mod tests {
         assert!(diagnostics.issues().iter().any(|issue| {
             issue.path.ends_with(".function") && issue.message.contains("unknown IPC command")
         }));
+        assert!(!super::gesture_swipe_binding_is_valid(
+            config.inner.behavior.gesture_swipe.last().unwrap()
+        ));
     }
 
     #[test]

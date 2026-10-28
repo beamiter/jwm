@@ -407,6 +407,11 @@ impl<C: CompositorConnection> Compositor<C> {
             .and_then(|geometry| geometry.scroll_t_at(y))
     }
 
+    pub(crate) fn system_ui_row_height(&self) -> Option<f64> {
+        self.system_ui_hit_geometry
+            .and_then(|geometry| geometry.row_height())
+    }
+
     pub(crate) fn push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
         let removed = self.toast_stack.push(toast, std::time::Instant::now());
         self.free_toast_textures(&removed);

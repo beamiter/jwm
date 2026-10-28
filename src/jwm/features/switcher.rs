@@ -550,6 +550,7 @@ mod tests {
         assert_eq!(inactive.remove_selected_switcher_row(), None);
 
         let mut notifications = SystemUiState::ListPanel {
+            list_scroll: None,
             kind: ListKind::Notifications,
             rows: vec![ListRow {
                 key: "1".to_string(),

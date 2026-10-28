@@ -18,8 +18,8 @@ use crate::presentation::{
     Size, Stroke, TextAlign, TextMeasurer, build_scene,
 };
 use crate::{
-    BarEdge, BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate,
-    ScrollAccumulator, ScrollDelta, ScrollMode, ScrollPhase, ScrollStep, UserAction,
+    BarModel, BarRuntime, BarSnapshot, ControlScroll, DockReporter, DockReporterInput,
+    RuntimeUpdate, ScrollDelta, ScrollPhase, UserAction,
 };
 
 const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
@@ -662,7 +662,7 @@ pub struct CairoBar {
     interaction: InteractionState,
     last_pointer: Option<Point>,
     pressed_button: Option<PointerButton>,
-    scroll: ScrollAccumulator<(crate::presentation::NodeId, BarEdge)>,
+    scroll: ControlScroll,
     scene: Scene,
     renderer: CairoRenderer,
     renderer_dirty: bool,
@@ -685,13 +685,14 @@ impl CairoBar {
         // same configuration field, without threading a second font argument
         // through ten `main.rs` files.
         let renderer = CairoRenderer::with_icon_font(font, config.icon_font.as_deref());
+        let scroll = ControlScroll::with_policy(config.scroll);
         Self {
             runtime,
             config,
             interaction: InteractionState::default(),
             last_pointer: None,
             pressed_button: None,
-            scroll: ScrollAccumulator::default(),
+            scroll,
             scene: empty_scene(),
             renderer,
             renderer_dirty: true,
@@ -1111,7 +1112,8 @@ impl CairoBar {
         let transition = self.interaction.update_hover_transition(&self.scene, point);
         if transition.target_changed() {
             if transition.previous.map(scroll_group) == transition.current.map(scroll_group) {
-                self.scroll.discard_partial();
+                self.scroll
+                    .hover(transition.current, self.config.edge, Instant::now());
             } else {
                 self.scroll.reset();
             }
@@ -1225,6 +1227,7 @@ impl CairoBar {
         delta: ScrollDelta,
         phase: ScrollPhase,
     ) -> PointerUpdate {
+        self.scroll.set_policy(self.config.scroll);
         self.last_pointer = Some(point);
         let hover_changed = self.interaction.update_hover(&self.scene, point);
         let had_press = self.interaction.pressed().is_some();
@@ -1235,28 +1238,10 @@ impl CairoBar {
             .hit_test(point)
             .filter(|hit| hit.scroll_up.is_some() || hit.scroll_down.is_some())
         {
-            Some(hit) => {
-                let mode = match hit.id {
-                    crate::presentation::NodeId::Audio
-                    | crate::presentation::NodeId::Brightness => ScrollMode::Adjustment,
-                    _ => ScrollMode::Navigation,
-                };
-                self.scroll
-                    .step(
-                        (scroll_group(hit.id), self.config.edge),
-                        delta,
-                        phase,
-                        mode,
-                        !self.config.edge.is_vertical(),
-                        Instant::now(),
-                    )
-                    .and_then(|step| {
-                        hit.action(match step {
-                            ScrollStep::Up => PointerAction::ScrollUp,
-                            ScrollStep::Down => PointerAction::ScrollDown,
-                        })
-                    })
-            }
+            Some(hit) => self
+                .scroll
+                .step(hit.id, self.config.edge, delta, phase, Instant::now())
+                .and_then(|input| hit.action(input)),
             None => {
                 self.scroll.reset();
                 None
@@ -1832,7 +1817,7 @@ mod tests {
     #[cfg(feature = "transport-shared")]
     use crate::WindowToken;
     use crate::presentation::{NodeId, Point, PresentationVisibility, VisualState};
-    use crate::{DirtyBits, ThemeMode, UserAction};
+    use crate::{BarEdge, DirtyBits, ThemeMode, UserAction};
     use cairo::{Format, ImageSurface};
     #[cfg(feature = "transport-shared")]
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3179,6 +3164,23 @@ mod tests {
             for _ in 0..8 {
                 assert!(bar.handle_pointer(packet).runtime.is_empty());
             }
+            // A reflow can expose a different control under the same cursor.
+            // Its adjustment must not inherit the navigation gesture's tail.
+            bar.scene.hits[0].id = NodeId::Audio;
+            assert!(bar.handle_pointer(packet).runtime.is_empty());
+            assert_eq!(bar.snapshot().theme, ThemeMode::Light);
+            let deliberate_adjustment = PointerInput::Wheel {
+                point,
+                delta: ScrollDelta::Pixels { x: 0.0, y: 16.0 },
+                phase: ScrollPhase::Started,
+            };
+            assert!(
+                bar.handle_pointer(deliberate_adjustment)
+                    .runtime
+                    .changes
+                    .contains(DirtyBits::THEME_CHANGED)
+            );
+            bar.scene.hits[0].id = NodeId::LayoutButton;
             let _ = bar.handle_pointer(PointerInput::Leave);
             let horizontal = bar.handle_pointer(PointerInput::Wheel {
                 point,

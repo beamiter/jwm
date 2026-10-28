@@ -117,6 +117,50 @@ impl WaylandCompositor {
         self.transition_active = false;
         self.transition_start = None;
         self.transition_mon = None;
+        self.workspace_swipe = None;
+        // The final interactive frame may still contain the outgoing image.
+        // Repair it after WM preview ownership returns to the live scene.
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+    }
+
+    pub(crate) fn begin_workspace_swipe(&mut self, rect: (i32, i32, u32, u32)) -> bool {
+        if !self.workspace_swipe_source_valid || self.transition_active {
+            return false;
+        }
+        self.notify_tag_switch(std::time::Duration::from_secs(1), 1, 0, rect);
+        if !self.transition_active {
+            return false;
+        }
+        self.workspace_swipe = Some(Default::default());
+        true
+    }
+
+    pub(crate) fn update_workspace_swipe(&mut self, progress: f32, direction: i32) {
+        if let Some(swipe) = &mut self.workspace_swipe {
+            swipe.update(progress);
+            self.transition_direction = if direction < 0 { -1 } else { 1 };
+            self.needs_render = true;
+            self.force_full_damage_next = true;
+        }
+    }
+
+    pub(crate) fn end_workspace_swipe(&mut self, commit: bool, animate: bool) {
+        if let Some(swipe) = &mut self.workspace_swipe {
+            if animate {
+                swipe.release(commit, std::time::Instant::now());
+            } else {
+                self.finish_transition();
+                self.transition_snapshot_pending = false;
+                self.workspace_swipe_source_valid = false;
+            }
+            self.needs_render = true;
+            self.force_full_damage_next = true;
+        }
+    }
+
+    pub(crate) fn workspace_swipe_active(&self) -> bool {
+        self.workspace_swipe.is_some()
     }
 
     fn prepare_flat_transition(
@@ -267,11 +311,17 @@ impl WaylandCompositor {
             self.finish_transition();
             return;
         };
-        let Some(progress) = normalized_transition_progress(
-            start,
-            std::time::Instant::now(),
-            self.transition_duration,
-        ) else {
+        let progress = self.workspace_swipe.as_ref().map_or_else(
+            || {
+                normalized_transition_progress(
+                    start,
+                    std::time::Instant::now(),
+                    self.transition_duration,
+                )
+            },
+            |swipe| swipe.sample(std::time::Instant::now()),
+        );
+        let Some(progress) = progress else {
             self.finish_transition();
             return;
         };
@@ -288,7 +338,11 @@ impl WaylandCompositor {
             self.finish_transition();
             return;
         };
-        let t = self.transition_mode.eased_progress(progress);
+        let t = if self.workspace_swipe.is_some() {
+            progress
+        } else {
+            self.transition_mode.eased_progress(progress)
+        };
 
         unsafe {
             gl.Enable(ffi::SCISSOR_TEST);
@@ -300,19 +354,23 @@ impl WaylandCompositor {
             );
         }
 
-        match self.transition_mode {
-            TransitionMode::Slide => self.render_slide_transition(gl, projection, layout, t),
-            TransitionMode::Cube => self.render_cube_transition(gl, layout, t),
-            TransitionMode::Flip => self.render_flip_transition(gl, layout, t),
-            TransitionMode::Fade => self.render_fade_transition(gl, projection, layout, t),
-            TransitionMode::Zoom => self.render_zoom_transition(gl, projection, layout, t),
-            TransitionMode::Portal => self.render_portal_transition(gl, projection, layout, t),
-            TransitionMode::Stack => self.render_stack_transition(gl, projection, layout, t),
-            TransitionMode::Blinds => self.render_blinds_transition(gl, projection, layout, t),
-            TransitionMode::CoverFlow => self.render_coverflow_transition(gl, layout, t),
-            TransitionMode::Helix => self.render_helix_transition(gl, layout, t),
-            TransitionMode::Book => self.render_book_transition(gl, layout, t),
-            TransitionMode::None => {}
+        if self.workspace_swipe.is_some() {
+            self.render_workspace_swipe(gl, projection, layout, t);
+        } else {
+            match self.transition_mode {
+                TransitionMode::Slide => self.render_slide_transition(gl, projection, layout, t),
+                TransitionMode::Cube => self.render_cube_transition(gl, layout, t),
+                TransitionMode::Flip => self.render_flip_transition(gl, layout, t),
+                TransitionMode::Fade => self.render_fade_transition(gl, projection, layout, t),
+                TransitionMode::Zoom => self.render_zoom_transition(gl, projection, layout, t),
+                TransitionMode::Portal => self.render_portal_transition(gl, projection, layout, t),
+                TransitionMode::Stack => self.render_stack_transition(gl, projection, layout, t),
+                TransitionMode::Blinds => self.render_blinds_transition(gl, projection, layout, t),
+                TransitionMode::CoverFlow => self.render_coverflow_transition(gl, layout, t),
+                TransitionMode::Helix => self.render_helix_transition(gl, layout, t),
+                TransitionMode::Book => self.render_book_transition(gl, layout, t),
+                TransitionMode::None => {}
+            }
         }
 
         // 3D modes select a monitor viewport, and blinds replaces the outer
@@ -326,7 +384,87 @@ impl WaylandCompositor {
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
 
-        self.needs_render = true;
+        self.needs_render |= self
+            .workspace_swipe
+            .as_ref()
+            .is_none_or(|swipe| swipe.is_settling());
+    }
+
+    fn render_workspace_swipe(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        layout: TransitionLayout,
+        progress: f32,
+    ) {
+        let (width, height) = (layout.scissor[2] as u32, layout.scissor[3] as u32);
+        let linear = self.transition_draws_linear;
+        let mut source = 0;
+        unsafe {
+            gl.GetIntegerv(ffi::DRAW_FRAMEBUFFER_BINDING, &mut source);
+        }
+        let compatible = self
+            .workspace_swipe_destination
+            .is_some_and(|(_, _, w, h, l)| (w, h, l) == (width, height, linear));
+        if !compatible {
+            if let Some((fbo, texture, _, _, _)) = self.workspace_swipe_destination.take() {
+                unsafe {
+                    gl.DeleteFramebuffers(1, &fbo);
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            let format = if linear { GL_RGBA16F } else { GL_RGB10_A2 };
+            match unsafe { super::create_fbo_texture_fmt(gl, width, height, format) } {
+                Ok((fbo, texture)) => {
+                    self.workspace_swipe_destination = Some((fbo, texture, width, height, linear))
+                }
+                Err(status) => {
+                    log::warn!("workspace swipe destination allocation failed: 0x{status:x}")
+                }
+            }
+        }
+        if let Some((fbo, texture, _, _, _)) = self.workspace_swipe_destination {
+            unsafe {
+                gl.Disable(ffi::SCISSOR_TEST);
+                gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, source as u32);
+                gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, fbo);
+                gl.BlitFramebuffer(
+                    layout.scissor[0],
+                    layout.scissor[1],
+                    layout.scissor[0] + layout.scissor[2],
+                    layout.scissor[1] + layout.scissor[3],
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    ffi::COLOR_BUFFER_BIT,
+                    ffi::NEAREST,
+                );
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, source as u32);
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(
+                    layout.scissor[0],
+                    layout.scissor[1],
+                    layout.scissor[2],
+                    layout.scissor[3],
+                );
+            }
+            self.prepare_flat_transition(gl, projection, layout);
+            unsafe {
+                gl.BindTexture(ffi::TEXTURE_2D, texture);
+                // The incoming copy has the exact target's domain already.
+                // Only the outgoing encoded snapshot needs an sRGB decode.
+                gl.Uniform1i(self.transition_uniforms.scene_linear, 0);
+            }
+            let mut incoming = layout.draw_rect;
+            incoming[0] += self.transition_direction as f32 * (1.0 - progress) * incoming[2];
+            self.draw_flat_transition_rect(gl, incoming, [0.0, 0.0, 1.0, 1.0], 1.0);
+        } else {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, source as u32);
+            }
+        }
+        self.render_slide_transition(gl, projection, layout, progress);
     }
 
     fn render_slide_transition(
@@ -346,7 +484,16 @@ impl WaylandCompositor {
         ];
 
         self.prepare_flat_transition(gl, projection, layout);
-        self.draw_flat_transition_rect(gl, rect, layout.uv_rect, 1.0 - 0.1 * t);
+        self.draw_flat_transition_rect(
+            gl,
+            rect,
+            layout.uv_rect,
+            if self.workspace_swipe.is_some() {
+                1.0
+            } else {
+                1.0 - 0.1 * t
+            },
+        );
     }
 
     fn render_fade_transition(

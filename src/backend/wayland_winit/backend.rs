@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, Event as InputEventExt, InputBackend, InputEvent, InputTime,
-    KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Event as InputEventExt, InputBackend, InputEvent, InputTime,
+    KeyboardKeyEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
@@ -82,11 +82,6 @@ struct SharedState {
     /// an X11 keyboard grab would and needs to see key releases too — the
     /// held-modifier window switcher commits on nothing else.
     system_ui_grab_active: bool,
-    /// Fractional wheel rotation carried between axis events, so a
-    /// touchpad's stream of sub-click deltas still adds up to whole button
-    /// 4/5 presses for the WM while a grab is up. Reset on the grab's rising
-    /// edge in `compositor_set_system_ui`.
-    wheel_remainder: f64,
     /// Cached key bindings (mods, keysym) for key event suppression.
     key_bindings: Vec<(Mods, KeySym)>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
@@ -106,7 +101,6 @@ impl Default for SharedState {
             pointer_y: 0.0,
             mods_state: 0,
             system_ui_grab_active: false,
-            wheel_remainder: 0.0,
             key_bindings: Vec::new(),
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
@@ -1630,7 +1624,8 @@ fn process_input_event_windowed<B: InputBackend>(
             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
             if let Some(pointer) = state.seat.get_pointer() {
-                pointer.motion(
+                crate::backend::wayland_scroll::motion(
+                    &pointer,
                     state,
                     focus,
                     &MotionEvent {
@@ -1700,7 +1695,8 @@ fn process_input_event_windowed<B: InputBackend>(
             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
             if let Some(pointer) = state.seat.get_pointer() {
-                pointer.motion(
+                crate::backend::wayland_scroll::motion(
+                    &pointer,
                     state,
                     focus,
                     &MotionEvent {
@@ -1778,7 +1774,8 @@ fn process_input_event_windowed<B: InputBackend>(
             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
             if let Some(pointer) = state.seat.get_pointer() {
-                pointer.motion(
+                crate::backend::wayland_scroll::motion(
+                    &pointer,
                     state,
                     focus,
                     &MotionEvent {
@@ -2016,71 +2013,39 @@ fn process_input_event_windowed<B: InputBackend>(
         }
 
         InputEvent::PointerAxis { event, .. } => {
-            let time = InputEventExt::time(&event);
-            // smithay's winit backend turns the host's wheel into PointerAxis,
-            // so without this arm the wheel reached neither the clients nor
-            // the WM. While a system-UI grab owns the pointer, the wheel
-            // belongs to the WM: one synthetic button-4/5 press/release pair
-            // per whole vertical click — the same synthesis the udev backend
-            // runs, hanging off the press path every WM wheel behavior uses
-            // (event_dispatcher.rs:461). The release half is not optional:
-            // the screenshot wheel path arms a one-shot release swallow
-            // (capture.rs `swallow_next_button_release`) that only the
-            // paired release clears — a press alone would leave the latch
-            // armed to eat the next unrelated release. The horizontal axis
-            // stays inert, exactly as X11 buttons 6/7 are no-ops in those
-            // branches.
-            let (grab_active, clicks, x, y, output, mods_state) = {
-                let mut s = shared.lock_safe();
-                let grab_active = s.system_ui_grab_active && !state.session_locked;
-                let mut clicks = 0;
-                if grab_active {
-                    let (steps, remainder) = wayland_dummy_ops::wheel_steps(
-                        s.wheel_remainder,
-                        event.amount_v120(Axis::Vertical),
-                        event.amount(Axis::Vertical),
-                    );
-                    s.wheel_remainder = remainder;
-                    clicks = steps;
-                }
+            let (mode, x, y, output, mods) = {
+                let s = shared.lock_safe();
+                let mode = if state.session_locked {
+                    crate::backend::scroll::ScrollMode::Locked(state.session_lock_epoch)
+                } else if s.system_ui_grab_active {
+                    crate::backend::scroll::ScrollMode::SystemUi
+                } else {
+                    crate::backend::scroll::ScrollMode::Client
+                };
                 let (x, y) = (s.pointer_x, s.pointer_y);
                 let output = s
                     .outputs
                     .iter()
                     .find(|o| {
-                        (x as i32) >= o.x
-                            && (y as i32) >= o.y
-                            && (x as i32) < (o.x + o.width)
-                            && (y as i32) < (o.y + o.height)
+                        x >= o.x as f64
+                            && y >= o.y as f64
+                            && x < (o.x + o.width) as f64
+                            && y < (o.y + o.height) as f64
                     })
                     .map(|o| o.id);
-                (grab_active, clicks, x, y, output, s.mods_state)
+                (mode, x, y, output, s.mods_state)
             };
-            if grab_active {
-                let detail = wayland_dummy_ops::wheel_click_detail(clicks);
-                for _ in 0..clicks.unsigned_abs() {
-                    let mut pending = pending_events.lock_safe();
-                    pending.push_back(BackendEvent::ButtonPress {
-                        target: HitTarget::Background { output },
-                        state: mods_state,
-                        detail,
-                        time: time.millis(),
-                        root_x: x,
-                        root_y: y,
-                    });
-                    pending.push_back(BackendEvent::ButtonRelease {
-                        target: HitTarget::Background { output },
-                        detail,
-                        time: time.millis(),
-                        root_x: x,
-                        root_y: y,
-                    });
-                }
-            } else if let Some(pointer) = state.seat.get_pointer() {
-                let frame = crate::backend::wayland_axis::pointer_axis_frame(&event, false);
-                pointer.axis(state, frame);
-                pointer.frame(state);
-            }
+            crate::backend::wayland_scroll::axis(
+                state,
+                &event,
+                mode,
+                false,
+                pending_events,
+                HitTarget::Background { output },
+                mods,
+                x,
+                y,
+            );
         }
 
         _ => {}
@@ -2093,6 +2058,14 @@ impl BackendDiagnostics for WaylandWinitBackend {}
 impl CompositorControl for WaylandWinitBackend {}
 impl CompositorMedia for WaylandWinitBackend {}
 impl CompositorWorkspaceEffects for WaylandWinitBackend {
+    fn compositor_scroll_epoch(&self) -> u64 {
+        self.state.scroll_routes.epoch()
+    }
+
+    fn compositor_cancel_scroll(&mut self) {
+        crate::backend::wayland_scroll::cancel(&mut self.state);
+    }
+
     /// The nested backend has no system-UI renderer, but the flag is not
     /// about drawing: while a panel is up the WM is the keyboard's owner, and
     /// `Jwm::on_key_release` — the only way the held-modifier switcher can
@@ -2106,12 +2079,16 @@ impl CompositorWorkspaceEffects for WaylandWinitBackend {
                 .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
         }
         let mut shared = self.shared.lock_safe();
-        if overlay.is_some() && !shared.system_ui_grab_active {
-            // A half-turn accumulated before the panel opened must not leak
-            // into its first scroll.
-            shared.wheel_remainder = 0.0;
-        }
         shared.system_ui_grab_active = overlay.is_some();
+        let mode = if self.state.session_locked {
+            crate::backend::scroll::ScrollMode::Locked(self.state.session_lock_epoch)
+        } else if shared.system_ui_grab_active {
+            crate::backend::scroll::ScrollMode::SystemUi
+        } else {
+            crate::backend::scroll::ScrollMode::Client
+        };
+        drop(shared);
+        crate::backend::wayland_scroll::set_mode(&mut self.state, mode);
     }
 
     /// No compositor draws per-monitor effects here, but taskbars bound to

@@ -2,7 +2,7 @@ use iced::futures::{SinkExt, Stream};
 use iced::mouse;
 use iced::time;
 use iced::widget::container;
-use xbar_core::presentation::VisualState;
+use xbar_core::presentation::{NodeId, PointerAction, VisualState};
 use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // Current iced widgets use explicit boxing at heterogeneous Element boundaries.
 use iced::widget::{Space, Stack, Widget as _, button, rich_text, tooltip};
@@ -303,6 +303,13 @@ enum Input {
 #[derive(Debug, Clone)]
 enum Message {
     Activate(Option<UserAction>),
+    ScrollControl {
+        id: NodeId,
+        delta: mouse::ScrollDelta,
+        up: Option<UserAction>,
+        down: Option<UserAction>,
+    },
+    ScrollHover(Option<NodeId>),
     TabSelected(usize),
     LayoutClicked(u32),
     ToggleLayoutSelector,
@@ -328,7 +335,6 @@ enum Message {
 
     // Audio
     AudioToggleMute,
-    AudioAdjust(i32),
 
     // Brightness
     BrightnessAdjust(i32),
@@ -343,6 +349,7 @@ enum Message {
 }
 
 struct IcedBar {
+    scroll: xbar_core::ControlScroll,
     tabs: [&'static str; 9],
     runtime: BarRuntime,
     presentation: xbar_core::presentation::PresentationConfig,
@@ -412,6 +419,7 @@ impl IcedBar {
         dock.set_edge(bar_config.presentation.edge);
         Self {
             tabs: TAG_ICONS,
+            scroll: xbar_core::ControlScroll::with_policy(bar_config.presentation.scroll),
             runtime,
             tag_contrast: bar_config.presentation.tag_contrast,
             schedule: RuntimeSchedule::default(),
@@ -439,7 +447,49 @@ impl IcedBar {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = match message {
+            Message::ScrollControl {
+                id,
+                delta,
+                up,
+                down,
+            } => {
+                let delta = match delta {
+                    mouse::ScrollDelta::Lines { x, y } => xbar_core::ScrollDelta::Lines {
+                        x: f64::from(x),
+                        y: f64::from(y),
+                    },
+                    // iced_winit preserves winit's physical pixel delta.
+                    mouse::ScrollDelta::Pixels { x, y } => xbar_core::ScrollDelta::physical_pixels(
+                        f64::from(x),
+                        f64::from(y),
+                        f64::from(self.scale_factor),
+                    ),
+                };
+                let action = self
+                    .scroll
+                    .step(
+                        id,
+                        self.presentation.edge,
+                        delta,
+                        xbar_core::ScrollPhase::Moved,
+                        Instant::now(),
+                    )
+                    .and_then(|input| {
+                        if input == PointerAction::ScrollUp {
+                            up
+                        } else {
+                            down
+                        }
+                    });
+                action.map_or_else(Task::none, |action| self.dispatch(action))
+            }
+            Message::ScrollHover(id) => {
+                self.scroll
+                    .hover(id, self.presentation.edge, Instant::now());
+                Task::none()
+            }
             Message::Activate(action) => {
+                self.scroll.reset();
                 action.map_or_else(Task::none, |action| self.dispatch(action))
             }
             Message::TabSelected(tab_index) => {
@@ -500,11 +550,15 @@ impl IcedBar {
 
             Message::RightClick => Task::none(),
 
-            Message::AudioToggleMute => self.dispatch(UserAction::ToggleMute),
+            Message::AudioToggleMute => {
+                self.scroll.reset();
+                self.dispatch(UserAction::ToggleMute)
+            }
 
-            Message::AudioAdjust(delta) => self.dispatch(UserAction::AdjustVolume(delta)),
-
-            Message::BrightnessAdjust(delta) => self.dispatch(UserAction::AdjustBrightness(delta)),
+            Message::BrightnessAdjust(delta) => {
+                self.scroll.reset();
+                self.dispatch(UserAction::AdjustBrightness(delta))
+            }
 
             Message::DockHover { binding, hovered } => {
                 if hovered {
@@ -521,6 +575,7 @@ impl IcedBar {
             }
 
             Message::GetScaleFactor(scale_factor) => {
+                self.scroll.reset();
                 info!("scale_factor: {}", scale_factor);
                 self.scale_factor = scale_factor;
                 self.window_metrics_received |= 0b001;
@@ -548,6 +603,7 @@ impl IcedBar {
             Message::WindowEvent(window_id, window::Event::Rescaled(scale_factor))
                 if Some(window_id) == self.current_window_id =>
             {
+                self.scroll.reset();
                 self.scale_factor = scale_factor;
                 self.runtime
                     .view()
@@ -557,6 +613,10 @@ impl IcedBar {
                     })
             }
 
+            Message::WindowEvent(_, window::Event::Unfocused) => {
+                self.scroll.cancel(Instant::now());
+                Task::none()
+            }
             Message::WindowEvent(_, _) => Task::none(),
 
             Message::TransportPoll => {
@@ -893,16 +953,13 @@ impl IcedBar {
         mouse_area(pill)
             .on_press(Message::BrightnessAdjust(5))
             .on_right_press(Message::BrightnessAdjust(-5))
-            .on_scroll(|delta| {
-                let d = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => y,
-                    mouse::ScrollDelta::Pixels { y, .. } => y,
-                };
-                if d > 0.0 {
-                    Message::BrightnessAdjust(5)
-                } else {
-                    Message::BrightnessAdjust(-5)
-                }
+            .on_enter(Message::ScrollHover(Some(NodeId::Brightness)))
+            .on_exit(Message::ScrollHover(None))
+            .on_scroll(|delta| Message::ScrollControl {
+                id: NodeId::Brightness,
+                delta,
+                up: Some(UserAction::AdjustBrightness(5)),
+                down: Some(UserAction::AdjustBrightness(-5)),
             })
             .boxed()
     }
@@ -942,16 +999,13 @@ impl IcedBar {
 
         mouse_area(pill)
             .on_press(Message::AudioToggleMute)
-            .on_scroll(|delta| {
-                let d = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => y,
-                    mouse::ScrollDelta::Pixels { y, .. } => y,
-                };
-                if d > 0.0 {
-                    Message::AudioAdjust(5)
-                } else {
-                    Message::AudioAdjust(-5)
-                }
+            .on_enter(Message::ScrollHover(Some(NodeId::Audio)))
+            .on_exit(Message::ScrollHover(None))
+            .on_scroll(|delta| Message::ScrollControl {
+                id: NodeId::Audio,
+                delta,
+                up: Some(UserAction::AdjustVolume(5)),
+                down: Some(UserAction::AdjustVolume(-5)),
             })
             .boxed()
     }
@@ -1439,25 +1493,20 @@ impl IcedBar {
         if spec.state.enabled && spec.bindings.primary.is_some() {
             button = button.on_press(Message::Activate(spec.bindings.primary));
         }
-        let mut area = mouse_area(button);
+        let mut area = mouse_area(button)
+            .on_enter(Message::ScrollHover(Some(spec.id)))
+            .on_exit(Message::ScrollHover(None));
         if spec.state.enabled {
             if spec.bindings.secondary.is_some() {
                 area = area.on_right_press(Message::Activate(spec.bindings.secondary));
             }
             let bindings = spec.bindings;
             if bindings.scroll_up.is_some() || bindings.scroll_down.is_some() {
-                area = area.on_scroll(move |delta| {
-                    let y = match delta {
-                        mouse::ScrollDelta::Lines { y, .. }
-                        | mouse::ScrollDelta::Pixels { y, .. } => y,
-                    };
-                    Message::Activate(if y > 0.0 {
-                        bindings.scroll_up
-                    } else if y < 0.0 {
-                        bindings.scroll_down
-                    } else {
-                        None
-                    })
+                area = area.on_scroll(move |delta| Message::ScrollControl {
+                    id: spec.id,
+                    delta,
+                    up: bindings.scroll_up,
+                    down: bindings.scroll_down,
                 });
             }
         }

@@ -2921,6 +2921,9 @@ mod tests {
     }
 
     struct RenderSpyBackend {
+        swipe_active: bool,
+        swipe_progress: Vec<(f32, i32)>,
+        swipe_finishes: Vec<(bool, bool)>,
         astronomy_ready: bool,
         astronomy_hit: bool,
         astronomy_active: bool,
@@ -2962,6 +2965,7 @@ mod tests {
         dock_preview_updates: Vec<(Option<WindowId>, Option<CompositorRect>)>,
         window_groups_pushes: Vec<Vec<crate::backend::compositor_common::window_tabs::TabGroup>>,
         system_ui_hit: SystemUiHitTarget,
+        scroll_epoch: u64,
         system_ui_scroll_t: Option<f32>,
         system_ui_hover_updates: Vec<Option<usize>>,
         /// Every lock-shade payload pushed, newest last.
@@ -2985,6 +2989,9 @@ mod tests {
     impl RenderSpyBackend {
         fn new() -> Self {
             Self {
+                swipe_active: false,
+                swipe_progress: Vec::new(),
+                swipe_finishes: Vec::new(),
                 window_ops: MapRestoreWindowOps::new(),
                 input_ops: GrabSpyInputOps::default(),
                 property_ops: MapRestorePropertyOps::new(),
@@ -3026,6 +3033,7 @@ mod tests {
                 dock_preview_updates: Vec::new(),
                 window_groups_pushes: Vec::new(),
                 system_ui_hit: SystemUiHitTarget::Unavailable,
+                scroll_epoch: 0,
                 system_ui_scroll_t: None,
                 system_ui_hover_updates: Vec::new(),
                 monitor_shade_pushes: Vec::new(),
@@ -3177,6 +3185,31 @@ mod tests {
         }
     }
     impl CompositorWorkspaceEffects for RenderSpyBackend {
+        fn compositor_cancel_scroll(&mut self) {
+            self.scroll_epoch = self.scroll_epoch.wrapping_add(1);
+        }
+        fn compositor_scroll_epoch(&self) -> u64 {
+            self.scroll_epoch
+        }
+        fn compositor_system_ui_row_height(&self) -> Option<f64> {
+            (self.system_ui_hit != SystemUiHitTarget::Unavailable).then_some(20.0)
+        }
+        fn compositor_begin_workspace_swipe(&mut self, _rect: (i32, i32, u32, u32)) -> bool {
+            self.swipe_active = true;
+            true
+        }
+        fn compositor_update_workspace_swipe(&mut self, progress: f32, direction: i32) {
+            self.swipe_progress.push((progress, direction));
+        }
+        fn compositor_end_workspace_swipe(&mut self, commit: bool, animate: bool) {
+            if self.swipe_active {
+                self.swipe_finishes.push((commit, animate));
+            }
+            self.swipe_active = false;
+        }
+        fn compositor_workspace_swipe_active(&self) -> bool {
+            self.swipe_active
+        }
         fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {
             self.compositor_monitor_updates += 1;
         }
@@ -6931,6 +6964,544 @@ mod tests {
         )
         .unwrap();
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), expected);
+    }
+
+    fn send_test_scroll(
+        jwm: &mut Jwm,
+        backend: &mut RenderSpyBackend,
+        packet: crate::backend::scroll::PointerScroll,
+    ) {
+        EventHandler::handle_event(
+            jwm,
+            backend,
+            BackendEvent::PointerScroll {
+                target: HitTarget::Background { output: None },
+                state: 0,
+                root_x: 10.0,
+                root_y: 10.0,
+                scroll: packet,
+            },
+        )
+        .unwrap();
+    }
+
+    fn test_scroll(
+        device: &str,
+        delta: (f64, f64),
+        phase: crate::backend::scroll::ScrollPhase,
+    ) -> crate::backend::scroll::PointerScroll {
+        crate::backend::scroll::PointerScroll {
+            device: device.into(),
+            delta,
+            phase,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn precision_scroll_moves_the_list_continuously_without_changing_its_action() {
+        use crate::backend::scroll::ScrollPhase;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+        let rows: Vec<_> = (0..40)
+            .map(|i| wifi_row(&format!("Network {i:02}")))
+            .collect();
+        jwm.features.system_ui.set_wifi_networks(&rows);
+        backend.system_ui_hit = SystemUiHitTarget::Item(2, 0.0);
+        let selected = jwm.features.system_ui.selected_wifi().unwrap().0;
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 5.0), ScrollPhase::Started),
+        );
+        assert_eq!(jwm.features.system_ui.pointer_scroll_fraction(), 0.25);
+        assert_eq!(jwm.features.system_ui.selected_wifi().unwrap().0, selected);
+        backend.system_ui_hit = SystemUiHitTarget::Unavailable;
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 20.0), ScrollPhase::Moved),
+        );
+        assert_eq!(
+            jwm.features.system_ui.pointer_scroll_fraction(),
+            0.25,
+            "texture rebuilds between frames preserve the captured scroll owner"
+        );
+        backend.system_ui_hit = SystemUiHitTarget::Item(2, 0.0);
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (12.0, 0.1), ScrollPhase::Moved),
+        );
+        assert_eq!(
+            jwm.features.system_ui.pointer_scroll_fraction(),
+            0.25,
+            "horizontal jitter is inert"
+        );
+        backend.system_ui_hit = SystemUiHitTarget::Outside;
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 10.0), ScrollPhase::Moved),
+        );
+        backend.system_ui_hit = SystemUiHitTarget::Panel;
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 10.0), ScrollPhase::Moved),
+        );
+        assert_eq!(
+            jwm.features.system_ui.pointer_scroll_fraction(),
+            0.25,
+            "leaving the control fences re-entry until lift"
+        );
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 0.0), ScrollPhase::Ended),
+        );
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (8.0, 1.0), ScrollPhase::Started),
+        );
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 1.0), ScrollPhase::Moved),
+        );
+        assert_eq!(
+            jwm.features.system_ui.pointer_scroll_fraction(),
+            0.25,
+            "a horizontal gesture's later pure-vertical jitter remains inert"
+        );
+    }
+
+    #[test]
+    fn modal_takeover_rejects_queued_precision_scroll_from_the_previous_owner() {
+        use crate::backend::scroll::ScrollPhase;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+        let rows: Vec<_> = (0..40)
+            .map(|i| wifi_row(&format!("Network {i:02}")))
+            .collect();
+        jwm.features.system_ui.set_wifi_networks(&rows);
+        backend.system_ui_hit = SystemUiHitTarget::Panel;
+        let stale = test_scroll("pad", (0.0, 10.0), ScrollPhase::Started);
+        jwm.cancel_pointer_scroll(&mut backend);
+        send_test_scroll(&mut jwm, &mut backend, stale.clone());
+        assert_eq!(jwm.features.system_ui.pointer_scroll_fraction(), 0.0);
+        let current = crate::backend::scroll::PointerScroll {
+            owner_epoch: backend.scroll_epoch,
+            ..stale
+        };
+        send_test_scroll(&mut jwm, &mut backend, current);
+        assert_eq!(jwm.features.system_ui.pointer_scroll_fraction(), 0.5);
+    }
+
+    #[test]
+    fn precision_scroll_cannot_adjust_a_different_slider_after_a_background_refresh() {
+        use crate::backend::scroll::ScrollPhase;
+        use crate::jwm::features::system_ui::{ControlEntry, ControlKind, SystemUiState};
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::ControlCenter {
+            entries: vec![ControlEntry {
+                kind: ControlKind::Volume,
+                percent: 50,
+                enabled: false,
+                label: String::new(),
+            }],
+            selected: 0,
+            armed: false,
+            shell_hub: false,
+        };
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 8.0), ScrollPhase::Started),
+        );
+        if let SystemUiState::ControlCenter { entries, .. } = &mut jwm.features.system_ui {
+            entries[0].kind = ControlKind::Brightness;
+        }
+        backend.system_ui_hit = SystemUiHitTarget::Unavailable;
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 8.0), ScrollPhase::Moved),
+        );
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 64.0), ScrollPhase::Moved),
+        );
+        let SystemUiState::ControlCenter { entries, .. } = &jwm.features.system_ui else {
+            panic!("panel changed");
+        };
+        assert_eq!(
+            entries[0].percent, 50,
+            "an old volume gesture cannot adjust a newly inserted brightness row"
+        );
+    }
+
+    #[test]
+    fn finger_hold_cancels_only_its_own_list_inertia_and_removes_the_wakeup() {
+        use crate::backend::scroll::ScrollPhase;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+        let rows: Vec<_> = (0..40)
+            .map(|i| wifi_row(&format!("Network {i:02}")))
+            .collect();
+        jwm.features.system_ui.set_wifi_networks(&rows);
+        backend.system_ui_hit = SystemUiHitTarget::Panel;
+        for (time, phase) in [
+            (0, ScrollPhase::Started),
+            (10, ScrollPhase::Moved),
+            (20, ScrollPhase::Moved),
+            (21, ScrollPhase::Ended),
+        ] {
+            let dy = if phase == ScrollPhase::Ended {
+                0.0
+            } else {
+                5.0
+            };
+            let mut packet = test_scroll("pad", (0.0, dy), phase);
+            packet.time = time;
+            send_test_scroll(&mut jwm, &mut backend, packet);
+        }
+        assert!(
+            jwm.features
+                .pointer_scroll
+                .next_wakeup(std::time::Instant::now())
+                .is_some()
+        );
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("other", (0.0, 0.0), ScrollPhase::Cancelled),
+        );
+        assert!(
+            jwm.features
+                .pointer_scroll
+                .next_wakeup(std::time::Instant::now())
+                .is_some()
+        );
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, 0.0), ScrollPhase::Cancelled),
+        );
+        assert_eq!(
+            jwm.features
+                .pointer_scroll
+                .next_wakeup(std::time::Instant::now()),
+            None
+        );
+    }
+
+    #[test]
+    fn precision_navigation_keeps_each_device_separate_and_commits_once() {
+        use crate::backend::scroll::ScrollPhase;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 1, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::calendar(date);
+        backend.system_ui_hit = SystemUiHitTarget::Panel;
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("internal", (20.0, 0.0), ScrollPhase::Started),
+        );
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("external", (20.0, 0.0), ScrollPhase::Started),
+        );
+        assert_eq!(jwm.features.system_ui.calendar_view().unwrap().month, 1);
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("internal", (21.0, 0.0), ScrollPhase::Moved),
+        );
+        assert_eq!(jwm.features.system_ui.calendar_view().unwrap().month, 2);
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("internal", (100.0, 0.0), ScrollPhase::Moved),
+        );
+        assert_eq!(jwm.features.system_ui.calendar_view().unwrap().month, 2);
+    }
+
+    #[test]
+    fn precision_capture_adjustment_pairs_the_synthetic_release() {
+        use crate::backend::scroll::ScrollPhase;
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.screenshot.active = true;
+        jwm.features.screenshot.committed = true;
+        let width = jwm.features.screenshot.stroke_width();
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, -3.0), ScrollPhase::Started),
+        );
+        assert_eq!(jwm.features.screenshot.stroke_width(), width);
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (0.0, -14.0), ScrollPhase::Moved),
+        );
+        assert_eq!(jwm.features.screenshot.stroke_width(), width + 1);
+        assert!(!jwm.features.capture.take_swallowed_button_release());
+        send_test_scroll(
+            &mut jwm,
+            &mut backend,
+            test_scroll("pad", (50.0, 0.0), ScrollPhase::Moved),
+        );
+        assert_eq!(jwm.features.screenshot.stroke_width(), width + 1);
+    }
+
+    fn send_test_swipe(
+        jwm: &mut Jwm,
+        backend: &mut RenderSpyBackend,
+        event: crate::backend::gesture_swipe::SwipeInput,
+    ) {
+        EventHandler::handle_event(jwm, backend, BackendEvent::GestureSwipe(event)).unwrap();
+    }
+
+    #[test]
+    fn touchpad_workspace_preview_does_not_change_tags_until_release_and_commits_once() {
+        use crate::backend::gesture_swipe::SwipeInput;
+        let (mut jwm, monitor, _, _) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let cfg = crate::config::CONFIG.load();
+        let id = crate::backend::gesture_swipe::next_swipe_id();
+        let before = jwm.state.monitors[monitor].get_active_tags();
+        let expected = jwm.calculate_next_tag(1);
+        let mut destination = crate::core::models::WMClient::new(WindowId::from_raw(0x990));
+        destination.mon = Some(monitor);
+        destination.state.tags = expected;
+        destination.geometry.x = -1600;
+        destination.geometry.y = 40;
+        destination.geometry.w = 800;
+        destination.geometry.h = 600;
+        destination.geometry.hidden_x = Some(-1600);
+        destination.geometry.hidden_restore_rect =
+            Some(crate::core::types::Rect::new(20, 40, 800, 600));
+        let destination_key = jwm.insert_client(destination);
+        jwm.attach_to_monitor(destination_key, monitor);
+        let parked = jwm.state.clients[destination_key].geometry.clone();
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Begin {
+                id,
+                fingers: 3,
+                config_signature: cfg.gesture_swipe_signature(),
+            },
+        );
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Update {
+                id,
+                dx: -90.0,
+                dy: 0.0,
+                time: 10,
+            },
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+        assert!(
+            !backend.swipe_progress.is_empty(),
+            "the full workspace compositor receives interactive progress"
+        );
+        let scene = jwm.build_compositor_scene(&backend, &std::collections::HashMap::new());
+        assert!(
+            scene.contains(&(0x990, 20, 40, 800, 600)),
+            "preview uses the visible restore rectangle"
+        );
+        assert_eq!(
+            jwm.state.clients[destination_key].geometry, parked,
+            "preview cannot consume parked input geometry"
+        );
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::End {
+                id,
+                cancelled: false,
+                time: 20,
+            },
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), expected);
+        assert_eq!(backend.swipe_finishes, [(true, true)]);
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::End {
+                id,
+                cancelled: false,
+                time: 21,
+            },
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), expected);
+    }
+
+    #[test]
+    fn touchpad_cancel_and_capture_takeover_never_change_the_source_workspace() {
+        use crate::backend::gesture_swipe::SwipeInput;
+        for capture in [false, true] {
+            let (mut jwm, monitor, _, _) = jwm_with_tab_group();
+            let mut backend = RenderSpyBackend::new();
+            let before = jwm.state.monitors[monitor].get_active_tags();
+            let cfg = crate::config::CONFIG.load();
+            let id = crate::backend::gesture_swipe::next_swipe_id();
+            send_test_swipe(
+                &mut jwm,
+                &mut backend,
+                SwipeInput::Begin {
+                    id,
+                    fingers: 3,
+                    config_signature: cfg.gesture_swipe_signature(),
+                },
+            );
+            send_test_swipe(
+                &mut jwm,
+                &mut backend,
+                SwipeInput::Update {
+                    id,
+                    dx: -100.0,
+                    dy: 0.0,
+                    time: 10,
+                },
+            );
+            if capture {
+                jwm.features.screenshot.active = true;
+            }
+            send_test_swipe(
+                &mut jwm,
+                &mut backend,
+                SwipeInput::End {
+                    id,
+                    cancelled: !capture,
+                    time: 20,
+                },
+            );
+            assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+            assert_eq!(backend.swipe_finishes, [(false, !capture)]);
+        }
+    }
+
+    #[test]
+    fn touchpad_queued_begin_cannot_revive_after_modal_entry_and_exit() {
+        use crate::backend::gesture_swipe::{SwipeInput, next_swipe_id};
+        let (mut jwm, monitor, _, _) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let before = jwm.state.monitors[monitor].get_active_tags();
+        let id = next_swipe_id();
+        let begin = SwipeInput::Begin {
+            id,
+            fingers: 3,
+            config_signature: crate::config::CONFIG.load().gesture_swipe_signature(),
+        };
+        // Physical Begin was queued before a capture briefly took ownership.
+        jwm.cancel_touchpad_gesture(&mut backend, false);
+        send_test_swipe(&mut jwm, &mut backend, begin);
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Update {
+                id,
+                dx: -200.0,
+                dy: 0.0,
+                time: 10,
+            },
+        );
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::End {
+                id,
+                cancelled: false,
+                time: 20,
+            },
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+        assert!(backend.swipe_progress.is_empty());
+    }
+
+    #[test]
+    fn touchpad_other_device_end_and_focus_change_cannot_commit_the_wrong_target() {
+        use crate::backend::gesture_swipe::SwipeInput;
+        let (mut jwm, monitor, first, second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let before = jwm.state.monitors[monitor].get_active_tags();
+        let cfg = crate::config::CONFIG.load();
+        let id = crate::backend::gesture_swipe::next_swipe_id();
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Begin {
+                id,
+                fingers: 3,
+                config_signature: cfg.gesture_swipe_signature(),
+            },
+        );
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Update {
+                id,
+                dx: -100.0,
+                dy: 0.0,
+                time: 10,
+            },
+        );
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::Begin {
+                id: u64::MAX,
+                fingers: 3,
+                config_signature: cfg.gesture_swipe_signature(),
+            },
+        );
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::End {
+                id: u64::MAX,
+                cancelled: false,
+                time: 20,
+            },
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+        assert!(backend.swipe_active);
+        let alternate = if jwm.get_selected_client_key() == Some(first) {
+            second
+        } else {
+            first
+        };
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(alternate));
+        send_test_swipe(
+            &mut jwm,
+            &mut backend,
+            SwipeInput::End {
+                id,
+                cancelled: false,
+                time: 21,
+            },
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
+        assert_eq!(backend.swipe_finishes, [(false, false)]);
     }
 
     #[test]
@@ -15647,6 +16218,7 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        next = min_optional_duration(next, self.features.pointer_scroll.next_wakeup(now));
         if !self.features.gif_exports.is_empty() {
             next = min_optional_duration(next, Some(std::time::Duration::from_millis(100)));
         }
@@ -15712,6 +16284,32 @@ impl EventHandler for Jwm {
         backend: &mut dyn Backend,
         event: BackendEvent,
     ) -> Result<(), BackendError> {
+        if matches!(
+            &event,
+            BackendEvent::OutputAdded(_)
+                | BackendEvent::OutputRemoved(_)
+                | BackendEvent::OutputChanged(_)
+                | BackendEvent::ScreenLayoutChanged
+                | BackendEvent::KeyPress { .. }
+                | BackendEvent::WmKeyboardShortcut { .. }
+                | BackendEvent::ButtonPress { .. }
+        ) && self.pointer_scroll_is_owned()
+        {
+            self.cancel_pointer_scroll(backend);
+        }
+        if matches!(
+            &event,
+            BackendEvent::OutputAdded(_)
+                | BackendEvent::OutputRemoved(_)
+                | BackendEvent::OutputChanged(_)
+                | BackendEvent::ScreenLayoutChanged
+                | BackendEvent::WindowDestroyed(_)
+                | BackendEvent::KeyPress { .. }
+                | BackendEvent::WmKeyboardShortcut { .. }
+                | BackendEvent::ButtonPress { .. }
+        ) {
+            self.cancel_touchpad_gesture(backend, false);
+        }
         // Lifecycle changes end our grab before another subsystem can take it.
         if matches!(
             &event,
@@ -15801,6 +16399,19 @@ impl EventHandler for Jwm {
             BackendEvent::MappingNotify => self.on_mapping_notify(backend),
 
             // === 输入事件 ===
+            BackendEvent::PointerScroll {
+                target,
+                state,
+                root_x,
+                root_y,
+                scroll,
+            } => {
+                self.last_mouse_root = (root_x, root_y);
+                if scroll.has_motion() {
+                    self.last_user_activity_time = scroll.time;
+                }
+                self.on_pointer_scroll(backend, target, state, root_x, root_y, scroll);
+            }
             BackendEvent::ButtonPress {
                 target,
                 state,
@@ -15974,6 +16585,7 @@ impl EventHandler for Jwm {
                     self.handle_gesture_swipe(backend, fingers, direction);
                 }
             }
+            BackendEvent::GestureSwipe(event) => self.handle_touchpad_input(backend, event),
         }
 
         backend.request_render();
@@ -15981,6 +16593,8 @@ impl EventHandler for Jwm {
     }
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
+        self.tick_touchpad_gesture(backend);
+        self.tick_pointer_scroll(backend);
         self.tick_wallpaper_drag(backend);
         let now = std::time::Instant::now();
         // Clear the counted completion level before inspecting any worker
@@ -16225,7 +16839,7 @@ impl Jwm {
     ) {
         // Check at dispatch as well as backend Begin: a lock can activate
         // while a completed gesture is still queued.
-        if self.features.system_ui.is_locked() {
+        if self.touchpad_modal_active() || backend.compositor_session_locked() {
             return;
         }
         let cfg = crate::config::CONFIG.load();

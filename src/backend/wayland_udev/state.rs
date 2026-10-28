@@ -469,9 +469,15 @@ pub struct JwmWaylandState {
     active_session_lock: Option<ExtSessionLockV1>,
     pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
 
+    pub(crate) scroll_routes: crate::backend::scroll::ScrollRoutes<WlSurface>,
+
     /// Touchpad swipe-gesture tracker. When `intercept` is true, the WM is
     /// "consuming" the in-progress swipe and forwarding nothing to clients.
     pub gesture_swipe: GestureSwipeTracker,
+    pub gesture_swipe_device: Option<String>,
+    pub gesture_swipe_id: u64,
+    pub gesture_pinch_device: Option<String>,
+    pub gesture_hold_device: Option<String>,
 
     /// XWayland shell state (for associating X11 windows with wl_surfaces).
     pub xwayland_shell_state: XWaylandShellState,
@@ -1516,6 +1522,8 @@ impl JwmWaylandState {
     /// Drop pre-lock input ownership before accepting any more input. A
     /// missing or crashed locker surface must leave the seat unfocused.
     fn revoke_unlocked_input(&mut self) {
+        let mode = crate::backend::scroll::ScrollMode::Locked(self.session_lock_epoch);
+        crate::backend::wayland_scroll::set_mode(self, mode);
         self.recent_popup_keys.entries.clear();
         if let Some(mut grab) = self.active_popup_grab.take() {
             grab.ungrab(PopupUngrabStrategy::All);
@@ -1526,6 +1534,10 @@ impl JwmWaylandState {
         self.popup_grab_prev_kbd_focus = None;
         self.pending_pointer_warp = None;
         self.gesture_swipe = Default::default();
+        self.gesture_swipe_device = None;
+        self.gesture_swipe_id = 0;
+        self.gesture_pinch_device = None;
+        self.gesture_hold_device = None;
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.unset_grab(self);
             keyboard.set_focus(self, None, serial);
@@ -1540,7 +1552,8 @@ impl JwmWaylandState {
             }
             pointer.unset_grab(self, serial, time);
             let location = self.pointer_location;
-            pointer.motion(
+            crate::backend::wayland_scroll::motion(
+                &pointer,
                 self,
                 None,
                 &smithay::input::pointer::MotionEvent {
@@ -1694,8 +1707,10 @@ impl JwmWaylandState {
                         | BackendEvent::KeyRelease { .. }
                         | BackendEvent::ButtonPress { .. }
                         | BackendEvent::ButtonRelease { .. }
+                        | BackendEvent::PointerScroll { .. }
                         | BackendEvent::MotionNotify { .. }
                         | BackendEvent::GestureSwipeAction { .. }
+                        | BackendEvent::GestureSwipe(_)
                         | BackendEvent::MoveResizeRequest { .. }
                 )
             });
@@ -3462,7 +3477,12 @@ impl JwmWaylandState {
                 pending_session_lock: None,
                 active_session_lock: None,
                 foreign_toplevel_handles: HashMap::new(),
+                scroll_routes: crate::backend::scroll::ScrollRoutes::default(),
                 gesture_swipe: GestureSwipeTracker::default(),
+                gesture_swipe_device: None,
+                gesture_swipe_id: 0,
+                gesture_pinch_device: None,
+                gesture_hold_device: None,
 
                 xwayland_shell_state,
                 x11_wm: None,
@@ -3709,7 +3729,8 @@ impl JwmWaylandState {
         }
         if let Some(pointer) = self.seat.get_pointer() {
             let location = self.pointer_location;
-            pointer.motion(
+            crate::backend::wayland_scroll::motion(
+                &pointer,
                 self,
                 None,
                 &smithay::input::pointer::MotionEvent {
@@ -7745,7 +7766,8 @@ mod protocol_hardening_tests {
         let surface = focused.surface(&server, surface_id);
         let pointer = server.state.seat.get_pointer().expect("seat pointer");
         let enter = smithay::utils::SERIAL_COUNTER.next_serial();
-        pointer.motion(
+        crate::backend::wayland_scroll::motion(
+            &pointer,
             &mut server.state,
             Some((surface, (0.0, 0.0).into())),
             &smithay::input::pointer::MotionEvent {
@@ -8205,6 +8227,110 @@ mod protocol_hardening_tests {
             smithay::utils::SERIAL_COUNTER.next_serial(),
             smithay::backend::input::InputTime::from_millis(100),
         )
+    }
+
+    #[test]
+    fn scroll_handoffs_send_axis_stop_and_frame_before_pointer_leave() {
+        use crate::backend::scroll::{PointerScroll, ScrollMode};
+        use smithay::backend::input::{Axis, AxisSource, InputTime};
+        use smithay::input::pointer::{AxisFrame, MotionEvent};
+        for handoff in ["focus", "capture", "lock"] {
+            let mut server = Server::new();
+            let (mut app, surface, _) = input_test_client(&mut server);
+            let seat = app.bind("wl_seat", 7);
+            let pointer_id = app.new_id();
+            app.request(seat, 0, &[pointer_id]);
+            server.roundtrip();
+            let pointer = server.state.seat.get_pointer().unwrap();
+            let motion = MotionEvent {
+                location: (8.0, 8.0).into(),
+                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                time: InputTime::from_millis(1),
+            };
+            crate::backend::wayland_scroll::motion(
+                &pointer,
+                &mut server.state,
+                Some((surface.clone(), (0.0, 0.0).into())),
+                &motion,
+            );
+            pointer.frame(&mut server.state);
+            let mut packet = PointerScroll {
+                device: "pad".into(),
+                delta: (0.5, 1.25),
+                time: 10,
+                ..Default::default()
+            };
+            assert!(
+                server
+                    .state
+                    .scroll_routes
+                    .route(&mut packet, Some(surface.clone()), false)
+            );
+            pointer.axis(
+                &mut server.state,
+                AxisFrame::new(InputTime::from_millis(10))
+                    .source(AxisSource::Finger)
+                    .value(Axis::Horizontal, 0.5)
+                    .value(Axis::Vertical, 1.25),
+            );
+            pointer.frame(&mut server.state);
+            server.roundtrip();
+            app.events();
+
+            match handoff {
+                "focus" => crate::backend::wayland_scroll::motion(
+                    &pointer,
+                    &mut server.state,
+                    None,
+                    &motion,
+                ),
+                "capture" => {
+                    crate::backend::wayland_scroll::set_mode(&mut server.state, ScrollMode::Capture)
+                }
+                _ => {
+                    server.state.session_locked = true;
+                    server.state.session_lock_epoch += 1;
+                    server.state.revoke_unlocked_input();
+                }
+            }
+            server.roundtrip();
+            let events = app
+                .events()
+                .into_iter()
+                .filter(|e| e.0 == pointer_id)
+                .collect::<Vec<_>>();
+            let stops = events
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.1 == 7)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                stops.len(),
+                2,
+                "{handoff}: one stop per active axis: {events:?}"
+            );
+            assert!(
+                events.iter().any(|e| e.1 == 5),
+                "{handoff}: stops are framed"
+            );
+            assert!(
+                !events.iter().any(|e| e.1 == 4),
+                "{handoff}: no fabricated movement"
+            );
+            if let Some(leave) = events.iter().position(|e| e.1 == 1) {
+                assert!(
+                    stops.iter().all(|(at, _)| *at < leave),
+                    "{handoff}: stop before leave"
+                );
+            }
+            let mut tail = PointerScroll {
+                device: "pad".into(),
+                delta: (0.0, 4.0),
+                time: 20,
+                ..Default::default()
+            };
+            assert!(!server.state.scroll_routes.route(&mut tail, None, false));
+        }
     }
 
     #[test]

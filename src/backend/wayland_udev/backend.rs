@@ -53,11 +53,11 @@ use smithay::wayland::viewporter::ViewportCachedState;
 
 use smithay::backend::drm::{DrmNode, NodeType};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, Event as InputEventExt,
-    GestureBeginEvent as GestureBeginEventTrait, GestureEndEvent as GestureEndEventTrait,
+    AbsolutePositionEvent, Event as InputEventExt, GestureBeginEvent as GestureBeginEventTrait,
+    GestureEndEvent as GestureEndEventTrait,
     GesturePinchUpdateEvent as GesturePinchUpdateEventTrait,
     GestureSwipeUpdateEvent as GestureSwipeUpdateEventTrait, InputEvent, KeyboardKeyEvent,
-    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchEvent as TouchEventTrait,
+    PointerButtonEvent, PointerMotionEvent, TouchEvent as TouchEventTrait,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::session::Event as SessionEvent;
@@ -103,6 +103,68 @@ fn gesture_swipe_should_intercept(
     bindings.iter().any(|binding| {
         binding.fingers == fingers && crate::config::gesture_swipe_binding_is_valid(binding)
     })
+}
+
+/// Revoke one sequence once, then swallow its remaining device events. A
+/// modal takeover must not turn a compositor-owned Update into a client event.
+fn cancel_native_swipe(state: &mut JwmWaylandState) {
+    use crate::backend::gesture_swipe::SwipeInput;
+    if state.gesture_swipe_id != 0 {
+        state
+            .pending_events
+            .lock_safe()
+            .push_back(BackendEvent::GestureSwipe(SwipeInput::End {
+                id: state.gesture_swipe_id,
+                cancelled: true,
+                time: 0,
+            }));
+        state.gesture_swipe_id = 0;
+    } else if state.gesture_swipe_device.is_some() && !state.gesture_swipe.intercept {
+        if let Some(pointer) = state.seat.get_pointer() {
+            pointer.gesture_swipe_end(
+                state,
+                &smithay::input::pointer::GestureSwipeEndEvent {
+                    serial: SCOUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::from_millis(0),
+                    cancelled: true,
+                },
+            );
+        }
+    }
+    state.gesture_swipe.intercept = true;
+    if let Some(pointer) = state.seat.get_pointer() {
+        if state.gesture_pinch_device.take().is_some() {
+            pointer.gesture_pinch_end(
+                state,
+                &smithay::input::pointer::GesturePinchEndEvent {
+                    serial: SCOUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::from_millis(0),
+                    cancelled: true,
+                },
+            );
+        }
+        if state.gesture_hold_device.take().is_some() {
+            pointer.gesture_hold_end(
+                state,
+                &smithay::input::pointer::GestureHoldEndEvent {
+                    serial: SCOUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::from_millis(0),
+                    cancelled: true,
+                },
+            );
+        }
+    }
+    state.request_client_flush();
+}
+
+fn native_gesture_has_other_device(state: &JwmWaylandState, device: &str) -> bool {
+    [
+        &state.gesture_swipe_device,
+        &state.gesture_pinch_device,
+        &state.gesture_hold_device,
+    ]
+    .into_iter()
+    .any(|owner| owner.as_deref().is_some_and(|owner| owner != device))
 }
 
 /// Build the per-surface color plan for the frame's actual render target.
@@ -563,7 +625,8 @@ fn reconcile_button_routes(state: &mut JwmWaylandState, shared: &Arc<Mutex<Share
         if discard_focus {
             let location = state.pointer_location;
             pointer.unset_grab(state, serial, time);
-            pointer.motion(
+            crate::backend::wayland_scroll::motion(
+                &pointer,
                 state,
                 None,
                 &MotionEvent {
@@ -589,7 +652,27 @@ fn reconcile_button_routes(state: &mut JwmWaylandState, shared: &Arc<Mutex<Share
     }
 }
 
+fn scroll_mode(
+    state: &JwmWaylandState,
+    shared: &SharedState,
+) -> crate::backend::scroll::ScrollMode {
+    use crate::backend::scroll::ScrollMode;
+    if !shared.session_active {
+        ScrollMode::Suspended
+    } else if state.session_locked {
+        ScrollMode::Locked(state.session_lock_epoch)
+    } else if shared.screenshot_grab_active {
+        ScrollMode::Capture
+    } else if shared.system_ui_grab_active {
+        ScrollMode::SystemUi
+    } else {
+        ScrollMode::Client
+    }
+}
+
 fn reconcile_touch_routes(state: &mut JwmWaylandState, shared: &Arc<Mutex<SharedState>>) {
+    let mode = scroll_mode(state, &shared.lock_safe());
+    crate::backend::wayland_scroll::set_mode(state, mode);
     reconcile_button_routes(state, shared);
     let cancel = {
         let mut shared = shared.lock_safe();
@@ -654,12 +737,6 @@ struct SharedState {
     system_ui_grab_active: bool,
     touch_routes: TouchRoutes,
     button_routes: ButtonRoutes,
-    /// Fractional vertical wheel rotation, in clicks, not yet reported to
-    /// the WM. While one of the grabs above owns the pointer, rotation is
-    /// converted into synthetic button 4/5 presses one whole click at a
-    /// time; this carries the sub-click remainder across events so smooth
-    /// touchpad scrolling still adds up.
-    wheel_remainder: f64,
     /// The toast cards the compositor drew on the last composited frame, in
     /// the same coordinates as the pointer. A press that lands on one belongs
     /// to the card, not to the client it is drawn over.
@@ -696,7 +773,6 @@ impl Default for SharedState {
             system_ui_grab_active: false,
             touch_routes: TouchRoutes::default(),
             button_routes: ButtonRoutes::default(),
-            wheel_remainder: 0.0,
             toast_rects: Vec::new(),
         }
     }
@@ -937,12 +1013,6 @@ impl InputOps for UdevInputOps {
             // cursor renderer immediately after our raw GLES frame, and some
             // drivers are sensitive to inherited VAO/VBO state during that path.
             let mut shared = self.shared.lock_safe();
-            if !shared.screenshot_grab_active {
-                // A grab that is just opening starts with a fresh wheel: a
-                // half-turn of touchpad scroll from before it must not leak
-                // in as clicks.
-                shared.wheel_remainder = 0.0;
-            }
             shared.screenshot_grab_active = true;
             shared.touch_routes.set_modal(true);
             if !shared.button_routes.owner_epoch.0 {
@@ -1673,6 +1743,7 @@ pub struct UdevBackend {
 
     shared: Arc<Mutex<SharedState>>,
     session: LibSeatSession,
+    input_devices: Rc<RefCell<super::input_config::InputDevices>>,
 
     kms: Option<Rc<RefCell<KmsState>>>,
 
@@ -2777,6 +2848,9 @@ impl UdevBackend {
                 "assign libinput seat",
             )?;
         let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
+        let input_devices = Rc::new(RefCell::new(super::input_config::InputDevices::new(
+            session_active_at_start,
+        )));
         if !session_active_at_start {
             log::debug!(
                 "[udev] session inactive at startup; keeping libinput running and retrying KMS"
@@ -2927,15 +3001,33 @@ impl UdevBackend {
             // from the clients: their release must be kept back with them, or
             // a client would hold a press that never ends.
             let mut toast_swallowed_buttons: HashSet<u32> = HashSet::new();
+            let input_devices_for_events = input_devices.clone();
             event_loop
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
                     reconcile_touch_routes(state, &shared);
+                    let gesture_modal = {
+                        let s = shared.lock_safe();
+                        !s.session_active || (!state.session_locked && (s.screenshot_grab_active || s.system_ui_grab_active))
+                    };
+                    if gesture_modal { cancel_native_swipe(state); }
                     // Notify idle tracker on any input activity
                     state.idle_notifier_state.notify_activity(&state.seat);
                     state.last_input = std::time::Instant::now();
 
                     match event {
+                        InputEvent::DeviceAdded { device } => {
+                            input_devices_for_events.borrow_mut().added(device, crate::config::CONFIG.load().input());
+                        }
+                        InputEvent::DeviceRemoved { device } => {
+                            input_devices_for_events.borrow_mut().removed(&device);
+                            crate::backend::wayland_scroll::remove_device(state, device.sysname());
+                            if [&state.gesture_swipe_device, &state.gesture_pinch_device, &state.gesture_hold_device]
+                                .into_iter().any(|owner| owner.as_deref() == Some(device.sysname())) {
+                                cancel_native_swipe(state);
+                                state.gesture_swipe_device = None;
+                            }
+                        }
                         InputEvent::PointerMotion { event, .. } => {
                             let delta = event.delta();
                             let time = event.time();
@@ -3004,7 +3096,7 @@ impl UdevBackend {
                                         time,
                                     },
                                 );
-                                pointer.motion(
+                                crate::backend::wayland_scroll::motion(&pointer,
                                     state,
                                     if in_screenshot { None } else { focus },
                                     &MotionEvent {
@@ -3085,7 +3177,7 @@ impl UdevBackend {
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
                             if let Some(pointer) = state.seat.get_pointer() {
-                                pointer.motion(
+                                crate::backend::wayland_scroll::motion(&pointer,
                                     state,
                                     if in_screenshot { None } else { focus },
                                     &MotionEvent {
@@ -3191,7 +3283,7 @@ impl UdevBackend {
                             if deliver_button {
                                 if let Some(pointer) = state.seat.get_pointer() {
                                     // Ensure focus is up-to-date before sending the button.
-                                    pointer.motion(
+                                    crate::backend::wayland_scroll::motion(&pointer,
                                         state,
                                         focus,
                                         &MotionEvent {
@@ -3722,76 +3814,16 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::PointerAxis { event, .. } => {
-                            let time = InputEventExt::time(&event);
-                            // While a system-UI or screenshot grab owns the
-                            // pointer the way an X11 grab would, the wheel
-                            // belongs to the window manager, not to the
-                            // client the panel is drawn over. X11 delivers
-                            // rotation through the grab as button 4/5
-                            // press/release pairs and every WM wheel behavior
-                            // — switcher browsing, panel scrolling, the
-                            // screenshot stroke-width adjustment — hangs off
-                            // that press path (event_dispatcher.rs:461), so
-                            // the vertical axis becomes one synthetic pair
-                            // per whole click. The release half is not
-                            // optional: the screenshot wheel path arms a
-                            // one-shot release swallow
-                            // (capture.rs `swallow_next_button_release`) that
-                            // only the paired release clears — a press alone
-                            // would leave the latch armed to eat the next
-                            // unrelated release, like the one ending a region
-                            // drag. The horizontal axis stays inert, exactly
-                            // as X11 buttons 6/7 are no-ops in every one of
-                            // those branches.
-                            let (grab_active, clicks, x, y, output, mods_state) = {
-                                let mut s = shared.lock_safe();
-                                let grab_active =
-                                    (s.screenshot_grab_active || s.system_ui_grab_active) && !state.session_locked;
-                                let mut clicks = 0;
-                                if grab_active {
-                                    let (steps, remainder) = wheel_steps(
-                                        s.wheel_remainder,
-                                        event.amount_v120(Axis::Vertical),
-                                        event.amount(Axis::Vertical),
-                                    );
-                                    s.wheel_remainder = remainder;
-                                    clicks = steps;
-                                }
+                            let (mode, x, y, output, mods) = {
+                                let s = shared.lock_safe();
+                                let mode = scroll_mode(state, &s);
                                 let (x, y) = (s.pointer_x, s.pointer_y);
-                                (
-                                    grab_active,
-                                    clicks,
-                                    x,
-                                    y,
-                                    output_at(s.enabled_outputs(), x, y),
-                                    s.mods_state,
-                                )
+                                (mode, x, y, output_at(s.enabled_outputs(), x, y), s.mods_state)
                             };
-                            if grab_active {
-                                let detail = wheel_click_detail(clicks);
-                                for _ in 0..clicks.unsigned_abs() {
-                                    let mut pending = pending_events.lock_safe();
-                                    pending.push_back(BackendEvent::ButtonPress {
-                                        target: HitTarget::Background { output },
-                                        state: mods_state,
-                                        detail,
-                                        time: time.millis(),
-                                        root_x: x,
-                                        root_y: y,
-                                    });
-                                    pending.push_back(BackendEvent::ButtonRelease {
-                                        target: HitTarget::Background { output },
-                                        detail,
-                                        time: time.millis(),
-                                        root_x: x,
-                                        root_y: y,
-                                    });
-                                }
-                            } else if let Some(pointer) = state.seat.get_pointer() {
-                                let frame = crate::backend::wayland_axis::pointer_axis_frame(&event, true);
-                                pointer.axis(state, frame);
-                                pointer.frame(state);
-                            }
+                            crate::backend::wayland_scroll::axis(
+                                state, &event, mode, true, &pending_events,
+                                HitTarget::Background { output }, mods, x, y,
+                            );
                         }
                         InputEvent::TouchDown { event, .. } => {
                             let time = event.time();
@@ -3871,15 +3903,26 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureSwipeBegin { event, .. } => {
+                            use crate::backend::gesture_swipe::{SwipeInput, next_swipe_id};
+                            let device = event.device().sysname().to_owned();
+                            if native_gesture_has_other_device(state, &device) { return; }
+                            cancel_native_swipe(state);
+                            state.gesture_swipe_device = Some(device);
                             let fingers = event.fingers();
                             let cfg = crate::config::CONFIG.load();
-                            let intercept = !state.session_locked && gesture_swipe_should_intercept(
+                            let intercept = !gesture_modal && !state.session_locked && gesture_swipe_should_intercept(
                                 fingers,
                                 &cfg.behavior().gesture_swipe,
                             );
-                            state.gesture_swipe.begin(fingers, intercept);
+                            state.gesture_swipe.begin(fingers, intercept || gesture_modal);
                             state.gesture_swipe.config_signature = cfg.gesture_swipe_signature();
-                            if !intercept && let Some(pointer) = state.seat.get_pointer() {
+                            if intercept {
+                                let id = next_swipe_id();
+                                state.gesture_swipe_id = id;
+                                pending_events.lock_safe().push_back(BackendEvent::GestureSwipe(SwipeInput::Begin {
+                                    id, fingers, config_signature: cfg.gesture_swipe_signature(),
+                                }));
+                            } else if !gesture_modal && let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_begin(
                                     state,
                                     &smithay::input::pointer::GestureSwipeBeginEvent {
@@ -3891,9 +3934,14 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureSwipeUpdate { event, .. } => {
+                            if state.gesture_swipe_device.as_deref() != Some(event.device().sysname()) { return; }
                             if state.gesture_swipe.intercept {
-                                let d = event.delta();
-                                state.gesture_swipe.update(d.x, d.y);
+                                if state.gesture_swipe_id != 0 {
+                                    let d = event.delta();
+                                    pending_events.lock_safe().push_back(BackendEvent::GestureSwipe(crate::backend::gesture_swipe::SwipeInput::Update {
+                                        id: state.gesture_swipe_id, dx: d.x, dy: d.y, time: event.time().millis(),
+                                    }));
+                                }
                             } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_update(
                                     state,
@@ -3905,18 +3953,14 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureSwipeEnd { event, .. } => {
+                            if state.gesture_swipe_device.as_deref() != Some(event.device().sysname()) { return; }
                             if state.gesture_swipe.intercept {
-                                let cfg = crate::config::CONFIG.load();
-                                let threshold = cfg.behavior().gesture_swipe_threshold;
-                                let config_signature = state.gesture_swipe.config_signature.clone();
-                                let policy_changed = config_signature != cfg.gesture_swipe_signature();
-                                if let Some((fingers, direction)) = state.gesture_swipe.finish(
-                                    event.cancelled() || state.session_locked || policy_changed,
-                                    threshold,
-                                ) {
-                                    pending_events.lock_safe().push_back(
-                                        BackendEvent::GestureSwipeAction { fingers, direction, config_signature },
-                                    );
+                                if state.gesture_swipe_id != 0 {
+                                    pending_events.lock_safe().push_back(BackendEvent::GestureSwipe(crate::backend::gesture_swipe::SwipeInput::End {
+                                        id: state.gesture_swipe_id,
+                                        cancelled: event.cancelled() || state.session_locked || gesture_modal,
+                                        time: event.time().millis(),
+                                    }));
                                 }
                             } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_end(
@@ -3928,8 +3972,17 @@ impl UdevBackend {
                                     },
                                 );
                             }
+                            state.gesture_swipe_device = None;
+                            state.gesture_swipe_id = 0;
+                            state.gesture_swipe = Default::default();
                         }
                         InputEvent::GesturePinchBegin { event, .. } => {
+                            if gesture_modal { return; }
+                            let device = event.device().sysname().to_owned();
+                            if native_gesture_has_other_device(state, &device) { return; }
+                            cancel_native_swipe(state);
+                            state.gesture_swipe_device = None;
+                            state.gesture_pinch_device = Some(device);
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_pinch_begin(
                                     state,
@@ -3942,6 +3995,7 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GesturePinchUpdate { event, .. } => {
+                            if state.gesture_pinch_device.as_deref() != Some(event.device().sysname()) { return; }
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_pinch_update(
                                     state,
@@ -3955,6 +4009,8 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GesturePinchEnd { event, .. } => {
+                            if state.gesture_pinch_device.as_deref() != Some(event.device().sysname()) { return; }
+                            state.gesture_pinch_device = None;
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_pinch_end(
                                     state,
@@ -3967,6 +4023,17 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureHoldBegin { event, .. } => {
+                            if gesture_modal {
+                                if state.scroll_routes.belongs_to_wm() {
+                                    crate::backend::wayland_scroll::cancel_wm_device(state, event.device().sysname(), event.time().millis());
+                                }
+                                return;
+                            }
+                            let device = event.device().sysname().to_owned();
+                            if native_gesture_has_other_device(state, &device) { return; }
+                            cancel_native_swipe(state);
+                            state.gesture_swipe_device = None;
+                            state.gesture_hold_device = Some(device);
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_hold_begin(
                                     state,
@@ -3979,6 +4046,8 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureHoldEnd { event, .. } => {
+                            if state.gesture_hold_device.as_deref() != Some(event.device().sysname()) { return; }
+                            state.gesture_hold_device = None;
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_hold_end(
                                     state,
@@ -4007,12 +4076,20 @@ impl UdevBackend {
             let pending_events = pending_events.clone();
             let seat_name = seat_name.clone();
             let mut notifier_libinput_context = libinput_context.clone();
+            let input_devices_for_session = input_devices.clone();
             event_loop
                 .handle()
                 .insert_source(notifier, move |event, &mut (), state| match event {
                     SessionEvent::PauseSession => {
+                        cancel_native_swipe(state);
+                        state.gesture_swipe_device = None;
+                        input_devices_for_session.borrow_mut().set_active(false);
                         cancel_key_repeat_timer(&state.loop_handle, &shared);
                         shared.lock_safe().session_active = false;
+                        crate::backend::wayland_scroll::set_mode(
+                            state,
+                            crate::backend::scroll::ScrollMode::Suspended,
+                        );
                         reconcile_button_routes(state, &shared);
                         pending_events
                             .lock_safe()
@@ -4026,6 +4103,10 @@ impl UdevBackend {
                         shared.lock_safe().session_active = true;
                         if let Err(e) = notifier_libinput_context.resume() {
                             log::warn!("[udev] libinput resume after VT-switch failed: {e:?}");
+                        } else {
+                            let mut devices = input_devices_for_session.borrow_mut();
+                            devices.set_active(true);
+                            devices.apply_config(crate::config::CONFIG.load().input());
                         }
                         refresh_preferred_device_id(&shared, &seat_name);
                         pending_events
@@ -4164,6 +4245,7 @@ impl UdevBackend {
 
             shared,
             session,
+            input_devices,
 
             kms,
             window_ops: Box::new(WaylandWindowOps {
@@ -4747,6 +4829,11 @@ impl CompositorControl for UdevBackend {
     }
 
     fn compositor_apply_config(&mut self) {
+        crate::backend::wayland_scroll::cancel(&mut self.state);
+        cancel_native_swipe(&mut self.state);
+        self.input_devices
+            .borrow_mut()
+            .apply_config(crate::config::CONFIG.load().input());
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.apply_config();
         }
@@ -5062,6 +5149,17 @@ impl CompositorMedia for UdevBackend {
 }
 
 impl CompositorWorkspaceEffects for UdevBackend {
+    fn compositor_scroll_epoch(&self) -> u64 {
+        self.state.scroll_routes.epoch()
+    }
+
+    fn compositor_cancel_scroll(&mut self) {
+        crate::backend::wayland_scroll::cancel(&mut self.state);
+        // Common modal/capture handoffs revoke client gesture ownership too,
+        // before waiting for the next physical libinput event.
+        cancel_native_swipe(&mut self.state);
+    }
+
     fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
         self.compositor_desired.set_system_ui(overlay.clone());
         let locked = overlay.as_ref().is_some_and(|overlay| overlay.locked);
@@ -5073,12 +5171,6 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         {
             let mut shared = self.shared.lock_safe();
-            // Same fresh-wheel rule as the screenshot grab, but only on the
-            // rising edge: re-arming the same overlay mid-scroll must not
-            // eat the half-click the user has already accumulated.
-            if overlay.is_some() && !shared.system_ui_grab_active {
-                shared.wheel_remainder = 0.0;
-            }
             shared.system_ui_grab_active = overlay.is_some();
             let modal = shared.system_ui_grab_active
                 || shared.screenshot_grab_active
@@ -5132,6 +5224,12 @@ impl CompositorWorkspaceEffects for UdevBackend {
             .and_then(|compositor| compositor.system_ui_scroll_t(y))
     }
 
+    fn compositor_system_ui_row_height(&self) -> Option<f64> {
+        self.compositor
+            .as_ref()
+            .and_then(|compositor| compositor.system_ui_row_height())
+    }
+
     fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.push_toast(toast);
@@ -5176,6 +5274,29 @@ impl CompositorWorkspaceEffects for UdevBackend {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_magnifier(enabled);
         }
+    }
+
+    fn compositor_begin_workspace_swipe(&mut self, rect: (i32, i32, u32, u32)) -> bool {
+        self.compositor
+            .as_mut()
+            .is_some_and(|c| c.begin_workspace_swipe(rect))
+    }
+    fn compositor_update_workspace_swipe(&mut self, progress: f32, direction: i32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.update_workspace_swipe(progress, direction);
+        }
+        self.request_render();
+    }
+    fn compositor_end_workspace_swipe(&mut self, commit: bool, animate: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.end_workspace_swipe(commit, animate);
+        }
+        self.request_render();
+    }
+    fn compositor_workspace_swipe_active(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|c| c.workspace_swipe_active())
     }
 
     fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {

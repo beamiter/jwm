@@ -31,9 +31,9 @@ use xbar_core::{
 use xbar_linux_actions::ProcessActionHandler;
 
 use gpui::{
-    App, Bounds, Context, IntoElement, ParentElement, Pixels, Render, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowKind, WindowOptions, div, point, prelude::*, px, size,
+    App, Bounds, Context, IntoElement, ParentElement, Pixels, Render, Rgba, ScrollWheelEvent,
+    SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
+    WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 struct GpuiBar {
     runtime: BarRuntime,
+    scroll: xbar_core::ControlScroll,
     presentation: xbar_core::presentation::PresentationConfig,
     tag_contrast: TagContrastMode,
     process_actions: ProcessActionHandler,
@@ -98,6 +99,15 @@ struct GpuiBar {
     background: Rgba,
     background_opacity: Option<f64>,
     translucent: bool,
+}
+
+impl gpui_sidebar::ScrollOwner for GpuiBar {
+    fn control_scroll(&mut self) -> &mut xbar_core::ControlScroll {
+        &mut self.scroll
+    }
+    fn scroll_edge(&self) -> xbar_core::BarEdge {
+        self.presentation.edge
+    }
 }
 
 impl GpuiBar {
@@ -130,6 +140,7 @@ impl GpuiBar {
         dock.set_edge(bar_config.presentation.edge);
         let mut this = Self {
             runtime,
+            scroll: xbar_core::ControlScroll::with_policy(bar_config.presentation.scroll),
             tag_contrast: bar_config.presentation.tag_contrast,
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
@@ -475,6 +486,13 @@ impl GpuiBar {
 
         div()
             .id("brightness")
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                gpui_sidebar::hover_control(
+                    this,
+                    xbar_core::presentation::NodeId::Brightness,
+                    *hovered,
+                )
+            }))
             .h(px(22.))
             .px(px(7.))
             .py(px(2.))
@@ -489,12 +507,31 @@ impl GpuiBar {
             .text_size(px(11.))
             .child(label)
             .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.scroll.reset();
                 this.dispatch(UserAction::BrightnessUp);
                 cx.notify();
             }))
             .on_aux_click(cx.listener(|this, event: &gpui::ClickEvent, _w, cx| {
                 if event.is_right_click() {
+                    this.scroll.reset();
                     this.dispatch(UserAction::BrightnessDown);
+                    cx.notify();
+                }
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                cx.stop_propagation();
+                if let Some(input) = gpui_sidebar::scroll_action(
+                    this,
+                    xbar_core::presentation::NodeId::Brightness,
+                    event,
+                ) {
+                    this.dispatch(
+                        if input == xbar_core::presentation::PointerAction::ScrollUp {
+                            UserAction::BrightnessUp
+                        } else {
+                            UserAction::BrightnessDown
+                        },
+                    );
                     cx.notify();
                 }
             }))
@@ -528,6 +565,9 @@ impl GpuiBar {
 
         div()
             .id("volume")
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                gpui_sidebar::hover_control(this, xbar_core::presentation::NodeId::Audio, *hovered)
+            }))
             .h(px(22.))
             .px(px(7.))
             .py(px(2.))
@@ -542,27 +582,24 @@ impl GpuiBar {
             .text_size(px(11.))
             .child(label)
             .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.scroll.reset();
                 this.dispatch(UserAction::ToggleMute);
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _w, cx| {
-                let delta_y = match event.delta {
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
-                    ScrollDelta::Lines(delta) => delta.y,
-                };
-
-                if delta_y == 0.0 {
-                    return;
+                cx.stop_propagation();
+                if let Some(input) =
+                    gpui_sidebar::scroll_action(this, xbar_core::presentation::NodeId::Audio, event)
+                {
+                    this.dispatch(
+                        if input == xbar_core::presentation::PointerAction::ScrollUp {
+                            UserAction::VolumeUp
+                        } else {
+                            UserAction::VolumeDown
+                        },
+                    );
+                    cx.notify();
                 }
-
-                let action = if delta_y > 0.0 {
-                    UserAction::VolumeUp
-                } else {
-                    UserAction::VolumeDown
-                };
-                this.dispatch(action);
-
-                cx.notify();
             }))
     }
 
@@ -769,6 +806,7 @@ impl Render for GpuiBar {
             .last_scale_factor
             .is_none_or(|previous| previous.to_bits() != scale_factor.to_bits());
         if self.geometry_dirty || scale_changed {
+            self.scroll.reset();
             let default_size = self.default_size.expect("default size is initialized");
             let target_size = self.active_geometry.map_or(default_size, |geometry| {
                 xbar_core::BarPlacement::from_bar_geometry(

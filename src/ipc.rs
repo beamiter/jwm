@@ -267,6 +267,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "restart",
         "restore",
         "restore_preview",
+        "toggle_expose",
         "restore_session",
         "save",
         "save_session",
@@ -447,6 +448,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_idl",
         "get_idle",
         "get_idle_status",
+        "get_input_status",
+        "get_inputs",
         "get_layout",
         "get_lock",
         "get_lt",
@@ -1524,6 +1527,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         }
         "app_launcher" | "launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
         "restore_preview" => Ok((Jwm::restore_preview as WMFuncType, WMArgEnum::Int(0))),
+        "toggle_expose" => Ok((Jwm::toggle_expose as WMFuncType, WMArgEnum::Int(0))),
         "toggle_shortcut_passthrough" => Ok((
             Jwm::toggle_shortcut_passthrough as WMFuncType,
             WMArgEnum::Int(0),
