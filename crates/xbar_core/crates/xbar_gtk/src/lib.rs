@@ -300,6 +300,17 @@ impl BarSurface {
         } else {
             self.root.remove_css_class("frosted");
         }
+        self.root.remove_css_class("backdrop-dark");
+        self.root.remove_css_class("backdrop-light");
+        self.root.add_css_class(
+            match xbar_core::background::wallpaper_theme(
+                snapshot.theme,
+                snapshot.wallpaper_luminance,
+            ) {
+                ThemeMode::Dark => "backdrop-dark",
+                ThemeMode::Light => "backdrop-light",
+            },
+        );
         let palette = TagPalette::for_wallpaper(
             snapshot.theme,
             snapshot.wallpaper_luminance,

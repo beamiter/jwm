@@ -358,36 +358,32 @@ fn mode_style(
     translucent: bool,
     blur_status_bar: Option<bool>,
     wallpaper_luminance: Option<u8>,
-    tag_theme: xbar_core::ThemeMode,
+    theme: xbar_core::ThemeMode,
 ) -> String {
-    let [r, g, b] = fallback_rgb(config.theme);
-    let palette = Palette::for_theme(config.theme);
+    let [r, g, b] = fallback_rgb(theme);
     let alpha = xbar_core::background::bar_background_opacity(
         blur_status_bar,
         config.background_opacity,
         translucent,
     );
+    let palette = Palette::for_background(theme, wallpaper_luminance, alpha);
     let background = format!("rgba({r}, {g}, {b}, {alpha})");
     let text = css_rgba(palette.text);
     let muted = css_rgba(palette.muted_text);
     let idle = css_rgba(palette.occupied);
     let hovered = css_rgba(palette.hovered);
-    let outline = match config.theme {
-        xbar_core::ThemeMode::Dark => "rgba(0,0,0,0.9)",
-        xbar_core::ThemeMode::Light => "rgba(255,255,255,0.95)",
-    };
 
     let mut css = format!(
         ".button-row {{ background: {background}; }}
 body {{ color: {text}; }}
-.emoji-button.state-default {{ background: {idle}; border-color: {hovered}; color: {muted}; text-shadow: -1px 0 {outline}, 1px 0 {outline}, 0 -1px {outline}, 0 1px {outline}; }}
+.emoji-button.state-default {{ background: {idle}; border-color: {hovered}; color: {muted}; text-shadow: none; }}
 .emoji-button.state-default:hover:not(:disabled):not(.pressed):not(:active) {{ background: {hovered}; border-color: {hovered}; }}
 .emoji-button.state-default.pressed, .emoji-button.state-default:active {{ background: {hovered} !important; border-color: {hovered} !important; }}
 .button-row .emoji-button.state-occupied {{ color: {text} !important; }}
 .button-row .emoji-button.state-occupied::after {{ color: {muted}; }}"
     );
     let tags = xbar_core::tag_contrast::TagPalette::for_wallpaper(
-        tag_theme,
+        theme,
         wallpaper_luminance,
         config.presentation.tag_contrast,
     );

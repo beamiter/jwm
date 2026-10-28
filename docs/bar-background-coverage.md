@@ -22,10 +22,26 @@ An explicit per-bar `background_opacity` still controls its tint.
 | tauri_leptos_bar, tauri_react_bar, tauri_solid_bar, tauri_svelte_bar, tauri_vue_bar, tauri_yew_bar | Shared Tauri bridge requests a transparent window, but does not claim verified native alpha. Sharp/frosted configured wallpaper fallback; no wallpaper means solid |
 
 Wallpaper sampling cannot reveal live windows or an animated compositor layer.
-Cairo, GTK, egui and Dioxus add contrasting text outlines for clear backgrounds;
-other presenters retain their existing opaque controls/text treatment. Contrast
-on arbitrary wallpaper still needs visual testing. Per-pixel clear mode does
-not strip intentional selection/pill fills.
+Cairo, GTK/Relm and egui use single-pass glyph rendering without contrasting
+outlines. When the resolved background alpha is below 0.1, ordinary text uses
+solid black or white ink from the WM's smoothed wallpaper luminance, and muted
+titles use 86% ink coverage. Dioxus uses the same foreground policy for its
+unfilled elements. Missing samples follow the application theme; frosted and
+opaque backgrounds retain theme ink. Explicit tag, selection, alert and Dock
+card foregrounds stay paired with their own fills. Other presenters retain
+their existing opaque controls/text treatment. An average wallpaper sample
+cannot guarantee contrast against every local detail; arbitrary wallpaper
+still needs visual testing. Per-pixel clear mode does not strip intentional
+selection/pill fills.
+
+The Cairo regression checks single-color antialiased ink at 1x, 1.25x, 1.5x
+and 2x, wallpaper-driven color changes, stable targets and retained damage.
+Reproduce light/dark wallpaper previews for all four edges and both themes:
+
+```sh
+cargo run -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-bar-light clear-light
+cargo run -p xbar_core --features render-cairo --example render_four_edges -- /tmp/jwm-bar-dark clear-dark
+```
 
 ## Validation boundary
 

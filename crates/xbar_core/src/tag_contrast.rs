@@ -45,11 +45,7 @@ impl TagPalette {
             TagContrastMode::Dark => ThemeMode::Dark,
             TagContrastMode::Light => ThemeMode::Light,
             TagContrastMode::Theme => theme,
-            TagContrastMode::Auto => match luminance {
-                Some(value) if value >= 46 => ThemeMode::Light,
-                Some(_) => ThemeMode::Dark,
-                None => theme,
-            },
+            TagContrastMode::Auto => crate::background::wallpaper_theme(theme, luminance),
         };
         let (empty, occupied, hovered, foreground) = match material {
             ThemeMode::Dark => (16, 64, 72, Rgba::rgb8(255, 255, 255)),

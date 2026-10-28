@@ -6,13 +6,15 @@
 //! and hidden urgent workspaces on a short output. `pressed` holds the active
 //! workspace; `pressed-dock` holds the hovered Browser card. Standard snapshots
 //! remain unchanged; use separate output directories to compare the scenarios.
+//! `clear-light` and `clear-dark` exercise transparent text over a wallpaper
+//! gradient, including a theme that disagrees with the wallpaper.
 //!
 //! PNGs use portable text labels so geometry can be inspected even on CI hosts
 //! without Nerd Fonts. JSON contains the identical scene and pointer targets.
 
 #[cfg(feature = "render-cairo")]
 mod preview {
-    use cairo::{Context, Format, ImageSurface};
+    use cairo::{Context, Format, ImageSurface, LinearGradient};
     use pango::FontDescription;
     use std::path::Path;
     use xbar_core::presentation::{
@@ -79,6 +81,11 @@ mod preview {
 
         match scenario {
             "standard" | "pressed" | "pressed-dock" => {}
+            "clear-light" | "clear-dark" => {
+                snapshot.wallpaper_luminance =
+                    Some(if scenario == "clear-light" { 100 } else { 8 });
+                snapshot.minimized_windows.clear();
+            }
             "named" => {
                 snapshot.tags = (0..4)
                     .map(|index| TagState {
@@ -106,7 +113,7 @@ mod preview {
             }
             _ => {
                 return Err(format!(
-                    "Unknown scenario {scenario:?}: use standard, named, crowded, pressed or pressed-dock"
+                    "Unknown scenario {scenario:?}: use standard, named, crowded, pressed, pressed-dock, clear-light or clear-dark"
                 )
                 .into());
             }
@@ -134,7 +141,30 @@ mod preview {
                         ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
                     let context = Context::new(&surface)?;
                     context.scale(f64::from(scale), f64::from(scale));
-                    let renderer = CairoRenderer::new(FontDescription::from_string("DejaVu Sans"));
+                    let clear = scenario.starts_with("clear-");
+                    let mut renderer =
+                        CairoRenderer::new(FontDescription::from_string("DejaVu Sans"));
+                    let backdrop = if clear {
+                        renderer.set_background_opacity(Some(0.0));
+                        let backdrop =
+                            ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
+                        let wallpaper = Context::new(&backdrop)?;
+                        let gradient = LinearGradient::new(0.0, 0.0, width as f64, height as f64);
+                        if scenario == "clear-light" {
+                            gradient.add_color_stop_rgb(0.0, 0.57, 0.72, 0.78);
+                            gradient.add_color_stop_rgb(0.5, 0.45, 0.64, 0.75);
+                            gradient.add_color_stop_rgb(1.0, 0.76, 0.80, 0.81);
+                        } else {
+                            gradient.add_color_stop_rgb(0.0, 0.07, 0.12, 0.20);
+                            gradient.add_color_stop_rgb(0.5, 0.18, 0.23, 0.32);
+                            gradient.add_color_stop_rgb(1.0, 0.10, 0.14, 0.23);
+                        }
+                        wallpaper.set_source(&gradient)?;
+                        wallpaper.paint()?;
+                        Some(backdrop)
+                    } else {
+                        None
+                    };
                     let engine =
                         LayoutEngine::new(config.clone(), renderer.text_measurer(&context));
                     let initial =
@@ -155,8 +185,13 @@ mod preview {
                             interaction.press(&initial, point);
                         }
                     }
-                    let scene = engine.build(snapshot.view(), viewport, &interaction);
-                    renderer.render(&context, &scene)?;
+                    let mut scene = engine.build(snapshot.view(), viewport, &interaction);
+                    scene.adapt_text_to_background(
+                        theme,
+                        snapshot.wallpaper_luminance,
+                        renderer.background_opacity().unwrap_or(1.0),
+                    );
+                    renderer.render_over(&context, &scene, backdrop.as_ref())?;
                     drop(context);
                     surface.flush();
                     let stride = surface.stride() as usize;

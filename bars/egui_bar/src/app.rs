@@ -521,6 +521,11 @@ impl eframe::App for EguiBarApp {
             self.background_opacity,
             self.translucent,
         ) as f32;
+        self.scene.adapt_text_to_background(
+            self.runtime.view().theme,
+            self.runtime.view().wallpaper_luminance,
+            f64::from(self.style.background_opacity),
+        );
         let painter = ctx.layer_painter(egui::LayerId::background());
         crate::scene::paint(&painter, viewport.min, &self.scene, &self.style);
 

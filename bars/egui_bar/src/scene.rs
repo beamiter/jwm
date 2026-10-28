@@ -221,29 +221,6 @@ pub fn paint(painter: &Painter, origin: Pos2, scene: &Scene, style: &SceneStyle)
                 // is actually drawn, so the galley origin shifts by however far
                 // the ink starts outside it.
                 let position = origin + Vec2::new(x, y) - extents.min.to_vec2();
-                if style.background_opacity == 0.0 {
-                    let luminance = text_color.red * 0.2126
-                        + text_color.green * 0.7152
-                        + text_color.blue * 0.0722;
-                    let outline = if luminance > 0.5 {
-                        Color32::BLACK
-                    } else {
-                        Color32::WHITE
-                    };
-                    let shadow = painter.layout_no_wrap(
-                        text.clone(),
-                        font_id(*size, &style.family),
-                        outline,
-                    );
-                    for offset in [
-                        Vec2::new(-1.0, 0.0),
-                        Vec2::new(1.0, 0.0),
-                        Vec2::new(0.0, -1.0),
-                        Vec2::new(0.0, 1.0),
-                    ] {
-                        painter.galley(position + offset, shadow.clone(), outline);
-                    }
-                }
                 painter.galley(position, galley, tint);
             }
             SceneNode::Polyline {

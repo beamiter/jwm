@@ -87,10 +87,13 @@ blur_status_bar = false # default: clear background
 
 Reload the JWM config to update running bars, or set it for the current session
 with `jwm-tool msg set_config --args '{"key":"behavior.blur_status_bar","value":true}'`.
-The setting changes the bar background only; text, icons and individual control
-pills keep their own opacity. Cairo bars give text a small contrasting outline
-in clear mode. Existing explicitly configured `blur_status_bar = true` keeps
-frosting. An omitted setting now selects clear. A bar's explicit
+Background opacity applies to the full bar surface; controls and text render
+separately. Cairo, egui and GTK/Relm render clear-mode text
+without hard outlines: ordinary text follows the WM's smoothed wallpaper
+luminance, with stronger ink for muted window titles. Dioxus uses the same
+foreground policy for its unfilled elements. Controls with their own fills
+keep their paired foreground colors. Existing explicitly configured
+`blur_status_bar = true` keeps frosting. An omitted setting now selects clear. A bar's explicit
 `background_opacity` remains an override for its background tint.
 
 The shared-state wire retains its existing size/version: the optional mode is

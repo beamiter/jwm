@@ -410,17 +410,6 @@ impl CairoRenderer {
         let extents = layout_paint_extents(layout);
         let (x, y) = text_origin(bounds, extents.width(), extents.height(), style.align);
         let origin = (x - f64::from(extents.x()), y - f64::from(extents.y()));
-        if self.background_opacity.is_some_and(|opacity| opacity < 0.1) {
-            // Clear bars have no full-width contrast veil. Keep the ink intact
-            // and outline glyphs locally, including Pango's icon glyphs.
-            let light_ink = style.color.red + style.color.green + style.color.blue > 1.5;
-            let outline = if light_ink { 0.0 } else { 1.0 };
-            context.move_to(origin.0, origin.1);
-            pangocairo::functions::layout_path(context, layout);
-            context.set_source_rgba(outline, outline, outline, 0.8);
-            context.set_line_width(2.0);
-            context.stroke()?;
-        }
         set_source(context, style.color, 1.0);
         context.move_to(origin.0, origin.1);
         pangocairo::functions::show_layout(context, layout);
@@ -862,6 +851,11 @@ impl CairoBar {
                 &next_interaction,
             );
         }
+        next_scene.adapt_text_to_background(
+            self.runtime.view().theme,
+            self.runtime.view().wallpaper_luminance,
+            self.renderer.background_opacity().unwrap_or(1.0),
+        );
         self.renderer.render_over(context, &next_scene, backdrop)?;
         self.last_damage = if self.renderer_dirty
             || material_changed
@@ -2195,6 +2189,111 @@ mod tests {
         assert_eq!(pixel(12, 12), pixel(15, 2));
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn clear_text_keeps_single_color_ink_at_integer_and_fractional_scales() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for level in [0, 255] {
+                let mut surface = ImageSurface::create(
+                    Format::ARgb32,
+                    (120.0 * scale) as i32,
+                    (32.0 * scale) as i32,
+                )
+                .unwrap();
+                let scene = Scene {
+                    viewport: Size::new(120.0, 32.0),
+                    clip: Rect::new(0.0, 0.0, 120.0, 32.0),
+                    hits: Vec::new(),
+                    nodes: vec![SceneNode::Text {
+                        id: NodeId::Clock,
+                        bounds: Rect::new(0.0, 0.0, 120.0, 32.0),
+                        text: "Hi 51%".to_owned(),
+                        size: 12.0,
+                        color: Rgba::rgb8(level, level, level),
+                        align: TextAlign::Center,
+                        state: VisualState::default(),
+                    }],
+                };
+                {
+                    let context = Context::new(&surface).unwrap();
+                    context.scale(scale, scale);
+                    CairoRenderer::new(FontDescription::from_string("Sans"))
+                        .with_background_opacity(0.0)
+                        .render(&context, &scene)
+                        .unwrap();
+                }
+                surface.flush();
+                let data = surface.data().unwrap();
+                let mut ink_pixels = 0;
+                for bytes in data.chunks_exact(4) {
+                    let pixel = u32::from_ne_bytes(bytes.try_into().unwrap());
+                    let alpha = (pixel >> 24) as u8;
+                    ink_pixels += usize::from(alpha > 0);
+                    // Premultiplied antialiased edges must contain only the
+                    // requested ink, never a ring in the opposite color.
+                    let expected = if level == 0 { 0 } else { alpha };
+                    for channel in [pixel as u8, (pixel >> 8) as u8, (pixel >> 16) as u8] {
+                        assert_eq!(channel, expected, "{scale}x, ink={level}, {pixel:#010x}");
+                    }
+                }
+                assert!(ink_pixels > 20, "the label must actually be drawn");
+            }
+        }
+    }
+
+    #[test]
+    fn clear_bar_tracks_wallpaper_ink_and_retains_geometry_and_damage() {
+        use crate::{BarEvent, TagState, WmSnapshot};
+
+        let mut snapshot = WmSnapshot {
+            client_name: "Clear bar text".to_owned(),
+            layout_symbol: "[]=".to_owned(),
+            wallpaper_luminance: Some(255),
+            tags: vec![TagState {
+                selected: true,
+                ..TagState::default()
+            }],
+            ..WmSnapshot::default()
+        };
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+        bar.follow_wm_background(None, true);
+        let surface = ImageSurface::create(Format::ARgb32, 1600, 42).unwrap();
+        let context = Context::new(&surface).unwrap();
+        let mut previous: Option<Scene> = None;
+        for (sample, ink) in [(255, 0), (0, 255)] {
+            snapshot.wallpaper_luminance = Some(sample);
+            bar.runtime_mut()
+                .apply_event(BarEvent::WindowManager(snapshot.clone()));
+            bar.render(&context, Size::new(1600.0, 42.0)).unwrap();
+            assert!(bar.scene().nodes_for(NodeId::LayoutButton).any(|node| {
+                matches!(node, SceneNode::Text { color, .. } if *color == Rgba::rgb8(ink, ink, ink))
+            }));
+            assert!(bar.scene().nodes_for(NodeId::Client).any(|node| {
+                matches!(node, SceneNode::Text { color, .. } if color.red == f32::from(ink) / 255.0 && color.alpha == 0.86)
+            }));
+            if let Some(previous) = previous {
+                assert_eq!(bar.scene().hits, previous.hits);
+                for (old, new) in previous.nodes.iter().zip(&bar.scene().nodes) {
+                    assert_eq!(old.bounds(), new.bounds());
+                    if !matches!(old, SceneNode::Text { .. }) && !matches!(old.id(), NodeId::Tag(_))
+                    {
+                        assert_eq!(old, new, "non-tag surfaces and indicators stay intact");
+                    }
+                }
+                assert!(!bar.last_damage().is_empty());
+            }
+            previous = Some(bar.scene().clone());
+            bar.render(&context, Size::new(1600.0, 42.0)).unwrap();
+            assert!(
+                bar.last_damage().is_empty(),
+                "unchanged ink needs no upload"
+            );
+        }
     }
 
     #[test]

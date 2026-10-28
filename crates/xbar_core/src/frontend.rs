@@ -430,7 +430,10 @@ pub fn snapshot_changes(previous: &BarSnapshot, current: &BarSnapshot) -> DirtyB
     if previous.time != current.time || previous.show_seconds != current.show_seconds {
         changes.set(DirtyBits::TIME_CHANGED);
     }
-    if previous.theme != current.theme || previous.blur_status_bar != current.blur_status_bar {
+    if previous.theme != current.theme
+        || previous.blur_status_bar != current.blur_status_bar
+        || previous.wallpaper_luminance != current.wallpaper_luminance
+    {
         changes.set(DirtyBits::THEME_CHANGED);
     }
     if previous.audio != current.audio || previous.audio_device != current.audio_device {
@@ -1169,6 +1172,10 @@ mod tests {
 
         let mut changed = original.clone();
         changed.blur_status_bar = Some(true);
+        assert_exact(changed, DirtyBits::THEME_CHANGED);
+
+        let mut changed = original.clone();
+        changed.wallpaper_luminance = Some(255);
         assert_exact(changed, DirtyBits::THEME_CHANGED);
 
         let mut changed = original.clone();

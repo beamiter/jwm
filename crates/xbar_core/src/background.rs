@@ -1,4 +1,16 @@
-//! Shared bar-only background policy. Foreground/pill opacity is untouched.
+//! Shared bar background policy and wallpaper-aware foreground selection.
+
+/// Choose readable ink using the WM's smoothed linear wallpaper luminance.
+/// Keep this threshold aligned with the producer's 38/54 hysteresis band.
+/// Missing samples follow the application theme.
+#[must_use]
+pub const fn wallpaper_theme(theme: crate::ThemeMode, luminance: Option<u8>) -> crate::ThemeMode {
+    match luminance {
+        Some(value) if value >= 46 => crate::ThemeMode::Light,
+        Some(_) => crate::ThemeMode::Dark,
+        None => theme,
+    }
+}
 
 /// Existing frosted material veil, shared by every presenter.
 pub const FROSTED_BACKGROUND_OPACITY: f64 = 0.55;

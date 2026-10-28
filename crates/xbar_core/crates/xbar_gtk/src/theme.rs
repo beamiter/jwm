@@ -143,10 +143,18 @@ fn theme_rules(theme: ThemeMode, background_opacity: Option<f64>, translucent: b
         xbar_core::background::bar_background_opacity(Some(true), background_opacity, translucent);
     let background = css(with_alpha(palette.background, alpha));
     let frosted_background = css(with_alpha(palette.background, frosted_alpha));
-    let outline = match theme {
-        ThemeMode::Dark => "rgba(0, 0, 0, 0.9)",
-        ThemeMode::Light => "rgba(255, 255, 255, 0.95)",
-    };
+    let mut backdrop_text = String::new();
+    for (mode, opacity) in [(":not(.frosted)", alpha), (".frosted", frosted_alpha)] {
+        for (class, luminance) in [("backdrop-dark", 0), ("backdrop-light", 255)] {
+            let ink = Palette::for_background(theme, Some(luminance), opacity);
+            backdrop_text.push_str(&format!(
+                "{scope} .bar-root{mode}.{class} .pill:not(.tag):not(.selected):not(.urgent) {{ color: {text}; }}\n\
+                 {scope} .bar-root{mode}.{class} .client-name {{ color: {muted}; }}\n",
+                text = css(ink.text),
+                muted = css(ink.muted_text),
+            ));
+        }
+    }
     // In solid mode the window itself carries the theme color: the theme
     // class scopes make a runtime theme toggle recolor the whole strip
     // without regenerating the stylesheet.
@@ -172,10 +180,7 @@ fn theme_rules(theme: ThemeMode, background_opacity: Option<f64>, translucent: b
   color: {selected_text};
 }}
 {scope} .client-name {{ color: {muted}; }}
-{scope} .bar-root:not(.frosted) .pill:not(.selected):not(.urgent),
-{scope} .bar-root:not(.frosted) .client-name {{
-  text-shadow: -1px 0 {outline}, 1px 0 {outline}, 0 -1px {outline}, 0 1px {outline};
-}}
+{backdrop_text}
 ",
         pill = css(palette.pill),
         occupied = css(palette.occupied),

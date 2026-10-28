@@ -462,6 +462,38 @@ impl Damage {
 }
 
 impl Scene {
+    /// Adapt ordinary text in a freshly built scene after the backdrop's actual
+    /// alpha has been resolved. Keep explicit tag, selection, alert and Dock
+    /// card colors paired with their own surfaces. Only paint changes, so
+    /// retained presenters see text changes in normal scene damage.
+    pub fn adapt_text_to_background(
+        &mut self,
+        theme: ThemeMode,
+        wallpaper_luminance: Option<u8>,
+        background_opacity: f64,
+    ) {
+        let original = Palette::for_theme(theme);
+        let adapted = Palette::for_background(theme, wallpaper_luminance, background_opacity);
+        for node in &mut self.nodes {
+            if let SceneNode::Text {
+                id, color, state, ..
+            } = node
+            {
+                if matches!(id, NodeId::Tag(_) | NodeId::MinimizedWindow(_))
+                    || state.selected
+                    || state.urgent
+                {
+                    continue;
+                }
+                if *color == original.text {
+                    *color = adapted.text;
+                } else if *color == original.muted_text {
+                    *color = adapted.muted_text;
+                }
+            }
+        }
+    }
+
     #[must_use]
     pub fn hit_test(&self, point: Point) -> Option<&HitRegion> {
         let visible = self
@@ -3051,6 +3083,28 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// Clear bars use solid ink chosen from the wallpaper rather than a hard
+    /// outline around every glyph. Muted titles keep enough ink to remain
+    /// readable without thickening the font. Frosted/opaque targets retain
+    /// their theme colors, including explicit background-opacity overrides.
+    #[must_use]
+    pub fn for_background(
+        theme: ThemeMode,
+        wallpaper_luminance: Option<u8>,
+        background_opacity: f64,
+    ) -> Self {
+        let mut palette = Self::for_theme(theme);
+        if (0.0..0.1).contains(&background_opacity) {
+            palette.text = match crate::background::wallpaper_theme(theme, wallpaper_luminance) {
+                ThemeMode::Dark => Rgba::rgb8(255, 255, 255),
+                ThemeMode::Light => Rgba::rgb8(0, 0, 0),
+            };
+            palette.muted_text = palette.text;
+            palette.muted_text.alpha = 0.86;
+        }
+        palette
+    }
+
     // macOS menu-bar material. Overlay colors are translucent white/black so
     // they read correctly over any frosted background a frontend composites
     // beneath the scene; selection is the system accent blue.
@@ -3794,6 +3848,32 @@ mod tests {
             assert!(scene.nodes_for(id).any(
                 |node| matches!(node, SceneNode::RoundedRect { fill, .. } if *fill == expected.fill)
             ));
+        }
+    }
+
+    #[test]
+    fn clear_ink_uses_wallpaper_while_tinted_materials_keep_the_theme() {
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let original = Palette::for_theme(theme);
+            for sample in [None, Some(0), Some(45), Some(46), Some(255)] {
+                for opacity in [0.0, 0.05, 0.1, 0.55, 1.0, f64::NAN] {
+                    let palette = Palette::for_background(theme, sample, opacity);
+                    assert_eq!(palette.background, original.background);
+                    assert_eq!(palette.selected_text, original.selected_text);
+                    assert_eq!(palette.selected, original.selected);
+                    assert_eq!(palette.urgent, original.urgent);
+                    if opacity < 0.1 {
+                        let light_background =
+                            sample.map_or(theme == ThemeMode::Light, |v| v >= 46);
+                        let level = if light_background { 0 } else { 255 };
+                        assert_eq!(palette.text, Rgba::rgb8(level, level, level));
+                        assert_eq!(palette.muted_text.alpha, 0.86);
+                    } else {
+                        assert_eq!(palette.text, original.text);
+                        assert_eq!(palette.muted_text, original.muted_text);
+                    }
+                }
+            }
         }
     }
 
