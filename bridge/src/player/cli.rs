@@ -56,7 +56,9 @@ With no FILE, open or raise the player. Further launches reuse the same player.\
   --help      Show this help\n\
   --version   Show the helper version\n\
 Requires mpv and a D-Bus session. Local file:// URIs are accepted.\n\
-Space: pause; arrows: seek; 9/0: volume; m: mute; f: fullscreen; </>: track; q: quit.";
+Ctrl+O: open files; Space: pause; arrows: seek; 9/0: volume; m: mute;\n\
+f: fullscreen; l: queue; s: subtitles; </>: track; q: quit;\n\
+h: hide/restore bars; Ctrl+H: cycle Auto/Always/Hidden (music and video).";
 
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Cli, String> {
     let mut open = Open::default();

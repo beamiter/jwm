@@ -2670,8 +2670,17 @@ impl Config {
         }
     }
 
+    fn default_media_player_keys() -> [KeyConfig; 2] {
+        [("m", "music_player"), ("v", "video_player")].map(|(key, function)| KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into(), "Shift".into()],
+            key: key.into(),
+            function: function.into(),
+            argument: ArgumentConfig::Int(0),
+        })
+    }
+
     fn get_default_keys() -> Vec<KeyConfig> {
-        vec![
+        let mut keys = vec![
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "e".to_string(),
@@ -3345,7 +3354,9 @@ impl Config {
                 function: "restart".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
-        ]
+        ];
+        keys.extend(Self::default_media_player_keys());
+        keys
     }
 
     fn get_default_button_configs() -> Vec<ButtonConfig> {
@@ -3790,6 +3801,35 @@ impl Config {
         (!occupied && !leader_occupied && !in_chord).then_some(fallback)
     }
 
+    /// Older key lists gain the media entry points without taking an existing
+    /// binding or chord leader. Share this decision with the shortcut viewer.
+    pub fn media_player_fallback_keys(&self) -> Vec<KeyConfig> {
+        let chord = self.chord_config();
+        let chord_enabled = self.compile_chord().is_some();
+        Self::default_media_player_keys()
+            .into_iter()
+            .filter(|fallback| {
+                let modifiers = self.parse_modifiers(&fallback.modifier);
+                let keysym = self.parse_keysym(&fallback.key);
+                let occupied = self.key_configs().iter().any(|key| {
+                    self.convert_key_config(key).is_some()
+                        && (key.function == fallback.function
+                            || ((self.parse_modifiers(&key.modifier)
+                                & !(Mods::CAPS | Mods::NUMLOCK))
+                                == modifiers
+                                && self.parse_keysym(&key.key) == keysym))
+                });
+                let leader_occupied = self.parse_modifiers(&chord.leader_modifier) == modifiers
+                    && self.parse_keysym(&chord.leader_key) == keysym;
+                let in_chord = chord_enabled
+                    && chord.bindings.iter().any(|key| {
+                        key.function == fallback.function && self.convert_key_config(key).is_some()
+                    });
+                !occupied && !leader_occupied && !in_chord
+            })
+            .collect()
+    }
+
     pub fn get_keys(&self) -> Vec<WMKey> {
         let mut keys = Vec::new();
 
@@ -3994,6 +4034,11 @@ impl Config {
             && let Some(binding) = self.convert_key_config(&fallback)
         {
             keys.push(binding);
+        }
+        for fallback in self.media_player_fallback_keys() {
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                keys.push(binding);
+            }
         }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
@@ -7965,6 +8010,16 @@ mod tests {
             ("p", Mods::ALT | Mods::CONTROL, Jwm::toggle_spawn_placement),
             ("Return", Mods::ALT | Mods::CONTROL, Jwm::togglemaximize),
             ("F10", Mods::ALT | Mods::SHIFT, Jwm::bluetooth_picker),
+            (
+                "m",
+                Mods::ALT | Mods::CONTROL | Mods::SHIFT,
+                Jwm::music_player,
+            ),
+            (
+                "v",
+                Mods::ALT | Mods::CONTROL | Mods::SHIFT,
+                Jwm::video_player,
+            ),
         ] {
             let keysym = config.parse_keysym(name).expect("supported default keysym");
             let matches: Vec<_> = bindings
@@ -10347,6 +10402,67 @@ border_px = 3
         assert!(cfg.restore_preview_fallback_key().is_some());
         cfg.inner.keybindings.chord.leader_modifier.pop();
         assert!(cfg.restore_preview_fallback_key().is_none());
+    }
+
+    #[test]
+    fn media_player_shortcuts_respect_custom_bindings_and_chords() {
+        use crate::jwm::{Jwm, WMFuncType};
+
+        for (fallback, function) in Config::default_media_player_keys()
+            .into_iter()
+            .zip([Jwm::music_player as WMFuncType, Jwm::video_player])
+        {
+            let mut cfg = Config::default();
+            assert!(cfg.media_player_fallback_keys().is_empty());
+            cfg.inner
+                .keybindings
+                .keys
+                .retain(|key| key.function != fallback.function);
+            assert_eq!(cfg.media_player_fallback_keys().len(), 1);
+            let count = |cfg: &Config| {
+                cfg.get_keys()
+                    .iter()
+                    .filter(|binding| {
+                        binding
+                            .func_opt
+                            .is_some_and(|f| std::ptr::fn_addr_eq(f, function))
+                    })
+                    .count()
+            };
+            assert_eq!(count(&cfg), 1, "older key lists gain the action once");
+
+            let mut occupied = fallback.clone();
+            occupied.function = "minimize".into();
+            cfg.inner.keybindings.keys.push(occupied);
+            assert!(cfg.media_player_fallback_keys().is_empty());
+            assert_eq!(count(&cfg), 0, "a custom action keeps its key");
+            cfg.inner.keybindings.keys.pop();
+
+            let mut custom = fallback.clone();
+            custom.key = "F9".into();
+            cfg.inner.keybindings.keys.push(custom);
+            assert!(cfg.media_player_fallback_keys().is_empty());
+            assert_eq!(
+                count(&cfg),
+                1,
+                "an explicit player shortcut is not duplicated"
+            );
+            cfg.inner.keybindings.keys.pop();
+
+            cfg.inner.keybindings.chord.leader_modifier = fallback.modifier.clone();
+            cfg.inner.keybindings.chord.leader_key = fallback.key.clone();
+            assert!(cfg.media_player_fallback_keys().is_empty());
+            assert_eq!(count(&cfg), 0, "chord leaders are reserved");
+            cfg.inner.keybindings.chord.leader_key = "F9".into();
+            cfg.inner.keybindings.chord.bindings = vec![fallback];
+            assert!(cfg.media_player_fallback_keys().is_empty());
+            cfg.inner.keybindings.chord.leader_key.clear();
+            assert_eq!(
+                cfg.media_player_fallback_keys().len(),
+                1,
+                "disabled chords do not suppress defaults"
+            );
+        }
     }
 
     #[test]
