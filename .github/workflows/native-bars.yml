@@ -219,6 +219,10 @@ jobs:
             manifest: bars/egui_bar/Cargo.toml
             extra-packages: libgtk-3-dev
             full_format: false
+          - name: gpui
+            manifest: bars/gpui_bar/Cargo.toml
+            extra-packages: libgtk-3-dev
+            full_format: true
           - name: gpui-component
             manifest: bars/gpui_component_bar/Cargo.toml
             extra-packages: libgtk-3-dev
@@ -291,6 +295,37 @@ jobs:
       - name: Check egui protocol adapter formatting
         if: ${{ !matrix.full_format }}
         run: rustfmt --edition 2024 --check bars/egui_bar/src/app.rs
+
+      # Check the resolved closure, not just the direct Cargo.toml entries:
+      # an internal GPUI dependency must not reintroduce the editor checkout.
+      - name: Verify standalone GPUI dependency sources
+        if: ${{ matrix.name == 'gpui' || matrix.name == 'gpui-component' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --manifest-path "${{ matrix.manifest }}" --format-version 1 \
+            > "$RUNNER_TEMP/gpui-metadata.json"
+          python3 - "$RUNNER_TEMP/gpui-metadata.json" <<'PY'
+          import json
+          import sys
+          from urllib.parse import urlsplit
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              packages = json.load(stream)["packages"]
+          for package in packages:
+              source = package["source"] or ""
+              if source.startswith("git+"):
+                  url = urlsplit(source.removeprefix("git+"))
+                  repo = url.path.rstrip("/").removesuffix(".git").lower()
+                  if url.hostname == "github.com" and repo == "/zed-industries/zed":
+                      raise SystemExit(f"Zed monorepo dependency: {package['id']}")
+          gpui = [package for package in packages if package["name"].startswith("gpui-pre")]
+          if not gpui or any(
+              not (package["source"] or "").startswith("registry+") for package in gpui
+          ):
+              raise SystemExit("GPUI must resolve to published registry packages")
+          print(f"Verified {len(gpui)} GPUI packages; no Zed monorepo dependency")
+          PY
 
       - name: Check all targets
         run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
@@ -371,8 +406,8 @@ jobs:
         run: cargo fmt --manifest-path "${{ matrix.manifest }}" -- --check
 
       # These manifests intentionally track upstream branches and have no
-      # committed lockfile. Unlike gpui_bar, both graphs are practical to
-      # resolve in CI, so compile them honestly at the selected branch head.
+      # committed lockfile. Compile them at the selected branch head; the
+      # registry-based GPUI bars are checked in desktop-toolkits above.
       - name: Check all targets at the selected upstream branch
         run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
 
@@ -500,7 +535,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   static-source-contracts:
-    name: Frontend source contracts and legacy GPUI formatting
+    name: Frontend source contracts
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -517,17 +552,6 @@ jobs:
 
       - name: Test asynchronous frontend readiness without a browser
         run: node scripts/test-bar-startup.mjs
-
-      - name: Install Rustfmt
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
-        with:
-          components: rustfmt
-
-      # gpui_bar follows an unpinned `main` branch and has no Cargo.lock. A
-      # mandatory network build would be non-reproducible; formatting and the
-      # binding assertion below still cover repository-owned source.
-      - name: Check gpui_bar formatting without resolving git dependencies
-        run: cargo fmt --manifest-path bars/gpui_bar/Cargo.toml -- --check
 
       - name: Assert generation-aware source contracts (not a frontend build)
         shell: bash
@@ -565,7 +589,6 @@ jobs:
         run: |
           {
             printf '%s\n' "### Intentional exclusions"
-            printf '%s\n' "- \`gpui_bar\`: formatting + static binding assertion only; its git \`main\` dependencies are unpinned and it has no lockfile."
             printf '%s\n' "- React/Vue/Solid/Svelte UI: frozen dependency install, typecheck/build, audit and four-edge Chromium interaction checks in locked-web-frontends. The browser tests use a mock Tauri IPC host; they do not launch native WebKit windows."
             printf '%s\n' "- The six Tauri Rust hosts are format-checked and statically wired by \`tauri-host-contracts\`; that job explicitly documents why it does not claim compilation."
           } >> "$GITHUB_STEP_SUMMARY"

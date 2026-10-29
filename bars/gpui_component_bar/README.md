@@ -28,3 +28,6 @@ snapshot: this bar pairs `gpui-component 0.6.6` with `gpui-pre 0.3.6` and
 `gpui-pre-platform 0.3.6`. Update these together after checking all targets.
 The older `gpui 0.2.2` is a different package with incompatible component types;
 using the aligned packages also removes its obsolete xattr dependency.
+
+The plain [`gpui_bar`](../gpui_bar/README.md) uses the same published GPUI
+snapshot. Keep both bars aligned when updating their shared sidebar API.

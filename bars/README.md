@@ -202,6 +202,13 @@ the other seven use GTK/Relm, GPUI/GPUI-component, Iced, Xilem or Dioxus. The si
 Tauri frontend applications share `xbar_tauri`, whose explicit `[workspace]`
 boundary allows it to be checked independently too.
 
+Both GPUI bars use the same pinned, standalone `gpui-pre` framework and
+`gpui-pre-platform` packages from crates.io. Building them does not fetch the
+Zed editor monorepo. The plain bar also aligns its transparency probe with
+GPUI's graphics dependencies. See [GPUI dependencies](gpui_bar/README.md) for
+the version policy and build commands. Both bars receive an all-target compile
+check and a resolved-source check in the native-bars workflow.
+
 Run these commands from the repository root:
 
 ```bash
