@@ -99,6 +99,8 @@ pub(crate) struct EvaRuntime {
     microphone_active: bool,
     undo_available: bool,
     input_caption: Option<Value>,
+    followup_deadline_ns: Option<u64>,
+    followup_turn_epoch: Option<u64>,
     pub(crate) ui_action_grabs: Vec<(crate::backend::common_define::Mods, u32)>,
     confirmation: Option<Confirmation>,
     media_observation: Option<Value>,
@@ -130,6 +132,8 @@ impl Default for EvaRuntime {
             microphone_active: false,
             undo_available: false,
             input_caption: None,
+            followup_deadline_ns: None,
+            followup_turn_epoch: None,
             ui_action_grabs: Vec::new(),
             confirmation: None,
             media_observation: None,
@@ -255,6 +259,8 @@ impl Jwm {
         self.eva.microphone_active = false;
         self.eva.undo_available = false;
         self.eva.input_caption = None;
+        self.eva.followup_deadline_ns = None;
+        self.eva.followup_turn_epoch = None;
         if let Some(permit) = had_permit {
             self.broadcast_ipc_event(
                 "assistant/cancelled",
@@ -545,6 +551,7 @@ impl Jwm {
         };
         json!({"active":self.eva_active(),"visible":self.eva_active() || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":self.eva.state,"text":text,"level":self.eva.level,"microphone_active":if self.eva.state=="error"&&self.eva.error_visible_until.is_some(){None}else{Some(self.eva.microphone_active)},
             "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
+            "followup_remaining_ms":self.eva.followup_deadline_ns.filter(|_|self.eva_active()&&matches!(self.eva.state.as_str(),"follow_up"|"followup")).map(|deadline|deadline.saturating_sub(monotonic_ns())/1_000_000),
             "lease_remaining_ms":self.eva.lease_until.map(|t|t.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0)})
     }
     pub(crate) fn eva_control(&mut self, backend: &mut dyn Backend, args: &Value) -> IpcResponse {
@@ -636,6 +643,38 @@ impl Jwm {
             self.eva_sync_ui(backend);
             return IpcResponse::ok(Some(self.eva_overlay_snapshot()));
         }
+        let in_followup = matches!(state, "follow_up" | "followup");
+        let followup_turn = args["turn_epoch"].as_u64().or(self.eva.followup_turn_epoch);
+        let same_followup = matches!(self.eva.state.as_str(), "follow_up" | "followup")
+            && followup_turn == self.eva.followup_turn_epoch;
+        let followup_deadline = if in_followup {
+            match args.get("followup_deadline_monotonic_ns") {
+                None | Some(Value::Null) => {
+                    if same_followup {
+                        self.eva.followup_deadline_ns
+                    } else {
+                        None
+                    }
+                }
+                Some(value) => {
+                    let now = monotonic_ns();
+                    let Some(deadline) = value.as_u64().filter(|deadline| {
+                        now != 0 && *deadline <= now.saturating_add(600_000_000_000)
+                    }) else {
+                        return failure("plan_invalid: follow-up deadline");
+                    };
+                    // Repeated heartbeats may refresh the visibility lease,
+                    // but cannot extend this turn's speaking window.
+                    Some(if same_followup {
+                        self.eva.followup_deadline_ns.map_or(deadline, |old| old.min(deadline))
+                    } else {
+                        deadline
+                    })
+                }
+            }
+        } else {
+            None
+        };
         self.eva.microphone_active = match args.get("microphone_active") {
             Some(Value::Bool(active)) => *active,
             None => false,
@@ -666,6 +705,9 @@ impl Jwm {
             }
         };
         self.eva.state = state.into();
+        self.eva.followup_deadline_ns = followup_deadline;
+        self.eva.followup_turn_epoch = in_followup
+            .then_some(followup_turn).flatten();
         if let Some(text) = args.get("text").and_then(Value::as_str) {
             self.eva.text = text.chars().filter(|c| !c.is_control()).take(240).collect();
         }
@@ -940,7 +982,7 @@ impl Jwm {
     pub(crate) fn eva_execution_context(&mut self) -> Value {
         self.eva_record_focus();
         let monitors: Vec<Value> = self.state.monitor_order.iter().filter_map(|&key|self.state.monitors.get(key).map(|m|json!({
-            "monitor_token":self.eva_monitor_token(key),"monitor_ref":format!("m{:x}",key.data().as_ffi()),"num":m.num,"tab_tokens":self.tab_group_clients(key).iter().map(|w|self.eva_window_token(*w)).collect::<Vec<_>>(),"visible_tag_mask":m.get_active_tags(),"layout":canonical_layout(&m.lt),"locked":self.monitor_key_is_locked(key)
+            "monitor_token":self.eva_monitor_token(key),"monitor_ref":format!("m{:x}",key.data().as_ffi()),"num":m.num,"geometry":[m.geometry.m_x,m.geometry.m_y,m.geometry.m_w,m.geometry.m_h],"tab_tokens":self.tab_group_clients(key).iter().map(|w|self.eva_window_token(*w)).collect::<Vec<_>>(),"visible_tag_mask":m.get_active_tags(),"layout":canonical_layout(&m.lt),"locked":self.monitor_key_is_locked(key)
         }))).collect();
         let windows: Vec<Value> = self.state.clients.iter().filter(|(_,c)|!c.state.is_dock && !c.state.is_desktop).map(|(key,c)|json!({
             "target_token":self.eva_window_token(key),"window_ref":format!("w{:x}",key.data().as_ffi()),"id":c.win.raw().to_string(),"title":c.name.chars().take(160).collect::<String>(),"class":c.class.chars().take(80).collect::<String>(),"monitor_token":c.mon.map(|m|self.eva_monitor_token(m)),"tag_mask":c.state.tags,"focused":self.get_selected_client_key()==Some(key),"minimized":c.state.is_hidden,"floating":c.state.is_floating,"maximized":c.state.is_maximized_vert&&c.state.is_maximized_horz,"maximized_horz":c.state.is_maximized_horz,"maximized_vert":c.state.is_maximized_vert,"sticky":c.state.is_sticky,"pip":c.state.is_pip
@@ -1642,6 +1684,48 @@ impl Jwm {
             }
         };
         match action.name.as_str() {
+            "set_volume" | "adjust_volume" | "set_brightness" | "adjust_brightness" => {
+                use crate::jwm::features::system_controls::{ControlDomain, ControlRequest};
+                let volume = matches!(action.name.as_str(), "set_volume" | "adjust_volume");
+                let request = match action.name.as_str() {
+                    "set_volume" => ControlRequest::VolumeSet(
+                        args["percent"].as_u64().filter(|n| *n <= 100)
+                            .ok_or("plan_invalid: volume percent")? as u8,
+                    ),
+                    "set_brightness" => ControlRequest::BrightnessSet(
+                        args["percent"].as_u64().filter(|n| (1..=100).contains(n))
+                            .ok_or("plan_invalid: brightness percent")? as u8,
+                    ),
+                    name => {
+                        let delta = args["delta"].as_i64()
+                            .filter(|n| (-25..=25).contains(n) && *n != 0)
+                            .ok_or("plan_invalid: level delta")? as i32;
+                        if name == "adjust_volume" {
+                            ControlRequest::VolumeAdjust(delta)
+                        } else {
+                            ControlRequest::BrightnessAdjust(delta)
+                        }
+                    }
+                };
+                let (domain, seq) = if volume {
+                    let (seq, _) = self.queue_volume_request(request)
+                        .ok_or("volume_control_unavailable")?;
+                    self.features.control_feedback.owe_osd(ControlDomain::Volume, seq);
+                    ("volume", seq)
+                } else {
+                    let (seq, _) = self.queue_brightness_request(request)
+                        .ok_or("backlight_control_unavailable")?;
+                    self.features.control_feedback.owe_osd(ControlDomain::Brightness, seq);
+                    ("brightness", seq)
+                };
+                if let Some(op) = self.eva.operations.get_mut(operation_id) {
+                    op.control_sequence = Some((domain.into(), seq));
+                }
+                // An optimistic slider/cache update is never completion.
+                // Only the worker's matching sequence and native read-back
+                // can settle this operation in eva_level_completion.
+                Ok(("accepted", json!({"completion":"awaiting_control_readback","domain":domain})))
+            }
             "switch_tag" | "switch_tags" => {
                 let m = monitor()?;
                 let mask = tag_mask()?;
@@ -2791,6 +2875,41 @@ impl Jwm {
             })
             .and_then(|op| op.request["action"]["arguments"]["muted"].as_bool())
     }
+    pub(crate) fn eva_level_completion(
+        &mut self,
+        domain: &str,
+        seq: u64,
+        percent: Option<u8>,
+        muted: Option<bool>,
+    ) {
+        let action = self.eva.operations.values().find(|op| {
+            !op.terminal && op.control_sequence.as_ref()
+                .is_some_and(|(d, s)| d == domain && *s == seq)
+        }).map(|op| &op.request["action"]);
+        let took = action.and_then(|action| percent.map(|actual| {
+            match (domain, action["name"].as_str()) {
+                ("volume", Some("set_volume")) => {
+                    action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
+                        && muted == Some(false)
+                }
+                ("brightness", Some("set_brightness")) => {
+                    action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
+                }
+                // Applied(seq, actual) is emitted only after this worker
+                // performs the relative request and reads the real level.
+                ("volume", Some("adjust_volume")) => actual <= 100,
+                // A positive minimum raw backlight step can round to 0%.
+                ("brightness", Some("adjust_brightness")) => actual <= 100,
+                _ => false,
+            }
+        }));
+        self.eva_control_completion(
+            domain,
+            seq,
+            took,
+            json!({"domain":domain,"percent":percent,"muted":muted}),
+        );
+    }
     pub(crate) fn eva_note_control_sequence(&mut self, domain: &str, seq: u64) {
         for op in self
             .eva
@@ -2824,6 +2943,13 @@ impl Jwm {
                     None => "unknown",
                 });
                 op.result["verified"]["read_back"] = evidence.clone();
+                if matches!(domain, "volume" | "brightness") {
+                    op.result["verified"]["completion"] = json!(match took {
+                        Some(true) => "native_control_readback_observed",
+                        Some(false) => "native_control_target_not_reached",
+                        None => "native_control_readback_unavailable",
+                    });
+                }
                 op.terminal = took.is_some() && !media_pending;
                 if op.terminal {
                     op.expires = Instant::now() + RETENTION;
@@ -2944,6 +3070,86 @@ mod tests {
         payload.as_object_mut().unwrap().remove("request_digest");
         value["request_digest"] = json!(jwm_eva_core::protocol::digest(&payload));
         value
+    }
+    #[test]
+    fn eva_followup_heartbeat_cannot_extend_or_erase_the_same_turn_deadline() {
+        let (mut jwm, mut backend) = setup();
+        let deadline = monotonic_ns() + 5_000_000_000;
+        let mut status = json!({"assistant_permit":jwm.eva.permit,"state":"follow_up",
+            "turn_epoch":1,"microphone_active":true,"followup_deadline_monotonic_ns":deadline});
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        status["followup_deadline_monotonic_ns"] = Value::Null;
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert_eq!(jwm.eva.followup_deadline_ns, Some(deadline));
+        status["followup_deadline_monotonic_ns"] = json!(deadline + 1_000_000_000);
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert_eq!(jwm.eva.followup_deadline_ns, Some(deadline));
+        assert!(jwm.eva_overlay_snapshot()["followup_remaining_ms"].as_u64().unwrap() <= 5000);
+        status["turn_epoch"] = json!(2);
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert_eq!(jwm.eva.followup_deadline_ns, Some(deadline + 1_000_000_000));
+        status["state"] = json!("planning");
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert!(jwm.eva_overlay_snapshot()["followup_remaining_ms"].is_null());
+        jwm.eva_cancel("test");
+        assert!(jwm.eva.followup_deadline_ns.is_none());
+    }
+    #[test]
+    fn eva_levels_require_matching_native_receipts_and_deduplicate_dispatch() {
+        use crate::jwm::features::system_controls::TestControlQueueGuard;
+        for (name, args, domain, actual) in [
+            ("set_volume", json!({"percent":35}), "volume", 35),
+            ("adjust_volume", json!({"delta":-5}), "volume", 30),
+            ("set_brightness", json!({"percent":60}), "brightness", 60),
+            ("adjust_brightness", json!({"delta":-5}), "brightness", 0),
+        ] {
+            let queue = TestControlQueueGuard::install();
+            let (mut jwm, mut backend) = setup();
+            let action = json!({"name":name,"arguments":args});
+            let req = request(&jwm, name, action);
+            let reply = jwm.eva_guarded_execute(&mut backend, &req);
+            assert!(reply.success, "{name}: {reply:?}");
+            assert_eq!(reply.data.unwrap()["status"], "accepted", "{name}");
+            assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+            assert_eq!(queue.requests().len(), 1, "{name}: duplicate must not requeue");
+            jwm.eva_level_completion(domain, 0, Some(actual), Some(false));
+            assert_eq!(jwm.eva.operations[name].result["status"], "accepted");
+            jwm.eva_level_completion(domain, 1, Some(actual), Some(false));
+            let result = &jwm.eva.operations[name].result;
+            assert_eq!(result["status"], "succeeded", "{name}: {result}");
+            assert_eq!(result["verified"]["read_back"]["percent"], actual);
+            assert_eq!(result["verified"]["completion"], "native_control_readback_observed");
+        }
+    }
+    #[test]
+    fn eva_level_readback_failure_and_unreached_targets_are_not_success() {
+        use crate::jwm::features::system_controls::TestControlQueueGuard;
+        let _queue = TestControlQueueGuard::install();
+        let (mut jwm, mut backend) = setup();
+        let req = request(&jwm, "volume", json!({"name":"set_volume","arguments":{"percent":40}}));
+        assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+        jwm.eva_level_completion("volume", 1, None, None);
+        assert_eq!(jwm.eva.operations["volume"].result["status"], "unknown");
+        jwm.eva_level_completion("volume", 1, Some(40), Some(true));
+        assert_eq!(jwm.eva.operations["volume"].result["status"], "failed");
+    }
+    #[test]
+    fn eva_out_of_range_level_commands_never_reach_the_native_queue() {
+        use crate::jwm::features::system_controls::TestControlQueueGuard;
+        let queue = TestControlQueueGuard::install();
+        let (mut jwm, mut backend) = setup();
+        for (index, action) in [
+            json!({"name":"set_volume","arguments":{"percent":101}}),
+            json!({"name":"set_volume","arguments":{"percent":-1}}),
+            json!({"name":"set_brightness","arguments":{"percent":0}}),
+            json!({"name":"adjust_volume","arguments":{"delta":0}}),
+            json!({"name":"adjust_brightness","arguments":{"delta":26}}),
+            json!({"name":"adjust_volume","arguments":{"delta":-26}}),
+        ].into_iter().enumerate() {
+            let req = request(&jwm, &format!("invalid-{index}"), action);
+            assert!(!jwm.eva_guarded_execute(&mut backend, &req).success);
+        }
+        assert!(queue.requests().is_empty());
     }
     #[test]
     fn activation_requires_visible_overlay_and_never_issues_permit_headlessly() {

@@ -35,7 +35,8 @@ env:
 jobs:
   offline:
     name: Offline plan, daemon, transport, and installer contracts
-    runs-on: ubuntu-latest
+    # The isolated WirePlumber fixture uses the 0.4 policy shipped by Noble.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -46,7 +47,7 @@ jobs:
       - name: Install audio build and shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pulseaudio pulseaudio-utils pipewire pipewire-bin pipewire-media-session dbus-daemon mpv ffmpeg
+          sudo apt-get install -y --no-install-recommends pkg-config libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pulseaudio pulseaudio-utils pipewire pipewire-bin wireplumber dbus-daemon mpv ffmpeg
       - name: Resolve compatible PipeWire development headers
         run: |
           bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"
@@ -160,3 +161,4 @@ jobs:
       - run: cargo test --locked -p jwm-eva --test live_api -- --ignored --exact realtime_configuration_handshake
       - name: Report handshake scope
         run: echo 'Real API session configuration verified. Real microphone, desktop operation, semantic corpus and latency acceptance remain separate.' >> "$GITHUB_STEP_SUMMARY"
+

@@ -120,6 +120,13 @@ fn targets(value: &Value) -> Value {
 }
 fn verified(value: &Value) -> Value {
     let mut output = serde_json::Map::new();
+    if let Some(percent) = value.get("percent").filter(|percent| {
+        percent
+            .as_f64()
+            .is_some_and(|percent| percent.is_finite() && (0.0..=100.0).contains(&percent))
+    }) {
+        output.insert("percent".into(), percent.clone());
+    }
     for key in [
         "tag_number",
         "muted",
@@ -210,13 +217,18 @@ fn public_facts(value: &Value) -> Value {
                                 projected.insert(key.into(), value);
                             }
                         }
+                        if let Some(effect) = crate::language::projected_repeatable_effect(step) {
+                            projected.insert("follow_up".into(), effect);
+                        }
                         Value::Object(projected)
                     })
                     .collect(),
             ),
         );
     }
-    Value::Object(output)
+    let mut facts = Value::Object(output);
+    facts["conversation_context"] = crate::language::conversation_grounding(&facts);
+    facts
 }
 
 #[cfg(test)]
@@ -319,5 +331,33 @@ mod tests {
         let text = serde_json::to_string(&frozen.begin_round(message("fresh context"))).unwrap();
         assert!(text.contains("哪个窗口"));
         assert!(!text.contains("untrusted ASR"));
+    }
+    #[test]
+    fn follow_up_context_uses_only_one_verified_effect_and_never_raw_parameters() {
+        let step = json!({
+            "name":"resize_horizontal","status":"succeeded",
+            "targets":{"window_ref":"w1","monitor_ref":"m1"},
+            "follow_up":{"name":"resize_horizontal","parameters":{"value":-0.05,"tag_number":3,"window_token":"private-token","transcript":"secret-caption"}}
+        });
+        let facts = public_facts(&json!({"status":"succeeded","steps":[step.clone()]}));
+        assert_eq!(facts["conversation_context"]["can_repeat"], true);
+        assert_eq!(facts["conversation_context"]["last_effect"]["parameters"], json!({"value":-0.05,"tag_number":3}));
+        assert!(!facts.to_string().contains("private-token"));
+        assert!(!facts.to_string().contains("secret-caption"));
+        let failed = public_facts(&json!({"status":"unknown","steps":[step]}));
+        assert_eq!(failed["conversation_context"]["can_repeat"], false);
+        assert!(failed["conversation_context"]["window_ref"].is_null());
+    }
+    #[test]
+    fn unrelated_follow_up_name_cannot_promote_an_absolute_action_to_repeat() {
+        let facts = public_facts(&json!({
+            "status":"succeeded","steps":[{
+                "name":"set_window_maximized","status":"succeeded",
+                "targets":{"window_ref":"w1","monitor_ref":"m1"},
+                "follow_up":{"name":"resize_horizontal","parameters":{"value":0.05,"tag_number":1}}
+            }]
+        }));
+        assert_eq!(facts["conversation_context"]["can_repeat"], false);
+        assert!(facts["steps"][0].get("follow_up").is_none());
     }
 }

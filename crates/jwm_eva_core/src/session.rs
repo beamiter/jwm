@@ -114,6 +114,14 @@ impl Session {
     pub fn execution_allowed(&self) -> bool {
         self.state == State::Executing && self.permit.is_some()
     }
+    /// Presentation only: the original follow-up deadline never moves with
+    /// microphone levels, heartbeats or the bounded speech-start grace.
+    pub fn follow_up_remaining_ms(&self, now: u64) -> Option<u64> {
+        (self.state == State::FollowUp)
+            .then_some(self.follow_up_deadline)
+            .flatten()
+            .map(|deadline| deadline.saturating_sub(now))
+    }
     pub fn matches(&self, epoch: u64, turn: u64) -> bool {
         self.session_epoch == epoch
             && self.turn_epoch == turn
@@ -330,5 +338,18 @@ mod tests {
         s.local_speech_candidate(e, 4999, 5000);
         assert!(!s.local_speech_candidate(e, 5000, 6000));
         assert_eq!(s.tick(6501).as_deref(), Some("follow_up_timeout"));
+    }
+    #[test]
+    fn follow_up_countdown_does_not_extend_for_speech_start_grace() {
+        let mut s = followup();
+        assert_eq!(s.follow_up_remaining_ms(4), Some(5000));
+        assert_eq!(s.follow_up_remaining_ms(4004), Some(1000));
+        assert!(s.local_speech_candidate(s.session_epoch, 5003, 5004));
+        assert_eq!(s.follow_up_remaining_ms(5100), Some(0));
+        assert!(s.tick(5100).is_none());
+        assert!(s.speech_started(s.session_epoch, 5200));
+        assert_eq!(s.follow_up_remaining_ms(5200), None);
+        s.cancel("test", 5201);
+        assert_eq!(s.follow_up_remaining_ms(5201), None);
     }
 }

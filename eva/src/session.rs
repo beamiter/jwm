@@ -147,8 +147,20 @@ fn publish(
     state: &Session,
     text: &str,
     level: f32,
+    now_ms: u64,
 ) {
-    let _=tx.try_send(Update{permit:p.clone(),state:json!({"state":state.state,"text":text,"level":level,"session_epoch":state.session_epoch,"turn_epoch":state.turn_epoch,"microphone_active":state.capture_allowed()})});
+    let followup_deadline = state.follow_up_remaining_ms(now_ms).and_then(|remaining| {
+        crate::context::monotonic_ns()
+            .ok()?
+            .checked_add(remaining.checked_mul(1_000_000)?)
+    });
+    let _ = tx.try_send(Update {
+        permit: p.clone(),
+        state: json!({"state":state.state,"text":text,"level":level,
+            "session_epoch":state.session_epoch,"turn_epoch":state.turn_epoch,
+            "microphone_active":state.capture_allowed(),
+            "followup_deadline_monotonic_ns":followup_deadline}),
+    });
 }
 fn check_error(e: &Value) -> io::Result<()> {
     if e["type"] != "error" {
@@ -308,7 +320,7 @@ pub async fn run(
         .reserve_transcription(&transcription_request(&p, state.turn_epoch), &c)?;
     let mut capture = Some(Capture::start(&c.audio.input_device, audio_tx.clone())?);
     crate::telemetry::mark("activation", p.generation, 0);
-    publish(&tx, &p, &state, "正在连接", 0.0);
+    publish(&tx, &p, &state, "正在连接", 0.0, elapsed(start));
     let connect = Realtime::connect(&c, &key);
     tokio::pin!(connect);
     let mut prefetched = Vec::new();
@@ -475,6 +487,7 @@ async fn conversation(
             "正在听"
         },
         0.0,
+        elapsed(start),
     );
     if let Some(cap) = capture.as_ref() {
         cap.check()?;
@@ -514,6 +527,7 @@ async fn conversation(
     let mut quiet_gate =
         input_discarded.then(|| crate::input::QuietGate::new(c.turn_detection.silence_duration_ms));
     let mut admission = PlanAdmission::default();
+    let mut followup_text = String::new();
     loop {
         tokio::select! {biased;
             frame=audio_rx.recv(),if capture.is_some()=>{
@@ -522,7 +536,7 @@ async fn conversation(
                 if let Some(gate)=quiet_gate.as_mut(){
                     if gate.observe(frame.level){
                         quiet_gate=None;input_gate.request_clear();ws.send(json!({"type":"input_audio_buffer.clear"})).await?;
-                        publish(tx,p,&state,"请重新说一次",0.0);
+                        publish(tx,p,&state,"请重新说一次",0.0,elapsed(start));
                     }
                     continue;
                 }
@@ -536,7 +550,10 @@ async fn conversation(
                 }
                 if let Some(cap)=capture.as_ref(){cap.check()?;}
                 if state.upload_allowed(){input_gate.ensure_utterance_limit(frame.pcm.len()/2,c.interaction.max_utterance_ms)?;ws.append(&frame.pcm).await?;input_gate.uploaded(frame.pcm.len()/2,frame.captured,frame.timestamp_verified)?;}
-                if last_level.elapsed()>=Duration::from_millis(100){publish(tx,p,&state,"正在听",frame.level);last_level=Instant::now();}
+                if last_level.elapsed()>=Duration::from_millis(100){
+                    let text=if state.state==State::FollowUp{followup_text.as_str()}else{"正在听"};
+                    publish(tx,p,&state,text,frame.level,elapsed(start));last_level=Instant::now();
+                }
             },
             event=ws.next()=>{
                 let event=event?;check_error(&event)?;observe_receipt(c,trace,&store,&event)?;
@@ -573,7 +590,7 @@ async fn conversation(
                         ws.send(json!({"type":"input_audio_buffer.clear"})).await?;
                         if let Some(cap)=capture.take(){cap.check()?;cap.stop().await;}
                         while audio_rx.try_recv().is_ok(){}
-                        trace.record("input_committed",&json!({}));publish(tx,p,&state,"正在理解",0.0);
+                        trace.record("input_committed",&json!({}));publish(tx,p,&state,"正在理解",0.0,elapsed(start));
                         let commit_at=Instant::now();
                         let verified=if let Some(binding)=onset_binding.as_ref(){desktop.verify_commit(binding,commit_at).await}else{Err(io::Error::other(onset_error.as_deref().unwrap_or("local_onset_unavailable")))};
                         let (mut context,focus_changed)=match verified {
@@ -601,7 +618,7 @@ async fn conversation(
                         }else{
                             state.claim_plan(epoch,state.turn_epoch,plan.requires_confirmation,elapsed(start));
                             let confirmation=if plan.requires_confirmation {
-                                publish(tx,p,&state,&confirmation_summary(&plan,&context),0.0);
+                                publish(tx,p,&state,&confirmation_summary(&plan,&context),0.0,elapsed(start));
                                 command("set_assistant_status",json!({"assistant_permit":p,"state":"confirming","text":confirmation_summary(&plan,&context),"confirmation":{"plan_hash":plan.plan_hash,"targets":plan.actions,"timeout_ms":c.execution.confirmation_timeout_ms}})).await?;
                                 let token=tokio::time::timeout(Duration::from_millis(c.execution.confirmation_timeout_ms),async {
                                     loop {
@@ -615,12 +632,13 @@ async fn conversation(
                                 }).await.map_err(|_|io::Error::other("confirmation_expired"))??;
                                 state.confirm(epoch,state.turn_epoch,elapsed(start));Some(token)
                             }else{None};
-                            crate::telemetry::mark("execution_started",p.generation,state.turn_epoch);publish(tx,p,&state,"正在执行",0.0);
+                            crate::telemetry::mark("execution_started",p.generation,state.turn_epoch);publish(tx,p,&state,"正在执行",0.0,elapsed(start));
                             if plan.actions.len()==1&&plan.actions[0].name=="undo_last_plan" {executor::undo(p,store.clone(),c).await?}
                             else{executor::execute(&plan,p,confirmation,store.clone(),c).await?}
                         };
                         state.respond(epoch,state.turn_epoch,elapsed(start));
-                        trace.record("verification_completed",&json!({"result":result["status"]}));let text=feedback_text(&result);publish(tx,p,&state,&text,0.0);
+                        trace.record("verification_completed",&json!({"result":result["status"]}));let text=feedback_text(&result);publish(tx,p,&state,&text,0.0,elapsed(start));
+                        followup_text=text.clone();
                         let public_result=cloud_execution_result(&result,&plan,c,&context);
                         command("set_assistant_status",json!({"assistant_permit":p,"state":"responding","text":text,"level":0.0,"microphone_active":false})).await?;
                         ws.send(function_output(&call_id,&public_result)).await?;
@@ -646,7 +664,7 @@ async fn conversation(
                         store.lock().unwrap().reserve_transcription(&transcription_request(p,state.turn_epoch.wrapping_add(1)),c)?;
                         input_gate.request_clear();ws.send(json!({"type":"input_audio_buffer.clear"})).await?;
                         capture=Some(Capture::start(&c.audio.input_device,audio_tx.clone())?);
-                        publish(tx,p,&state,"正在听，可以继续说",0.0);
+                        publish(tx,p,&state,&followup_text,0.0,elapsed(start));
                     },
                     _=>{},
                 }
@@ -705,6 +723,10 @@ fn action_category(name: &str) -> &'static str {
         | "resize_vertical"
         | "layout_picker" => "layout",
         "set_audio_device"
+        | "set_volume"
+        | "adjust_volume"
+        | "set_brightness"
+        | "adjust_brightness"
         | "set_mic_mute"
         | "set_power_profile"
         | "toggle_wifi"
@@ -769,6 +791,10 @@ fn common_specs() -> Vec<jwm_eva_core::actions::ActionSpec> {
                     | "set_window_minimized"
                     | "launch_application"
                     | "undo_last_plan"
+                    | "set_volume"
+                    | "adjust_volume"
+                    | "set_brightness"
+                    | "adjust_brightness"
             )
         })
         .collect()
@@ -1105,7 +1131,10 @@ pub fn cloud_context_for_categories(context: &Value, categories: &[String]) -> V
         .get("activation_monitor_token")
         .filter(|token| !token.is_null())
         .unwrap_or(&context["selected_monitor_token"]);
-    json!({"session_unlocked":context["session_unlocked"],"tag_count":context["tag_count"],"selected_monitor_ref":monitor_ref(selected_monitor),"speech_focus_ref":focus,"speech_focus_uncertain":context["speech_focus_uncertain"].as_bool().unwrap_or(false),"monitors":monitors,"windows":windows,"workspaces":workspaces})
+    let mut desktop = json!({"session_unlocked":context["session_unlocked"],"tag_count":context["tag_count"],"selected_monitor_ref":monitor_ref(selected_monitor),"speech_focus_ref":focus,"speech_focus_uncertain":context["speech_focus_uncertain"].as_bool().unwrap_or(false),"monitors":monitors,"windows":windows,"workspaces":workspaces});
+    desktop["language_context"] =
+        crate::language::desktop_grounding(context, &desktop, include_titles);
+    desktop
 }
 
 fn normalized_error(value: &Value) -> Option<String> {
@@ -1150,6 +1179,22 @@ fn verified_summary(value: &Value) -> Value {
         }) {
             summary.insert(key.into(), value.clone());
         }
+    }
+    if let Some(percent) = value
+        .get("percent")
+        .or_else(|| value["read_back"].get("percent"))
+        .filter(|percent| {
+            percent
+                .as_f64()
+                .is_some_and(|percent| percent.is_finite() && (0.0..=100.0).contains(&percent))
+        })
+    {
+        summary.insert("percent".into(), percent.clone());
+    }
+    if !summary.contains_key("muted")
+        && let Some(muted) = value["read_back"]["muted"].as_bool()
+    {
+        summary.insert("muted".into(), json!(muted));
     }
     if let Some(completion) = value["completion"].as_str().filter(|v| v.len() <= 128) {
         summary.insert("completion".into(), json!(completion));
@@ -1342,6 +1387,9 @@ fn cloud_execution_result(
             }
             if !targets.is_empty() {
                 step["targets"] = Value::Object(targets);
+            }
+            if let Some(effect) = crate::language::repeatable_effect(step, &action.arguments) {
+                step["follow_up"] = effect;
             }
             if step["status"] == "succeeded"
                 && matches!(action.name.as_str(), "query_state" | "query_window")
@@ -1621,10 +1669,73 @@ fn simple_success(result: &Value) -> bool {
                                 | "media_play_pause"
                                 | "media_stop"
                                 | "undo_last_plan"
+                                | "set_volume"
+                                | "adjust_volume"
+                                | "set_brightness"
+                                | "adjust_brightness"
                         )
                     )
                 })
         })
+}
+fn verified_step_feedback(step: &Value) -> Option<String> {
+    if step["status"] != "succeeded" {
+        return None;
+    }
+    let verified = &step["result"]["verified"];
+    let single_tag = |key: &str| {
+        let mask = u32::try_from(verified[key].as_u64()?).ok()?;
+        (mask.count_ones() == 1).then(|| mask.trailing_zeros() + 1)
+    };
+    match step["name"].as_str()? {
+        "switch_tag" | "switch_tags" => {
+            Some(format!("已切到第 {} 个工作区", single_tag("visible_tag_mask")?))
+        }
+        "move_window_to_tag" | "move_window_to_tags" => {
+            Some(format!("窗口已移到第 {} 个工作区", single_tag("tag_mask")?))
+        }
+        "set_layout" | "set_layout_at" => {
+            let name = match verified["layout"].as_str()? {
+                "tile" => "主从平铺",
+                "scrolling" => "滚动",
+                "grid" => "网格",
+                "float" => "浮动",
+                "monocle" => "单窗口",
+                "centered_master" => "居中主窗口",
+                "fullscreen" => "全屏",
+                _ => return None,
+            };
+            Some(format!("已切换为{name}布局"))
+        }
+        "set_window_minimized" => Some(if verified["minimized"].as_bool()? {
+            "窗口已最小化".into()
+        } else {
+            "窗口已恢复".into()
+        }),
+        "set_window_maximized" => Some(if verified["maximized"].as_bool()? {
+            "窗口已最大化".into()
+        } else {
+            "窗口已恢复原尺寸".into()
+        }),
+        "focus_window" => Some("已切换到目标窗口".into()),
+        "set_volume" | "adjust_volume" | "set_brightness" | "adjust_brightness" => {
+            if verified["completion"] != "native_control_readback_observed" {
+                return None;
+            }
+            let actual = &verified["read_back"];
+            let percent = actual["percent"].as_u64().filter(|value| *value <= 100)?;
+            match actual["domain"].as_str()? {
+                "volume" => Some(format!("音量 {percent}%{}", if actual["muted"] == true {
+                    "，输出仍为静音"
+                } else {
+                    ""
+                })),
+                "brightness" => Some(format!("屏幕亮度 {percent}%")),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 fn feedback_text(result: &Value) -> String {
     if result["undo_scope"] == "reversible_changes" {
@@ -1664,6 +1775,19 @@ fn feedback_text(result: &Value) -> String {
     }
     if let Some(q) = result["question"].as_str() {
         return q.to_owned();
+    }
+    if result["status"] == "succeeded"
+        && let Some(steps) = result["steps"].as_array().filter(|steps| (1..=3).contains(&steps.len()))
+        && let Some(lines) = steps.iter().map(verified_step_feedback).collect::<Option<Vec<_>>>()
+    {
+        return format!("{}。", lines.join("；"));
+    }
+    if result["status"] == "partial"
+        && result["steps"].as_array().is_some_and(|steps| steps.iter().any(|step| {
+            matches!(step["status"].as_str(), Some("accepted" | "queued" | "in_flight" | "unknown"))
+        }))
+    {
+        return "部分操作已完成，另有操作尚未确认；未继续后续步骤。".into();
     }
     match result["status"].as_str().unwrap_or("") {
         "succeeded" => "已完成。",
@@ -1954,6 +2078,22 @@ mod tests {
             assert_eq!(public["steps"][0]["verified"]["playback_verified"], true);
             assert_eq!(public["steps"][0]["verified"]["completion"], completion);
         }
+    }
+
+    #[test]
+    fn feedback_names_verified_targets_and_native_levels_without_guessing_success() {
+        let tag = json!({"status":"succeeded","steps":[{"name":"switch_tag","status":"succeeded","result":{"verified":{"visible_tag_mask":4}}}]});
+        assert_eq!(feedback_text(&tag), "已切到第 3 个工作区。");
+        let volume = json!({"status":"succeeded","steps":[{"name":"adjust_volume","status":"succeeded","result":{"verified":{"completion":"native_control_readback_observed","read_back":{"domain":"volume","percent":35,"muted":true}}}}]});
+        assert_eq!(feedback_text(&volume), "音量 35%，输出仍为静音。");
+        let mut pending = volume.clone();
+        pending["status"] = json!("accepted");
+        pending["steps"][0]["status"] = json!("accepted");
+        assert_eq!(feedback_text(&pending), "已提交，正在等待完成。");
+        let question = json!({"status":"clarify","question":"浏览器有两个窗口，你要文档还是视频？","steps":[]});
+        assert_eq!(feedback_text(&question), question["question"].as_str().unwrap());
+        let partial = json!({"status":"partial","steps":[tag["steps"][0].clone(),pending["steps"][0].clone()]});
+        assert!(feedback_text(&partial).contains("尚未确认"));
     }
 
     #[test]
@@ -2396,6 +2536,34 @@ mod tests {
         assert_eq!(cloud["windows"][0]["monitor_ref"], "m1");
     }
     #[test]
+    fn successful_frozen_resize_exports_repeat_hint_with_human_tag_number() {
+        let context = desktop();
+        let plan = jwm_eva_core::actions::FrozenPlan {
+            plan_hash: "p".into(),
+            wm_instance_id: "private-instance".into(),
+            disposition: Disposition::Execute,
+            actions: vec![jwm_eva_core::protocol::Action {
+                name: "resize_horizontal".into(),
+                arguments: json!({"window_token":"private-window-1","monitor_token":"private-monitor","tag_mask":1,"value":-0.05}),
+            }],
+            question: None,
+            reason: None,
+            requires_confirmation: false,
+        };
+        let result = json!({"status":"succeeded","steps":[{"name":"resize_horizontal","status":"succeeded","result":{"verified":{}}}]});
+        let public = cloud_execution_result(&result, &plan, &Config::default(), &context);
+        assert_eq!(public["steps"][0]["follow_up"]["parameters"], json!({"tag_number":1,"value":-0.05}));
+        assert_eq!(public["steps"][0]["follow_up"]["targets"]["window_ref"], "w1");
+        assert!(!public.to_string().contains("private-"));
+    }
+    #[test]
+    fn verified_device_feedback_projects_only_bounded_readback_scalars() {
+        let value = json!({"read_back":{"percent":55,"muted":true,"device_name":"private-device","assistant_permit":"private-permit"}});
+        assert_eq!(verified_summary(&value), json!({"percent":55,"muted":true}));
+        assert_eq!(verified_summary(&json!({"read_back":{"percent":101,"muted":"true"}})), json!({}));
+        assert_eq!(verified_summary(&json!({"read_back":{"percent":-1}})), json!({}));
+    }
+    #[test]
     fn feedback_cannot_leak_nested_execution_authority() {
         let result = cloud_result(
             &json!({"status":"succeeded","result":{"monitor_token":"secret","assistant_permit":{"generation":3},"layout":"grid"}}),
@@ -2408,7 +2576,7 @@ mod tests {
         assert!(describe_categories(r#"{"categories":["bridge_internal"]}"#).is_err());
         assert!(describe_categories(r#"{"categories":["windows"],"execute":true}"#).is_err());
         let specs = common_specs();
-        assert!(specs.len() < 12);
+        assert_eq!(specs.len(), 13);
         assert!(!specs.iter().any(|spec| spec.canonical_name == "set_config"));
         let data = desktop();
         let minimal = cloud_context(&data);

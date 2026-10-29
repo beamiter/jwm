@@ -3856,10 +3856,16 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Rasterize (and cache) the OSD label texture; re-render only when the
-    /// text changed (key repeat updates the percent every event).
-    fn update_eva_texture(&mut self, text: &str, width: u32) {
-        let cache_key = format!("{width}|{text}");
+    /// Upload the shared Eva typography only when content, font or theme changes.
+    fn update_eva_texture(&mut self, text: &str, width: u32, now: std::time::Instant) {
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let ink = ui_theme::palette().osd_ink;
+        let raster = self.eva_overlay.text_raster(now, width);
+        let cache_key = format!(
+            "{width}|{text}|{font}|{ink:?}|{}|{}",
+            raster.width, raster.height
+        );
         if self
             .eva_texture
             .as_ref()
@@ -3870,21 +3876,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some((_, tex, _, _)) = self.eva_texture.take() {
             unsafe { self.gl.delete_texture(tex) };
         }
-        let config = crate::config::CONFIG.load();
-        let description = config.system_ui_font();
-        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        let text = &crate::backend::compositor_common::eva_overlay::fit_eva_label(
-            text,
-            description,
-            size,
-            width,
-        );
-        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
-            text,
-            description,
-            size,
-            ui_theme::palette().osd_ink,
-        );
+        let (pixels, w, h) = (&raster.pixels, raster.width, raster.height);
         if w == 0 || h == 0 {
             return;
         }
@@ -3900,7 +3892,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     0,
                     glow::RGBA,
                     glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                    glow::PixelUnpackData::Slice(Some(pixels)),
                 );
                 for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
                     self.gl
@@ -3959,15 +3951,8 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Volume/brightness OSD: one replace-in-place card docked under the status
-    /// bar — icon+percent label on the left, progress bar on the right — with
-    /// the hold+fade envelope shared with the Wayland backend.
-    ///
-    /// The card springs open out of the bar and morphs when its content changes
-    /// size, so a volume slider replaced by a wider media card travels to the
-    /// new width instead of being swapped for a second card. Its top corners
-    /// are square: that is what makes it read as part of the bar rather than a
-    /// rectangle parked underneath one.
+    /// Persistent floating Eva card using the active glass/flat theme. The
+    /// common raster owns typography and protected confirmation row geometry.
     fn render_eva_overlay(&mut self, proj: &[f32; 16]) {
         if !self.eva_overlay.visible() {
             return;
@@ -3976,11 +3961,12 @@ impl<C: CompositorConnection> Compositor<C> {
         let alpha = self.eva_overlay.alpha(now);
         let text = self.eva_overlay.label(now);
         let fill = self.eva_overlay.level(now);
+        let accent = self.eva_overlay.accent(now);
         let rect = self
             .eva_overlay
             .rect([self.screen_w as f32, self.screen_h as f32]);
         self.eva_overlay.mark_drawn(now);
-        self.update_eva_texture(&text, (rect[2] - 40.0).max(1.0) as u32);
+        self.update_eva_texture(&text, self.eva_overlay.text_width(rect[2]), now);
         let Some((tex, tw, th)) = self.eva_texture.as_ref().map(|(_, t, w, h)| (*t, *w, *h)) else {
             return;
         };
@@ -4001,7 +3987,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 ui.osd,
                 alpha,
             );
-            if let Some(fill) = fill {
+            let rail_width = (w - 48.0).clamp(1.0, 32.0);
+            let rail_height = 2.0_f32.min(h * 0.2);
+            self.sysui_fill_rounded(
+                x + (w - rail_width) * 0.5,
+                y + 10.0_f32.min(h * 0.15),
+                rail_width,
+                rail_height,
+                rail_height * 0.5,
+                [accent[0], accent[1], accent[2], alpha],
+            );
+            if let Some(fill) = fill.filter(|_| w > 40.0 && h > 24.0) {
                 self.sysui_fill_rounded(
                     x + 20.0,
                     y + h - 12.0,
@@ -4016,7 +4012,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     ],
                 );
                 if fill > 0.0 {
-                    let c = self.border_gradient_color_a;
+                    let c = accent;
                     self.sysui_fill_rounded(
                         x + 20.0,
                         y + h - 12.0,
@@ -4038,15 +4034,11 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), alpha);
             self.gl.active_texture(glow::TEXTURE0);
-            let scale = ((w - 40.0) / tw as f32)
-                .min((h - 24.0) / th as f32)
-                .min(1.0)
-                .max(0.01);
-            let (lw, lh) = (tw as f32 * scale, th as f32 * scale);
+            let [tx, ty, lw, lh] = self.eva_overlay.text_rect(rect, [tw, th]);
             self.gl.uniform_4_f32(
                 self.hud_text_uniforms.rect.as_ref(),
-                x + (w - lw) * 0.5,
-                y + (h - lh) * 0.5 - 3.0,
+                tx,
+                ty,
                 lw,
                 lh,
             );

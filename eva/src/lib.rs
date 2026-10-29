@@ -8,6 +8,7 @@ pub mod errors;
 pub mod executor;
 pub mod feedback;
 pub mod input;
+pub mod language;
 pub mod lifecycle;
 pub mod planning_input;
 pub mod providers;

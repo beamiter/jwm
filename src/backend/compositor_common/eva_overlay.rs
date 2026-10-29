@@ -11,6 +11,22 @@ struct ConfirmationLine {
 }
 type ConfirmationCache =
     std::cell::RefCell<Option<(String, [f32; 4], std::sync::Arc<ConfirmationPrepared>)>>;
+type TextCache = std::cell::RefCell<Option<(String, std::sync::Arc<EvaTextRaster>)>>;
+
+/// One cached raster shared by the native GL and nested renderers. Typography,
+/// wrapping and spacing must not vary with the active window-system backend.
+#[derive(Debug)]
+pub(crate) struct EvaTextRaster {
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+struct TextSection {
+    text: String,
+    heading: bool,
+    rows: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaLocalAction {
@@ -35,6 +51,8 @@ pub(crate) struct EvaOverlayState {
     details_page: Option<usize>,
     seen_pages: Vec<usize>,
     deadline: Option<Instant>,
+    followup_deadline: Option<Instant>,
+    followup_drawn: Option<u64>,
     viewport: Option<[f32; 4]>,
     expiry_drawn: bool,
     appeared: Option<Instant>,
@@ -42,6 +60,7 @@ pub(crate) struct EvaOverlayState {
     motion_suppressed: bool,
     last_rect: std::cell::Cell<Option<[f32; 4]>>,
     prepared: ConfirmationCache,
+    text_cache: TextCache,
 }
 
 impl EvaOverlayState {
@@ -53,6 +72,7 @@ impl EvaOverlayState {
             self.session_active,
             self.undo_available,
             self.caption.clone(),
+            self.followup_seconds(now),
         );
         let previous = (
             self.active,
@@ -100,13 +120,7 @@ impl EvaOverlayState {
             .as_str()
             .unwrap_or("idle")
             .to_ascii_lowercase();
-        self.text = snapshot["text"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(96)
-            .collect();
+        self.text = clean(snapshot["text"].as_str().unwrap_or(""), 256);
         self.level = snapshot["level"]
             .as_f64()
             .filter(|x| x.is_finite())
@@ -158,6 +172,17 @@ impl EvaOverlayState {
                     .min(3000),
             )
         });
+        // This is the real follow-up deadline supplied by the WM, not the
+        // heartbeat/permit lease. Merely repainting never grants more time.
+        self.followup_deadline = if self.session_active
+            && matches!(self.state.as_str(), "followup" | "follow_up")
+        {
+            snapshot["followup_remaining_ms"]
+                .as_u64()
+                .map(|remaining| now + Duration::from_millis(remaining.min(600_000)))
+        } else {
+            None
+        };
         self.viewport = snapshot["monitor_rect"].as_array().and_then(|v| {
             if v.len() != 4 {
                 return None;
@@ -182,6 +207,7 @@ impl EvaOverlayState {
                 self.session_active,
                 self.undo_available,
                 self.caption.clone(),
+                self.followup_seconds(now),
             )
             || previous.0 != self.active
             || (self.active
@@ -245,10 +271,12 @@ impl EvaOverlayState {
         (self.expired(now) && !self.expiry_drawn)
             || self.dismissed.is_some()
             || (self.active && self.alpha(now) < 1.0)
+            || self.followup_seconds(now) != self.followup_drawn
     }
 
     pub(crate) fn mark_drawn(&mut self, now: Instant) {
         self.expiry_drawn = self.expired(now);
+        self.followup_drawn = self.followup_seconds(now);
         if self.dismissed.is_some() && self.alpha(now) <= 0.0 {
             self.dismissed = None;
         }
@@ -263,6 +291,14 @@ impl EvaOverlayState {
         self.deadline
             .into_iter()
             .chain(animation)
+            .chain(
+                self.followup_deadline
+                    .filter(|at| self.active && !self.expired(now) && *at > now)
+                    .map(|at| {
+                        let remaining = at.saturating_duration_since(now).as_millis() as u64;
+                        now + Duration::from_millis(remaining.saturating_sub(1) % 1000 + 1)
+                    }),
+            )
             .filter(|at| *at > now)
             .map(|at| at.saturating_duration_since(now))
             .min()
@@ -300,38 +336,85 @@ impl EvaOverlayState {
                 }
             );
         }
-        let title = if self.text.is_empty() {
+        self.text_sections(now)
+            .into_iter()
+            .map(|section| section.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn followup_seconds(&self, now: Instant) -> Option<u64> {
+        (self.active && !self.expired(now))
+            .then_some(self.followup_deadline)
+            .flatten()
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(now)
+                    .as_millis()
+                    .div_ceil(1000) as u64
+            })
+    }
+
+    fn text_sections(&self, now: Instant) -> Vec<TextSection> {
+        let status = match self.state.as_str() {
+            "connecting" => "正在连接",
+            "listening" => "正在听",
+            "planning" => "正在理解",
+            "confirming" => "请确认操作",
+            "executing" => "正在执行",
+            "responding" => "正在反馈",
+            "followup" | "follow_up" => "可以继续说",
+            "closing" => "正在结束",
+            "error" => "需要处理",
+            "unknown" => "等待结果确认",
+            _ => "语音助手",
+        };
+        let compact = self.viewport.is_some_and(|rect| rect[3] < 360.0);
+        let mut sections = vec![TextSection {
+            text: format!("Eva · {status}"),
+            heading: true,
+            rows: 1,
+        }];
+        let text = if !self.text.is_empty() && self.text != status {
+            self.text.as_str()
+        } else {
             match self.state.as_str() {
-                "connecting" => "正在连接",
-                "listening" => "正在听",
-                "planning" => "正在理解",
-                "confirming" => "请确认操作",
-                "executing" => "正在执行",
-                "responding" => "正在反馈",
-                "followup" | "follow_up" => "可以继续说话",
-                "error" => "语音服务暂不可用",
-                "unknown" => "操作结果尚未确认",
-                _ => "语音会话",
+                "listening" => "想做什么，直接说就好",
+                "planning" => "正在结合当前桌面理解你的意思",
+                "followup" | "follow_up" => "可以继续补充或修正刚才的指令",
+                "connecting" => "正在准备语音连接",
+                _ => "",
             }
-        } else {
-            &self.text
         };
-        let hint = if self.state == "error" && self.microphone.is_none() {
-            "麦克风状态待确认"
-        } else if self.microphone_on(now) {
-            "麦克风已开启 · Esc 退出"
-        } else if self.state == "error" {
-            "麦克风未开启"
-        } else {
-            "麦克风已暂停 · Esc 退出"
-        };
-        let mut lines = vec![format!("Eva · {title}")];
-        if !self.caption.is_empty() {
-            lines.push(format!("识别：{}", self.caption));
+        if !text.is_empty() {
+            sections.push(TextSection {
+                text: text.into(),
+                heading: false,
+                rows: if compact { 2 } else { 5 },
+            });
         }
-        lines.push(hint.into());
-        if self.state == "error" {
-            lines.push("Alt+Ctrl+R 重试 · Alt+Ctrl+I 诊断".into());
+        if !self.caption.is_empty() {
+            sections.push(TextSection {
+                text: format!("你说：{}", self.caption),
+                heading: false,
+                rows: if compact { 1 } else { 2 },
+            });
+        }
+        let microphone = if self.state == "error" && self.microphone.is_none() {
+            "麦克风状态待确认".to_owned()
+        } else if self.microphone_on(now) {
+            match self.followup_seconds(now) {
+                Some(0) => "麦克风已开启 · 本轮即将结束".into(),
+                Some(seconds) => format!("麦克风已开启 · 还可说话 {seconds} 秒"),
+                None => "麦克风已开启".into(),
+            }
+        } else if self.state == "error" {
+            "麦克风未开启".into()
+        } else {
+            "麦克风已暂停".into()
+        };
+        let actions = if self.state == "error" {
+            "Alt+Ctrl+R 重试 · Alt+Ctrl+I 诊断 · Esc 退出"
         } else if self.session_active
             && self.undo_available
             && matches!(
@@ -339,9 +422,95 @@ impl EvaOverlayState {
                 "listening" | "followup" | "follow_up" | "responding"
             )
         {
-            lines.push("Alt+Ctrl+Z 撤销可逆更改".into());
+            "Alt+Ctrl+Z 撤销可逆更改 · Esc 退出"
+        } else {
+            "Esc 退出 · Alt+Ctrl+E 结束会话"
+        };
+        sections.push(TextSection {
+            text: microphone,
+            heading: false,
+            rows: 2,
+        });
+        sections.push(TextSection {
+            text: actions.into(),
+            heading: false,
+            rows: 3,
+        });
+        sections
+    }
+
+    /// Text never takes its color from the status accent. The existing OSD
+    /// ink/surface contrast remains valid for light, dark and flat themes.
+    pub(crate) fn accent(&self, now: Instant) -> [f32; 4] {
+        if self.expired(now) || self.state == "error" {
+            [0.92, 0.35, 0.40, 1.0]
+        } else if self.confirmation || self.state == "unknown" {
+            [0.93, 0.67, 0.24, 1.0]
+        } else if self.microphone_on(now) {
+            [0.16, 0.72, 0.56, 1.0]
+        } else {
+            [0.40, 0.53, 0.91, 1.0]
         }
-        lines.join("\n")
+    }
+
+    pub(crate) fn text_width(&self, width: f32) -> u32 {
+        (width - if self.confirmation { 40.0 } else { 48.0 }).max(1.0) as u32
+    }
+
+    pub(crate) fn text_rect(&self, rect: [f32; 4], size: [u32; 2]) -> [f32; 4] {
+        let [x, y, w, h] = rect;
+        let [tw, th] = size.map(|n| n.max(1) as f32);
+        let horizontal = if self.confirmation { 40.0 } else { 48.0 };
+        let vertical = if self.confirmation { 24.0 } else { 52.0 };
+        let scale = ((w - horizontal).max(1.0) / tw)
+            .min((h - vertical).max(1.0) / th)
+            .min(1.0);
+        let (lw, lh) = (tw * scale, th * scale);
+        if self.confirmation {
+            [x + (w - lw) * 0.5, y + (h - lh) * 0.5 - 3.0, lw, lh]
+        } else {
+            [
+                x + 24.0_f32.min((w - lw).max(0.0)),
+                y + (h - lh) * 0.5,
+                lw,
+                lh,
+            ]
+        }
+    }
+
+    pub(crate) fn text_raster(&self, now: Instant, width: u32) -> std::sync::Arc<EvaTextRaster> {
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(font);
+        let ink = super::ui_theme::palette().osd_ink;
+        let label = self.label(now);
+        let compact = self.viewport.is_some_and(|rect| rect[3] < 360.0);
+        let key = format!(
+            "{width}|{font}|{size}|{ink:?}|{}|{compact}|{label}",
+            self.confirmation
+        );
+        if let Some((old, raster)) = self.text_cache.borrow().as_ref()
+            && old == &key
+        {
+            return raster.clone();
+        }
+        let raster = if self.confirmation || self.expired(now) || !self.active {
+            // Confirmation target rows retain their exact baseline, font and
+            // reserved caption row. Presentation never alters review gating.
+            let fitted = fit_eva_label(&label, font, size, width);
+            let (pixels, width, height) =
+                crate::backend::compositor_font::render_ui_text_to_rgba(&fitted, font, size, ink);
+            EvaTextRaster {
+                pixels,
+                width,
+                height,
+            }
+        } else {
+            rasterize_sections(self.text_sections(now), font, size, width, ink)
+        };
+        let raster = std::sync::Arc::new(raster);
+        *self.text_cache.borrow_mut() = Some((key, raster.clone()));
+        raster
     }
 
     pub(crate) fn local_actions(snapshot: &Value) -> Vec<EvaLocalAction> {
@@ -559,17 +728,15 @@ impl EvaOverlayState {
             return rect;
         }
         let [x, y, w, h] = self.viewport.unwrap_or([0.0, 0.0, screen[0], screen[1]]);
-        let width = (w - 32.0).clamp(1.0, if self.confirmation { 880.0 } else { 520.0 });
+        let width = (w - 32.0).clamp(1.0, if self.confirmation { 880.0 } else { 560.0 });
         let desired_h = if self.confirmation {
             let config = crate::config::CONFIG.load();
             let size = crate::backend::compositor_font::ui_font_pixel_size(config.system_ui_font());
             (self.confirmation_layout().text.lines().count() + 1) as f32 * (size * 1.5).ceil()
                 + 32.0
         } else {
-            let config = crate::config::CONFIG.load();
-            let size = crate::backend::compositor_font::ui_font_pixel_size(config.system_ui_font());
-            (self.label(Instant::now()).lines().count() as f32 * (size * 1.5).ceil() + 32.0)
-                .max(104.0)
+            (self.text_raster(Instant::now(), self.text_width(width)).height as f32 + 52.0)
+                .max(132.0)
         };
         let height = (h - 32.0).clamp(1.0, desired_h);
         let rect = [
@@ -582,6 +749,61 @@ impl EvaOverlayState {
         rect
     }
 }
+
+fn rasterize_sections(
+    sections: Vec<TextSection>,
+    font: &str,
+    size: f32,
+    width: u32,
+    ink: [u8; 4],
+) -> EvaTextRaster {
+    use crate::backend::compositor_font::{
+        fit_ui_text_lines, render_ui_text_to_rgba, wrap_ui_text_lines,
+    };
+    let mut parts = Vec::new();
+    let mut total_width = 1_u32;
+    let mut total_height = 0_u32;
+    for section in sections {
+        let section_size = if section.heading { size * 1.16 } else { size };
+        let mut lines = if section.heading {
+            vec![fit_ui_text_lines(&section.text, font, section_size, width)]
+        } else {
+            wrap_ui_text_lines(&section.text, font, section_size, width)
+        };
+        if lines.len() > section.rows {
+            lines.truncate(section.rows);
+            if let Some(last) = lines.last_mut() {
+                *last = fit_ui_text_lines(&format!("{last}…"), font, section_size, width);
+            }
+        }
+        let fitted = fit_ui_text_lines(&lines.join("\n"), font, section_size, width);
+        let (pixels, w, h) = render_ui_text_to_rgba(&fitted, font, section_size, ink);
+        if w == 0 || h == 0 {
+            continue;
+        }
+        if !parts.is_empty() {
+            total_height += 6;
+        }
+        parts.push((pixels, w, h, total_height));
+        total_width = total_width.max(w);
+        total_height += h;
+    }
+    total_height = total_height.max(1);
+    let mut pixels = vec![0_u8; total_width as usize * total_height as usize * 4];
+    for (part, w, h, top) in parts {
+        for row in 0..h as usize {
+            let from = row * w as usize * 4;
+            let to = (top as usize + row) * total_width as usize * 4;
+            pixels[to..to + w as usize * 4].copy_from_slice(&part[from..from + w as usize * 4]);
+        }
+    }
+    EvaTextRaster {
+        pixels,
+        width: total_width,
+        height: total_height,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ConfirmationPrepared {
     signature: u64,
@@ -649,6 +871,118 @@ fn clean(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn eva_result_keeps_its_state_header_and_wraps_unicode_message() {
+        let now = Instant::now();
+        let question = "你是说正在播放视频的浏览器，还是用于查看项目文档的另一个浏览器窗口？".repeat(4);
+        let mut state = EvaOverlayState::default();
+        state.update(
+            &json!({"active":true,"state":"follow_up","text":question,"microphone_active":true,"followup_remaining_ms":5000,"monitor_rect":[0,0,560,720]}),
+            now,
+        );
+        let label = state.label(now);
+        assert!(label.starts_with("Eva · 可以继续说\n"));
+        assert!(label.contains(&question));
+        assert!(label.contains("麦克风已开启"));
+        let raster = state.text_raster(now, 480);
+        assert!(raster.width <= 480);
+        assert!(raster.height > 80);
+        assert_eq!(
+            raster.pixels.len(),
+            raster.width as usize * raster.height as usize * 4
+        );
+        assert!(std::sync::Arc::ptr_eq(&raster, &state.text_raster(now, 480)));
+    }
+
+    #[test]
+    fn eva_audio_level_heartbeat_reuses_the_typography_cache() {
+        let now = Instant::now();
+        let mut state = EvaOverlayState::default();
+        let mut snapshot = json!({"active":true,"state":"listening","microphone_active":true,"level":0.1});
+        state.update(&snapshot, now);
+        let before = state.text_raster(now, 512);
+        snapshot["level"] = json!(0.8);
+        state.update(&snapshot, now + Duration::from_millis(100));
+        let after = state.text_raster(now + Duration::from_millis(100), 512);
+        assert!(std::sync::Arc::ptr_eq(&before, &after));
+        assert_eq!(state.level(now + Duration::from_millis(100)), Some(0.8));
+    }
+
+    #[test]
+    fn eva_countdown_uses_followup_deadline_and_only_wakes_on_second_boundaries() {
+        let now = Instant::now();
+        let mut state = EvaOverlayState::default();
+        state.update(
+            &json!({"active":true,"state":"follow_up","microphone_active":true,"followup_remaining_ms":5000,"lease_remaining_ms":3000}),
+            now,
+        );
+        state.settle_motion_for_test(now);
+        state.mark_drawn(now);
+        assert!(state.label(now).contains("还可说话 5 秒"));
+        assert!(!state.needs_frame(now));
+        assert_eq!(state.next_wakeup(now), Some(Duration::from_secs(1)));
+        let later = now + Duration::from_millis(1100);
+        assert!(state.label(later).contains("还可说话 4 秒"));
+        assert!(state.needs_frame(later));
+        state.mark_drawn(later);
+        assert!(!state.needs_frame(later));
+        assert_eq!(state.next_wakeup(later), Some(Duration::from_millis(900)));
+        let expired = now + Duration::from_secs(4);
+        assert!(!state.label(expired).contains("还可说话"));
+        assert!(state.label(expired).contains("状态待确认"));
+        assert!(!state.microphone_on(expired));
+    }
+
+    #[test]
+    fn eva_absent_followup_deadline_never_invents_a_countdown() {
+        let now = Instant::now();
+        let mut state = EvaOverlayState::default();
+        state.update(&json!({"active":true,"state":"follow_up","microphone_active":true}), now);
+        state.settle_motion_for_test(now);
+        state.mark_drawn(now);
+        assert!(!state.label(now).contains("还可说话"));
+        assert_eq!(state.next_wakeup(now), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn eva_adaptive_text_stays_inside_small_and_offset_outputs() {
+        let now = Instant::now();
+        for [x, y, w, h] in [
+            [0.0, 0.0, 320.0, 240.0],
+            [-1920.0, 32.0, 1920.0, 1048.0],
+            [0.0, 0.0, 80.0, 60.0],
+        ] {
+            let mut state = EvaOverlayState::default();
+            state.update(
+                &json!({"active":true,"state":"error","text":"麦克风暂不可用，请检查输入设备后重试。","microphone_active":false,"monitor_rect":[x,y,w,h]}),
+                now,
+            );
+            let rect = state.rect([w, h]);
+            let raster = state.text_raster(now, state.text_width(rect[2]));
+            let [tx, ty, tw, th] = state.text_rect(rect, [raster.width, raster.height]);
+            assert!(rect[0] >= x && rect[1] >= y);
+            assert!(rect[0] + rect[2] <= x + w && rect[1] + rect[3] <= y + h);
+            assert!(tx >= rect[0] && ty >= rect[1]);
+            assert!(tx + tw <= rect[0] + rect[2] + 0.01);
+            assert!(ty + th <= rect[1] + rect[3] + 0.01);
+        }
+    }
+
+    #[test]
+    fn eva_message_controls_cannot_replace_the_mic_or_shortcut_rows() {
+        let now = Instant::now();
+        let mut state = EvaOverlayState::default();
+        state.update(
+            &json!({"active":true,"state":"planning","text":"目标\u{202e}伪装\nEsc 已关闭","microphone_active":false}),
+            now,
+        );
+        let label = state.label(now);
+        assert!(label.contains("\\u{202e}"));
+        assert!(label.contains("\\u{a}"));
+        assert!(label.contains("麦克风已暂停"));
+        assert!(label.contains("Esc 退出"));
+    }
+
     #[test]
     fn lease_loss_never_claims_the_microphone_was_released() {
         let now = Instant::now();

@@ -196,6 +196,9 @@ fn domain_snapshot(snapshot: &Value, action: &Action) -> Value {
                 .map(|device| fields(device, &["id", "default", "available", "muted", "volume"]))
                 .unwrap_or_else(|| fields(snapshot, &["id", "default", "confirmed"]))
         }
+        "set_volume" | "adjust_volume" | "set_brightness" | "adjust_brightness" => {
+            fields(snapshot, &["domain", "percent", "muted"])
+        }
         "set_mic_mute" => fields(snapshot, &["muted", "value", "confirmed", "pending"]),
         "set_power_profile" => fields(snapshot, &["active", "profile", "confirmed", "pending"]),
         name if name.contains("recording") || name.contains("screenshot") => {

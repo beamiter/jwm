@@ -19,6 +19,11 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
         "context_failed",
         "reply_lost",
         "late_receipt",
+        "level_receipt",
+        "level_unknown",
+        "level_wrong_receipt",
+        "level_multi_stop",
+        "level_multi_success",
     ] {
         let base = if std::path::Path::new("/dev/shm").is_dir() {
             std::path::PathBuf::from("/dev/shm")
@@ -34,7 +39,9 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
         let stop = Arc::new(AtomicBool::new(false));
         let dispatches = Arc::new(Mutex::new(Vec::<Value>::new()));
         let queries = Arc::new(AtomicUsize::new(0));
+        let status_queries = Arc::new(Mutex::new(Vec::<Value>::new()));
         let (s, d, q) = (stop.clone(), dispatches.clone(), queries.clone());
+        let receipts = status_queries.clone();
         let mode = scenario.to_string();
         let server = thread::spawn(move || {
             while !s.load(Ordering::Acquire) {
@@ -67,13 +74,42 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
                             if mode == "reply_lost" {
                                 continue;
                             }
-                            if mode == "second_failed" && count == 2 {
+                            if mode.starts_with("level_") {
+                                json!({"success":true,"data":{"operation_id":request["args"]["operation_id"],"status":"accepted","verified":{"completion":"awaiting_control_readback"}}})
+                            } else if mode == "second_failed" && count == 2 {
                                 json!({"success":false,"error":"target_gone"})
                             } else {
                                 json!({"success":true,"data":{"status":"succeeded","verified":{"minimized":true}}})
                             }
                         } else if request["query"] == "get_execution_status" {
-                            json!({"success":true,"data":{"status":if mode=="late_receipt"{"succeeded"}else{"unknown"},"verified":{"minimized":true}}})
+                            let receipt_count = {
+                                let mut records = receipts.lock().unwrap();
+                                records.push(request.clone());
+                                records
+                                    .iter()
+                                    .filter(|record| {
+                                        record["args"]["operation_id"]
+                                            == request["args"]["operation_id"]
+                                    })
+                                    .count()
+                            };
+                            if mode.starts_with("level_") {
+                                let status = match mode.as_str() {
+                                    "level_unknown" => "unknown",
+                                    "level_wrong_receipt" => "succeeded",
+                                    "level_multi_stop" => "failed",
+                                    _ if receipt_count == 1 => "accepted",
+                                    _ => "succeeded",
+                                };
+                                let operation_id = if mode == "level_wrong_receipt" {
+                                    json!("different-operation")
+                                } else {
+                                    request["args"]["operation_id"].clone()
+                                };
+                                json!({"success":true,"data":{"operation_id":operation_id,"status":status,"verified":{"read_back":{"domain":"volume","percent":45,"muted":false}}}})
+                            } else {
+                                json!({"success":true,"data":{"status":if mode=="late_receipt"{"succeeded"}else{"unknown"},"verified":{"minimized":true}}})
+                            }
                         } else {
                             panic!("unexpected IPC request: {request}")
                         };
@@ -96,7 +132,7 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
         stop.store(true, Ordering::Release);
         server.join().unwrap();
         let count = dispatches.lock().unwrap().len();
-        let expected = if scenario == "second_failed" {
+        let expected = if matches!(scenario, "second_failed" | "level_multi_success") {
             2
         } else if scenario == "late_receipt" {
             0
@@ -114,6 +150,25 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
             count, expected,
             "no mutation may be replayed, and later steps must stop"
         );
+        if scenario.starts_with("level_") {
+            let records = dispatches.lock().unwrap();
+            let receipts = status_queries.lock().unwrap();
+            assert!(!receipts.is_empty(), "{scenario}: acceptance needs read-back");
+            for receipt in receipts.iter() {
+                assert_eq!(receipt["args"]["wm_instance_id"], "test-wm");
+                assert!(
+                    records.iter().any(|record| {
+                        record["args"]["operation_id"] == receipt["args"]["operation_id"]
+                    }),
+                    "{scenario}: status query must address an already dispatched operation"
+                );
+            }
+            if matches!(scenario, "level_receipt" | "level_multi_success") {
+                assert_eq!(receipts.len(), 2 * count, "must wait past accepted to a receipt");
+            } else {
+                assert_eq!(receipts.len(), 1, "unknown or failure must not be polled into a retry");
+            }
+        }
     }
 }
 #[test]
@@ -151,15 +206,30 @@ fn executor_child() {
             assert!(store.lock().unwrap().ledger.operations.values().all(|record|record.state==OperationState::Succeeded),"read-only reconciliation must accept old real receipts beyond the first sixteen");
             return;
         }
-        let action = Action {
-            name: "set_window_minimized".into(),
-            arguments: json!({"window_token":"original-window","enabled":true}),
+        let level = scenario.starts_with("level_");
+        let action = if level {
+            Action {
+                name: "adjust_volume".into(),
+                arguments: json!({"delta":-5}),
+            }
+        } else {
+            Action {
+                name: "set_window_minimized".into(),
+                arguments: json!({"window_token":"original-window","enabled":true}),
+            }
+        };
+        let actions = if matches!(scenario.as_str(), "level_multi_stop" | "level_multi_success") {
+            vec![action.clone(), action]
+        } else if level {
+            vec![action]
+        } else {
+            vec![action.clone(), action.clone(), action]
         };
         let plan = FrozenPlan {
             plan_hash: "123456789abcdef".into(),
             wm_instance_id: "test-wm".into(),
             disposition: Disposition::Execute,
-            actions: vec![action.clone(), action.clone(), action],
+            actions,
             question: None,
             reason: None,
             requires_confirmation: false,
@@ -171,12 +241,34 @@ fn executor_child() {
                 generation: 1,
             },
             None,
-            store,
+            store.clone(),
             &config,
         )
         .await
         .unwrap();
-        if scenario == "reply_lost" {
+        if level {
+            let expected_status = match scenario.as_str() {
+                "level_receipt" | "level_multi_success" => "succeeded",
+                "level_multi_stop" => "failed",
+                _ => "unknown",
+            };
+            assert_eq!(result["status"], expected_status, "{scenario}");
+            let expected_steps = usize::from(scenario == "level_multi_success") + 1;
+            assert_eq!(result["steps"].as_array().unwrap().len(), expected_steps);
+            assert_eq!(
+                result["unexecuted_steps"],
+                usize::from(scenario == "level_multi_stop"),
+                "the remaining plan must stop without a verified receipt"
+            );
+            let storage = store.lock().unwrap();
+            assert_eq!(storage.ledger.operations.len(), expected_steps);
+            if expected_status == "succeeded" {
+                assert!(storage.ledger.operations.values().all(|record| {
+                    record.state == jwm_eva_core::ledger::OperationState::Succeeded
+                }));
+                assert_eq!(result["steps"][0]["result"]["verified"]["read_back"]["percent"], 45);
+            }
+        } else if scenario == "reply_lost" {
             assert_eq!(result["status"], "unknown");
             assert_eq!(result["steps"].as_array().unwrap().len(), 1);
         } else {

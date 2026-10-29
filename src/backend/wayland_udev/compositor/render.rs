@@ -8408,10 +8408,22 @@ impl WaylandCompositor {
         self.refresh_toast_hover(now);
     }
 
-    /// Rasterize (and cache) the OSD label texture; re-render only when the
-    /// text changed (key repeat updates the percent every event).
-    unsafe fn update_eva_texture(&mut self, gl: &ffi::Gles2, text: &str, width: u32) {
-        let cache_key = format!("{width}|{text}");
+    /// Upload the shared Eva typography only when content, font or theme changes.
+    unsafe fn update_eva_texture(
+        &mut self,
+        gl: &ffi::Gles2,
+        text: &str,
+        width: u32,
+        now: std::time::Instant,
+    ) {
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let ink = ui_theme::palette().osd_ink;
+        let raster = self.eva_overlay.text_raster(now, width);
+        let cache_key = format!(
+            "{width}|{text}|{font}|{ink:?}|{}|{}",
+            raster.width, raster.height
+        );
         if self
             .eva_texture
             .as_ref()
@@ -8422,21 +8434,7 @@ impl WaylandCompositor {
         if let Some((_, tex, _, _)) = self.eva_texture.take() {
             unsafe { gl.DeleteTextures(1, &tex) };
         }
-        let config = crate::config::CONFIG.load();
-        let description = config.system_ui_font();
-        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        let text = &crate::backend::compositor_common::eva_overlay::fit_eva_label(
-            text,
-            description,
-            size,
-            width,
-        );
-        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
-            text,
-            description,
-            size,
-            ui_theme::palette().osd_ink,
-        );
+        let (pixels, w, h) = (&raster.pixels, raster.width, raster.height);
         if w == 0 || h == 0 {
             return;
         }
@@ -8505,9 +8503,8 @@ impl WaylandCompositor {
         }
     }
 
-    /// Volume/brightness OSD: one replace-in-place pill card at the bottom
-    /// center — icon+percent label on the left, progress bar on the right —
-    /// with the hold+fade envelope shared with the X11 backend.
+    /// Persistent floating Eva card using the active glass/flat theme. The
+    /// common raster owns typography and protected confirmation row geometry.
     unsafe fn render_eva_overlay(
         &mut self,
         gl: &ffi::Gles2,
@@ -8521,11 +8518,12 @@ impl WaylandCompositor {
         let alpha = self.eva_overlay.alpha(now);
         let text = self.eva_overlay.label(now);
         let fill = self.eva_overlay.level(now);
+        let accent = self.eva_overlay.accent(now);
         let rect = self
             .eva_overlay
             .rect([self.screen_w as f32, self.screen_h as f32]);
         self.eva_overlay.mark_drawn(now);
-        unsafe { self.update_eva_texture(gl, &text, (rect[2] - 40.0).max(1.0) as u32) };
+        unsafe { self.update_eva_texture(gl, &text, self.eva_overlay.text_width(rect[2]), now) };
         let Some((tex, tw, th)) = self.eva_texture.as_ref().map(|(_, t, w, h)| (*t, *w, *h)) else {
             return;
         };
@@ -8548,7 +8546,18 @@ impl WaylandCompositor {
                 alpha,
                 scene_linear,
             );
-            if let Some(fill) = fill {
+            let rail_width = (w - 48.0).clamp(1.0, 32.0);
+            let rail_height = 2.0_f32.min(h * 0.2);
+            self.sysui_fill_rounded(
+                gl,
+                x + (w - rail_width) * 0.5,
+                y + 10.0_f32.min(h * 0.15),
+                rail_width,
+                rail_height,
+                rail_height * 0.5,
+                [accent[0], accent[1], accent[2], alpha],
+            );
+            if let Some(fill) = fill.filter(|_| w > 40.0 && h > 24.0) {
                 self.sysui_fill_rounded(
                     gl,
                     x + 20.0,
@@ -8564,7 +8573,7 @@ impl WaylandCompositor {
                     ],
                 );
                 if fill > 0.0 {
-                    let c = self.border_gradient_color_a;
+                    let c = accent;
                     self.sysui_fill_rounded(
                         gl,
                         x + 20.0,
@@ -8585,12 +8594,8 @@ impl WaylandCompositor {
             gl.Uniform1i(tp, 0);
             gl.Uniform1f(op, alpha);
             gl.ActiveTexture(ffi::TEXTURE0);
-            let scale = ((w - 40.0) / tw as f32)
-                .min((h - 24.0) / th as f32)
-                .min(1.0)
-                .max(0.01);
-            let (lw, lh) = (tw as f32 * scale, th as f32 * scale);
-            gl.Uniform4f(rp, x + (w - lw) * 0.5, y + (h - lh) * 0.5 - 3.0, lw, lh);
+            let [tx, ty, lw, lh] = self.eva_overlay.text_rect(rect, [tw, th]);
+            gl.Uniform4f(rp, tx, ty, lw, lh);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             gl.BindVertexArray(0);

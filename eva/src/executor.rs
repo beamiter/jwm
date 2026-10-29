@@ -300,6 +300,15 @@ async fn execute_with_step_budget(
         } else {
             dispatch_once(json!(request), &id, &plan.wm_instance_id, dispatch_deadline).await
         };
+        let result = if matches!(
+            action.name.as_str(),
+            "set_volume" | "adjust_volume" | "set_brightness" | "adjust_brightness"
+        ) && dispatched
+        {
+            settle_level_control(result, &id, &plan.wm_instance_id, dispatch_deadline).await
+        } else {
+            result
+        };
         let status = result["status"].as_str().unwrap_or("unknown").to_owned();
         crate::telemetry::event(
             if status == "succeeded" {
@@ -437,6 +446,48 @@ async fn dispatch_once(
                 _ => json!({"status":"unknown","error":"ipc_timeout"}),
             };
             (result, true)
+        }
+    }
+}
+/// Wait only for the submitted operation's receipt. Queries can settle an
+/// accepted control, but never re-dispatch it or infer success from an OSD.
+async fn settle_level_control(
+    mut result: Value,
+    id: &str,
+    instance: &str,
+    dispatch_deadline: std::time::Instant,
+) -> Value {
+    let deadline = dispatch_deadline.min(
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    );
+    loop {
+        if result["operation_id"].as_str() != Some(id) {
+            return json!({"operation_id":id,"status":"unknown","error":"control_receipt_mismatch"});
+        }
+        if !matches!(result["status"].as_str(), Some("accepted" | "queued" | "in_flight")) {
+            return result;
+        }
+        let observed = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            query("get_execution_status", json!({"operation_id":id,"wm_instance_id":instance})),
+        ).await;
+        match observed {
+            Ok(Ok(receipt)) => result = receipt,
+            _ => {
+                result["status"] = json!("unknown");
+                result["error"] = json!("control_readback_unavailable");
+                return result;
+            }
+        }
+        if matches!(result["status"].as_str(), Some("accepted" | "queued" | "in_flight")) {
+            if std::time::Instant::now() >= deadline {
+                result["status"] = json!("unknown");
+                result["error"] = json!("control_readback_timeout");
+                return result;
+            }
+            tokio::time::sleep_until(tokio::time::Instant::from_std(
+                deadline.min(std::time::Instant::now() + std::time::Duration::from_millis(40)),
+            )).await;
         }
     }
 }
