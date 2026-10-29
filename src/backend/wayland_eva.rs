@@ -40,11 +40,17 @@ impl EvaElement {
         let (w, h) = (w.round().max(1.0) as usize, h.round().max(1.0) as usize);
         let label = self.state.label(now);
         let level = self.state.level(now);
-        let key = format!("{label}|{level:?}|{w}|{h}");
+        let ui = ui_theme::palette();
+        let cfg = crate::config::CONFIG.load();
+        let font = cfg.system_ui_font();
+        let accent = self.state.accent(now);
+        let key = format!(
+            "{label}|{level:?}|{w}|{h}|{font}|{:?}|{:?}|{accent:?}",
+            ui.osd, ui.osd_ink
+        );
         if self.cached.as_ref().is_none_or(|(old, _)| old != &key) {
-            let ui = ui_theme::palette();
             let mut pixels = vec![0u8; w * h * 4];
-            let r = 16.0f32.min(w as f32 / 2.0).min(h as f32 / 2.0);
+            let r = ui.osd_radius.min(w as f32 / 2.0).min(h as f32 / 2.0);
             for yy in 0..h {
                 for xx in 0..w {
                     let cx = (xx as f32).clamp(r, w as f32 - r);
@@ -61,48 +67,49 @@ impl EvaElement {
                     px[3] = (ui.osd[3] * 255.0) as u8;
                 }
             }
-            let cfg = crate::config::CONFIG.load();
-            let font = cfg.system_ui_font();
-            let font_size = crate::backend::compositor_font::ui_font_pixel_size(font);
-            let fitted = crate::backend::compositor_common::eva_overlay::fit_eva_label(
-                &label,
-                font,
-                font_size,
-                w.saturating_sub(40) as u32,
+            let raster = self.state.text_raster(now, self.state.text_width(w as f32));
+            let (tw, th) = (raster.width as usize, raster.height as usize);
+            let [tx, ty, rw, rh] = self.state.text_rect(
+                [0.0, 0.0, w as f32, h as f32],
+                [raster.width, raster.height],
             );
-            let (text, tw, th) = crate::backend::compositor_font::render_ui_text_to_rgba(
-                &fitted, font, font_size, ui.osd_ink,
-            );
-            let (tw, th) = (tw as usize, th as usize);
-            let ox = w.saturating_sub(tw) / 2;
-            let oy = h.saturating_sub(th) / 2;
-            for ty in 0..th.min(h) {
-                for tx in 0..tw.min(w) {
-                    if ox + tx >= w || oy + ty >= h {
-                        continue;
+            let (rw, rh) = (rw.round().max(1.0) as usize, rh.round().max(1.0) as usize);
+            let (ox, oy) = (tx.max(0.0) as usize, ty.max(0.0) as usize);
+            if tw > 0 && th > 0 {
+                for yy in 0..rh.min(h.saturating_sub(oy)) {
+                    for xx in 0..rw.min(w.saturating_sub(ox)) {
+                        let (sx, sy) = (xx * tw / rw, yy * th / rh);
+                        let src = &raster.pixels[(sy * tw + sx) * 4..(sy * tw + sx + 1) * 4];
+                        let dst = &mut pixels
+                            [((oy + yy) * w + ox + xx) * 4..((oy + yy) * w + ox + xx + 1) * 4];
+                        let a = src[3] as u32;
+                        for c in 0..3 {
+                            dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+                        }
+                        dst[3] = (a + (dst[3] as u32 * (255 - a)) / 255).min(255) as u8;
                     }
-                    let src = &text[(ty * tw + tx) * 4..(ty * tw + tx + 1) * 4];
-                    let dst = &mut pixels
-                        [((oy + ty) * w + ox + tx) * 4..((oy + ty) * w + ox + tx + 1) * 4];
-                    let a = src[3] as u32;
-                    for c in 0..3 {
-                        dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
-                    }
-                    dst[3] = (a + (dst[3] as u32 * (255 - a)) / 255).min(255) as u8;
                 }
             }
-            if let Some(level) = level {
-                let count = ((w.saturating_sub(40)) as f32 * level) as usize;
-                for yy in h.saturating_sub(12)..h.saturating_sub(9) {
-                    for xx in 20..w.saturating_sub(20) {
-                        let color = if xx - 20 < count {
-                            ui.osd_ink
-                        } else {
-                            [80, 80, 80, 255]
-                        };
-                        pixels[(yy * w + xx) * 4..(yy * w + xx + 1) * 4].copy_from_slice(&color);
-                    }
-                }
+            let rail_width = w.saturating_sub(48).clamp(1, 32);
+            paint_box(
+                &mut pixels,
+                (w, h),
+                [(w - rail_width) / 2, 10.min(h / 6), rail_width, 2.min(h)],
+                accent,
+            );
+            if let Some(level) = level.filter(|_| w > 40 && h > 24) {
+                paint_box(
+                    &mut pixels,
+                    (w, h),
+                    [20, h - 12, w - 40, 3],
+                    ui.slider_track,
+                );
+                paint_box(
+                    &mut pixels,
+                    (w, h),
+                    [20, h - 12, ((w - 40) as f32 * level) as usize, 3],
+                    accent,
+                );
             }
             self.cached = Some((
                 key,
@@ -127,5 +134,22 @@ impl EvaElement {
             Kind::Unspecified,
         )
         .ok()
+    }
+}
+
+/// Blend into the premultiplied fallback card. Theme colors retain their own
+/// alpha; a quiet microphone does not acquire a fake waveform or activity.
+fn paint_box(pixels: &mut [u8], size: (usize, usize), rect: [usize; 4], color: [f32; 4]) {
+    let (w, h) = size;
+    let [x, y, width, height] = rect;
+    let alpha = color[3].clamp(0.0, 1.0);
+    for yy in y.min(h)..y.saturating_add(height).min(h) {
+        for xx in x.min(w)..x.saturating_add(width).min(w) {
+            let dst = &mut pixels[(yy * w + xx) * 4..(yy * w + xx + 1) * 4];
+            for c in 0..3 {
+                dst[c] = (color[c] * alpha * 255.0 + dst[c] as f32 * (1.0 - alpha)) as u8;
+            }
+            dst[3] = (alpha * 255.0 + dst[3] as f32 * (1.0 - alpha)) as u8;
+        }
     }
 }

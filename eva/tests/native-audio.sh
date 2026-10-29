@@ -15,9 +15,16 @@ case "$graph_rate" in
     24000|48000) ;;
     *) echo 'JWM_EVA_TEST_GRAPH_RATE must be 24000 or 48000' >&2; exit 2 ;;
 esac
-for executable in pipewire pipewire-media-session pw-cli pw-dump python3 rg; do
+for executable in pipewire pw-cli pw-dump python3 rg; do
     command -v "$executable" >/dev/null || { echo "missing test dependency: $executable" >&2; exit 1; }
 done
+session_manager=pipewire-media-session
+if command -v wireplumber >/dev/null && [[ "$(wireplumber --version)" == *'libwireplumber 0.4.'* ]]; then
+    session_manager=wireplumber
+elif ! command -v pipewire-media-session >/dev/null; then
+    echo 'missing compatible session manager: install WirePlumber 0.4 (Ubuntu 24.04) or pipewire-media-session' >&2
+    exit 1
+fi
 runtime_dir=$(mktemp -d /tmp/jwm-eva-pw-XXXXXX)
 chmod 700 "$runtime_dir"
 mkdir -m700 "$runtime_dir/config" "$runtime_dir/state" "$runtime_dir/data" "$runtime_dir/pulse"
@@ -113,7 +120,7 @@ CONFIG
 # particular, PULSE_SERVER would make automatic backend selection choose PA
 # instead of this private graph. Leave it absent so the only PA probe is the
 # nonexistent pulse/native socket under our own XDG_RUNTIME_DIR.
-for audio_variable in "${!PULSE_@}" "${!PIPEWIRE_@}"; do
+for audio_variable in "${!PULSE_@}" "${!PIPEWIRE_@}" "${!WIREPLUMBER_@}"; do
     [[ -z "$audio_variable" ]] || unset "$audio_variable"
 done
 export XDG_RUNTIME_DIR="$runtime_dir"
@@ -171,6 +178,40 @@ CONFIG
 # media-session 0.4 resolves both -c and its fallback client configuration
 # relative to the media-session.d namespace, even when -c looks absolute.
 cp "$runtime_dir/config/client.conf" "$runtime_dir/config/media-session.d/client.conf"
+# WirePlumber 0.4 provides the same native linking policy on distributions
+# without media-session. Load only the needed modules/scripts, never main.lua,
+# bluetooth.lua or any hardware/portal monitor from the desktop configuration.
+# 0.5 has a different policy/configuration API and must not silently use this.
+cat > "$runtime_dir/config/eva-native-wireplumber.conf" <<'CONFIG'
+context.properties = {
+    support.dbus = false
+    wireplumber.script-engine = lua-scripting
+    wireplumber.export-core = false
+}
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.* = support/libspa-support
+}
+context.modules = [
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-client-device }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-metadata }
+    { name = libpipewire-module-session-manager }
+]
+wireplumber.components = [
+    { name = libwireplumber-module-lua-scripting, type = module }
+    { name = libwireplumber-module-si-node, type = module }
+    { name = libwireplumber-module-si-audio-adapter, type = module }
+    { name = libwireplumber-module-si-standard-link, type = module }
+    { name = libwireplumber-module-si-audio-endpoint, type = module }
+    { name = libwireplumber-module-default-nodes, type = module }
+    { name = libwireplumber-module-default-nodes-api, type = module }
+    { name = create-item.lua, type = script/lua }
+    { name = policy-node.lua, type = script/lua }
+]
+CONFIG
 server_binary=${JWM_EVA_PIPEWIRE_SERVER:-pipewire}
 pw_cli_command=(pw-cli)
 pw_dump_command=(pw-dump)
@@ -197,7 +238,11 @@ for _ in {1..100}; do
     kill -0 "$pw_pid" 2>/dev/null || { cat "$runtime_dir/server.log" >&2; exit 1; }
     sleep 0.02
 done
-pipewire-media-session -c media-session.conf >"$runtime_dir/manager.log" 2>&1 &
+if [[ "$session_manager" == wireplumber ]]; then
+    WIREPLUMBER_CONFIG_DIR="$runtime_dir/config" wireplumber -c eva-native-wireplumber.conf >"$runtime_dir/manager.log" 2>&1 &
+else
+    pipewire-media-session -c media-session.conf >"$runtime_dir/manager.log" 2>&1 &
+fi
 manager_pid=$!
 manager_ready=false
 for _ in {1..100}; do
@@ -264,3 +309,4 @@ if "${pw_cli_command[@]}" ls Node | rg -q 'node.name = "jwm-eva\.(capture|playba
     echo "Eva left an audio stream after capture.stop/playback.finish" >&2
     exit 1
 fi
+

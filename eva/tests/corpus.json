@@ -80,7 +80,8 @@
         "no conversation referent for 那个/它/过去",
         "browser matches w2 and w3",
         "外接屏 has two candidates where needed"
-      ]
+      ],
+      "confirmed_reference": null
     },
     "media_playing": {
       "inherits": "standard",
@@ -136,6 +137,297 @@
     "media_paused": {
       "inherits": "standard",
       "media_state": "Paused"
+    },
+    "tag_three": {
+      "inherits": "standard",
+      "selected_monitor": "m1",
+      "monitors": [
+        {
+          "ref": "m1",
+          "connector": "DP-1",
+          "position": "left",
+          "visible_tags": [
+            3
+          ]
+        },
+        {
+          "ref": "m2",
+          "connector": "HDMI-1",
+          "position": "right",
+          "visible_tags": [
+            2
+          ]
+        }
+      ]
+    },
+    "tag_nine": {
+      "inherits": "standard",
+      "selected_monitor": "m1",
+      "monitors": [
+        {
+          "ref": "m1",
+          "connector": "DP-1",
+          "position": "left",
+          "visible_tags": [
+            9
+          ]
+        },
+        {
+          "ref": "m2",
+          "connector": "HDMI-1",
+          "position": "right",
+          "visible_tags": [
+            2
+          ]
+        }
+      ]
+    },
+    "multiple_visible_tags": {
+      "inherits": "standard",
+      "selected_monitor": "m1",
+      "monitors": [
+        {
+          "ref": "m1",
+          "connector": "DP-1",
+          "position": "left",
+          "visible_tags": [
+            1,
+            3
+          ]
+        },
+        {
+          "ref": "m2",
+          "connector": "HDMI-1",
+          "position": "right",
+          "visible_tags": [
+            2
+          ]
+        }
+      ]
+    },
+    "recent_editor_focus": {
+      "inherits": "standard",
+      "speech_start_focus": "w1",
+      "focus_history_oldest_first": [
+        "w3",
+        "w2",
+        "w1"
+      ],
+      "notes": [
+        "w2 is the nearest distinct focus before w1; all three instances are still alive"
+      ]
+    },
+    "previous_focus_gone": {
+      "inherits": "standard",
+      "speech_start_focus": "w1",
+      "focus_history_oldest_first": [
+        "w3",
+        "removed-window",
+        "w1"
+      ],
+      "notes": [
+        "nearest previous window no longer exists; do not silently skip to older w3"
+      ]
+    },
+    "no_previous_focus": {
+      "inherits": "standard",
+      "speech_start_focus": "w1",
+      "focus_history_oldest_first": [
+        "w1"
+      ]
+    },
+    "one_browser": {
+      "inherits": "standard",
+      "windows": [
+        {
+          "ref": "w1",
+          "app": "editor",
+          "class": "code",
+          "title": "JWM",
+          "monitor_ref": "m1",
+          "tags": [
+            1
+          ]
+        },
+        {
+          "ref": "w2",
+          "app": "browser",
+          "class": "firefox",
+          "title": "项目文档",
+          "monitor_ref": "m1",
+          "tags": [
+            3
+          ]
+        }
+      ]
+    },
+    "two_terminals": {
+      "inherits": "standard",
+      "windows": [
+        {
+          "ref": "w1",
+          "app": "terminal",
+          "class": "Ember",
+          "title": "JWM / 编译",
+          "monitor_ref": "m1",
+          "tags": [
+            1
+          ]
+        },
+        {
+          "ref": "w4",
+          "app": "terminal",
+          "class": "Frost",
+          "title": "日志",
+          "monitor_ref": "m2",
+          "tags": [
+            2
+          ]
+        }
+      ]
+    },
+    "two_right_monitors": {
+      "inherits": "standard",
+      "monitors": [
+        {
+          "ref": "m1",
+          "position": "left",
+          "visible_tags": [
+            1
+          ]
+        },
+        {
+          "ref": "m2",
+          "position": "upper-right",
+          "visible_tags": [
+            2
+          ]
+        },
+        {
+          "ref": "m3",
+          "position": "lower-right",
+          "visible_tags": [
+            4
+          ]
+        }
+      ]
+    },
+    "no_monitor_geometry": {
+      "inherits": "standard",
+      "notes": [
+        "all monitor positions and geometry unavailable; connector labels remain available",
+        "monitor enumeration order does not establish left/right placement"
+      ],
+      "monitors": [
+        {
+          "ref": "m1",
+          "connector": "DP-1",
+          "visible_tags": [
+            1
+          ]
+        },
+        {
+          "ref": "m2",
+          "connector": "HDMI-1",
+          "visible_tags": [
+            2
+          ]
+        }
+      ]
+    },
+    "maximized_window": {
+      "inherits": "standard",
+      "window_state": {
+        "ref": "w1",
+        "maximized": true
+      }
+    },
+    "clarifying_browser": {
+      "inherits": "standard",
+      "previous_turn": {
+        "status": "clarify",
+        "question": "是第三个工作区的项目文档，还是右屏的邮件？",
+        "candidate_window_refs": [
+          "w2",
+          "w3"
+        ]
+      }
+    },
+    "recent_failed_window_action": {
+      "inherits": "standard",
+      "previous_turn": {
+        "status": "failed",
+        "target_window_ref": "w2"
+      },
+      "notes": [
+        "failed attempt is not a verified conversational referent"
+      ],
+      "confirmed_reference": null
+    },
+    "after_volume_down": {
+      "inherits": "standard",
+      "previous_turn": {
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "adjust_volume",
+            "status": "succeeded",
+            "requested_delta": -5,
+            "verified_percent": 45
+          }
+        ]
+      },
+      "notes": [
+        "single repeatable verified relative effect on system default output; no named-device targeting implied"
+      ]
+    },
+    "after_brightness_up": {
+      "inherits": "standard",
+      "previous_turn": {
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "adjust_brightness",
+            "status": "succeeded",
+            "requested_delta": 5,
+            "verified_percent": 60
+          }
+        ]
+      },
+      "notes": [
+        "single repeatable verified relative effect"
+      ]
+    },
+    "after_two_relative_changes": {
+      "inherits": "standard",
+      "previous_turn": {
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "adjust_volume",
+            "status": "succeeded",
+            "requested_delta": -5
+          },
+          {
+            "name": "adjust_brightness",
+            "status": "succeeded",
+            "requested_delta": 5
+          }
+        ]
+      }
+    },
+    "after_absolute_volume": {
+      "inherits": "standard",
+      "previous_turn": {
+        "status": "succeeded",
+        "steps": [
+          {
+            "name": "set_volume",
+            "status": "succeeded",
+            "verified_percent": 50
+          }
+        ]
+      }
     }
   },
   "cases": [
@@ -2252,7 +2544,9 @@
         "actions": [
           {
             "name": "control_center",
-            "arguments": {}
+            "arguments": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -2268,7 +2562,9 @@
         "actions": [
           {
             "name": "calendar",
-            "arguments": {}
+            "arguments": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -2284,7 +2580,9 @@
         "actions": [
           {
             "name": "notification_center",
-            "arguments": {}
+            "arguments": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -2300,7 +2598,9 @@
         "actions": [
           {
             "name": "wallpaper_picker",
-            "arguments": {}
+            "arguments": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -2316,7 +2616,9 @@
         "actions": [
           {
             "name": "app_launcher",
-            "arguments": {}
+            "arguments": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -2332,7 +2634,9 @@
         "actions": [
           {
             "name": "bluetooth_picker",
-            "arguments": {}
+            "arguments": {
+              "enabled": true
+            }
           }
         ]
       }
@@ -2706,6 +3010,1608 @@
         ],
         "invariants": [
           "never use PlayPause for an explicit play request"
+        ]
+      }
+    },
+    {
+      "id": "eva-154",
+      "category": "colloquial_workspace",
+      "scenario": "standard",
+      "text": "Eva，麻烦带我去三号桌面，谢谢",
+      "expected": {
+        "disposition": "execute",
+        "intent": "polite and mixed-language workspace alias resolves tag 3",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-155",
+      "category": "colloquial_workspace",
+      "scenario": "standard",
+      "text": "帮我切去 workspace three 好吗",
+      "expected": {
+        "disposition": "execute",
+        "intent": "polite and mixed-language workspace alias resolves tag 3",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-156",
+      "category": "colloquial_workspace",
+      "scenario": "standard",
+      "text": "去第三个工作区就行",
+      "expected": {
+        "disposition": "execute",
+        "intent": "polite and mixed-language workspace alias resolves tag 3",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-157",
+      "category": "relative_workspace",
+      "scenario": "standard",
+      "text": "去下一个工作区",
+      "expected": {
+        "disposition": "execute",
+        "intent": "one visible tag allows bounded next tag",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-158",
+      "category": "relative_workspace",
+      "scenario": "tag_three",
+      "text": "再往后翻一个桌面",
+      "expected": {
+        "disposition": "execute",
+        "intent": "tag 3 advances exactly one",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 4
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-159",
+      "category": "relative_workspace",
+      "scenario": "tag_three",
+      "text": "回前一个工作区",
+      "expected": {
+        "disposition": "execute",
+        "intent": "tag 3 moves to tag 2",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-160",
+      "category": "relative_workspace",
+      "scenario": "tag_nine",
+      "text": "去下一个工作区",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "last configured tag does not implicitly wrap",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-161",
+      "category": "relative_workspace",
+      "scenario": "standard",
+      "text": "回前一个工作区",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "first configured tag does not implicitly wrap",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-162",
+      "category": "relative_workspace",
+      "scenario": "multiple_visible_tags",
+      "text": "去下一个工作区",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "multiple visible tags do not identify a single ordinal anchor",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-163",
+      "category": "colloquial_window",
+      "scenario": "standard",
+      "text": "把这个窗口先收起来",
+      "expected": {
+        "disposition": "execute",
+        "intent": "minimize the speech-bound window",
+        "actions": [
+          {
+            "name": "set_window_minimized",
+            "arguments": {
+              "window_ref": "w1",
+              "minimized": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-164",
+      "category": "colloquial_window",
+      "scenario": "standard",
+      "text": "minimize this one please",
+      "expected": {
+        "disposition": "execute",
+        "intent": "minimize the speech-bound window",
+        "actions": [
+          {
+            "name": "set_window_minimized",
+            "arguments": {
+              "window_ref": "w1",
+              "minimized": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-165",
+      "category": "colloquial_window",
+      "scenario": "standard",
+      "text": "这个窗口铺满屏幕吧",
+      "expected": {
+        "disposition": "execute",
+        "intent": "maximize window, not change the whole workspace layout",
+        "actions": [
+          {
+            "name": "set_window_maximized",
+            "arguments": {
+              "window_ref": "w1",
+              "enabled": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-166",
+      "category": "colloquial_window",
+      "scenario": "maximized_window",
+      "text": "这个别占满屏幕了，恢复普通大小",
+      "expected": {
+        "disposition": "execute",
+        "intent": "disable maximize idempotently",
+        "actions": [
+          {
+            "name": "set_window_maximized",
+            "arguments": {
+              "window_ref": "w1",
+              "enabled": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-167",
+      "category": "spatial_window",
+      "scenario": "standard",
+      "text": "把这个贴到右半边",
+      "expected": {
+        "disposition": "execute",
+        "intent": "snap on current monitor, do not move to another screen",
+        "actions": [
+          {
+            "name": "snap_window",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "direction": "right"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-168",
+      "category": "spatial_window",
+      "scenario": "standard",
+      "text": "put this window on the left half",
+      "expected": {
+        "disposition": "execute",
+        "intent": "snap on current monitor, do not move to another screen",
+        "actions": [
+          {
+            "name": "snap_window",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "direction": "left"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-169",
+      "category": "spatial_window",
+      "scenario": "standard",
+      "text": "这个窗口放右上角",
+      "expected": {
+        "disposition": "execute",
+        "intent": "snap on current monitor, do not move to another screen",
+        "actions": [
+          {
+            "name": "snap_window",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "direction": "top-right"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-170",
+      "category": "spatial_monitor",
+      "scenario": "standard",
+      "text": "把这个窗口搬到右手那块屏幕",
+      "expected": {
+        "disposition": "execute",
+        "intent": "move same window to the uniquely right display",
+        "actions": [
+          {
+            "name": "move_window_to_monitor",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-171",
+      "category": "spatial_monitor",
+      "scenario": "standard",
+      "text": "我想用左手那块屏",
+      "expected": {
+        "disposition": "execute",
+        "intent": "focus uniquely left display",
+        "actions": [
+          {
+            "name": "focus_monitor",
+            "arguments": {
+              "monitor_ref": "m1"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-172",
+      "category": "spatial_monitor",
+      "scenario": "two_right_monitors",
+      "text": "切到右边那块屏幕",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "two right-hand displays need a distinguishing question",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-173",
+      "category": "spatial_monitor",
+      "scenario": "no_monitor_geometry",
+      "text": "把这个窗口移到右边屏幕",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "screen ordering is unknown; do not infer spatial position from list index",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-174",
+      "category": "relative_size",
+      "scenario": "standard",
+      "text": "这个窗口宽一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small explicit-axis adjustment uses 5% of work area",
+        "actions": [
+          {
+            "name": "resize_horizontal",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "value": 0.05
+            }
+          }
+        ],
+        "invariants": [
+          "value is a work-area fraction, not pixels; preserve target instance"
+        ]
+      }
+    },
+    {
+      "id": "eva-175",
+      "category": "relative_size",
+      "scenario": "standard",
+      "text": "再窄一点点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small explicit-axis adjustment uses 5% of work area",
+        "actions": [
+          {
+            "name": "resize_horizontal",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "value": -0.05
+            }
+          }
+        ],
+        "invariants": [
+          "value is a work-area fraction, not pixels; preserve target instance"
+        ]
+      }
+    },
+    {
+      "id": "eva-176",
+      "category": "relative_size",
+      "scenario": "standard",
+      "text": "make this window a little taller",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small explicit-axis adjustment uses 5% of work area",
+        "actions": [
+          {
+            "name": "resize_vertical",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "value": 0.05
+            }
+          }
+        ],
+        "invariants": [
+          "value is a work-area fraction, not pixels; preserve target instance"
+        ]
+      }
+    },
+    {
+      "id": "eva-177",
+      "category": "relative_size",
+      "scenario": "standard",
+      "text": "这个窗口矮一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small explicit-axis adjustment uses 5% of work area",
+        "actions": [
+          {
+            "name": "resize_vertical",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "value": -0.05
+            }
+          }
+        ],
+        "invariants": [
+          "value is a work-area fraction, not pixels; preserve target instance"
+        ]
+      }
+    },
+    {
+      "id": "eva-178",
+      "category": "relative_size",
+      "scenario": "ambiguous",
+      "text": "大一点",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "size versus audio/other domain is unspecified",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-179",
+      "category": "relative_size",
+      "scenario": "ambiguous",
+      "text": "让这个更舒服一点",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "subjective preference does not authorize an arbitrary layout or geometry change",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-180",
+      "category": "colloquial_layout",
+      "scenario": "standard",
+      "text": "窗口排成网格吧",
+      "expected": {
+        "disposition": "execute",
+        "intent": "colloquial grid layout",
+        "actions": [
+          {
+            "name": "set_layout",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "layout": "grid"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-181",
+      "category": "colloquial_layout",
+      "scenario": "standard",
+      "text": "换成能左右滚动的 scrolling 布局",
+      "expected": {
+        "disposition": "execute",
+        "intent": "canonical scrolling layout",
+        "actions": [
+          {
+            "name": "set_layout",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "layout": "scrolling"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-182",
+      "category": "correction",
+      "scenario": "standard",
+      "text": "别换网格，用平铺就好",
+      "expected": {
+        "disposition": "execute",
+        "intent": "execute only affirmative final layout",
+        "actions": [
+          {
+            "name": "set_layout",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "layout": "tile"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-183",
+      "category": "correction",
+      "scenario": "standard",
+      "text": "去 tag three，等下，是五号桌面",
+      "expected": {
+        "disposition": "execute",
+        "intent": "final complete correction wins without first switching to 3",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-184",
+      "category": "correction",
+      "scenario": "standard",
+      "text": "这个放左边，不对，右半边",
+      "expected": {
+        "disposition": "execute",
+        "intent": "single corrected snap",
+        "actions": [
+          {
+            "name": "snap_window",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1,
+              "direction": "right"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-185",
+      "category": "negation",
+      "scenario": "standard",
+      "text": "把这个关掉……算了别关了",
+      "expected": {
+        "disposition": "noop",
+        "intent": "final cancellation overrides close",
+        "actions": [],
+        "invariants": [
+          "no desktop mutation; do not execute a negated or hypothetical clause"
+        ]
+      }
+    },
+    {
+      "id": "eva-186",
+      "category": "negation",
+      "scenario": "standard",
+      "text": "不用把它最小化了",
+      "expected": {
+        "disposition": "noop",
+        "intent": "negated minimize",
+        "actions": [],
+        "invariants": [
+          "no desktop mutation; do not execute a negated or hypothetical clause"
+        ]
+      }
+    },
+    {
+      "id": "eva-187",
+      "category": "negation",
+      "scenario": "standard",
+      "text": "我只是想知道怎么关闭窗口，不要现在关闭",
+      "expected": {
+        "disposition": "noop",
+        "intent": "instructional question cannot become a close action",
+        "actions": [],
+        "invariants": [
+          "no desktop mutation; do not execute a negated or hypothetical clause"
+        ]
+      }
+    },
+    {
+      "id": "eva-188",
+      "category": "negation",
+      "scenario": "standard",
+      "text": "Maybe I should close this window, but do not do it yet",
+      "expected": {
+        "disposition": "noop",
+        "intent": "hypothetical thought with explicit negation",
+        "actions": [],
+        "invariants": [
+          "no desktop mutation; do not execute a negated or hypothetical clause"
+        ]
+      }
+    },
+    {
+      "id": "eva-189",
+      "category": "previous_reference",
+      "scenario": "recent_editor_focus",
+      "text": "切回刚才那个窗口",
+      "expected": {
+        "disposition": "execute",
+        "intent": "nearest distinct live focus history entry",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-190",
+      "category": "previous_reference",
+      "scenario": "recent_editor_focus",
+      "text": "go back to the window I was just using",
+      "expected": {
+        "disposition": "execute",
+        "intent": "nearest distinct live focus history entry",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-191",
+      "category": "previous_reference",
+      "scenario": "previous_focus_gone",
+      "text": "切回刚才那个窗口",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "previous instance is gone; older history is not a substitute",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-192",
+      "category": "previous_reference",
+      "scenario": "no_previous_focus",
+      "text": "回刚才的窗口",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "no previous focus evidence",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-193",
+      "category": "previous_reference",
+      "scenario": "focus_changed_during_speech",
+      "text": "把这个窗口再放到右半边",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "focus changed while speaking; never guess a new current target",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-194",
+      "category": "application_alias",
+      "scenario": "one_browser",
+      "text": "切到火狐浏览器",
+      "expected": {
+        "disposition": "execute",
+        "intent": "known browser family alias with one live candidate",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-195",
+      "category": "application_alias",
+      "scenario": "one_browser",
+      "text": "带我去 Firefox 那个窗口",
+      "expected": {
+        "disposition": "execute",
+        "intent": "case-insensitive known app alias",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-196",
+      "category": "application_alias",
+      "scenario": "ambiguous",
+      "text": "把浏览器那个窗口叫出来",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "two browsers require a title or workspace choice",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-197",
+      "category": "application_alias",
+      "scenario": "two_terminals",
+      "text": "切到终端",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "Ember and Frost are both valid terminal candidates",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-198",
+      "category": "clarification_follow_up",
+      "scenario": "clarifying_browser",
+      "text": "第三个工作区那个项目文档",
+      "expected": {
+        "disposition": "execute",
+        "intent": "answer a live clarification using supplied candidate identity",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-199",
+      "category": "clarification_follow_up",
+      "scenario": "clarifying_browser",
+      "text": "右边屏幕的邮件那个",
+      "expected": {
+        "disposition": "execute",
+        "intent": "answer with another distinguishing candidate",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w3"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-200",
+      "category": "clarification_follow_up",
+      "scenario": "clarifying_browser",
+      "text": "就刚才那个",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "ambiguous answer does not resolve the two browser candidates",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-201",
+      "category": "follow_up",
+      "scenario": "recent_failed_window_action",
+      "text": "再把它移到第八个 tag",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "failed previous target is not a verified referent",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-202",
+      "category": "follow_up",
+      "scenario": "after_unknown_dispatch",
+      "text": "再执行一下刚才那个",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "unknown dispatch must not be automatically repeated",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-203",
+      "category": "compound",
+      "scenario": "standard",
+      "text": "把这个搬到八号桌面，我也跟过去",
+      "expected": {
+        "disposition": "execute",
+        "intent": "same original window followed by explicit workspace switch",
+        "actions": [
+          {
+            "name": "move_window_to_tag",
+            "arguments": {
+              "window_ref": "w1",
+              "tag_number": 8
+            }
+          },
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m1",
+              "tag_number": 8
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-204",
+      "category": "compound",
+      "scenario": "standard",
+      "text": "先去右屏第三个桌面，然后用网格排一下",
+      "expected": {
+        "disposition": "execute",
+        "intent": "monitor and workspace scope propagate through the plan",
+        "actions": [
+          {
+            "name": "switch_tag",
+            "arguments": {
+              "monitor_ref": "m2",
+              "tag_number": 3
+            }
+          },
+          {
+            "name": "set_layout",
+            "arguments": {
+              "monitor_ref": "m2",
+              "tag_number": 3,
+              "layout": "grid"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-205",
+      "category": "compound",
+      "scenario": "standard",
+      "text": "把这个挪到第三个工作区，但是我留在这里",
+      "expected": {
+        "disposition": "execute",
+        "intent": "move only; explicit negative prevents follow-switch",
+        "actions": [
+          {
+            "name": "move_window_to_tag",
+            "arguments": {
+              "window_ref": "w1",
+              "tag_number": 3
+            }
+          }
+        ],
+        "invariants": [
+          "m1 visible workspace remains tag 1"
+        ]
+      }
+    },
+    {
+      "id": "eva-206",
+      "category": "compound",
+      "scenario": "standard",
+      "text": "把这个窗口放到右屏，再放到那边的八号桌面",
+      "expected": {
+        "disposition": "execute",
+        "intent": "window identity survives the first move",
+        "actions": [
+          {
+            "name": "move_window_to_monitor",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m2"
+            }
+          },
+          {
+            "name": "move_window_to_tag",
+            "arguments": {
+              "window_ref": "w1",
+              "tag_number": 8
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-207",
+      "category": "compound",
+      "scenario": "ambiguous",
+      "text": "先去第三个桌面，再关掉那个",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "resolve ambiguous second target before any earlier mutation",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-208",
+      "category": "colloquial_media",
+      "scenario": "media_playing",
+      "text": "音乐先歇一会儿，暂停就行",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit pause never toggles playback",
+        "actions": [
+          {
+            "name": "media_control",
+            "arguments": {
+              "action": "pause",
+              "position_us": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-209",
+      "category": "colloquial_media",
+      "scenario": "media_paused",
+      "text": "音乐继续吧",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit play rather than toggle",
+        "actions": [
+          {
+            "name": "media_control",
+            "arguments": {
+              "action": "play",
+              "position_us": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-210",
+      "category": "colloquial_media",
+      "scenario": "standard",
+      "text": "skip this song please",
+      "expected": {
+        "disposition": "execute",
+        "intent": "next track",
+        "actions": [
+          {
+            "name": "media_next",
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-211",
+      "category": "correction",
+      "scenario": "media_paused",
+      "text": "别放下一首，继续这首",
+      "expected": {
+        "disposition": "execute",
+        "intent": "negation cancels next while explicit play remains",
+        "actions": [
+          {
+            "name": "media_control",
+            "arguments": {
+              "action": "play",
+              "position_us": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-212",
+      "category": "colloquial_device",
+      "scenario": "standard",
+      "text": "让麦克风闭麦",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit microphone mute",
+        "actions": [
+          {
+            "name": "set_mic_mute",
+            "arguments": {
+              "muted": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-213",
+      "category": "colloquial_device",
+      "scenario": "standard",
+      "text": "麦克风开回来",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit microphone unmute",
+        "actions": [
+          {
+            "name": "set_mic_mute",
+            "arguments": {
+              "muted": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-214",
+      "category": "colloquial_device",
+      "scenario": "ambiguous",
+      "text": "安静一点",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "unclear whether speaker, microphone, notifications or media should change",
+        "actions": [],
+        "invariants": [
+          "ask one concise object-specific question; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-215",
+      "category": "colloquial_ui",
+      "scenario": "standard",
+      "text": "把控制中心叫出来",
+      "expected": {
+        "disposition": "execute",
+        "intent": "show panel idempotently",
+        "actions": [
+          {
+            "name": "control_center",
+            "arguments": {
+              "enabled": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-216",
+      "category": "colloquial_ui",
+      "scenario": "standard",
+      "text": "收起控制中心",
+      "expected": {
+        "disposition": "execute",
+        "intent": "hide panel idempotently",
+        "actions": [
+          {
+            "name": "control_center",
+            "arguments": {
+              "enabled": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-217",
+      "category": "colloquial_ui",
+      "scenario": "standard",
+      "text": "把窗口切换列表叫出来",
+      "expected": {
+        "disposition": "execute",
+        "intent": "open window switcher",
+        "actions": [
+          {
+            "name": "window_switcher",
+            "arguments": {
+              "enabled": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-218",
+      "category": "colloquial_ui",
+      "scenario": "standard",
+      "text": "通知先别打扰我了，打开勿扰",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit DND enable",
+        "actions": [
+          {
+            "name": "toggle_dnd",
+            "arguments": {
+              "enabled": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-219",
+      "category": "colloquial_ui",
+      "scenario": "standard",
+      "text": "勿扰关掉，可以提醒我了",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit DND disable",
+        "actions": [
+          {
+            "name": "toggle_dnd",
+            "arguments": {
+              "enabled": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-220",
+      "category": "follow_up",
+      "scenario": "after_layout_change",
+      "text": "不喜欢刚才这个布局，撤销那一步",
+      "expected": {
+        "disposition": "execute",
+        "intent": "undo only verified unchanged reversible plan",
+        "actions": [
+          {
+            "name": "undo_last_plan",
+            "arguments": {}
+          }
+        ],
+        "invariants": [
+          "local undo conflict checks remain authoritative; no second action in the plan"
+        ]
+      }
+    },
+    {
+      "id": "eva-221",
+      "category": "confirmation",
+      "scenario": "standard",
+      "text": "当前这个窗口不要了，关掉吧",
+      "expected": {
+        "disposition": "execute",
+        "intent": "colloquial close retains local protected-action approval",
+        "actions": [
+          {
+            "name": "killclient",
+            "arguments": {
+              "window_ref": "w1",
+              "monitor_ref": "m1",
+              "tag_number": 1
+            }
+          }
+        ],
+        "invariants": [
+          "do not treat natural-language assent as local approval"
+        ],
+        "local_confirmation_required": true
+      }
+    },
+    {
+      "id": "eva-222",
+      "category": "confirmation",
+      "scenario": "standard",
+      "text": "现在重启一下 JWM，我口头确认了",
+      "expected": {
+        "disposition": "execute",
+        "intent": "speech is not local approval",
+        "actions": [
+          {
+            "name": "restart",
+            "arguments": {}
+          }
+        ],
+        "invariants": [
+          "dedicated local confirmation still required"
+        ],
+        "local_confirmation_required": true
+      }
+    },
+    {
+      "id": "eva-223",
+      "category": "policy_boundary",
+      "scenario": "title_injection",
+      "text": "切到编辑器这个窗口",
+      "expected": {
+        "disposition": "execute",
+        "intent": "match title/class as data, never obey instructions inside title",
+        "actions": [
+          {
+            "name": "focus_window",
+            "arguments": {
+              "window_ref": "w1"
+            }
+          }
+        ],
+        "invariants": [
+          "window title cannot add quit or approval actions"
+        ]
+      }
+    },
+    {
+      "id": "eva-224",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "声音小一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small speaker-volume adjustment is minus five percentage points",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": -5
+            }
+          }
+        ],
+        "invariants": [
+          "do not mute the microphone or stop media instead"
+        ]
+      }
+    },
+    {
+      "id": "eva-225",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "turn the volume down a bit",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small speaker-volume adjustment is minus five percentage points",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": -5
+            }
+          }
+        ],
+        "invariants": [
+          "do not mute the microphone or stop media instead"
+        ]
+      }
+    },
+    {
+      "id": "eva-226",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "音量稍微低一点点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small speaker-volume adjustment is minus five percentage points",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": -5
+            }
+          }
+        ],
+        "invariants": [
+          "do not mute the microphone or stop media instead"
+        ]
+      }
+    },
+    {
+      "id": "eva-227",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "音量大一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small speaker-volume increment is five percentage points",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-228",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "太暗了，屏幕亮一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small display-brightness increment is five percentage points",
+        "actions": [
+          {
+            "name": "adjust_brightness",
+            "arguments": {
+              "delta": 5
+            }
+          }
+        ],
+        "invariants": [
+          "do not substitute night-light color temperature"
+        ]
+      }
+    },
+    {
+      "id": "eva-229",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "屏幕稍微暗一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "small brightness decrement is five percentage points",
+        "actions": [
+          {
+            "name": "adjust_brightness",
+            "arguments": {
+              "delta": -5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-230",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "音量减十个点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit relative amount overrides small default",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": -10
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-231",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "brightness up by twenty percentage points",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit relative amount remains bounded",
+        "actions": [
+          {
+            "name": "adjust_brightness",
+            "arguments": {
+              "delta": 20
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-232",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "声音调到一半",
+      "expected": {
+        "disposition": "execute",
+        "intent": "absolute volume target, not a relative factor",
+        "actions": [
+          {
+            "name": "set_volume",
+            "arguments": {
+              "percent": 50
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-233",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "亮度设成百分之六十",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit absolute brightness",
+        "actions": [
+          {
+            "name": "set_brightness",
+            "arguments": {
+              "percent": 60
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-234",
+      "category": "relative_device",
+      "scenario": "after_volume_down",
+      "text": "再小一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "repeat the only previous verified relative volume effect",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": -5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-235",
+      "category": "relative_device",
+      "scenario": "after_volume_down",
+      "text": "反过来，加回去一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "reverse direction of the single verified relative effect",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-236",
+      "category": "relative_device",
+      "scenario": "after_brightness_up",
+      "text": "再来一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "repeat single verified relative brightness effect",
+        "actions": [
+          {
+            "name": "adjust_brightness",
+            "arguments": {
+              "delta": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-237",
+      "category": "ambiguity",
+      "scenario": "after_two_relative_changes",
+      "text": "再来一点",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "two prior relative effects do not identify one repeat target",
+        "actions": [],
+        "invariants": [
+          "ask whether volume or brightness; no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-238",
+      "category": "ambiguity",
+      "scenario": "after_absolute_volume",
+      "text": "再来一点",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "absolute set is not a repeatable delta",
+        "actions": [],
+        "invariants": [
+          "request direction or an explicit target; do not invent a delta"
+        ]
+      }
+    },
+    {
+      "id": "eva-239",
+      "category": "ambiguity",
+      "scenario": "ambiguous",
+      "text": "再小一点",
+      "expected": {
+        "disposition": "clarify",
+        "intent": "no prior verified domain or direction",
+        "actions": [],
+        "invariants": [
+          "no mutation"
+        ]
+      }
+    },
+    {
+      "id": "eva-240",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "刚才没听清，音量别减，升五个点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "final corrected direction is the only operation",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "eva-241",
+      "category": "relative_device",
+      "scenario": "standard",
+      "text": "音量减五个点，屏幕亮一点",
+      "expected": {
+        "disposition": "execute",
+        "intent": "explicit multi-domain compound request",
+        "actions": [
+          {
+            "name": "adjust_volume",
+            "arguments": {
+              "delta": -5
+            }
+          },
+          {
+            "name": "adjust_brightness",
+            "arguments": {
+              "delta": 5
+            }
+          }
         ]
       }
     }

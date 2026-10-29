@@ -517,6 +517,17 @@ impl Jwm {
         let mut panel_changed = false;
 
         if let Some(volume) = report.volume {
+            use crate::jwm::features::system_controls::VolumeReport;
+            let (seq, actual) = match volume {
+                VolumeReport::Applied(seq, state) => (seq, Some(state)),
+                VolumeReport::Failed(seq) => (seq, None),
+            };
+            self.eva_level_completion(
+                "volume",
+                seq,
+                actual.map(|state| state.percent),
+                actual.map(|state| state.muted),
+            );
             match self.features.control_feedback.resolve_volume(volume, now) {
                 FeedbackAction::Adopt(state) => {
                     let current = self
@@ -549,6 +560,12 @@ impl Jwm {
         }
 
         if let Some(brightness) = report.brightness {
+            use crate::jwm::features::system_controls::BrightnessReport;
+            let (seq, actual) = match brightness {
+                BrightnessReport::Applied(seq, percent) => (seq, Some(percent)),
+                BrightnessReport::Failed(seq) => (seq, None),
+            };
+            self.eva_level_completion("brightness", seq, actual, None);
             match self
                 .features
                 .control_feedback
