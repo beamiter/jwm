@@ -1,6 +1,6 @@
 # JWM Eva
 
-Eva 是快捷键激活的独立语音服务。默认 Alt+Ctrl+E 开始一段中文会话，再按同一快捷键或 Esc 取消。反馈结束后保留 5 秒继续说话窗口；Idle 释放麦克风。需要确认的操作由本地 Alt+Ctrl+Enter 批准，模型不能代替确认。
+Eva 是 JWM 的独立语音服务。默认 Alt+Ctrl+E 直接启动 `gpt-realtime` 标准版会话，再按同一快捷键或 Esc 取消。也可用可配置快捷键开启 `gpt-realtime-mini` 全时监听，说“hi eva”后切到标准版。默认反馈后保留 30 秒继续说话窗口；未启用唤醒监听时，Idle 释放麦克风。需要确认的操作由本地 Alt+Ctrl+Enter 批准，模型不能代替确认。
 
 ## 日常口语与交互
 
@@ -32,7 +32,7 @@ bash scripts/install-eva.sh --help
 
 构建 Eva 音频模块需要 `pkg-config`、`libpulse-dev`、PipeWire/SPA 开发头文件以及 `clang`/`libclang-dev`。Rust 的 libspa 绑定及实际加载的 PipeWire 客户端库需要 ≥ 1.2；安装器会先调用 `scripts/ensure_pipewire.sh --env`，在系统开发包不足时构建私有开发前缀并配置 rpath。这个客户端可连接 ≥ 0.3.44 的 PipeWire 服务端及其会话管理器；旧服务端缺少可靠时间证据时作废或澄清该句，不用事件接收时间猜测执行对象。音频不依赖 `pw-record`/`pw-play` 子进程。音频连接或格式失效会作废整句；播放完成依据原生排空回执和播放时钟。
 
-按快捷键激活时，Eva 自动连接当前用户的原生音频后端：真实 PulseAudio 服务使用原生 PulseAudio 采集和播放；PipeWire 桌面继续使用原生 PipeWire。无需停止 PulseAudio、切换全局音频服务或手动启用设备。会话结束和取消会断开本次音频流，Idle 不保留麦克风流。
+按快捷键激活时，Eva 自动连接当前用户的原生音频后端：真实 PulseAudio 服务使用原生 PulseAudio 采集和播放；PipeWire 桌面继续使用原生 PipeWire。无需停止 PulseAudio、切换全局音频服务或手动启用设备。会话结束和取消会断开本次音频流。开启唤醒监听后，正常对话结束会重新进入 mini 待机；关闭唤醒监听后，Idle 不保留麦克风流。
 
 `jwm-eva doctor` 显示 `audio_backend`、输入和输出设备是否可用；诊断只读，不打开音频流。PipeWire 后端需要真实 `Audio/Source` 与 `Audio/Sink` 节点，不能用仅有摄像头或屏幕视频的连接代替。PulseAudio 后端只连接当前用户的本机 Unix socket，拒绝把扬声器 monitor 当作麦克风；显式指定的输入设备消失时结束该句，不悄悄切到别的设备。
 
@@ -54,15 +54,36 @@ key = "e"
 function = "eva_toggle"
 ```
 
-不要同时给这个组合绑定 `spawn ["jwm-eva", "toggle"]`。X11 需要启用 JWM 合成器以显示开麦浮层；浮层不可用时拒绝激活。运行中失去浮层或锁屏会撤销执行许可。首次安装后用 `systemctl --user status jwm-eva.service` 查看服务状态。
+唤醒监听使用独立的原生入口，可选择空闲组合键，例如：
+
+```toml
+[[keybindings.keys]]
+modifier = ["Mod1", "Control", "Shift"]
+key = "e"
+function = "eva_wake_toggle"
+```
+
+该组合切换“监听 hi eva”，`eva_toggle` 则直接开始或取消标准版会话。也可在终端运行 `jwm-eva wake enable`、`jwm-eva wake disable` 或 `jwm-eva wake toggle`，用 `jwm-eva status --json` 查看状态。锁屏会关闭唤醒监听，解锁后需重新开启。
+
+不要同时给直接激活组合绑定 `spawn ["jwm-eva", "toggle"]`。X11 需要启用 JWM 合成器以显示开麦浮层；浮层不可用时拒绝激活。运行中失去浮层或锁屏会撤销执行许可。首次安装后用 `systemctl --user status jwm-eva.service` 查看服务状态。
 
 确认卡列出本地冻结的每项动作、稳定目标引用和完整目标值。长参数可按 Alt+Ctrl+D 打开详情，用 PageUp/PageDown 查看；全部详情页看过后才能按 Alt+Ctrl+Enter 批准。Esc 随时取消。需要较长审阅时间时，在 `[execution]` 调整 `confirmation_timeout_ms`（1000–600000；默认 15000）；心跳不会延长当前确认期限。
 
 可撤销时，浮层提供 Alt+Ctrl+Z 入口；执行时仍会检查窗口实例和手动修改冲突。错误卡可按 Alt+Ctrl+R 重试，Alt+Ctrl+I 打开本地诊断。默认不显示输入字幕；显式开启 `input_transcription` 后只显示对应已提交音频的实际异步转写，字幕不参与执行授权，也不写入日志或账本。
 
-首版要求保持半双工和本地起声检测开启，关闭这些必要条件会直接报配置错误。本地起声用于跟进窗口的截止判断；执行前还会用实际成功上传的 PCM 区间核对服务端音频 item 的归属。无法证明输入时序或窗口起声上下文时，会停止或要求重新说，不改用新焦点猜测。
+本地起声检测必须开启，用于跟进窗口的截止判断；执行前还会用实际成功上传的 PCM 区间核对服务端音频 item 的归属。无法证明输入时序或窗口起声上下文时，会停止或要求重新说，不改用新焦点猜测。连续对话与打断使用 `half_duplex = false`；配置 `feedback = "voice"` 时，成功、澄清和普通聊天均使用标准版语音反馈。
 
 浮层可以迁移到仍可显示的输出，操作目标保留原激活显示器的范围。原目标已拔出时需要重新激活；迁移浮层不会把旧命令自动改到另一块屏幕。
+
+## mini 待机与标准版对话
+
+示例配置默认不在服务启动时开麦。按唤醒快捷键或运行 `jwm-eva wake enable` 后，麦克风音频会发送给 `[wake_word].model` 指定的 mini 模型判断唤醒词，待机界面显示监听状态。mini 只判断唤醒，不接收桌面动作工具。说“hi eva”，等 Listening 提示后再说指令；唤醒句本身不会作为桌面指令执行。mini 的麦克风和连接在标准版会话启动前关闭。
+
+`[openai].model` 指定唤醒后的标准版，`[wake_word].model` 指定待机 mini，默认分别为 `gpt-realtime` 和 `gpt-realtime-mini`。两者使用同一凭据，分别使用 `[pricing]` 与 `[wake_pricing]` 估算费用，共享日预算。云端全时监听会上传环境声音并产生费用；`save_raw_audio = false` 只表示本地不保存录音。用 `jwm-eva wake disable` 关闭监听并释放麦克风。网络或设备错误会显示状态并按配置间隔重连，预算耗尽则停止监听。
+
+安装器保留已有 `eva.toml`。升级后需对照 [示例配置](dist/eva.toml) 更新模型、对应费率和交互选项，已有 mini 模型配置不会自动升级成标准版。`[future_wake_word]` 作为旧配置段名仍兼容，新配置使用 `[wake_word]`，两者不要同时填写。设置 `enabled = true` 可在服务启动时进入待机。
+
+长指令默认最多 120 秒、每轮最多 32 个动作、最多 8 轮能力发现/规划；超过能力范围或目标不明确时，Eva 会澄清。窗口标题可以用于语义匹配，最终执行仍绑定实际窗口和显示器引用。所有操作都受当前 JWM 的能力目录和本地执行校验约束；模型不能绕过确认、调用任意 shell 或使用不存在的功能。
 
 ## 接入 API 后验证
 
@@ -70,7 +91,10 @@ function = "eva_toggle"
 2. 说“切到第三个 tag”，再跟进说“换成 scrolling 布局”。核对同一显示器和工作区。
 3. 说“把这个窗口移到第八个 tag，然后切过去”。核对同一窗口实例。
 4. 等待模型时按 Esc，确认迟到计划没有执行；再在等待期间切换应用，确认不会误改新窗口。
-5. 会话退出后检查实际 PipeWire/PulseAudio 采集流已释放。不能只根据浮层文字判断。
+5. 开启唤醒监听，说“hi eva”，等待 Listening 后说指令；核对待机费用归 mini、对话费用归标准版。正常对话结束后应回 mini 待机。
+6. 在理解、执行或播放回复时说“停一下”，再说修正指令；核对旧计划没有继续派发，已完成动作不被隐式回滚，迟到回复不会继续播放。
+7. 测试否定、模糊目标、长连续指令及背景播放，分别记录成功率、误唤醒和误打断。扬声器环境需实测回声影响。
+8. 关闭唤醒监听后检查实际 PipeWire/PulseAudio 采集流已释放；锁屏后检查待机麦克风也已释放。不能只根据浮层文字判断。
 
 完整 X11/Wayland、设备故障、费用、语义和延迟验收清单在 [验收账本](../docs/eva-acceptance.md)。本地测试和实时 API 测试分别报告；没有 key 或没有图形会话的检查不算语音端到端通过。
 
@@ -88,9 +112,9 @@ journalctl --user -u jwm-eva.service -f
 
 `doctor` 同时只读显示本机当日已结算、在途预留和未知费用，按模型与价格版本汇总，并给出官方账户用量/额度入口。它不会调用模型、采集声音或修改账本；本地估算不代表整个账户的总账。
 
-修改配置后重启 `jwm-eva.service`。`toggle`、`dry-run` 和 `undo` 会核对客户端所选配置与运行中 daemon 的配置，避免模型、凭据来源或预算设置不一致；显式指定的 `--config` 文件缺失会报错。取消和状态查询在配置损坏时仍可使用。预算默认采用系统本地时区，示例配置显式选择 `Asia/Shanghai`，也支持 `UTC`。
+修改配置后重启 `jwm-eva.service`。`toggle`、`wake`、`dry-run` 和 `undo` 会核对客户端所选配置与运行中 daemon 的配置，避免模型、凭据来源或预算设置不一致；显式指定的 `--config` 文件缺失会报错。取消和状态查询在配置损坏时仍可使用。预算默认采用系统本地时区，示例配置显式选择 `Asia/Shanghai`，也支持 `UTC`。
 
-应用启动仅使用配置 `[applications]` 中登记的 ID → argv，按本机已安装程序填写；模型不能提交 shell 字符串。撤销按最近已验证计划的逆序执行，桌面被手动修改后会拒绝有冲突的补偿。`hi eva`、双工自然打断和 jagent 扩展当前保持关闭。
+应用启动仅使用配置 `[applications]` 中登记的 ID → argv，按本机已安装程序填写；模型不能提交 shell 字符串。撤销按最近已验证计划的逆序执行，桌面被手动修改后会拒绝有冲突的补偿。jagent 扩展仍未接入。
 
 媒体核验需要安装同次构建的 `jwm-bridge` 和 `jwm-player`，并运行 bridge 的 MPRIS 监听。打开播放器只返回已提交；指定文件被播放器报告为正在播放后才确认播放，加入队列则核对实际队列条目增加。缺少读回时保留结果未知，用户可检查播放器后再决定下一步。
 
@@ -119,7 +143,7 @@ cargo test --locked --offline -p jwm --lib jwm::eva::tests -- --test-threads=1
 bash scripts/test-install-eva.sh
 ```
 
-有凭据时可显式执行仅连接和配置的实时契约检查。该测试使用代码中的 `Config::default()`，不读取已安装的 `eva.toml`、Secret Service 或 `api_key_file`，并要求当前测试进程的 `OPENAI_API_KEY`。它不采集声音、不操作桌面，也不替代使用实际安装配置的语音演示。
+有凭据时可显式执行仅连接和配置的实时契约检查。该测试依次检查代码中 `Config::default()` 的标准版与 `wake_config()` 的 mini 模型，不读取已安装的 `eva.toml`、Secret Service 或 `api_key_file`，并要求当前测试进程的 `OPENAI_API_KEY`。它不采集声音、不操作桌面，也不替代使用实际安装配置的语音演示。
 
 先完成上面的构建环境准备，再在同一 Bash 中使用临时子 shell 输入密钥。密钥不会进入命令历史或命令参数，子 shell 结束后不保留此环境变量：
 

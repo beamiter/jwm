@@ -50,6 +50,7 @@ pub struct Session {
     pub turn_epoch: u64,
     pub permit: Option<AssistantPermit>,
     pub limits: Limits,
+    pub full_duplex: bool,
     pub close_reason: Option<String>,
     started_at: u64,
     entered_at: u64,
@@ -71,6 +72,7 @@ impl Session {
             turn_epoch: 0,
             permit: None,
             limits,
+            full_duplex: false,
             close_reason: None,
             started_at: 0,
             entered_at: 0,
@@ -106,7 +108,11 @@ impl Session {
         matches!(
             self.state,
             State::Connecting | State::Listening | State::FollowUp
-        )
+        ) || (self.full_duplex
+            && matches!(
+                self.state,
+                State::Planning | State::Confirming | State::Executing | State::Responding
+            ))
     }
     pub fn upload_allowed(&self) -> bool {
         matches!(self.state, State::Listening | State::FollowUp)
@@ -217,6 +223,25 @@ impl Session {
         self.follow_up_deadline = Some(now.saturating_add(self.limits.follow_up_ms));
         self.speech_at = None;
         self.candidate = None;
+        true
+    }
+    /// Local speech revokes the pending turn without revoking the desktop
+    /// session. Old response/call IDs stay fenced by a new turn epoch.
+    pub fn interrupt(&mut self, epoch: u64, now: u64) -> bool {
+        if !self.matches(epoch, self.turn_epoch)
+            || !matches!(
+                self.state,
+                State::Planning | State::Confirming | State::Executing | State::Responding
+            )
+        {
+            return false;
+        }
+        self.turn_epoch = self.turn_epoch.wrapping_add(1);
+        self.plan_claimed = false;
+        self.speech_at = None;
+        self.candidate = None;
+        self.follow_up_deadline = None;
+        self.enter(State::Listening, now);
         true
     }
     pub fn cancel(&mut self, reason: &str, now: u64) {
@@ -351,5 +376,33 @@ mod tests {
         assert_eq!(s.follow_up_remaining_ms(5200), None);
         s.cancel("test", 5201);
         assert_eq!(s.follow_up_remaining_ms(5201), None);
+    }
+    #[test]
+    fn interruption_fences_old_turn_without_reusing_approval() {
+        for phase in [
+            State::Planning,
+            State::Confirming,
+            State::Executing,
+            State::Responding,
+        ] {
+            let mut session = listening();
+            let epoch = session.session_epoch;
+            let old_turn = session.turn_epoch;
+            session.state = phase;
+            session.plan_claimed = true;
+            assert!(session.interrupt(epoch, 100));
+            assert_eq!(session.state, State::Listening);
+            assert!(session.capture_allowed());
+            assert!(!session.matches(epoch, old_turn));
+            assert!(!session.confirm(epoch, old_turn, 101));
+            assert!(!session.claim_plan(epoch, old_turn, false, 101));
+            assert!(session.speech_started(epoch, 101));
+            assert!(session.input_committed(epoch, session.turn_epoch, 102));
+            assert!(session.claim_plan(epoch, session.turn_epoch, false, 103));
+        }
+        let mut closed = listening();
+        let old_epoch = closed.session_epoch;
+        closed.cancel("user_cancel", 1);
+        assert!(!closed.interrupt(old_epoch, 2));
     }
 }

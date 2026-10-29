@@ -2704,6 +2704,15 @@ impl Config {
         }
     }
 
+    fn default_eva_wake_toggle_key() -> KeyConfig {
+        KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into(), "Shift".into()],
+            key: "e".into(),
+            function: "eva_wake_toggle".into(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
     fn default_restore_preview_key() -> KeyConfig {
         KeyConfig {
             modifier: vec!["Mod1".to_string(), "Control".to_string()],
@@ -2745,6 +2754,7 @@ impl Config {
     fn get_default_keys() -> Vec<KeyConfig> {
         let mut keys = vec![
             Self::default_eva_toggle_key(),
+            Self::default_eva_wake_toggle_key(),
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "e".to_string(),
@@ -3975,6 +3985,10 @@ impl Config {
         self.available_fallback_keys([Self::default_eva_toggle_key()])
     }
 
+    pub fn eva_wake_toggle_fallback_keys(&self) -> Vec<KeyConfig> {
+        self.available_fallback_keys([Self::default_eva_wake_toggle_key()])
+    }
+
     pub fn desktop_shell_mode_fallback_keys(&self) -> Vec<KeyConfig> {
         self.available_fallback_keys([Self::default_desktop_shell_mode_key()])
     }
@@ -4230,7 +4244,11 @@ impl Config {
                 keys.push(binding);
             }
         }
-        for fallback in self.eva_toggle_fallback_keys() {
+        for fallback in self
+            .eva_toggle_fallback_keys()
+            .into_iter()
+            .chain(self.eva_wake_toggle_fallback_keys())
+        {
             if let Some(binding) = self.convert_key_config(&fallback) {
                 keys.push(binding);
             }
@@ -4365,6 +4383,7 @@ impl Config {
         match func_name {
             "spawn" => Some(Jwm::spawn),
             "eva_toggle" => Some(Jwm::eva_toggle),
+            "eva_wake_toggle" => Some(Jwm::eva_wake_toggle),
             "app_launcher" => Some(Jwm::app_launcher),
             "monitor_layout" => Some(Jwm::monitor_layout),
             "lock_screen" => Some(Jwm::lock_screen),
@@ -10585,6 +10604,28 @@ border_px = 3
         cfg.inner.keybindings.chord.leader_modifier = default.modifier;
         cfg.inner.keybindings.chord.leader_key = default.key;
         assert!(cfg.eva_toggle_fallback_keys().is_empty());
+    }
+
+    #[test]
+    fn eva_wake_hotkey_is_native_and_preserves_user_bindings() {
+        let mut cfg = Config::default();
+        let default = Config::default_eva_wake_toggle_key();
+        assert!(!key_function_is_repeatable("eva_wake_toggle"));
+        assert!(cfg.convert_key_config(&default).is_some());
+        assert!(cfg.eva_wake_toggle_fallback_keys().is_empty());
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "eva_wake_toggle");
+        assert_eq!(cfg.eva_wake_toggle_fallback_keys().len(), 1);
+        let mut occupied = default.clone();
+        occupied.function = "minimize".into();
+        cfg.inner.keybindings.keys.push(occupied);
+        assert!(cfg.eva_wake_toggle_fallback_keys().is_empty());
+        cfg.inner.keybindings.keys.pop();
+        cfg.inner.keybindings.chord.leader_modifier = default.modifier;
+        cfg.inner.keybindings.chord.leader_key = default.key;
+        assert!(cfg.eva_wake_toggle_fallback_keys().is_empty());
     }
 
     #[test]

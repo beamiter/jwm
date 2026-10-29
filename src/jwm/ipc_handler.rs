@@ -2103,6 +2103,9 @@ impl Jwm {
         if name == "assistant_control" {
             return self.eva_control(backend, args);
         }
+        if name == "set_assistant_wake_status" {
+            return self.eva_set_wake_status(backend, args);
+        }
         if name == "set_assistant_status" {
             return self.eva_set_status(backend, args);
         }
@@ -2923,7 +2926,10 @@ impl Jwm {
         match name {
             "get_execution_context" => IpcResponse::ok(Some(self.eva_execution_context())),
             "get_execution_status" => self.eva_execution_status(backend, args),
-            "get_assistant_status" => IpcResponse::ok(Some(self.eva_overlay_snapshot())),
+            "get_assistant_status" => {
+                self.eva_tick(backend);
+                IpcResponse::ok(Some(self.eva_overlay_snapshot()))
+            }
             "get_command_schema" => IpcResponse::ok(Some(self.eva_command_schema())),
             "get_status" | "get_st" => IpcResponse::ok(Some(
                 serde_json::to_value(self.query_runtime_status(backend)).unwrap_or_default(),

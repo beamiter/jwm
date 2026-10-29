@@ -20,13 +20,13 @@ section!(Service {
 section!(Interaction {
     trigger: String = "hotkey".into(),
     mode: String = "toggle".into(),
-    follow_up_ms: u64 = 5000,
+    follow_up_ms: u64 = 30000,
     first_speech_timeout_ms: u64 = 8000,
-    max_utterance_ms: u64 = 20000,
-    max_session_ms: u64 = 300000,
-    half_duplex: bool = true,
+    max_utterance_ms: u64 = 120000,
+    max_session_ms: u64 = 600000,
+    half_duplex: bool = false,
     escape_cancel: bool = true,
-    feedback: String = "brief".into(),
+    feedback: String = "voice".into(),
     local_start_detection: bool = true,
     start_candidate_grace_ms: u64 = 1500
 });
@@ -40,10 +40,10 @@ section!(Audio {
     playback_tail_ms: u64 = 200
 });
 section!(Openai {
-    model: String = "gpt-realtime-2.1-mini".into(), transport: String = "websocket".into(),
+    model: String = "gpt-realtime".into(), transport: String = "websocket".into(),
     api_key_source: String = "secret_service".into(), api_key_file: Option<PathBuf> = None,
     voice: String = "marin".into(), input_transcription: bool = false, connect_timeout_ms: u64 = 8000,
-    plan_deadline_ms: u64 = 12000, plan_max_output_tokens: u32 = 2048, feedback_max_output_tokens: u32 = 256
+    plan_deadline_ms: u64 = 30000, plan_max_output_tokens: u32 = 4096, feedback_max_output_tokens: u32 = 1024
 });
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -69,8 +69,8 @@ impl Default for TurnDetection {
     }
 }
 section!(Execution {
-    max_actions_per_turn: usize = 8,
-    max_planning_rounds: u8 = 3,
+    max_actions_per_turn: usize = 32,
+    max_planning_rounds: u8 = 8,
     max_schema_repair_attempts: u8 = 1,
     require_guarded_execution: bool = true,
     query_retries: u8 = 1,
@@ -94,20 +94,35 @@ section!(Budget {
 });
 section!(Pricing {
     version: String = "openai-2026-10-29".into(),
-    model: String = "gpt-realtime-2.1-mini".into(),
-    input_text: f64 = 0.60,
-    input_audio: f64 = 10.0,
-    cached_text: f64 = 0.06,
-    cached_audio: f64 = 0.30,
-    output_text: f64 = 2.40,
-    output_audio: f64 = 20.0,
+    model: String = "gpt-realtime".into(),
+    input_text: f64 = 4.0,
+    input_audio: f64 = 32.0,
+    cached_text: f64 = 0.40,
+    cached_audio: f64 = 0.40,
+    output_text: f64 = 16.0,
+    output_audio: f64 = 64.0,
     transcription_per_minute: f64 = 0.0045
 });
-section!(FutureWakeWord {
+section!(WakeWord {
     enabled: bool = false,
-    phrase: String = "hi eva".into()
+    phrase: String = "hi eva".into(),
+    model: String = "gpt-realtime-mini".into(),
+    reconnect_ms: u64 = 3000,
+    max_session_ms: u64 = 600000
 });
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+fn mini_pricing() -> Pricing {
+    Pricing {
+        model: "gpt-realtime-mini".into(),
+        input_text: 0.60,
+        input_audio: 10.0,
+        cached_text: 0.06,
+        cached_audio: 0.30,
+        output_text: 2.40,
+        output_audio: 20.0,
+        ..Pricing::default()
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub service: Service,
@@ -120,10 +135,40 @@ pub struct Config {
     pub privacy: Privacy,
     pub budget: Budget,
     pub pricing: Pricing,
-    pub future_wake_word: FutureWakeWord,
+    #[serde(alias = "future_wake_word")]
+    pub wake_word: WakeWord,
+    #[serde(default = "mini_pricing")]
+    pub wake_pricing: Pricing,
     pub applications: std::collections::BTreeMap<String, Vec<String>>,
 }
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            service: Service::default(),
+            interaction: Interaction::default(),
+            audio: Audio::default(),
+            openai: Openai::default(),
+            turn_detection: TurnDetection::default(),
+            execution: Execution::default(),
+            undo: Undo::default(),
+            privacy: Privacy::default(),
+            budget: Budget::default(),
+            pricing: Pricing::default(),
+            wake_word: WakeWord::default(),
+            wake_pricing: mini_pricing(),
+            applications: Default::default(),
+        }
+    }
+}
 impl Config {
+    /// Model changes require a new Realtime connection; billing follows each model.
+    pub fn wake_config(&self) -> Self {
+        let mut config = self.clone();
+        config.openai.model = self.wake_word.model.clone();
+        config.openai.input_transcription = false;
+        config.pricing = self.wake_pricing.clone();
+        config
+    }
     pub fn path() -> PathBuf {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -155,17 +200,16 @@ impl Config {
             && (3..=60).contains(&self.service.watchdog_seconds)
             && self.interaction.escape_cancel
             && self.interaction.local_start_detection
-            && ["brief", "text", "none", "beep"].contains(&self.interaction.feedback.as_str())
+            && ["voice", "brief", "text", "none", "beep"]
+                .contains(&self.interaction.feedback.as_str())
             && self.interaction.trigger == "hotkey"
             && self.interaction.mode == "toggle"
-            && self.interaction.half_duplex
-            && !self.future_wake_word.enabled
             && !self.privacy.save_raw_audio
             && !self.privacy.persist_transcripts
             && self.execution.require_guarded_execution
             && self.execution.stop_on_error
-            && (1..=8).contains(&self.execution.max_actions_per_turn)
-            && (1..=3).contains(&self.execution.max_planning_rounds)
+            && (1..=32).contains(&self.execution.max_actions_per_turn)
+            && (1..=8).contains(&self.execution.max_planning_rounds)
             && self.execution.max_schema_repair_attempts <= 1
             && self.audio.realtime_rate_hz == 24000
             && self.audio.channels == 1
@@ -190,6 +234,14 @@ impl Config {
             && !self.turn_detection.create_response
             && !self.turn_detection.interrupt_response
             && (0.0..=1.0).contains(&self.turn_detection.threshold)
+            && self.wake_pricing.model == self.wake_word.model
+            && !self.wake_word.model.is_empty()
+            && !self.wake_word.phrase.trim().is_empty()
+            && self.wake_word.phrase.len() <= 80
+            && !self.wake_word.phrase.chars().any(char::is_control)
+            && (1000..=60000).contains(&self.wake_word.reconnect_ms)
+            && (1000..=3600000).contains(&self.wake_word.max_session_ms)
+            && valid_pricing(&self.wake_pricing)
             && self.pricing.model == self.openai.model
             && !self.pricing.version.is_empty()
             && [
@@ -287,6 +339,20 @@ impl Config {
         Ok(key)
     }
 }
+fn valid_pricing(p: &Pricing) -> bool {
+    !p.version.is_empty()
+        && [
+            p.input_text,
+            p.input_audio,
+            p.cached_text,
+            p.cached_audio,
+            p.output_text,
+            p.output_audio,
+            p.transcription_per_minute,
+        ]
+        .iter()
+        .all(|v| v.is_finite() && *v >= 0.0)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,7 +360,9 @@ mod tests {
     fn rejects_unknown_and_unsupported() {
         assert!(toml::from_str::<Config>("[openai]\nmodle='oops'").is_err());
         let mut c = Config::default();
-        c.future_wake_word.enabled = true;
+        c.wake_word.enabled = true;
+        assert!(c.validate().is_ok());
+        c.wake_word.phrase.clear();
         assert!(c.validate().is_err());
         c = Config::default();
         c.execution.require_guarded_execution = false;
@@ -303,6 +371,36 @@ mod tests {
         c.interaction.local_start_detection = false;
         assert!(c.validate().is_err());
         assert!(Config::default().validate().is_ok());
+    }
+
+    #[test]
+    fn wake_model_uses_separate_rates_and_preserves_credential_source() {
+        let mut config = Config::default();
+        config.openai.api_key_source = "env".into();
+        let wake = config.wake_config();
+        assert_eq!(config.openai.model, "gpt-realtime");
+        assert_eq!(wake.openai.model, "gpt-realtime-mini");
+        assert_eq!(wake.pricing.model, wake.openai.model);
+        assert_eq!(wake.pricing.input_audio, 10.0);
+        assert_eq!(config.pricing.input_audio, 32.0);
+        assert_eq!(wake.openai.api_key_source, "env");
+        assert!(!wake.openai.input_transcription);
+        assert!(!config.interaction.half_duplex);
+        assert!(config.validate().is_ok());
+        config.wake_pricing.model = config.openai.model.clone();
+        assert!(config.validate().is_err());
+    }
+    #[test]
+    fn legacy_wake_section_migrates_and_duplicate_sections_fail() {
+        let config: Config = toml::from_str("[future_wake_word]\nenabled=true").unwrap();
+        assert!(config.wake_word.enabled);
+        assert!(config.validate().is_ok());
+        assert!(
+            toml::from_str::<Config>(
+                "[future_wake_word]\nenabled=true\n[wake_word]\nenabled=false"
+            )
+            .is_err()
+        );
     }
 
     #[test]

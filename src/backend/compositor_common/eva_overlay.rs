@@ -137,7 +137,7 @@ impl EvaOverlayState {
             .as_array()
             .into_iter()
             .flatten()
-            .take(8)
+            .take(jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN)
             .map(|item| ConfirmationLine {
                 critical: clean(
                     item.get("critical")
@@ -357,6 +357,9 @@ impl EvaOverlayState {
     fn text_sections(&self, now: Instant) -> Vec<TextSection> {
         let status = match self.state.as_str() {
             "connecting" => "正在连接",
+            "standby" => "唤醒待机",
+            "paused" => "唤醒待机已暂停",
+            "disabled" => "正在关闭唤醒监听",
             "listening" => "正在听",
             "planning" => "正在理解",
             "confirming" => "请确认操作",
@@ -378,6 +381,9 @@ impl EvaOverlayState {
             self.text.as_str()
         } else {
             match self.state.as_str() {
+                "standby" => "说 hi eva 开始对话",
+                "paused" => "唤醒监听暂时暂停",
+                "disabled" => "正在释放麦克风",
                 "listening" => "想做什么，直接说就好",
                 "planning" => "正在结合当前桌面理解你的意思",
                 "followup" | "follow_up" => "可以继续补充或修正刚才的指令",
@@ -412,7 +418,13 @@ impl EvaOverlayState {
         } else {
             "麦克风已暂停".into()
         };
-        let actions = if self.state == "error" {
+        let actions = if !self.session_active
+            && matches!(
+                self.state.as_str(),
+                "standby" | "paused" | "connecting" | "disabled"
+            ) {
+            "使用唤醒快捷键关闭监听"
+        } else if self.state == "error" {
             "Alt+Ctrl+R 重试 · Alt+Ctrl+I 诊断 · Esc 退出"
         } else if self.session_active
             && self.undo_available
@@ -592,7 +604,7 @@ impl EvaOverlayState {
             // ASR is always reserved and never affects page capacity.
             let rows = (((h - 64.0) / line_h).floor() as isize - 4).clamp(1, 8) as usize;
             let valid = self.confirmation_total > 0
-                && self.confirmation_total <= 8
+                && self.confirmation_total <= jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN
                 && self.confirmation_items.len() == self.confirmation_total
                 && self
                     .confirmation_items
@@ -874,6 +886,29 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn wake_standby_uses_adaptive_status_sections_and_its_own_exit_hint() {
+        let now = Instant::now();
+        let mut state = EvaOverlayState::default();
+        state.update(
+            &json!({"active":false,"visible":true,"state":"standby",
+            "microphone_active":true,"monitor_rect":[0,0,560,720]}),
+            now,
+        );
+        let label = state.label(now);
+        assert!(label.starts_with("Eva · 唤醒待机\n"));
+        assert!(label.contains("hi eva"));
+        assert!(label.contains("麦克风已开启"));
+        assert!(label.contains("使用唤醒快捷键关闭监听"));
+        assert!(!label.contains("Esc"));
+        assert!(!label.contains("还可说话"));
+        let raster = state.text_raster(now, 480);
+        assert!(raster.width <= 480);
+        assert_eq!(
+            raster.pixels.len(),
+            raster.width as usize * raster.height as usize * 4
+        );
+    }
+    #[test]
     fn eva_result_keeps_its_state_header_and_wraps_unicode_message() {
         let now = Instant::now();
         let question =
@@ -1129,6 +1164,33 @@ mod tests {
         let rect = overlay.rect([3840.0, 1080.0]);
         assert!(rect[0] >= 1920.0 && rect[0] + rect[2] <= 3840.0);
         assert_eq!(rect[2], 880.0);
+    }
+    #[test]
+    fn thirty_two_action_confirmation_requires_review_of_every_page() {
+        let now = Instant::now();
+        let items: Vec<_> = (1..=32)
+            .map(|n| json!({"critical":format!("w{n} close_window → target-{n}")}))
+            .collect();
+        let mut snapshot = json!({"active":true,"state":"confirming","lease_remaining_ms":3000,"monitor_rect":[0,0,1280,720],"confirmation":{"total_actions":32,"display_items":items}});
+        let pages = EvaOverlayState::confirmation_page_count(&snapshot);
+        assert!(pages >= 4);
+        assert!(!EvaOverlayState::confirmation_reviewable_snapshot(
+            &snapshot
+        ));
+        let mut state = EvaOverlayState::default();
+        state.update(&snapshot, now);
+        assert_eq!(state.confirmation_items.len(), 32);
+        let mut rendered = String::new();
+        for page in 0..pages {
+            snapshot["confirmation"]["details_page"] = json!(page);
+            snapshot["confirmation"]["details_seen_pages"] = json!((0..=page).collect::<Vec<_>>());
+            state.update(&snapshot, now);
+            rendered.push_str(&state.label(now));
+        }
+        assert!(EvaOverlayState::confirmation_reviewable_snapshot(&snapshot));
+        for n in 1..=32 {
+            assert!(rendered.contains(&format!("w{n} close_window → target-{n}")));
+        }
     }
     #[test]
     fn eight_confirmation_actions_preserve_identity_and_target_inside_bounds() {

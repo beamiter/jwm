@@ -360,6 +360,9 @@ pub(super) fn stream_properties(capture: bool) -> io::Result<Proplist> {
         (pulse::proplist::properties::APPLICATION_NAME, "JWM Eva"),
         (pulse::proplist::properties::APPLICATION_ID, "org.jwm.eva"),
         (pulse::proplist::properties::MEDIA_ROLE, "phone"),
+        // module-filter-heuristics/module-filter-apply may supply native AEC.
+        // A preference alone must never be reported as an active filter.
+        ("filter.want", "echo-cancel"),
         (
             pulse::proplist::properties::MEDIA_NAME,
             if capture {

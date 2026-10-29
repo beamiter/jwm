@@ -62,7 +62,7 @@ pub fn normalize_layout(label: &str) -> Option<&'static str> {
 }
 
 pub fn validate_plan(plan: &Plan, context: &Value) -> Result<FrozenPlan, String> {
-    if plan.actions.len() > 8 {
+    if plan.actions.len() > super::MAX_ACTIONS_PER_PLAN {
         return Err("too_many_actions".into());
     }
     if plan
@@ -409,6 +409,27 @@ mod tests {
     use super::*;
     fn context() -> Value {
         json!({"session_unlocked":true,"wm_instance_id":"wm1","tag_count":9,"monitors":[{"monitor_ref":"m1","monitor_token":"mon1","locked":false}],"windows":[{"window_ref":"w1","target_token":"win1"}]})
+    }
+    #[test]
+    fn long_ordered_plans_have_one_shared_bounded_capacity() {
+        let action = Action {
+            name: "focus_window".into(),
+            arguments: json!({"window_ref":"w1"}),
+        };
+        let mut plan = Plan {
+            disposition: Disposition::Execute,
+            actions: vec![action; super::super::MAX_ACTIONS_PER_PLAN],
+            question: None,
+            reason: None,
+        };
+        let frozen = validate_plan(&plan, &context()).unwrap();
+        assert_eq!(frozen.actions.len(), 32);
+        assert_eq!(frozen.actions[31].arguments["window_token"], "win1");
+        plan.actions.push(plan.actions[0].clone());
+        assert_eq!(
+            validate_plan(&plan, &context()).unwrap_err(),
+            "too_many_actions"
+        );
     }
     #[test]
     fn tags_are_human_numbered() {

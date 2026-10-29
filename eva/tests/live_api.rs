@@ -18,7 +18,12 @@ async fn realtime_configuration_handshake() {
         .expect("OPENAI_API_KEY is required; missing credentials are a failed gate, not a pass");
     assert!(!key.trim().is_empty(), "OPENAI_API_KEY must not be empty");
     let config = Config::default();
-    let mut provider = Realtime::connect(&config, &key)
+    handshake(&config, &key).await;
+    handshake(&config.wake_config(), &key).await;
+}
+
+async fn handshake(config: &Config, key: &str) {
+    let mut provider = Realtime::connect(config, key)
         .await
         .expect("live Realtime connection failed");
     let created = tokio::time::timeout(Duration::from_secs(8), provider.next())
@@ -30,7 +35,7 @@ async fn realtime_configuration_handshake() {
         "expected the official session lifecycle"
     );
     provider
-        .configure(&config)
+        .configure(config)
         .await
         .expect("session update failed");
     tokio::time::timeout(Duration::from_secs(8), async {
@@ -42,7 +47,7 @@ async fn realtime_configuration_handshake() {
             );
             if event["type"] == "session.updated" {
                 assert!(
-                    ready_with(&event, &config),
+                    ready_with(&event, config),
                     "effective PCM/VAD/session configuration differs from the local contract"
                 );
                 break;

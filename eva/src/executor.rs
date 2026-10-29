@@ -10,8 +10,18 @@ use jwm_eva_core::{
 use serde_json::{Value, json};
 use std::{
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+
+struct DispatchLifetime(Arc<AtomicBool>);
+impl Drop for DispatchLifetime {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 pub async fn query(name: &str, args: Value) -> io::Result<Value> {
     let name = name.to_string();
@@ -95,6 +105,8 @@ async fn execute_with_step_budget(
     c: &Config,
     step_budget: std::time::Duration,
 ) -> io::Result<Value> {
+    let dispatch_cancelled = Arc::new(AtomicBool::new(false));
+    let _lifetime = DispatchLifetime(dispatch_cancelled.clone());
     let mut steps = Vec::new();
     let mut undo = Vec::new();
     let mut ledger_error = None;
@@ -239,11 +251,13 @@ async fn execute_with_step_budget(
             let record_action = action.clone();
             let storage = store.clone();
             let wire = json!(request);
+            let cancelled = dispatch_cancelled.clone();
             // This one already-admitted operation may settle after the voice
             // actor closes. It never owns the remainder of the desktop plan.
             let current = tokio::spawn(async move {
                 let (mut result, dispatched) =
-                    dispatch_once(wire, &id, &instance, dispatch_deadline).await;
+                    dispatch_once_cancellable(wire, &id, &instance, dispatch_deadline, cancelled)
+                        .await;
                 if !result.is_object() {
                     result = json!({"status":"unknown"});
                 }
@@ -298,7 +312,54 @@ async fn execute_with_step_budget(
                 ),
             }
         } else {
-            dispatch_once(json!(request), &id, &plan.wm_instance_id, dispatch_deadline).await
+            let id = id.clone();
+            let instance = plan.wm_instance_id.clone();
+            let wire = json!(request);
+            let storage = store.clone();
+            let action = action.clone();
+            let before = before.clone();
+            let cancelled = dispatch_cancelled.clone();
+            // Barge-in drops the plan future. Retain only this already admitted
+            // operation so a late IPC receipt settles its ledger intent; this
+            // task has neither the remaining steps nor authority to replay it.
+            let current = tokio::spawn(async move {
+                let (mut result, dispatched) =
+                    dispatch_once_cancellable(wire, &id, &instance, dispatch_deadline, cancelled)
+                        .await;
+                let mut store = storage.lock().unwrap();
+                let current = store.ledger.operations.get(&id);
+                if current.is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        OperationState::Succeeded
+                            | OperationState::Failed
+                            | OperationState::Cancelled
+                    )
+                }) && let Some(known) = current.and_then(|record| record.result.clone())
+                {
+                    return (known, dispatched);
+                }
+                let saved = store
+                    .ledger
+                    .record_result(
+                        &id,
+                        operation_state(&result),
+                        crate::result_projection::for_ledger(&result, &action, &before),
+                    )
+                    .map_err(io::Error::other)
+                    .and_then(|()| store.save());
+                if let Err(error) = saved {
+                    result["ledger_error"] = json!(error.to_string());
+                }
+                (result, dispatched)
+            });
+            match current.await {
+                Ok(result) => result,
+                Err(_) => (
+                    json!({"status":"unknown","error":"operation_settlement_interrupted"}),
+                    true,
+                ),
+            }
         };
         let result = if matches!(
             action.name.as_str(),
@@ -395,15 +456,38 @@ async fn execute_with_step_budget(
     }
     Ok(execution_report(plan.actions.len(), steps, ledger_error))
 }
+#[cfg(test)]
 async fn dispatch_once(
     request: Value,
     id: &str,
     instance: &str,
     deadline: std::time::Instant,
 ) -> (Value, bool) {
+    dispatch_once_cancellable(
+        request,
+        id,
+        instance,
+        deadline,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+async fn dispatch_once_cancellable(
+    request: Value,
+    id: &str,
+    instance: &str,
+    deadline: std::time::Instant,
+    cancelled: Arc<AtomicBool>,
+) -> (Value, bool) {
     // Check again inside the blocking worker: a delayed executor or fsync must
     // not turn a stale intention into a newly dispatched desktop mutation.
     let reply = tokio::task::spawn_blocking(move || {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "execution_cancelled",
+            ));
+        }
         if std::time::Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -418,10 +502,11 @@ async fn dispatch_once(
     match reply {
         Err(error)
             if error.kind() == io::ErrorKind::Interrupted
-                && error.to_string() == "execution_deadline_expired" =>
+                && ["execution_deadline_expired", "execution_cancelled"]
+                    .contains(&error.to_string().as_str()) =>
         {
             (
-                json!({"status":"cancelled","error":"execution_deadline_expired","dispatched":false}),
+                json!({"status":"cancelled","error":error.to_string(),"dispatched":false}),
                 false,
             )
         }
@@ -1026,6 +1111,23 @@ mod undo_tests {
         assert!(!dispatched);
         assert_eq!(result["status"], "cancelled");
         assert_eq!(result["error"], "execution_deadline_expired");
+    }
+    #[tokio::test]
+    async fn dropped_plan_lifetime_fences_queued_dispatch_without_desktop_request() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let lifetime = DispatchLifetime(cancelled.clone());
+        drop(lifetime);
+        let (result, dispatched) = dispatch_once_cancellable(
+            json!({}),
+            "cancelled",
+            "old-instance",
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            cancelled,
+        )
+        .await;
+        assert!(!dispatched);
+        assert_eq!(result["status"], "cancelled");
+        assert_eq!(result["error"], "execution_cancelled");
     }
     #[test]
     fn inverse_covers_declared_initial_actions_and_freezes_related_state() {

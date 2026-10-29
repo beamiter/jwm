@@ -11,7 +11,7 @@ use std::{
     collections::VecDeque,
     io,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     thread,
@@ -175,6 +175,136 @@ pub struct Frame {
     pub pcm: Vec<u8>,
     pub level: f32,
 }
+/// A bounded, in-memory rendering reference for local barge-in detection.
+/// Native session-manager AEC remains the primary echo treatment. Correlation
+/// rejects recognizably echoed Eva output when no filter is available; it
+/// cannot remove room reverberation or replace an adaptive echo canceller.
+#[derive(Default)]
+struct RenderReference {
+    samples: VecDeque<i16>,
+    queued_at: Option<Instant>,
+}
+const ECHO_REFERENCE_SAMPLES: usize = RATE as usize * 3;
+static RENDER_REFERENCE: OnceLock<Mutex<RenderReference>> = OnceLock::new();
+fn rendered_reference(pcm: &[u8]) {
+    let mut reference = RENDER_REFERENCE
+        .get_or_init(|| Mutex::new(RenderReference::default()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if reference
+        .queued_at
+        .is_some_and(|at| at.elapsed() > Duration::from_millis(2500))
+    {
+        reference.samples.clear();
+    }
+    for sample in pcm.chunks_exact(2) {
+        if reference.samples.len() == ECHO_REFERENCE_SAMPLES {
+            reference.samples.pop_front();
+        }
+        reference
+            .samples
+            .push_back(i16::from_le_bytes([sample[0], sample[1]]));
+    }
+    reference.queued_at = Some(Instant::now());
+}
+fn echo_matches(pcm: &[u8], reference: &[i16]) -> bool {
+    // Compare decimated, mean-centred waveforms across possible device and
+    // acoustic delays. Normalization tolerates speaker/microphone gain and a
+    // phase inversion. Deliberately require a strong match so overlapping new
+    // speech can interrupt rather than being hidden by output activity alone.
+    let samples: Vec<f64> = pcm
+        .chunks_exact(2)
+        .step_by(4)
+        .map(|sample| f64::from(i16::from_le_bytes([sample[0], sample[1]])))
+        .collect();
+    if samples.len() < 40 || reference.len() < pcm.len() / 2 {
+        return false;
+    }
+    let coarse = samples.iter().step_by(4).copied().collect::<Vec<_>>();
+    let stats = |input: &[f64]| {
+        let count = input.len() as f64;
+        let sum = input.iter().sum::<f64>();
+        let energy = input.iter().map(|sample| sample * sample).sum::<f64>() - sum * sum / count;
+        (count, sum, energy)
+    };
+    let complete_stats = stats(&samples);
+    let coarse_stats = stats(&coarse);
+    if complete_stats.2 <= 1.0 {
+        return false;
+    }
+    let matches = |input: &[f64],
+                   (count, sum, energy): (f64, f64, f64),
+                   offset: usize,
+                   step: usize,
+                   threshold: f64| {
+        let mut other_sum = 0.0;
+        let mut other_square = 0.0;
+        let mut product = 0.0;
+        for (index, sample) in input.iter().enumerate() {
+            let other = f64::from(reference[offset + index * step]);
+            other_sum += other;
+            other_square += other * other;
+            product += sample * other;
+        }
+        let other_energy = other_square - other_sum * other_sum / count;
+        let covariance = product - sum * other_sum / count;
+        other_energy > 1.0
+            && covariance * covariance >= threshold * threshold * energy * other_energy
+    };
+    for offset in (0..=reference.len() - pcm.len() / 2).step_by(16) {
+        // Reject most offsets using only 30 points before evaluating all 120.
+        // This keeps the voice gate inexpensive even across a full render tail.
+        if matches(&coarse, coarse_stats, offset, 16, 0.45)
+            && matches(&samples, complete_stats, offset, 4, 0.72)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Sustained local speech interrupts pending work without waiting for ASR or
+/// a model response. PCM is used only for echo comparison and never persisted.
+#[derive(Default)]
+pub struct BargeInGate {
+    speech_frames: u8,
+    echo_detected: bool,
+}
+impl BargeInGate {
+    pub fn reset(&mut self) {
+        self.speech_frames = 0;
+        self.echo_detected = false;
+    }
+    pub fn echo_detected(&self) -> bool {
+        self.echo_detected
+    }
+    pub fn observe(&mut self, frame: &Frame) -> bool {
+        if !frame.level.is_finite() || frame.level <= 0.025 {
+            self.echo_detected = false;
+            self.speech_frames = self.speech_frames.saturating_sub(2);
+            return false;
+        }
+        let reference = RENDER_REFERENCE.get().and_then(|reference| {
+            let reference = reference.lock().unwrap_or_else(|error| error.into_inner());
+            reference
+                .queued_at
+                .filter(|at| at.elapsed() <= Duration::from_millis(2500))
+                .map(|_| reference.samples.iter().copied().collect::<Vec<_>>())
+        });
+        self.observe_with_reference(frame, reference.as_deref().unwrap_or(&[]))
+    }
+    fn observe_with_reference(&mut self, frame: &Frame, reference: &[i16]) -> bool {
+        self.echo_detected =
+            frame.level.is_finite() && frame.level > 0.025 && echo_matches(&frame.pcm, reference);
+        if !frame.level.is_finite() || frame.level <= 0.025 || self.echo_detected {
+            self.speech_frames = self.speech_frames.saturating_sub(2);
+            return false;
+        }
+        self.speech_frames = self.speech_frames.saturating_add(1);
+        self.speech_frames >= 6 // six 20 ms frames reject clicks and short noise.
+    }
+}
+
 pub struct Capture {
     worker: Worker,
     fault: Fault,
@@ -300,6 +430,9 @@ fn props(capture: bool, device: &str) -> pw::properties::PropertiesBox {
         *pw::keys::NODE_DONT_RECONNECT => "true",
         *pw::keys::NODE_LATENCY => "480/24000",
         "stream.capture.sink" => "false",
+        // Ask the session manager for its communication echo canceller. This
+        // is a preference, not evidence that an AEC filter was negotiated.
+        "filter.want" => "echo-cancel",
     };
     if device != "default" {
         p.insert(*pw::keys::TARGET_OBJECT, device);
@@ -1135,6 +1268,8 @@ impl Playback {
         }
         state.received_samples = end;
         state.queue.extend(pcm);
+        drop(state);
+        rendered_reference(pcm);
         Ok(())
     }
     pub fn history(&self) -> PlaybackHistory {
@@ -1175,6 +1310,14 @@ impl Drop for Playback {
         }
         state.queue.clear();
         state.queue.shrink_to_fit();
+        if let Some(reference) = RENDER_REFERENCE.get() {
+            let mut reference = reference.lock().unwrap_or_else(|error| error.into_inner());
+            for sample in &mut reference.samples {
+                *sample = 0;
+            }
+            reference.samples.clear();
+            reference.queued_at = None;
+        }
     }
 }
 fn playback_loop(
@@ -1694,6 +1837,82 @@ mod native_tests {
         eprintln!(
             "native source: PCM16LE/24kHz/mono, timestamp_verified={}, release={}ms, drain={}ms",
             frame.timestamp_verified, release_ms, drain_ms
+        );
+    }
+}
+
+#[cfg(test)]
+mod barge_in_tests {
+    use super::*;
+
+    fn frame(samples: &[i16]) -> Frame {
+        let pcm = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        Frame {
+            captured: Instant::now(),
+            timestamp_verified: true,
+            level: rms(&pcm),
+            pcm,
+        }
+    }
+    fn voice(seed: u32) -> Vec<i16> {
+        // A deterministic aperiodic reference avoids a sine wave's unrealistic
+        // perfect correlation at arbitrary delays.
+        let mut value = seed;
+        (0..480)
+            .map(|_| {
+                value = value.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((value >> 17) as i16).wrapping_sub(16000)
+            })
+            .collect()
+    }
+    #[test]
+    fn sustained_new_voice_interrupts_but_clicks_and_silence_do_not() {
+        let voice = frame(&voice(1));
+        let quiet = frame(&[0; 480]);
+        let mut gate = BargeInGate::default();
+        assert!(!gate.observe_with_reference(&voice, &[]));
+        for _ in 0..20 {
+            assert!(!gate.observe_with_reference(&quiet, &[]));
+        }
+        for _ in 0..5 {
+            assert!(!gate.observe_with_reference(&voice, &[]));
+        }
+        assert!(gate.observe_with_reference(&voice, &[]));
+        gate.reset();
+        assert!(!gate.observe_with_reference(&voice, &[]));
+    }
+    #[test]
+    fn echoed_output_with_delay_and_gain_does_not_interrupt() {
+        let output = voice(7);
+        let mut reference = vec![0; 64];
+        reference.extend_from_slice(&output);
+        reference.extend_from_slice(&[0; 96]);
+        let echoed = frame(&output.iter().map(|sample| -sample / 3).collect::<Vec<_>>());
+        assert!(echo_matches(&echoed.pcm, &reference));
+        let mut gate = BargeInGate::default();
+        for _ in 0..20 {
+            assert!(!gate.observe_with_reference(&echoed, &reference));
+            assert!(gate.echo_detected());
+        }
+        let new_voice = frame(&voice(42));
+        for _ in 0..5 {
+            assert!(!gate.observe_with_reference(&new_voice, &reference));
+        }
+        assert!(gate.observe_with_reference(&new_voice, &reference));
+        assert!(!gate.echo_detected());
+    }
+    #[test]
+    fn native_streams_request_echo_treatment_without_changing_device_pin() {
+        let capture = props(true, "my-microphone");
+        assert_eq!(capture.get("filter.want"), Some("echo-cancel"));
+        assert_eq!(capture.get(*pw::keys::TARGET_OBJECT), Some("my-microphone"));
+        assert_eq!(capture.get("node.dont-fallback"), Some("true"));
+        assert_eq!(
+            props(false, "default").get("filter.want"),
+            Some("echo-cancel")
         );
     }
 }

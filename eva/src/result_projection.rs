@@ -126,7 +126,7 @@ fn config_snapshot(snapshot: &Value, action: &Action) -> Value {
             .into_iter()
             .flatten()
             .map(|change| change["key"].clone())
-            .take(8)
+            .take(jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN)
             .collect()
     };
     let mut result = serde_json::Map::new();

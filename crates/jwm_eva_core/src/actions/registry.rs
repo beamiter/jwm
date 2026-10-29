@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Upper bound shared by planning, execution confirmations and result history.
+pub const MAX_ACTIONS_PER_PLAN: usize = 32;
+
 pub const LAYOUTS: &[&str] = &[
     "tile",
     "float",
@@ -1085,7 +1088,7 @@ pub fn tool_schema() -> Value {
 }
 pub fn tool_schema_for(specs: &[ActionSpec]) -> Value {
     let branches:Vec<_> = specs.iter().filter(|s|s.support_status=="implemented" && s.role=="user").map(|s| json!({"type":"object","description":s.description_zh,"properties":{"name":{"const":s.canonical_name},"arguments":s.parameters_schema},"required":["name","arguments"],"additionalProperties":false})).collect();
-    json!({"type":"function","name":"eva_submit_plan","description":"提交完整桌面操作计划。三种互斥格式：execute 的 actions 必须含 1..8 项且 question 必须为 JSON null；clarify 的 actions 必须为 [] 且 question 必须为非空澄清问句；noop 的 actions 必须为 [] 且 question 必须为 JSON null。不能用空字符串或字符串 null 代替 JSON null。只能引用本轮对象；执行确认由本地应用负责，不要写入 execute.question。结果由本地执行核验。","parameters":{"type":"object","properties":{"disposition":{"type":"string","enum":["execute","clarify","noop"],"description":"execute：执行 1..8 个 actions，question=null；clarify：actions=[]，question 为非空澄清问句；noop：actions=[]，question=null。"},"actions":{"type":"array","description":"execute 时必须含 1..8 项；clarify 和 noop 时必须为空数组 []。多步操作按执行顺序放在同一个数组。","maxItems":8,"items":{"oneOf":branches}},"question":{"type":["string","null"],"description":"仅 clarify 使用非空澄清问句，不能全是空白。execute 和 noop 必须为 JSON null，不能为任何字符串（包括空字符串或字符串 null）。执行说明、确认请求不属于此字段。","maxLength":160},"reason":{"type":["string","null"],"maxLength":160}},"required":["disposition","actions","question","reason"],"additionalProperties":false}})
+    json!({"type":"function","name":"eva_submit_plan","description":"提交完整桌面操作计划。三种互斥格式：execute 的 actions 必须含 1..32 项且 question 必须为 JSON null；clarify 的 actions 必须为 [] 且 question 必须为非空澄清问句；noop 的 actions 必须为 [] 且 question 必须为 JSON null。不能用空字符串或字符串 null 代替 JSON null。只能引用本轮对象；执行确认由本地应用负责，不要写入 execute.question。结果由本地执行核验。","parameters":{"type":"object","properties":{"disposition":{"type":"string","enum":["execute","clarify","noop"],"description":"execute：执行 1..32 个 actions，question=null；clarify：actions=[]，question 为非空澄清问句；noop：actions=[]，question=null。"},"actions":{"type":"array","description":"execute 时必须含 1..32 项；clarify 和 noop 时必须为空数组 []。多步操作按执行顺序放在同一个数组。","maxItems":MAX_ACTIONS_PER_PLAN,"items":{"oneOf":branches}},"question":{"type":["string","null"],"description":"仅 clarify 使用非空澄清问句，不能全是空白。execute 和 noop 必须为 JSON null，不能为任何字符串（包括空字符串或字符串 null）。执行说明、确认请求不属于此字段。","maxLength":160},"reason":{"type":["string","null"],"maxLength":160}},"required":["disposition","actions","question","reason"],"additionalProperties":false}})
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1100,6 +1103,8 @@ pub fn ipc_catalog() -> Vec<CatalogEntry> {
         serde_json::from_str(include_str!("ipc_catalog.json")).expect("reviewed IPC catalog");
     for (name, kind) in [
         ("eva_toggle", "command"),
+        ("eva_wake_toggle", "command"),
+        ("set_assistant_wake_status", "command"),
         ("assistant_control", "command"),
         ("set_assistant_status", "command"),
         ("guarded_execute", "command"),
@@ -1170,7 +1175,7 @@ pub fn full_registry() -> Vec<ActionSpec> {
             } else if readonly {
                 "只读状态查询，经固定查询适配器返回；不执行窗口聚焦"
             } else if compiled_plan {
-                "编译为最多八个已冻结语义步骤，每步独立许可校验、执行和核验"
+                "编译为最多三十二个已冻结语义步骤，每步独立许可校验、执行和核验"
             } else {
                 "已登记，语义适配与完成核验尚待实施"
             }
@@ -1306,7 +1311,7 @@ mod tests {
             properties["actions"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("1..8")
+                .contains("1..32")
         );
         assert!(properties["actions"].get("minItems").is_none());
         assert!(

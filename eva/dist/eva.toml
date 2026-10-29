@@ -9,13 +9,13 @@ watchdog_seconds = 5
 [interaction]
 trigger = "hotkey"
 mode = "toggle"
-follow_up_ms = 5000
+follow_up_ms = 30000
 first_speech_timeout_ms = 8000
-max_utterance_ms = 20000
-max_session_ms = 300000
-half_duplex = true
+max_utterance_ms = 120000
+max_session_ms = 600000
+half_duplex = false
 escape_cancel = true
-feedback = "brief" # brief: local tone for simple success, cloud voice otherwise; text/none: local text; beep: local tone
+feedback = "voice" # voice: spoken replies; brief: tone for simple success; text/none: text; beep: tone
 local_start_detection = true
 start_candidate_grace_ms = 1500
 
@@ -31,7 +31,7 @@ connect_buffer_ms = 2000
 playback_tail_ms = 200
 
 [openai]
-model = "gpt-realtime-2.1-mini"
+model = "gpt-realtime"
 transport = "websocket"
 api_key_source = "secret_service"
 # Alternative: api_key_source = "file" and an absolute api_key_file owned by
@@ -40,9 +40,9 @@ api_key_source = "secret_service"
 voice = "marin"
 input_transcription = false
 connect_timeout_ms = 8000
-plan_deadline_ms = 12000
-plan_max_output_tokens = 2048
-feedback_max_output_tokens = 256
+plan_deadline_ms = 30000
+plan_max_output_tokens = 4096
+feedback_max_output_tokens = 1024
 
 [turn_detection]
 type = "server_vad"
@@ -53,8 +53,8 @@ create_response = false
 interrupt_response = false
 
 [execution]
-max_actions_per_turn = 8
-max_planning_rounds = 3
+max_actions_per_turn = 32
+max_planning_rounds = 8
 max_schema_repair_attempts = 1
 require_guarded_execution = true
 query_retries = 1
@@ -80,7 +80,28 @@ timezone = "Asia/Shanghai"
 # Update all entries and the version when selecting a different model.
 [pricing]
 version = "openai-2026-10-29"
-model = "gpt-realtime-2.1-mini"
+model = "gpt-realtime"
+input_text = 4.00
+input_audio = 32.0
+cached_text = 0.40
+cached_audio = 0.40
+output_text = 16.0
+output_audio = 64.0
+transcription_per_minute = 0.0045
+
+# Cloud standby sends microphone audio to the mini model while enabled.
+# Keep disabled at startup, then toggle with a shortcut or `jwm-eva wake toggle`.
+[wake_word]
+enabled = false
+phrase = "hi eva"
+model = "gpt-realtime-mini"
+reconnect_ms = 3000
+max_session_ms = 600000
+
+# Independent mini-model estimates; both models share the daily budget.
+[wake_pricing]
+version = "openai-2026-10-29"
+model = "gpt-realtime-mini"
 input_text = 0.60
 input_audio = 10.0
 cached_text = 0.06
@@ -88,10 +109,6 @@ cached_audio = 0.30
 output_text = 2.40
 output_audio = 20.0
 transcription_per_minute = 0.0045
-
-[future_wake_word]
-enabled = false
-phrase = "hi eva"
 
 # Only these local IDs can be launched; values are argv, never shell strings.
 # Adjust installed programs before asking Eva to launch one.

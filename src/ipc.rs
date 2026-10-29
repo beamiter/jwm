@@ -174,6 +174,7 @@ pub struct IpcRegistry {
 pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     dispatch_commands: &[
         "eva_toggle",
+        "eva_wake_toggle",
         "adjust_recording_region",
         "ain",
         "annotate",
@@ -367,6 +368,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     special_commands: &[
         "assistant_control",
         "set_assistant_status",
+        "set_assistant_wake_status",
         "guarded_execute",
         "desktop_shell_action",
         "register_desktop_shell",
@@ -1539,6 +1541,7 @@ pub struct TreeNode {
 pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEnum), String> {
     match name {
         "eva_toggle" => Ok((Jwm::eva_toggle as WMFuncType, WMArgEnum::Int(0))),
+        "eva_wake_toggle" => Ok((Jwm::eva_wake_toggle as WMFuncType, WMArgEnum::Int(0))),
         // --- Window management ---
         "focusstack" | "focus_stack" => {
             Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?))

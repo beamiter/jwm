@@ -97,6 +97,14 @@ pub(crate) struct EvaRuntime {
     text: String,
     level: f64,
     microphone_active: bool,
+    wake_requested: bool,
+    wake_generation: u64,
+    wake_lease_until: Option<Instant>,
+    wake_state: String,
+    wake_text: String,
+    wake_microphone_active: bool,
+    wake_level: f64,
+    standby_allowed: bool,
     undo_available: bool,
     input_caption: Option<Value>,
     followup_deadline_ns: Option<u64>,
@@ -130,6 +138,14 @@ impl Default for EvaRuntime {
             text: String::new(),
             level: 0.,
             microphone_active: false,
+            wake_requested: false,
+            wake_generation: 0,
+            wake_lease_until: None,
+            wake_state: "disabled".into(),
+            wake_text: String::new(),
+            wake_microphone_active: false,
+            wake_level: 0.,
+            standby_allowed: false,
             undo_available: false,
             input_caption: None,
             followup_deadline_ns: None,
@@ -274,6 +290,7 @@ impl Jwm {
             .into_iter()
             .chain(self.eva.confirmation.as_ref().map(|c| c.expires))
             .chain(self.eva.error_visible_until)
+            .chain(self.eva.wake_lease_until)
             .chain(
                 self.eva
                     .operations
@@ -297,6 +314,33 @@ impl Jwm {
     }
     pub(crate) fn eva_tick(&mut self, backend: &mut dyn Backend) {
         self.eva_record_focus();
+        self.eva.standby_allowed = backend.compositor_supports_eva_overlay()
+            && self
+                .eva_presentable_monitor(backend, self.state.sel_mon)
+                .is_some()
+            && !backend.compositor_session_locked()
+            && !self.features.system_ui.is_locked()
+            && self.features.monitor_lock.is_empty()
+            && self.running.load(std::sync::atomic::Ordering::SeqCst);
+        if self.eva.wake_requested && !self.eva.standby_allowed {
+            self.eva_set_wake_requested(false);
+        }
+        if self
+            .eva
+            .wake_lease_until
+            .is_some_and(|at| at <= Instant::now())
+        {
+            self.eva.wake_lease_until = None;
+            self.eva_set_wake_requested(false);
+            self.eva.wake_microphone_active = false;
+            self.eva.wake_state = "error".into();
+            self.eva.wake_text = "唤醒服务连接已中断，麦克风状态待确认".into();
+            if !self.eva_active() {
+                self.eva.state = "error".into();
+                self.eva.text = self.eva.wake_text.clone();
+                self.eva.error_visible_until = Some(Instant::now() + Duration::from_secs(2));
+            }
+        }
         if self.eva.permit.is_some() {
             let monitor = self.eva_presentable_monitor(
                 backend,
@@ -451,6 +495,105 @@ impl Jwm {
         }
         Ok(())
     }
+    pub(crate) fn eva_wake_toggle(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let response = self.eva_control(backend, &json!({"action":"wake_toggle"}));
+        if !response.success {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "Eva wake activation failed".into())
+                .into());
+        }
+        #[cfg(not(test))]
+        if self.eva.wake_requested {
+            let mut command = std::process::Command::new("systemctl");
+            command
+                .args(["--user", "start", "--no-block", "jwm-eva.service"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            match command.spawn() {
+                Ok(child) => self.supervise_transient_child(child),
+                Err(error) => {
+                    self.eva_set_wake_requested(false);
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn eva_set_wake_requested(&mut self, enabled: bool) {
+        if self.eva.wake_requested == enabled {
+            return;
+        }
+        self.eva.wake_requested = enabled;
+        self.eva.wake_generation = self.eva.wake_generation.saturating_add(1);
+        self.eva.wake_lease_until = if enabled {
+            Some(Instant::now() + Duration::from_secs(10))
+        } else {
+            self.eva
+                .wake_microphone_active
+                .then(|| Instant::now() + LEASE)
+        };
+        self.eva.wake_level = 0.;
+        self.eva.wake_state = if enabled { "connecting" } else { "disabled" }.into();
+        self.eva.wake_text.clear();
+        self.broadcast_ipc_event(
+            "assistant/wake_action",
+            json!({
+                "action":if enabled {"enable"} else {"disable"},
+                "wake_generation":self.eva.wake_generation,
+            }),
+        );
+    }
+    /// Standby has its own short lease and generation, never an execution permit.
+    pub(crate) fn eva_set_wake_status(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &Value,
+    ) -> IpcResponse {
+        self.eva_tick(backend);
+        if args["wake_generation"].as_u64() != Some(self.eva.wake_generation) {
+            return failure("assistant_wake_generation_mismatch");
+        }
+        let Some(enabled) = args["enabled"].as_bool() else {
+            return failure("invalid_wake_enabled");
+        };
+        let Some(microphone) = args["microphone_active"].as_bool() else {
+            return failure("invalid_wake_microphone");
+        };
+        if (enabled || microphone) && (!self.eva.wake_requested || !self.eva.standby_allowed) {
+            return failure("assistant_wake_not_requested");
+        }
+        let Some(state) = args["state"].as_str().filter(|s| {
+            matches!(
+                *s,
+                "standby" | "connecting" | "paused" | "error" | "disabled"
+            )
+        }) else {
+            return failure("invalid_wake_state");
+        };
+        self.eva.wake_state = state.into();
+        self.eva.wake_text = args["text"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(160)
+            .collect();
+        self.eva.wake_microphone_active = microphone;
+        self.eva.wake_level = args["level"]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.)
+            .clamp(0., 1.);
+        self.eva.wake_lease_until = self.eva.wake_requested.then(|| Instant::now() + LEASE);
+        self.eva_sync_ui(backend);
+        IpcResponse::ok(Some(self.eva_overlay_snapshot()))
+    }
     /// Called only by trusted local key/pointer routing. The model and IPC
     /// status publisher cannot manufacture approval with `confirmed: true`.
     /// Page visits belong to one concrete readable layout. Output/font changes
@@ -549,15 +692,40 @@ impl Jwm {
         } else {
             self.eva.text.clone()
         };
-        json!({"active":self.eva_active(),"visible":self.eva_active() || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":self.eva.state,"text":text,"level":self.eva.level,"microphone_active":if self.eva.state=="error"&&self.eva.error_visible_until.is_some(){None}else{Some(self.eva.microphone_active)},
+        let standby =
+            !self.eva_active() && (self.eva.wake_requested || self.eva.wake_microphone_active);
+        json!({"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some(){None}else{Some(self.eva.microphone_active)},
+            "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,
             "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
             "followup_remaining_ms":self.eva.followup_deadline_ns.filter(|_|self.eva_active()&&matches!(self.eva.state.as_str(),"follow_up"|"followup")).map(|deadline|deadline.saturating_sub(monotonic_ns())/1_000_000),
             "lease_remaining_ms":self.eva.lease_until.map(|t|t.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0)})
     }
     pub(crate) fn eva_control(&mut self, backend: &mut dyn Backend, args: &Value) -> IpcResponse {
-        let Some(action) = args.get("action").and_then(Value::as_str) else {
+        let Some(mut action) = args.get("action").and_then(Value::as_str) else {
             return failure("plan_invalid: missing assistant action");
         };
+        if action == "wake_activate" {
+            self.eva_tick(backend);
+            if !self.eva.wake_requested
+                || !self.eva.standby_allowed
+                || self.eva_active()
+                || args["wake_generation"].as_u64() != Some(self.eva.wake_generation)
+            {
+                return failure("assistant_wake_activation_stale");
+            }
+            action = "activate";
+        }
+        if matches!(action, "wake_toggle" | "wake_enable" | "wake_disable") {
+            self.eva_tick(backend);
+            let enabled =
+                action == "wake_enable" || (action == "wake_toggle" && !self.eva.wake_requested);
+            if enabled && !self.eva.standby_allowed {
+                return failure("assistant_standby_unavailable");
+            }
+            self.eva_set_wake_requested(enabled);
+            self.eva_sync_ui(backend);
+            return IpcResponse::ok(Some(self.eva_overlay_snapshot()));
+        }
         if !matches!(action, "toggle" | "activate" | "cancel") {
             return failure("plan_invalid: unsupported assistant action");
         }
@@ -727,11 +895,10 @@ impl Jwm {
             if targets.to_string().len() > MAX_REQUEST_BYTES {
                 return failure("plan_invalid: confirmation too large");
             }
-            let Some(actions) = targets
-                .as_array()
-                .filter(|actions| !actions.is_empty() && actions.len() <= 8)
-            else {
-                return failure("plan_invalid: confirmation must contain one to eight actions");
+            let Some(actions) = targets.as_array().filter(|actions| {
+                !actions.is_empty() && actions.len() <= jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN
+            }) else {
+                return failure("plan_invalid: confirmation must contain 1..32 actions");
             };
             for action in actions {
                 let Ok(action) =
@@ -3196,6 +3363,87 @@ mod tests {
             assert!(!jwm.eva_guarded_execute(&mut backend, &req).success);
         }
         assert!(queue.requests().is_empty());
+    }
+    #[test]
+    fn wake_standby_is_generation_fenced_and_has_no_desktop_permit() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let generation = jwm.eva.wake_generation;
+        let heartbeat = json!({"wake_generation":generation,"enabled":true,"microphone_active":true,"state":"standby","level":0.2});
+        assert!(jwm.eva_set_wake_status(&mut backend, &heartbeat).success);
+        let status = jwm.eva_overlay_snapshot();
+        assert_eq!(status["visible"], true);
+        assert_eq!(status["active"], false);
+        assert_eq!(status["microphone_active"], true);
+        assert!(status["assistant_permit"].is_null());
+        assert!(!jwm.eva_active());
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_disable"}))
+                .success
+        );
+        assert!(!jwm.eva_set_wake_status(&mut backend, &heartbeat).success);
+        // Keep the physical mic indicator until the daemon confirms cleanup.
+        assert!(jwm.eva.wake_microphone_active);
+        let disabled = json!({"wake_generation":jwm.eva.wake_generation,"enabled":false,"microphone_active":false,"state":"disabled"});
+        assert!(jwm.eva_set_wake_status(&mut backend, &disabled).success);
+        assert!(!jwm.eva.wake_microphone_active);
+        assert!(!jwm.eva.wake_requested);
+    }
+    #[test]
+    fn lost_wake_heartbeat_or_presentation_revokes_standby() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        jwm.eva.wake_lease_until = Some(Instant::now() - Duration::from_millis(1));
+        jwm.eva_tick(&mut backend);
+        assert!(!jwm.eva.wake_requested);
+        assert!(jwm.eva.permit.is_none());
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        backend.eva_overlay_supported = false;
+        jwm.eva_tick(&mut backend);
+        assert!(!jwm.eva.wake_requested);
+        assert!(!jwm.eva.standby_allowed);
+    }
+    #[test]
+    fn wake_handoff_cannot_replace_a_manual_session_or_outlive_disable() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let request = json!({"action":"wake_activate","wake_generation":jwm.eva.wake_generation});
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"activate"}))
+                .success
+        );
+        let permit = jwm.eva.permit.clone();
+        assert!(!jwm.eva_control(&mut backend, &request).success);
+        assert_eq!(jwm.eva.permit, permit);
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_disable"}))
+                .success
+        );
+        assert!(!jwm.eva_control(&mut backend, &request).success);
+        assert!(jwm.eva.permit.is_none());
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let request = json!({"action":"wake_activate","wake_generation":jwm.eva.wake_generation});
+        assert!(jwm.eva_control(&mut backend, &request).success);
+        assert!(jwm.eva_active());
     }
     #[test]
     fn activation_requires_visible_overlay_and_never_issues_permit_headlessly() {

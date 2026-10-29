@@ -15,6 +15,11 @@ enum Command {
     Daemon,
     Toggle,
     Cancel,
+    /// Toggle cloud mini wake-word standby (separate from the active conversation).
+    Wake {
+        #[arg(value_enum, default_value = "toggle")]
+        action: WakeAction,
+    },
     Status {
         #[arg(long)]
         json: bool,
@@ -33,6 +38,13 @@ enum Command {
     },
     Undo,
 }
+#[derive(Clone, clap::ValueEnum)]
+enum WakeAction {
+    Toggle,
+    Enable,
+    Disable,
+}
+
 fn print(value: Value) {
     println!("{}", serde_json::to_string_pretty(&value).unwrap());
 }
@@ -58,7 +70,12 @@ async fn run(args: Cli) -> io::Result<()> {
     // configuration is invalid; they do not start provider or audio work.
     let c = if matches!(
         &args.command,
-        Command::Cancel | Command::Status { .. } | Command::Capabilities { .. }
+        Command::Cancel
+            | Command::Wake {
+                action: WakeAction::Disable
+            }
+            | Command::Status { .. }
+            | Command::Capabilities { .. }
     ) {
         Config::default()
     } else {
@@ -70,9 +87,25 @@ async fn run(args: Cli) -> io::Result<()> {
             daemon::ensure_running(&c).await?;
             print(executor::command("assistant_control", json!({"action":"toggle"})).await?);
         }
-        Command::Cancel => {
-            print(executor::command("assistant_control", json!({"action":"cancel"})).await?);
+        Command::Wake { action } => {
+            if !matches!(action, WakeAction::Disable) {
+                daemon::ensure_running(&c).await?;
+            }
+            let action = match action {
+                WakeAction::Toggle => "wake_toggle",
+                WakeAction::Enable => "wake_enable",
+                WakeAction::Disable => "wake_disable",
+            };
+            print(executor::command("assistant_control", json!({"action":action})).await?);
         }
+        Command::Cancel => match daemon::control(json!({"command":"cancel"})).await {
+            Ok(value) => print(value),
+            Err(_) => {
+                let _ =
+                    executor::command("assistant_control", json!({"action":"wake_disable"})).await;
+                print(executor::command("assistant_control", json!({"action":"cancel"})).await?);
+            }
+        },
         Command::Status { json: _ } => {
             print(daemon::control(json!({"command":"status"})).await?);
         }

@@ -287,6 +287,30 @@ impl Store {
         )
     }
     pub fn receipt(&mut self, event: &serde_json::Value) -> io::Result<()> {
+        // A user can interrupt after response.create was sent but before the
+        // turn actor sees response.created. Read-only drains must still bind
+        // late usage to the already-admitted local reservation. Metadata never
+        // admits work: an unknown request cannot create a billing record.
+        if matches!(
+            event["type"].as_str(),
+            Some("response.created" | "response.done")
+        ) {
+            let response = &event["response"];
+            if let (Some(request), Some(id)) = (
+                response["metadata"]["eva_request_id"].as_str(),
+                response["id"].as_str().filter(|id| {
+                    !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+                }),
+            ) {
+                if request != id
+                    && self.usage.records.contains_key(request)
+                    && !self.usage.records.contains_key(id)
+                    && !self.usage.is_archived(id)
+                {
+                    self.associate(request, id)?;
+                }
+            }
+        }
         if matches!(
             event["type"].as_str(),
             Some(
@@ -339,6 +363,35 @@ pub fn wall_ms() -> u64 {
 mod tests {
     use super::*;
     #[test]
+    fn interrupted_response_can_settle_from_late_correlated_receipts() {
+        let dir = std::env::temp_dir().join(format!(
+            "eva-late-response-{}-{}",
+            std::process::id(),
+            wall_ms()
+        ));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        let config = Config::default();
+        store.reserve("pending-turn", "plan", &config).unwrap();
+        store.unknown_pending().unwrap();
+        let created = serde_json::json!({"type":"response.created","response":{"id":"late-response","metadata":{"eva_request_id":"pending-turn"}}});
+        store.receipt(&created).unwrap();
+        assert!(!store.usage.records.contains_key("pending-turn"));
+        assert!(store.usage.records["late-response"].unknown);
+        let done = serde_json::json!({"type":"response.done","response":{"id":"late-response","metadata":{"eva_request_id":"pending-turn"},"status":"cancelled","usage":{"input_tokens":0,"output_tokens":1,"input_token_details":{"text_tokens":0,"audio_tokens":0,"cached_tokens":0},"output_token_details":{"text_tokens":1,"audio_tokens":0}}}});
+        store.receipt(&done).unwrap();
+        store.receipt(&done).unwrap();
+        assert_eq!(
+            store.usage.records["late-response"].settled_microusd,
+            Some(16)
+        );
+        let foreign = serde_json::json!({"type":"response.created","response":{"id":"foreign","metadata":{"eva_request_id":"unreserved"}}});
+        store.receipt(&foreign).unwrap();
+        assert_eq!(store.usage.records.len(), 1);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn usage_load_is_bounded_and_does_not_follow_a_replaced_file() {
         let dir = std::env::temp_dir().join(format!(
             "eva-usage-load-{}-{}",
@@ -387,6 +440,7 @@ mod tests {
             pending_transcription: Default::default(),
         };
         let mut config = Config::default();
+        config.interaction.max_utterance_ms = 20_000;
         store.reserve_transcription("disabled", &config).unwrap();
         assert!(store.usage.records.is_empty());
         config.openai.input_transcription = true;
@@ -430,6 +484,7 @@ mod tests {
             .unwrap();
         let mut store = Store::open_at(dir.clone()).unwrap();
         let mut config = Config::default();
+        config.interaction.max_utterance_ms = 20_000;
         config.openai.input_transcription = true;
         config.budget.daily_limit_usd = 0.000001;
         let event = serde_json::json!({"type":"conversation.item.input_audio_transcription.completed","item_id":"foreign-B","content_index":0,"transcript":"foreign transcript must never persist","usage":{"type":"duration","seconds":2.0}});
@@ -480,6 +535,7 @@ mod tests {
             .unwrap();
         let mut store = Store::open_at(dir.clone()).unwrap();
         let mut config = Config::default();
+        config.interaction.max_utterance_ms = 20_000;
         store
             .register_foreign_transcription("disabled", &config)
             .unwrap();

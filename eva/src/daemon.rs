@@ -175,7 +175,8 @@ pub async fn run(c: Config) -> io::Result<()> {
         return Err(io::Error::other("Eva service disabled in configuration"));
     }
     let (listener, _guard) = listen()?;
-    // A restarted daemon never resumes an old microphone or an old plan.
+    // A restarted daemon discards old streams and plans. A still-live native
+    // wake request may establish a fresh, non-authoritative standby session.
     let _ = command("assistant_control", json!({"action":"cancel"})).await;
     let store = Arc::new(Mutex::new(Store::open()?));
     let (request_tx, mut requests) = mpsc::channel::<Request>(16);
@@ -208,6 +209,14 @@ pub async fn run(c: Config) -> io::Result<()> {
         }
     });
     let (updates_tx, mut updates) = mpsc::channel::<Update>(64);
+    let (wake_tx, mut wake_updates) = mpsc::channel::<crate::wake::Update>(16);
+    let mut wake_worker = None;
+    let mut wake_cancel = None;
+    let mut wake_generation = 0;
+    let mut wake_status = json!({"state":"disabled","microphone_active":false});
+    let mut wake_requested = false;
+    let mut wake_retry = std::time::Instant::now();
+    let mut wake_heartbeat = std::time::Instant::now() - Duration::from_secs(1);
     let (events_tx, mut events) = mpsc::channel(64);
     jwm_ipc_client::subscribe(jwm_ipc_client::JwmIpc::new(), &["assistant"], events_tx);
     let watchdog = Watchdog::start(c.service.watchdog_seconds)?;
@@ -226,6 +235,9 @@ pub async fn run(c: Config) -> io::Result<()> {
     // start systemd's runtime watchdog until recovery, the control listener,
     // actor channels, signal handler and our own watchdog are all ready.
     notify_systemd("READY=1");
+    if c.wake_word.enabled {
+        let _ = command("assistant_control", json!({"action":"wake_enable"})).await;
+    }
     loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
@@ -234,6 +246,8 @@ pub async fn run(c: Config) -> io::Result<()> {
                 if request.request["command"]=="dry_run" {
                     if worker.is_some()||permit.is_some(){let _=request.reply.send(json!({"success":false,"error":"Eva is busy; finish the active session before dry-run"}));continue;}
                     let Some(text)=request.request["text"].as_str().filter(|s|!s.is_empty()&&s.len()<=4096).map(str::to_owned)else{let _=request.reply.send(json!({"success":false,"error":"dry_run text must be 1..4096 bytes"}));continue;};
+                    stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                    wake_status=json!({"state":"paused","microphone_active":false,"text":"正在演练"});
                     let config=c.clone();let storage=store.clone();status=json!({"state":"planning","text":"正在生成演练计划","microphone_active":false,"execution_enabled":false});
                     worker=Some(tokio::spawn(async move{
                         let result=crate::session::dry_run(&config,&text,storage.clone()).await;
@@ -242,7 +256,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     }));continue;
                 }
                 let response=match request.request["command"].as_str().unwrap_or(""){
-                    "status"=>json!({"success":true,"data":status,"assistant_permit":permit,"pid":std::process::id(),"configuration_id":c.fingerprint(),"model":c.openai.model}),
+                    "status"=>json!({"success":true,"data":status,"assistant_permit":permit,"pid":std::process::id(),"configuration_id":c.fingerprint(),"model":c.openai.model,"wake_requested":wake_requested,"wake_generation":wake_generation,"wake_model":c.wake_word.model,"wake":wake_status}),
                     "undo" if permit.is_some() && request.request.get("assistant_permit").is_none_or(|requested|serde_json::to_value(permit.as_ref().unwrap()).is_ok_and(|p|p==*requested)) && ["listening","follow_up","responding"].contains(&status["state"].as_str().unwrap_or(""))=>{
                         stop(&mut worker,&mut cancellation).await;
                         // Both workers use this permit. Joining first and
@@ -259,12 +273,18 @@ pub async fn run(c: Config) -> io::Result<()> {
                     },
                     "undo"=>json!({"success":false,"error":"activate Eva and wait for Listening before undo"}),
                     "cancel"=>{
+                        let _=command("assistant_control",json!({"action":"wake_disable"})).await;
+                        stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                        wake_status=json!({"state":"disabled","microphone_active":false});
                         let result=command("assistant_control",json!({"action":"cancel"})).await;
                         stop(&mut worker,&mut cancellation).await;store.lock().unwrap().unknown_pending()?;
                         match result{Ok(v)=>json!({"success":true,"data":v}),Err(e)=>json!({"success":false,"error":e.to_string()})}
                     },
                     _=>json!({"success":false,"error":"unsupported_control_command"}),
                 };let _=request.reply.send(response);
+            },
+            Some(update)=wake_updates.recv()=>{
+                if update.generation==wake_generation && wake_worker.is_some() { wake_status=update.state; }
             },
             Some(update)=updates.recv()=>{if permit.as_ref().is_some_and(|p|update.apply(p,&mut status)){last_heartbeat=std::time::Instant::now()-Duration::from_secs(1);}},
             Some(event)=events.recv()=>{
@@ -298,7 +318,63 @@ pub async fn run(c: Config) -> io::Result<()> {
                     if command("set_assistant_status",update).await.is_err(){stop(&mut worker,&mut cancellation).await;permit=None;status=json!({"state":"idle","microphone_active":false});}
                     last_heartbeat=std::time::Instant::now();
                 }
-                let observed=query("get_assistant_status",json!({})).await;
+                let mut observed=query("get_assistant_status",json!({})).await;
+                let native_generation=observed.as_ref().ok().and_then(|s|s["wake_generation"].as_u64()).unwrap_or(0);
+                wake_requested=observed.as_ref().is_ok_and(|s|s["wake_requested"]==true);
+                let standby_allowed=observed.as_ref().is_ok_and(|s|s["standby_allowed"]==true);
+                if native_generation!=wake_generation {
+                    stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                    while wake_updates.try_recv().is_ok(){}
+                    wake_generation=native_generation;
+                    wake_retry=std::time::Instant::now();
+                    wake_status=json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false});
+                }
+                if wake_worker.as_ref().is_some_and(|w|w.is_finished()) {
+                    let finished=wake_worker.take().unwrap().await;wake_cancel=None;
+                    while wake_updates.try_recv().is_ok(){}
+                    wake_status=json!({"state":"paused","microphone_active":false});
+                    match finished {
+                        Ok(Ok(crate::wake::Outcome::Detected)) if wake_requested && standby_allowed && worker.is_none() && observed.as_ref().is_ok_and(|s|s["active"]!=true) => {
+                            // The mini stream has been joined and released. A
+                            // new native activation supplies all desktop authority.
+                            if command("assistant_control",json!({"action":"wake_activate","wake_generation":wake_generation})).await.is_ok() {
+                                observed=query("get_assistant_status",json!({})).await;
+                            }
+                        },
+                        Ok(Err(error))=>{
+                            let (code,text)=crate::errors::describe(&error);
+                            wake_status=json!({"state":"error","text":text,"error_code":code,"microphone_active":false});
+                            wake_retry=std::time::Instant::now()+Duration::from_millis(c.wake_word.reconnect_ms);
+                            if error.to_string().contains("budget_exceeded") {
+                                let _=command("assistant_control",json!({"action":"wake_disable"})).await;
+                                wake_requested=false;
+                            }
+                        },
+                        Err(_)=>{
+                            wake_status=json!({"state":"error","text":"语音唤醒已停止，正在重连","microphone_active":false});
+                            wake_retry=std::time::Instant::now()+Duration::from_millis(c.wake_word.reconnect_ms);
+                        },
+                        _=>{},
+                    }
+                }
+                let active=observed.as_ref().is_ok_and(|s|s["active"]==true);
+                if !wake_requested || !standby_allowed || active || worker.is_some() {
+                    stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                    while wake_updates.try_recv().is_ok(){}
+                    wake_status=json!({"state":if wake_requested{"paused"}else{"disabled"},"text":if wake_requested{"对话期间暂停唤醒监听"}else{"语音唤醒已关闭"},"microphone_active":false});
+                } else if wake_worker.is_none() && std::time::Instant::now()>=wake_retry {
+                    let (cancel_tx,cancel_rx)=watch::channel(false);wake_cancel=Some(cancel_tx);
+                    wake_status=json!({"state":"connecting","text":"正在连接语音唤醒","microphone_active":false});
+                    wake_worker=Some(tokio::spawn(crate::wake::run(c.clone(),wake_generation,wake_tx.clone(),store.clone(),cancel_rx)));
+                }
+                if wake_heartbeat.elapsed()>=Duration::from_secs(1) {
+                    let mut update=wake_status.clone();update["wake_generation"]=json!(wake_generation);update["enabled"]=json!(wake_requested);
+                    if command("set_assistant_wake_status",update).await.is_err() {
+                        stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                        wake_status=json!({"state":"paused","microphone_active":false});
+                    }
+                    wake_heartbeat=std::time::Instant::now();
+                }
                 wm_instance=observed.as_ref().ok().and_then(|s|s["wm_instance_id"].as_str()).map(str::to_owned);
                 let next=observed.as_ref().ok().filter(|s|s["active"]==true).and_then(|s|serde_json::from_value::<AssistantPermit>(s["assistant_permit"].clone()).ok());
                 if next!=permit {
@@ -314,6 +390,10 @@ pub async fn run(c: Config) -> io::Result<()> {
             }
         }
     }
+    stop_wake(&mut wake_worker, &mut wake_cancel).await;
+    if let Ok(native) = command("assistant_control", json!({"action":"wake_disable"})).await {
+        let _=command("set_assistant_wake_status",json!({"wake_generation":native["wake_generation"],"enabled":false,"microphone_active":false,"state":"disabled"})).await;
+    }
     stop(&mut worker, &mut cancellation).await;
     if let Some(p) = permit {
         let _ = command(
@@ -327,6 +407,22 @@ pub async fn run(c: Config) -> io::Result<()> {
         t.abort();
     }
     Ok(())
+}
+async fn stop_wake(
+    worker: &mut Option<tokio::task::JoinHandle<io::Result<crate::wake::Outcome>>>,
+    cancel: &mut Option<watch::Sender<bool>>,
+) {
+    if let Some(c) = cancel.take() {
+        let _ = c.send(true);
+    }
+    if let Some(mut w) = worker.take()
+        && tokio::time::timeout(Duration::from_millis(600), &mut w)
+            .await
+            .is_err()
+    {
+        w.abort();
+        let _ = w.await;
+    }
 }
 async fn stop(
     worker: &mut Option<tokio::task::JoinHandle<io::Result<()>>>,
