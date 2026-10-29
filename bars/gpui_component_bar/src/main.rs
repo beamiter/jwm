@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
-    ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds,
+    ScrollEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds,
     WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
@@ -528,7 +528,7 @@ impl GpuiComponentBar {
                     *hovered,
                 )
             }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 if let Some(input) = gpui_sidebar::scroll_action(
                     this,
@@ -591,7 +591,7 @@ impl GpuiComponentBar {
                 this.dispatch(UserAction::ToggleMute);
                 cx.notify();
             }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 if let Some(input) =
                     gpui_sidebar::scroll_action(this, xbar_core::presentation::NodeId::Audio, event)
@@ -848,12 +848,15 @@ fn main() {
         // Root paints the whole window in the component theme's background.
         // Solid mode recolors that sheet to the shared fallback; translucent
         // mode clears it entirely so the panel's own wash is the only alpha
-        // the compositor gets to see.
-        Theme::global_mut(cx).background = if translucent {
-            gpui::transparent_black()
-        } else {
-            panel_background.into()
-        };
+        // the compositor gets to see. Keep the root's background token in sync
+        // with the theme color through the component theme update API.
+        Theme::update(cx, |theme| {
+            theme.background = if translucent {
+                gpui::transparent_black()
+            } else {
+                panel_background.into()
+            };
+        });
         let mut height: Pixels = px(config.presentation.logical_thickness(1.0) as f32);
         let mut width: Pixels = cx
             .primary_display()

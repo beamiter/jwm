@@ -324,7 +324,11 @@ jobs:
               not (package["source"] or "").startswith("registry+") for package in gpui
           ):
               raise SystemExit("GPUI must resolve to published registry packages")
-          print(f"Verified {len(gpui)} GPUI packages; no Zed monorepo dependency")
+          core = [package for package in gpui if package["name"] == "gpui-pre"]
+          platform = [package for package in gpui if package["name"] == "gpui-pre-platform"]
+          if len(core) != 1 or len(platform) != 1 or core[0]["version"] != platform[0]["version"]:
+              raise SystemExit("GPUI core and platform must share one snapshot version")
+          print(f"Verified {len(gpui)} GPUI packages at snapshot {core[0]['version']}; no Zed monorepo dependency")
           PY
 
       - name: Check all targets

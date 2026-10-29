@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-# gpui-component 0.6.6 uses this exact GPUI snapshot. Keep the framework and
+# gpui-component 0.8.1 uses this exact GPUI snapshot. Keep the framework and
 # native platform aligned so component elements share the same GPUI types.
-gpui = { package = "gpui-pre", version = "=0.3.6" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.6", features = ["wayland", "x11"] }
-gpui-component = "=0.6.6"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["wayland", "x11"] }
+gpui-component = "=0.8.1"
 log = "0.4"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }

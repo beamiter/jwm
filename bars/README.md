@@ -275,7 +275,7 @@ contrast, not font rasterization quality or physical-display calibration.
   local properties (which outrank Masonry's hover/active theme defaults), leaving
   the shared material on its fixed-size outer box visible in every state.
 - GPUI-component remains on its original, independent legacy palette and is
-  **not wallpaper-adaptive** in this change. Its pinned 0.6.6 Button transforms
+  **not wallpaper-adaptive** in this change. Its pinned 0.8.1 Button transforms
   custom fills and overrides interaction borders; adoption is deferred until
   its native styling adapter is implemented and validated. No contrast-policy
   guarantee is made for this example frontend.

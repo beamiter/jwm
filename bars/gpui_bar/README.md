@@ -5,10 +5,10 @@ projection, with native X11 and Wayland backends.
 
 ## Standalone GPUI dependencies
 
-This bar consumes the published `gpui-pre = 0.3.6` and
-`gpui-pre-platform = 0.3.6` packages from crates.io. They package GPUI and its
+This bar consumes the published `gpui-pre = 0.3.10` and
+`gpui-pre-platform = 0.3.10` packages from crates.io. They package GPUI and its
 supporting crates from Zed revision
-`bcf6582ce3500df93a8a39366640173e6786cea6`; Cargo does not clone or update the
+`08cbb88a152c3751a43e853425a70e9f631a5918`; Cargo does not clone or update the
 Zed editor repository to build this bar. The Rust import names remain `gpui`
 and `gpui_platform` through dependency aliases.
 
@@ -19,7 +19,7 @@ and `x11` stay enabled. The package versions match
 the shared sidebar, without adding `gpui-component` to this bar.
 
 The startup transparency probe uses the same dependency lines as this GPUI
-snapshot: `wgpu 29.0.4`, `x11rb 0.13.2` and `pollster 0.4`. Keep those aligned
+snapshot: `wgpu 30.0.1`, `x11rb 0.13.2` and `pollster 0.4`. Keep those aligned
 when upgrading GPUI to avoid a second graphics stack and differing surface
 capability APIs. The old macOS placeholder crates are no longer needed;
 platform-specific dependencies resolve from their published packages.

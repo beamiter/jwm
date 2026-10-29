@@ -4,8 +4,7 @@
 
 use gpui::prelude::*;
 use gpui::{
-    Context, MouseButton, Render, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Window, div,
-    px,
+    Context, MouseButton, Render, Rgba, ScrollDelta, ScrollEvent, SharedString, Window, div, px,
 };
 use xbar_core::presentation::{NodeId, Palette, PointerAction, PresentationConfig, VisualState};
 use xbar_core::tag_contrast::TagPalette;
@@ -29,7 +28,7 @@ pub fn hover_control<T: ScrollOwner>(this: &mut T, id: NodeId, hovered: bool) {
 pub fn scroll_action<T: ScrollOwner>(
     this: &mut T,
     id: NodeId,
-    event: &ScrollWheelEvent,
+    event: &ScrollEvent,
 ) -> Option<PointerAction> {
     let delta = match event.delta {
         ScrollDelta::Pixels(delta) => xbar_core::ScrollDelta::Pixels {
@@ -185,7 +184,7 @@ fn cell<T: ScrollOwner + 'static>(
                 }),
             );
         }
-        item = item.on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+        item = item.on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
             if bindings.scroll_up.is_none() && bindings.scroll_down.is_none() {
                 return;
             }

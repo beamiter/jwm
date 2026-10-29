@@ -31,7 +31,7 @@ use xbar_core::{
 use xbar_linux_actions::ProcessActionHandler;
 
 use gpui::{
-    App, Bounds, Context, IntoElement, ParentElement, Pixels, Render, Rgba, ScrollWheelEvent,
+    App, Bounds, Context, IntoElement, ParentElement, Pixels, Render, Rgba, ScrollEvent,
     SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
     WindowOptions, div, point, prelude::*, px, size,
 };
@@ -518,7 +518,7 @@ impl GpuiBar {
                     cx.notify();
                 }
             }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 if let Some(input) = gpui_sidebar::scroll_action(
                     this,
@@ -586,7 +586,7 @@ impl GpuiBar {
                 this.dispatch(UserAction::ToggleMute);
                 cx.notify();
             }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _w, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _w, cx| {
                 cx.stop_propagation();
                 if let Some(input) =
                     gpui_sidebar::scroll_action(this, xbar_core::presentation::NodeId::Audio, event)
