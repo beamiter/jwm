@@ -22,7 +22,11 @@ bash scripts/install-eva.sh
 bash scripts/install-eva.sh --help
 ```
 
-构建 Eva 音频模块需要 `pkg-config`、PipeWire/SPA 开发头文件以及 `clang`/`libclang-dev`。Rust 的 libspa 绑定及实际加载的 PipeWire 客户端库需要 ≥ 1.2；安装器会先调用 `scripts/ensure_pipewire.sh --env`，在系统开发包不足时构建私有开发前缀并配置 rpath。这个客户端可连接 ≥ 0.3.44 的 PipeWire 服务端及其会话管理器；旧服务端缺少可靠时间证据时作废或澄清该句，不用事件接收时间猜测执行对象。音频不依赖 `pw-record`/`pw-play` 子进程。音频连接或格式失效会作废整句；播放完成依据设备实际 drained 回执。
+构建 Eva 音频模块需要 `pkg-config`、`libpulse-dev`、PipeWire/SPA 开发头文件以及 `clang`/`libclang-dev`。Rust 的 libspa 绑定及实际加载的 PipeWire 客户端库需要 ≥ 1.2；安装器会先调用 `scripts/ensure_pipewire.sh --env`，在系统开发包不足时构建私有开发前缀并配置 rpath。这个客户端可连接 ≥ 0.3.44 的 PipeWire 服务端及其会话管理器；旧服务端缺少可靠时间证据时作废或澄清该句，不用事件接收时间猜测执行对象。音频不依赖 `pw-record`/`pw-play` 子进程。音频连接或格式失效会作废整句；播放完成依据原生排空回执和播放时钟。
+
+按快捷键激活时，Eva 自动连接当前用户的原生音频后端：真实 PulseAudio 服务使用原生 PulseAudio 采集和播放；PipeWire 桌面继续使用原生 PipeWire。无需停止 PulseAudio、切换全局音频服务或手动启用设备。会话结束和取消会断开本次音频流，Idle 不保留麦克风流。
+
+`jwm-eva doctor` 显示 `audio_backend`、输入和输出设备是否可用；诊断只读，不打开音频流。PipeWire 后端需要真实 `Audio/Source` 与 `Audio/Sink` 节点，不能用仅有摄像头或屏幕视频的连接代替。PulseAudio 后端只连接当前用户的本机 Unix socket，拒绝把扬声器 monitor 当作麦克风；显式指定的输入设备消失时结束该句，不悄悄切到别的设备。
 
 API 凭据默认从 Secret Service 读取；在桌面会话中运行下面命令，按提示输入 key（不会写入配置文件）：
 
@@ -58,7 +62,7 @@ function = "eva_toggle"
 2. 说“切到第三个 tag”，再跟进说“换成 scrolling 布局”。核对同一显示器和工作区。
 3. 说“把这个窗口移到第八个 tag，然后切过去”。核对同一窗口实例。
 4. 等待模型时按 Esc，确认迟到计划没有执行；再在等待期间切换应用，确认不会误改新窗口。
-5. 会话退出后检查实际 PipeWire 采集流已释放。不能只根据浮层文字判断。
+5. 会话退出后检查实际 PipeWire/PulseAudio 采集流已释放。不能只根据浮层文字判断。
 
 完整 X11/Wayland、设备故障、费用、语义和延迟验收清单在 [验收账本](../docs/eva-acceptance.md)。本地测试和实时 API 测试分别报告；没有 key 或没有图形会话的检查不算语音端到端通过。
 

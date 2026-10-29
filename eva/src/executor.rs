@@ -800,9 +800,13 @@ fn reconciliation_batch(
 /// This is read-only and can never restore a session or replay an operation.
 pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
     static CURSOR: Mutex<Option<String>> = Mutex::new(None);
-    let pending = {
+    let snapshot_store = store.clone();
+    // Both a busy Store mutex and its durable filesystem operations can wait
+    // arbitrarily long under host I/O pressure. Never occupy an async worker
+    // while taking the snapshot or writing a reconciled receipt.
+    let pending = tokio::task::spawn_blocking(move || {
         let mut cursor = CURSOR.lock().unwrap();
-        let s = store.lock().unwrap();
+        let s = snapshot_store.lock().unwrap();
         let ids = reconciliation_batch(&s.ledger, cursor.as_deref(), 16);
         *cursor = ids.last().cloned();
         ids.into_iter()
@@ -816,7 +820,9 @@ pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
                 )
             })
             .collect::<Vec<_>>()
-    };
+    })
+    .await
+    .map_err(|_| io::Error::other("reconciliation_snapshot_failed"))?;
     for (id, instance, action, previous) in pending {
         let receipt = if matches!(action.as_str(), "quit" | "restart") {
             let mut previous = previous.unwrap_or_else(|| json!({"status":"unknown"}));
@@ -856,34 +862,40 @@ pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
                 json!({"status":"unknown","error":"historical_receipt_unavailable"}),
             ),
         };
-        let mut s = store.lock().unwrap();
-        if s.ledger.operations.get(&id).is_some_and(|record| {
-            matches!(
-                record.state,
-                OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
-            )
-        }) {
-            continue;
-        }
-        let projected = if let Some(record) = s.ledger.operations.get(&id) {
-            crate::result_projection::for_ledger(
-                &value,
-                &record.action,
-                record.result.as_ref().unwrap_or(&Value::Null),
-            )
-        } else {
-            continue;
-        };
-        if s.ledger
-            .operations
-            .get(&id)
-            .is_some_and(|r| r.state != state || r.result.as_ref() != Some(&projected))
-        {
-            s.ledger
-                .record_result(&id, state, projected)
-                .map_err(io::Error::other)?;
-            s.save()?;
-        }
+        let settlement_store = store.clone();
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let mut s = settlement_store.lock().unwrap();
+            if s.ledger.operations.get(&id).is_some_and(|record| {
+                matches!(
+                    record.state,
+                    OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+                )
+            }) {
+                return Ok(());
+            }
+            let projected = if let Some(record) = s.ledger.operations.get(&id) {
+                crate::result_projection::for_ledger(
+                    &value,
+                    &record.action,
+                    record.result.as_ref().unwrap_or(&Value::Null),
+                )
+            } else {
+                return Ok(());
+            };
+            if s.ledger
+                .operations
+                .get(&id)
+                .is_some_and(|r| r.state != state || r.result.as_ref() != Some(&projected))
+            {
+                s.ledger
+                    .record_result(&id, state, projected)
+                    .map_err(io::Error::other)?;
+                s.save()?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| io::Error::other("reconciliation_settlement_failed"))??;
     }
     Ok(())
 }

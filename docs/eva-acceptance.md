@@ -9,7 +9,7 @@
 - `待实测`：需要登录桌面、真实设备或用户提供的 API 凭据。
 - P4 的唤醒词、AEC、自然打断和 jagent 是方案明确留待后续的扩展；首版必须保持本地唤醒词关闭。
 
-本次本地验收截止 2026-10-29。真实云端模型、实体音频设备和实际用户桌面验收仍按下列边界保留，不能以合成图、mock 或 IPC 测试替代。
+以下冻结矩阵记录 2026-10-29 的初始本地验收。2026-10-30 的用户 X11 会话、真实麦克风与 API 基础联调另见文末；未覆盖的模型语料、设备和性能指标继续保留，不能以合成图、mock 或 IPC 测试替代。
 
 ## 本地可重复检查
 
@@ -185,3 +185,39 @@
 provider 在 session.created 前拒绝配置，在 session.updated 完整核对 PCM、voice、VAD 阈值/填充/静音、自动响应开关与转写配置之后才允许 append。PCM 空包/奇数字节/超长包在发送前拒绝，网络/API错误只输出归一化错误码。真实 API 参数和设备流仍待各自集成实测。
 
 PipeWire 时钟/队列/设备延迟是不同量，参考[官方 pw_time 说明](https://docs.pipewire.org/structpw__time.html)；会话配置回执流程参考[OpenAI Realtime 会话指南](https://developers.openai.com/api/docs/guides/realtime-conversations)。
+
+## 2026-10-30 用户 X11 会话与真实语音联调
+
+本轮使用用户已安装并重启的 JWM、实体麦克风和 `gpt-realtime-2.1-mini`，凭据由用户在本机输入受保护文件。未保存原始音频、凭据或完整桌面标题。初次联调先修复了 TLS provider 初始化、单个 function call 与附带 message 的解析、严格计划跨字段约束、PipeWire 首块跨度以及阻塞存储影响 watchdog 的问题；失败记录保留，不能只统计重试成功。
+
+| 场景 | 本轮观察与用户确认 |
+|---|---|
+| 只读真实 API 计划 | “切到第三个 tag”生成正确计划，`execution_enabled=false`；不将其计为语音执行 |
+| 语音切换 tag | 实体语音切到第三个 tag，真实 operation 后状态与用户确认一致 |
+| 语音布局与撤销 | 第三个 tag 切为 scrolling；语音撤销恢复 tile；两次真实后状态与用户确认一致 |
+| Esc 取消 | 说切到第五个 tag 后立即 Esc；观察到取消回 Idle，未产生该 tag 的执行记录，用户确认没有切换 |
+
+上述首次实体语音验证使用临时 PipeWire ALSA 接管。测试后已恢复原 PulseAudio 服务和配置；输入、输出、音量、静音与声卡 profile 对照原快照一致。此步骤不作为日常激活方式，后续自动激活应直接使用桌面的现有音频服务。
+
+本轮只证明这些基础场景；没有取得完整语料成功率、P50/P95、跨应用起声绑定、Wayland 实体设备或全部故障矩阵的实测结果。
+
+### 快捷键自动连接现有音频服务
+
+用户要求恢复原音频设置后仍能通过 Alt+Ctrl+E 自动开麦。现增加原生 PulseAudio 后端：真实 PulseAudio 桌面直接使用其当前输入/输出，PipeWire 桌面优先使用原生 PipeWire。探测和连接在可取消的音频线程中完成；`doctor` 只查询设备，不创建音频流。不会启停系统音频服务、修改默认设备或解除静音。显式指定的输入不存在时拒绝回退，PulseAudio monitor 不作为麦克风。
+
+PulseAudio 采集使用本机 Unix socket、原生 timing/index 与带误差界限的墙钟到单调时钟映射；不以回调到达时刻冒充采集时间。播放尾部除 drain ACK 外还需新鲜原生时间证据，确认最后音频已离开 sink FIFO；普通部分播放位置不累加静音进度。两种后端均在取消时关闭本次 stream。
+
+| 检查 | 实测结果 |
+|---|---|
+| Rust 1.89 Eva/core 与集成测试 | Eva 92 passed、4 个原生音频用例单独执行；core 37 passed；daemon/executor/packaging/undo 共 6 passed；真实 API opt-in 用例未在此轮重跑 |
+| 全目标 Clippy | Eva/core `-D warnings` 通过 |
+| 私有 PulseAudio 15.99.1 | 2/2 通过；测试公共后端选择、可信采集、缺失/monitor 拒绝、停止、真实播放 drain 和部分历史；250 ms 音频 drain 276 ms，停止 10 ms，部分位置 321 ms；结束后零输入/输出流 |
+| 私有 PipeWire 1.2.8 的 24/48 kHz 图 | 两种图速率各 2/2 通过，客户端保持 24 kHz；48 kHz 跳过首个不可信混合帧后恢复真实时间戳，采集释放 11 ms、200 ms 播放 drain 222 ms。新增回归验证未知启动片段不会永久污染后续完整帧 |
+| 无响应音频服务 | 自有 Unix socket 接收握手但不回复；`Capture::start` 返回 0 ms，100 ms 后取消，1 ms 完成停止，连接全部关闭 |
+| 用户原有 PulseAudio 实体麦克风 | 只在内存采集两秒，98 帧全部时间戳有效，未上传；停止 10 ms；原服务 PID 未改变 |
+| 已安装程序诊断 | `audio_backend=pulseaudio`，输入/输出可用，`microphone_opened=false`，协议就绪；安装保留原 `eva.toml` 和凭据文件权限 |
+| 快捷键与真实语音复测 | 用户确认 Ctrl+Alt+E 自动开麦并成功执行 tag 切换；观察到 connecting/listening/planning/responding 后回到 Idle，实际 PulseAudio 输入和输出流均归零 |
+
+PulseAudio 隔离用例的 sine source 固定以两秒为量子，测试接收队列据此配置；生产两秒缓冲上限与溢出即拒绝的规则未放宽。PipeWire 隔离图禁用硬件发现，并检查会话管理器实际注册；两类 fixture 都不能连接用户音频图。
+
+复测后 PulseAudio PID、默认输入和默认输出与安装前一致；快捷键只管理 Eva 自己的音频流。

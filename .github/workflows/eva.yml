@@ -46,7 +46,7 @@ jobs:
       - name: Install audio build and shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pipewire pipewire-bin pipewire-media-session dbus-daemon mpv ffmpeg
+          sudo apt-get install -y --no-install-recommends pkg-config libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pulseaudio pulseaudio-utils pipewire pipewire-bin pipewire-media-session dbus-daemon mpv ffmpeg
       - name: Resolve compatible PipeWire development headers
         run: |
           bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"
@@ -59,7 +59,15 @@ jobs:
           done < "$RUNNER_TEMP/eva-pipewire.env"
       - run: cargo test --locked -p jwm_eva_core -p jwm-eva -p jwm_ipc_client
       - name: Native capture, playback drain, and interrupted history on a private graph
-        run: bash eva/tests/native-audio.sh
+        run: |
+          bash eva/tests/native-audio.sh
+          JWM_EVA_TEST_GRAPH_RATE=48000 bash eva/tests/native-audio.sh
+      - name: Native PulseAudio capture and playback on a private server
+        run: |
+          cargo test --locked -p jwm-eva --lib --no-run --message-format=json > "$RUNNER_TEMP/eva-lib-build.jsonl"
+          JWM_EVA_PULSE_TEST_BINARY="$(python3 -c 'import json,sys; records=[json.loads(line) for line in open(sys.argv[1])]; print(next(r["executable"] for r in records if r.get("reason")=="compiler-artifact" and r.get("target",{}).get("name")=="jwm_eva" and r.get("profile",{}).get("test") and r.get("executable")))' "$RUNNER_TEMP/eva-lib-build.jsonl")"
+          export JWM_EVA_PULSE_TEST_BINARY
+          bash eva/tests/native-pulse.sh
       - name: MPRIS identities and actual headless player queue readback
         run: |
           cargo test --locked -p jwm-bridge --bin jwm-bridge mpris::tests -- --test-threads=1
@@ -67,7 +75,7 @@ jobs:
         env:
           JWM_REQUIRE_DBUS_DAEMON: '1'
           RUN_JWM_MPV_TESTS: '1'
-      - run: shellcheck --enable=check-extra-masked-returns --exclude=SC2312 scripts/install-eva.sh scripts/test-install-eva.sh
+      - run: shellcheck --enable=check-extra-masked-returns --exclude=SC2312 scripts/install-eva.sh scripts/test-install-eva.sh eva/tests/native-audio.sh eva/tests/native-pulse.sh
       - run: bash scripts/test-install-eva.sh
       - name: State evidence boundary
         run: echo 'Offline contracts passed. Ignored live API tests and unavailable real voice/desktop tests are NOT end-to-end acceptance.' >> "$GITHUB_STEP_SUMMARY"
@@ -138,7 +146,7 @@ jobs:
       - name: Install native audio build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build
+          sudo apt-get install -y --no-install-recommends pkg-config libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build
       - name: Resolve compatible PipeWire development headers
         run: |
           bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"

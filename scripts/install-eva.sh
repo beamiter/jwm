@@ -55,6 +55,10 @@ done
 eva_target_dir=${CARGO_TARGET_DIR:-$eva_repo/target}
 if [[ $eva_target_dir != /* ]]; then eva_target_dir="$eva_repo/$eva_target_dir"; fi
 if [[ $eva_build == true ]]; then
+    if ! command -v pkg-config >/dev/null || ! pkg-config --exists libpulse; then
+        printf 'install-eva: native PulseAudio headers are required (Debian/Ubuntu: libpulse-dev)\n' >&2
+        exit 1
+    fi
     eva_pipewire_environment=$(bash "$eva_repo/scripts/ensure_pipewire.sh" --env)
     while IFS= read -r eva_setting; do
         case "$eva_setting" in

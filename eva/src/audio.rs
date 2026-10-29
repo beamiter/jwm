@@ -1,4 +1,4 @@
-//! Native PipeWire audio. Only an activated Capture/Playback owns a stream.
+//! Native desktop audio. Only an activated Capture/Playback owns a stream.
 //!
 //! The realtime capture callback writes to a preallocated SPSC ring. Framing,
 //! allocation and event delivery run on a dedicated ordinary loop thread. The
@@ -18,6 +18,85 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Notify, mpsc};
+
+mod pulse;
+mod pulse_playback;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioBackend {
+    PipeWire,
+    PulseAudio,
+}
+
+pub struct AudioStatus {
+    pub backend: &'static str,
+    pub input_available: bool,
+    pub output_available: bool,
+}
+
+fn check_cancelled(stop: &AtomicBool) -> io::Result<()> {
+    if stop.load(Ordering::Acquire) {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "audio_cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn selected_audio(device: &str, stop: &AtomicBool) -> io::Result<(AudioBackend, AudioStatus)> {
+    check_cancelled(stop)?;
+    let pulse = match pulse::probe(device, stop) {
+        Ok(probe) => Some(probe),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+        Err(error) if std::env::var_os("PULSE_SERVER").is_some_and(|value| !value.is_empty()) => {
+            return Err(error);
+        }
+        Err(_) => None,
+    };
+    check_cancelled(stop)?;
+    // A real PulseAudio server is the current desktop's audio owner. A
+    // PipeWire compatibility server leaves the native PipeWire path preferred.
+    if let Some(info) = pulse.as_ref().filter(|info| !info.is_pipewire_server) {
+        return Ok((
+            AudioBackend::PulseAudio,
+            AudioStatus {
+                backend: "pulseaudio",
+                input_available: info.source_available,
+                output_available: info.sink_available,
+            },
+        ));
+    }
+    if let Ok((input_available, output_available)) = pipewire_devices(device, stop)
+        && (input_available && output_available || pulse.is_none())
+    {
+        return Ok((
+            AudioBackend::PipeWire,
+            AudioStatus {
+                backend: "pipewire",
+                input_available,
+                output_available,
+            },
+        ));
+    }
+    check_cancelled(stop)?;
+    if let Some(info) = pulse {
+        return Ok((
+            AudioBackend::PulseAudio,
+            AudioStatus {
+                backend: "pulseaudio",
+                input_available: info.source_available,
+                output_available: info.sink_available,
+            },
+        ));
+    }
+    Err(io::Error::other("audio_server_unavailable"))
+}
+
+pub fn inspect(device: &str) -> io::Result<AudioStatus> {
+    selected_audio(device, &AtomicBool::new(false)).map(|(_, status)| status)
+}
 
 const RATE: u32 = 24_000;
 const FRAME_BYTES: usize = 960; // 20 ms, mono PCM16.
@@ -90,7 +169,7 @@ impl Drop for Worker {
 }
 
 pub struct Frame {
-    /// First sample's capture timestamp, mapped from PipeWire's monotonic clock.
+    /// First sample's capture timestamp, mapped from verified native audio timing.
     pub captured: Instant,
     pub timestamp_verified: bool,
     pub pcm: Vec<u8>,
@@ -102,7 +181,6 @@ pub struct Capture {
 }
 impl Capture {
     pub fn start(device: &str, tx: mpsc::Sender<io::Result<Frame>>) -> io::Result<Self> {
-        ensure_runtime()?;
         if device.is_empty() || device.len() > 512 || device.contains('\0') {
             return Err(io::Error::other("invalid_input_device"));
         }
@@ -112,7 +190,22 @@ impl Capture {
         let thread = thread::Builder::new()
             .name("eva-capture".into())
             .spawn(move || {
-                if let Err(error) = capture_loop(&device, &tx, &stop2, &fault2) {
+                let result = (|| {
+                    let (backend, status) = selected_audio(&device, &stop2)?;
+                    check_cancelled(&stop2)?;
+                    if !status.input_available {
+                        return Err(io::Error::other("audio_capture_device_unavailable"));
+                    }
+                    match backend {
+                        AudioBackend::PipeWire => capture_loop(&device, &tx, &stop2, &fault2),
+                        AudioBackend::PulseAudio => {
+                            pulse::capture_loop(&device, &tx, &stop2, &fault2)
+                        }
+                    }
+                })();
+                if let Err(error) = result
+                    && !stop2.load(Ordering::Acquire)
+                {
                     fail(&fault2, error.to_string());
                     let _ = tx.try_send(Err(error));
                 }
@@ -135,14 +228,46 @@ impl Capture {
 
 /// Check the native server roundtrip without creating a capture/playback node.
 pub fn probe() -> io::Result<()> {
+    let status = inspect("default")?;
+    if !status.input_available || !status.output_available {
+        return Err(io::Error::other("audio_device_unavailable"));
+    }
+    Ok(())
+}
+
+fn pipewire_devices(device: &str, stop: &AtomicBool) -> io::Result<(bool, bool)> {
+    check_cancelled(stop)?;
     ensure_runtime()?;
     use std::{cell::Cell, rc::Rc};
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(io_error)?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(io_error)?;
     let core = context.connect_rc(None).map_err(io_error)?;
+    let registry = core.get_registry().map_err(io_error)?;
     let done = Rc::new(Cell::new(false));
     let flag = done.clone();
+    let input = Rc::new(Cell::new(false));
+    let output = Rc::new(Cell::new(false));
+    let (input_seen, output_seen) = (input.clone(), output.clone());
+    let device = device.to_owned();
+    let _globals = registry
+        .add_listener_local()
+        .global(move |global| {
+            let Some(props) = global.props.as_ref() else {
+                return;
+            };
+            match props.get("media.class") {
+                Some("Audio/Source") => {
+                    let name = props.get("node.name").unwrap_or("");
+                    if !name.ends_with(".monitor") && (device == "default" || name == device) {
+                        input_seen.set(true);
+                    }
+                }
+                Some("Audio/Sink") => output_seen.set(true),
+                _ => {}
+            }
+        })
+        .register();
     // The server's initial core.info is the handshake acknowledgement. Do
     // not attach pipewire-rs's core.done adapter: older servers can send a
     // legitimate seq=0 which that adapter converts to AsyncSeq by panicking.
@@ -150,16 +275,20 @@ pub fn probe() -> io::Result<()> {
         .add_listener_local()
         .info(move |_| flag.set(true))
         .register();
-    let until = Instant::now() + Duration::from_secs(2);
-    while !done.get() {
+    let until = Instant::now() + Duration::from_millis(500);
+    while !done.get() || !input.get() || !output.get() {
+        check_cancelled(stop)?;
         if Instant::now() >= until {
-            return Err(io::Error::other("pipewire_probe_timeout"));
+            if !done.get() {
+                return Err(io::Error::other("pipewire_probe_timeout"));
+            }
+            break;
         }
         mainloop
             .loop_()
             .iterate(pw::loop_::Timeout::Finite(LOOP_INTERVAL));
     }
-    Ok(())
+    Ok((input.get(), output.get()))
 }
 
 fn props(capture: bool, device: &str) -> pw::properties::PropertiesBox {
@@ -174,6 +303,8 @@ fn props(capture: bool, device: &str) -> pw::properties::PropertiesBox {
     };
     if device != "default" {
         p.insert(*pw::keys::TARGET_OBJECT, device);
+        p.insert("node.dont-fallback", "true");
+        p.insert("node.dont-move", "true");
     }
     p
 }
@@ -294,7 +425,11 @@ impl Framer {
                     .checked_duration_since(expected)
                     .unwrap_or_else(|| expected.duration_since(actual));
                 if drift > Duration::from_millis(5) {
-                    return Err(io::Error::other("audio_timestamp_discontinuity"));
+                    let direction = if actual >= expected { "late" } else { "early" };
+                    return Err(io::Error::other(format!(
+                        "audio_timestamp_discontinuity: drift_us={} direction={direction}",
+                        drift.as_micros()
+                    )));
                 }
             }
             self.expected_next = timestamp.and_then(|at| {
@@ -319,7 +454,6 @@ impl Framer {
             }
             let pcm: Vec<u8> = self.bytes.drain(..FRAME_BYTES).collect();
             let captured = self.first.unwrap_or_else(Instant::now);
-            self.first = captured.checked_add(Duration::from_millis(20));
             let frame = Frame {
                 captured,
                 timestamp_verified: self.verified,
@@ -329,6 +463,17 @@ impl Framer {
 
             tx.try_send(Ok(frame))
                 .map_err(|_| io::Error::other("audio_buffer_overflow"))?;
+            // Every older partial chunk has now been consumed. All remaining
+            // bytes belong to this push, so re-anchor to its own native time
+            // and trust instead of carrying an unknown startup timestamp.
+            let consumed = bytes.len() - self.bytes.len();
+            self.first = match timestamp {
+                Some(start) => start.checked_add(Duration::from_nanos(
+                    (consumed as u64) * 1_000_000_000 / (RATE as u64 * 2),
+                )),
+                None => captured.checked_add(Duration::from_millis(20)),
+            };
+            self.verified = verified && self.first.is_some();
         }
         self.seen = true;
         Ok(())
@@ -368,11 +513,58 @@ fn capture_cycle_time(
 }
 
 const NATIVE_CHUNK_BYTES: usize = 16_384;
+#[derive(Clone, Copy, Default)]
+struct CaptureTiming {
+    header_pts: i64,
+    cycle: i64,
+    now: i64,
+    delay: i64,
+    rate_num: u32,
+    rate_denom: u32,
+    buffered: u64,
+    quantum_frames: u64,
+    ticks: u64,
+}
+/// The cycle stamps buffer delivery, while size describes the samples for
+/// this graph quantum. Startup/resampling can put more than one quantum in
+/// a buffer, so its first sample precedes the ordinary cycle anchor.
+fn capture_buffer_time(timing: CaptureTiming, samples: u64) -> Option<Instant> {
+    let maximum_samples = (NATIVE_CHUNK_BYTES / 2) as u64;
+    if samples == 0
+        || samples > maximum_samples
+        || timing.quantum_frames == 0
+        || timing.quantum_frames > maximum_samples
+        // A shorter buffer's position inside the quantum is unspecified.
+        || samples < timing.quantum_frames
+    {
+        return None;
+    }
+    let anchor = capture_cycle_time(
+        timing.cycle,
+        timing.now,
+        timing.delay,
+        timing.rate_num,
+        timing.rate_denom,
+        timing.buffered,
+    )?;
+    let extra = samples - timing.quantum_frames;
+    let offset =
+        Duration::from_nanos((extra as u128 * 1_000_000_000).div_ceil(RATE as u128) as u64);
+    let captured = anchor.checked_sub(offset)?;
+    let now = Instant::now();
+    if captured > now + Duration::from_millis(100)
+        || now.saturating_duration_since(captured) > Duration::from_secs(5)
+    {
+        return None;
+    }
+    Some(captured)
+}
 #[derive(Clone, Copy)]
 struct NativeChunk {
     bytes: [u8; NATIVE_CHUNK_BYTES],
     len: usize,
     timestamp: Option<Instant>,
+    timing: CaptureTiming,
 }
 /// One RT producer and one ordinary-loop consumer. All slots are allocated
 /// before stream activation; publish/read acquire-release pairs own each slot.
@@ -394,6 +586,7 @@ impl CaptureRing {
                         bytes: [0; NATIVE_CHUNK_BYTES],
                         len: 0,
                         timestamp: None,
+                        timing: CaptureTiming::default(),
                     }))
                 })
                 .collect(),
@@ -429,6 +622,7 @@ fn capture_loop(
     stop: &AtomicBool,
     fault: &Fault,
 ) -> io::Result<()> {
+    check_cancelled(stop)?;
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(io_error)?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(io_error)?;
@@ -442,6 +636,7 @@ fn capture_loop(
     let (state_fault, param_fault) = (fault.clone(), fault.clone());
     let mut seen = false;
     let mut framer = Framer::default();
+    let mut previous_timing: Option<(CaptureTiming, usize)> = None;
     let _listener = stream
         .add_local_listener_with_user_data(())
         .state_changed(move |_, _, old, new| {
@@ -476,21 +671,18 @@ fn capture_loop(
                     process_fault.store(2, Ordering::Release);
                     return;
                 }
-                let timestamp = header
-                    .and_then(|(pts, _)| monotonic_instant(pts))
-                    .or_else(|| {
-                        stream.time().ok().and_then(|t| {
-                            let r = t.rate();
-                            capture_cycle_time(
-                                buffer.cycle_time(),
-                                t.now(),
-                                t.delay(),
-                                r.num,
-                                r.denom,
-                                t.buffered(),
-                            )
-                        })
-                    });
+                let graph = stream.time().ok();
+                let timing = CaptureTiming {
+                    header_pts: header.map_or(0, |(pts, _)| pts),
+                    cycle: buffer.cycle_time(),
+                    now: graph.as_ref().map_or(0, |time| time.now()),
+                    delay: graph.as_ref().map_or(0, |time| time.delay()),
+                    rate_num: graph.as_ref().map_or(0, |time| time.rate().num),
+                    rate_denom: graph.as_ref().map_or(0, |time| time.rate().denom),
+                    buffered: graph.as_ref().map_or(0, |time| time.buffered()),
+                    quantum_frames: graph.as_ref().map_or(0, |time| time.as_raw().size),
+                    ticks: graph.as_ref().map_or(0, |time| time.ticks()),
+                };
                 let Some(data) = buffer.data() else {
                     process_fault.store(1, Ordering::Release);
                     return;
@@ -511,10 +703,14 @@ fn capture_loop(
                     process_fault.store(1, Ordering::Release);
                     return;
                 };
+                let timestamp = header
+                    .and_then(|(pts, _)| monotonic_instant(pts))
+                    .or_else(|| capture_buffer_time(timing, (len / 2) as u64));
                 let mut chunk = NativeChunk {
                     bytes: [0; NATIVE_CHUNK_BYTES],
                     len,
                     timestamp,
+                    timing,
                 };
                 chunk.bytes[..len].copy_from_slice(bytes);
                 buffer.frames((len / 2) as u64);
@@ -531,6 +727,7 @@ fn capture_loop(
     let mut params =
         [spa::pod::Pod::from_bytes(&pod)
             .ok_or_else(|| io::Error::other("audio_format_invalid"))?];
+    check_cancelled(stop)?;
     stream
         .connect(
             spa::utils::Direction::Input,
@@ -558,7 +755,19 @@ fn capture_loop(
                 chunk.timestamp,
                 chunk.timestamp.is_some(),
                 tx,
-            )?;
+            ).map_err(|error| {
+                if error.to_string().starts_with("audio_timestamp_discontinuity") {
+                    let t = chunk.timing;
+                    io::Error::other(format!(
+                            "{error} header_pts={} cycle={} graph_now={} graph_delay={} graph_rate={}/{} buffered={} quantum_frames={} ticks={} chunk_bytes={} previous={:?}",
+                            t.header_pts, t.cycle, t.now, t.delay, t.rate_num, t.rate_denom, t.buffered, t.quantum_frames, t.ticks, chunk.len,
+                            previous_timing.map(|(p, len)| (p.header_pts, p.cycle, p.now, p.delay, p.rate_num, p.rate_denom, p.buffered, p.quantum_frames, p.ticks, len))
+                    ))
+                } else {
+                    error
+                }
+            })?;
+            previous_timing = Some((chunk.timing, chunk.len));
         }
     }
     let _ = stream.set_active(false);
@@ -818,7 +1027,6 @@ pub struct Playback {
 }
 impl Playback {
     pub fn start() -> io::Result<Self> {
-        ensure_runtime()?;
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(Output::default()));
         let fault = Fault::default();
@@ -828,7 +1036,22 @@ impl Playback {
         let thread = thread::Builder::new()
             .name("eva-playback".into())
             .spawn(move || {
-                if let Err(error) = playback_loop(&stop2, &state2, &fault2, &notify2) {
+                let result = (|| {
+                    let (backend, status) = selected_audio("default", &stop2)?;
+                    check_cancelled(&stop2)?;
+                    if !status.output_available {
+                        return Err(io::Error::other("audio_playback_device_unavailable"));
+                    }
+                    match backend {
+                        AudioBackend::PipeWire => playback_loop(&stop2, &state2, &fault2, &notify2),
+                        AudioBackend::PulseAudio => {
+                            pulse_playback::playback_loop(&stop2, &state2, &fault2, &notify2)
+                        }
+                    }
+                })();
+                if let Err(error) = result
+                    && !stop2.load(Ordering::Acquire)
+                {
                     fail(&fault2, error.to_string());
                 }
                 notify2.notify_waiters();
@@ -960,6 +1183,7 @@ fn playback_loop(
     fault: &Fault,
     notify: &Arc<Notify>,
 ) -> io::Result<()> {
+    check_cancelled(stop)?;
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(io_error)?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(io_error)?;
@@ -1038,6 +1262,7 @@ fn playback_loop(
     let mut params =
         [spa::pod::Pod::from_bytes(&pod)
             .ok_or_else(|| io::Error::other("audio_format_invalid"))?];
+    check_cancelled(stop)?;
     stream
         .connect(
             spa::utils::Direction::Output,
@@ -1098,6 +1323,86 @@ fn playback_loop(
 mod tests {
     use super::*;
     #[test]
+    fn verified_chunks_recover_after_an_unaligned_unknown_startup_prefix() {
+        let source = Instant::now();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut framer = Framer::default();
+        framer.push(&[0; 196], None, false, &tx).unwrap();
+        for index in 0..12 {
+            let samples = 98 + index * 128;
+            let timestamp =
+                source + Duration::from_nanos(samples * 1_000_000_000 / u64::from(RATE));
+            framer.push(&[0; 256], Some(timestamp), true, &tx).unwrap();
+        }
+        let first = rx.try_recv().unwrap().unwrap();
+        let second = rx.try_recv().unwrap().unwrap();
+        let third = rx.try_recv().unwrap().unwrap();
+        assert!(!first.timestamp_verified);
+        assert!(second.timestamp_verified && third.timestamp_verified);
+        assert!(
+            second
+                .captured
+                .duration_since(source)
+                .abs_diff(Duration::from_millis(20))
+                <= Duration::from_nanos(2)
+        );
+        assert!(
+            third
+                .captured
+                .duration_since(second.captured)
+                .abs_diff(Duration::from_millis(20))
+                <= Duration::from_nanos(2)
+        );
+    }
+    #[test]
+    fn startup_buffer_span_maps_to_contiguous_source_samples() {
+        let now = crate::context::monotonic_ns().unwrap() as i64;
+        let first = CaptureTiming {
+            cycle: now - 100_000_000,
+            now: now - 100_000_000,
+            delay: 512,
+            rate_num: 1,
+            rate_denom: 48_000,
+            buffered: 32,
+            quantum_frames: 255,
+            ..CaptureTiming::default()
+        };
+        let second = CaptureTiming {
+            cycle: first.cycle + 10_666_667,
+            now: first.now + 10_666_667,
+            ..first
+        };
+        let a = capture_buffer_time(first, 480).unwrap();
+        let b = capture_buffer_time(second, 256).unwrap();
+        assert!(
+            b.duration_since(a).abs_diff(Duration::from_millis(20)) < Duration::from_micros(100)
+        );
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut framer = Framer::default();
+        framer.push(&[0; 960], Some(a), true, &tx).unwrap();
+        framer.push(&[0; 512], Some(b), true, &tx).unwrap();
+        assert!(rx.try_recv().unwrap().unwrap().timestamp_verified);
+        assert!(
+            capture_buffer_time(
+                CaptureTiming {
+                    quantum_frames: 0,
+                    ..first
+                },
+                480
+            )
+            .is_none()
+        );
+        assert!(capture_buffer_time(first, 0).is_none());
+        assert!(capture_buffer_time(first, 254).is_none());
+        let old = CaptureTiming {
+            cycle: now - 4_900_000_000,
+            now: now - 4_900_000_000,
+            quantum_frames: 1,
+            ..first
+        };
+        assert!(capture_buffer_time(old, 8_192).is_none());
+    }
+    #[test]
     fn capture_ring_is_bounded_and_preserves_order_across_wrap() {
         let ring = CaptureRing::new();
         for round in 0..20 {
@@ -1106,6 +1411,7 @@ mod tests {
                     bytes: [0; NATIVE_CHUNK_BYTES],
                     len: 2,
                     timestamp: None,
+                    timing: CaptureTiming::default(),
                 };
                 chunk.bytes[0] = round * 4 + index;
                 assert!(ring.push(chunk));
@@ -1114,6 +1420,7 @@ mod tests {
                 bytes: [0; NATIVE_CHUNK_BYTES],
                 len: 2,
                 timestamp: None,
+                timing: CaptureTiming::default(),
             }));
             for index in 0..4 {
                 assert_eq!(ring.pop().unwrap().bytes[0], round * 4 + index);

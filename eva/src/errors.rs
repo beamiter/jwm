@@ -19,6 +19,8 @@ pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
         )
     } else if s.contains("audio")
         || s.contains("PipeWire")
+        || s.starts_with("pipewire_")
+        || s.starts_with("pulse_")
         || s.contains("capture")
         || s.contains("playback")
     {
@@ -63,7 +65,12 @@ pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
         ("connect_timeout", "等待服务超时，请稍后重试。")
     } else if s.contains("unsupported") {
         ("unsupported_action", "当前桌面不支持这项操作。")
-    } else if s.contains("plan") || s.contains("response") || s.contains("discovery") {
+    } else if s.contains("plan")
+        || s.contains("response")
+        || s.contains("discovery")
+        || s.contains("tool_call")
+        || s.contains("tool_output")
+    {
         ("plan_invalid", "未能确认完整操作计划，请重新说一次。")
     } else {
         (
@@ -87,6 +94,20 @@ mod tests {
             let (actual, text) = super::describe(&std::io::Error::other(code));
             assert_eq!(actual, code);
             assert!(!text.contains(code));
+        }
+        let (code, _) = super::describe(&std::io::Error::other(
+            "expected_exactly_one_tool_call: output_items=2 function_calls=2",
+        ));
+        assert_eq!(code, "plan_invalid");
+        for error in [
+            "pulse_context_failed",
+            "pulse_source_unavailable_or_monitor",
+            "pipewire_probe_timeout",
+        ] {
+            assert_eq!(
+                super::describe(&std::io::Error::other(error)).0,
+                "audio_unavailable"
+            );
         }
     }
 }

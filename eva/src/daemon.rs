@@ -133,6 +133,13 @@ struct Request {
     request: Value,
     reply: oneshot::Sender<Value>,
 }
+async fn control_reply(reply: oneshot::Receiver<Value>) -> Value {
+    match tokio::time::timeout(Duration::from_secs(60), reply).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => json!({"success":false,"error":"daemon_worker_failed"}),
+        Err(_) => json!({"success":false,"error":"daemon_request_timeout"}),
+    }
+}
 fn local_undo_request(event: &Value, permit: Option<&AssistantPermit>) -> Option<Value> {
     let expected = permit?;
     let observed =
@@ -156,6 +163,13 @@ fn undo_available(
                     <= config.undo.max_age_seconds.saturating_mul(1000)
         })
 }
+fn heartbeat_undo_available(config: &Config, store: &Mutex<Store>, wm: Option<&str>) -> bool {
+    // This is only an optional UI hint. A slow durable write must not block
+    // cancellation, JWM lease renewal or the daemon's watchdog heartbeat.
+    store
+        .try_lock()
+        .is_ok_and(|storage| undo_available(config, &storage.ledger, wm))
+}
 pub async fn run(c: Config) -> io::Result<()> {
     if !c.service.enabled {
         return Err(io::Error::other("Eva service disabled in configuration"));
@@ -163,7 +177,6 @@ pub async fn run(c: Config) -> io::Result<()> {
     let (listener, _guard) = listen()?;
     // A restarted daemon never resumes an old microphone or an old plan.
     let _ = command("assistant_control", json!({"action":"cancel"})).await;
-    notify_systemd("READY=1");
     let store = Arc::new(Mutex::new(Store::open()?));
     let (request_tx, mut requests) = mpsc::channel::<Request>(16);
     let local_request_tx = request_tx.clone();
@@ -184,12 +197,12 @@ pub async fn run(c: Config) -> io::Result<()> {
                 let _slot = slot;
                 if let Ok(request) = read_frame(&mut socket).await {
                     let (reply, rx) = oneshot::channel();
-                    if tx.try_send(Request { request, reply }).is_ok()
-                        && let Ok(Ok(value)) =
-                            tokio::time::timeout(Duration::from_secs(60), rx).await
-                    {
-                        let _ = write_frame(&mut socket, &value).await;
-                    }
+                    let value = if tx.try_send(Request { request, reply }).is_ok() {
+                        control_reply(rx).await
+                    } else {
+                        json!({"success":false,"error":"daemon_request_queue_full"})
+                    };
+                    let _ = write_frame(&mut socket, &value).await;
                 }
             });
         }
@@ -209,6 +222,10 @@ pub async fn run(c: Config) -> io::Result<()> {
     let mut last_reconcile = std::time::Instant::now();
     let mut error_until: Option<std::time::Instant> = None;
     let mut last_heartbeat = std::time::Instant::now() - Duration::from_secs(1);
+    // Store recovery includes durable fsyncs and can wait on host I/O. Do not
+    // start systemd's runtime watchdog until recovery, the control listener,
+    // actor channels, signal handler and our own watchdog are all ready.
+    notify_systemd("READY=1");
     loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
@@ -276,7 +293,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     if status["state"]!="error"{status=json!({"state":"idle","text":"","microphone_active":false});}
                 }
                 if let Some(p)=permit.as_ref() && last_heartbeat.elapsed()>=Duration::from_secs(1){
-                    status["undo_available"]=json!(undo_available(&c,&store.lock().unwrap().ledger,wm_instance.as_deref()));
+                    status["undo_available"]=json!(heartbeat_undo_available(&c,&store,wm_instance.as_deref()));
                     let mut update=status.clone();update["assistant_permit"]=serde_json::to_value(p)?;
                     if command("set_assistant_status",update).await.is_err(){stop(&mut worker,&mut cancellation).await;permit=None;status=json!({"state":"idle","microphone_active":false});}
                     last_heartbeat=std::time::Instant::now();
@@ -456,6 +473,60 @@ impl Drop for Watchdog {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn busy_store_does_not_block_undo_heartbeat() {
+        let base = if std::path::Path::new("/dev/shm").is_dir() {
+            std::path::PathBuf::from("/dev/shm")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base.join(format!(
+            "eva-heartbeat-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::store::Store::open_at(dir.clone()).unwrap(),
+        ));
+        let held = store.lock().unwrap();
+        let probe_store = store.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let probe = std::thread::spawn(move || {
+            send.send(super::heartbeat_undo_available(
+                &crate::config::Config::default(),
+                &probe_store,
+                Some("wm"),
+            ))
+            .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_millis(200));
+        // Release before joining even on failure, so a blocking-lock regression
+        // fails this assertion rather than hanging the complete test process.
+        drop(held);
+        probe.join().unwrap();
+        assert!(!result.unwrap());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn dropped_worker_reply_returns_a_structured_failure_over_the_socket() {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            let result = super::control_reply(receiver).await;
+            super::write_frame(&mut server, &result).await.unwrap();
+        });
+        // A panicking worker drops its sender without producing a response.
+        drop(sender);
+        let response = super::read_frame(&mut client).await.unwrap();
+        assert_eq!(response["success"], false);
+        assert_eq!(response["error"], "daemon_worker_failed");
+        task.await.unwrap();
+    }
+
     #[test]
     fn local_undo_is_bound_to_the_full_active_permit_and_latest_mutation() {
         use jwm_eva_core::{

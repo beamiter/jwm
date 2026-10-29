@@ -107,10 +107,14 @@ async fn run(args: Cli) -> io::Result<()> {
                     .map_err(|_| io::Error::other("local cost diagnostics failed"))?;
             let cap = executor::query("get_capabilities", json!({})).await;
             let key = c.api_key().await;
-            let audio = tokio::task::spawn_blocking(jwm_eva::audio::probe)
+            let input_device = c.audio.input_device.clone();
+            let audio = tokio::task::spawn_blocking(move || jwm_eva::audio::inspect(&input_device))
                 .await
-                .map(|r| r.is_ok())
-                .unwrap_or(false);
+                .ok()
+                .and_then(Result::ok);
+            let audio_ready = audio
+                .as_ref()
+                .is_some_and(|a| a.input_available && a.output_available);
             let context = executor::query("get_execution_context", json!({})).await;
             let schema = executor::query("get_command_schema", json!({})).await;
             let protocol_ready = context.as_ref().is_ok_and(|v| v["protocol_version"] == 1)
@@ -120,9 +124,9 @@ async fn run(args: Cli) -> io::Result<()> {
                         && v["context_tokens"] == true
                 });
             print(
-                json!({"configuration":"valid","config_path":args.config.unwrap_or_else(Config::path),"model":c.openai.model,"credential_source":c.openai.api_key_source,"credential_available":key.is_ok(),"native_pipewire_connected":audio,"ipc_connected":cap.is_ok(),"execution_protocol":context.as_ref().ok().map(|v|v["protocol_version"].clone()),"protocol_ready":protocol_ready,"microphone_opened":false,"cloud_connected":false,"local_costs":costs}),
+                json!({"configuration":"valid","config_path":args.config.unwrap_or_else(Config::path),"model":c.openai.model,"credential_source":c.openai.api_key_source,"credential_available":key.is_ok(),"audio_backend":audio.as_ref().map(|a|a.backend),"audio_input_available":audio.as_ref().is_some_and(|a|a.input_available),"audio_output_available":audio.as_ref().is_some_and(|a|a.output_available),"native_audio_connected":audio.is_some(),"native_pipewire_connected":audio.as_ref().filter(|a|a.backend=="pipewire").map(|_|true),"ipc_connected":cap.is_ok(),"execution_protocol":context.as_ref().ok().map(|v|v["protocol_version"].clone()),"protocol_ready":protocol_ready,"microphone_opened":false,"cloud_connected":false,"local_costs":costs}),
             );
-            if key.is_err() || !audio || !protocol_ready {
+            if key.is_err() || !audio_ready || !protocol_ready {
                 return Err(io::Error::other(
                     "doctor found missing dependencies, credentials or JWM protocol; no audio or cloud session was opened",
                 ));
