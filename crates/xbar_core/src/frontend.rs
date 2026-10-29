@@ -28,6 +28,18 @@ pub struct FrontendEnvelope {
     pub revision: u64,
     pub changes: DirtyBits,
     pub snapshot: BarSnapshot,
+    /// Canonical sparse workspace strip. IDs retain their original tag index.
+    #[serde(default)]
+    pub workspace_tags: Vec<crate::WorkspaceTag>,
+    /// Same rate text used by the native desktop header.
+    #[serde(default)]
+    pub header_network: String,
+    #[serde(default)]
+    pub header_cpu: String,
+    #[serde(default)]
+    pub header_memory: String,
+    #[serde(default)]
+    pub header_clock_compact: String,
     /// Optional coarse sections for frontends that keep independent stores.
     /// A consumer can derive the same value from `changes` when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,11 +48,21 @@ pub struct FrontendEnvelope {
 
 impl FrontendEnvelope {
     #[must_use]
-    pub const fn new(revision: u64, changes: DirtyBits, snapshot: BarSnapshot) -> Self {
+    pub fn new(revision: u64, changes: DirtyBits, snapshot: BarSnapshot) -> Self {
+        let workspace_tags = snapshot.workspace_tags();
+        let header_network = crate::controls::network_value(&snapshot.network);
+        let header_cpu = crate::controls::percent_value(snapshot.system.cpu_percent);
+        let header_memory = crate::controls::percent_value(snapshot.system.memory_percent);
+        let header_clock_compact = crate::controls::compact_clock_value(&snapshot.time);
         Self {
             revision,
             changes,
             snapshot,
+            workspace_tags,
+            header_network,
+            header_cpu,
+            header_memory,
+            header_clock_compact,
             partition_changes: None,
         }
     }
@@ -675,6 +697,29 @@ fn checked_tag(tag_index: usize) -> Result<TagId, ActionRequestError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn envelope_carries_atomic_sparse_workspace_projection() {
+        let mut snapshot = crate::BarModel::default().snapshot();
+        snapshot.tags[2].occupied = true;
+        snapshot.tags[7].occupied = true;
+        snapshot.tags[4].selected = true;
+        snapshot.active_tag = crate::TagId::new(4);
+        let envelope = super::FrontendEnvelope::new(11, crate::DirtyBits::default(), snapshot);
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(
+            json["workspace_tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tag| tag["number"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [3, 5, 8]
+        );
+        assert_eq!(json["workspace_tags"][2]["id"], 7);
+        assert_eq!(json["snapshot"]["tags"].as_array().unwrap().len(), 9);
+        assert_eq!(json["workspace_tags"][1]["state"]["selected"], true);
+    }
+
     use serde::Deserialize;
     use serde::de::value::{Error as ValueError, U8Deserializer};
 

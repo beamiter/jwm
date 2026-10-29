@@ -113,6 +113,9 @@ valid_stable_path() {
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
         usr/local/bin/jwm-player|\
+        usr/local/bin/jwm-shell|\
+        usr/local/bin/jwm-toggle-sidebar-mode|\
+        usr/local/bin/tauri_leptos_bar|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
@@ -162,6 +165,8 @@ if ((SKIP_BUILD == 0)); then
     cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/Cargo.toml"
     cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bridge/Cargo.toml"
     cargo build --locked --release --bin tao_glow_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_glow_bar/Cargo.toml"
+    cargo build --locked --release --manifest-path "$PROJECT_ROOT/crates/jwm_shell/Cargo.toml" --target-dir "$TARGET_DIR"
+    bash "$PROJECT_ROOT/scripts/build-leptos-bar.sh" "$TARGET_DIR"
     cargo build --locked --release --bin tao_pixels_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_pixels_bar/Cargo.toml"
 fi
 

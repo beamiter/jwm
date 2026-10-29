@@ -1,3 +1,4 @@
+mod header;
 use xbar_core::presentation::VisualState;
 use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 // xilem_bar — xilem port of iced_bar.
@@ -16,7 +17,6 @@ use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
 
 use std::collections::HashMap;
 use std::env;
-use std::ffi::c_void;
 use std::fs;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -201,7 +201,7 @@ impl<D> GeometryDriver<D> {
         }
     }
 
-    fn sync_window(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_>) {
+    fn sync_window(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_, '_>) {
         let bridge = self.bridge.snapshot();
         let window = ctx.window(window_id).handle();
         let scale_factor = window.scale_factor().max(f64::EPSILON);
@@ -261,7 +261,7 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
     fn on_action(
         &mut self,
         window_id: WindowId,
-        ctx: &mut DriverCtx<'_>,
+        ctx: &mut DriverCtx<'_, '_>,
         widget_id: WidgetId,
         action: ErasedAction,
     ) {
@@ -272,7 +272,7 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
     fn on_async_action(
         &mut self,
         window_id: WindowId,
-        ctx: &mut DriverCtx<'_>,
+        ctx: &mut DriverCtx<'_, '_>,
         action: ErasedAction,
     ) {
         self.inner.on_async_action(window_id, ctx, action);
@@ -283,7 +283,7 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
         self.inner.on_start(state);
     }
 
-    fn on_close_requested(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_>) {
+    fn on_close_requested(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_, '_>) {
         self.inner.on_close_requested(window_id, ctx);
     }
 
@@ -327,19 +327,18 @@ fn compositor_active(conn: &XCBConnection, screen_num: usize) -> bool {
 
 /// Raw-handle wrapper for the probe window, so wgpu can build a surface on a
 /// window masonry knows nothing about.
+#[derive(Debug, Clone)]
 struct ProbeTarget {
-    conn: *mut c_void,
+    conn: Arc<XCBConnection>,
     screen: i32,
     window: u32,
     visual_id: u32,
 }
 
-unsafe impl Send for ProbeTarget {}
-unsafe impl Sync for ProbeTarget {}
-
 impl HasDisplayHandle for ProbeTarget {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let conn = NonNull::new(self.conn).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let conn = NonNull::new(self.conn.get_raw_xcb_connection())
+            .ok_or(raw_window_handle::HandleError::Unavailable)?;
         let handle = XcbDisplayHandle::new(Some(conn), self.screen);
         Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Xcb(handle)) })
     }
@@ -355,14 +354,22 @@ impl HasWindowHandle for ProbeTarget {
     }
 }
 
-/// Whether a wgpu surface on this display can actually deliver per-pixel
-/// alpha. Masonry picks its surface alpha mode internally and never reports
-/// the outcome, so the bar asks the same question ahead of time: build a
-/// throwaway depth-32 window, get the surface capabilities, and accept only
-/// what masonry itself would blit transparently — `PostMultiplied` or
-/// `PreMultiplied`. Anything less and a transparent window would compose
-/// garbage, so the bar must stay solid.
-fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
+/// Native X11 ARGB may retain alpha even when GLES advertises Opaque.
+/// Keep non-ARGB and other backends on the toolkit's existing WSI policy.
+fn native_argb_alpha_supported(
+    native_argb: bool,
+    backend: wgpu::Backend,
+    modes: &[wgpu::CompositeAlphaMode],
+) -> bool {
+    native_argb
+        && (modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            || modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+            || (backend == wgpu::Backend::Gl && modes.contains(&wgpu::CompositeAlphaMode::Opaque)))
+}
+
+/// Probe a server-verified ARGB window on an owned native display.
+/// GLES may advertise only Opaque while retaining that native alpha channel.
+fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
     let Some(screen) = conn.setup().roots.get(screen_num) else {
         return false;
     };
@@ -420,16 +427,30 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
         return false;
     }
 
+    // The server, rather than the requested creation depth, is authoritative.
+    let native_argb = conn
+        .get_geometry(window)
+        .ok()
+        .and_then(|reply| reply.reply().ok())
+        .is_some_and(|geometry| geometry.depth == 32);
+    if !native_argb {
+        let _ = conn.destroy_window(window);
+        let _ = conn.free_colormap(colormap);
+        let _ = conn.flush();
+        return false;
+    }
+
     let target = ProbeTarget {
-        conn: conn.get_raw_xcb_connection(),
+        conn: Arc::clone(&conn),
         screen: screen_num as i32,
         window,
         visual_id,
     };
     // Env-aware, like the instance masonry itself will build: a `WGPU_BACKEND`
     // override must steer the probe onto the same backend it steers vello onto.
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
+        Box::new(target.clone()),
+    ));
     let capable = instance
         .create_surface(target)
         .ok()
@@ -443,13 +464,16 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
                 },
             ))
             .ok()?;
-            let modes = surface.get_capabilities(&adapter).alpha_modes;
-            Some(
-                modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied)
-                    || modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied),
-            )
+            Some(native_argb_alpha_supported(
+                native_argb,
+                adapter.get_info().backend,
+                &surface.get_capabilities(&adapter).alpha_modes,
+            ))
         })
         .unwrap_or(false);
+    // Both the borrowed surface and its display-owning instance are gone
+    // before destroying the native scratch window.
+    drop(instance);
 
     let _ = conn.destroy_window(window);
     let _ = conn.free_colormap(colormap);
@@ -522,11 +546,26 @@ impl XilemBar {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
-        let theme_mode = load_theme_mode();
+        let mut app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            xbar_core::config::BarConfig::default()
+        });
+        let header = app_config.presentation.apply_desktop_header_profile();
+        if header {
+            app_config.background_opacity = app_config.background_opacity.or(Some(0.58));
+        }
+        // The horizontal header follows the shared theme. Keep the legacy
+        // preference when no shared configuration exists, and on side bars.
+        let shared_theme = header
+            && xbar_core::config::BarConfig::default_path().is_some_and(|(path, _)| path.is_file());
+        let theme_mode = if shared_theme {
+            app_config.theme
+        } else {
+            load_theme_mode()
+        };
         let config = ModelConfig {
             brightness_step: 10,
             initial_theme: theme_mode,
-            show_seconds: true,
             ..ModelConfig::default()
         };
         let runtime = if shared_path.is_empty() {
@@ -537,12 +576,6 @@ impl XilemBar {
             BarRuntime::with_managed_transport(config, recovery)
         };
         let runtime = runtime.expect("xilem bar model configuration is valid");
-        // Only `background_opacity` applies here; the rest of this bar's
-        // appearance is its own theme.
-        let app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
-            warn!("falling back to the default bar config: {error}");
-            xbar_core::config::BarConfig::default()
-        });
         let background_opacity = app_config.background_opacity;
         let mut dock = DockBridge::new();
         dock.set_edge(app_config.presentation.edge);
@@ -1688,7 +1721,7 @@ fn sidebar_cell(
     );
     let tags = tag_palette.colors(VisualState {
         hovered: false,
-        selected: spec.state.selected || spec.state.filled,
+        selected: spec.state.selected,
         urgent: spec.state.urgent,
         occupied: spec.state.occupied,
     });
@@ -1901,7 +1934,7 @@ fn driver_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<
 }
 
 // Top-level view: fork attaches the background tasks to the visible tree.
-fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
+fn root(state: &mut XilemBar) -> Box<xilem::AnyWidgetView<XilemBar>> {
     // The background is `fallback_rgb` for the live theme in both modes —
     // re-derived on every rebuild so a ToggleTheme click repaints it — and
     // only the alpha differs: washed to the configured opacity when the
@@ -1913,6 +1946,9 @@ fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
         state.translucent,
     );
     let bar_bg = with_alpha(rgb(r, g, b), alpha as f32);
+    if state.presentation.desktop_header && !state.presentation.edge.is_vertical() {
+        return fork(header::view(state), (driver_task(),)).boxed();
+    }
     let controls = app_logic(state);
     let shelf = state.dock.shelf_bounds();
     let vertical = state.presentation.edge.is_vertical();
@@ -1966,6 +2002,7 @@ fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
             .background(bar_bg),
         (driver_task(),),
     )
+    .boxed()
 }
 
 // -------- main ---------------------------------------------------------------
@@ -1982,7 +2019,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let translucent = if x11rb::xcb_ffi::load_libxcb().is_ok() {
         match XCBConnection::connect(None) {
             Ok((conn, screen_num)) => {
-                compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+                let conn = Arc::new(conn);
+                compositor_active(&conn, screen_num)
+                    && surface_alpha_capable(Arc::clone(&conn), screen_num)
             }
             Err(_) => false,
         }
@@ -2036,4 +2075,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         masonry::theme::default_property_set(),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod alpha_probe_tests {
+    use super::native_argb_alpha_supported;
+    use wgpu::{Backend, CompositeAlphaMode as Alpha};
+    #[test]
+    fn opaque_gles_requires_a_verified_native_argb_window() {
+        let advertised = [Alpha::Opaque];
+        assert!(native_argb_alpha_supported(true, Backend::Gl, &advertised));
+        assert!(!native_argb_alpha_supported(
+            false,
+            Backend::Gl,
+            &advertised
+        ));
+        assert!(!native_argb_alpha_supported(
+            true,
+            Backend::Vulkan,
+            &advertised
+        ));
+        assert_eq!(advertised, [Alpha::Opaque]);
+    }
+    #[test]
+    fn missing_native_alpha_or_missing_modes_remains_opaque() {
+        assert!(!native_argb_alpha_supported(
+            false,
+            Backend::Gl,
+            &[Alpha::PreMultiplied]
+        ));
+        assert!(!native_argb_alpha_supported(true, Backend::Gl, &[]));
+        assert!(native_argb_alpha_supported(
+            true,
+            Backend::Vulkan,
+            &[Alpha::PreMultiplied]
+        ));
+    }
 }

@@ -338,6 +338,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_waterlily",
         "toggle_wifi",
         "togglebar",
+        "toggle_desktop_shell_mode",
         "togglecompositor",
         "togglefloating",
         "togglemaximize",
@@ -363,6 +364,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "zoom_master",
     ],
     special_commands: &[
+        "desktop_shell_action",
+        "register_desktop_shell",
         "batch",
         "benchmark",
         "bluetooth_pairing_done",
@@ -431,6 +434,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_conn",
         "get_connectivity",
         "get_cp",
+        "get_desktop_shell",
         "get_desktops",
         "get_devices",
         "get_dnd",
@@ -541,6 +545,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_xwayland_status",
     ],
     subscription_topics: &[
+        "desktop_shell",
+        "desktop_shell/state",
         "*",
         "audio",
         "audio_recording",
@@ -1643,6 +1649,9 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         }
         "layout_picker" | "layouts" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
         "togglebar" | "toggle_bar" | "bar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
+        "toggle_desktop_shell_mode" => {
+            Ok((Jwm::toggle_desktop_shell_mode, parse_int_arg(args, 0)?))
+        }
 
         // --- Tags ---
         "view" => Ok((Jwm::view, parse_configured_tag_mask_arg("view", args)?)),

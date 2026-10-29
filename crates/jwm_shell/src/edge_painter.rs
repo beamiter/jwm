@@ -2,12 +2,12 @@ use super::{Action, Hit, Panel};
 use anyhow::Result;
 use cairo::{Context, LinearGradient};
 use xbar_core::model::{BarSnapshot, ShellRoute, TagId, UserAction};
-pub(super) struct Painter<'a> {
-    pub(super) ctx: &'a Context,
-    pub(super) panel: &'a mut Panel,
-    pub(super) snapshot: &'a BarSnapshot,
-    pub(super) tasks: &'a [crate::shell_ipc::Task],
-    pub(super) dark: bool,
+pub(crate) struct Painter<'a> {
+    pub(crate) ctx: &'a Context,
+    pub(crate) panel: &'a mut Panel,
+    pub(crate) snapshot: &'a BarSnapshot,
+    pub(crate) tasks: &'a [crate::ipc::Task],
+    pub(crate) dark: bool,
 }
 
 impl Painter<'_> {
@@ -84,6 +84,8 @@ impl Painter<'_> {
             rect,
             action,
             slider: None,
+            enabled: true,
+            slider_value: None,
         });
         Ok(())
     }
@@ -103,6 +105,8 @@ impl Painter<'_> {
             rect,
             action,
             slider: None,
+            enabled: true,
+            slider_value: None,
         });
         Ok(())
     }
@@ -116,7 +120,7 @@ impl Painter<'_> {
         Ok(())
     }
 
-    pub(super) fn left(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
+    pub(crate) fn left(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
         let size = (w - 16.0).clamp(1.0, 44.0);
         let bx = x + (w - size) / 2.0;
         let gap = if h < 620.0 { 6.0 } else { 8.0 };
@@ -197,7 +201,7 @@ impl Painter<'_> {
         Ok(())
     }
 
-    pub(super) fn right(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
+    pub(crate) fn right(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
         let size = (w - 16.0).clamp(1.0, 44.0);
         let bx = x + (w - size) / 2.0;
         let mut cy = y + 10.0;
@@ -250,6 +254,8 @@ impl Painter<'_> {
                     UserAction::OpenShellHub(ShellRoute::Hub)
                 }),
                 slider: None,
+                enabled: true,
+                slider_value: None,
             });
             let top = cy + 40.0;
             let length = sh - 54.0;
@@ -271,15 +277,6 @@ impl Painter<'_> {
                     self.ctx.set_source_rgb(0.12, 0.50, 1.0);
                     self.ctx.fill()?;
                 }
-                self.panel.hits.push(Hit {
-                    rect: [bx, top, size, length],
-                    action: Action::Model(if audio {
-                        UserAction::ToggleMute
-                    } else {
-                        UserAction::OpenShellHub(ShellRoute::Hub)
-                    }),
-                    slider: Some((audio, top, length)),
-                });
             } else {
                 self.ink();
                 text(
@@ -292,6 +289,17 @@ impl Painter<'_> {
                     true,
                 )?;
             }
+            self.panel.hits.push(Hit {
+                rect: [bx, top, size, length],
+                action: Action::Model(if audio {
+                    UserAction::ToggleMute
+                } else {
+                    UserAction::OpenShellHub(ShellRoute::Hub)
+                }),
+                slider: Some((audio, top, length)),
+                enabled: value.is_some(),
+                slider_value: value,
+            });
             cy += sh + 12.0;
         }
         self.rule(x + 18.0, cy + 3.0, (w - 36.0).max(1.0))?;
@@ -327,7 +335,7 @@ impl Painter<'_> {
         Ok(())
     }
 
-    pub(super) fn bottom(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
+    pub(crate) fn bottom(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
         let size = (h - 20.0).clamp(1.0, 42.0);
         let cy = y + (h - size) / 2.0;
         let media_width = if w >= 1000.0 {
@@ -526,9 +534,31 @@ impl Painter<'_> {
         Ok(())
     }
 
-    fn task_button(&mut self, rect: [f64; 4], task: &crate::shell_ipc::Task) -> Result<()> {
+    fn task_button(&mut self, rect: [f64; 4], task: &crate::ipc::Task) -> Result<()> {
         let [x, y, w, h] = rect;
-        self.button(rect, "", Action::FocusWindow(task.id), task.is_focused)?;
+        let action = self
+            .snapshot
+            .minimized_windows
+            .iter()
+            .find(|window| window.token.get() == task.id && task.is_minimized)
+            .map(|window| {
+                Action::Model(UserAction::RestoreWindow {
+                    window: window.token,
+                    wm_session_id: self.snapshot.wm_session_id,
+                    minimized_generation: self.snapshot.wm_sequence.unwrap_or_default(),
+                    geometry: xbar_core::DockItemGeometry::new(
+                        self.panel.placement.x.saturating_add(x.round() as i32),
+                        self.panel.placement.y.saturating_add(y.round() as i32),
+                        w.round().max(1.0) as u32,
+                        h.round().max(1.0) as u32,
+                    ),
+                })
+            })
+            .unwrap_or(Action::FocusWindow {
+                id: task.id,
+                incarnation: task.incarnation,
+            });
+        self.button(rect, "", action, task.is_focused)?;
         let compact = w < 96.0;
         let icon_size = 24.0_f64.min((h - 8.0).max(1.0)).min((w - 8.0).max(1.0));
         let ix = x + if compact { (w - icon_size) / 2.0 } else { 10.0 };
@@ -566,7 +596,7 @@ impl Painter<'_> {
     }
 }
 
-pub(super) fn rounded(ctx: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+pub(crate) fn rounded(ctx: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w.max(0.0) / 2.0).min(h.max(0.0) / 2.0);
     ctx.new_sub_path();
     ctx.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
@@ -624,7 +654,7 @@ fn text(
 
 /// Shared capsule material: a cool translucent tint with a restrained upper
 /// highlight. The host supplies the rounded clip and the real desktop backdrop.
-pub(super) fn material(ctx: &Context, rect: [f64; 4], dark: bool) -> Result<()> {
+pub(crate) fn material(ctx: &Context, rect: [f64; 4], dark: bool) -> Result<()> {
     let [x, y, _, h] = rect;
     let tint = LinearGradient::new(x, y, x, y + h);
     if dark {
@@ -988,6 +1018,40 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_sliders_remain_visible_diagnostics_without_input_targets() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 90, 656).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        for available in [false, true] {
+            let mut snapshot = xbar_core::model::BarModel::default().snapshot();
+            let value = available.then(|| xbar_core::Percent::from_whole(42).unwrap());
+            snapshot.audio.volume_percent = value;
+            snapshot.brightness.percent = value;
+            let mut panel = panel(BarEdge::Right, 0);
+            Painter {
+                ctx: &ctx,
+                panel: &mut panel,
+                snapshot: &snapshot,
+                tasks: &[],
+                dark: false,
+            }
+            .right(12.0, 0.0, 66.0, 656.0)
+            .unwrap();
+            let sliders: Vec<_> = panel
+                .hits
+                .iter()
+                .filter(|hit| hit.slider.is_some())
+                .collect();
+            assert_eq!(sliders.len(), 2);
+            for hit in sliders {
+                assert_eq!(hit.enabled, available);
+                assert_eq!(hit.slider_value, value);
+                let [x, y, w, h] = hit.rect;
+                assert_eq!(hit.contains(x + w / 2.0, y + h / 2.0), available);
+            }
+        }
+    }
+
+    #[test]
     fn four_row_workspace_pages_keep_all_tags_reachable() {
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 84, 680).unwrap();
         let ctx = Context::new(&surface).unwrap();
@@ -1072,8 +1136,9 @@ mod tests {
     fn overflow_keeps_every_task_reachable_without_overlapping_trailing_controls() {
         let snapshot = xbar_core::model::BarModel::default().snapshot();
         let tasks: Vec<_> = (0..12)
-            .map(|id| crate::shell_ipc::Task {
+            .map(|id| crate::ipc::Task {
                 id,
+                incarnation: 0,
                 name: format!("Task {id}"),
                 class: String::new(),
                 monitor: 0,
@@ -1118,7 +1183,7 @@ mod tests {
                         "{width}: {:?}",
                         hit.rect
                     );
-                    if let Action::FocusWindow(id) = hit.action {
+                    if let Action::FocusWindow { id, .. } = hit.action {
                         seen.insert(id);
                     }
                     for other in &panel.hits[i + 1..] {

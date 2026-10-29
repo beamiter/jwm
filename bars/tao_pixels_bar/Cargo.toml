@@ -24,11 +24,15 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 cairo-rs = "0.22.9"
 pango = "0.22.9"
-pixels = "0.17.2"
+pixels = "=0.17.2"
 raw-window-handle = "0.6.2"
 tao = "0.37.0"
 x11rb = "0.14"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"
+
 # GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
 [patch.crates-io]
+pixels = { path = "../../vendor/pixels" }
 glib = { path = "../../vendor/glib" }

@@ -6,11 +6,8 @@ use std::env;
 use xbar_core::logging::init as initialize_logging;
 
 fn main() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-    }
-
+    // Keep WebKit's compositor default for a single transparent material.
+    // Explicit WEBKIT_DISABLE_COMPOSITING_MODE remains a supported opaque fallback.
     let shared_path = env::args().nth(1).unwrap_or_default();
     if let Err(error) = initialize_logging("tauri_leptos_bar", &shared_path) {
         eprintln!("failed to initialize logging: {error}");

@@ -121,6 +121,9 @@ valid_stable_path() {
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
         usr/local/bin/jwm-player|\
+        usr/local/bin/jwm-shell|\
+        usr/local/bin/jwm-toggle-sidebar-mode|\
+        usr/local/bin/tauri_leptos_bar|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
@@ -250,6 +253,13 @@ load_manifest() {
     local manifest=$1 line=0 kind source version_path stable_path mode extra index
     local -A seen_version=() seen_stable=()
     [[ -f $manifest && ! -L $manifest ]] || die "missing regular release manifest: $manifest"
+    local manifest_header manifest_format
+    IFS= read -r manifest_header < "$manifest"
+    case "$manifest_header" in
+        '# JWM release manifest, format 1.') manifest_format=1 ;;
+        '# JWM release manifest, format 2.') manifest_format=2 ;;
+        *) die "unsupported release manifest format" ;;
+    esac
     while IFS=$'\t' read -r kind source version_path stable_path mode extra || [[ -n ${kind:-} ]]; do
         ((line += 1))
         [[ -n ${kind:-} ]] || continue
@@ -299,6 +309,9 @@ load_manifest() {
         usr/share/dbus-1/services/org.freedesktop.Notifications.service
         usr/local/share/doc/jwm
     )
+    if [[ $manifest_format == 2 ]]; then
+        required+=(usr/local/bin/jwm-shell usr/local/bin/tauri_leptos_bar)
+    fi
     local required_path found
     for required_path in "${required[@]}"; do
         found=0

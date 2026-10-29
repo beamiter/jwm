@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "baseline": "artifacts/shared-shell/baseline/performance.json",
+  "scope": "jwm-shell process including all threads; top frontend reported separately",
+  "sample_seconds": 3,
+  "maximum": {
+    "idle_cpu_percent_one_core": 16.24,
+    "rss_bytes": 242757632,
+    "wakeups_per_second": 266.12,
+    "workspace_roundtrip_ms": 1000,
+    "restore_roundtrip_ms": 1500
+  },
+  "latency_method": "native pointer event through IPC state observation; includes fixture dispatch and sampling; distribution is archived per run"
+}

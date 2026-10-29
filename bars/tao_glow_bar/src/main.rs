@@ -2,9 +2,9 @@ mod edge_shell;
 #[path = "../../native_x11.rs"]
 mod native_x11;
 mod redraw;
-mod shell_ipc;
 mod shell_actions;
 mod shell_host;
+mod shell_ipc;
 mod shell_scene;
 #[path = "../../tao_scroll.rs"]
 mod tao_scroll;
@@ -32,10 +32,8 @@ use glutin::prelude::GlSurface;
 use redraw::RedrawGate;
 use texture_upload::TextureUpload;
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::glass::{
-    GlassBackdrop, GlassError, GlassImage, GlassParams, MAX_GLASS_IMAGE_BYTES, StripRequest,
-    WallpaperSource, fallback_rgb,
+    GlassBackdrop, GlassParams, MAX_GLASS_IMAGE_BYTES, WallpaperSource, fallback_rgb,
 };
 use xbar_core::{
     AlignedWakeThread, BarEdge, BarPlacement, BarRuntime, MonitorGeometry, RuntimeUpdate,
@@ -69,6 +67,8 @@ fn bgra_frame_len(width: u32, height: u32) -> Result<usize> {
 
 #[derive(Debug)]
 enum UserEvent {
+    #[cfg(target_os = "linux")]
+    GtkWheel(PointerInput),
     Tick,
     SharedUpdated(WakeAck),
     EdgeAction(edge_shell::Action),
@@ -509,6 +509,10 @@ impl App {
     fn handle_edge_action(&mut self, action: edge_shell::Action) {
         use edge_shell::Action;
         let command = match action {
+            Action::Bound { action, .. } => {
+                self.handle_edge_action(*action);
+                return;
+            }
             Action::Model(action) => {
                 let update = self.bar.runtime_mut().dispatch(action);
                 self.handle_runtime_update(update);
@@ -533,7 +537,7 @@ impl App {
                 }
                 return;
             }
-            Action::FocusWindow(id) => {
+            Action::FocusWindow { id, .. } => {
                 std::thread::spawn(move || {
                     if let Err(error) =
                         shell_ipc::request("focus_window", serde_json::json!({"id": id}))
@@ -1067,217 +1071,7 @@ fn initial_logical_size(
     PhysicalSize::new(placement.width, placement.height).to_logical(scale_factor)
 }
 
-fn compositor_active(conn: &RustConnection, screen_num: usize) -> bool {
-    use x11rb::protocol::xproto::ConnectionExt as _;
-    let name = format!("_NET_WM_CM_S{screen_num}");
-    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
-        return false;
-    };
-    let Ok(atom) = cookie.reply() else {
-        return false;
-    };
-    conn.get_selection_owner(atom.atom)
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .map(|reply| reply.owner != x11rb::NONE)
-        .unwrap_or(false)
-}
-
-enum OpaqueWallpaper {
-    File(WallpaperFile),
-    Root(RootPixmapSource),
-    FileThenRoot {
-        file: WallpaperFile,
-        root: RootPixmapSource,
-    },
-}
-
-impl OpaqueWallpaper {
-    fn has_root_pixmap(&self) -> bool {
-        match self {
-            Self::File(_) => true,
-            Self::Root(root) | Self::FileThenRoot { root, .. } => root.has_pixmap(),
-        }
-    }
-}
-
-impl WallpaperSource for OpaqueWallpaper {
-    fn revision(&mut self) -> u64 {
-        match self {
-            Self::File(source) => source.revision(),
-            Self::Root(source) => source.revision(),
-            Self::FileThenRoot { file, root } => file.revision().wrapping_add(root.revision()),
-        }
-    }
-
-    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
-        match self {
-            Self::File(source) => source.strip(request),
-            Self::Root(source) => source.strip(request),
-            Self::FileThenRoot { file, root } => {
-                file.strip(request).or_else(|_| root.strip(request))
-            }
-        }
-    }
-}
-
-struct RootPixmapSource {
-    conn: Rc<RustConnection>,
-    root: u32,
-    xrootpmap: u32,
-    esetroot: u32,
-    pixmap: u32,
-    revision: u64,
-    last_probe: Option<Instant>,
-}
-
-impl RootPixmapSource {
-    fn new(conn: Rc<RustConnection>, screen_num: usize) -> Self {
-        use x11rb::connection::Connection as _;
-        let root = conn
-            .setup()
-            .roots
-            .get(screen_num)
-            .map(|screen| screen.root)
-            .unwrap_or(0);
-        let xrootpmap = intern_atom(&conn, b"_XROOTPMAP_ID");
-        let esetroot = intern_atom(&conn, b"ESETROOT_PMAP_ID");
-        if root != 0 {
-            use x11rb::protocol::xproto::{
-                ChangeWindowAttributesAux, ConnectionExt as _, EventMask,
-            };
-            let _ = conn.change_window_attributes(
-                root,
-                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-            );
-            let _ = conn.flush();
-        }
-        Self {
-            conn,
-            root,
-            xrootpmap,
-            esetroot,
-            pixmap: 0,
-            revision: 0,
-            last_probe: None,
-        }
-    }
-
-    fn has_pixmap(&self) -> bool {
-        self.pixmap != 0
-    }
-
-    fn pixmap_atom(&self, atom: u32) -> Option<u32> {
-        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
-        if atom == 0 || self.root == 0 {
-            return None;
-        }
-        let reply = self
-            .conn
-            .get_property(false, self.root, atom, AtomEnum::PIXMAP, 0, 1)
-            .ok()?
-            .reply()
-            .ok()?;
-        reply.value32()?.next().filter(|pixmap| *pixmap != 0)
-    }
-
-    fn current_pixmap(&self) -> Option<u32> {
-        self.pixmap_atom(self.xrootpmap)
-            .or_else(|| self.pixmap_atom(self.esetroot))
-    }
-
-    fn refresh_pixmap(&mut self) {
-        let now = Instant::now();
-        if self
-            .last_probe
-            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_millis(200))
-        {
-            return;
-        }
-        self.last_probe = Some(now);
-        let pixmap = self.current_pixmap().unwrap_or(0);
-        if pixmap != self.pixmap {
-            self.pixmap = pixmap;
-            self.revision = self.revision.wrapping_add(1);
-        }
-    }
-}
-
-fn intern_atom(conn: &RustConnection, name: &[u8]) -> u32 {
-    use x11rb::protocol::xproto::ConnectionExt as _;
-    conn.intern_atom(false, name)
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .map(|reply| reply.atom)
-        .unwrap_or(0)
-}
-
-impl WallpaperSource for RootPixmapSource {
-    fn revision(&mut self) -> u64 {
-        // GlassBackdrop also asks for the revision while painting. Throttle
-        // here, so high-rate pointer frames cannot bypass the host's poll
-        // cadence and turn every redraw into X11 property round trips.
-        self.refresh_pixmap();
-        self.revision
-    }
-
-    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
-        use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
-
-        self.refresh_pixmap();
-        let pixmap = (self.pixmap != 0).then_some(self.pixmap).ok_or_else(|| {
-            GlassError::Unavailable("root wallpaper pixmap is not published yet".into())
-        })?;
-        let geometry = self
-            .conn
-            .get_geometry(pixmap)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .ok_or_else(|| {
-                GlassError::Unavailable("root wallpaper pixmap has no geometry".into())
-            })?;
-        let pad = request.height.saturating_add(request.pad);
-        let x0 = request.x.max(0);
-        let y0 = request.y.max(0);
-        let x1 = request.x.saturating_add(request.width as i32).max(0);
-        let y1 = request.y.saturating_add(pad as i32).max(0);
-        let clip_x = x0.min(geometry.width as i32);
-        let clip_y = y0.min(geometry.height as i32);
-        let clip_right = x1.min(geometry.width as i32);
-        let clip_bottom = y1.min(geometry.height as i32);
-        if clip_x >= clip_right || clip_y >= clip_bottom {
-            return Err(GlassError::EmptyRegion);
-        }
-        let width = (clip_right - clip_x) as u32;
-        let height = (clip_bottom - clip_y) as u32;
-        let x = i16::try_from(clip_x).map_err(|_| GlassError::Overflow)?;
-        let y = i16::try_from(clip_y).map_err(|_| GlassError::Overflow)?;
-        let w = u16::try_from(width).map_err(|_| GlassError::Overflow)?;
-        let h = u16::try_from(height).map_err(|_| GlassError::Overflow)?;
-        let reply = self
-            .conn
-            .get_image(ImageFormat::Z_PIXMAP, pixmap, x, y, w, h, u32::MAX)
-            .map_err(|error| GlassError::Unavailable(error.to_string()))?
-            .reply()
-            .map_err(|error| GlassError::Unavailable(error.to_string()))?;
-        let stride = if height == 0 {
-            width as usize * 4
-        } else {
-            reply.data.len() / height as usize
-        };
-        let row = width as usize * 4;
-        if stride < row || reply.data.len() < stride.saturating_mul(height as usize) {
-            return Err(GlassError::Unavailable(
-                "root wallpaper pixmap returned a short image".into(),
-            ));
-        }
-        let mut image = GlassImage::from_bgra(width, height, stride, &reply.data)?;
-        for pixel in image.data_mut().as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-        Ok(image)
-    }
-}
+use jwm_shell::wallpaper::{OpaqueWallpaper, RootPixmapSource, compositor_active};
 
 fn window_is_argb(conn: &impl x11rb::connection::Connection, xid: u32) -> bool {
     use x11rb::protocol::xproto::ConnectionExt as _;
@@ -1302,6 +1096,13 @@ fn main() -> Result<()> {
     initialize_logging("tao_glow_bar", &shared_path)?;
 
     let app_config = xbar_core::config::BarConfig::load_default()?;
+    let shell_owner = std::env::var("JWM_DESKTOP_SHELL").ok();
+    let legacy_requested =
+        std::env::var("XBAR_LEGACY_PRIVATE_SHELL").is_ok_and(|value| value == "1");
+    // Ownership gates companion creation, while the original top-bar skin,
+    // font and presentation configuration continue to apply unchanged.
+    let suppress_private_shell =
+        shell_owner.as_deref() == Some("1") || (shell_owner.is_some() && !legacy_requested);
     if shell_host::requested() {
         return shell_host::run(app_config, shared_path);
     }
@@ -1312,11 +1113,7 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
-    if app_config.edge_shell.enabled
-        && presentation.tag_contrast == xbar_core::tag_contrast::TagContrastMode::Auto
-    {
-        presentation.tag_contrast = xbar_core::tag_contrast::TagContrastMode::Glass;
-    }
+    let desktop_header = presentation.apply_desktop_header_profile();
     let families = xbar_core::icon_font::installed_families();
     let nerd = xbar_core::icon_font::select_installed_nerd_font_family(
         families.iter().map(String::as_str),
@@ -1325,75 +1122,9 @@ fn main() -> Result<()> {
     if nerd.is_some() {
         presentation.apply_nerd_font_icons_if_stock();
     }
-    if app_config.edge_shell.enabled {
-        // A fresh Linux installation should remain readable without a patched
-        // icon font. Explicit user labels are preserved.
-        let stock = xbar_core::presentation::PresentationConfig::default();
-        if app_config.presentation.tag_labels == stock.tag_labels {
-            presentation.tag_labels = [
-                "1 Dev", "2 Web", "3 Media", "4 Chat", "5", "6", "7", "8", "9",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        }
-        if app_config.presentation.labels == stock.labels
-            && app_config.presentation.icon_set.is_none()
-        {
-            presentation.icon_set = None;
-            presentation.labels = xbar_core::presentation::PresentationLabels {
-                clock: String::new(),
-                screenshot: "▣".into(),
-                theme_dark: "◐".into(),
-                theme_light: "☼".into(),
-                monitor: "▣".into(),
-                cpu: "CPU".into(),
-                memory: "MEM".into(),
-                audio: "♪".into(),
-                muted: "×".into(),
-                brightness: "☼".into(),
-                battery: "BAT".into(),
-                charging: "+".into(),
-                network: "NET".into(),
-                network_offline: "×".into(),
-                media_playing: "▶".into(),
-                media_paused: "Ⅱ".into(),
-                shell_routes: ["▦", "⌕", "♧", "▤", "▣", "▱", "◐"].map(str::to_owned),
-            };
-        }
-    }
-    if app_config.edge_shell.enabled && presentation.edge == BarEdge::Top {
-        let stock = xbar_core::presentation::PresentationConfig::default();
-        presentation.desktop_header = true;
-        presentation.visibility.minimized_windows = false;
-        presentation.visibility.media = false;
-        presentation.visibility.brightness = false;
-        presentation.visibility.theme = false;
-        presentation.visibility.screenshot = false;
-        if presentation.font_size == stock.font_size {
-            presentation.font_size = 12.0;
-        }
-        if presentation.horizontal_padding == stock.horizontal_padding {
-            presentation.horizontal_padding = 12.0;
-        }
-        if presentation.vertical_padding == stock.vertical_padding {
-            presentation.vertical_padding = 7.0;
-        }
-        if presentation.item_gap == stock.item_gap {
-            presentation.item_gap = 8.0;
-        }
-        if presentation.pill_horizontal_padding == stock.pill_horizontal_padding {
-            presentation.pill_horizontal_padding = 12.0;
-        }
-        if presentation.corner_radius == stock.corner_radius {
-            presentation.corner_radius = 16.0;
-        }
-    }
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
-    if app_config.edge_shell.enabled {
-        bar.renderer_mut().set_capsule(true);
-    }
+    bar.renderer_mut().set_capsule(desktop_header);
 
     let (x11, compositor_active, screen_num) = match x11rb::connect(None) {
         Ok((conn, screen_num)) => {
@@ -1405,7 +1136,7 @@ fn main() -> Result<()> {
     bar.follow_wm_background(
         app_config
             .background_opacity
-            .or(app_config.edge_shell.enabled.then_some(0.58)),
+            .or(desktop_header.then_some(0.58)),
         compositor_active,
     );
 
@@ -1465,6 +1196,14 @@ fn main() -> Result<()> {
             .context("failed to build tao window")?,
     );
 
+    #[cfg(target_os = "linux")]
+    tao_scroll::install_gtk_bridge(
+        window.as_ref(),
+        proxy.clone(),
+        UserEvent::GtkWheel,
+        bar.config().scroll,
+    );
+
     let tint = fallback_rgb(app_config.theme);
     let glass = {
         let params = app_config.glass.params();
@@ -1513,8 +1252,10 @@ fn main() -> Result<()> {
     let update = app.bar.poll_transport();
     app.handle_runtime_update(update);
     app.sync_transport_wake();
+    let mut companion_config = app_config.clone();
+    companion_config.edge_shell.enabled &= !suppress_private_shell;
     app.edge_shell = edge_shell::EdgeShell::start(
-        app_config.clone(),
+        companion_config,
         initial_monitor,
         app.bar.runtime().snapshot(),
         app.proxy.clone(),
@@ -1526,6 +1267,8 @@ fn main() -> Result<()> {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            #[cfg(target_os = "linux")]
+            Event::UserEvent(UserEvent::GtkWheel(input)) => app.handle_pointer_input(input),
             Event::UserEvent(UserEvent::Tick) => {
                 app.tick_and_poll();
             }
@@ -1587,6 +1330,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     if let Some(point) = app.last_cursor_pos {
                         let input =

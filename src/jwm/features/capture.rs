@@ -1129,44 +1129,71 @@ mod tests {
 
     #[test]
     fn layout_cancellation_hooks_follow_output_identity_guards() {
-        let monitors = include_str!("../monitor.rs");
-        for (method, guard, mutation) in [
-            (
-                "fn handle_output_added(",
-                "return Ok(())",
-                "self.add_monitor(info)",
-            ),
-            (
-                "fn handle_output_removed(",
-                "if let Some(mon_key) = mon_key_opt",
-                "self.retire_secondary_bar",
-            ),
-            (
-                "fn handle_output_changed(",
-                "return Ok(())",
-                "m.geometry.m_x = info.x",
-            ),
-        ] {
-            let body = monitors.split_once(method).unwrap().1;
-            let hook = body
-                .find("self.cancel_capture_selection_for_layout_change(backend)")
-                .unwrap();
-            assert!(body.find(guard).unwrap() < hook, "{method}");
-            assert!(hook < body.find(mutation).unwrap(), "{method}");
+        use crate::backend::common_define::OutputId;
+        use crate::jwm::features::{DeferredGrab, DeferredGrabAction};
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        fn begin_selection(jwm: &mut Jwm) {
+            jwm.features.screenshot.start();
+            jwm.features
+                .screenshot
+                .select_rect(Rect::new(100, 100, 640, 360));
+            jwm.features.deferred_grab = Some(DeferredGrab::new(
+                DeferredGrabAction::Screenshot {
+                    output_path: "/unused/retry.png".into(),
+                },
+                std::time::Instant::now(),
+            ));
         }
-        let root = include_str!("../../jwm.rs");
-        let handler = root
-            .split_once("fn handle_screen_geometry_change(")
-            .unwrap()
-            .1;
-        assert!(
-            handler
-                .find("self.cancel_capture_selection_for_layout_change(backend)")
-                .unwrap()
-                < handler
-                    .find("self.update_fullscreen_clients_on_monitor")
-                    .unwrap()
-        );
+
+        fn assert_selection(jwm: &Jwm, active: bool) {
+            assert_eq!(jwm.features.screenshot.active, active);
+            assert_eq!(jwm.features.deferred_grab.is_some(), active);
+        }
+
+        let first = output(1, 0, 0, 1920, 1080);
+        let mut backend = DisplaySpyBackend::new(vec![first.clone()]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        begin_selection(&mut jwm);
+
+        // Duplicate startup notifications and unknown identities must not
+        // discard a user's selection or its pending input-grab retry.
+        jwm.handle_output_added(&mut backend, first).unwrap();
+        assert_selection(&jwm, true);
+        jwm.handle_output_removed(&mut backend, OutputId(99))
+            .unwrap();
+        assert_selection(&jwm, true);
+        jwm.handle_output_changed(&mut backend, output(99, 1920, 0, 1920, 1080))
+            .unwrap();
+        assert_selection(&jwm, true);
+        assert_eq!(jwm.state.monitors.len(), 1);
+
+        // Real topology changes must cancel both, regardless of which bar
+        // retirement/migration helpers the output handler delegates to.
+        let second = output(2, 1920, 0, 1920, 1080);
+        backend.output_ops.outputs.push(second.clone());
+        jwm.handle_output_added(&mut backend, second.clone())
+            .unwrap();
+        assert_selection(&jwm, false);
+        assert_eq!(jwm.state.monitors.len(), 2);
+
+        begin_selection(&mut jwm);
+        let mut scaled = second;
+        scaled.scale = 1.5;
+        backend.output_ops.outputs[1] = scaled.clone();
+        jwm.handle_output_changed(&mut backend, scaled).unwrap();
+        assert_selection(&jwm, false);
+
+        begin_selection(&mut jwm);
+        backend.output_ops.outputs.pop();
+        jwm.handle_output_removed(&mut backend, OutputId(2))
+            .unwrap();
+        assert_selection(&jwm, false);
+        assert_eq!(jwm.state.monitors.len(), 1);
+
+        begin_selection(&mut jwm);
+        jwm.handle_screen_geometry_change(&mut backend).unwrap();
+        assert_selection(&jwm, false);
     }
 
     #[test]

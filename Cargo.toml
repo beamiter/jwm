@@ -59,6 +59,7 @@ exclude = [
     "crates/xbar_core/crates/xbar_tauri",
     "crates/xbar_core/crates/xbar_present_wgpu",
     "crates/xbar_core/crates/xbar_gtk",
+    "crates/jwm_shell",
 ]
 resolver = "3"
 

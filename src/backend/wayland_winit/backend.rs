@@ -55,6 +55,7 @@ smithay::backend::renderer::element::render_elements! {
     pub WinitRenderElement<R> where R: ImportAll + ImportMem;
     Surface=WaylandSurfaceRenderElement<R>,
     Solid=SolidColorRenderElement,
+    Preview=crate::backend::wayland::preview::PreviewElement<R>,
 }
 
 #[derive(Clone)]
@@ -239,6 +240,15 @@ impl WindowOps for WaylandWindowOps {
                     let bw = geo.border as i32;
                     geo.x = x + bw;
                     geo.y = y + bw;
+                    // XWayland clients also need their X11 root-coordinate
+                    // geometry updated; moving only the compositor texture
+                    // leaves popup positions and client ConfigureNotify stale.
+                    if let Some(x11) = state.x11_surfaces.get(&win) {
+                        let _ = x11.configure(Some(Rectangle::new(
+                            (geo.x, geo.y).into(),
+                            (geo.w as i32, geo.h as i32).into(),
+                        )));
+                    }
                 }
                 state.needs_redraw = true;
             });
@@ -278,6 +288,12 @@ impl WindowOps for WaylandWindowOps {
                 // Nested outputs always resend; this also pays a pending
                 // set/unset_maximized reply with the state policy staged.
                 state.send_toplevel_configure(win, true);
+                if let Some(x11) = state.x11_surfaces.get(&win) {
+                    let _ = x11.configure(Some(Rectangle::new(
+                        (x + bw, y + bw).into(),
+                        (w as i32, h as i32).into(),
+                    )));
+                }
                 state.reconstrain_popups_for_toplevel(win);
                 state.needs_redraw = true;
             });
@@ -304,8 +320,7 @@ impl WindowOps for WaylandWindowOps {
     fn map_window(&self, win: WindowId) -> Result<(), BackendError> {
         unsafe {
             self.with_state_mut(|state| {
-                state.mapped_windows.insert(win);
-                state.needs_redraw = true;
+                state.set_manager_window_mapped(win, true);
             });
         }
         self.request_flush();
@@ -315,8 +330,7 @@ impl WindowOps for WaylandWindowOps {
     fn unmap_window(&self, win: WindowId) -> Result<(), BackendError> {
         unsafe {
             self.with_state_mut(|state| {
-                state.mapped_windows.remove(&win);
-                state.needs_redraw = true;
+                state.set_manager_window_mapped(win, false);
             });
         }
         self.request_flush();
@@ -355,6 +369,8 @@ impl WindowOps for WaylandWindowOps {
             self.with_state_mut(|state| {
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.send_close();
+                } else if let Some(x11) = state.x11_surfaces.get(&win) {
+                    let _ = x11.close();
                 }
             });
         }
@@ -366,9 +382,19 @@ impl WindowOps for WaylandWindowOps {
         &self,
         win: WindowId,
     ) -> Result<crate::backend::api::WindowAttributes, BackendError> {
-        let viewable = unsafe { self.with_state_mut(|state| state.mapped_windows.contains(&win)) };
+        let (viewable, override_redirect) = unsafe {
+            self.with_state_mut(|state| {
+                (
+                    state.mapped_windows.contains(&win),
+                    state
+                        .x11_surfaces
+                        .get(&win)
+                        .is_some_and(|surface| surface.is_override_redirect()),
+                )
+            })
+        };
         Ok(crate::backend::api::WindowAttributes {
-            override_redirect: false,
+            override_redirect,
             map_state_viewable: viewable,
         })
     }
@@ -391,8 +417,8 @@ impl WindowOps for WaylandWindowOps {
         Ok(())
     }
 
-    fn kill_client(&self, _win: WindowId) -> Result<(), BackendError> {
-        Ok(())
+    fn kill_client(&self, win: WindowId) -> Result<(), BackendError> {
+        self.close_window(win).map(|_| ())
     }
 
     fn apply_window_changes(
@@ -469,6 +495,15 @@ impl PropertyOps for WaylandPropertyOps {
                 )
             })
         };
+
+        // Auto-hidden shell panels and their edge sensors deliberately own
+        // no exclusive zone. They remain layer-shell docks, never ordinary
+        // application windows in tiling or the task inventory.
+        if layer_info.is_some()
+            && (title.starts_with("jwm-shell-") || app_id.starts_with("jwm-shell-"))
+        {
+            return vec![crate::backend::api::WindowType::Dock];
+        }
 
         if let Some(info) = layer_info {
             if info.exclusive_zone != 0 {
@@ -639,6 +674,9 @@ pub struct WaylandWinitBackend {
     cursor_size: i32,
 
     needs_render: bool,
+    dock_preview: Option<crate::backend::wayland::preview::Preview>,
+    preview_edge: xbar_core::BarEdge,
+    screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
     background_id: Id,
 
     window_ops: Box<dyn WindowOps>,
@@ -687,7 +725,10 @@ impl WaylandWinitBackend {
             y: 0,
             width,
             height,
-            scale: 1.0,
+            // The nested compositor output has its own scale, independent of
+            // the outer host window's toolkit DPI. Advertise the same value
+            // native clients receive through wl_output/xdg-output.
+            scale: self.output.current_scale().fractional_scale() as f32,
             refresh_rate: 60_000,
             transform: 0,
             hdr_capable: true,
@@ -715,6 +756,13 @@ impl WaylandWinitBackend {
     }
 
     fn render_if_needed(&mut self) -> Result<(), BackendError> {
+        if self
+            .dock_preview
+            .is_some_and(|preview| preview.deadline <= std::time::Instant::now())
+        {
+            self.dock_preview = None;
+            self.needs_render = true;
+        }
         if !self.needs_render && !self.state.needs_redraw {
             return Ok(());
         }
@@ -869,7 +917,40 @@ impl WaylandWinitBackend {
             }
         }
 
+        if let Some(preview) = self.dock_preview
+            && let Some((preview_elements, surface)) = crate::backend::wayland::preview::render(
+                self.winit_backend.renderer(),
+                &self.state,
+                preview,
+                out_w,
+                out_h,
+                self.preview_edge,
+            )
+        {
+            frame_roots.push(surface.clone());
+            with_surface_tree_downward(
+                &surface,
+                (),
+                |_, _, _| TraversalAction::DoChildren(()),
+                |child, _, _| {
+                    self.output.enter(child);
+                    visible_surfaces.insert(child.downgrade());
+                },
+                |_, _, _| true,
+            );
+            elements.extend(
+                preview_elements
+                    .into_iter()
+                    .map(WinitRenderElement::Preview),
+            );
+        }
+
         for win in self.state.window_stack.iter().rev() {
+            // Layer surfaces are already composed in their dedicated passes;
+            // policy raising a Dock must not paint translucent panels twice.
+            if self.state.layer_surfaces.contains_key(win) {
+                continue;
+            }
             if !self.state.mapped_windows.contains(win) {
                 continue;
             }
@@ -1085,6 +1166,13 @@ impl WaylandWinitBackend {
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
 
             submit_damage = res.damage.cloned();
+            crate::backend::wayland::capture::drain(
+                renderer,
+                &fb,
+                &mut self.screenshot_requests,
+                out_w as u32,
+                out_h as u32,
+            );
         }
 
         if let Err(err) = self.winit_backend.submit(submit_damage.as_deref()) {
@@ -1272,6 +1360,11 @@ impl WaylandWinitBackend {
         if let Some(name) = socket_name.as_deref() {
             child_environment.set("WAYLAND_DISPLAY", name);
         }
+        crate::backend::wayland::xwayland::start_nested(
+            &display_handle,
+            event_loop.handle(),
+            child_environment.clone(),
+        )?;
 
         let _ = winit_backend.renderer().bind_wl_display(&display_handle);
 
@@ -1387,7 +1480,7 @@ impl WaylandWinitBackend {
                         WinitEvent::CloseRequested => {
                             exit_requested.store(true, Ordering::SeqCst);
                         }
-                        WinitEvent::Resized { size, scale_factor } => {
+                        WinitEvent::Resized { size, .. } => {
                             let mode = WlMode {
                                 size: (size.w, size.h).into(),
                                 refresh: 60_000,
@@ -1431,7 +1524,7 @@ impl WaylandWinitBackend {
                                 y: 0,
                                 width: mode.size.w,
                                 height: mode.size.h,
-                                scale: scale_factor as f32,
+                                scale: output_clone.current_scale().fractional_scale() as f32,
                                 refresh_rate: 60_000,
                                 transform: 0,
                                 hdr_capable: true,
@@ -1498,6 +1591,9 @@ impl WaylandWinitBackend {
             cursor_size: crate::config::CONFIG.load().resolved_cursor().1 as i32,
 
             needs_render: true,
+            dock_preview: None,
+            preview_edge: xbar_core::BarEdge::Top,
+            screenshot_requests: Default::default(),
             background_id: Id::new(),
 
             window_ops: Box::new(wayland_dummy_ops::DummyWindowOps),
@@ -2056,7 +2152,43 @@ fn process_input_event_windowed<B: InputBackend>(
 impl CompositorBenchmark for WaylandWinitBackend {}
 impl BackendDiagnostics for WaylandWinitBackend {}
 impl CompositorControl for WaylandWinitBackend {}
-impl CompositorMedia for WaylandWinitBackend {}
+impl CompositorMedia for WaylandWinitBackend {
+    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
+        self.screenshot_requests
+            .request_full(path.to_path_buf().into())
+            .map_err(|error| BackendError::Message(error.to_string()))?;
+        self.needs_render = true;
+        Ok(true)
+    }
+    fn take_screenshot_region_to_file(
+        &mut self,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, BackendError> {
+        self.screenshot_requests
+            .request_region(path.to_path_buf().into(), x, y, width, height)
+            .map_err(|error| BackendError::Message(error.to_string()))?;
+        self.needs_render = true;
+        Ok(true)
+    }
+    fn take_screenshot_to_memory(
+        &mut self,
+        target: crate::backend::compositor_common::screenshot::ScreenshotMemorySender,
+    ) -> Result<bool, BackendError> {
+        self.screenshot_requests
+            .request_full(
+                crate::backend::compositor_common::screenshot::ScreenshotDestination::Memory(
+                    target,
+                ),
+            )
+            .map_err(|error| BackendError::Message(error.to_string()))?;
+        self.needs_render = true;
+        Ok(true)
+    }
+}
 impl CompositorWorkspaceEffects for WaylandWinitBackend {
     fn compositor_scroll_epoch(&self) -> u64 {
         self.state.scroll_routes.epoch()
@@ -2097,7 +2229,28 @@ impl CompositorWorkspaceEffects for WaylandWinitBackend {
         self.state.sync_workspace_monitors(monitors);
     }
 }
-impl CompositorWindowEffects for WaylandWinitBackend {}
+impl CompositorWindowEffects for WaylandWinitBackend {
+    fn compositor_set_minimized_window_preview(
+        &mut self,
+        window: Option<WindowId>,
+        anchor: Option<crate::backend::api::CompositorRect>,
+    ) {
+        self.dock_preview = window
+            .zip(anchor.and_then(|anchor| anchor.normalized()))
+            .map(
+                |(window, anchor)| crate::backend::wayland::preview::Preview {
+                    window,
+                    anchor,
+                    deadline: std::time::Instant::now() + Duration::from_secs(4),
+                },
+            );
+        self.needs_render = true;
+    }
+    fn compositor_set_minimized_preview_edge(&mut self, edge: xbar_core::BarEdge) {
+        self.preview_edge = edge;
+        self.needs_render = true;
+    }
+}
 impl CompositorAnnotation for WaylandWinitBackend {}
 impl DisplayControl for WaylandWinitBackend {}
 impl RenderScheduler for WaylandWinitBackend {

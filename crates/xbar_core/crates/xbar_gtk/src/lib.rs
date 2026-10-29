@@ -11,6 +11,7 @@
 //! [`UserAction`](xbar_core::UserAction).
 
 mod dock;
+mod header;
 pub mod pill;
 pub mod theme;
 mod window;
@@ -40,6 +41,8 @@ pub struct BarTheme {
     pub metrics: Metrics,
     pub pill_style: PillStyle,
     pub stylesheet: String,
+    background_opacity: Option<f64>,
+    translucent: bool,
     provider: RefCell<Option<(gdk4::Display, gtk4::CssProvider)>>,
 }
 
@@ -57,6 +60,7 @@ impl BarTheme {
     #[must_use]
     pub fn from_config_at_scale(config: &BarConfig, translucent: bool, scale: f64) -> Self {
         let mut presentation = config.presentation.clone();
+        presentation.apply_desktop_header_profile();
         // Monochrome Nerd Font glyphs tinted by the text color read like macOS
         // template icons; only the stock emoji are replaced, so a config that
         // overrides individual labels keeps its customization. The Cairo bars
@@ -87,7 +91,9 @@ impl BarTheme {
                 .min(((presentation.bar_height - font_height - 2.0) * 0.5).max(0.0));
         }
         let metrics = Metrics::from_config(&presentation);
-        let background_opacity = config.background_opacity;
+        let background_opacity = config
+            .background_opacity
+            .or((presentation.desktop_header && !presentation.edge.is_vertical()).then_some(0.58));
         let stylesheet =
             theme::stylesheet(&presentation, &config.font, background_opacity, translucent);
         let pill_style = PillStyle {
@@ -128,6 +134,8 @@ impl BarTheme {
             metrics,
             pill_style,
             stylesheet,
+            background_opacity,
+            translucent,
             provider: RefCell::new(None),
         }
     }
@@ -230,6 +238,7 @@ pub struct BarSurface {
     client_name: Label,
     minimized_dock: dock::MinimizedDock,
     tag_contrast: TagContrastMode,
+    header: Option<header::HeaderSurface>,
 }
 
 impl BarSurface {
@@ -265,7 +274,7 @@ impl BarSurface {
         root.add_css_class("bar-root");
         root.add_css_class(theme.presentation.edge.as_str());
         root.add_css_class(if vertical { "vertical" } else { "horizontal" });
-        let minimized_dock = dock::MinimizedDock::new(&root, theme, dispatch);
+        let minimized_dock = dock::MinimizedDock::new(&root, theme, dispatch.clone());
         root.append(&scrollable_controls(
             leading.widget(),
             vertical,
@@ -279,8 +288,18 @@ impl BarSurface {
             theme.metrics,
         ));
 
+        let header = (theme.presentation.desktop_header && !vertical).then(|| {
+            while let Some(child) = root.first_child() {
+                root.remove(&child);
+            }
+            root.add_css_class("desktop-header");
+            let header = header::HeaderSurface::new(theme, dispatch);
+            root.append(&header.widget());
+            header
+        });
         Self {
             root,
+            header,
             leading,
             trailing,
             client_name,
@@ -299,6 +318,10 @@ impl BarSurface {
     /// Which cells exist, their order, their glyphs and their state are all
     /// decided by `xbar_core`; this only spends that decision on widgets.
     pub fn sync(&self, snapshot: &BarSnapshot, presentation: BarPresentation) {
+        if let Some(header) = &self.header {
+            header.sync(snapshot);
+            return;
+        }
         if snapshot.blur_status_bar.unwrap_or(false) {
             self.root.add_css_class("frosted");
         } else {
@@ -378,6 +401,9 @@ impl BarSurface {
 
     #[must_use]
     pub fn focused_control(&self) -> Option<xbar_core::presentation::NodeId> {
+        if let Some(header) = &self.header {
+            return header.focused_control();
+        }
         self.leading
             .focused_control()
             .or_else(|| self.trailing.focused_control())
@@ -393,6 +419,10 @@ impl BarSurface {
         let Some(control) = control else {
             return;
         };
+        if let Some(header) = &self.header {
+            header.restore_focus(control);
+            return;
+        }
         if self.leading.focus_control(control) || self.trailing.focus_control(control) {
             return;
         }

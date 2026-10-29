@@ -67,9 +67,12 @@ native dependency plus the Rust toolchain (via rustup, since distro packages are
 older than the 1.89 floor) in one step:
 
 ```bash
-bash scripts/bootstrap_deps.sh              # apt packages + rustup toolchain
-JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh   # China: rustup + cargo via rsproxy.cn
+bash scripts/bootstrap_deps.sh --with-tauri # apt packages + Rust + default bar prerequisites
+JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh --with-tauri # China: rustup + cargo via rsproxy.cn
 bash scripts/bootstrap_deps.sh --help       # options include --with-portal, --with-tauri, --cn
+rustup target add wasm32-unknown-unknown
+cargo install trunk --version 0.22.1 --locked
+cargo install tauri-cli --version 2.12.4 --locked
 ```
 
 `--with-portal` (or `JWM_WITH_PORTAL=1`) adds the PipeWire headers needed by the
@@ -121,8 +124,8 @@ fails if an unrelated validation error would remain. Use a batch for correlated
 hot-tunable changes that must become valid together; non-hot-tunable values must
 be edited in the configuration file.
 
-The installation helper builds JWM and the selected status bar
-(`tao_glow_bar` by default; use `--bar` to choose another crate under `bars/`), installs
+The installation helper builds JWM, the independent `jwm-shell` host, and the
+selected status bar (`tauri_leptos_bar` by default; use `--bar` to choose another crate under `bars/`), installs
 the session files (Wayland session recommended), and checks both configuration
 templates against their last installed versions. The records are stored beside
 each config as `.config_x11.toml.installed-defaults` and
@@ -146,6 +149,13 @@ the updated JWM session after installing if your current session lacks it.
 ```bash
 scripts/install_jwm_scripts.sh --help
 ```
+
+All 28 status-bar frontends can keep their own top bar while JWM supervises one
+`jwm-shell` process for the shared left, right and bottom panels. Enable this
+explicitly with `[desktop_shell] enabled = true`; changing `status_bar.name`
+then replaces only the top bar. See the [configuration and rollback guide](docs/shared-desktop-shell.md)
+and [implementation acceptance record](docs/shared-shell-delivery.md). Native
+Wayland physical-output acceptance is tracked separately from nested tests.
 
 The source installer also installs all 14 bundled static PNG wallpapers into
 `~/.config/jwm/wallpapers/` (or `$XDG_CONFIG_HOME/jwm/wallpapers/`). Open the
@@ -385,6 +395,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Shift+M / V | Open the music / video library |
 | Alt+Control+Shift+, / . | [Exchange all tags, windows and layouts](docs/monitor-swap.md) with the previous / next monitor; stay on this output |
 | Ctrl+Super+F12 | Toggle keyboard shortcut passthrough for the focused remote desktop window |
+| Super+Shift+B | Toggle enabled shared sidebars between auto-hide and pinned mode; save the selection |
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |
 | Alt+Control+R | Interactively choose a source and start/stop screen recording |
 | Print / Shift+Print | Interactive / immediate desktop screenshot |

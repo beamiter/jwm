@@ -1598,25 +1598,8 @@ impl Config {
             );
         }
 
-        if self.status_bar_four_edge() {
-            if std::path::Path::new(self.status_bar_name())
-                .file_name()
-                .and_then(|name| name.to_str())
-                != Some("tao_glow_bar")
-            {
-                diagnostics.error(
-                    "status_bar.layout",
-                    "four-edge layout requires the tao_glow_bar frontend",
-                    Some("set status_bar.name=\"tao_glow_bar\" or use layout=\"single\"".into()),
-                );
-            }
-            if super::get_backend_family() != super::BackendFamily::X11 {
-                diagnostics.error(
-                    "status_bar.layout",
-                    "four-edge auxiliary surfaces currently require the native X11 backend",
-                    Some("use layout=\"single\" for a Wayland session".into()),
-                );
-            }
+        if let Err(error) = self.desktop_shell_config().validate() {
+            diagnostics.error("desktop_shell", error, None);
         }
 
         if self.inner.status_bar.monitors.len() > 128 {

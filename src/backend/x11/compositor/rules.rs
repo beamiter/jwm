@@ -336,7 +336,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.windows.values().any(|wt| {
             (wt.class_name == bar_name || wt.class_name.contains(bar_name))
                 && !shell_owns_backdrop(
-                    cfg.status_bar_four_edge(),
+                    cfg.desktop_shell_enabled(),
                     wt.has_rgba,
                     &wt.class_name,
                     bar_name,
@@ -835,7 +835,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Whether a window should receive per-frame backdrop blur compositing.
     pub(super) fn needs_backdrop_blur(&self, wt: &WindowTexture, status_bar_name: &str) -> bool {
         if shell_owns_backdrop(
-            crate::config::CONFIG.load().status_bar_four_edge(),
+            crate::config::CONFIG.load().desktop_shell_enabled(),
             wt.has_rgba,
             &wt.class_name,
             status_bar_name,

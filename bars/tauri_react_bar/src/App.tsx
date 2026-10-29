@@ -12,6 +12,12 @@ interface TagState {
   occupied: boolean;
 }
 
+interface WorkspaceTag {
+  id: number;
+  number: number;
+  state: TagState;
+}
+
 interface AudioDeviceInfo {
   name: string;
   volume: number;
@@ -52,6 +58,12 @@ interface BarSnapshot {
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
+  workspace_tags?: WorkspaceTag[];
+  header_network?: string;
+  header_cpu?: string;
+  header_memory?: string;
+  theme?: string;
+  header_clock_compact?: string;
   active_tag?: number | null;
   monitor: number;
   layout_symbol: string;
@@ -68,6 +80,11 @@ interface BarSnapshot {
 }
 
 interface FrontendEnvelope {
+  workspace_tags: WorkspaceTag[];
+  header_network: string;
+  header_cpu: string;
+  header_memory: string;
+  header_clock_compact: string;
   revision: number;
   changes: number;
   snapshot: BarSnapshot;
@@ -98,6 +115,7 @@ const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
 
 type ActionRequest =
   | { action: "view_tag_on"; tag_index: number; monitor_id: number }
+  | { action: "toggle_tag_on"; tag_index: number; monitor_id: number }
   | { action: "toggle_layout_selector" }
   | { action: "set_layout_on"; layout_id: number; monitor_id: number }
   | { action: "toggle_seconds" }
@@ -130,22 +148,12 @@ type ActionRequest =
     }
   | { action: "open_shell_hub"; route: ShellRoute };
 
+const desktopHeader = () => !["left", "right"].includes(document.documentElement.dataset.barEdge || "top");
 const dispatchAction = (request: ActionRequest): Promise<void> =>
-  invoke("dispatch_action", { request });
+  desktopHeader() && request.action === "set_dock_geometry" ? Promise.resolve() : invoke("dispatch_action", { request });
 
 let snapshotBarOrigin: Pick<DockGeometry, "x" | "y"> | null = null;
 
-const TAG_ICONS = [
-  "\u{F0A1E}",
-  "\u{F0239}",
-  "\u{F0A1B}",
-  "\u{F0B79}",
-  "\u{F024B}",
-  "\u{F0388}",
-  "\u{F0567}",
-  "\u{F01F0}",
-  "\u{F0297}",
-];
 
 const ICON_CPU = "\u{F4BC}";
 const ICON_MEM = "\u{F035B}";
@@ -162,12 +170,11 @@ const ICON_MON = "\u{F0379}";
 
 const getButtonClass = (tag: TagState): string => {
   const state = tag.urgent ? "urgent"
-    : tag.filled ? "filtered"
     : tag.selected ? "selected"
     : tag.occupied ? "occupied"
     : "default";
   // Keep the client marker independent of the winning background state.
-  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}`;
+  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}${tag.filled ? " has-focus" : ""}`;
 };
 
 const formatBytes = (bytes: number): string => {
@@ -523,6 +530,7 @@ function MinimizedDock({
   );
 
   useEffect(() => {
+    if (desktopHeader()) return;
     let retryTimer: number | undefined;
     let publishInFlight = false;
     let republishRequested = false;
@@ -633,18 +641,12 @@ function MinimizedDock({
   );
 }
 
-function TagButtons({ tags, monitor, activeTag }: { tags: TagState[]; monitor: number; activeTag?: number | null }) {
+function TagButtons({ workspaceTags, monitor, available }: { workspaceTags: WorkspaceTag[]; monitor: number; available: boolean }) {
   const [pressedButton, setPressedButton] = useState<number | null>(null);
 
   return (
     <>
-      {TAG_ICONS.map((icon, index) => {
-        const tag = tags[index] ?? {
-          selected: false,
-          urgent: false,
-          filled: false,
-          occupied: false,
-        };
+      {workspaceTags.map(({ id: index, number, state: tag }) => {
         const baseClass = getButtonClass(tag);
         const buttonClass = pressedButton === index ? `${baseClass} pressed` : baseClass;
         return (
@@ -652,7 +654,10 @@ function TagButtons({ tags, monitor, activeTag }: { tags: TagState[]; monitor: n
             key={index}
             className={buttonClass}
             aria-pressed={tag.selected}
-            aria-current={activeTag === index ? 'true' : undefined}
+            aria-current={tag.selected ? 'true' : undefined}
+            data-tag-index={index}
+            disabled={!available}
+            onContextMenu={event => { event.preventDefault(); event.stopPropagation(); if (available) dispatchAction({ action: "toggle_tag_on", tag_index: index, monitor_id: monitor }).catch(console.error); }}
             onMouseDown={() => setPressedButton(index)}
             onClick={() => {
               setPressedButton(null);
@@ -663,9 +668,9 @@ function TagButtons({ tags, monitor, activeTag }: { tags: TagState[]; monitor: n
               }).catch(console.error);
             }}
             onMouseLeave={() => setPressedButton(null)}
-            title={`Tag ${index + 1}`}
+            title={`Tag ${number}`}
           >
-            <span className="nf-icon">{icon}</span>
+            <span className="workspace-number">{number}</span>
           </button>
         );
       })}
@@ -696,13 +701,13 @@ function SystemInfoDisplay({ snapshot }: { snapshot: BarSnapshot }) {
   return (
     <div className="system-info-container">
       <div className={`pill usage-pill ${severity(details.cpu_average)}`} title="CPU 平均使用率">
-        <span className="nf-icon">{ICON_CPU}</span> {details.cpu_average.toFixed(0)}%
+        <span className="nf-icon">{ICON_CPU}</span> {snapshot.header_cpu || "--"}
       </div>
       <div
         className={`pill usage-pill ${severity(details.memory_usage_percent)}`}
         title={`内存使用: ${formatBytes(details.memory_used)} / ${formatBytes(details.memory_total)}`}
       >
-        <span className="nf-icon">{ICON_MEM}</span> {details.memory_usage_percent.toFixed(0)}%
+        <span className="nf-icon">{ICON_MEM}</span> {snapshot.header_memory || "--"}
       </div>
       <div
         className={`pill usage-pill ${batteryClass}`}
@@ -720,9 +725,9 @@ function SystemInfoDisplay({ snapshot }: { snapshot: BarSnapshot }) {
 }
 
 function VolumeControl({ device }: { device: AudioDeviceInfo | null }) {
-  const muted = !device || device.is_muted;
+  const muted = device?.is_muted ?? false;
   const onWheel = (event: React.WheelEvent) => {
-    event.preventDefault();
+    // The shared non-passive capture listener owns default-scroll cancellation.
     dispatchAction({
       action: "adjust_volume",
       delta: event.deltaY < 0 ? 5 : -5,
@@ -754,7 +759,6 @@ function BrightnessControl({ percent }: { percent: number | null }) {
         adjust(-5);
       }}
       onWheel={(event) => {
-        event.preventDefault();
         adjust(event.deltaY < 0 ? 5 : -5);
       }}
       title="左键加亮 / 右键减暗 / 滚轮调节"
@@ -779,7 +783,7 @@ function ShellButton({ available }: { available: boolean }) {
         onClick={() => open("hub")}
         title="JWM shell"
       >
-        <span className="nf-icon">{SHELL_ROUTES[0].icon}</span>
+        <span className="header-launcher-glyph">▦</span>
       </div>
       {available && (
         <div className="shell-dropdown">
@@ -819,10 +823,11 @@ function ScreenshotButton() {
   );
 }
 
-function TimeDisplay({ time, showSeconds }: { time: string; showSeconds: boolean }) {
+function TimeDisplay({ time, showSeconds, compactTime }: { time: string; showSeconds: boolean; compactTime: string }) {
   return (
     <div
       className="pill time-pill"
+      data-header-clock={compactTime}
       onClick={() => dispatchAction({ action: "toggle_seconds" }).catch(console.error)}
       title={showSeconds ? "点击隐藏秒" : "点击显示秒"}
     >
@@ -884,7 +889,7 @@ function App() {
         if (revision.current !== null && event.payload.revision < revision.current) return;
         revision.current = event.payload.revision;
         snapshotBarOrigin = event.payload.snapshot.geometry;
-        setSnapshot(event.payload.snapshot);
+        setSnapshot({ ...event.payload.snapshot, workspace_tags: event.payload.workspace_tags, header_network: event.payload.header_network, header_cpu: event.payload.header_cpu, header_memory: event.payload.header_memory, header_clock_compact: event.payload.header_clock_compact });
       });
       if (cancelled) {
         unlisten();
@@ -913,16 +918,17 @@ function App() {
   if (!snapshot) return <div className="button-row">Loading...</div>;
 
   return (
-    <div className="button-row">
+    <div className="button-row" data-desktop-header="true" data-active-tag={snapshot.active_tag ?? ""} data-battery-charging={String(snapshot.battery.charging)} data-theme={snapshot.theme?.toLowerCase()}>
       <div className="buttons-container">
-        <TagButtons tags={snapshot.tags} monitor={snapshot.monitor} activeTag={snapshot.active_tag} />
+        <ShellButton available={snapshot.wm_available} />
+        <TagButtons workspaceTags={snapshot.workspace_tags ?? []} monitor={snapshot.monitor} available={snapshot.wm_available} />
         <LayoutControls
           symbol={snapshot.layout_symbol}
           monitor={snapshot.monitor}
           open={snapshot.layout_selector_open}
         />
       </div>
-      <div className="spacer" />
+      <div className="client-title" title={snapshot.client_name || "JWM Desktop"}>{snapshot.client_name || "JWM Desktop"}</div>
       <div className="right-info-container">
         <MinimizedDock
           windows={snapshot.minimized_windows}
@@ -933,11 +939,12 @@ function App() {
           barGeometry={snapshot.geometry}
         />
         <SystemInfoDisplay snapshot={snapshot} />
+        <div className="pill network-pill" title="Network"><span className="metric-label">NET</span>{snapshot.header_network || "--"}</div>
         <BrightnessControl percent={snapshot.brightness.percent} />
         <VolumeControl device={snapshot.audio_device} />
-        <ShellButton available={snapshot.wm_available} />
+
         <ScreenshotButton />
-        <TimeDisplay time={snapshot.time} showSeconds={snapshot.show_seconds} />
+        <TimeDisplay time={snapshot.time} showSeconds={snapshot.show_seconds} compactTime={snapshot.header_clock_compact || "--"} />
         <div className="pill monitor-pill" title={snapshot.client_name || "显示器"}>
           <span className="nf-icon">{ICON_MON}</span> {monitorIcon(snapshot.monitor)}
         </div>

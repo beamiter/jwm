@@ -2099,6 +2099,12 @@ impl Jwm {
         if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
             return IpcResponse::err("session is shutting down");
         }
+        if name == "register_desktop_shell" {
+            return self.register_desktop_shell(backend, args);
+        }
+        if name == "desktop_shell_action" {
+            return self.desktop_shell_action(backend, args);
+        }
         // This remains a dispatch command so it can be bound to a key, but IPC
         // callers need the asynchronous submission contract and destination
         // rather than a bare success bit that could be mistaken for a saved PNG.
@@ -2916,6 +2922,7 @@ impl Jwm {
                 let workspaces = self.query_workspaces(backend);
                 IpcResponse::ok(Some(serde_json::to_value(workspaces).unwrap_or_default()))
             }
+            "get_desktop_shell" => IpcResponse::ok(Some(self.desktop_shell_snapshot_json(backend))),
             "get_monitors" | "get_outputs" | "get_mons" => {
                 let monitors = self.query_monitors(backend);
                 IpcResponse::ok(Some(serde_json::to_value(monitors).unwrap_or_default()))
@@ -4406,15 +4413,9 @@ impl Jwm {
                 active_tags,
             );
             let (occupied_tags_mask, urgent_tags_mask) = {
-                const EMPTY_CLIENTS: &[ClientKey] = &[];
-                let monitor_clients = self
-                    .state
-                    .monitor_clients
-                    .get(mk)
-                    .map_or(EMPTY_CLIENTS, Vec::as_slice);
-                crate::jwm::StatusBarBuilder::calculate_tag_masks(
+                crate::jwm::StatusBarBuilder::calculate_tag_masks_for_monitor(
                     &self.state.clients,
-                    monitor_clients,
+                    mk,
                 )
             };
             for (i, counts) in per_tag_counts.into_iter().enumerate() {
@@ -6480,6 +6481,8 @@ impl Jwm {
             "wallpaper": cfg.behavior().wallpaper,
             "wallpaper_mode": cfg.behavior().wallpaper_mode,
             "persist_tags": cfg.layout_persist_tags(),
+            "desktop_shell": cfg.desktop_shell_config(),
+            "desktop_shell_source": cfg.desktop_shell_source(),
             "status_bar_name": cfg.status_bar_name(),
             "status_bar_layout": cfg.status_bar_layout().as_str(),
             "status_bar_position": cfg.status_bar_position().as_str(),
@@ -6700,6 +6703,8 @@ impl Jwm {
             crate::config::NewClientPosition::AfterFocused => "after_focused",
         };
         let polish6 = serde_json::json!({
+            "desktop_shell": cfg.desktop_shell_config(),
+            "desktop_shell_source": cfg.desktop_shell_source(),
             "status_bar_name": cfg.status_bar_name(),
             "status_bar_layout": cfg.status_bar_layout().as_str(),
             "status_bar_position": cfg.status_bar_position().as_str(),

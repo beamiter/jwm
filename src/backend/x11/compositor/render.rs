@@ -4965,7 +4965,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // The four-panel Dock paints title buttons rather than thumbnail
         // slots. Keep these targets for Genie/restore and hover previews,
         // without drawing a second window image over the native button text.
-        if crate::config::CONFIG.load().status_bar_four_edge() {
+        if crate::config::CONFIG.load().desktop_shell_enabled() {
             return;
         }
         let preview = self

@@ -542,8 +542,10 @@ impl X11rbBackend {
             .extension_information(x11rb::protocol::randr::X11_EXTENSION_NAME)?
             .is_some()
         {
-            let mask =
-                NotifyMask::SCREEN_CHANGE | NotifyMask::OUTPUT_CHANGE | NotifyMask::CRTC_CHANGE;
+            let mask = NotifyMask::SCREEN_CHANGE
+                | NotifyMask::OUTPUT_CHANGE
+                | NotifyMask::CRTC_CHANGE
+                | NotifyMask::RESOURCE_CHANGE;
             conn.randr_select_input(screen.root, mask)?;
         }
 

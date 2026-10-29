@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+jwm_shell = { path = "../../crates/jwm_shell" }
 anyhow = "1.0.104"
 bytemuck = "1.25.2"
 cairo-rs = "0.22.9"

@@ -20,7 +20,7 @@ provider-system = ["xbar_core/provider-system"]
 
 [dependencies]
 log = "0.4.33"
-tauri = { version = "2.11.5", default-features = false }
+tauri = { version = "~2.12.5", default-features = false }
 xbar_core = { path = "../..", default-features = false, features = [
     "config-toml",
     "glass-wallpaper",
@@ -28,8 +28,15 @@ xbar_core = { path = "../..", default-features = false, features = [
 ] }
 xbar_linux_actions = { path = "../xbar_linux_actions" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+tauri = { version = "~2.12.5", default-features = false, features = ["wry"] }
+raw-window-handle = "0.6"
+x11rb = "0.14"
+
 [dev-dependencies]
-tauri = { version = "2.11.5", default-features = false, features = ["wry"] }
+tauri = { version = "~2.12.5", default-features = false, features = ["wry"] }
 
 # GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
 [patch.crates-io]

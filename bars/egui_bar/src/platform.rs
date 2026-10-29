@@ -41,6 +41,16 @@ impl X11Session {
         )
     }
 
+    /// The actual eframe window must have an alpha-carrying native visual,
+    /// even after the startup probe found a compatible scratch surface.
+    pub fn window_is_argb(&self, window: Window) -> bool {
+        self.conn
+            .get_geometry(window)
+            .ok()
+            .and_then(|reply| reply.reply().ok())
+            .is_some_and(|geometry| geometry.depth == 32)
+    }
+
     /// Root dimensions may change after hotplug; setup() is only a startup
     /// snapshot and would make bottom/right reservations stale.
     pub fn screen_geometry(&self) -> Result<MonitorGeometry> {
@@ -147,20 +157,39 @@ impl X11Session {
     }
 }
 
+/// Whether a verified X11 ARGB surface can retain alpha.
+///
+/// GLES advertises `Opaque` even for an EGL window on an ARGB visual. This
+/// does not erase the native alpha channel. Keep that exception specific to
+/// GLES and a verified native visual; other backends follow their WSI modes.
+fn x11_alpha_supported(
+    native_argb: bool,
+    backend: wgpu::Backend,
+    modes: &[wgpu::CompositeAlphaMode],
+) -> bool {
+    native_argb
+        && modes.iter().any(|mode| {
+            matches!(
+                mode,
+                wgpu::CompositeAlphaMode::PreMultiplied
+                    | wgpu::CompositeAlphaMode::PostMultiplied
+                    | wgpu::CompositeAlphaMode::Inherit
+            ) || (backend == wgpu::Backend::Gl && *mode == wgpu::CompositeAlphaMode::Opaque)
+        })
+}
+
 /// Whether a wgpu surface on this display can composite alpha.
 ///
 /// egui-wgpu negotiates the surface's `CompositeAlphaMode` deep inside eframe
 /// and never reports the outcome, so the bar asks the same question ahead of
 /// time: a scratch depth-32 window, a surface on it, and the adapter's
-/// advertised alpha modes. egui-wgpu 0.36 takes `PreMultiplied` or
-/// `PostMultiplied` for a transparent window and silently falls back to an
-/// opaque `Auto` when neither is offered (`install_surface` in its
-/// `winit.rs`), so those two are the acceptance set here. Any failure along
-/// the way reads as "no alpha" and lands the bar in solid mode.
+/// advertised alpha modes. The native visual remains authoritative for GLES,
+/// whose `Opaque` advertisement does not describe its framebuffer alpha.
+/// Any failure along the way reads as "no alpha" and keeps the solid fallback.
 pub fn surface_alpha_capable() -> bool {
-    use std::ffi::c_void;
     use std::num::NonZeroU32;
     use std::ptr::NonNull;
+    use std::sync::Arc;
 
     use raw_window_handle::{
         DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -170,20 +199,18 @@ pub fn surface_alpha_capable() -> bool {
     use x11rb::xcb_ffi::XCBConnection;
 
     /// The scratch window, shaped the way wgpu's safe surface API wants it.
+    #[derive(Debug, Clone)]
     struct ProbeTarget {
-        conn: NonNull<c_void>,
+        conn: Arc<XCBConnection>,
         screen: i32,
         window: u32,
         visual: u32,
     }
-    // The raw connection pointer never leaves this thread; wgpu only insists
-    // on the bounds.
-    unsafe impl Send for ProbeTarget {}
-    unsafe impl Sync for ProbeTarget {}
-
     impl HasDisplayHandle for ProbeTarget {
         fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
-            let handle = XcbDisplayHandle::new(Some(self.conn), self.screen);
+            let connection =
+                NonNull::new(self.conn.get_raw_xcb_connection()).ok_or(HandleError::Unavailable)?;
+            let handle = XcbDisplayHandle::new(Some(connection), self.screen);
             Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Xcb(handle)) })
         }
     }
@@ -207,6 +234,7 @@ pub fn surface_alpha_capable() -> bool {
     let Ok((conn, screen_num)) = XCBConnection::connect(None) else {
         return false;
     };
+    let conn = Arc::new(conn);
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
     // The same visual winit will pick for the real window once transparency
@@ -255,18 +283,27 @@ pub fn surface_alpha_capable() -> bool {
             .is_ok()
         && conn.flush().is_ok();
 
-    // The surface borrows the raw connection, so it lives and dies inside
-    // this closure — before the window underneath it is destroyed.
+    // Confirm the server accepted the ARGB window before trusting its alpha.
+    let native_argb = created
+        && conn
+            .get_geometry(window)
+            .ok()
+            .and_then(|reply| reply.reply().ok())
+            .is_some_and(|geometry| geometry.depth == 32);
+    // The descriptor and surface each own a connection reference, and both
+    // die before the scratch native window is destroyed below.
     let capable = created
-        && NonNull::new(conn.get_raw_xcb_connection()).is_some_and(|raw| {
+        && native_argb
+        && (|| {
             let target = ProbeTarget {
-                conn: raw,
+                conn: Arc::clone(&conn),
                 screen: screen_num as i32,
                 window,
                 visual,
             };
-            let instance =
-                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+                Box::new(target.clone()),
+            ));
             let Ok(surface) = instance.create_surface(target) else {
                 return false;
             };
@@ -279,23 +316,42 @@ pub fn surface_alpha_capable() -> bool {
             let Ok(adapter) = adapter else {
                 return false;
             };
-            surface
-                .get_capabilities(&adapter)
-                .alpha_modes
-                .iter()
-                .any(|mode| {
-                    matches!(
-                        mode,
-                        wgpu::CompositeAlphaMode::PreMultiplied
-                            | wgpu::CompositeAlphaMode::PostMultiplied
-                    )
-                })
-        });
+            x11_alpha_supported(
+                native_argb,
+                adapter.get_info().backend,
+                &surface.get_capabilities(&adapter).alpha_modes,
+            )
+        })();
 
     let _ = conn.destroy_window(window);
     let _ = conn.free_colormap(colormap);
     let _ = conn.flush();
     capable
+}
+
+#[cfg(test)]
+mod alpha_tests {
+    use super::x11_alpha_supported;
+    use wgpu::{Backend, CompositeAlphaMode as Alpha};
+
+    #[test]
+    fn gles_opaque_advertisement_does_not_remove_verified_native_argb() {
+        let modes = [Alpha::Opaque];
+        assert!(x11_alpha_supported(true, Backend::Gl, &modes));
+        assert_eq!(modes, [Alpha::Opaque]);
+        assert!(!x11_alpha_supported(false, Backend::Gl, &modes));
+        assert!(!x11_alpha_supported(true, Backend::Vulkan, &modes));
+    }
+
+    #[test]
+    fn advertised_alpha_still_requires_the_native_argb_visual() {
+        for mode in [Alpha::PreMultiplied, Alpha::PostMultiplied, Alpha::Inherit] {
+            assert!(x11_alpha_supported(true, Backend::Gl, &[mode]));
+            assert!(x11_alpha_supported(true, Backend::Vulkan, &[mode]));
+            assert!(!x11_alpha_supported(false, Backend::Gl, &[mode]));
+        }
+        assert!(!x11_alpha_supported(true, Backend::Gl, &[]));
+    }
 }
 
 /// The X11 window id behind an eframe window, if this is an X11 session.

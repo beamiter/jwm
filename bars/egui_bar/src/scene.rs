@@ -137,6 +137,7 @@ pub fn galley_extents(galley: &egui::Galley) -> EguiRect {
 
 /// How to paint a scene that the presentation layer does not decide itself.
 pub struct SceneStyle {
+    pub capsule: bool,
     /// Family every text node is laid out in. Icon glyphs resolve through the
     /// fallback chain installed by [`crate::fonts`].
     pub family: FontFamily,
@@ -173,7 +174,11 @@ pub fn paint(painter: &Painter, origin: Pos2, scene: &Scene, style: &SceneStyle)
             SceneNode::Background { fill, .. } => {
                 painter.rect_filled(
                     rect,
-                    CornerRadius::ZERO,
+                    if style.capsule {
+                        CornerRadius::same((rect.height() * 0.5).round().clamp(0.0, 255.0) as u8)
+                    } else {
+                        CornerRadius::ZERO
+                    },
                     color(*fill, style.background_opacity),
                 );
             }

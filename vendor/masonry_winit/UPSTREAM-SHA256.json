@@ -1,0 +1,15 @@
+{
+  "source": "https://github.com/linebender/xilem",
+  "commit": "78d4f4b6878a1c2e2884edd72d7ecd83f1f6f704",
+  "files": {
+    "README.md": "16f596d810147b34056dc220807111490908afcec22c4a92e046019a9dc1e6e8",
+    "Cargo.toml": "815cbaefb68e3fe88772b4413ccc25b6df9ae542ccf302b33de7fbd1c5df5ef7",
+    "LICENSE": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+    ".gitignore": "ecd4bcf5c1847334f494690d2aeb86af8a4ebc94129713f75e34d808fbc35702",
+    "src/event_loop_runner.rs": "b32914747ceb6074fd0ece2ec4e0ab8176cc9a6f995fd38eed426084220deeba",
+    "src/app_driver.rs": "b175e526e53588feb096ce18b1ea8f216544de88af9c6d00803439e7579cb607",
+    "src/convert_winit_event.rs": "976a39abbee0b9567331f79baa414a39963a96d14c0f1a3eb5d8f7d26c784607",
+    "src/lib.rs": "27f2565f08d7b4a037d0916cf1facc08af495e8dcc3cd3dd549af8294ceaf8ce",
+    "src/vello_util.rs": "005ea2caddf4266b07b7fe948069faacca0dbfa1bfc5b275ab7c0be29c5aef7a"
+  }
+}

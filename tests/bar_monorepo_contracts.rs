@@ -345,3 +345,56 @@ fn optional_native_alpha_probes_handle_missing_libxcb_without_panicking() {
         );
     }
 }
+
+#[test]
+fn shared_shell_inventory_covers_every_frontend_without_counting_the_host() {
+    let inventory: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repository_root().join("docs/shared-shell-coverage.json")).unwrap(),
+    )
+    .unwrap();
+    let names: BTreeSet<String> = inventory["frontends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names.len(), 28);
+    assert_eq!(names, bar_directories());
+    assert!(
+        repository_root()
+            .join("crates/jwm_shell/Cargo.toml")
+            .is_file()
+    );
+    assert!(!names.contains("jwm_shell"));
+}
+
+#[test]
+fn rust_wasm_frontends_include_an_executable_trunk_entrypoint() {
+    for frontend in ["leptos", "yew"] {
+        let html = fs::read_to_string(
+            repository_root().join(format!("bars/tauri_{frontend}_bar/index.html")),
+        )
+        .unwrap();
+        assert!(
+            html.contains("data-trunk rel=\"rust\""),
+            "{frontend}: a CSS-only Trunk build renders an empty native webview"
+        );
+    }
+}
+
+#[test]
+fn release_bundle_and_source_install_include_the_shared_host_and_default_frontend() {
+    let root = repository_root();
+    let manifest = fs::read_to_string(root.join("packaging/release-manifest.tsv")).unwrap();
+    for name in ["jwm-shell", "tauri_leptos_bar"] {
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line.starts_with(&format!("built\t{name}\t"))),
+            "release bundle omits required executable {name}"
+        );
+    }
+    let installer = fs::read_to_string(root.join("scripts/install_jwm_scripts.sh")).unwrap();
+    assert!(installer.contains("JWM_BAR_NAME=\"${JWM_BAR_NAME:-tauri_leptos_bar}\""));
+    assert!(installer.contains("build_and_install_shell"));
+}

@@ -1,4 +1,4 @@
-# JWM release manifest, format 1.
+# JWM release manifest, format 2.
 # Columns: kind<TAB>source<TAB>version_path<TAB>stable_path<TAB>mode
 # A dash means that the field is intentionally unused. Paths are relative and
 # are validated by both the packager and the installer.
@@ -8,6 +8,11 @@ built	jwm-support	bin/jwm-support	usr/local/bin/jwm-support	0755
 built	jwm-remote	bin/jwm-remote	-	0755
 built	jwm-bridge	bin/jwm-bridge	usr/local/bin/jwm-bridge	0755
 built	jwm-player	bin/jwm-player	usr/local/bin/jwm-player	0755
+built	jwm-shell	bin/jwm-shell	usr/local/bin/jwm-shell	0755
+repo-file	scripts/jwm-toggle-sidebar-mode	bin/jwm-toggle-sidebar-mode	usr/local/bin/jwm-toggle-sidebar-mode	0755
+repo-file	vendor/pixels/LICENSE	share/licenses/pixels/LICENSE	-	0644
+repo-file	vendor/pixels/JWM-DISPLAY-PATCH.md	share/licenses/pixels/JWM-DISPLAY-PATCH.md	-	0644
+built	tauri_leptos_bar	bin/tauri_leptos_bar	usr/local/bin/tauri_leptos_bar	0755
 built	tao_pixels_bar	bin/tao_pixels_bar	usr/local/bin/tao_pixels_bar	0755
 built	tao_glow_bar	bin/tao_glow_bar	usr/local/bin/tao_glow_bar	0755
 repo-file	jwm-x11rb.desktop	share/xsessions/jwm-x11rb.desktop	usr/share/xsessions/jwm-x11rb.desktop	0644

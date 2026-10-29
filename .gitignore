@@ -20,3 +20,6 @@ gpu.log
 # `Cargo.lock` is committed for reproducible JWM application builds.
 
 /assets/wallpapers/jwm-14.zip
+
+# Native acceptance outputs are archived by CI, not checked-in build inputs.
+/artifacts/

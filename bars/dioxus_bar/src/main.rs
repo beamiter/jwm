@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "../../../crates/xbar_core/crates/xbar_tauri/src/native_scroll.rs"]
+mod native_scroll;
+
 use dioxus::{
     desktop::{
         Config, DesktopContext, LogicalPosition, LogicalSize, WindowBuilder,
@@ -30,12 +34,14 @@ const STYLE_CSS: &str = include_str!("../assets/style.css");
 fn bar_presentation() -> &'static xbar_core::presentation::PresentationConfig {
     static PRESENTATION: OnceLock<xbar_core::presentation::PresentationConfig> = OnceLock::new();
     PRESENTATION.get_or_init(|| {
-        xbar_core::config::BarConfig::load_default()
+        let mut presentation = xbar_core::config::BarConfig::load_default()
             .unwrap_or_else(|error| {
                 warn!("falling back to the default bar config: {error}");
                 xbar_core::config::BarConfig::default()
             })
-            .presentation
+            .presentation;
+        presentation.apply_desktop_header_profile();
+        presentation
     })
 }
 
@@ -55,17 +61,6 @@ const STARTUP_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_millis(500);
 const DIAGNOSTIC_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 // ===== Nerd Font 图标（与 tauri_react_bar 对齐） =====
-const TAG_ICONS: &[&str] = &[
-    "\u{F0A1E}", // terminal
-    "\u{F0239}", // browser
-    "\u{F0A1B}", // code
-    "\u{F0B79}", // chat
-    "\u{F024B}", // folder
-    "\u{F0388}", // music
-    "\u{F0567}", // video
-    "\u{F01F0}", // mail
-    "\u{F0297}", // gamepad
-];
 
 const ICON_CPU: &str = "\u{F4BC}";
 const ICON_MEM: &str = "\u{F035B}";
@@ -167,6 +162,9 @@ impl RuntimeOwner {
     }
 
     fn service_dock(&mut self, scale_factor: f64) -> RuntimeUpdate {
+        if !bar_presentation().edge.is_vertical() {
+            return RuntimeUpdate::default();
+        }
         let snapshot = self.runtime.snapshot();
         self.dock.synchronize(
             &snapshot,
@@ -222,6 +220,9 @@ impl RuntimeOwner {
     }
 
     fn dock_ui(&self) -> DockView {
+        if !bar_presentation().edge.is_vertical() {
+            return DockView::default();
+        }
         DockView::from_bridge(&self.dock)
     }
 }
@@ -339,6 +340,18 @@ fn css_rgba(color: Rgba) -> String {
     )
 }
 
+/// Horizontal headers use the same tint as the native scene. The neutral
+/// glass fallback remains the material for legacy and vertical layouts.
+fn material_background(theme: xbar_core::ThemeMode, alpha: f64, desktop_header: bool) -> String {
+    let [red, green, blue] = if desktop_header {
+        let color = Palette::for_theme(theme).background;
+        [color.red, color.green, color.blue].map(|channel| (channel * 255.0).round() as u8)
+    } else {
+        fallback_rgb(theme)
+    };
+    format!("rgba({red}, {green}, {blue}, {alpha})")
+}
+
 /// The part of the bar's appearance that the stylesheet cannot know: the
 /// compositor mode and the configured theme.
 ///
@@ -360,14 +373,15 @@ fn mode_style(
     wallpaper_luminance: Option<u8>,
     theme: xbar_core::ThemeMode,
 ) -> String {
-    let [r, g, b] = fallback_rgb(theme);
     let alpha = xbar_core::background::bar_background_opacity(
         blur_status_bar,
-        config.background_opacity,
+        config
+            .background_opacity
+            .or((!config.presentation.edge.is_vertical()).then_some(0.58)),
         translucent,
     );
     let palette = Palette::for_background(theme, wallpaper_luminance, alpha);
-    let background = format!("rgba({r}, {g}, {b}, {alpha})");
+    let background = material_background(theme, alpha, bar_presentation().desktop_header);
     let text = css_rgba(palette.text);
     let muted = css_rgba(palette.muted_text);
     let idle = css_rgba(palette.occupied);
@@ -385,7 +399,7 @@ body {{ color: {text}; }}
     let tags = xbar_core::tag_contrast::TagPalette::for_wallpaper(
         theme,
         wallpaper_luminance,
-        config.presentation.tag_contrast,
+        bar_presentation().tag_contrast,
     );
     for (class, colors) in [
         ("default", tags.empty),
@@ -584,7 +598,7 @@ fn ShellButton(wm_available: bool, on_action: EventHandler<UserAction>) -> Eleme
                     }
                 },
                 title: "JWM shell",
-                span { class: "nf-icon", "{ROUTES[0].1}" }
+                span { class: "header-launcher-glyph", "▦" }
             }
             if wm_available {
                 div { class: "shell-dropdown",
@@ -622,6 +636,8 @@ fn SystemInfoDisplay(
     snapshot: Option<SystemDetails>,
     battery_percent: Option<u8>,
     is_charging: bool,
+    header_cpu: String,
+    header_memory: String,
 ) -> Element {
     let sev = |p: f32| {
         if p <= 30.0 {
@@ -635,7 +651,8 @@ fn SystemInfoDisplay(
         }
     };
 
-    if let Some(ref s) = snapshot {
+    {
+        let s = snapshot.unwrap_or_default();
         let battery_percent = battery_percent.map(f32::from);
         let cpu_class = sev(s.cpu_average);
         let mem_class = sev(s.memory_usage_percent);
@@ -665,8 +682,8 @@ fn SystemInfoDisplay(
         } else {
             ICON_BAT_FULL
         };
-        let cpu_text = format!("{:.0}%", s.cpu_average);
-        let mem_text = format!("{:.0}%", s.memory_usage_percent);
+        let cpu_text = header_cpu;
+        let mem_text = header_memory;
         let batt_text =
             battery_percent.map_or_else(|| "--".to_owned(), |percent| format!("{percent:.0}%"));
 
@@ -686,23 +703,6 @@ fn SystemInfoDisplay(
                 }
             }
         }
-    } else {
-        rsx! {
-            div { class: "system-info-container",
-                div { class: "pill usage-pill usage-warn",
-                    span { class: "nf-icon", "{ICON_CPU}" }
-                    "--%"
-                }
-                div { class: "pill usage-pill usage-warn",
-                    span { class: "nf-icon", "{ICON_MEM}" }
-                    "--%"
-                }
-                div { class: "pill usage-pill usage-warn",
-                    span { class: "nf-icon", "{ICON_BAT_FULL}" }
-                    "--%"
-                }
-            }
-        }
     }
 }
 
@@ -713,7 +713,7 @@ fn VolumeControl(
     on_action: EventHandler<UserAction>,
 ) -> Element {
     let snap = snapshot.clone();
-    let muted = snap.as_ref().map(|s| s.is_muted).unwrap_or(true);
+    let muted = snap.as_ref().is_some_and(|s| s.is_muted);
     let has_device = snap.is_some();
     let vol = snap.as_ref().map(|s| s.volume).unwrap_or(0);
     let icon = volume_icon(snap.as_ref());
@@ -795,7 +795,6 @@ fn BrightnessControl(percent: Option<Percent>, on_action: EventHandler<UserActio
 
 #[derive(Debug, Clone, PartialEq)]
 enum ButtonState {
-    Filtered,
     Selected,
     Urgent,
     Occupied,
@@ -803,11 +802,9 @@ enum ButtonState {
 }
 
 impl ButtonState {
-    fn from_flags(is_filtered: bool, is_selected: bool, is_urg: bool, is_occ: bool) -> Self {
+    fn from_flags(_is_filtered: bool, is_selected: bool, is_urg: bool, is_occ: bool) -> Self {
         if is_urg {
             ButtonState::Urgent
-        } else if is_filtered {
-            ButtonState::Filtered
         } else if is_selected {
             ButtonState::Selected
         } else if is_occ {
@@ -819,7 +816,6 @@ impl ButtonState {
 
     fn to_css_class(&self) -> &'static str {
         match self {
-            ButtonState::Filtered => "emoji-button state-filtered",
             ButtonState::Selected => "emoji-button state-selected",
             ButtonState::Urgent => "emoji-button state-urgent",
             ButtonState::Occupied => "emoji-button state-occupied",
@@ -835,7 +831,10 @@ fn get_button_class(index: usize, tags: &[TagState]) -> String {
     let state =
         ButtonState::from_flags(tag.filled, tag.selected, tag.urgent, tag.occupied).to_css_class();
     let occupancy = if tag.occupied { " has-clients" } else { "" };
-    format!("{state}{occupancy}")
+    format!(
+        "{state}{occupancy}{}",
+        if tag.filled { " has-focus" } else { "" }
+    )
 }
 
 fn shared_path_from_environment() -> String {
@@ -917,6 +916,7 @@ fn main() {
             Config::new().with_window(
                 WindowBuilder::new()
                     .with_title("dioxus_bar")
+                    .with_visible(!cfg!(target_os = "linux"))
                     .with_position(LogicalPosition::new(0, 0))
                     .with_inner_size(initial_bar_size())
                     .with_maximizable(false)
@@ -952,6 +952,24 @@ mod tests {
     }
 
     #[test]
+    fn desktop_material_uses_native_tint_and_preserves_opaque_fallback() {
+        let alpha = xbar_core::background::bar_background_opacity(None, Some(0.58), true);
+        assert_eq!(
+            super::material_background(xbar_core::ThemeMode::Light, alpha, true),
+            "rgba(204, 231, 255, 0.58)"
+        );
+        let opaque = xbar_core::background::bar_background_opacity(None, Some(0.58), false);
+        assert_eq!(
+            super::material_background(xbar_core::ThemeMode::Light, opaque, true),
+            "rgba(204, 231, 255, 1)"
+        );
+        assert_eq!(
+            super::material_background(xbar_core::ThemeMode::Light, alpha, false),
+            "rgba(246, 246, 248, 0.58)"
+        );
+    }
+
+    #[test]
     fn tag_css_reserves_a_fixed_marker_for_every_state() {
         let config = xbar_core::config::BarConfig::default();
         for theme in [xbar_core::ThemeMode::Dark, xbar_core::ThemeMode::Light] {
@@ -967,6 +985,19 @@ mod tests {
             assert!(css.contains("background: currentColor !important; color: inherit !important"));
             assert!(css.contains("transform: none !important"));
         }
+    }
+
+    #[test]
+    fn filled_focus_never_selects_an_inactive_workspace() {
+        let tag = TagState {
+            filled: true,
+            occupied: true,
+            ..TagState::default()
+        };
+        let classes = get_button_class(0, &[tag]);
+        assert!(classes.contains("state-occupied"));
+        assert!(classes.contains("has-focus"));
+        assert!(!classes.contains("state-selected"));
     }
 
     #[test]
@@ -1070,6 +1101,22 @@ fn App() -> Element {
     let shared_path = shared_path_from_environment();
 
     let window = use_window();
+    #[cfg(target_os = "linux")]
+    {
+        let window = window.clone();
+        use_hook(move || {
+            use dioxus_desktop::wry::WebViewExtUnix;
+            native_scroll::install(&window.webview.webview());
+        });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let window = window.clone();
+        // Showing the GTK toplevel before the WebView's initial component
+        // setup can leave its first frame blank until the window is remapped.
+        // Publish it once setup is complete, without a hide/show recovery.
+        use_effect(move || window.set_visible(true));
+    }
     let window_baseline = {
         let window = window.clone();
         use_hook(move || {
@@ -1261,10 +1308,14 @@ fn App() -> Element {
 
     let state = bar_snapshot();
     let wm_available = state.wm_available;
-    let wm_tags = if state.wm_available {
-        state.tags.as_slice()
+    let monitor = state.monitor;
+    let workspace_tags = state.workspace_tags();
+    let header_network = xbar_core::controls::network_value(&state.network);
+    let header_clock_compact = xbar_core::controls::compact_clock_value(&state.time);
+    let client_title = if state.client_name.trim().is_empty() {
+        "JWM Desktop"
     } else {
-        &[]
+        state.client_name.as_str()
     };
     let layout_symbol = if state.wm_available {
         state.layout_symbol.as_str()
@@ -1294,7 +1345,7 @@ fn App() -> Element {
         info!("Button {} released", index);
         pressed_button.set(None);
         if wm_available && let Some(tag) = TagId::new(index) {
-            dispatch_action.call(UserAction::ViewTag(tag));
+            dispatch_action.call(UserAction::ViewTagOn { tag, monitor });
         }
     };
 
@@ -1324,13 +1375,18 @@ fn App() -> Element {
         document::Style { "{mode_css}" }
         document::Style { "{xbar_core::web_layout::STYLESHEET}" }
 
-        div { class: "button-row", style: "--xbar-fixed-dock: {dock_extent}px",
+        div { class: "button-row", "data-desktop-header": "true", "data-active-tag": state.active_tag.map(|tag| tag.index().to_string()).unwrap_or_default(), "data-battery-charging": state.battery.charging.to_string(), "data-theme": if state.theme == xbar_core::ThemeMode::Dark { "dark" } else { "light" }, style: "--xbar-fixed-dock: {dock_extent}px",
             div { class: "buttons-container",
-                for (i , icon) in TAG_ICONS.iter().enumerate() {
+                ShellButton {
+                    wm_available,
+                    on_action: move |action| dispatch_action.call(action),
+                }
+                for workspace in workspace_tags {
                     {
-                        let base_class = get_button_class(i, wm_tags);
-                        let is_selected = wm_tags.get(i).is_some_and(|tag| tag.selected);
-                        let is_current = state.active_tag.is_some_and(|tag| tag.index() == i);
+                        let i = workspace.id.index();
+                        let base_class = get_button_class(0, std::slice::from_ref(&workspace.state));
+                        let is_selected = workspace.state.selected;
+                        let is_current = is_selected;
                         let is_pressed = pressed_button() == Some(i);
                         let button_class = if is_pressed {
                             format!("{} pressed", base_class)
@@ -1343,11 +1399,14 @@ fn App() -> Element {
                                 class: "{button_class}",
                                 "aria-pressed": "{is_selected}",
                                 "aria-current": "{is_current}",
-                                title: "Tag {i + 1}",
+                                title: "Tag {workspace.number}",
+                                "data-tag-index": "{i}",
+                                disabled: !wm_available,
+                                oncontextmenu: move |event| { event.prevent_default(); event.stop_propagation(); if wm_available { dispatch_action.call(UserAction::ToggleTagOn { tag: workspace.id, monitor }); } },
                                 onmousedown: move |_| handle_button_press(i),
                                 onmouseleave: move |_| handle_button_leave(i),
                                 onclick: move |_| handle_button_release(i),
-                                span { class: "nf-icon", "{icon}" }
+                                span { class: "workspace-number", "{workspace.number}" }
                             }
                         }
                     }
@@ -1390,13 +1449,16 @@ fn App() -> Element {
                 }
             }
 
-            div { class: "spacer" }
+            div { class: "client-title", title: "{client_title}", "{client_title}" }
 
             div { class: "right-info-container",
+                div { class: "pill network-pill", title: "Network", span { class: "metric-label", "NET" } "{header_network}" }
                 SystemInfoDisplay {
                     snapshot: state.system.cpu_percent.is_some().then(|| state.system_details.clone()),
                     battery_percent: state.battery.percent.filter(|_| state.battery.present).map(|value| value.rounded()),
                     is_charging: state.battery.charging,
+                    header_cpu: xbar_core::controls::percent_value(state.system.cpu_percent),
+                    header_memory: xbar_core::controls::percent_value(state.system.memory_percent),
                 }
                 BrightnessControl {
                     percent: state.brightness.percent,
@@ -1406,14 +1468,12 @@ fn App() -> Element {
                     snapshot: state.audio_device.clone(),
                     on_action: move |action| dispatch_action.call(action),
                 }
-                ShellButton {
-                    wm_available,
-                    on_action: move |action| dispatch_action.call(action),
-                }
+
                 ScreenshotButton { on_action: move |action| dispatch_action.call(action) }
 
                 div {
                     class: "pill time-pill",
+                    "data-header-clock": "{header_clock_compact}",
                     onclick: move |_| dispatch_action.call(UserAction::ToggleSeconds),
                     span { class: "nf-icon", "{ICON_TIME}" }
                     span { "{state.time}" }

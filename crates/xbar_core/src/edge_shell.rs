@@ -1,11 +1,11 @@
 //! Four-edge shell policy. Native hosts own windows; this module owns timing
 //! and bounded physical geometry so revealing one edge cannot reveal another.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use crate::{BarEdge, BarPlacement, MonitorGeometry};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RevealMode {
     #[default]
@@ -14,7 +14,7 @@ pub enum RevealMode {
     Disabled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EdgeShellConfig {
     /// The official Tao/Glow frontend hosts these companion panels.

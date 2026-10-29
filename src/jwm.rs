@@ -3,6 +3,7 @@ pub mod client;
 pub mod client_stack;
 pub(crate) mod closed_placement;
 pub mod constraints;
+pub(crate) mod desktop_shell;
 pub mod event_dispatcher;
 pub mod features;
 pub mod focus;
@@ -178,6 +179,7 @@ pub struct Jwm {
 
     // Per-monitor status bars
     pub secondary_bars: HashMap<i32, SecondaryBarInstance>,
+    pub(crate) desktop_shell: desktop_shell::DesktopShellSupervisor,
     pub secondary_bar_failures: HashMap<i32, u32>,
     pub secondary_bar_retry_after: HashMap<i32, std::time::Instant>,
 
@@ -913,6 +915,113 @@ mod control_socket_tests {
         assert_eq!(first.state.monitor_order.len(), 1);
         assert!(first.state.sel_mon.is_some());
     }
+
+    #[test]
+    fn shared_shell_queries_do_not_consume_pending_subscription_revisions() {
+        use std::io::{BufRead as _, Write as _};
+        let path = std::env::temp_dir().join(format!(
+            "jwm-shell-sub-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut backend = InertBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.ipc_server =
+            Some(crate::ipc_server::IpcServer::new_at_test_path(path.clone()).unwrap());
+        let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        stream
+            .write_all(b"{\"subscribe\":[\"desktop_shell/state\"]}\n")
+            .unwrap();
+        jwm.process_ipc(&mut backend);
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let acknowledgement: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(acknowledgement["success"], true);
+        // Another client can query first. That must not consume the event
+        // intended for the persistent subscriber.
+        let queried = jwm.desktop_shell_snapshot_json(&backend);
+        jwm.publish_desktop_shell_state(&backend, std::time::Instant::now());
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(event["event"], "desktop_shell/state");
+        assert_eq!(event["payload"]["revision"], queried["revision"]);
+        assert_eq!(event["payload"]["session"], queried["session"]);
+    }
+
+    #[test]
+    fn shared_shell_snapshot_is_atomic_idempotent_and_scopes_recycled_tasks() {
+        let mut backend = InertBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.sel_mon.unwrap();
+        let mut client = crate::core::models::WMClient::new(WindowId::from_raw(77));
+        client.mon = Some(monitor);
+        client.name = "task".into();
+        let old_key = jwm.state.clients.insert(client.clone());
+        jwm.state.client_order.push(old_key);
+        let first = jwm.desktop_shell_snapshot_json(&backend);
+        let repeated = jwm.desktop_shell_snapshot_json(&backend);
+        assert_eq!(first["revision"], repeated["revision"]);
+        let wire: xbar_core::desktop_shell::ShellSnapshot =
+            serde_json::from_value(first.clone()).unwrap();
+        wire.validate().unwrap();
+        assert_eq!(wire.outputs[0].tasks[0].id, 77);
+        // RandR can reuse this positional monitor slot for a different output.
+        // An already queued worker callback must lose authority immediately,
+        // even before another client requests the replacement snapshot.
+        jwm.state
+            .output_map
+            .insert(monitor, crate::backend::common_define::OutputId(991));
+        let old_output = jwm.desktop_shell_action(&mut backend, &serde_json::json!({
+            "session": wire.session, "output": wire.outputs[0].id,
+            "output_identity": wire.outputs[0].identity,
+            "name": "focus_window", "args": {"id": 77, "incarnation": wire.outputs[0].tasks[0].incarnation}
+        }));
+        assert!(!old_output.success);
+        assert_eq!(
+            old_output.error.as_deref(),
+            Some("stale desktop shell output identity")
+        );
+        let replaced_output = jwm.desktop_shell_snapshot_json(&backend);
+        assert_ne!(
+            replaced_output["outputs"][0]["identity"],
+            first["outputs"][0]["identity"]
+        );
+        let old_incarnation = wire.outputs[0].tasks[0].incarnation;
+        jwm.state.clients.remove(old_key);
+        jwm.state.client_order.clear();
+        let new_key = jwm.state.clients.insert(client);
+        jwm.state.client_order.push(new_key);
+        let replaced = jwm.desktop_shell_snapshot_json(&backend);
+        assert!(replaced["revision"].as_u64().unwrap() > first["revision"].as_u64().unwrap());
+        assert_ne!(
+            replaced["outputs"][0]["tasks"][0]["incarnation"].as_u64(),
+            Some(old_incarnation)
+        );
+        let stale = jwm.desktop_shell_action(
+            &mut backend,
+            &serde_json::json!({
+                "session": wire.session + 1, "output": wire.outputs[0].id,
+                "name": "focus_window", "args": {"id": 77}
+            }),
+        );
+        assert!(!stale.success);
+        let wrong_version = jwm.register_desktop_shell(
+            &mut backend,
+            &serde_json::json!({
+                "protocol_version": xbar_core::desktop_shell::SHELL_PROTOCOL_VERSION + 1,
+                "session": wire.session, "pid": std::process::id(), "panels": []
+            }),
+        );
+        assert!(!wrong_version.success);
+    }
 }
 
 impl Jwm {
@@ -1073,6 +1182,8 @@ impl Jwm {
             "toggle_spawn_placement"
         } else if eq!(Jwm::togglebar) {
             "togglebar"
+        } else if eq!(Jwm::toggle_desktop_shell_mode) {
+            "toggle_desktop_shell_mode"
         } else if eq!(Jwm::setmfact) {
             "setmfact"
         } else if eq!(Jwm::setcfact) {
@@ -1349,6 +1460,7 @@ impl Jwm {
             message: SharedMessage::default(),
 
             secondary_bars: HashMap::new(),
+            desktop_shell: Default::default(),
             secondary_bar_failures: HashMap::new(),
             secondary_bar_retry_after: HashMap::new(),
             transient_children: process::TransientChildSupervisor::default(),
@@ -2140,8 +2252,6 @@ impl Jwm {
 
     fn process_commands_from_status_bar(&mut self, backend: &mut dyn Backend) {
         let mut commands_to_process: Vec<(i32, SharedCommand)> = Vec::new();
-        let mut dock_generation_cache: HashMap<MonitorIndex, Option<u64>> = HashMap::new();
-        let mut reconciled_preview_generations = HashSet::new();
 
         // Read commands from all per-monitor status bars
         for (&source_monitor, bar) in &mut self.secondary_bars {
@@ -2182,8 +2292,17 @@ impl Jwm {
             }
         }
 
-        // Process all collected commands
-        for (source_monitor, cmd) in commands_to_process {
+        self.process_bar_commands(backend, commands_to_process);
+    }
+
+    pub(crate) fn process_bar_commands(
+        &mut self,
+        backend: &mut dyn Backend,
+        commands: Vec<(i32, SharedCommand)>,
+    ) {
+        let mut dock_generation_cache: HashMap<MonitorIndex, Option<u64>> = HashMap::new();
+        let mut reconciled_preview_generations = HashSet::new();
+        for (source_monitor, cmd) in commands {
             match cmd.cmd_type.into() {
                 CommandType::ViewTag => {
                     if !self.select_status_bar_control_monitor(
@@ -2211,7 +2330,9 @@ impl Jwm {
                         cmd.parameter
                     );
                     let arg = WMArgEnum::UInt(cmd.parameter);
-                    let _ = self.toggletag(backend, &arg);
+                    // Workspace buttons toggle the monitor's viewed set.
+                    // Client membership remains the separate toggletag action.
+                    let _ = self.toggleview(backend, &arg);
                 }
                 CommandType::SetLayout => {
                     if !self.select_status_bar_control_monitor(
@@ -2419,7 +2540,7 @@ impl Jwm {
                             });
                         backend.compositor_set_minimized_preview_edge(
                             bar_geometry::minimized_preview_edge(
-                                config.status_bar_four_edge(),
+                                config.desktop_shell_enabled(),
                                 config.status_bar_position_for_monitor(source_monitor),
                                 output,
                                 anchor,
@@ -2550,6 +2671,7 @@ impl Jwm {
         }
         key_configs.extend(cfg.media_player_fallback_keys());
         key_configs.extend(cfg.monitor_swap_fallback_keys());
+        key_configs.extend(cfg.desktop_shell_mode_fallback_keys());
         let lines = keybinding_viewer_lines(
             &key_configs,
             cfg.tags_length(),
@@ -2826,13 +2948,7 @@ impl Jwm {
     }
 
     fn calculate_tag_masks(&self, mon_key: MonitorKey) -> (u32, u32) {
-        const EMPTY_CLIENTS: &[ClientKey] = &[];
-        let monitor_clients = self
-            .state
-            .monitor_clients
-            .get(mon_key)
-            .map_or(EMPTY_CLIENTS, Vec::as_slice);
-        StatusBarBuilder::calculate_tag_masks(&self.state.clients, monitor_clients)
+        StatusBarBuilder::calculate_tag_masks_for_monitor(&self.state.clients, mon_key)
     }
 
     fn is_filled_tag(&self, mon_key: MonitorKey, tag_bit: u32) -> bool {

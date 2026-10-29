@@ -94,13 +94,25 @@ chmod 0751 -- "$DESTDIR/usr/local/bin/jwm"
 # original managed paths and restore collisions only with explicit --replace.
 LEGACY_MANIFEST="$TMP_ROOT/release-manifest-v1.tsv"
 awk -F '\t' '
-    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player") { next }
-    $2 == "bridge/dist/jwm-player.desktop" || $2 == "bridge/dist/jwm-video.desktop" { next }
+    NR == 1 { sub("format 2", "format 1") }
+    $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player" || $2 == "jwm-shell" || $2 == "tauri_leptos_bar") { next }
+    $2 == "bridge/dist/jwm-player.desktop" || $2 == "bridge/dist/jwm-video.desktop" || $2 == "scripts/jwm-toggle-sidebar-mode" { next }
     { print }
 ' \
     "$MANIFEST" > "$LEGACY_MANIFEST"
 BUNDLE_V1=$(make_fake_bundle 1.0.0 release-v1 "$LEGACY_MANIFEST")
 BUNDLE_V2=$(make_fake_bundle 2.0.0 release-v2 "$MANIFEST")
+
+# Format 2 cannot silently omit the shared host or the selected default.
+for missing in jwm-shell tauri_leptos_bar; do
+    reduced="$TMP_ROOT/manifest-missing-$missing.tsv"
+    awk -F '\t' -v missing="$missing" '$2 != missing { print }' "$MANIFEST" > "$reduced"
+    incomplete=$(make_fake_bundle "3.0.0-missing-$missing" incomplete "$reduced")
+    if bash "$incomplete/install-release.sh" install --destdir "$DESTDIR" --replace > "$TMP_ROOT/missing-$missing.log" 2>&1; then
+        fail "format 2 accepted missing required executable: $missing"
+    fi
+    grep -Fq "manifest omits required destination: usr/local/bin/$missing" "$TMP_ROOT/missing-$missing.log" || fail "missing-$missing was rejected for the wrong reason"
+done
 
 # Bundle extraction metadata is untrusted input. A privileged installation
 # must not preserve a user's writable or set-id modes in the immutable tree.
@@ -283,6 +295,9 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-player \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_glow_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_pixels_bar \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-shell \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-toggle-sidebar-mode \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tauri_leptos_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/xsessions/jwm-x11rb.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/wayland-sessions/jwm-wayland.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/dbus-1/services/org.freedesktop.Notifications.service \

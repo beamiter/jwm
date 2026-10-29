@@ -1,3 +1,7 @@
+#[path = "../../gpui_alpha.rs"]
+mod gpui_alpha;
+#[path = "../../gpui_header.rs"]
+mod gpui_header;
 #[path = "../../gpui_sidebar.rs"]
 mod gpui_sidebar;
 
@@ -36,9 +40,6 @@ use gpui::{
     WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
-use std::sync::Arc;
-use x11rb::connection::Connection as _;
-use x11rb::xcb_ffi::XCBConnection;
 use xbar_core::glass::fallback_rgb;
 
 // -------- Constants (mirror iced_bar) ----------------------------------------
@@ -119,12 +120,15 @@ impl GpuiBar {
     ) -> Self {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
-        let bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
+        let mut bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
+        let header = bar_config.presentation.apply_desktop_header_profile();
+        let background_opacity = if header {
+            bar_config.background_opacity.or(Some(0.58))
+        } else {
+            background_opacity
+        };
         let config = ModelConfig {
             initial_theme: bar_config.theme,
-            show_seconds: true,
-            clock_minute_format: "%m-%d %H:%M".into(),
-            clock_second_format: "%m-%d %H:%M:%S".into(),
             ..ModelConfig::default()
         };
         let runtime = if shared_path.is_empty() {
@@ -843,6 +847,16 @@ impl Render for GpuiBar {
             )
             .into_any_element();
         }
+        if self.presentation.desktop_header {
+            return gpui_header::render(
+                &self.runtime.snapshot(),
+                &self.presentation,
+                self.background.a,
+                Self::dispatch,
+                window,
+                cx,
+            );
+        }
         let system = self.runtime.view().system;
         let cpu = system.cpu_percent.map_or(0.0, |value| value.as_f32());
         let mem = system.memory_percent.map_or(0.0, |value| value.as_f32());
@@ -934,7 +948,7 @@ fn main() {
         xbar_core::config::BarConfig::default()
     });
 
-    let translucent = detect_translucency();
+    let translucent = gpui_alpha::detect_translucency();
     let [red, green, blue] = fallback_rgb(config.theme);
     let opacity =
         xbar_core::background::bar_background_opacity(None, config.background_opacity, translucent);
@@ -989,200 +1003,4 @@ fn main() {
         .expect("failed to open window");
         cx.activate(true);
     });
-}
-
-// -------- Compositor coupling ------------------------------------------------
-
-/// The startup mode decision: translucent only when a compositing manager is
-/// running AND gpui's renderer can actually deliver per-pixel alpha; anything
-/// less paints the solid fallback. Both checks ride one side connection that
-/// is gone before gpui opens its own.
-fn detect_translucency() -> bool {
-    if x11rb::xcb_ffi::load_libxcb().is_err() {
-        return false;
-    }
-    // No X server to ask (a native-Wayland session, say) means nobody honors
-    // the CM-selection contract either way: solid.
-    let Ok((conn, screen_num)) = XCBConnection::connect(None) else {
-        return false;
-    };
-    compositor_active(&conn, screen_num) && renderer_alpha_capable(&conn, screen_num)
-}
-
-/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
-/// selection.
-///
-/// Sampled once, before gpui runs: per-pixel alpha is a window-creation
-/// decision, so a compositor started or stopped later goes unnoticed until
-/// the bar restarts. Ownership also only promises compositing — whether the
-/// compositor blurs behind the bar is its own affair.
-fn compositor_active(conn: &XCBConnection, screen_num: usize) -> bool {
-    use x11rb::protocol::xproto::ConnectionExt as _;
-
-    let name = format!("_NET_WM_CM_S{screen_num}");
-    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
-        return false;
-    };
-    let Ok(atom) = cookie.reply() else {
-        return false;
-    };
-    conn.get_selection_owner(atom.atom)
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .map(|reply| reply.owner != x11rb::NONE)
-        .unwrap_or(false)
-}
-
-/// A 32-bit TrueColor visual to probe with, if the server has one.
-fn find_argb_visual(screen: &x11rb::protocol::xproto::Screen) -> Option<u32> {
-    use x11rb::protocol::xproto::VisualClass;
-
-    screen
-        .allowed_depths
-        .iter()
-        .find(|depth| depth.depth == 32)
-        .and_then(|depth| {
-            depth
-                .visuals
-                .iter()
-                .find(|visual| visual.class == VisualClass::TRUE_COLOR)
-        })
-        .map(|visual| visual.visual_id)
-}
-
-/// Whether gpui's wgpu renderer could actually hand per-pixel alpha to the
-/// server.
-///
-/// gpui negotiates its surface alpha mode internally and never reports the
-/// outcome, so this asks wgpu the same question ahead of time: an unmapped
-/// 1x1 ARGB window, a surface over it, and the adapter's capabilities, on the
-/// same backends gpui itself enables (`gpui_wgpu::WgpuContext::instance`).
-/// The acceptance set mirrors gpui_wgpu's transparent-window preference list
-/// (`wgpu_renderer.rs`): `PreMultiplied` or `Inherit` — anything else and the
-/// renderer would quietly composite opaque.
-fn renderer_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
-    use x11rb::protocol::xproto::{
-        ColormapAlloc, ConnectionExt as _, CreateWindowAux, WindowClass,
-    };
-
-    let screen = &conn.setup().roots[screen_num];
-    let Some(visual_id) = find_argb_visual(screen) else {
-        return false;
-    };
-    let (Ok(colormap), Ok(window)) = (conn.generate_id(), conn.generate_id()) else {
-        return false;
-    };
-    if !conn
-        .create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
-        .map(|cookie| cookie.check().is_ok())
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    let created = conn
-        .create_window(
-            32,
-            window,
-            screen.root,
-            0,
-            0,
-            1,
-            1,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            visual_id,
-            &CreateWindowAux::new()
-                .background_pixel(0)
-                .border_pixel(0)
-                .colormap(colormap)
-                .override_redirect(1),
-        )
-        .map(|cookie| cookie.check().is_ok())
-        .unwrap_or(false);
-
-    let capable = created && {
-        let target = Arc::new(ProbeTarget {
-            conn: conn.get_raw_xcb_connection(),
-            screen: screen_num as i32,
-            window,
-            visual_id,
-        });
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(target.clone()))
-        });
-        instance
-            .create_surface(target)
-            .ok()
-            .and_then(|surface| {
-                let adapter =
-                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::LowPower,
-                        force_fallback_adapter: false,
-                        compatible_surface: Some(&surface),
-                        ..Default::default()
-                    }))
-                    .ok()?;
-                let modes = surface.get_capabilities(&adapter).alpha_modes;
-                Some(
-                    modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-                        || modes.contains(&wgpu::CompositeAlphaMode::Inherit),
-                )
-            })
-            .unwrap_or(false)
-    };
-
-    if created {
-        let _ = conn.destroy_window(window);
-    }
-    let _ = conn.free_colormap(colormap);
-    let _ = conn.flush();
-    capable
-}
-
-/// Raw-handle wrapper the capability probe hands to wgpu: the side XCB
-/// connection plus the throwaway ARGB window created on it.
-#[derive(Debug)]
-struct ProbeTarget {
-    conn: *mut std::ffi::c_void,
-    screen: i32,
-    window: u32,
-    visual_id: u32,
-}
-
-// The raw connection pointer is only ever read on this thread; wgpu's surface
-// types nonetheless insist on Send + Sync targets.
-unsafe impl Send for ProbeTarget {}
-unsafe impl Sync for ProbeTarget {}
-
-impl raw_window_handle::HasDisplayHandle for ProbeTarget {
-    fn display_handle(
-        &self,
-    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let handle = raw_window_handle::XcbDisplayHandle::new(
-            std::ptr::NonNull::new(self.conn),
-            self.screen,
-        );
-        Ok(unsafe {
-            raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Xcb(
-                handle,
-            ))
-        })
-    }
-}
-
-impl raw_window_handle::HasWindowHandle for ProbeTarget {
-    fn window_handle(
-        &self,
-    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        let mut handle = raw_window_handle::XcbWindowHandle::new(
-            std::num::NonZeroU32::new(self.window).expect("X11 resource ids are never zero"),
-        );
-        handle.visual_id = std::num::NonZeroU32::new(self.visual_id);
-        Ok(unsafe {
-            raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Xcb(
-                handle,
-            ))
-        })
-    }
 }

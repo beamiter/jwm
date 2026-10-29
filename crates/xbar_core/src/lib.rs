@@ -26,6 +26,8 @@ mod cairo_renderer;
 #[cfg(feature = "config-toml")]
 pub mod config;
 pub mod controls;
+pub mod desktop_header_profile;
+pub mod desktop_shell;
 pub mod display;
 pub mod dock;
 pub mod edge_shell;
@@ -92,11 +94,11 @@ pub use input::{
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,
     BrightnessState, ClockState, DockItemGeometry, LayoutId, MAX_MODEL_CLOCK_FORMAT_BYTES,
-    MAX_MODEL_CPU_SAMPLES, MAX_MODEL_MINIMIZED_WINDOWS, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
-    MINIMIZED_WINDOW_FLAG_URGENT, MediaPlayback, MediaState, MinimizedWindow, ModelConfig,
-    ModelError, ModelUpdate, MonitorGeometry, MonitorId, NetworkState, Percent, PercentError,
-    ShellRoute, SystemDetails, SystemLoadAverage, SystemState, TagId, TagState, UserAction,
-    WindowToken, WmCommand, WmSnapshot,
+    MAX_MODEL_CPU_SAMPLES, MAX_MODEL_MINIMIZED_WINDOWS, MAX_MODEL_TAGS,
+    MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE, MINIMIZED_WINDOW_FLAG_URGENT, MediaPlayback,
+    MediaState, MinimizedWindow, ModelConfig, ModelError, ModelUpdate, MonitorGeometry, MonitorId,
+    NetworkState, Percent, PercentError, ShellRoute, SystemDetails, SystemLoadAverage, SystemState,
+    TagId, TagState, UserAction, WindowToken, WmCommand, WmSnapshot, WorkspaceTag, workspace_tags,
 };
 pub use placement::{
     BarEdge, BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut,

@@ -1,3 +1,7 @@
+#[path = "../../gpui_alpha.rs"]
+mod gpui_alpha;
+#[path = "../../gpui_header.rs"]
+mod gpui_header;
 #[path = "../../gpui_sidebar.rs"]
 mod gpui_sidebar;
 
@@ -120,12 +124,15 @@ impl GpuiComponentBar {
         cx: &mut Context<Self>,
     ) -> Self {
         let shared_path = env::args().skip(1).last().unwrap_or_default();
-        let bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
+        let mut bar_config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
+        let header = bar_config.presentation.apply_desktop_header_profile();
+        let background_opacity = if header {
+            bar_config.background_opacity.or(Some(0.58))
+        } else {
+            background_opacity
+        };
         let config = ModelConfig {
             initial_theme: bar_config.theme,
-            show_seconds: true,
-            clock_minute_format: "%m-%d %H:%M".into(),
-            clock_second_format: "%m-%d %H:%M:%S".into(),
             ..ModelConfig::default()
         };
         let runtime = if shared_path.is_empty() {
@@ -743,6 +750,16 @@ impl Render for GpuiComponentBar {
             )
             .into_any_element();
         }
+        if self.presentation.desktop_header {
+            return gpui_header::render(
+                &self.runtime.snapshot(),
+                &self.presentation,
+                self.panel_background.a,
+                Self::dispatch,
+                window,
+                cx,
+            );
+        }
         let left = div()
             .flex()
             .flex_row()
@@ -826,7 +843,7 @@ fn main() {
         xbar_core::config::BarConfig::default()
     });
 
-    let translucent = compositor_active() && RENDERER_ALPHA_CAPABLE;
+    let translucent = gpui_alpha::detect_translucency();
     let [red, green, blue] = fallback_rgb(config.theme);
     let opacity =
         xbar_core::background::bar_background_opacity(None, config.background_opacity, translucent);
@@ -897,42 +914,6 @@ fn main() {
         .expect("failed to open gpui_component_bar window");
         cx.activate(true);
     });
-}
-
-// -------- Compositor coupling ------------------------------------------------
-
-/// Conservative startup policy until the aligned GPUI platform's negotiated
-/// surface alpha mode can be verified. A transparent window must not be used
-/// merely because a compositing manager is present; keep the solid fallback
-/// until a renderer-capability probe or platform validation justifies it.
-const RENDERER_ALPHA_CAPABLE: bool = false;
-
-/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
-/// selection.
-///
-/// Sampled once, on a throwaway side connection, before gpui runs: per-pixel
-/// alpha is a window-creation decision, so a compositor started or stopped
-/// later goes unnoticed until the bar restarts. Ownership also only promises
-/// compositing — whether the compositor blurs behind the bar is its own
-/// affair.
-fn compositor_active() -> bool {
-    use x11rb::protocol::xproto::ConnectionExt as _;
-
-    let Ok((conn, screen_num)) = x11rb::connect(None) else {
-        return false;
-    };
-    let name = format!("_NET_WM_CM_S{screen_num}");
-    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
-        return false;
-    };
-    let Ok(atom) = cookie.reply() else {
-        return false;
-    };
-    conn.get_selection_owner(atom.atom)
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .map(|reply| reply.owner != x11rb::NONE)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

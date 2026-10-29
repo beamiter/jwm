@@ -11,6 +11,12 @@
     occupied: boolean;
   }
 
+  interface WorkspaceTag {
+    id: number;
+    number: number;
+    state: TagState;
+  }
+
   interface AudioDeviceInfo {
     name: string;
     volume: number;
@@ -51,6 +57,12 @@
     wm_session_id: number;
     geometry: DockGeometry | null;
     tags: TagState[];
+    workspace_tags?: WorkspaceTag[];
+    header_network?: string;
+    header_cpu?: string;
+    header_memory?: string;
+    theme?: string;
+    header_clock_compact?: string;
     active_tag?: number | null;
     monitor: number;
     layout_symbol: string;
@@ -67,6 +79,11 @@
   }
 
   interface FrontendEnvelope {
+    workspace_tags: WorkspaceTag[];
+    header_network: string;
+    header_cpu: string;
+    header_memory: string;
+    header_clock_compact: string;
     revision: number;
     changes: number;
     snapshot: BarSnapshot;
@@ -97,6 +114,7 @@
 
   type ActionRequest =
     | { action: "view_tag_on"; tag_index: number; monitor_id: number }
+  | { action: "toggle_tag_on"; tag_index: number; monitor_id: number }
     | { action: "toggle_layout_selector" }
     | { action: "set_layout_on"; layout_id: number; monitor_id: number }
     | { action: "toggle_seconds" }
@@ -129,25 +147,15 @@
       }
     | { action: "open_shell_hub"; route: ShellRoute };
 
+  const desktopHeader = () => !["left", "right"].includes(document.documentElement.dataset.barEdge || "top");
   const dispatchAction = (request: ActionRequest): Promise<void> =>
-    invoke("dispatch_action", { request });
+    desktopHeader() && request.action === "set_dock_geometry" ? Promise.resolve() : invoke("dispatch_action", { request });
 
   let snapshotBarOrigin: Pick<DockGeometry, "x" | "y"> | null = null;
   let currentWmSessionId = 0;
   let currentMinimizedGeneration = 0;
   let currentWmAvailable = false;
 
-  const TAG_ICONS = [
-    "\u{F0A1E}",
-    "\u{F0239}",
-    "\u{F0A1B}",
-    "\u{F0B79}",
-    "\u{F024B}",
-    "\u{F0388}",
-    "\u{F0567}",
-    "\u{F01F0}",
-    "\u{F0297}",
-  ];
 
   const ICON_CPU = "\u{F4BC}";
   const ICON_MEM = "\u{F035B}";
@@ -203,12 +211,11 @@
 
   function getButtonClass(tag: TagState): string {
     const state = tag.urgent ? "urgent"
-      : tag.filled ? "filtered"
-      : tag.selected ? "selected"
+        : tag.selected ? "selected"
       : tag.occupied ? "occupied"
       : "default";
     // Keep the client marker independent of the winning background state.
-    return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}`;
+    return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}${tag.filled ? " has-focus" : ""}`;
   }
 
   function formatBytes(bytes: number): string {
@@ -623,6 +630,7 @@
   }
 
   function scheduleDockGeometry(current: BarSnapshot) {
+    if (desktopHeader()) { cancelDockGeometryRetry(); return; }
     if (!current.wm_available || current.wm_session_id === 0) {
       cancelDockGeometryRetry();
       dockResizeObserver?.disconnect();
@@ -759,7 +767,7 @@
           currentWmSessionId = event.payload.snapshot.wm_session_id;
           currentMinimizedGeneration = event.payload.snapshot.wm_sequence ?? 0;
           currentWmAvailable = event.payload.snapshot.wm_available;
-          snapshot = event.payload.snapshot;
+          snapshot = { ...event.payload.snapshot, workspace_tags: event.payload.workspace_tags, header_network: event.payload.header_network, header_cpu: event.payload.header_cpu, header_memory: event.payload.header_memory, header_clock_compact: event.payload.header_clock_compact };
           scheduleDockGeometry(event.payload.snapshot);
         },
       );
@@ -806,25 +814,48 @@
   {@const monitorId = snapshot.monitor}
   {@const wmSessionId = snapshot.wm_session_id}
   {@const minimizedGeneration = snapshot.wm_sequence ?? 0}
-  <div class="button-row">
+  <div class="button-row" data-desktop-header="true" data-active-tag={snapshot.active_tag ?? ""} data-battery-charging={String(snapshot.battery.charging)} data-theme={snapshot.theme?.toLowerCase()}>
     <div class="buttons-container">
-      {#each TAG_ICONS as icon, index}
-        {@const tag = snapshot.tags[index] ?? {
-          selected: false,
-          urgent: false,
-          filled: false,
-          occupied: false,
-        }}
+<div class="shell-menu">
+        <button
+          type="button"
+          class={`pill shell-pill ${snapshot.wm_available ? "" : "shell-pill-offline"}`}
+          onclick={() => openShell("hub")}
+          title="JWM shell"
+        >
+          <span class="header-launcher-glyph">▦</span>
+        </button>
+        {#if snapshot.wm_available}
+          <div class="shell-dropdown">
+            {#each SHELL_ROUTES as entry (entry.route)}
+              <button
+                type="button"
+                class="shell-route"
+                onclick={() => openShell(entry.route)}
+              >
+                <span class="nf-icon">{entry.icon}</span>
+                <span>{entry.label}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+      {#each snapshot.workspace_tags ?? [] as workspace (workspace.id)}
+        {@const index = workspace.id}
+        {@const tag = workspace.state}
         <button
           class={`${getButtonClass(tag)}${pressed === index ? " pressed" : ""}`}
           aria-pressed={tag.selected}
-          aria-current={snapshot.active_tag === index ? 'true' : undefined}
+          aria-current={tag.selected ? 'true' : undefined}
+          data-tag-index={index}
+          disabled={!snapshot.wm_available}
+          oncontextmenu={event => { event.preventDefault(); event.stopPropagation(); if (snapshot?.wm_available) dispatchAction({ action: "toggle_tag_on", tag_index: index, monitor_id: monitorId }).catch(console.error); }}
           onmousedown={() => (pressed = index)}
           onclick={() => handleRelease(index, monitorId)}
           onmouseleave={() => (pressed = null)}
-          title={`Tag ${index + 1}`}
+          title={`Tag ${workspace.number}`}
         >
-          <span class="nf-icon">{icon}</span>
+          <span class="workspace-number">{workspace.number}</span>
         </button>
       {/each}
 
@@ -865,9 +896,10 @@
       </div>
     </div>
 
-    <div class="spacer"></div>
+    <div class="client-title" title={snapshot.client_name || "JWM Desktop"}>{snapshot.client_name || "JWM Desktop"}</div>
 
     <div class="right-info-container">
+<div class="pill network-pill" title="Network"><span class="metric-label">NET</span>{snapshot.header_network || "--"}</div>
         <div
           class="minimized-dock"
           class:is-empty={snapshot.minimized_windows.length === 0 && !snapshot.minimized_overflow}
@@ -920,14 +952,14 @@
           title="CPU 平均使用率"
         >
           <span class="nf-icon">{ICON_CPU}</span>
-          {`${snapshot.system_details.cpu_average.toFixed(0)}%`}
+          {snapshot.header_cpu || "--"}
         </div>
         <div
           class={`pill usage-pill ${severity(snapshot.system_details.memory_usage_percent)}`}
           title={`内存使用: ${formatBytes(snapshot.system_details.memory_used)} / ${formatBytes(snapshot.system_details.memory_total)}`}
         >
           <span class="nf-icon">{ICON_MEM}</span>
-          {`${snapshot.system_details.memory_usage_percent.toFixed(0)}%`}
+          {snapshot.header_memory || "--"}
         </div>
         <div
           class={`pill usage-pill ${batteryClass(snapshot)}`}
@@ -962,7 +994,7 @@
 
       <button
         type="button"
-        class={`pill volume-pill ${!snapshot.audio_device || snapshot.audio_device.is_muted ? "muted" : ""}`}
+        class={`pill volume-pill ${snapshot.audio_device?.is_muted ? "muted" : ""}`}
         onclick={toggleMute}
         onwheel={(event) => {
           event.preventDefault();
@@ -977,30 +1009,7 @@
         {snapshot.audio_device ? `${snapshot.audio_device.volume}%` : "--"}
       </button>
 
-      <div class="shell-menu">
-        <button
-          type="button"
-          class={`pill shell-pill ${snapshot.wm_available ? "" : "shell-pill-offline"}`}
-          onclick={() => openShell("hub")}
-          title="JWM shell"
-        >
-          <span class="nf-icon">{SHELL_ROUTES[0].icon}</span>
-        </button>
-        {#if snapshot.wm_available}
-          <div class="shell-dropdown">
-            {#each SHELL_ROUTES as entry (entry.route)}
-              <button
-                type="button"
-                class="shell-route"
-                onclick={() => openShell(entry.route)}
-              >
-                <span class="nf-icon">{entry.icon}</span>
-                <span>{entry.label}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
+
 
       <button
         type="button"
@@ -1014,6 +1023,7 @@
       <button
         type="button"
         class="pill time-pill"
+                data-header-clock={snapshot.header_clock_compact || "--"}
         onclick={toggleSeconds}
         title={snapshot.show_seconds ? "点击隐藏秒" : "点击显示秒"}
       >

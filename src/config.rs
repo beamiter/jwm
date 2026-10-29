@@ -7,6 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
+use xbar_core::desktop_shell::{DesktopShellConfig, DesktopShellSource};
 use xbar_core::placement::BarEdge;
 
 use std::fmt;
@@ -493,13 +494,16 @@ pub fn get_backend_family() -> BackendFamily {
 
 /// Matches the bar installed by `scripts/install_jwm_scripts.sh` when the user
 /// does not select another implementation explicitly.
-pub const STATUS_BAR_NAME: &str = "tao_glow_bar";
+pub const STATUS_BAR_NAME: &str = "tauri_leptos_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {
     pub appearance: AppearanceConfig,
     pub behavior: BehaviorConfig,
     pub status_bar: StatusBarConfig,
+    /// None preserves legacy compatibility; explicit false overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_shell: Option<DesktopShellConfig>,
     pub colors: ColorsConfig,
     pub keybindings: KeyBindingsConfig,
     pub mouse_bindings: MouseBindingsConfig,
@@ -2329,6 +2333,8 @@ pub struct RuleConfig {
 #[derive(Clone)]
 pub struct Config {
     inner: TomlConfig,
+    // Only an explicitly present legacy xbar [edge_shell] table migrates.
+    legacy_edge_shell: Option<xbar_core::edge_shell::EdgeShellConfig>,
     // Runtime-only ownership identity: cloning an active snapshot preserves it,
     // but loading/replacing the complete configuration cancels older gestures.
     gesture_policy_generation: u64,
@@ -2374,7 +2380,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             gesture_policy_generation: next_gesture_policy_generation(),
+            legacy_edge_shell: None,
             inner: TomlConfig {
+                desktop_shell: None,
                 input: InputConfig::default(),
                 appearance: AppearanceConfig {
                     border_px: 3,
@@ -2671,6 +2679,15 @@ impl Default for Config {
 
 #[allow(dead_code)]
 impl Config {
+    fn default_desktop_shell_mode_key() -> KeyConfig {
+        KeyConfig {
+            modifier: vec!["Mod4".into(), "Shift".into()],
+            key: "b".into(),
+            function: "toggle_desktop_shell_mode".into(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
     fn default_restore_preview_key() -> KeyConfig {
         KeyConfig {
             modifier: vec!["Mod1".to_string(), "Control".to_string()],
@@ -2902,6 +2919,7 @@ impl Config {
                 function: "togglebar".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
+            Self::default_desktop_shell_mode_key(),
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "b".to_string(),
@@ -3425,6 +3443,7 @@ impl Config {
         let config: TomlConfig = toml::from_str(&content)?;
         let cfg = Self {
             inner: config,
+            legacy_edge_shell: Self::load_legacy_edge_shell(),
             gesture_policy_generation: next_gesture_policy_generation(),
         };
         let diagnostics = cfg.diagnostics();
@@ -3571,8 +3590,86 @@ impl Config {
         self.inner.status_bar.layout
     }
 
+    /// The legacy coordinated layout is suppressed by an explicit new table.
     pub fn status_bar_four_edge(&self) -> bool {
-        self.status_bar_layout() == StatusBarLayout::FourEdge
+        self.inner.desktop_shell.is_none() && self.status_bar_layout() == StatusBarLayout::FourEdge
+    }
+
+    fn effective_desktop_shell(&self) -> (DesktopShellConfig, DesktopShellSource) {
+        // Once migrated, ownership belongs to the session: changing the top
+        // frontend must not change a legacy companion configuration's owner.
+        DesktopShellConfig::resolve(
+            self.inner.desktop_shell.as_ref(),
+            self.status_bar_layout() == StatusBarLayout::FourEdge,
+            self.legacy_edge_shell.as_ref(),
+        )
+    }
+
+    pub fn desktop_shell_config(&self) -> DesktopShellConfig {
+        self.effective_desktop_shell().0
+    }
+
+    pub fn desktop_shell_source(&self) -> DesktopShellSource {
+        self.effective_desktop_shell().1
+    }
+
+    pub fn desktop_shell_enabled(&self) -> bool {
+        self.desktop_shell_config().enabled
+    }
+
+    fn load_legacy_edge_shell() -> Option<xbar_core::edge_shell::EdgeShellConfig> {
+        let path = std::env::var_os("XBAR_CONFIG")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|path| std::path::PathBuf::from(path).join(".config"))
+                    })
+                    .map(|path| path.join("xbar/config.toml"))
+            })?;
+        Self::legacy_edge_shell_from_file(&path)
+    }
+
+    fn legacy_edge_shell_from_file(path: &Path) -> Option<xbar_core::edge_shell::EdgeShellConfig> {
+        let content = read_config_text(path).ok()?;
+        let value: toml::Value = toml::from_str(&content).ok()?;
+        let legacy: xbar_core::edge_shell::EdgeShellConfig =
+            value.get("edge_shell")?.clone().try_into().ok()?;
+        legacy.validate().ok()?;
+        Some(legacy)
+    }
+
+    /// Called by the session supervisor's bounded health timer. Invalid legacy
+    /// edits retain the last valid modes; explicit new ownership never polls it.
+    pub(crate) fn refreshed_legacy_desktop_shell(&self) -> Option<Self> {
+        if self.inner.desktop_shell.is_some()
+            || self.status_bar_layout() == StatusBarLayout::FourEdge
+        {
+            return None;
+        }
+        self.with_refreshed_legacy_desktop_shell(Self::load_legacy_edge_shell())
+    }
+
+    fn with_refreshed_legacy_desktop_shell(
+        &self,
+        latest: Option<xbar_core::edge_shell::EdgeShellConfig>,
+    ) -> Option<Self> {
+        if self.inner.desktop_shell.is_some()
+            || self.status_bar_layout() == StatusBarLayout::FourEdge
+        {
+            return None;
+        }
+        let latest = latest?;
+        if self.legacy_edge_shell.as_ref() == Some(&latest) {
+            return None;
+        }
+        let mut updated = self.clone();
+        updated.legacy_edge_shell = Some(latest);
+        Some(updated)
     }
 
     pub fn status_bar_position(&self) -> BarEdge {
@@ -3583,7 +3680,7 @@ impl Config {
         // The top surface owns the WM transport and the native auxiliary
         // panels follow it. The single-bar edge preference is retained so
         // returning to the single layout restores the user's placement.
-        if self.status_bar_four_edge() {
+        if self.desktop_shell_enabled() {
             return BarEdge::Top;
         }
         self.inner
@@ -3856,6 +3953,10 @@ impl Config {
         self.available_fallback_keys(Self::default_monitor_swap_keys())
     }
 
+    pub fn desktop_shell_mode_fallback_keys(&self) -> Vec<KeyConfig> {
+        self.available_fallback_keys([Self::default_desktop_shell_mode_key()])
+    }
+
     fn available_fallback_keys(
         &self,
         defaults: impl IntoIterator<Item = KeyConfig>,
@@ -4107,6 +4208,11 @@ impl Config {
                 keys.push(binding);
             }
         }
+        for fallback in self.desktop_shell_mode_fallback_keys() {
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                keys.push(binding);
+            }
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -4254,6 +4360,7 @@ impl Config {
             "togglefloating" => Some(Jwm::togglefloating),
             "toggle_spawn_placement" => Some(Jwm::toggle_spawn_placement),
             "togglebar" => Some(Jwm::togglebar),
+            "toggle_desktop_shell_mode" => Some(Jwm::toggle_desktop_shell_mode),
             "setmfact" => Some(Jwm::setmfact),
             "setgaps" => Some(Jwm::setgaps),
             "setcfact" => Some(Jwm::setcfact),
@@ -5487,6 +5594,7 @@ impl Config {
         let config: TomlConfig = toml::from_str(&content)?;
         Ok(Self {
             inner: config,
+            legacy_edge_shell: Self::load_legacy_edge_shell(),
             gesture_policy_generation: next_gesture_policy_generation(),
         }
         .diagnostics())
@@ -5590,6 +5698,47 @@ impl Config {
                     return Err(format!("layout.n_master={v} out of [0, {MAX_N_MASTER}]"));
                 }
                 self.inner.layout.n_master = v;
+            }
+            "status_bar.name" => {
+                let name = as_string()?;
+                if name.trim().is_empty() || name.len() > 4096 || name.contains('\0') {
+                    return Err("status_bar.name must name an executable".into());
+                }
+                self.inner.status_bar.name = name;
+            }
+            "desktop_shell" => {
+                self.inner.desktop_shell = if value.is_null() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_value(value.clone())
+                            .map_err(|error| format!("invalid desktop_shell: {error}"))?,
+                    )
+                };
+            }
+            key if key.starts_with("desktop_shell.") => {
+                let mut config = self.desktop_shell_config();
+                match key {
+                    "desktop_shell.enabled" => config.enabled = as_bool()?,
+                    "desktop_shell.left" | "desktop_shell.right" | "desktop_shell.bottom" => {
+                        let mode = serde_json::from_value(value.clone()).map_err(|_| {
+                            "shell edge mode must be always, hover, or disabled".to_string()
+                        })?;
+                        match key {
+                            "desktop_shell.left" => config.left = mode,
+                            "desktop_shell.right" => config.right = mode,
+                            _ => config.bottom = mode,
+                        }
+                    }
+                    "desktop_shell.reveal_delay_ms" => {
+                        config.reveal_delay_ms = u64::from(as_u32()?)
+                    }
+                    "desktop_shell.hide_delay_ms" => config.hide_delay_ms = u64::from(as_u32()?),
+                    "desktop_shell.trigger_pixels" => config.trigger_pixels = as_u32()?,
+                    _ => return Err(format!("unknown configuration key: {key}")),
+                }
+                config.validate().map_err(str::to_owned)?;
+                self.inner.desktop_shell = Some(config);
             }
             "status_bar.show_bar" => self.inner.status_bar.show_bar = as_bool()?,
             "status_bar.layout" => {
@@ -6549,6 +6698,7 @@ mod tests {
         assert!(legacy.behavior.wallpaper_earth_texture.is_empty());
         let mut config = Config {
             inner: legacy,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         config.inner.behavior.wallpaper = "/walls/static.png".into();
@@ -6773,6 +6923,7 @@ mod tests {
         assert_eq!(legacy.behavior.wallpaper_earth_rotation_minutes, 20);
         let mut config = Config {
             inner: legacy,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         for view in ["rotating", "fixed"] {
@@ -6851,6 +7002,7 @@ mod tests {
         );
         let mut config = Config {
             inner: legacy,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         for view in ["fixed", "rotating"] {
@@ -7137,6 +7289,7 @@ mod tests {
         assert_eq!(legacy.behavior.wallpaper_astronomy_layout, "span");
         let mut config = Config {
             inner: legacy,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         config
@@ -7306,6 +7459,7 @@ mod tests {
                 let parsed: TomlConfig = toml::from_str(&encoded).unwrap();
                 let invalid_config = Config {
                     inner: parsed,
+                    legacy_edge_shell: None,
                     gesture_policy_generation: super::next_gesture_policy_generation(),
                 };
                 assert!(
@@ -7404,6 +7558,7 @@ mod tests {
         let loaded: TomlConfig = toml::from_str(&toml::to_string(&config.inner).unwrap()).unwrap();
         let loaded = Config {
             inner: loaded,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         assert!(
@@ -7508,6 +7663,7 @@ mod tests {
 
         let mut config = Config {
             inner: legacy,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         config.inner.behavior.wallpaper_rotation = "daily".into();
@@ -7618,6 +7774,7 @@ mod tests {
         assert!(!serialized.contains("/walls/two.png"));
         let reloaded = Config {
             inner: toml::from_str(&serialized).unwrap(),
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         assert!(reloaded.behavior().wallpaper_daily_pick.is_none());
@@ -8160,6 +8317,92 @@ mod tests {
                 .iter()
                 .any(|issue| issue.message.contains("unreachable")),
             "{diagnostics}"
+        );
+    }
+
+    #[test]
+    fn legacy_sidebar_mode_fallback_respects_custom_actions_helper_and_chords() {
+        let mut config = Config::default();
+        config
+            .inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "toggle_desktop_shell_mode");
+        let count_native = |config: &Config| {
+            config
+                .get_keys()
+                .iter()
+                .filter(|binding| {
+                    binding.func_opt.is_some_and(|action| {
+                        std::ptr::fn_addr_eq(
+                            action,
+                            crate::jwm::Jwm::toggle_desktop_shell_mode
+                                as crate::jwm::types::WMFuncType,
+                        )
+                    })
+                })
+                .count()
+        };
+        assert_eq!(config.desktop_shell_mode_fallback_keys().len(), 1);
+        assert_eq!(count_native(&config), 1);
+        let fallback = Config::default_desktop_shell_mode_key();
+        let mut helper = fallback.clone();
+        helper.modifier = vec!["Shift".into(), "Mod4".into(), "CapsLock".into()];
+        helper.function = "spawn".into();
+        helper.argument = ArgumentConfig::StringVec(vec!["jwm-toggle-sidebar-mode".into()]);
+        config.inner.keybindings.keys.push(helper);
+        assert!(
+            config.desktop_shell_mode_fallback_keys().is_empty(),
+            "an explicit compatibility helper owns this chord"
+        );
+        assert_eq!(count_native(&config), 0);
+        config.inner.keybindings.keys.pop();
+        let mut custom = fallback.clone();
+        custom.key = "F9".into();
+        config.inner.keybindings.keys.push(custom);
+        assert!(
+            config.desktop_shell_mode_fallback_keys().is_empty(),
+            "an explicit action on another key wins"
+        );
+        assert_eq!(count_native(&config), 1);
+        config.inner.keybindings.keys.pop();
+        config.inner.keybindings.chord.leader_modifier = fallback.modifier.clone();
+        config.inner.keybindings.chord.leader_key = fallback.key.clone();
+        assert!(config.desktop_shell_mode_fallback_keys().is_empty());
+        config.inner.keybindings.chord.leader_key = "F8".into();
+        config.inner.keybindings.chord.bindings = vec![fallback];
+        assert!(
+            config.desktop_shell_mode_fallback_keys().is_empty(),
+            "a valid chord already binds the action"
+        );
+    }
+
+    #[test]
+    fn desktop_shell_toggle_has_an_unambiguous_default_binding() {
+        let config = Config::default();
+        let binding = config
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .find(|key| key.function == "toggle_desktop_shell_mode")
+            .expect("sidebar mode shortcut");
+        assert_eq!(binding.key, "b");
+        assert_eq!(binding.modifier, ["Mod4", "Shift"]);
+        let converted = config.convert_key_config(binding).unwrap();
+        assert!(std::ptr::fn_addr_eq(
+            converted.func_opt.unwrap(),
+            crate::jwm::Jwm::toggle_desktop_shell_mode as crate::jwm::types::WMFuncType
+        ));
+        assert_eq!(
+            config
+                .inner
+                .keybindings
+                .keys
+                .iter()
+                .filter(|key| key.key == binding.key && key.modifier == binding.modifier)
+                .count(),
+            1
         );
     }
 
@@ -9725,7 +9968,11 @@ border_px = 3
         let defaults = std::fs::read_to_string(&path).unwrap();
         let changed_values = defaults
             .replacen("border_px = 3", "border_px = 7", 1)
-            .replacen("name = \"tao_glow_bar\"", "name = \"custom_bar\"", 1);
+            .replacen(
+                &format!("name = {:?}", STATUS_BAR_NAME),
+                "name = \"custom_bar\"",
+                1,
+            );
         assert_ne!(changed_values, defaults);
         let mut parsed: toml::Value = toml::from_str(&changed_values).unwrap();
         assert_eq!(parsed["status_bar"]["name"].as_str(), Some("custom_bar"));
@@ -11101,6 +11348,7 @@ border_px = 3
         .unwrap();
         let config = Config {
             inner,
+            legacy_edge_shell: None,
             gesture_policy_generation: super::next_gesture_policy_generation(),
         };
         let diagnostics = config.diagnostics();
@@ -11209,14 +11457,119 @@ border_px = 3
     }
 
     #[test]
-    fn four_edge_layout_rejects_a_frontend_that_cannot_create_auxiliary_panels() {
+    fn legacy_four_edge_layout_uses_shared_host_for_every_frontend() {
         let mut config = validated_value_fixture(42);
         config.inner.status_bar.name = "tao_pixels_bar".into();
-        assert!(
-            config
-                .with_validated_value("status_bar.layout", &serde_json::json!("four-edge"))
-                .is_err()
+        let migrated = config
+            .with_validated_value("status_bar.layout", &serde_json::json!("four-edge"))
+            .unwrap();
+        assert!(migrated.desktop_shell_enabled());
+        assert_eq!(migrated.desktop_shell_source().as_str(), "legacy_four_edge");
+    }
+
+    #[test]
+    fn legacy_shell_hot_reload_keeps_last_valid_modes_and_respects_new_owner() {
+        let path = temporary_config_path("legacy-shell-reload");
+        let mut config = validated_value_fixture(42);
+        config.legacy_edge_shell = Some(xbar_core::edge_shell::EdgeShellConfig::default());
+        std::fs::write(
+            &path,
+            "[edge_shell]\nenabled=true\nleft='always'\nright='disabled'\n",
+        )
+        .unwrap();
+        let changed = Config::legacy_edge_shell_from_file(&path);
+        let mut updated = config.with_refreshed_legacy_desktop_shell(changed).unwrap();
+        assert_eq!(
+            updated.desktop_shell_config().left,
+            xbar_core::edge_shell::RevealMode::Always
         );
+        assert_eq!(
+            updated.desktop_shell_config().right,
+            xbar_core::edge_shell::RevealMode::Disabled
+        );
+        std::fs::write(&path, "[edge_shell]\nleft='invalid'\n").unwrap();
+        assert!(
+            updated
+                .with_refreshed_legacy_desktop_shell(Config::legacy_edge_shell_from_file(&path))
+                .is_none()
+        );
+        assert_eq!(
+            updated.desktop_shell_config().left,
+            xbar_core::edge_shell::RevealMode::Always
+        );
+        updated
+            .set_values(&[("desktop_shell.enabled".into(), serde_json::json!(false))])
+            .unwrap();
+        assert!(
+            updated
+                .with_refreshed_legacy_desktop_shell(config.legacy_edge_shell.clone())
+                .is_none()
+        );
+        assert!(!updated.desktop_shell_enabled());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migrated_hover_shell_survives_top_frontend_switches() {
+        let mut config = validated_value_fixture(42);
+        config.legacy_edge_shell = Some(xbar_core::edge_shell::EdgeShellConfig::default());
+        let before = config.desktop_shell_config();
+        assert!(before.enabled);
+        assert_eq!(config.desktop_shell_source().as_str(), "legacy_edge_shell");
+        for name in ["tao_glow_bar", "tao_pixels_bar", "tauri_leptos_bar"] {
+            config
+                .set_values(&[("status_bar.name".into(), serde_json::json!(name))])
+                .unwrap();
+            assert_eq!(config.desktop_shell_config(), before);
+        }
+        config
+            .set_values(&[("desktop_shell.enabled".into(), serde_json::json!(false))])
+            .unwrap();
+        assert!(!config.desktop_shell_enabled());
+    }
+
+    #[test]
+    fn explicit_shared_shell_overrides_legacy_and_restores_saved_edge_when_disabled() {
+        let mut config = validated_value_fixture(42);
+        assert!(!config.desktop_shell_enabled());
+        config
+            .set_values(&[
+                ("status_bar.position".into(), serde_json::json!("right")),
+                ("status_bar.layout".into(), serde_json::json!("four-edge")),
+                ("desktop_shell.enabled".into(), serde_json::json!(false)),
+            ])
+            .unwrap();
+        assert!(!config.desktop_shell_enabled());
+        assert!(!config.status_bar_four_edge());
+        assert_eq!(
+            config.status_bar_position_for_monitor(0),
+            xbar_core::BarEdge::Right
+        );
+        assert_eq!(config.desktop_shell_source().as_str(), "desktop_shell");
+        config
+            .set_values(&[
+                ("desktop_shell.enabled".into(), serde_json::json!(true)),
+                ("desktop_shell.left".into(), serde_json::json!("hover")),
+                ("desktop_shell.bottom".into(), serde_json::json!("disabled")),
+            ])
+            .unwrap();
+        assert_eq!(
+            config.status_bar_position_for_monitor(0),
+            xbar_core::BarEdge::Top
+        );
+        let encoded = toml::to_string(&config.inner).unwrap();
+        let loaded: TomlConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(loaded.desktop_shell, config.inner.desktop_shell);
+        let before = serde_json::to_value(&config.inner).unwrap();
+        for (key, value) in [
+            ("desktop_shell.hide_delay_ms", serde_json::json!(5001)),
+            ("desktop_shell.trigger_pixels", serde_json::json!(0)),
+            ("desktop_shell.left", serde_json::json!("sometimes")),
+            ("desktop_shell", serde_json::json!({"unknown":true})),
+        ] {
+            assert!(config.set_values(&[(key.into(), value)]).is_err());
+            assert_eq!(serde_json::to_value(&config.inner).unwrap(), before);
+        }
     }
 
     #[test]

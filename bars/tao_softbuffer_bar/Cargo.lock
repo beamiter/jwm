@@ -2352,6 +2352,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "cairo-rs 0.22.9",
+ "gtk",
  "libc",
  "log",
  "pango 0.22.9",

@@ -62,6 +62,20 @@ html[data-bar-edge="bottom"] :is(.pill, .emoji-button) {
   padding-top: 1px;
   padding-bottom: 1px;
 }
+/* Retain each theme's normal type sizes, but leave 4px outside the control
+   and 4px for its border/padding when a high-DPI bar is only 21px tall. */
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .pill {
+  font-size: min(14px, calc(100vh - 8px));
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .emoji-button {
+  font-size: min(18px, calc(100vh - 8px));
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .pill .nf-icon {
+  font-size: min(15px, calc(100vh - 8px));
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .emoji-button .nf-icon {
+  font-size: min(18px, calc(100vh - 8px));
+}
 /* A hover highlight must not move the next control or change its hit target.
    The legacy themes widened these borders and animated every CSS property. */
 html[data-bar-edge] .pill {
@@ -347,3 +361,169 @@ html[data-bar-edge] .button-row .core-dock .minimized-dock-card {
   box-sizing: border-box;
   pointer-events: none;
 }
+
+/* The desktop header mirrors Tao Glow's three zones and compact numeric
+   workspace strip. Framework components continue to own every action. */
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] {
+  --xbar-header-ink: rgb(18, 43, 73);
+  --xbar-header-muted: rgba(18, 43, 73, .68);
+  --xbar-header-control: rgba(255, 255, 255, .42);
+  --xbar-header-hover: rgba(255, 255, 255, .62);
+  --xbar-header-accent: rgb(0, 122, 255);
+  --xbar-header-cell-height: max(18px, calc(100vh - 14px));
+  display: flex !important;
+  align-items: center !important;
+  padding: min(7px, max(0px, calc((100vh - 18px) / 2))) 12px !important;
+  gap: 8px !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .65) !important;
+  color: var(--xbar-header-ink);
+  font: 12px/1 "DejaVu Sans", sans-serif;
+  overflow: hidden;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"][data-theme="dark"] {
+  --xbar-header-ink: rgba(255, 255, 255, .88);
+  --xbar-header-muted: rgba(255, 255, 255, .55);
+  --xbar-header-control: rgba(255, 255, 255, .12);
+  --xbar-header-hover: rgba(255, 255, 255, .18);
+  --xbar-header-accent: rgb(10, 132, 255);
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] [data-xbar-header-hidden="true"] { display: none !important; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] :is(.layout-controls, .minimized-dock, .brightness-pill, .screenshot-pill, .monitor-pill, .scale-pill) { display: none !important; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container {
+  flex: 0 1 var(--xbar-header-leading-width, 40%) !important;
+  width: var(--xbar-header-leading-width, 40%);
+  max-width: 52%;
+  padding: 0 !important;
+  margin: 0 !important;
+  gap: 8px !important;
+  scrollbar-width: none;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .right-info-container {
+  flex: 0 0 var(--xbar-header-status-width, 49%) !important;
+  width: var(--xbar-header-status-width, 49%);
+  max-width: 49%;
+  padding: 0 !important;
+  margin: 0 !important;
+  gap: 8px !important;
+  overflow: hidden !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .system-info-container { display: contents !important; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .client-title {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: center;
+  color: var(--xbar-header-ink);
+  font: inherit;
+}
+html:is([data-bar-edge="left"], [data-bar-edge="right"]) .client-title { display: none; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] :is(.pill, .emoji-button) {
+  position: relative;
+  box-sizing: border-box;
+  height: var(--xbar-header-cell-height) !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  padding: 0 12px !important;
+  border: 1px solid transparent;
+  border-radius: 16px !important;
+  font: 12px/1 "DejaVu Sans", sans-serif !important;
+  font-variant-numeric: tabular-nums !important;
+  transform: none !important;
+  text-shadow: none !important;
+  transition: background-color 120ms ease-in-out, box-shadow 120ms ease-in-out !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container .emoji-button {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 32px !important;
+  max-width: 40px !important;
+  padding: 0 9px !important;
+  background: var(--xbar-header-control) !important;
+  color: var(--xbar-header-ink) !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container .emoji-button.state-selected {
+  background: var(--xbar-header-accent) !important;
+  color: white !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container .emoji-button.state-urgent {
+  background: rgb(185, 35, 45) !important;
+  color: white !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container .emoji-button::before { display: none !important; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container .emoji-button::after {
+  content: "" !important;
+  position: absolute !important;
+  left: calc(50% - 3px) !important;
+  right: auto !important;
+  top: auto !important;
+  bottom: 3px !important;
+  width: 6px !important;
+  height: 2px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 1px !important;
+  background: currentColor !important;
+  opacity: 1 !important;
+  visibility: hidden !important;
+  transform: none !important;
+  box-shadow: none !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .buttons-container .emoji-button.has-clients::after { visibility: visible !important; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .shell-menu { flex: 0 0 32px; width: 32px; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .shell-pill {
+  width: 32px !important;
+  min-width: 32px !important;
+  padding: 0 !important;
+  background: var(--xbar-header-control) !important;
+  color: var(--xbar-header-ink) !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .header-launcher-glyph { font: inherit; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .right-info-container .pill {
+  flex: 0 0 auto !important;
+  width: max-content;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  color: var(--xbar-header-ink) !important;
+  filter: none !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .usage-pill:nth-child(1) { order: 10; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .usage-pill:nth-child(2) { order: 20; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .network-pill { order: 30; width: 190px !important; display: inline-flex; justify-content: center; gap: 6px; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .volume-pill { order: 40; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .usage-pill:nth-child(3) { order: 50; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .time-pill { order: 60; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] :is(.usage-pill, .volume-pill) { grid-template-columns: 3.3ch calc(3ch + 1em); gap: 6px; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] :is(.usage-pill, .volume-pill) > .nf-icon {
+  width: 100%;
+  margin: 0;
+  font-size: 0 !important;
+  font-family: inherit !important;
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] :is(.usage-pill, .volume-pill) > .nf-icon::after { font: 12px/1 "DejaVu Sans", sans-serif; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .usage-pill:nth-child(1) > .nf-icon::after { content: "CPU"; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .usage-pill:nth-child(2) > .nf-icon::after { content: "MEM"; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .usage-pill:nth-child(3) > .nf-icon::after { content: "BAT"; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .volume-pill > .nf-icon::after { content: "♪"; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .volume-pill.muted > .nf-icon::after { content: "×"; }
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .time-pill > .nf-icon { display: none; }
+@media (max-width: 1423px) {
+  html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .time-pill { font-size: 0 !important; }
+  html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] .time-pill::after { content: attr(data-header-clock); font: 12px/1 "DejaVu Sans", sans-serif; }
+}
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"] :is(.usage-pill, .volume-pill)::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  bottom: 1px;
+  width: calc((100% - 4px) * var(--xbar-header-progress, 0));
+  height: 1px;
+  background: var(--xbar-header-accent);
+  pointer-events: none;
+}
+
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .button-row[data-desktop-header="true"][data-battery-charging="true"] .system-info-container > .usage-pill:nth-child(3) .nf-icon::after { content: "+"; }

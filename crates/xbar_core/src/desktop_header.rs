@@ -115,7 +115,7 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             .cloned()
             .filter(|_| available >= 480.0)
         {
-            let width = height.max(32.0).min(40.0);
+            let width = height.clamp(32.0, 40.0);
             if width + gap <= available - status_used {
                 let mut spec = self.pill_spec(launcher, true);
                 spec.text = "▦".to_owned();
@@ -137,75 +137,25 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             self.config.tag_contrast,
         );
         let tag_budget = (available * 0.40).min((trailing - leading - 80.0).max(32.0));
-        let preferred = 88.0_f32.max(height * 2.0).min(100.0);
-        let overflow_width = height.max(32.0).min(40.0);
-        let max_tags = ((tag_budget - overflow_width - gap) / (preferred + gap))
-            .floor()
-            .clamp(1.0, 4.0) as usize;
-        let mut visible: Vec<_> = (0..projected.tags.len().min(max_tags)).collect();
-        let active = view.active_tag.and_then(|id| {
-            projected
-                .tags
-                .iter()
-                .position(|control| control.id == NodeId::Tag(id))
-        });
-        if let Some(active) = active
-            && !visible.contains(&active)
-        {
-            if let Some(last) = visible.last_mut() {
-                *last = active;
-            }
-            visible.sort_unstable();
-        }
-        let full_visible = visible.len();
-        for &index in &visible {
-            let control = projected.tags[index].clone();
-            let width = preferred.min((trailing - leading).max(0.0));
-            if width < 32.0 {
-                break;
-            }
-            let spec = PillSpec {
-                tag_palette: Some(tag_palette),
-                ..self.pill_spec(control, false)
-            };
-            self.push_pill(
-                &mut scene,
-                Rect::new(leading, y, width, height),
-                spec,
+        // The same sparse numeric strip is used by every presentation. Its
+        // compact targets fit more than four workspaces when space permits;
+        // on narrow outputs overflow keeps the active workspace reachable.
+        leading = self.push_workspace_group(
+            &mut scene,
+            projected.tags,
+            tag_budget,
+            leading,
+            ControlGroupContext {
+                axis,
+                cross: y,
+                cross_size: height,
+                gap,
                 interaction,
                 palette,
-                Some(bar),
-            );
-            leading += width + gap;
-        }
-        if full_visible < projected.tags.len() && trailing - leading >= overflow_width {
-            let active = active.unwrap_or(0);
-            let source = &projected.tags[active];
-            let first_hidden = (1..=projected.tags.len())
-                .map(|offset| (active + offset) % projected.tags.len())
-                .find(|index| !visible.contains(index));
-            let mut spec = self.pill_spec(source.clone(), true);
-            spec.id = NodeId::WorkspaceOverflow;
-            spec.text = "+".to_owned();
-            spec.lines.clear();
-            spec.state.selected = false;
-            spec.state.urgent = projected
-                .tags
-                .iter()
-                .enumerate()
-                .any(|(index, control)| !visible.contains(&index) && control.state.urgent);
-            spec.primary = first_hidden.and_then(|index| projected.tags[index].bindings.primary);
-            spec.secondary = source.bindings.scroll_up;
-            self.push_pill(
-                &mut scene,
-                Rect::new(leading, y, overflow_width, height),
-                spec,
-                interaction,
-                palette,
-                Some(bar),
-            );
-            leading += overflow_width + gap;
-        }
+                active_tag: view.active_tag,
+            },
+            tag_palette,
+        );
         if trailing - leading >= 80.0 {
             let title_bounds = Rect::new(
                 leading + gap,
@@ -275,7 +225,7 @@ mod tests {
         );
     }
     #[test]
-    fn header_has_four_workspace_pills_center_title_and_no_second_dock() {
+    fn header_shows_all_eligible_workspace_pills_center_title_and_no_second_dock() {
         let mut model = crate::model::BarModel::default();
         let mut config = PresentationConfig {
             desktop_header: true,
@@ -285,7 +235,13 @@ mod tests {
         config.labels.memory = "MEM".into();
         let update = crate::model::WmSnapshot {
             client_name: "Focused application".into(),
-            tags: vec![crate::model::TagState::default(); 9],
+            tags: vec![
+                crate::model::TagState {
+                    occupied: true,
+                    ..Default::default()
+                };
+                9
+            ],
             ..Default::default()
         };
         model
@@ -304,13 +260,13 @@ mod tests {
                 .iter()
                 .filter(|hit| matches!(hit.id, NodeId::Tag(_)))
                 .count(),
-            4
+            9
         );
         assert!(
-            scene
+            !scene
                 .hits
                 .iter()
-                .any(|hit| hit.id == NodeId::WorkspaceOverflow && hit.primary.is_some())
+                .any(|hit| hit.id == NodeId::WorkspaceOverflow)
         );
         assert!(scene.nodes.iter().any(|node| node.id() == NodeId::Client));
         assert!(!scene.nodes.iter().any(|node| matches!(
@@ -327,7 +283,13 @@ mod tests {
     fn active_workspace_survives_narrow_header_and_hidden_tags_stay_reachable() {
         let mut model = crate::model::BarModel::default();
         let active = TagId::new(8).unwrap();
-        let mut tags = vec![crate::model::TagState::default(); 9];
+        let mut tags = vec![
+            crate::model::TagState {
+                occupied: true,
+                ..Default::default()
+            };
+            9
+        ];
         tags[8].selected = true;
         model
             .update(crate::model::BarEvent::WindowManager(
@@ -369,7 +331,13 @@ mod tests {
         let mut active = 0;
         let mut seen = std::collections::HashSet::new();
         for _ in 0..12 {
-            let mut tags = vec![crate::model::TagState::default(); 9];
+            let mut tags = vec![
+                crate::model::TagState {
+                    occupied: true,
+                    ..Default::default()
+                };
+                9
+            ];
             tags[active].selected = true;
             model
                 .update(crate::model::BarEvent::WindowManager(
@@ -383,7 +351,7 @@ mod tests {
                 &config,
                 &Metrics,
                 model.view(),
-                Size::new(1672.0, 50.0),
+                Size::new(800.0, 50.0),
                 &InteractionState::default(),
             );
             let action = scene
@@ -400,6 +368,6 @@ mod tests {
             active = tag.index();
             seen.insert(active);
         }
-        assert!((4..9).all(|index| seen.contains(&index)));
+        assert!((0..9).all(|index| seen.contains(&index)), "{seen:?}");
     }
 }

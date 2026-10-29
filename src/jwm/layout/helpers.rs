@@ -34,6 +34,11 @@ fn workarea_debug_enabled() -> bool {
 /// historical status-bar offset below stand in. Flooring the depth first
 /// would turn such a dock into a `pad`-pixel reservation and suppress that
 /// fallback, hiding the bar's own offset behind a five-pixel gap.
+fn shared_shell_layer(client: &crate::core::models::WMClient) -> bool {
+    client.state.dock_layer_info.is_some()
+        && (client.name.starts_with("jwm-shell-") || client.class.starts_with("jwm-shell-"))
+}
+
 fn bounded_dock_reservation(depth: i64, pad: i32, extent: i32) -> i32 {
     let limit = i64::from(extent.max(1));
     depth.saturating_add(i64::from(pad.max(0))).clamp(0, limit) as i32
@@ -382,6 +387,14 @@ impl Jwm {
                 if !client.state.is_dock {
                     continue;
                 }
+                // Shared panels and sensors use layer-shell Dock roles even
+                // while overlaying with no exclusive zone. Their reservation
+                // has one owner: the effective shell config and supervisor
+                // below. Inferring it again from sensor/hover geometry would
+                // reserve invisible edges or double-charge pinned panels.
+                if shared_shell_layer(client) {
+                    continue;
+                }
                 if !self.is_client_visible_on_monitor(client_key, mon_key) {
                     continue;
                 }
@@ -568,11 +581,18 @@ impl Jwm {
                 monitor.geometry.m_w,
                 monitor.geometry.m_h,
             );
-            let depths = crate::jwm::bar_geometry::BarGeometry::reservation_depths(
+            let mut depths = crate::jwm::bar_geometry::BarGeometry::reservation_depths(
                 physical,
                 bar.edge,
                 &configured,
             );
+            // Host failures withdraw only the shared companions; the selected
+            // primary bar keeps its ordinary top strip.
+            if configured.desktop_shell_enabled() && !self.desktop_shell.reserves_space() {
+                depths[0] = 0;
+                depths[1] = 0;
+                depths[3] = 0;
+            }
             for (edge, reservation) in
                 [BarEdge::Left, BarEdge::Right, BarEdge::Top, BarEdge::Bottom]
                     .into_iter()
@@ -685,10 +705,30 @@ impl Jwm {
 mod tests {
     use super::{
         bounded_dock_reservation, dock_edge_distances, dock_reaches_output_edge,
-        padded_status_bar_offset, tiled_client_border_width, unreserved_top_fallback,
+        padded_status_bar_offset, shared_shell_layer, tiled_client_border_width,
+        unreserved_top_fallback,
     };
     use crate::core::types::Rect;
     use crate::jwm::strut_manager::clamp_opposing_edges;
+
+    #[test]
+    fn shared_shell_layer_reservations_have_one_owner_in_every_reveal_mode() {
+        let mut client = crate::core::models::WMClient::new(
+            crate::backend::common_define::WindowId::from_raw(37),
+        );
+        client.class = "jwm-shell-session-output-left".into();
+        // A similarly named ordinary application does not acquire shell policy.
+        assert!(!shared_shell_layer(&client));
+        for exclusive_zone in [-1, 0, 90] {
+            client.state.dock_layer_info = Some(crate::backend::api::LayerSurfaceInfo {
+                exclusive_zone,
+                ..Default::default()
+            });
+            assert!(shared_shell_layer(&client));
+        }
+        client.class = "external-layer-panel".into();
+        assert!(!shared_shell_layer(&client));
+    }
 
     #[test]
     fn status_bar_offset_widens_before_clamping_the_complete_sum() {

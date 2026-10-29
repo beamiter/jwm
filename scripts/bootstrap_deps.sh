@@ -71,7 +71,7 @@ fi
 APT_TOOLCHAIN=(
     build-essential pkg-config cmake ninja-build
     clang libclang-dev llvm-dev
-    git curl ca-certificates python3
+    git curl ca-certificates python3 python3-tomli
 )
 
 # X11 side (the `x11` and `x11rb`/`xcb` crates). Feature set in Cargo.toml pulls

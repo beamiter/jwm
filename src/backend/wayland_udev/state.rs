@@ -2764,6 +2764,13 @@ impl XwmHandler for JwmWaylandState {
     ) {
         let x11_id = window.window_id();
         if let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() {
+            // X11 reports the client content rectangle. JWM's server-drawn
+            // border belongs to policy, not that report: forgetting it turns
+            // the next get_geometry/move into an extra border-width offset.
+            let border = self
+                .window_geometry
+                .get(&win_id)
+                .map_or(0, |prior| prior.border);
             self.window_geometry.insert(
                 win_id,
                 Geometry {
@@ -2771,7 +2778,7 @@ impl XwmHandler for JwmWaylandState {
                     y: geometry.loc.y,
                     w: geometry.size.w.max(1) as u32,
                     h: geometry.size.h.max(1) as u32,
-                    border: 0,
+                    border,
                 },
             );
         }

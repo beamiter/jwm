@@ -1365,7 +1365,7 @@ impl Jwm {
                 // monitor and its hidden-client list are still addressable.
                 // Waiting until after removal loses both pieces of lookup
                 // state and leaves stale thumbnails at the unplugged output.
-                self.retire_secondary_bar(backend, monitor_num)
+                self.retire_disconnected_bar(backend, monitor_num)
             } else {
                 None
             };
@@ -1851,7 +1851,7 @@ impl Jwm {
                     .get(mon_key_to_remove)
                     .map(|monitor| monitor.num)
                 {
-                    self.retire_secondary_bar(backend, monitor_num)
+                    self.retire_disconnected_bar(backend, monitor_num)
                 } else {
                     None
                 };

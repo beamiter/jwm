@@ -101,3 +101,54 @@ fn daemon_check_fails_when_no_daemon_is_running() {
     );
     assert!(String::from_utf8_lossy(&running.stdout).contains("正在运行"));
 }
+
+#[test]
+fn daemon_retains_private_child_stderr_and_actual_exit_code() {
+    let runtime = RuntimeDir::new("child-diagnostics");
+    let home = runtime.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let fixture = runtime.path().join("jwm-fixture");
+    fs::write(
+        &fixture,
+        "#!/bin/sh\nprintf 'private startup failure\\n' >&2\nexit 37\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut daemon = StandIn(
+        Command::new(env!("CARGO_BIN_EXE_jwm-tool"))
+            .args(["daemon", "--jwm-binary"])
+            .arg(&fixture)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .env("JWM_BACKEND", "x11rb")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "private daemon failed to finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(status.success());
+    let diagnostic = runtime.path().join("jwm_child_stderr.log");
+    assert_eq!(
+        fs::read_to_string(&diagnostic).unwrap(),
+        "private startup failure\n"
+    );
+    assert_eq!(
+        fs::metadata(diagnostic).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let daemon_log = fs::read_to_string(home.join(".local/share/jwm/jwm_daemon.log")).unwrap();
+    assert!(daemon_log.contains("exit_code=37"), "{daemon_log}");
+}

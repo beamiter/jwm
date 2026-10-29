@@ -111,7 +111,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="${JWM_BAR_NAME:-tao_glow_bar}"
+JWM_BAR_NAME="${JWM_BAR_NAME:-tauri_leptos_bar}"
 JWM_BAR_SET_BY_ARGS=false
 UPDATED_CONFIG_PATHS=()
 SKIP_BAR=false
@@ -142,7 +142,7 @@ usage() {
 
 说明:
   - 推荐日用会话是 Wayland（jwm-wayland.desktop / wayland-udev）；X11 会话条目仍会安装，作为兼容面。
-  - 官方默认 status bar 是 tao_glow_bar；可通过 JWM_BAR_NAME 或 -b 选择其它 bar，-b 优先。
+  - 官方默认 status bar 是 tauri_leptos_bar；可通过 JWM_BAR_NAME 或 -b 选择其它 bar，-b 优先。
   - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数、环境变量或官方默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
@@ -160,7 +160,7 @@ usage() {
     缺失的配置会自动生成；手动 jwm --gen-config 可主动强制重置。
 
 示例:
-  $(basename "$0")                           # 安装 jwm + 官方默认 bar（tao_glow_bar）
+  $(basename "$0")                           # 安装 jwm + 官方默认 bar（tauri_leptos_bar）
   $(basename "$0") --gen-config              # 同上，并按字段变化更新配置
   $(basename "$0") -m debug                  # debug 模式编译安装
   $(basename "$0") -b xcb_bar                # 安装示例 bar（非官方默认）
@@ -502,6 +502,10 @@ build_tauri_bar() {
         build_env+=("CARGO_BUILD_JOBS=$JOBS")
     fi
 
+    if [[ "$bar" == tauri_leptos_bar ]]; then
+        tauri_args+=(-- --locked)
+    fi
+
     info "构建 $bar 前端与 Tauri 后端（$BUILD_MODE 模式）..."
     if [[ -f "$bar_dir/package.json" ]]; then
         if ! command -v pnpm &>/dev/null; then
@@ -527,18 +531,18 @@ build_tauri_bar() {
         fi
         if ! command -v trunk &>/dev/null; then
             err "trunk 未找到；构建 $bar 需要 Trunk"
-            err "安装后重试：cargo install trunk --locked"
+            err "安装后重试：cargo install trunk --version 0.22.1 --locked"
             exit 1
         fi
         local tauri_cli_version
         if ! tauri_cli_version="$(cargo tauri --version 2>/dev/null)"; then
             err "cargo-tauri 未找到；构建 $bar 需要 Tauri CLI 2"
-            err "安装后重试：cargo install tauri-cli --version '^2' --locked"
+            err "安装后重试：cargo install tauri-cli --version 2.12.4 --locked"
             exit 1
         fi
         if [[ ! "$tauri_cli_version" =~ (^|[[:space:]])2\. ]]; then
             err "检测到不兼容的 Tauri CLI：$tauri_cli_version（需要 major 2）"
-            err "升级后重试：cargo install tauri-cli --version '^2' --locked --force"
+            err "升级后重试：cargo install tauri-cli --version 2.12.4 --locked --force"
             exit 1
         fi
         if command -v rustup &>/dev/null \
@@ -609,6 +613,17 @@ build_bar() {
     cargo install --locked --target-dir "$JWM_TARGET_DIR/bar-install/$bar" --path "$bar_dir" --force "${CARGO_INSTALL_MODE_ARGS[@]}" "${CARGO_JOBS_ARGS[@]}" --root "$(cargo_install_root)"
 
     ok "$bar 安装完成: $(cargo_bin_dir)"
+}
+
+# Build the shared host independently of the selected frontend. It is installed
+# with the session so opting into desktop_shell never depends on a Tao bar.
+build_and_install_shell() {
+    info "构建共享三侧栏宿主 jwm-shell（$BUILD_MODE 模式）..."
+    cargo build --locked --manifest-path "$PROJECT_ROOT/crates/jwm_shell/Cargo.toml" \
+        --target-dir "$JWM_TARGET_DIR/shell-host" "${CARGO_BUILD_MODE_ARGS[@]}" "${CARGO_JOBS_ARGS[@]}"
+    local profile=release
+    [[ "$BUILD_MODE" == release ]] || profile=debug
+    install_system_binary "$JWM_TARGET_DIR/shell-host/$profile/jwm-shell" /usr/local/bin
 }
 
 # ============================================================
@@ -831,6 +846,7 @@ build_and_install_jwm() {
 
     # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support/jwm-remote 写入 cargo bin。
     build_workspace
+    build_and_install_shell
 
     local target_dir="$JWM_TARGET_DIR"
     if [[ "$BUILD_MODE" == "release" ]]; then
@@ -844,6 +860,7 @@ build_and_install_jwm() {
     install_system_binary "$target_dir/jwm-tool" /usr/local/bin
     install_system_binary "$target_dir/jwm-support" /usr/local/bin
     install_system_binary "$target_dir/jwm-remote" /usr/local/bin
+    install_system_binary "$PROJECT_ROOT/scripts/jwm-toggle-sidebar-mode" /usr/local/bin
 
     # Shared data is kept outside the executable and installed for both build modes.
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-october.jpg" \
@@ -1011,5 +1028,5 @@ ok "全部完成！"
 echo ""
 info "日用推荐: 在显示管理器里选「JWM」Wayland 会话（jwm-wayland.desktop）。"
 info "启动前跑: jwm --backend wayland-udev --doctor"
-info "官方 bar: ${JWM_BAR_NAME:-tao_glow_bar}（见 bars/README.md）"
+info "官方 bar: ${JWM_BAR_NAME:-tauri_leptos_bar}（见 bars/README.md）"
 info "真机验收清单: docs/hardware-validation.md"

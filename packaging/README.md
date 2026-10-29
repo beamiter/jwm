@@ -14,8 +14,19 @@ points so external packagers can pick the project up after the first
 | Checksums / provenance | `SHA256SUMS` + `actions/attest` |
 
 Prefer installing the Wayland session (`jwm-wayland.desktop`) and the official
-bar `tao_glow_bar`. See [hardware-validation](../docs/hardware-validation.md)
+bar `tauri_leptos_bar` and the independent `jwm-shell` host. See [hardware-validation](../docs/hardware-validation.md)
 before calling a package "stable".
+
+Manifest format 2 requires both `jwm-shell` and `tauri_leptos_bar` in the
+versioned payload and stable executable map. Missing either is a failed
+installation. The installer continues to accept format 1 for rollback to
+older releases; runtime shell registration also checks the IPC protocol version.
+
+The default shared panels auto-hide; Super+Shift+B toggles enabled panels to
+pinned mode and back. The packaged `jwm-toggle-sidebar-mode` compatibility helper
+also supports older running WM versions through existing IPC, without a session
+restart. It needs Python 3.11+, or Python 3 plus `tomli` (`python3-tomli`). The
+native shortcut in a new JWM does not require this helper.
 
 Music/video playback ships as `jwm-player`, built with the `jwm-bridge`
 package. It requires the `mpv` executable at runtime; the compositor and

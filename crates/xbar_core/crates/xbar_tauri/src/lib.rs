@@ -8,10 +8,18 @@
 
 use std::{
     fmt,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "linux")]
+mod native_material;
+#[cfg(target_os = "linux")]
+mod native_scroll;
 
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Runtime, State,
@@ -169,7 +177,11 @@ pub fn configure<R: Runtime>(
         .plugin(worker_lifecycle_plugin())
         .setup(move |app| setup(app.handle(), setup_config))
         .on_window_event(handle_window_event)
-        .invoke_handler(tauri::generate_handler![dispatch_action, frontend_ready]))
+        .invoke_handler(tauri::generate_handler![
+            dispatch_action,
+            frontend_ready,
+            frontend_diagnostic
+        ]))
 }
 
 struct BridgeState {
@@ -198,7 +210,8 @@ struct GlassBackdrop {
     explicit_opacity: Option<f64>,
     frosted_params: GlassParams,
     generation: Option<u64>,
-    material: Option<bool>,
+    material: Option<(bool, bool)>,
+    native_transparent: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -251,7 +264,11 @@ impl Drop for WorkerGuard {
 fn worker_lifecycle_plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     // The worker owns an AppHandle, so its managed guard cannot be the first
     // owner to drop. Break that ownership cycle while the app is still alive.
+    let initialization = include_str!("frontend_diagnostics.js").to_owned();
+    #[cfg(target_os = "linux")]
+    let initialization = format!("{initialization}\n{}", native_scroll::INSTALLER);
     tauri::plugin::Builder::new("xbar-worker-lifecycle")
+        .js_init_script(initialization)
         .on_event(|app, event| {
             if matches!(event, RunEvent::Exit) {
                 request_worker_stop(app);
@@ -276,7 +293,18 @@ fn setup<R: Runtime>(
     let window = app
         .get_webview_window(&config.window_label)
         .ok_or_else(|| format!("Tauri bar window {:?} is unavailable", config.window_label))?;
-    let bar_config = xbar_core::config::BarConfig::load_default()?;
+    let native_transparent = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "linux")]
+    {
+        let native_transparent = Arc::clone(&native_transparent);
+        window.with_webview(move |view| {
+            let view = view.inner();
+            native_scroll::install(&view);
+            native_material::configure(&view, native_transparent);
+        })?;
+    }
+    let mut bar_config = xbar_core::config::BarConfig::load_default()?;
+    apply_desktop_header_profile(&mut bar_config);
     let scale_factor = window.scale_factor()?;
     let thickness = bar_config.presentation.logical_thickness(scale_factor);
     let mut baseline = WindowBaseline {
@@ -320,7 +348,7 @@ fn setup<R: Runtime>(
         session: Mutex::new(FrontendSession::new(runtime)),
         baseline,
         process_actions: Mutex::new(ProcessActionHandler::new(config.process_actions.clone())),
-        glass: Mutex::new(glass_backdrop()),
+        glass: Mutex::new(glass_backdrop(native_transparent)),
         tag_contrast: bar_config.presentation.tag_contrast,
         tag_palette: Mutex::new(None),
         presentation: bar_config.presentation,
@@ -456,16 +484,119 @@ fn frontend_ready<R: Runtime>(
         .map_err(|error| format!("xbar frontend session lock poisoned: {error}"))?;
     if let Some(envelope) = session.replay() {
         refresh_tag_palette(&app, &state.inner, &envelope.snapshot, true)?;
-        return app
-            .emit(&state.inner.config.state_event, envelope)
-            .map_err(|error| format!("failed to replay xbar state: {error}"));
+        app.emit(&state.inner.config.state_event, envelope)
+            .map_err(|error| format!("failed to replay xbar state: {error}"))?;
+        drop(session);
+        return publish_frontend_ready(&app, &state.inner.config.window_label);
     }
 
     // A very fast webview can announce readiness before the worker's first
     // service turn. Initialize and deliver synchronously instead of exposing
     // a startup race to every frontend.
     let output = session.service();
-    deliver_output(&app, &state.inner, output, true)
+    deliver_output(&app, &state.inner, output, true)?;
+    drop(session);
+    publish_frontend_ready(&app, &state.inner.config.window_label)
+}
+
+/// Browser errors otherwise disappear inside WebKit's console. Keep startup
+/// evidence bounded and attached to the invoking native window.
+#[tauri::command]
+fn frontend_diagnostic<R: Runtime>(
+    window: WebviewWindow<R>,
+    stage: String,
+    message: String,
+) -> Result<(), String> {
+    let message: String = message.chars().take(2048).collect();
+    if !matches!(stage.as_str(), "boot" | "error" | "rendered") {
+        return Err("unknown frontend diagnostic stage".to_owned());
+    }
+    eprintln!("xbar frontend {stage}: {message}");
+    publish_frontend_property(&window, &stage, &message)
+}
+
+/// Mapping a native window does not prove that its JavaScript loaded. Publish
+/// this acknowledgement only after the page has installed its state listener,
+/// invoked `frontend_ready`, and received the initial/replayed state envelope.
+/// Native acceptance checks use the exact WebView window, never a guessed PID
+/// match or the existence of a transparent GTK shell.
+#[cfg(target_os = "linux")]
+fn publish_frontend_ready<R: Runtime>(app: &AppHandle<R>, label: &str) -> Result<(), String> {
+    publish_frontend_property(&main_window(app, label)?, "ready", "")
+}
+
+#[cfg(target_os = "linux")]
+fn publish_frontend_property<R: Runtime>(
+    window: &WebviewWindow<R>,
+    stage: &str,
+    message: &str,
+) -> Result<(), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, PropMode};
+    use x11rb::wrapper::ConnectionExt as _;
+
+    let handle = window
+        .window_handle()
+        .map_err(|error| format!("frontend native handle: {error}"))?;
+    let xid = match handle.as_raw() {
+        RawWindowHandle::Xlib(handle) => u32::try_from(handle.window)
+            .map_err(|_| "frontend X11 window exceeds protocol range".to_owned())?,
+        RawWindowHandle::Xcb(handle) => handle.window.get(),
+        // Native Wayland readiness is validated through the layer/WebView
+        // runtime. It must never be announced on an unrelated XWayland window.
+        _ => return Ok(()),
+    };
+    let (connection, _) = x11rb::connect(None)
+        .map_err(|error| format!("frontend readiness X11 connection: {error}"))?;
+    let property = connection
+        .intern_atom(
+            false,
+            match stage {
+                "ready" => b"_JWM_FRONTEND_READY".as_slice(),
+                "rendered" => b"_JWM_FRONTEND_RENDERED".as_slice(),
+                "boot" => b"_JWM_FRONTEND_BOOT".as_slice(),
+                _ => b"_JWM_FRONTEND_ERROR".as_slice(),
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?
+        .atom;
+    if matches!(stage, "ready" | "rendered") {
+        connection
+            .change_property32(PropMode::REPLACE, xid, property, AtomEnum::CARDINAL, &[1])
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| error.to_string())?;
+    } else {
+        let utf8 = connection
+            .intern_atom(false, b"UTF8_STRING")
+            .map_err(|error| error.to_string())?
+            .reply()
+            .map_err(|error| error.to_string())?
+            .atom;
+        connection
+            .change_property8(PropMode::REPLACE, xid, property, utf8, message.as_bytes())
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| error.to_string())?;
+    }
+    connection.flush().map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_frontend_ready<R: Runtime>(_: &AppHandle<R>, _: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_frontend_property<R: Runtime>(
+    _: &WebviewWindow<R>,
+    _: &str,
+    _: &str,
+) -> Result<(), String> {
+    Ok(())
 }
 
 fn deliver_output<R: Runtime>(
@@ -596,12 +727,28 @@ fn install_bar_layout<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner) -> Re
 ///
 /// Wallpaper, theme tint, and the optional background alpha are shared with
 /// native bars; the page retains its foreground and control styles.
-fn glass_backdrop() -> GlassBackdrop {
-    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+fn apply_desktop_header_profile(config: &mut xbar_core::config::BarConfig) {
+    if config.presentation.apply_desktop_header_profile() {
+        config.background_opacity = config.background_opacity.or(Some(0.58));
+    }
+}
+
+fn material_tint(config: &xbar_core::config::BarConfig) -> [u8; 3] {
+    if config.presentation.desktop_header {
+        let color = xbar_core::presentation::Palette::for_theme(config.theme).background;
+        [color.red, color.green, color.blue].map(|channel| (channel * 255.0).round() as u8)
+    } else {
+        fallback_rgb(config.theme)
+    }
+}
+
+fn glass_backdrop(native_transparent: Arc<AtomicBool>) -> GlassBackdrop {
+    let mut config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
         log::warn!("falling back to the default bar config: {error}");
         xbar_core::config::BarConfig::default()
     });
-    let tint = fallback_rgb(config.theme);
+    apply_desktop_header_profile(&mut config);
+    let tint = material_tint(&config);
     // Provisional dimensions are replaced with the WM monitor geometry.
     let strip = config.glass.file_strip(1920, 1080, tint);
     GlassBackdrop {
@@ -611,14 +758,13 @@ fn glass_backdrop() -> GlassBackdrop {
         frosted_params: config.glass.params(),
         generation: None,
         material: None,
+        native_transparent,
     }
 }
 
-/// Native transparency is requested in all six window configurations, but the
-/// bridge cannot verify realized alpha/compositor support without a platform
-/// adapter. A configured wallpaper therefore supplies a safe opaque backing:
-/// sharp in clear mode and blurred in frosted mode. With no wallpaper, keep a
-/// readable solid fallback rather than assume alpha can reach the desktop.
+/// Use the real compositor behind an ARGB WebKit surface for clear material.
+/// Opaque surfaces retain the wallpaper-image or solid fallback, while frosted
+/// material may still use the bridge's explicitly blurred wallpaper strip.
 fn refresh_glass<R: Runtime>(
     app: &AppHandle<R>,
     glass_state: &Mutex<GlassBackdrop>,
@@ -636,15 +782,22 @@ fn refresh_glass<R: Runtime>(
         GlassParams::clear()
     };
     let tint = glass.tint;
+    let native_transparent = glass.native_transparent.load(Ordering::Acquire);
+    let material = (frosted, native_transparent);
     let opacity = xbar_core::background::bar_background_opacity(
         blur_status_bar,
         glass.explicit_opacity,
-        glass.strip.is_some(),
+        native_transparent || glass.strip.is_some(),
     );
     let previous_generation = glass.generation;
     let previous_material = glass.material;
     let window = main_window(app, window_label)?;
-    let (generation, css) = if let Some(strip) = glass.strip.as_mut() {
+    let (generation, css) = if native_transparent && !frosted {
+        if previous_generation == Some(0) && previous_material == Some(material) {
+            return Ok(());
+        }
+        (0, solid_background_css(tint, opacity))
+    } else if let Some(strip) = glass.strip.as_mut() {
         strip.cache_mut().set_params(params);
         let monitor = window.current_monitor().ok().flatten();
         if let Some(monitor) = monitor.as_ref() {
@@ -676,7 +829,7 @@ fn refresh_glass<R: Runtime>(
         else {
             return Ok(());
         };
-        if previous_generation == Some(generation) && previous_material == Some(frosted) {
+        if previous_generation == Some(generation) && previous_material == Some(material) {
             return Ok(());
         }
         let css = image
@@ -684,7 +837,7 @@ fn refresh_glass<R: Runtime>(
             .map_err(|error| format!("failed to encode the bar backdrop: {error}"))?;
         (generation, css)
     } else {
-        if previous_generation == Some(0) && previous_material == Some(frosted) {
+        if previous_generation == Some(0) && previous_material == Some(material) {
             return Ok(());
         }
         (0, solid_background_css(tint, opacity))
@@ -693,7 +846,7 @@ fn refresh_glass<R: Runtime>(
         .eval(install_style_script(&css))
         .map_err(|error| format!("failed to install the bar backdrop: {error}"))?;
     glass.generation = Some(generation);
-    glass.material = Some(frosted);
+    glass.material = Some(material);
     Ok(())
 }
 
@@ -775,6 +928,40 @@ fn solid_background_css([red, green, blue]: [u8; 3], opacity: f64) -> String {
 #[cfg(test)]
 mod background_tests {
     use super::*;
+
+    #[test]
+    fn header_material_uses_the_native_palette_without_changing_legacy_tint() {
+        let mut config = xbar_core::config::BarConfig::default();
+        config.theme = xbar_core::ThemeMode::Light;
+        assert_eq!(material_tint(&config), [246, 246, 248]);
+        apply_desktop_header_profile(&mut config);
+        assert_eq!(material_tint(&config), [204, 231, 255]);
+        config.theme = xbar_core::ThemeMode::Dark;
+        assert_eq!(material_tint(&config), [28, 28, 30]);
+    }
+
+    #[test]
+    fn desktop_header_profile_and_material_share_horizontal_policy() {
+        for edge in [xbar_core::BarEdge::Top, xbar_core::BarEdge::Bottom] {
+            let mut config = xbar_core::config::BarConfig::default();
+            config.presentation.edge = edge;
+            apply_desktop_header_profile(&mut config);
+            assert!(config.presentation.desktop_header);
+            assert_eq!(config.presentation.font_size, 12.0);
+            assert_eq!(config.background_opacity, Some(0.58));
+            config.background_opacity = Some(0.31);
+            apply_desktop_header_profile(&mut config);
+            assert_eq!(config.background_opacity, Some(0.31));
+        }
+        for edge in [xbar_core::BarEdge::Left, xbar_core::BarEdge::Right] {
+            let mut config = xbar_core::config::BarConfig::default();
+            config.presentation.edge = edge;
+            let original = config.presentation.clone();
+            apply_desktop_header_profile(&mut config);
+            assert_eq!(config.presentation, original);
+            assert_eq!(config.background_opacity, None);
+        }
+    }
 
     #[test]
     fn tag_css_is_scoped_and_uses_the_shared_palette_for_all_states() {

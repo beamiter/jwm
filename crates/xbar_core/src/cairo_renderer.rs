@@ -3277,6 +3277,11 @@ mod tests {
         let snapshot = |active: usize| {
             let mut tags = vec![TagState::default(); 32];
             tags[active].selected = true;
+            // Sparse policy retains one occupied predecessor as a valid next
+            // wheel target, while compact overflow keeps the active cell.
+            if active > 0 {
+                tags[active - 1].occupied = true;
+            }
             WmSnapshot {
                 tags,
                 ..WmSnapshot::default()
@@ -3375,8 +3380,8 @@ mod tests {
     fn cairo_bar_rehits_a_stationary_pointer_after_layout_moves() {
         let config = crate::presentation::PresentationConfig {
             tag_labels: vec!["1".to_owned(); 9],
-            // Keep sufficient room to test a true label-driven relayout;
-            // responsive overflow deliberately keeps fixed compact slots.
+            // Keep enough room for an actual newly occupied workspace to
+            // move the layout button beneath an unmoved pointer.
             left_fraction: 0.8,
             visibility: PresentationVisibility {
                 client_name: false,
@@ -3423,7 +3428,20 @@ mod tests {
             Some(NodeId::LayoutButton)
         );
 
-        bar.config_mut().tag_labels[0] = "a much wider first workspace".to_owned();
+        bar.runtime_mut()
+            .apply_event(crate::BarEvent::WindowManager(crate::WmSnapshot {
+                tags: vec![
+                    crate::TagState {
+                        selected: true,
+                        ..Default::default()
+                    },
+                    crate::TagState {
+                        occupied: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }));
         bar.render(&context, viewport).unwrap();
 
         let current_target = bar.scene().hit_test(stationary).map(|hit| hit.id);

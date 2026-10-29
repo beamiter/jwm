@@ -5,6 +5,23 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Shared desktop sidebars and the Leptos default
+
+- JWM supervises an independent `jwm-shell` process for common left, right and
+  bottom panels, while each selected status bar retains its own top frontend.
+  `[desktop_shell]` controls each edge, migration precedence and rollback.
+- Sidebars use independent versioned IPC, output and window identities,
+  bounded updates and session-owned process recovery. Replacing a top bar
+  retains the shared Dock projection and host lifetime.
+- `tauri_leptos_bar` is the built-in and installer default. Its Rust/Wasm
+  entrypoint and reproducible locks are included with the standalone host in
+  release bundles. Native-process coverage is recorded per frontend/backend.
+- All horizontal headers use the TaoGlow profile with original numeric tag
+  labels. Each monitor shows occupied tags plus its actual selected tags,
+  including an empty selected tag; right-click toggles the workspace view.
+- Newly enabled sidebars auto-hide. Super+Shift+B switches enabled edges to
+  pinned mode and back, preserves disabled edges, and persists the selection.
+
 ### Player paging, daemon replies and frame timestamps
 
 - Paging through the player queue keeps the highlighted row on the visible

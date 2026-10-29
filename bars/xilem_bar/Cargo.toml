@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-xilem = { git = "https://github.com/linebender/xilem", branch = "main" }
-masonry = { git = "https://github.com/linebender/xilem", branch = "main" }
-masonry_winit = { git = "https://github.com/linebender/xilem", branch = "main" }
+xilem = { git = "https://github.com/linebender/xilem", rev = "78d4f4b6878a1c2e2884edd72d7ecd83f1f6f704" }
+masonry = { git = "https://github.com/linebender/xilem", rev = "78d4f4b6878a1c2e2884edd72d7ecd83f1f6f704" }
+masonry_winit = { git = "https://github.com/linebender/xilem", rev = "78d4f4b6878a1c2e2884edd72d7ecd83f1f6f704" }
 winit = "0.30"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 log = "0.4"
@@ -17,3 +17,9 @@ wgpu = "30"
 x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb"] }
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
+
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Preserve Masonry/Vello while correctly premultiplying verified X11 ARGB GLES output.
+[patch."https://github.com/linebender/xilem"]
+masonry_winit = { path = "../../vendor/masonry_winit" }

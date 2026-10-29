@@ -1,0 +1,30 @@
+[package]
+name = "jwm_shell"
+version = "0.1.0"
+edition = "2024"
+description = "Shared three-panel desktop host supervised by JWM"
+
+[[bin]]
+name = "jwm-shell"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+cairo-rs = "0.22.9"
+libc = "0.2"
+log = "0.4"
+pango = "0.22.9"
+pangocairo = "0.22.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jwm_ipc_transport = { path = "../jwm_ipc_transport" }
+x11rb = "0.14"
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client"] }
+smithay-client-toolkit = { version = "0.19.2", default-features = false }
+xbar_core = { path = "../xbar_core", default-features = false, features = [
+    "clock-chrono", "config-toml", "glass", "glass-wallpaper", "logging-flexi",
+    "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl",
+    "provider-network-sysfs", "provider-system", "render-cairo", "runtime-linux",
+] }
+xbar_linux_actions = { path = "../xbar_core/crates/xbar_linux_actions" }

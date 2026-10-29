@@ -29,6 +29,9 @@ raw-window-handle = "0.6.2"
 tao = "0.37.0"
 x11rb = "0.14"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"
+
 # GTK3 compatibility: upstream RUSTSEC-2024-0429 fix, see vendor/glib/JWM-BACKPORT.md.
 [patch.crates-io]
 glib = { path = "../../vendor/glib" }

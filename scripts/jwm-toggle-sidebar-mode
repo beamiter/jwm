@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Toggle shared sidebars without restarting JWM, including older WM builds."""
+import argparse
+import copy
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+def target_values(snapshot):
+    config = snapshot["config"]
+    if config["enabled"] is not True:
+        raise ValueError("shared sidebars are disabled; enable desktop_shell first")
+    modes = {edge: config[edge] for edge in ("left", "right", "bottom")}
+    if any(mode not in ("hover", "always", "disabled") for mode in modes.values()):
+        raise ValueError("unknown sidebar mode")
+    active = {edge: mode for edge, mode in modes.items() if mode != "disabled"}
+    if not active:
+        return {}
+    target = "always" if "hover" in active.values() else "hover"
+    # Preserve effective ownership when a legacy configuration is materialized
+    # into the new explicit table for the first time.
+    values = {"desktop_shell.enabled": True,
+              **{f"desktop_shell.{edge}": ("disabled" if mode == "disabled" else target)
+                 for edge, mode in modes.items()}}
+    for field in ("reveal_delay_ms", "hide_delay_ms", "trigger_pixels"):
+        if field in config:
+            values[f"desktop_shell.{field}"] = config[field]
+    return values
+
+
+def prepare_config(path, values):
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+    path = Path(path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValueError("configuration must be an absolute regular file")
+    original = path.read_bytes()
+    if len(original) > 4 * 1024 * 1024:
+        raise ValueError("configuration exceeds the helper size limit")
+    text = original.decode()
+    before = tomllib.loads(text)
+    expected = copy.deepcopy(before)
+    table = expected.setdefault("desktop_shell", {})
+    if not isinstance(table, dict):
+        raise ValueError("desktop_shell must be a TOML table")
+    fields = {key.split(".", 1)[1]: value for key, value in values.items()}
+    table.update(fields)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    section = re.search(r"(?ms)^[ \t]*\[desktop_shell\][^\n]*\n(?P<body>.*?)(?=^[ \t]*\[|\Z)", text)
+    if section:
+        body = section["body"]
+        for field, value in fields.items():
+            encoded = json.dumps(value)
+            pattern = r"(?m)^([ \t]*" + re.escape(field) + r"[ \t]*=[ \t]*)([^#\r\n]*)([ \t]*(?:#[^\r\n]*)?)(\r?)$"
+            body, count = re.subn(pattern, lambda match: match[1] + encoded + (" " if match[3] else "") + match[3] + match[4], body)
+            if count == 0:
+                body = body.rstrip("\r\n") + newline + field + " = " + encoded + newline
+        text = text[:section.start("body")] + body + text[section.end("body"):]
+    elif "desktop_shell" not in before:
+        text = text.rstrip("\r\n") + newline * 2 + "[desktop_shell]" + newline
+        text += "".join(field + " = " + json.dumps(value) + newline for field, value in fields.items())
+    else:
+        raise ValueError("cannot safely edit this desktop_shell representation; no file was changed")
+    if tomllib.loads(text) != expected:
+        raise ValueError("the edit would change unrelated TOML values; no file was changed")
+    return path, original, text, stat.S_IMODE(path.stat().st_mode)
+
+
+def commit_config(prepared):
+    path, original, text, mode = prepared
+    if path.read_bytes() != original:
+        raise ValueError("configuration changed concurrently; runtime mode applied but file left untouched")
+    descriptor, temporary = tempfile.mkstemp(prefix=".sidebar-mode-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, mode)
+        if path.read_bytes() != original:
+            raise ValueError("configuration changed concurrently; file left untouched")
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tool", default="jwm-tool", help="JWM IPC client executable")
+    args = parser.parse_args()
+
+    def request(name, values=None):
+        command = [args.tool, "msg", name, "--raw"]
+        if values is not None:
+            command += ["--args", json.dumps(values)]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=5, check=True)
+        reply = json.loads(completed.stdout)
+        if reply.get("success") is not True:
+            raise ValueError(reply.get("error", "JWM rejected the request"))
+        return reply.get("data")
+
+    try:
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/jwm-{os.geteuid()}"))
+        if not runtime.is_absolute() or runtime.is_symlink():
+            raise ValueError("runtime directory must be absolute and not a symlink")
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(runtime / "jwm-sidebar-mode.lock", os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "r+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 0
+            return toggle(request)
+    except (ImportError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(f"jwm-toggle-sidebar-mode: {error}", file=sys.stderr)
+        return 1
+
+
+def toggle(request):
+    values = target_values(request("get_desktop_shell"))
+    if values:
+        prepared = prepare_config(request("get_config_status")["path"], values)
+        # This is an idempotent assignment. Never retry a non-idempotent
+        # toggle after a deadline: the first request may already have run.
+        request("set_config_batch", {"values": values})
+        commit_config(prepared)
+        print(next(values[f"desktop_shell.{edge}"] for edge in ("left", "right", "bottom")
+                   if values[f"desktop_shell.{edge}"] != "disabled"))
+    else:
+        print("disabled")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

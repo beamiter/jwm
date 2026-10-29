@@ -692,6 +692,325 @@ fn log_line(msg: &str) {
     println!("{line}");
 }
 
+// --- Bounded child stderr (one drain and one writer for the daemon lifetime) ---
+mod child_diagnostics {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::os::fd::{AsFd, OwnedFd};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    };
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    pub(super) const LOG_BYTES: u64 = 256 * 1024;
+    const CHUNK_BYTES: usize = 8192;
+    const QUEUED_CHUNKS: usize = 8;
+    const FINISH_TIMEOUT: Duration = Duration::from_millis(300);
+
+    pub(super) struct RotatingLog {
+        path: PathBuf,
+        file: File,
+        size: u64,
+        limit: u64,
+    }
+    impl RotatingLog {
+        pub(super) fn open(path: &Path, limit: u64) -> io::Result<Self> {
+            if limit == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "zero stderr log limit",
+                ));
+            }
+            let file = Self::open_file(path, false)?;
+            let mut size = file.metadata()?.len();
+            if size > limit {
+                file.set_len(0)?;
+                size = 0;
+            }
+            let previous = super::rotated_log_path(path);
+            if previous.try_exists()? {
+                let old = Self::open_file(&previous, false)?;
+                if old.metadata()?.len() > limit {
+                    old.set_len(0)?;
+                }
+            }
+            Ok(Self {
+                path: path.to_owned(),
+                file,
+                size,
+                limit,
+            })
+        }
+        fn open_file(path: &Path, exclusive: bool) -> io::Result<File> {
+            let file = OpenOptions::new()
+                .append(true)
+                .create(!exclusive)
+                .create_new(exclusive)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+                .open(path)?;
+            let metadata = file.metadata()?;
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                || metadata.uid() != unsafe { nix::libc::geteuid() }
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "stderr log must be an owned regular file with one link",
+                ));
+            }
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            Ok(file)
+        }
+    }
+    impl Write for RotatingLog {
+        fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
+            let total = bytes.len();
+            while !bytes.is_empty() {
+                if self.size == self.limit {
+                    fs::rename(&self.path, super::rotated_log_path(&self.path))?;
+                    self.file = Self::open_file(&self.path, true)?;
+                    self.size = 0;
+                }
+                let count = bytes.len().min((self.limit - self.size) as usize);
+                self.file.write_all(&bytes[..count])?;
+                self.size += count as u64;
+                bytes = &bytes[count..];
+            }
+            Ok(total)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    #[derive(Default)]
+    pub(super) struct CaptureStats {
+        pub(super) dropped_bytes: AtomicU64,
+        pub(super) write_failed: AtomicBool,
+        drain_truncated: AtomicBool,
+    }
+    pub(super) struct Capture {
+        writer: Option<UnixStream>,
+        stop: Arc<AtomicBool>,
+        pub(super) stats: Arc<CaptureStats>,
+        reader: Option<JoinHandle<()>>,
+        reader_done: mpsc::Receiver<()>,
+        logger: Option<JoinHandle<()>>,
+        logger_done: mpsc::Receiver<()>,
+    }
+    impl Capture {
+        pub(super) fn start(path: &Path) -> io::Result<Self> {
+            Self::with_writer(RotatingLog::open(path, LOG_BYTES)?, path.to_owned())
+        }
+        pub(super) fn with_writer(
+            sink: impl Write + Send + 'static,
+            label: PathBuf,
+        ) -> io::Result<Self> {
+            let (mut input, writer) = UnixStream::pair()?;
+            input.set_nonblocking(true)?;
+            let (send, receive) = mpsc::sync_channel::<Vec<u8>>(QUEUED_CHUNKS);
+            let (reader_finished, reader_done) = mpsc::sync_channel(1);
+            let (logger_finished, logger_done) = mpsc::sync_channel(1);
+            let stop = Arc::new(AtomicBool::new(false));
+            let stats = Arc::new(CaptureStats::default());
+            let reader_stop = Arc::clone(&stop);
+            let reader_stats = Arc::clone(&stats);
+            let reader = thread::Builder::new()
+                .name("jwm-stderr-drain".into())
+                .spawn(move || {
+                    let mut bytes = [0u8; CHUNK_BYTES];
+                    let mut finish_by = None;
+                    loop {
+                        if reader_stop.load(Ordering::Acquire) {
+                            let deadline = *finish_by
+                                .get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
+                            if Instant::now() >= deadline {
+                                reader_stats.drain_truncated.store(true, Ordering::Release);
+                                break;
+                            }
+                        }
+                        match input.read(&mut bytes) {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                if send.try_send(bytes[..count].to_vec()).is_err() {
+                                    reader_stats
+                                        .dropped_bytes
+                                        .fetch_add(count as u64, Ordering::Relaxed);
+                                }
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                if finish_by.is_some() {
+                                    break;
+                                }
+                                let mut descriptors =
+                                    [PollFd::new(input.as_fd(), PollFlags::POLLIN)];
+                                let _ = poll(&mut descriptors, PollTimeout::from(50u8));
+                            }
+                            Err(error) => {
+                                eprintln!("jwm-tool: child stderr read failed: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    drop(send);
+                    let _ = reader_finished.send(());
+                })?;
+            let logger_stats = Arc::clone(&stats);
+            let logger = thread::Builder::new().name("jwm-stderr-log".into()).spawn(move || {
+                let mut sink = Some(sink);
+                let mut reported_drops = 0;
+                while let Ok(bytes) = receive.recv() {
+                    let dropped = logger_stats.dropped_bytes.load(Ordering::Relaxed);
+                    if let Some(output) = sink.as_mut() {
+                        let result = (|| {
+                            if dropped != reported_drops {
+                                writeln!(output, "\n[jwm-tool: dropped {} stderr bytes under logging pressure]", dropped - reported_drops)?;
+                                reported_drops = dropped;
+                            }
+                            output.write_all(&bytes)
+                        })();
+                        if let Err(error) = result {
+                            logger_stats.write_failed.store(true, Ordering::Release);
+                            eprintln!("jwm-tool: child stderr logging disabled at {}: {error}; continuing to drain/discard", label.display());
+                            sink = None;
+                        }
+                    } else {
+                        logger_stats.dropped_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    }
+                }
+                if let Some(output) = sink.as_mut() {
+                    let dropped = logger_stats.dropped_bytes.load(Ordering::Relaxed);
+                    let result = (|| {
+                        if dropped != reported_drops {
+                            writeln!(output, "\n[jwm-tool: dropped {} stderr bytes under logging pressure]", dropped - reported_drops)?;
+                        }
+                        output.flush()
+                    })();
+                    if let Err(error) = result {
+                        logger_stats.write_failed.store(true, Ordering::Release);
+                        eprintln!("jwm-tool: child stderr final flush failed at {}: {error}", label.display());
+                    }
+                }
+                let _ = logger_finished.send(());
+            });
+            let logger = match logger {
+                Ok(logger) => logger,
+                Err(error) => {
+                    stop.store(true, Ordering::Release);
+                    drop(writer);
+                    if reader_done.recv_timeout(FINISH_TIMEOUT).is_ok() {
+                        let _ = reader.join();
+                    }
+                    return Err(error);
+                }
+            };
+            Ok(Self {
+                writer: Some(writer),
+                stop,
+                stats,
+                reader: Some(reader),
+                reader_done,
+                logger: Some(logger),
+                logger_done,
+            })
+        }
+        pub(super) fn stdio(&self) -> io::Result<Stdio> {
+            let fd: OwnedFd = self
+                .writer
+                .as_ref()
+                .expect("active stderr capture")
+                .try_clone()?
+                .into();
+            Ok(Stdio::from(fd))
+        }
+        fn finish_thread(
+            thread: &mut Option<JoinHandle<()>>,
+            done: &mpsc::Receiver<()>,
+            label: &str,
+        ) {
+            let deadline = Instant::now() + FINISH_TIMEOUT;
+            let _ = done.recv_timeout(FINISH_TIMEOUT);
+            // A completion message can precede local destructors (including
+            // a filesystem close). Never turn it into an unbounded join.
+            while thread.as_ref().is_some_and(|thread| !thread.is_finished())
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if thread.as_ref().is_some_and(JoinHandle::is_finished) {
+                if thread.take().unwrap().join().is_err() {
+                    eprintln!("jwm-tool: {label} thread panicked");
+                }
+            } else {
+                eprintln!(
+                    "jwm-tool: {label} did not finish within bounded shutdown; diagnostic tail may be incomplete"
+                );
+                thread.take();
+            }
+        }
+    }
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.writer.take();
+            self.stop.store(true, Ordering::Release);
+            Self::finish_thread(&mut self.reader, &self.reader_done, "stderr drain");
+            Self::finish_thread(&mut self.logger, &self.logger_done, "stderr writer");
+            if self.stats.drain_truncated.load(Ordering::Acquire) {
+                eprintln!(
+                    "jwm-tool: child stderr shutdown drain budget exhausted; diagnostic tail may be incomplete"
+                );
+            }
+            let dropped = self.stats.dropped_bytes.load(Ordering::Relaxed);
+            if dropped != 0 {
+                eprintln!(
+                    "jwm-tool: discarded {dropped} child stderr bytes under logging pressure"
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedChildExit {
+    Code(i32),
+    Signal { number: i32, core_dumped: bool },
+    UnavailableEchild,
+    Other(i32),
+}
+impl ManagedChildExit {
+    fn from_status(status: std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(code) = status.code() {
+            Self::Code(code)
+        } else if let Some(number) = status.signal() {
+            Self::Signal {
+                number,
+                core_dumped: status.core_dumped(),
+            }
+        } else {
+            Self::Other(status.into_raw())
+        }
+    }
+    fn description(self) -> String {
+        match self {
+            Self::Code(code) => format!("exit_code={code}"),
+            Self::Signal { number, core_dumped } => format!("signal={number}, core_dumped={core_dumped}"),
+            Self::UnavailableEchild => "status_unavailable=ECHILD (child status was not available; exit code/signal unknown)".into(),
+            Self::Other(raw) => format!("unrecognized_wait_status={raw}"),
+        }
+    }
+}
+
 // --- JwmManager ---
 
 struct JwmManager {
@@ -700,6 +1019,9 @@ struct JwmManager {
     jwm_child: Option<Child>,
     jwm_pid: Option<i32>,
     unexpected_exit: bool,
+    last_exit: Option<ManagedChildExit>,
+    report_child_exit: bool,
+    child_stderr: Option<child_diagnostics::Capture>,
 }
 
 impl JwmManager {
@@ -710,6 +1032,9 @@ impl JwmManager {
             jwm_child: None,
             jwm_pid: None,
             unexpected_exit: false,
+            last_exit: None,
+            report_child_exit: false,
+            child_stderr: None,
         }
     }
 
@@ -736,8 +1061,40 @@ impl JwmManager {
         self.jwm_pid = Some(pid);
         self.jwm_child = Some(child);
         self.unexpected_exit = false;
+        self.last_exit = None;
         log_line(&format!("JWM已启动，PID: {}", pid));
         Ok(())
+    }
+
+    fn enable_child_diagnostics(&mut self, path: &Path) {
+        self.report_child_exit = true;
+        self.child_stderr = match child_diagnostics::Capture::start(path) {
+            Ok(capture) => {
+                log_line(&format!(
+                    "JWM stderr诊断: {} (两代，各最多{}字节，0600)",
+                    path.display(),
+                    child_diagnostics::LOG_BYTES
+                ));
+                Some(capture)
+            }
+            Err(error) => {
+                log_line(&format!(
+                    "JWM stderr诊断不可用: {}: {error}; 子进程stderr将丢弃",
+                    path.display()
+                ));
+                None
+            }
+        };
+    }
+
+    fn record_child_exit(&mut self, pid: u32, outcome: ManagedChildExit) {
+        self.last_exit = Some(outcome);
+        if self.report_child_exit {
+            log_line(&format!(
+                "JWM子进程结束: PID={pid}, {}",
+                outcome.description()
+            ));
+        }
     }
 
     /// The command that launches the managed JWM.
@@ -761,7 +1118,18 @@ impl JwmManager {
             )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(
+                match self.child_stderr.as_ref().map(|capture| capture.stdio()) {
+                    Some(Ok(stderr)) => stderr,
+                    Some(Err(error)) => {
+                        log_line(&format!(
+                            "JWM stderr诊断管道不可用: {error}; 子进程stderr将丢弃"
+                        ));
+                        Stdio::null()
+                    }
+                    None => Stdio::null(),
+                },
+            );
         command
     }
 
@@ -848,9 +1216,17 @@ impl JwmManager {
                     self.jwm_pid = Some(child.id() as i32);
                     return true;
                 }
-                Ok(Some(_)) => break,
+                Ok(Some(status)) => {
+                    let pid = child.id();
+                    self.record_child_exit(pid, ManagedChildExit::from_status(status));
+                    break;
+                }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => break,
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                    let pid = child.id();
+                    self.record_child_exit(pid, ManagedChildExit::UnavailableEchild);
+                    break;
+                }
                 Err(error) => {
                     // Do not replace or discard a child whose status is unknown.
                     log_line(&format!("try_wait 错误: {error}"));
@@ -1209,6 +1585,7 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
     log_line(&format!("控制管道: {}", control_pipe.display()));
 
     let mut mgr = JwmManager::new(jwm_binary, backend);
+    mgr.enable_child_diagnostics(&runtime_dir().join("jwm_child_stderr.log"));
     if let Err(error) = mgr.start() {
         cleanup_resources(&control_pipe, false);
         return Err(error);
@@ -9012,5 +9389,255 @@ mod executable_probe_tests {
                 launched
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod daemon_diagnostics_tests {
+    use super::{
+        JwmManager, ManagedChildExit,
+        child_diagnostics::{Capture, LOG_BYTES, RotatingLog},
+        rotated_log_path,
+    };
+    use std::fs;
+    use std::io::{self, Write};
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    struct PrivateDir(PathBuf);
+    impl PrivateDir {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "jwm-child-diagnostic-{}-{label}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            Self(path)
+        }
+        fn log(&self) -> PathBuf {
+            self.0.join("stderr.log")
+        }
+    }
+    impl Drop for PrivateDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn wait_child(child: &mut Child) -> io::Result<ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "private child blocked",
+                ));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn output_files(path: &Path) -> Vec<u8> {
+        let mut bytes = fs::read(rotated_log_path(path)).unwrap_or_default();
+        bytes.extend(fs::read(path).unwrap());
+        bytes
+    }
+
+    #[test]
+    fn rotation_strictly_bounds_two_generations_and_private_permissions() {
+        let dir = PrivateDir::new("rotation");
+        let path = dir.log();
+        let mut log = RotatingLog::open(&path, 1024).unwrap();
+        let data: Vec<_> = (0..3077).map(|i| (i % 251) as u8).collect();
+        log.write_all(&data).unwrap();
+        drop(log);
+        assert_eq!(fs::metadata(&path).unwrap().len(), 5);
+        assert_eq!(fs::metadata(rotated_log_path(&path)).unwrap().len(), 1024);
+        assert_eq!(output_files(&path), data[data.len() - 1029..]);
+        for file in [&path, &rotated_log_path(&path)] {
+            assert_eq!(
+                fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn unsafe_or_oversized_existing_logs_do_not_escape_the_bound() {
+        let dir = PrivateDir::new("existing");
+        let target = dir.0.join("unrelated");
+        fs::write(&target, b"unchanged").unwrap();
+        symlink(&target, dir.log()).unwrap();
+        assert!(RotatingLog::open(&dir.log(), 1024).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+        fs::remove_file(dir.log()).unwrap();
+        fs::write(dir.log(), vec![b'x'; 3000]).unwrap();
+        fs::write(rotated_log_path(&dir.log()), vec![b'y'; 3000]).unwrap();
+        let mut log = RotatingLog::open(&dir.log(), 1024).unwrap();
+        log.write_all(b"new").unwrap();
+        drop(log);
+        assert!(fs::metadata(dir.log()).unwrap().len() <= 1024);
+        assert!(fs::metadata(rotated_log_path(&dir.log())).unwrap().len() <= 1024);
+    }
+
+    struct StalledWriter(Arc<AtomicBool>);
+    impl Write for StalledWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            while !self.0.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn unterminated_stderr_flood_never_waits_for_a_stalled_log_writer() {
+        let release = Arc::new(AtomicBool::new(false));
+        let capture = Capture::with_writer(
+            StalledWriter(Arc::clone(&release)),
+            PathBuf::from("private-test-stalled-writer"),
+        )
+        .unwrap();
+        let mut child = Command::new("sh")
+            .args(["-c", "head -c 16777216 /dev/zero >&2"])
+            .stdout(Stdio::null())
+            .stderr(capture.stdio().unwrap())
+            .spawn()
+            .unwrap();
+        let result = wait_child(&mut child);
+        let dropped = capture.stats.dropped_bytes.load(Ordering::Relaxed);
+        release.store(true, Ordering::Release);
+        drop(capture);
+        assert!(result.unwrap().success());
+        assert!(
+            dropped > 0,
+            "bounded queue must discard rather than wait on the writer"
+        );
+    }
+
+    struct FailedWriter;
+    impl Write for FailedWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(nix::libc::ENOSPC))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn logging_io_failure_keeps_draining_the_child() {
+        let capture =
+            Capture::with_writer(FailedWriter, PathBuf::from("private-test-full-log")).unwrap();
+        let stats = Arc::clone(&capture.stats);
+        let mut child = Command::new("sh")
+            .args(["-c", "head -c 2097152 /dev/zero >&2"])
+            .stdout(Stdio::null())
+            .stderr(capture.stdio().unwrap())
+            .spawn()
+            .unwrap();
+        let result = wait_child(&mut child);
+        drop(capture);
+        assert!(result.unwrap().success());
+        assert!(stats.write_failed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn actual_pipe_capture_bounds_long_unterminated_input() {
+        let dir = PrivateDir::new("flood");
+        let path = dir.log();
+        let capture = Capture::start(&path).unwrap();
+        let mut child = Command::new("sh")
+            .args(["-c", "head -c 4194304 /dev/zero >&2"])
+            .stdout(Stdio::null())
+            .stderr(capture.stdio().unwrap())
+            .spawn()
+            .unwrap();
+        assert!(wait_child(&mut child).unwrap().success());
+        drop(capture);
+        let current = fs::metadata(&path).unwrap();
+        let previous = fs::metadata(rotated_log_path(&path)).unwrap();
+        assert!(current.len() <= LOG_BYTES && previous.len() <= LOG_BYTES);
+        assert_eq!(current.permissions().mode() & 0o777, 0o600);
+        assert_eq!(previous.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn production_launcher_preserves_stderr_across_selfexec_and_multiple_children() {
+        let dir = PrivateDir::new("selfexec");
+        let script = dir.0.join("jwm");
+        fs::write(&script, "#!/bin/sh\nprintf 'before=%s\\n' \"$$\" >&2\nexec /bin/sh -c 'printf \"after=%s\\n\" \"$$\" >&2; exit 23'\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut manager = JwmManager::new(script, Some("x11rb".into()));
+        manager.child_stderr = Some(Capture::start(&dir.log()).unwrap());
+        let mut pids = Vec::new();
+        for _ in 0..2 {
+            let mut child = manager.launch_command().spawn().unwrap();
+            pids.push(child.id());
+            assert_eq!(wait_child(&mut child).unwrap().code(), Some(23));
+        }
+        drop(manager);
+        let text = String::from_utf8(output_files(&dir.log())).unwrap();
+        for pid in pids {
+            assert!(text.contains(&format!("before={pid}\n")), "{text}");
+            assert!(text.contains(&format!("after={pid}\n")), "{text}");
+        }
+    }
+
+    fn manager_after(mut child: Child) -> JwmManager {
+        let mut manager = JwmManager::new(PathBuf::from("unused-private-fixture"), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        manager.jwm_pid = Some(child.id() as i32);
+        manager.jwm_child = Some(child);
+        while manager.is_running() {
+            if Instant::now() > deadline {
+                child = manager.jwm_child.take().unwrap();
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("private manager fixture did not exit");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        manager
+    }
+    #[test]
+    fn child_exit_code_signal_and_echild_remain_distinct() {
+        let exit = Command::new("sh").args(["-c", "exit 37"]).spawn().unwrap();
+        let mut manager = manager_after(exit);
+        assert_eq!(manager.last_exit, Some(ManagedChildExit::Code(37)));
+        assert!(!manager.is_running());
+        assert_eq!(manager.last_exit, Some(ManagedChildExit::Code(37)));
+        let signaled = Command::new("sleep").arg("30").spawn().unwrap();
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(signaled.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .unwrap();
+        let manager = manager_after(signaled);
+        assert_eq!(
+            manager.last_exit,
+            Some(ManagedChildExit::Signal {
+                number: 15,
+                core_dumped: false
+            })
+        );
+        let reaped = Command::new("sh").args(["-c", "exit 19"]).spawn().unwrap();
+        nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(reaped.id() as i32), None).unwrap();
+        let manager = manager_after(reaped);
+        assert_eq!(manager.last_exit, Some(ManagedChildExit::UnavailableEchild));
     }
 }

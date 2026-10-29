@@ -47,7 +47,7 @@ try {
         const snapshot = {
           wm_available: true, wm_sequence: 7, wm_session_id: 11,
           geometry: { x: -900, y: 80, width: vertical ? 42 : 900, height: vertical ? 450 : 800 },
-          tags: Array.from({ length: 9 }, (_, index) => ({ selected: index === 2 || index === 7, occupied: index % 2 === 0, urgent: index === 7, filled: false })),
+          tags: Array.from({ length: 9 }, (_, index) => ({ selected: index === 2 || index === 7, occupied: true, urgent: index === 7, filled: false })),
           active_tag: 7,
           monitor: 0, layout_symbol: '[]=', client_name: 'Browser regression', time: '18:42:09',
           show_seconds: true, layout_selector_open: false,
@@ -62,6 +62,8 @@ try {
           for (const [handler, event] of listeners) {
             if (event === 'xbar-state') callbacks.get(handler)?.({ event, id: handler, payload: {
               revision, changes: 0xffffffff, partition_changes: 0xffffffff, snapshot: structuredClone(snapshot),
+              workspace_tags: snapshot.tags.map((state, id) => ({ id, number: id + 1, state })),
+              header_cpu: '24%', header_memory: '50%', header_network: '↓1.0KiB/s ↑2.0KiB/s', header_clock_compact: '18:42:09',
             } });
           }
         };
@@ -92,7 +94,7 @@ try {
       const description = `${framework}/${edge}`;
       assert.equal(await page.locator('.emoji-button').nth(7).getAttribute('aria-pressed'), 'true', `${description}: urgent workspace retains actual selected semantics`);
       assert.equal(await page.locator('.emoji-button').nth(7).getAttribute('aria-current'), 'true', `${description}: active workspace is exposed`);
-      assert.equal(await page.locator('.emoji-button').nth(7).evaluate(node => node.tabIndex), 0, `${description}: active workspace is the initial toolbar entry`);
+      assert.equal(await page.locator('.emoji-button').nth(2).evaluate(node => node.tabIndex), 0, `${description}: active workspace is the initial toolbar entry`);
       await page.locator('.emoji-button').first().focus();
       await page.keyboard.press('Enter');
       assert.equal(await page.evaluate(() => window.__barRequests.filter(request => request.action === 'view_tag_on').length), 1,
@@ -100,8 +102,7 @@ try {
       // Exercise status/layout controls too: an existing local key handler
       // must never run an action again through the shared document adapter.
       for (const [selector, action] of [
-        ['.layout-toggle', 'toggle_layout_selector'],
-        ['.brightness-pill', 'adjust_brightness'],
+        ...(vertical ? [['.layout-toggle', 'toggle_layout_selector'], ['.brightness-pill', 'adjust_brightness']] : []),
         ['.volume-pill', 'toggle_mute'],
         ['.time-pill', 'toggle_seconds'],
         ['.shell-pill', 'open_shell_hub'],
@@ -120,7 +121,7 @@ try {
         assert.equal(await page.evaluate(() => document.activeElement.classList.contains('volume-pill')), true,
           `${description}: live toolbar follows visual order`);
       }
-      for (const [selector, action] of [['.volume-pill', 'adjust_volume'], ['.brightness-pill', 'adjust_brightness']]) {
+      for (const [selector, action] of [['.volume-pill', 'adjust_volume'], ...(vertical ? [['.brightness-pill', 'adjust_brightness']] : [])]) {
         await page.locator(selector).focus();
         for (const key of ['PageUp', 'PageDown', '+', '-']) {
           const before = await page.evaluate(action => window.__barRequests.filter(request => request.action === action).length, action);
@@ -129,6 +130,14 @@ try {
           assert.equal(adjusted.length, before + 1, `${description}: ${selector} ${key} dispatches exactly once`);
           assert.equal(Math.sign(adjusted.at(-1).delta), key === 'PageUp' || key === '+' ? 1 : -1, `${description}: ${selector} ${key} direction`);
         }
+      }
+      if (!vertical) {
+        assert.equal(await page.locator('.minimized-dock').evaluate(node => node.getClientRects().length), 0, `${description}: companion Dock owns minimized windows`);
+        assert.equal(await page.evaluate(() => window.__barRequests.filter(request => request.action === 'set_dock_geometry').length), 0, `${description}: header never overwrites companion Dock geometry`);
+        assert.deepEqual(errors, [], description);
+        await page.close();
+        cases++;
+        continue;
       }
       await page.locator('[data-window-id="2"]').focus();
       await page.evaluate(() => window.__barPublish({ wm_sequence: 8, time: '18:42:10' }));

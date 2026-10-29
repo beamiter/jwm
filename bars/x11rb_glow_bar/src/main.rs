@@ -737,6 +737,7 @@ fn main() -> Result<()> {
     let translucent = argb_visual.is_some();
 
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
     let edge = presentation.edge;
@@ -746,11 +747,17 @@ fn main() -> Result<()> {
         .clamp(1.0, f64::from(u16::MAX)) as u16;
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
+    bar.renderer_mut().set_capsule(desktop_header);
     // Under a compositor the background is a translucent wash the desktop
     // shows through, with an explicit config value still winning; without one
     // the palette background must paint fully opaque, so the configured
     // opacity is deliberately ignored rather than washed over nothing.
-    bar.follow_wm_background(app_config.background_opacity, translucent);
+    bar.follow_wm_background(
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
+        translucent,
+    );
 
     let win = conn.generate_id()?;
     let root_geometry = MonitorGeometry {
@@ -818,9 +825,24 @@ fn main() -> Result<()> {
     let properties: Vec<_> = spec
         .properties()
         .into_iter()
+        .chain(std::iter::once(DockProperty {
+            name: "_NET_WM_PID",
+            value: DockPropertyValue::Cardinals(vec![std::process::id()]),
+        }))
         .filter(|property| shared_path.is_empty() || !property.name.starts_with("_NET_WM_STRUT"))
         .collect();
     write_dock_properties(&conn, win, &properties)?;
+    // The compositor uses WM_CLASS for the header's material and outline.
+    // The title alone identifies the window to JWM but does not set that class.
+    let wm_class = format!("{BAR_NAME}\0{BAR_NAME}\0");
+    conn.change_property8(
+        PropMode::REPLACE,
+        win,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        wm_class.as_bytes(),
+    )?
+    .check()?;
     conn.map_window(win)?;
     if !translucent {
         conn.change_window_attributes(

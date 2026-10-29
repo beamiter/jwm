@@ -104,7 +104,7 @@ impl Metrics {
 /// Font family, weight and slant from the Pango description the Cairo bars
 /// render with. The size deliberately comes from `presentation.font_size`
 /// instead: that is the size `CairoRenderer` forces onto the description.
-fn font_rules(font: &str, font_size: f32) -> String {
+pub(crate) fn font_rules(font: &str, font_size: f32) -> String {
     let description = FontDescription::from_string(font);
     let family = description
         .family()
@@ -282,6 +282,7 @@ window.theme-dark {{
 .bar-root {{
   padding: {vertical_padding}px {horizontal_padding}px;
 }}
+.bar-root.desktop-header {{ padding: 0; background: transparent; }}
 .bar-root.vertical {{
   padding: {horizontal_padding}px {vertical_padding}px;
 }}
@@ -371,7 +372,8 @@ window.theme-dark {{
 {dark}
 {light}
 {dark_tags}
-{light_tags}",
+{light_tags}
+window.theme-dark .bar-root.desktop-header, window.theme-light .bar-root.desktop-header {{ background: transparent; padding: 0; }}",
         font = font_rules(font, config.font_size.max(1.0)),
         focus_color = css(Palette::for_theme(ThemeMode::Dark).accent),
         corner_radius = metrics.corner_radius,

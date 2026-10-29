@@ -10,6 +10,12 @@ interface TagState {
   occupied: boolean;
 }
 
+interface WorkspaceTag {
+  id: number;
+  number: number;
+  state: TagState;
+}
+
 interface AudioDeviceInfo {
   name: string;
   volume: number;
@@ -50,6 +56,12 @@ interface BarSnapshot {
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
+  workspace_tags?: WorkspaceTag[];
+  header_network?: string;
+  header_cpu?: string;
+  header_memory?: string;
+  theme?: string;
+  header_clock_compact?: string;
   active_tag?: number | null;
   monitor: number;
   layout_symbol: string;
@@ -66,6 +78,11 @@ interface BarSnapshot {
 }
 
 interface FrontendEnvelope {
+  workspace_tags: WorkspaceTag[];
+  header_network: string;
+  header_cpu: string;
+  header_memory: string;
+  header_clock_compact: string;
   revision: number;
   changes: number;
   snapshot: BarSnapshot;
@@ -96,6 +113,7 @@ const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
 
 type ActionRequest =
   | { action: "view_tag_on"; tag_index: number; monitor_id: number }
+  | { action: "toggle_tag_on"; tag_index: number; monitor_id: number }
   | { action: "toggle_layout_selector" }
   | { action: "set_layout_on"; layout_id: number; monitor_id: number }
   | { action: "toggle_seconds" }
@@ -128,22 +146,12 @@ type ActionRequest =
     }
   | { action: "open_shell_hub"; route: ShellRoute };
 
+const desktopHeader = () => !["left", "right"].includes(document.documentElement.dataset.barEdge || "top");
 const dispatchAction = (request: ActionRequest): Promise<void> =>
-  invoke("dispatch_action", { request });
+  desktopHeader() && request.action === "set_dock_geometry" ? Promise.resolve() : invoke("dispatch_action", { request });
 
 let snapshotBarOrigin: Pick<DockGeometry, "x" | "y"> | null = null;
 
-const TAG_ICONS = [
-  "\u{F0A1E}",
-  "\u{F0239}",
-  "\u{F0A1B}",
-  "\u{F0B79}",
-  "\u{F024B}",
-  "\u{F0388}",
-  "\u{F0567}",
-  "\u{F01F0}",
-  "\u{F0297}",
-];
 
 const ICON_CPU = "\u{F4BC}";
 const ICON_MEM = "\u{F035B}";
@@ -160,12 +168,11 @@ const ICON_MON = "\u{F0379}";
 
 const getButtonClass = (tag: TagState): string => {
   const state = tag.urgent ? "urgent"
-    : tag.filled ? "filtered"
     : tag.selected ? "selected"
     : tag.occupied ? "occupied"
     : "default";
   // Keep the client marker independent of the winning background state.
-  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}`;
+  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}${tag.filled ? " has-focus" : ""}`;
 };
 
 const formatBytes = (bytes: number): string => {
@@ -482,6 +489,7 @@ const publishDockGeometry = async (
   wmSessionId: number,
   minimizedGeneration: number,
 ) => {
+  if (desktopHeader()) return;
   const metrics = await windowMetrics();
   if (!dock.isConnected) return;
   if (!metrics) throw new Error("Dock window metrics are temporarily unavailable");
@@ -523,6 +531,7 @@ function MinimizedDock(props: {
 
   createEffect(() => {
     geometrySignature();
+    if (desktopHeader()) return;
     let retryTimer: number | undefined;
     let publishInFlight = false;
     let republishRequested = false;
@@ -664,7 +673,7 @@ function App() {
         if (revision !== null && event.payload.revision < revision) return;
         revision = event.payload.revision;
         snapshotBarOrigin = event.payload.snapshot.geometry;
-        setSnapshot(event.payload.snapshot);
+        setSnapshot({ ...event.payload.snapshot, workspace_tags: event.payload.workspace_tags, header_network: event.payload.header_network, header_cpu: event.payload.header_cpu, header_memory: event.payload.header_memory, header_clock_compact: event.payload.header_clock_compact });
       });
       if (cancelled) {
         stopListening();
@@ -736,12 +745,40 @@ function App() {
           `pill layout-option ${current().layout_symbol === symbol ? "current" : ""}`;
 
         return (
-          <div class="button-row">
+          <div class="button-row" data-desktop-header="true" data-active-tag={current().active_tag ?? ""} data-battery-charging={String(current().battery.charging)} data-theme={current().theme?.toLowerCase()}>
             <div class="buttons-container">
-              <For each={TAG_ICONS}>
-                {(icon, index) => {
+<div class="shell-menu">
+                <div
+                  class={`pill shell-pill ${
+                    current().wm_available ? "" : "shell-pill-offline"
+                  }`}
+                  onClick={() => openShell("hub", current().wm_available)}
+                  title="JWM shell"
+                >
+                  <span class="header-launcher-glyph">▦</span>
+                </div>
+                <Show when={current().wm_available}>
+                  <div class="shell-dropdown">
+                    <For each={SHELL_ROUTES}>
+                      {(entry) => (
+                        <div
+                          class="shell-route"
+                          onClick={() => openShell(entry.route, current().wm_available)}
+                        >
+                          <span class="nf-icon">{entry.icon}</span>
+                          <span>{entry.label}</span>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
+              <For each={(current().workspace_tags ?? []).map(workspace => workspace.id)}>
+                {(tagIndex) => {
+                  const workspace = () => current().workspace_tags?.find(item => item.id === tagIndex);
+                  const index = () => tagIndex;
                   const tag = () =>
-                    current().tags[index()] ?? {
+                    workspace()?.state ?? {
                       selected: false,
                       urgent: false,
                       filled: false,
@@ -751,7 +788,10 @@ function App() {
                     <button
                       class={`${getButtonClass(tag())}${pressed() === index() ? " pressed" : ""}`}
                       aria-pressed={tag().selected}
-                      aria-current={current().active_tag === index() ? 'true' : undefined}
+                      aria-current={tag().selected ? 'true' : undefined}
+                      data-tag-index={tagIndex}
+                      disabled={!current().wm_available}
+                      onContextMenu={event => { event.preventDefault(); event.stopPropagation(); if (current().wm_available) dispatchAction({ action: "toggle_tag_on", tag_index: tagIndex, monitor_id: current().monitor }).catch(console.error); }}
                       onMouseDown={() => setPressed(index())}
                       onClick={() => {
                         setPressed(null);
@@ -762,9 +802,9 @@ function App() {
                         }).catch(console.error);
                       }}
                       onMouseLeave={() => setPressed(null)}
-                      title={`Tag ${index() + 1}`}
+                      title={`Tag ${workspace()?.number ?? tagIndex + 1}`}
                     >
-                      <span class="nf-icon">{icon}</span>
+                      <span class="workspace-number">{workspace()?.number ?? tagIndex + 1}</span>
                     </button>
                   );
                 }}
@@ -807,9 +847,10 @@ function App() {
               </div>
             </div>
 
-            <div class="spacer" />
+            <div class="client-title" title={current().client_name || "JWM Desktop"}>{current().client_name || "JWM Desktop"}</div>
 
             <div class="right-info-container">
+<div class="pill network-pill" title="Network"><span class="metric-label">NET</span>{current().header_network || "--"}</div>
               <MinimizedDock
                 windows={current().minimized_windows}
                 overflow={current().minimized_overflow}
@@ -824,7 +865,7 @@ function App() {
                   title="CPU 平均使用率"
                 >
                   <span class="nf-icon">{ICON_CPU}</span>{" "}
-                  {current().system_details.cpu_average.toFixed(0)}%
+                  {current().header_cpu || "--"}
                 </div>
                 <div
                   class={`pill usage-pill ${severity(
@@ -835,7 +876,7 @@ function App() {
                   )} / ${formatBytes(current().system_details.memory_total)}`}
                 >
                   <span class="nf-icon">{ICON_MEM}</span>{" "}
-                  {current().system_details.memory_usage_percent.toFixed(0)}%
+                  {current().header_memory || "--"}
                 </div>
                 <div
                   class={`pill usage-pill ${batteryClass()}`}
@@ -880,7 +921,7 @@ function App() {
 
               <div
                 class={`pill volume-pill ${
-                  !current().audio_device || current().audio_device!.is_muted ? "muted" : ""
+                  current().audio_device?.is_muted ? "muted" : ""
                 }`}
                 onClick={() =>
                   dispatchAction({ action: "toggle_mute" }).catch(console.error)
@@ -898,32 +939,7 @@ function App() {
                 {current().audio_device ? `${current().audio_device!.volume}%` : "--"}
               </div>
 
-              <div class="shell-menu">
-                <div
-                  class={`pill shell-pill ${
-                    current().wm_available ? "" : "shell-pill-offline"
-                  }`}
-                  onClick={() => openShell("hub", current().wm_available)}
-                  title="JWM shell"
-                >
-                  <span class="nf-icon">{SHELL_ROUTES[0].icon}</span>
-                </div>
-                <Show when={current().wm_available}>
-                  <div class="shell-dropdown">
-                    <For each={SHELL_ROUTES}>
-                      {(entry) => (
-                        <div
-                          class="shell-route"
-                          onClick={() => openShell(entry.route, current().wm_available)}
-                        >
-                          <span class="nf-icon">{entry.icon}</span>
-                          <span>{entry.label}</span>
-                        </div>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-              </div>
+
 
               <div
                 class={`pill screenshot-pill ${isTaking() ? "taking" : ""}`}
@@ -935,6 +951,7 @@ function App() {
 
               <div
                 class="pill time-pill"
+                data-header-clock={current().header_clock_compact || "--"}
                 onClick={() =>
                   dispatchAction({ action: "toggle_seconds" }).catch(console.error)
                 }

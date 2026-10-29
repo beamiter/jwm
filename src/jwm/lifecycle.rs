@@ -1272,7 +1272,8 @@ impl Jwm {
     }
 
     pub(crate) fn cleanup_statusbar_processes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Clean up secondary bars
+        // The shared host belongs to the WM session, not any top bar.
+        self.stop_desktop_shell();
         self.cleanup_secondary_bars()?;
         Ok(())
     }

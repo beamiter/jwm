@@ -1,11 +1,12 @@
+mod header;
 use iced::futures::{SinkExt, Stream};
 use iced::mouse;
 use iced::time;
 use iced::widget::container;
 use xbar_core::presentation::{NodeId, PointerAction, VisualState};
 use xbar_core::tag_contrast::{TagColors, TagContrastMode, TagPalette};
-// Current iced widgets use explicit boxing at heterogeneous Element boundaries.
-use iced::widget::{Space, Stack, Widget as _, button, rich_text, tooltip};
+// Keep heterogeneous widget boundaries as Elements.
+use iced::widget::{Space, Stack, button, rich_text, tooltip};
 use iced::widget::{mouse_area, span};
 use iced::{Font, stream, theme};
 
@@ -19,10 +20,9 @@ use iced::{
 
 use log::{debug, info, warn};
 use std::env;
-use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
-use std::sync::{Once, OnceLock};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -110,19 +110,18 @@ fn compositor_active(conn: &XCBConnection, screen_num: usize) -> bool {
 
 /// Raw-handle wrapper for the probe window, so wgpu can build a surface on a
 /// window iced knows nothing about.
+#[derive(Debug, Clone)]
 struct ProbeTarget {
-    conn: *mut c_void,
+    conn: Arc<XCBConnection>,
     screen: i32,
     window: u32,
     visual_id: u32,
 }
 
-unsafe impl Send for ProbeTarget {}
-unsafe impl Sync for ProbeTarget {}
-
 impl HasDisplayHandle for ProbeTarget {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let conn = NonNull::new(self.conn).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let conn = NonNull::new(self.conn.get_raw_xcb_connection())
+            .ok_or(raw_window_handle::HandleError::Unavailable)?;
         let handle = XcbDisplayHandle::new(Some(conn), self.screen);
         Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Xcb(handle)) })
     }
@@ -138,14 +137,21 @@ impl HasWindowHandle for ProbeTarget {
     }
 }
 
-/// Whether a wgpu surface on this display can actually deliver per-pixel
-/// alpha. iced picks its surface alpha mode internally and never reports the
-/// outcome, so the bar asks the same question ahead of time: build a throwaway
-/// depth-32 window, get the surface capabilities, and accept only what
-/// iced_wgpu itself would upgrade to a transparent surface — `PreMultiplied`.
-/// Anything less and a transparent window would compose garbage, so the bar
-/// must stay solid.
-fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
+/// Native X11 ARGB may retain alpha even when GLES advertises Opaque.
+/// Keep non-ARGB and other backends on the toolkit's existing WSI policy.
+fn native_argb_alpha_supported(
+    native_argb: bool,
+    backend: wgpu::Backend,
+    modes: &[wgpu::CompositeAlphaMode],
+) -> bool {
+    native_argb
+        && (modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            || (backend == wgpu::Backend::Gl && modes.contains(&wgpu::CompositeAlphaMode::Opaque)))
+}
+
+/// Probe a server-verified ARGB window on an owned native display.
+/// GLES may advertise only Opaque while retaining that native alpha channel.
+fn surface_alpha_capable(conn: Arc<XCBConnection>, screen_num: usize) -> bool {
     let Some(screen) = conn.setup().roots.get(screen_num) else {
         return false;
     };
@@ -203,16 +209,30 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
         return false;
     }
 
+    // The server, rather than the requested creation depth, is authoritative.
+    let native_argb = conn
+        .get_geometry(window)
+        .ok()
+        .and_then(|reply| reply.reply().ok())
+        .is_some_and(|geometry| geometry.depth == 32);
+    if !native_argb {
+        let _ = conn.destroy_window(window);
+        let _ = conn.free_colormap(colormap);
+        let _ = conn.flush();
+        return false;
+    }
+
     let target = ProbeTarget {
-        conn: conn.get_raw_xcb_connection(),
+        conn: Arc::clone(&conn),
         screen: screen_num as i32,
         window,
         visual_id,
     };
     // Env-aware, like the instance iced itself will build: a `WGPU_BACKEND`
     // override must steer the probe onto the same backend it steers iced onto.
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
+        Box::new(target.clone()),
+    ));
     let capable = instance
         .create_surface(target)
         .ok()
@@ -226,14 +246,16 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
                 },
             ))
             .ok()?;
-            Some(
-                surface
-                    .get_capabilities(&adapter)
-                    .alpha_modes
-                    .contains(&wgpu::CompositeAlphaMode::PreMultiplied),
-            )
+            Some(native_argb_alpha_supported(
+                native_argb,
+                adapter.get_info().backend,
+                &surface.get_capabilities(&adapter).alpha_modes,
+            ))
         })
         .unwrap_or(false);
+    // Both the borrowed surface and its display-owning instance are gone
+    // before destroying the native scratch window.
+    drop(instance);
 
     let _ = conn.destroy_window(window);
     let _ = conn.free_colormap(colormap);
@@ -243,7 +265,9 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
 
 fn main() -> iced::Result {
     let args: Vec<String> = env::args().collect();
-    let application_id = "dev.iced.bar".to_string();
+    // JWM matches both halves of WM_CLASS against status_bar.name. Keep the
+    // toolkit identity aligned so this surface is managed as the header.
+    let application_id = "iced_bar".to_string();
     let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
     if let Err(e) = initialize_logging("iced_bar", &shared_path) {
@@ -258,7 +282,9 @@ fn main() -> iced::Result {
     let translucent = if x11rb::xcb_ffi::load_libxcb().is_ok() {
         match XCBConnection::connect(None) {
             Ok((conn, screen_num)) => {
-                compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+                let conn = Arc::new(conn);
+                compositor_active(&conn, screen_num)
+                    && surface_alpha_capable(Arc::clone(&conn), screen_num)
             }
             Err(_) => false,
         }
@@ -287,7 +313,7 @@ fn main() -> iced::Result {
             level: window::Level::AlwaysOnTop,
             ..Default::default()
         })
-        .font(NERD_FONT)
+        .default_font(NERD_FONT)
         .subscription(IcedBar::subscription)
         .style(IcedBar::style)
         .title("iced_bar")
@@ -385,13 +411,15 @@ impl IcedBar {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
-        let bar_config = BarConfig::load_default().unwrap_or_else(|error| {
+        let mut bar_config = BarConfig::load_default().unwrap_or_else(|error| {
             warn!("falling back to the default bar config: {error}");
             BarConfig::default()
         });
+        if bar_config.presentation.apply_desktop_header_profile() {
+            bar_config.background_opacity = bar_config.background_opacity.or(Some(0.58));
+        }
         let config = ModelConfig {
             initial_theme: bar_config.theme,
-            show_seconds: true,
             ..ModelConfig::default()
         };
         let runtime = if shared_path.is_empty() {
@@ -756,7 +784,16 @@ impl IcedBar {
             self.translucent,
         ) as f32;
         theme::Style {
-            background_color: background,
+            // The header canvas owns its rounded material; clearing behind
+            // it must leave the exterior pixels transparent.
+            background_color: if self.translucent
+                && self.presentation.desktop_header
+                && !self.presentation.edge.is_vertical()
+            {
+                Color::TRANSPARENT
+            } else {
+                background
+            },
             text_color: theme.palette().background.base.text,
         }
     }
@@ -809,7 +846,7 @@ impl IcedBar {
         let text_color = convert(colors.foreground);
 
         let radius = 6.0;
-        let workspace = button(
+        let workspace: Element<'a, Message> = button(
             rich_text![span(label.to_string()).color(text_color)]
                 .size(18)
                 .on_link_click(std::convert::identity),
@@ -840,7 +877,7 @@ impl IcedBar {
             }
         })
         .on_press(Message::TabSelected(index))
-        .boxed();
+        .into();
 
         // The passive overlay preserves the button's size and pointer events.
         // Keep an identical transparent marker for empty tags to avoid jumps.
@@ -855,7 +892,7 @@ impl IcedBar {
                 },
                 ..Default::default()
             });
-        let indicator = container(marker)
+        let indicator: Element<'a, Message> = container(marker)
             .width(Self::TAB_WIDTH)
             .height(Self::TAB_HEIGHT)
             .center_x(Self::TAB_WIDTH)
@@ -864,11 +901,11 @@ impl IcedBar {
                 bottom: 3.0,
                 ..Padding::ZERO
             })
-            .boxed();
-        Stack::<Element<'a, Message>>::new()
+            .into();
+        Stack::<Message>::new()
             .push(workspace)
             .push(indicator)
-            .boxed()
+            .into()
     }
 
     // -------- Pills --------
@@ -911,7 +948,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .boxed()
+            .into()
     }
 
     fn battery_pill<'a>(&self) -> Element<'a, Message> {
@@ -935,7 +972,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .boxed()
+            .into()
     }
 
     fn brightness_pill<'a>(&self) -> Element<'a, Message> {
@@ -961,7 +998,7 @@ impl IcedBar {
                 up: Some(UserAction::AdjustBrightness(5)),
                 down: Some(UserAction::AdjustBrightness(-5)),
             })
-            .boxed()
+            .into()
     }
 
     fn volume_pill<'a>(&self) -> Element<'a, Message> {
@@ -1007,7 +1044,7 @@ impl IcedBar {
                 up: Some(UserAction::AdjustVolume(5)),
                 down: Some(UserAction::AdjustVolume(-5)),
             })
-            .boxed()
+            .into()
     }
 
     /// Entry point into JWM's own shell surface.
@@ -1033,9 +1070,9 @@ impl IcedBar {
 
         let area = mouse_area(pill);
         if available {
-            area.on_press(Message::OpenShell).boxed()
+            area.on_press(Message::OpenShell).into()
         } else {
-            area.boxed()
+            area.into()
         }
     }
 
@@ -1057,7 +1094,7 @@ impl IcedBar {
             .on_enter(Message::MouseEnterScreenShot)
             .on_exit(Message::MouseExitScreenShot)
             .on_press(Message::LeftClick)
-            .boxed()
+            .into()
     }
 
     fn time_pill<'a>(&self) -> Element<'a, Message> {
@@ -1071,9 +1108,7 @@ impl IcedBar {
         .height(Self::PILL_HEIGHT)
         .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE));
 
-        mouse_area(pill)
-            .on_press(Message::ShowSecondsToggle)
-            .boxed()
+        mouse_area(pill).on_press(Message::ShowSecondsToggle).into()
     }
 
     fn monitor_pill<'a>(&self, monitor_num: i32) -> Element<'a, Message> {
@@ -1090,7 +1125,7 @@ impl IcedBar {
         .padding([3, 10])
         .height(Self::PILL_HEIGHT)
         .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
-        .boxed()
+        .into()
     }
 
     fn scale_pill<'a>(&self, scale: Option<f32>) -> Element<'a, Message> {
@@ -1103,7 +1138,7 @@ impl IcedBar {
             .padding([3, 10])
             .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
-            .boxed()
+            .into()
     }
 
     fn layout_toggle_button<'a>(&self) -> Element<'a, Message> {
@@ -1139,7 +1174,7 @@ impl IcedBar {
                 }
             })
             .on_press(Message::ToggleLayoutSelector)
-            .boxed()
+            .into()
     }
 
     /// One button per layout the *window manager* offers.
@@ -1168,7 +1203,7 @@ impl IcedBar {
             })
             .collect();
 
-        let mut row = Row::<Element<'_, Message>>::new().spacing(6);
+        let mut row = Row::<Message>::new().spacing(6);
         for (sym, idx, is_current) in layouts {
             let btn = button(text(sym).color(Color::WHITE))
                 .padding([3, 10])
@@ -1201,10 +1236,10 @@ impl IcedBar {
                 })
                 .on_press(Message::LayoutClicked(idx));
 
-            row = row.push(btn.boxed());
+            row = row.push(btn);
         }
 
-        row.boxed()
+        row.into()
     }
 
     fn place_dock_element<'a>(
@@ -1221,7 +1256,7 @@ impl IcedBar {
             })
             .width(Length::Fill)
             .height(Length::Fill)
-            .boxed()
+            .into()
     }
 
     fn minimized_dock(&self) -> Element<'_, Message> {
@@ -1301,7 +1336,7 @@ impl IcedBar {
                 hovered: false,
             });
             items.push(Self::place_dock_element(
-                target.boxed(),
+                target.into(),
                 slot.x - shelf.x,
                 slot.y - shelf.y,
             ));
@@ -1336,7 +1371,7 @@ impl IcedBar {
                     .padding([4, 8]),
                     self.tooltip_position(),
                 )
-                .boxed(),
+                .into(),
                 bounds.x - shelf.x,
                 bounds.y - shelf.y,
             ));
@@ -1344,7 +1379,7 @@ impl IcedBar {
         container(iced::widget::stack(items))
             .width(shelf.width)
             .height(shelf.height)
-            .boxed()
+            .into()
     }
 
     fn pinned_dock(&self) -> Element<'_, Message> {
@@ -1354,7 +1389,7 @@ impl IcedBar {
 
     fn view_work_space(&self) -> Element<'_, Message> {
         // Workspace tag buttons
-        let mut tags_row = Row::<Element<'_, Message>>::new().spacing(Self::TAB_SPACING * 0.5);
+        let mut tags_row = Row::<Message>::new().spacing(Self::TAB_SPACING * 0.5);
         for (index, label) in self.tabs.iter().enumerate() {
             tags_row = tags_row
                 .push(self.workspace_button(index, label))
@@ -1365,7 +1400,7 @@ impl IcedBar {
         let layout_selector = if self.runtime.view().layout_selector_open {
             self.layout_options_row()
         } else {
-            Row::<Element<'_, Message>>::new().boxed()
+            Row::<Message>::new().into()
         };
 
         // System info pills
@@ -1388,40 +1423,35 @@ impl IcedBar {
 
         let scale_pill = self.scale_pill(Some(self.scale_factor));
 
-        Row::<Element<'_, Message>>::new()
-            .push(tags_row.boxed())
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+        Row::<Message>::new()
+            .push(tags_row)
+            .push(Space::new().width(6).height(Length::Fill))
             .push(layout_button)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(layout_selector)
-            .push(
-                Space::new()
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .boxed(),
-            )
+            .push(Space::new().width(Length::Fill).height(Length::Fill))
             .push(cpu_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(memory_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(battery_pill)
-            .push(Space::new().width(8).height(Length::Fill).boxed())
+            .push(Space::new().width(8).height(Length::Fill))
             .push(brightness_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(volume_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(shell_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(screenshot_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(time_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(monitor_pill)
-            .push(Space::new().width(6).height(Length::Fill).boxed())
+            .push(Space::new().width(6).height(Length::Fill))
             .push(scale_pill)
-            .push(Space::new().width(4).height(Length::Fill).boxed())
+            .push(Space::new().width(4).height(Length::Fill))
             .align_y(iced::Alignment::Center)
-            .boxed()
+            .into()
     }
 
     fn tooltip_position(&self) -> tooltip::Position {
@@ -1443,7 +1473,7 @@ impl IcedBar {
         let is_tag = matches!(spec.id, xbar_core::presentation::NodeId::Tag(_));
         let state = VisualState {
             hovered: false,
-            selected: spec.state.selected || spec.state.filled,
+            selected: spec.state.selected,
             urgent: spec.state.urgent,
             occupied: spec.state.occupied,
         };
@@ -1515,15 +1545,13 @@ impl IcedBar {
             container(text(title).size(12)).padding([4, 8]),
             self.tooltip_position(),
         )
-        .boxed()
+        .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
         let projection =
             xbar_core::PresentationProjector::project(self.runtime.view(), &self.presentation);
-        let mut leading = Column::<Element<'_, Message>>::new()
-            .spacing(4)
-            .width(Length::Fill);
+        let mut leading = Column::<Message>::new().spacing(4).width(Length::Fill);
         for spec in projection
             .tags
             .into_iter()
@@ -1532,33 +1560,33 @@ impl IcedBar {
         {
             leading = leading.push(self.sidebar_cell(spec));
         }
-        let mut trailing = Column::<Element<'_, Message>>::new()
-            .spacing(4)
-            .width(Length::Fill);
+        let mut trailing = Column::<Message>::new().spacing(4).width(Length::Fill);
         for spec in projection.status.into_iter().rev() {
             trailing = trailing.push(self.sidebar_cell(spec));
         }
-        Column::<Element<'_, Message>>::new()
+        Column::<Message>::new()
             .padding(3)
             .spacing(6)
-            .push(
-                iced::widget::scrollable(leading)
-                    .height(Length::FillPortion(1))
-                    .boxed(),
-            )
-            .push(
-                iced::widget::scrollable(trailing)
-                    .height(Length::FillPortion(1))
-                    .boxed(),
-            )
+            .push(iced::widget::scrollable(leading).height(Length::FillPortion(1)))
+            .push(iced::widget::scrollable(trailing).height(Length::FillPortion(1)))
             .width(Length::Fill)
             .height(self.dock.shelf_bounds().map_or(Length::Fill, |bounds| {
                 Length::Fixed((bounds.y - 6.0).max(0.0))
             }))
-            .boxed()
+            .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.presentation.desktop_header && !self.presentation.edge.is_vertical() {
+            return iced::widget::canvas(header::Header {
+                snapshot: self.runtime.snapshot(),
+                config: self.presentation.clone(),
+                background_alpha: self.background.a,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        }
         let controls = if self.presentation.edge.is_vertical() {
             self.sidebar()
         } else {
@@ -1566,7 +1594,7 @@ impl IcedBar {
                 .dock
                 .shelf_bounds()
                 .map_or(4.0, |bounds| bounds.width + 10.0);
-            Column::<Element<'_, Message>>::new()
+            Column::<Message>::new()
                 .padding(Padding {
                     left: 4.0,
                     top: 4.0,
@@ -1577,11 +1605,47 @@ impl IcedBar {
                 .push(self.view_work_space())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .boxed()
+                .into()
         };
         iced::widget::stack([controls, self.pinned_dock()])
             .width(Length::Fill)
             .height(Length::Fill)
-            .boxed()
+            .into()
+    }
+}
+
+#[cfg(test)]
+mod alpha_probe_tests {
+    use super::native_argb_alpha_supported;
+    use wgpu::{Backend, CompositeAlphaMode as Alpha};
+    #[test]
+    fn opaque_gles_requires_a_verified_native_argb_window() {
+        let advertised = [Alpha::Opaque];
+        assert!(native_argb_alpha_supported(true, Backend::Gl, &advertised));
+        assert!(!native_argb_alpha_supported(
+            false,
+            Backend::Gl,
+            &advertised
+        ));
+        assert!(!native_argb_alpha_supported(
+            true,
+            Backend::Vulkan,
+            &advertised
+        ));
+        assert_eq!(advertised, [Alpha::Opaque]);
+    }
+    #[test]
+    fn missing_native_alpha_or_missing_modes_remains_opaque() {
+        assert!(!native_argb_alpha_supported(
+            false,
+            Backend::Gl,
+            &[Alpha::PreMultiplied]
+        ));
+        assert!(!native_argb_alpha_supported(true, Backend::Gl, &[]));
+        assert!(native_argb_alpha_supported(
+            true,
+            Backend::Vulkan,
+            &[Alpha::PreMultiplied]
+        ));
     }
 }

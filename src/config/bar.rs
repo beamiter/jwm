@@ -11,6 +11,46 @@ fn invalid(message: impl Into<String>) -> ConfigError {
 }
 
 impl Config {
+    /// Save the mode transition as one atomic, comment-preserving edit. A
+    /// first explicit table also carries legacy timing values forward.
+    pub(crate) fn persist_desktop_shell_mode(
+        &self,
+        desired: &xbar_core::desktop_shell::DesktopShellConfig,
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        self.persist_desktop_shell_mode_to(Self::resolve_load_path(), desired)
+    }
+
+    fn persist_desktop_shell_mode_to(
+        &self,
+        path: impl AsRef<Path>,
+        desired: &xbar_core::desktop_shell::DesktopShellConfig,
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        let value = serde_json::to_value(desired).map_err(|error| invalid(error.to_string()))?;
+        let selected = self
+            .with_validated_value("desktop_shell", &value)
+            .map_err(invalid)?;
+        let path = path.as_ref();
+        let existing = match super::read_config_text(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(selected.save_to_file_with_outcome(path)?.revision?);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let table: toml::Table = toml::from_str(&existing)?;
+        let is_migration = !table.contains_key("desktop_shell");
+        let mut edited = existing;
+        for (field, value) in value
+            .as_object()
+            .expect("desktop shell serializes as a table")
+        {
+            if is_migration || matches!(field.as_str(), "enabled" | "left" | "right" | "bottom") {
+                edited = edit_setting(&edited, "desktop_shell", field, value).map_err(invalid)?;
+            }
+        }
+        Ok(super::atomic_write_with_outcome(path, edited.as_bytes())?.revision?)
+    }
+
     pub(crate) fn persist_bar_setting(
         &self,
         key: &str,
@@ -28,7 +68,15 @@ impl Config {
         changed_monitor: Option<i32>,
     ) -> Result<std::time::SystemTime, ConfigError> {
         let (section, field) = match key {
+            "status_bar.name" => ("status_bar", "name"),
             "status_bar.layout" => ("status_bar", "layout"),
+            "desktop_shell.enabled" => ("desktop_shell", "enabled"),
+            "desktop_shell.left" => ("desktop_shell", "left"),
+            "desktop_shell.right" => ("desktop_shell", "right"),
+            "desktop_shell.bottom" => ("desktop_shell", "bottom"),
+            "desktop_shell.reveal_delay_ms" => ("desktop_shell", "reveal_delay_ms"),
+            "desktop_shell.hide_delay_ms" => ("desktop_shell", "hide_delay_ms"),
+            "desktop_shell.trigger_pixels" => ("desktop_shell", "trigger_pixels"),
             "status_bar.position" => ("status_bar", "position"),
             "status_bar.monitors" => ("status_bar", "monitors"),
             "appearance.status_bar_height" => ("appearance", "status_bar_height"),
@@ -155,6 +203,104 @@ fn edit_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_mode_persistence_is_atomic_and_keeps_unrelated_configuration() {
+        use xbar_core::desktop_shell::DesktopShellConfig;
+        use xbar_core::edge_shell::RevealMode;
+        let directory = std::env::temp_dir().join(format!(
+            "jwm-shell-mode-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("config_x11.toml");
+        let config = Config::default()
+            .with_validated_value(
+                "desktop_shell",
+                &serde_json::json!({"reveal_delay_ms":123,"hide_delay_ms":456}),
+            )
+            .unwrap();
+        config.save_to_file(&path).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!("# user's desktop\n{original}\n# trailing comment\n"),
+        )
+        .unwrap();
+        let desired = DesktopShellConfig {
+            enabled: true,
+            left: RevealMode::Always,
+            right: RevealMode::Disabled,
+            bottom: RevealMode::Always,
+            reveal_delay_ms: 123,
+            hide_delay_ms: 456,
+            ..Default::default()
+        };
+        config
+            .persist_desktop_shell_mode_to(&path, &desired)
+            .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# user's desktop"));
+        assert!(saved.contains("# trailing comment"));
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.desktop_shell_config(), desired);
+        assert_eq!(loaded.status_bar_position(), config.status_bar_position());
+        let hovered = desired.toggled_mode();
+        loaded
+            .persist_desktop_shell_mode_to(&path, &hovered)
+            .unwrap();
+        assert_eq!(
+            Config::load_from_file(&path)
+                .unwrap()
+                .desktop_shell_config(),
+            hovered
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn shell_mode_persistence_promotes_legacy_ownership_and_disabled_edges() {
+        use xbar_core::desktop_shell::{DesktopShellConfig, DesktopShellSource};
+        use xbar_core::edge_shell::RevealMode;
+        let path = std::env::temp_dir().join(format!(
+            "jwm-shell-mode-legacy-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let config = Config::default()
+            .with_validated_value("status_bar.layout", &serde_json::json!("four-edge"))
+            .unwrap();
+        config.save_to_file(&path).unwrap();
+        assert_eq!(
+            config.desktop_shell_source(),
+            DesktopShellSource::LegacyFourEdge
+        );
+        let desired = DesktopShellConfig {
+            right: RevealMode::Disabled,
+            ..config.desktop_shell_config()
+        }
+        .toggled_mode();
+        config
+            .persist_desktop_shell_mode_to(&path, &desired)
+            .unwrap();
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(
+            loaded.desktop_shell_source(),
+            DesktopShellSource::DesktopShell
+        );
+        assert_eq!(loaded.desktop_shell_config(), desired);
+        assert!(desired.enabled);
+        assert_eq!(desired.right, RevealMode::Disabled);
+        assert_eq!(desired.left, RevealMode::Hover);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn bar_persistence_preserves_unrelated_comments_and_supports_monitor_tables() {

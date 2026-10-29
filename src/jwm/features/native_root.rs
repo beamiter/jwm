@@ -163,7 +163,7 @@ impl Jwm {
         if !root_wallpaper_needed(
             backend.has_compositor(),
             backend.native_root_wallpaper_supported(),
-            CONFIG.load().status_bar_four_edge(),
+            CONFIG.load().desktop_shell_enabled(),
         ) {
             return;
         }
@@ -253,7 +253,7 @@ impl Jwm {
             return;
         };
         self.features.native_root_job = None;
-        if backend.has_compositor() && !CONFIG.load().status_bar_four_edge() {
+        if backend.has_compositor() && !CONFIG.load().desktop_shell_enabled() {
             return;
         }
         if let Some(pixels) = result {

@@ -1944,8 +1944,6 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pixels"
 version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27af78f16789b973b8b340fe3f68cc2ec9f5e6f4aea64e4d794d5833ac9ca52e"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2569,6 +2567,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cairo-rs 0.22.9",
+ "gtk",
  "libc",
  "log",
  "pango 0.22.9",

@@ -568,11 +568,7 @@ impl Pill {
             .update_property(&[gtk4::accessible::Property::Label(&accessible)]);
         self.button.set_can_focus(spec.state.enabled);
 
-        set_class(
-            &self.button,
-            "selected",
-            spec.state.selected || (matches!(spec.id, NodeId::Tag(_)) && spec.state.filled),
-        );
+        set_class(&self.button, "selected", spec.state.selected);
         set_class(&self.button, "urgent", spec.state.urgent);
         // `filled` means filter/selection, not the presence of clients.
         let occupied =

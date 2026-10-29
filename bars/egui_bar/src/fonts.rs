@@ -89,8 +89,14 @@ fn register(
     family: &str,
     key: &str,
 ) -> Option<String> {
+    let family_name = match family.trim().to_ascii_lowercase().as_str() {
+        "sans" | "sans serif" | "sans-serif" | "system-ui" => FamilyName::SansSerif,
+        "serif" => FamilyName::Serif,
+        "monospace" | "mono" => FamilyName::Monospace,
+        _ => FamilyName::Title(family.to_owned()),
+    };
     let handle = source
-        .select_best_match(&[FamilyName::Title(family.to_owned())], &Properties::new())
+        .select_best_match(&[family_name], &Properties::new())
         .ok()?;
     // The face index matters: the Noto CJK faces ship as `.ttc` collections,
     // and index 0 is a different language's face than the one selected.

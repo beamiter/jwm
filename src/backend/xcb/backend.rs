@@ -1399,7 +1399,8 @@ impl XcbBackend {
             window: root,
             enable: xcb::randr::NotifyMask::SCREEN_CHANGE
                 | xcb::randr::NotifyMask::OUTPUT_CHANGE
-                | xcb::randr::NotifyMask::CRTC_CHANGE,
+                | xcb::randr::NotifyMask::CRTC_CHANGE
+                | xcb::randr::NotifyMask::RESOURCE_CHANGE,
         }));
 
         let compositor_enabled = crate::config::effective_x11_compositor_enabled(

@@ -5,11 +5,11 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
-mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bridge/dist" "$REPO/assets/wallpapers" "$TEST_ROOT/bin"
-cp "$ROOT/scripts/install_jwm_scripts.sh" "$ROOT/scripts/install-wallpapers.sh" "$REPO/scripts/"
+mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/bridge/dist" "$REPO/assets/wallpapers" "$TEST_ROOT/bin"
+cp "$ROOT/scripts/install_jwm_scripts.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$REPO/scripts/"
 printf 'bundled fixture\n' > "$REPO/assets/wallpapers/01-fixture.png"
 touch "$REPO/bars/tao_glow_bar/Cargo.toml" "$REPO/bridge/Cargo.toml" "$REPO/bridge/dist/org.freedesktop.Notifications.service"
-touch "$REPO/bars/tao_pixels_bar/Cargo.toml"
+touch "$REPO/bars/tao_pixels_bar/Cargo.toml" "$REPO/bars/tauri_leptos_bar/Cargo.toml" "$REPO/crates/jwm_shell/Cargo.toml"
 cp "$ROOT/bridge/dist/jwm-player.desktop" "$ROOT/bridge/dist/jwm-video.desktop" "$REPO/bridge/dist/"
 cat > "$TEST_ROOT/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
@@ -49,7 +49,7 @@ if [[ $package == jwm && $SCENARIO != success && $SCENARIO != tee-success && $SC
     fi
 fi
 mkdir -p "$target/$profile"
-for binary in jwm jwm-tool jwm-support jwm-remote jwm-bridge jwm-player; do
+for binary in jwm jwm-tool jwm-support jwm-remote jwm-bridge jwm-player jwm-shell; do
     [[ $SCENARIO != player-missing || $binary != jwm-player ]] || continue
     printf '#!/bin/sh\nexit 0\n' > "$target/$profile/$binary"
     chmod +x "$target/$profile/$binary"
@@ -224,7 +224,7 @@ check_bar_selection() {
     grep -Fq "\"$expected_config\"" "$CASE_DIR/config/jwm/config_x11.toml" || fail "$name changed or failed to change the selected bar"
     grep -Fq "\"$expected_config\"" "$CASE_DIR/config/jwm/config_wayland.toml" || fail "$name ignored the Wayland bar configuration"
 }
-check_bar_selection default '' tao_glow_bar
+check_bar_selection default '' tauri_leptos_bar
 check_bar_selection environment tao_pixels_bar tao_pixels_bar
 check_bar_selection argument tao_glow_bar tao_pixels_bar --bar tao_pixels_bar
 check_bar_selection argument-over-environment tao_pixels_bar tao_glow_bar --bar tao_glow_bar

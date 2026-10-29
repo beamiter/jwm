@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real edge sensors, independent reveal, hide cancellation and pinning.
 
-Build bars/tao_glow_bar first. Requires Xvfb, xdotool, xev and a D-Bus session.
+Build bars/tao_glow_bar first. Requires Xvfb, xdotool and libX11. A D-Bus session enables desktop providers.
 No existing desktop or user configuration is touched.
 JWM_TEST_BIN_DIR selects JWM/tool binaries (default target/debug).
 """
@@ -40,6 +40,7 @@ def main():
         log = (work / "session.log").open("w+")
 
         event_files = []
+        event_displays = []
 
         def spawn(*args, **kwargs):
             kwargs.setdefault("stdout", log)
@@ -51,8 +52,8 @@ def main():
         def run(*args):
             return subprocess.check_output(args, env=env, text=True, stderr=subprocess.STDOUT, timeout=10)
 
-        def wait_for(predicate, label="edge shell readiness/interaction timeout"):
-            deadline = time.monotonic() + 10
+        def wait_for(predicate, label="edge shell readiness/interaction timeout", timeout=10):
+            deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
                     value = predicate()
@@ -121,13 +122,41 @@ def main():
                 xlib.XCloseDisplay(display)
 
         def observe_structure(window, label):
+            # Observe on our own synchronized X connection. An external xev
+            # process can be scheduled after the baseline sample under parallel
+            # build load, falsely attributing an intentional earlier hide to a
+            # later handoff. XSync orders every sample against server events.
+            import ctypes.util
+            xlib = ctypes.CDLL(ctypes.util.find_library("X11"))
+            xlib.XOpenDisplay.argtypes, xlib.XOpenDisplay.restype = [ctypes.c_char_p], ctypes.c_void_p
+            xlib.XSelectInput.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_long]
+            xlib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            xlib.XPending.argtypes = [ctypes.c_void_p]
+            xlib.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            display = xlib.XOpenDisplay(env["DISPLAY"].encode())
+            assert display, "structure observer could not open private display"
+            event_displays.append((xlib, display))
+            xlib.XSelectInput(display, int(window, 0), 1 << 17)  # StructureNotifyMask
+            xlib.XSync(display, 0)
             trace = work / f"structure-{label}.log"
-            stream = trace.open("w")
+            stream = trace.open("w", buffering=1)
             event_files.append(stream)
-            watcher = spawn("stdbuf", "-oL", "xev", "-id", window, "-event", "structure", stdout=stream)
-            time.sleep(0.08)
-            assert watcher.poll() is None, "structure observer failed to attach"
-            return lambda: trace.read_text().count("UnmapNotify")
+            count = 0
+            def unmaps():
+                nonlocal count
+                xlib.XSync(display, 0)
+                while xlib.XPending(display):
+                    event = (ctypes.c_long * 24)()
+                    xlib.XNextEvent(display, ctypes.byref(event))
+                    kind = ctypes.cast(ctypes.byref(event), ctypes.POINTER(ctypes.c_int))[0]
+                    if kind == 18:
+                        count += 1
+                        stream.write("UnmapNotify\n")
+                    elif kind == 19:
+                        stream.write("MapNotify\n")
+                return count
+            return unmaps
 
         def stay_visible(window, unmaps, baseline, label, duration):
             deadline = time.monotonic() + duration
@@ -227,7 +256,9 @@ def main():
 
             config.write_text('[edge_shell]\nreveal_delay_ms = 40\nhide_delay_ms = 300\n')
             bar = spawn(str(BAR))
-            left, right, bottom = [wait_for(lambda edge=edge: find(edge)) for edge in ["left", "right", "bottom"]]
+            # GTK may synchronously wait for a freshly activated desktop portal
+            # during application registration. Interaction deadlines stay short.
+            left, right, bottom = [wait_for(lambda edge=edge: find(edge), timeout=45) for edge in ["left", "right", "bottom"]]
             triggers = [find("trigger-" + edge) for edge in ["left", "right", "bottom"]]
             if os.environ.get("JWM_EDGE_TEST_WAYLAND_TRIGGER") == "1":
                 assert "Depth: 32" in run("xwininfo","-id",triggers[0])
@@ -304,6 +335,12 @@ def main():
             if os.environ.get("JWM_EDGE_TEST_REFERENCE") == "1":
                 content = re.sub(r'^status_bar_height = .*$', 'status_bar_height = 52', content, flags=re.M)
                 content = re.sub(r'^status_bar_padding = .*$', 'status_bar_padding = 12', content, flags=re.M)
+            content = re.sub(r'^name = ".*_bar"$', 'name = "tao_glow_bar"', content, flags=re.M)
+            # This fixture retains the explicit independent legacy rollback path.
+            # Shared-host lifecycle and all frontend switches have their own
+            # parameterized test-shared-sidebar-shell-x11.py fixture.
+            content += '\n[desktop_shell]\nenabled = false\n'
+            env["XBAR_LEGACY_PRIVATE_SHELL"] = "1"
             jwm_config.write_text(content)
             config.write_text('[edge_shell]\nleft = "always"\nright = "always"\nbottom = "always"\n[glass]\nwallpaper = ' + json.dumps(str(wallpaper)) + '\n')
             spawn(str(jwm), "--backend", "x11rb")
@@ -367,6 +404,8 @@ def main():
                     pass
             raise
         finally:
+            for xlib, display in event_displays:
+                xlib.XCloseDisplay(display)
             for child in reversed(children):
                 if child.poll() is None:
                     child.terminate()
@@ -381,4 +420,18 @@ def main():
 
 
 if __name__ == "__main__":
+    # Keep the original standalone/explicit rollback hover handoff, grab and
+    # flicker regression, then exercise migration to the shared process.
     main()
+    # Legacy per-edge settings now migrate to the session-owned shared host;
+    # this entry point continues to exercise file hot edits and rollback.
+    import sys
+    command = [sys.executable, str(ROOT / "scripts/test-shared-sidebar-shell-x11.py"),
+               "--bar", "tao_glow_bar", "--bar-bin", str(BAR),
+               "--backend", os.environ.get("JWM_TEST_BACKEND", "x11rb"),
+               "--bin-dir", str(BIN), "--shell-bin", os.environ.get("JWM_TEST_SHELL_BIN", str(ROOT / "crates/jwm_shell/target/debug/jwm-shell")),
+               "--legacy-edge-shell", "--deep"]
+    second = ROOT / "bars/tao_pixels_bar/target/debug/tao_pixels_bar"
+    if second.is_file():
+        command.extend(["--second-bar-bin", str(second)])
+    subprocess.run(command, check=True)

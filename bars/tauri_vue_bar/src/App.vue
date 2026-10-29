@@ -3,21 +3,45 @@
   <div v-if="!monitorSnapshot" class="button-row">Loading...</div>
 
   <!-- 主界面 -->
-  <div v-else class="button-row">
+  <div v-else class="button-row" data-desktop-header="true" :data-active-tag="monitorSnapshot.active_tag ?? ''" :data-battery-charging="String(monitorSnapshot.battery.charging)" :data-theme="monitorSnapshot.theme?.toLowerCase()">
     <div class="buttons-container">
+<div class="shell-menu">
+        <div
+          class="pill shell-pill"
+          :class="{ 'shell-pill-offline': !wmAvailable }"
+          @click="onOpenShell('hub')"
+          title="JWM shell"
+        >
+          <span class="header-launcher-glyph">▦</span>
+        </div>
+        <div v-if="wmAvailable" class="shell-dropdown">
+          <div
+            v-for="entry in SHELL_ROUTES"
+            :key="entry.route"
+            class="shell-route"
+            @click="onOpenShell(entry.route)"
+          >
+            <span class="nf-icon">{{ entry.icon }}</span>
+            <span>{{ entry.label }}</span>
+          </div>
+        </div>
+      </div>
       <!-- Tag Buttons -->
       <button
-        v-for="(icon, i) in TAG_ICONS"
-        :key="i"
-        :class="buttonClass(i)"
-        :aria-pressed="monitorSnapshot.tags[i]?.selected ?? false"
-        :aria-current="monitorSnapshot.active_tag === i ? 'true' : undefined"
-        @mousedown="pressedButton = i"
-        @click="onTagRelease(i)"
+        v-for="workspace in monitorSnapshot.workspace_tags ?? []"
+        :key="workspace.id"
+        :class="buttonClass(workspace)"
+        :aria-pressed="workspace.state.selected"
+        :aria-current="workspace.state.selected ? 'true' : undefined"
+        :data-tag-index="workspace.id"
+        :disabled="!wmAvailable"
+        @contextmenu.prevent.stop="wmAvailable && dispatchAction({ action: 'toggle_tag_on', tag_index: workspace.id, monitor_id: monitorSnapshot.monitor }).catch(console.error)"
+        @mousedown="pressedButton = workspace.id"
+        @click="onTagRelease(workspace.id)"
         @mouseleave="pressedButton = null"
-        :title="`Tag ${i + 1}`"
+        :title="`Tag ${workspace.number}`"
       >
-        <span class="nf-icon">{{ icon }}</span>
+        <span class="workspace-number">{{ workspace.number }}</span>
       </button>
 
       <!-- 布局切换 -->
@@ -52,9 +76,10 @@
       </div>
     </div>
 
-    <div class="spacer"></div>
+    <div class="client-title" :title="monitorSnapshot.client_name || 'JWM Desktop'">{{ monitorSnapshot.client_name || 'JWM Desktop' }}</div>
 
     <div class="right-info-container">
+<div class="pill network-pill" title="Network"><span class="metric-label">NET</span>{{ monitorSnapshot.header_network || '--' }}</div>
       <div
         class="minimized-dock"
         :class="{ 'is-empty': !monitorSnapshot.minimized_windows.length && !monitorSnapshot.minimized_overflow }"
@@ -92,7 +117,7 @@
         <div class="system-info-container">
           <div class="pill usage-pill" :class="cpuClass" title="CPU 平均使用率">
             <span class="nf-icon">{{ ICON_CPU }}</span>
-            {{ Math.round(systemSnapshot.cpu_average) }}%
+            {{ monitorSnapshot.header_cpu || '--' }}
           </div>
           <div
             class="pill usage-pill"
@@ -100,7 +125,7 @@
             :title="`内存使用: ${formatBytes(systemSnapshot.memory_used)} / ${formatBytes(systemSnapshot.memory_total)}`"
           >
             <span class="nf-icon">{{ ICON_MEM }}</span>
-            {{ Math.round(systemSnapshot.memory_usage_percent) }}%
+            {{ monitorSnapshot.header_memory || '--' }}
           </div>
           <div
             class="pill usage-pill"
@@ -148,27 +173,7 @@
       </div>
 
       <!-- JWM shell 入口 -->
-      <div class="shell-menu">
-        <div
-          class="pill shell-pill"
-          :class="{ 'shell-pill-offline': !wmAvailable }"
-          @click="onOpenShell('hub')"
-          title="JWM shell"
-        >
-          <span class="nf-icon">{{ SHELL_ROUTES[0].icon }}</span>
-        </div>
-        <div v-if="wmAvailable" class="shell-dropdown">
-          <div
-            v-for="entry in SHELL_ROUTES"
-            :key="entry.route"
-            class="shell-route"
-            @click="onOpenShell(entry.route)"
-          >
-            <span class="nf-icon">{{ entry.icon }}</span>
-            <span>{{ entry.label }}</span>
-          </div>
-        </div>
-      </div>
+
 
       <!-- 截图按钮 -->
       <div
@@ -183,6 +188,7 @@
       <!-- 时间 -->
       <div
         class="pill time-pill"
+                :data-header-clock="monitorSnapshot.header_clock_compact || '--'"
         @click="onToggleSeconds"
         :title="showSeconds ? '点击隐藏秒' : '点击显示秒'"
       >
@@ -211,6 +217,12 @@ interface TagState {
   urgent: boolean;
   filled: boolean;
   occupied: boolean;
+}
+
+interface WorkspaceTag {
+  id: number;
+  number: number;
+  state: TagState;
 }
 
 interface AudioDeviceInfo {
@@ -258,6 +270,12 @@ interface BarSnapshot {
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
+  workspace_tags?: WorkspaceTag[];
+  header_network?: string;
+  header_cpu?: string;
+  header_memory?: string;
+  theme?: string;
+  header_clock_compact?: string;
   active_tag?: number | null;
   monitor: number;
   layout_symbol: string;
@@ -274,6 +292,11 @@ interface BarSnapshot {
 }
 
 interface FrontendEnvelope {
+  workspace_tags: WorkspaceTag[];
+  header_network: string;
+  header_cpu: string;
+  header_memory: string;
+  header_clock_compact: string;
   revision: number;
   changes: number;
   snapshot: BarSnapshot;
@@ -291,6 +314,7 @@ type ShellRoute =
 
 type ActionRequest =
   | { action: 'view_tag_on'; tag_index: number; monitor_id: number }
+  | { action: "toggle_tag_on"; tag_index: number; monitor_id: number }
   | { action: 'toggle_layout_selector' }
   | { action: 'set_layout_on'; layout_id: number; monitor_id: number }
   | { action: 'toggle_seconds' }
@@ -323,8 +347,9 @@ type ActionRequest =
     }
   | { action: 'open_shell_hub'; route: ShellRoute };
 
+const desktopHeader = () => !["left", "right"].includes(document.documentElement.dataset.barEdge || "top");
 const dispatchAction = (request: ActionRequest): Promise<void> =>
-  invoke('dispatch_action', { request });
+  desktopHeader() && request.action === "set_dock_geometry" ? Promise.resolve() : invoke('dispatch_action', { request });
 
 let snapshotBarOrigin: Pick<DockGeometry, 'x' | 'y'> | null = null;
 let currentWmSessionId = 0;
@@ -332,17 +357,7 @@ let currentMinimizedGeneration = 0;
 let currentWmAvailable = false;
 
 // --- Nerd Font 图标 ---
-const TAG_ICONS = [
-  '\u{F0A1E}', // terminal
-  '\u{F0239}', // firefox
-  '\u{F0A1B}', // code
-  '\u{F0B79}', // chat
-  '\u{F024B}', // folder
-  '\u{F0388}', // music
-  '\u{F0567}', // video
-  '\u{F01F0}', // mail
-  '\u{F0297}', // gamepad
-];
+
 
 const ICON_CPU = '\u{F4BC}';
 const ICON_MEM = '\u{F035B}';
@@ -373,12 +388,11 @@ const ICON_MON = '\u{F0379}';
 // --- 帮助函数 ---
 const getButtonClass = (tag: TagState): string => {
   const state = tag.urgent ? "urgent"
-    : tag.filled ? "filtered"
     : tag.selected ? "selected"
     : tag.occupied ? "occupied"
     : "default";
   // Keep the client marker independent of the winning background state.
-  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}`;
+  return `emoji-button state-${state}${tag.occupied ? " has-clients" : ""}${tag.filled ? " has-focus" : ""}`;
 };
 
 const formatBytes = (bytes: number): string => {
@@ -601,6 +615,7 @@ function requestDockGeometryPublish(
 }
 
 function scheduleDockGeometry(current: BarSnapshot) {
+    if (desktopHeader()) { cancelDockGeometryRetry(); return; }
   if (!current.wm_available || current.wm_session_id === 0) {
     cancelDockGeometryRetry();
     dockResizeObserver?.disconnect();
@@ -658,7 +673,7 @@ onMounted(() => {
       currentWmSessionId = event.payload.snapshot.wm_session_id;
       currentMinimizedGeneration = event.payload.snapshot.wm_sequence ?? 0;
       currentWmAvailable = event.payload.snapshot.wm_available;
-      snapshot.value = event.payload.snapshot;
+      snapshot.value = { ...event.payload.snapshot, workspace_tags: event.payload.workspace_tags, header_network: event.payload.header_network, header_cpu: event.payload.header_cpu, header_memory: event.payload.header_memory, header_clock_compact: event.payload.header_clock_compact };
       scheduleDockGeometry(event.payload.snapshot);
     });
     if (cancelled) {
@@ -756,7 +771,7 @@ const batteryLabel = computed(() => {
 
 const volumeMuted = computed(() => {
   const s = audioSnapshot.value;
-  return !s || s.is_muted;
+  return s?.is_muted ?? false;
 });
 
 const volumeIconChar = computed(() => {
@@ -781,15 +796,9 @@ const brightnessLabel = computed(() => {
 });
 
 // --- 事件处理 ---
-function buttonClass(i: number) {
-  const tag = snapshot.value?.tags[i] ?? {
-    selected: false,
-    urgent: false,
-    filled: false,
-    occupied: false,
-  };
-  const baseClass = getButtonClass(tag);
-  const isPressed = pressedButton.value === i;
+function buttonClass(workspace: WorkspaceTag) {
+  const baseClass = getButtonClass(workspace.state);
+  const isPressed = pressedButton.value === workspace.id;
   return isPressed ? `${baseClass} pressed` : baseClass;
 }
 

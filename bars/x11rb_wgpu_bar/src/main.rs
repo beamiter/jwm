@@ -335,6 +335,7 @@ fn main() -> Result<()> {
     let screen = &setup.roots[screen_num];
 
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
     let edge = presentation.edge;
@@ -344,10 +345,11 @@ fn main() -> Result<()> {
         .clamp(1.0, f64::from(u16::MAX)) as u16;
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
+    bar.renderer_mut().set_capsule(desktop_header);
 
     // Only ask wgpu for an alpha-carrying surface when a compositor can blend
-    // it and the server has an ARGB visual to build the window on; the surface
-    // negotiation below still has the final say.
+    // it and the server has an ARGB visual to build the window on. That native
+    // alpha channel is authoritative even when GLES reports an Opaque WSI.
     let argb_visual = if compositor_active(&conn, screen_num) {
         find_argb_visual(screen)
     } else {
@@ -426,9 +428,24 @@ fn main() -> Result<()> {
     let properties: Vec<_> = spec
         .properties()
         .into_iter()
+        .chain(std::iter::once(DockProperty {
+            name: "_NET_WM_PID",
+            value: DockPropertyValue::Cardinals(vec![std::process::id()]),
+        }))
         .filter(|property| shared_path.is_empty() || !property.name.starts_with("_NET_WM_STRUT"))
         .collect();
     write_dock_properties(&conn, win, &properties)?;
+    // The compositor uses WM_CLASS for the header's material and outline.
+    // The title alone identifies the window to JWM but does not set that class.
+    let wm_class = format!("{BAR_NAME}\0{BAR_NAME}\0");
+    conn.change_property8(
+        PropMode::REPLACE,
+        win,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        wm_class.as_bytes(),
+    )?
+    .check()?;
 
     // 绑定 WGPU
     let target = Arc::new(XcbTarget {
@@ -449,7 +466,12 @@ fn main() -> Result<()> {
     // translucent; anywhere short of that the bar must paint fully opaque —
     // a 0.55 wash over an undefined clear is never acceptable.
     let translucent = want_alpha && gpu.is_transparent();
-    bar.follow_wm_background(app_config.background_opacity, translucent);
+    bar.follow_wm_background(
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
+        translucent,
+    );
 
     conn.map_window(win)?.check()?;
     conn.flush()?;

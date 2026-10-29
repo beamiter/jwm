@@ -3430,6 +3430,7 @@ mod tests {
             system_ui_query_replace: false,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
+            desktop_shell: Default::default(),
             secondary_bar_failures: HashMap::new(),
             secondary_bar_retry_after: HashMap::new(),
             transient_children: crate::jwm::process::TransientChildSupervisor::default(),
@@ -7573,6 +7574,54 @@ mod tests {
         jwm.s_w = 3840;
         jwm.s_h = 1080;
         (jwm, left, right)
+    }
+
+    #[test]
+    fn bar_secondary_workspace_command_toggles_only_the_target_monitors_view() {
+        use crate::core::models::WMClient;
+        use xbar_core::shared_structures::SharedCommand;
+
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        jwm.state.monitors[left].tag_set = [1 << 4; 2];
+        jwm.state.monitors[right].tag_set = [1 << 7; 2];
+        let mut keys = Vec::new();
+        for (index, monitor, tags) in [(0, left, 1 << 4), (1, right, 1 << 7)] {
+            let mut client = WMClient::new(WindowId::from_raw(0x7bc00 + index));
+            client.mon = Some(monitor);
+            client.state.tags = tags;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            jwm.state.monitors[monitor].sel = Some(key);
+            keys.push((key, tags));
+        }
+        // The command's target monitor wins even when another monitor's bar
+        // queue delivered it and the keyboard focus was elsewhere.
+        jwm.process_bar_commands(
+            &mut backend,
+            vec![(0, SharedCommand::toggle_tag(1 << 2, 1))],
+        );
+        assert_eq!(jwm.state.monitors[left].get_active_tags(), 1 << 4);
+        assert_eq!(
+            jwm.state.monitors[right].get_active_tags(),
+            (1 << 7) | (1 << 2)
+        );
+        for &(key, original_tags) in &keys {
+            assert_eq!(
+                jwm.state.clients[key].state.tags, original_tags,
+                "workspace selection must not retag applications"
+            );
+        }
+        jwm.process_bar_commands(
+            &mut backend,
+            vec![(0, SharedCommand::toggle_tag(1 << 2, 1))],
+        );
+        assert_eq!(jwm.state.monitors[right].get_active_tags(), 1 << 7);
+        // The ordinary IPC/key action keeps its existing client-tag meaning.
+        jwm.toggletag(&mut backend, &WMArgEnum::UInt(1 << 1))
+            .unwrap();
+        assert_eq!(jwm.state.clients[keys[1].0].state.tags, (1 << 7) | (1 << 1));
+        assert_eq!(jwm.state.monitors[right].get_active_tags(), 1 << 7);
     }
 
     /// The selection cannot be left on a monitor that just went behind an
@@ -16246,6 +16295,7 @@ impl Jwm {
         next = min_optional_duration(next, self.layout_persist_next_wakeup(now));
         next = min_optional_duration(next, self.window_preferences_next_wakeup(now));
         next = min_optional_duration(next, self.secondary_bar_next_wakeup(now));
+        next = min_optional_duration(next, self.desktop_shell_next_wakeup(now));
         next = min_optional_duration(next, self.ping_next_wakeup(now));
         next = min_optional_duration(next, self.idle_next_wakeup(now));
         // The lock screen's clock row repaints when the wall-clock minute
@@ -16617,6 +16667,7 @@ impl EventHandler for Jwm {
         // Ensure all monitor bars are running (sequential creation)
         self.expire_pending_scratchpads(now);
         self.tick_hidden_client_park_retries(backend, now);
+        self.ensure_desktop_shell_running(backend, now);
         self.ensure_secondary_bars_running(backend, now);
 
         // Settle an already failed current encoder before answering status or
@@ -16636,6 +16687,7 @@ impl EventHandler for Jwm {
             self.mark_bar_update_needed_if_visible(Some(monitor));
         }
         self.flush_pending_bar_updates();
+        self.publish_desktop_shell_state(backend, now);
         // The layout picker commits on its own once the user stops browsing.
         // Ahead of the animation tick, whose panel flush then carries the
         // countdown's new position out in the same iteration.

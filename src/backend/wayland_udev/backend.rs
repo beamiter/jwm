@@ -1344,6 +1344,15 @@ impl PropertyOps for WaylandPropertyOps {
             return vec![WindowType::Dialog];
         }
 
+        // Auto-hidden shell panels and their edge sensors deliberately own
+        // no exclusive zone. They remain layer-shell docks, never ordinary
+        // application windows in tiling or the task inventory.
+        if layer_info.is_some()
+            && (title.starts_with("jwm-shell-") || app_id.starts_with("jwm-shell-"))
+        {
+            return vec![crate::backend::api::WindowType::Dock];
+        }
+
         if let Some(info) = layer_info {
             if info.exclusive_zone != 0 {
                 return vec![WindowType::Dock];

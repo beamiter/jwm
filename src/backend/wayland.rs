@@ -5,3 +5,15 @@
 
 #[path = "wayland_udev/state.rs"]
 pub mod state;
+
+#[cfg(feature = "backend-wayland-nested")]
+#[path = "wayland_xwayland.rs"]
+pub(crate) mod xwayland;
+
+#[cfg(feature = "backend-wayland-nested")]
+#[path = "wayland_capture.rs"]
+pub(crate) mod capture;
+
+#[cfg(feature = "backend-wayland-nested")]
+#[path = "wayland_preview.rs"]
+pub(crate) mod preview;

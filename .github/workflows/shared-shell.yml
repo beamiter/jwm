@@ -1,0 +1,143 @@
+name: Shared sidebar shell native matrix
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'bars/**'
+      - 'crates/jwm_shell/**'
+      - 'crates/xbar_core/**'
+      - 'crates/shared_structures/**'
+      - 'src/**'
+      - 'vendor/pixels/**'
+      - 'vendor/masonry_winit/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/*shared*shell*'
+      - 'scripts/*sidebar*mode*'
+      - 'scripts/*sparse*header*'
+      - 'docs/shared-shell-coverage.json'
+      - '.github/workflows/shared-shell.yml'
+permissions:
+  contents: read
+concurrency:
+  group: shared-shell-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    outputs:
+      bars: ${{ steps.inventory.outputs.bars }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: inventory
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          names = [x['name'] for x in json.loads(Path('docs/shared-shell-coverage.json').read_text())['frontends']]
+          assert len(names) == len(set(names)) == 28
+          print('bars=' + json.dumps(names))
+          PY
+  native:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      WGPU_BACKEND: gl
+      VK_ICD_FILENAMES: /nonexistent-jwm-vulkan-icd.json
+      __GLX_VENDOR_LIBRARY_NAME: mesa
+      __EGL_VENDOR_LIBRARY_FILENAMES: /usr/share/glvnd/egl_vendor.d/50_mesa.json
+      LP_NUM_THREADS: '2'
+    strategy:
+      fail-fast: false
+      matrix:
+        bar: ${{ fromJson(needs.inventory.outputs.bars) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install native build and private display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config \
+            libgtk-3-dev libgtk-4-dev libadwaita-1-dev libwebkit2gtk-4.1-dev libxdo-dev \
+            libasound2-dev libdbus-1-dev libudev-dev libinput-dev libseat-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxext-dev \
+            libxxf86vm-dev libxcb-composite0-dev libxcb-damage0-dev \
+            libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxrandr-dev libxrender-dev libvulkan-dev mesa-vulkan-drivers libgl1-mesa-dri clang cmake \
+            xvfb xwayland x11-utils x11-xserver-utils xdotool x11-apps dbus-x11 python3-pil python3-dbus python3-gi alsa-utils
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: shared-shell-${{ matrix.bar }}
+      - name: Build JWM and the independent host
+        run: |
+          cargo build --locked --release --no-default-features --features backend-x11rb,backend-xcb --bin jwm --bin jwm-tool
+          cargo build --locked --release -p jwm-bridge --bin jwm-bridge
+          cargo build --locked --manifest-path crates/jwm_shell/Cargo.toml
+      - name: Install web frontend tools
+        if: startsWith(matrix.bar, 'tauri_')
+        run: |
+          npm install -g pnpm
+          cargo install tauri-cli --version 2.12.4 --locked
+          if [[ '${{ matrix.bar }}' == tauri_leptos_bar || '${{ matrix.bar }}' == tauri_yew_bar ]]; then
+            cargo install trunk --version 0.22.1 --locked
+          else
+            pnpm --dir 'bars/${{ matrix.bar }}' install --frozen-lockfile
+          fi
+      - name: Build actual frontend and exercise XCB and X11RB
+        run: |
+          python3 scripts/validate-shared-shell-matrix.py --bars '${{ matrix.bar }}' \
+            --jobs 1 --output 'artifacts/shared-shell/${{ matrix.bar }}.json'
+          binary=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["frontends"][0]["binary"])' 'artifacts/shared-shell/${{ matrix.bar }}.json')
+          for backend in xcb x11rb; do
+            python3 scripts/test-sparse-header.py --bar '${{ matrix.bar }}' --bar-bin "$binary" \
+              --backend "$backend" --bin-dir target/release --shell-bin crates/jwm_shell/target/debug/jwm-shell \
+              --evidence-dir artifacts/shared-shell/sparse-header
+          done
+      - name: Verify the default production WebView, not only debug assets
+        if: matrix.bar == 'tauri_leptos_bar'
+        run: |
+          bash scripts/build-leptos-bar.sh "$PWD/target/default-release"
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend xcb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --backend x11rb --bin-dir target/release --evidence-dir artifacts/shared-shell/production
+          python3 scripts/test-shared-sidebar-shell-daemon.py --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --shell-bin crates/jwm_shell/target/debug/jwm-shell --bin-dir target/release --evidence-dir artifacts/shared-shell/daemon
+      - name: Exercise supervisor recovery and rollback
+        if: matrix.bar == 'tao_glow_bar'
+        run: |
+          cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --bin-dir target/release
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --bin-dir target/release
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend xcb --deep --legacy-four-edge --bin-dir target/release --evidence-dir artifacts/shared-shell/legacy
+          python3 scripts/test-shared-sidebar-shell-x11.py --bar tao_glow_bar --backend x11rb --deep --legacy-edge-shell --bin-dir target/release --evidence-dir artifacts/shared-shell/legacy
+      - name: Verify sidebar mode persistence and sparse workspace interactions
+        if: matrix.bar == 'tao_glow_bar'
+        run: |
+          python3 scripts/test-sidebar-mode-helper.py
+          for backend in xcb x11rb; do
+            python3 scripts/test-shared-sidebar-mode.py --backend "$backend" --bin-dir target/release --shell-bin crates/jwm_shell/target/debug/jwm-shell --evidence-dir artifacts/shared-shell/sidebar-mode
+          done
+      - name: Verify native Wayland panels separately from physical output acceptance
+        if: matrix.bar == 'tauri_leptos_bar'
+        run: |
+          cargo build --locked --release --no-default-features --features backend-x11rb,backend-xcb,backend-wayland-nested --bin jwm --bin jwm-tool
+          cargo build --locked --manifest-path crates/jwm_shell/Cargo.toml --example native_shell_client
+          cargo build --locked --manifest-path bars/tao_pixels_bar/Cargo.toml
+          python3 scripts/test-shared-sidebar-shell-wayland.py --bar tauri_leptos_bar --bar-bin "$PWD/target/default-release/release/tauri_leptos_bar" --evidence-dir artifacts/shared-shell/wayland-nested
+      - name: Archive actual process results, compositor captures and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: shared-shell-${{ matrix.bar }}
+          path: artifacts/shared-shell

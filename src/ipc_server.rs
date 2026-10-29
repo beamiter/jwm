@@ -891,6 +891,23 @@ impl IpcServer {
         })
     }
 
+    /// Isolated socket injection for tests; never selects the live session path.
+    #[cfg(test)]
+    pub(crate) fn new_at_test_path(path: PathBuf) -> io::Result<Self> {
+        let (listener, identity) = bind_owned_socket(&path)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener,
+            socket_path: path,
+            socket_identity: Some(identity),
+            clients: HashMap::new(),
+            next_id: 1,
+            next_poll_client: 1,
+            readiness: None,
+            readiness_healthy: false,
+        })
+    }
+
     #[must_use]
     pub fn socket_path() -> PathBuf {
         socket_location().0

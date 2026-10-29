@@ -31,6 +31,8 @@ use xbar_linux_actions::{EffectRouter, GeometryRequest};
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 enum UserEvent {
+    #[cfg(target_os = "linux")]
+    GtkWheel(PointerInput),
     Tick,
     SharedUpdated(WakeAck),
 }
@@ -471,10 +473,12 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
+    bar.renderer_mut().set_capsule(desktop_header);
     // One side connection answers the compositor question and later verifies
     // the window's depth; losing the display entirely just means solid mode.
     let (x11, compositor_active) = match x11rb::connect(None) {
@@ -487,7 +491,12 @@ fn main() -> Result<()> {
     // A translucent background only reads as a material when a compositor is
     // there to blend the desktop behind it; without one the bar keeps the
     // palette background at full opacity.
-    bar.follow_wm_background(app_config.background_opacity, compositor_active);
+    bar.follow_wm_background(
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
+        compositor_active,
+    );
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -544,6 +553,14 @@ fn main() -> Result<()> {
             .build(&event_loop)
             .context("failed to build tao window")?,
     );
+    #[cfg(target_os = "linux")]
+    tao_scroll::install_gtk_bridge(
+        window.as_ref(),
+        proxy.clone(),
+        UserEvent::GtkWheel,
+        bar.config().scroll,
+    );
+
     let mut app = App::new(
         window,
         bar,
@@ -566,6 +583,8 @@ fn main() -> Result<()> {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            #[cfg(target_os = "linux")]
+            Event::UserEvent(UserEvent::GtkWheel(input)) => app.handle_pointer_input(input),
             Event::UserEvent(UserEvent::Tick) => {
                 app.tick_and_poll();
             }
@@ -626,6 +645,7 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     if let Some(point) = app.last_cursor_pos {
                         let input =

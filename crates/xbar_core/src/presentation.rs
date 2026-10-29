@@ -2177,11 +2177,14 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             .zip(&selected)
             .filter(|(_, visible)| !**visible)
             .fold(VisualState::default(), |mut state, (control, _)| {
-                state.selected |= control.state.selected || control.state.filled;
+                state.selected |= control.state.selected;
                 state.urgent |= control.state.urgent;
                 state.occupied |= control.state.occupied;
                 state
             });
+        // Cycling the eligible sequence remains complete when the compact
+        // visible window moves; jumping to its first hidden neighbor can
+        // oscillate between two windows and strand intermediate workspaces.
         let previous = controls[active].bindings.scroll_up;
         let next = controls[active].bindings.scroll_down;
         let enabled = controls[active].state.enabled;
@@ -3063,8 +3066,7 @@ impl From<ControlSpec> for PillSpec {
             scroll_down: bindings.scroll_down,
             state: VisualState {
                 hovered: control.state.hovered,
-                selected: control.state.selected
-                    || (matches!(control.id, NodeId::Tag(_)) && control.state.filled),
+                selected: control.state.selected,
                 urgent: control.state.urgent,
                 occupied: control.state.occupied
                     || (!matches!(control.id, NodeId::Tag(_)) && control.state.filled),
@@ -3453,7 +3455,13 @@ mod tests {
 
     #[test]
     fn hit_test_maps_primary_secondary_and_scroll_actions() {
-        let tags = vec![TagState::default(); 3];
+        let tags = vec![
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            };
+            3
+        ];
         let scene = engine().build(
             view(&tags, "client"),
             Size::new(1600.0, 38.0),
@@ -3726,7 +3734,13 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(tag_rect(0), (palette.empty.fill, palette.empty.stroke));
+        assert!(
+            !scene
+                .hits
+                .iter()
+                .any(|hit| hit.id == NodeId::Tag(TagId::new(0).unwrap())),
+            "unoccupied unselected tag is omitted"
+        );
         assert_eq!(
             tag_rect(1),
             (palette.occupied.fill, palette.occupied.stroke)
@@ -3745,12 +3759,18 @@ mod tests {
                     for hovered in [false, true] {
                         let mut pair = Vec::new();
                         for occupied in [false, true] {
-                            let tags = vec![TagState {
-                                occupied,
-                                selected,
-                                urgent,
-                                ..TagState::default()
-                            }];
+                            let tags = vec![
+                                TagState {
+                                    occupied,
+                                    selected,
+                                    urgent,
+                                    ..TagState::default()
+                                },
+                                TagState {
+                                    selected: !selected,
+                                    ..TagState::default()
+                                },
+                            ];
                             let id = NodeId::Tag(TagId::new(0).unwrap());
                             let interaction = InteractionState {
                                 hovered: hovered.then_some(id),
@@ -3760,6 +3780,10 @@ mod tests {
                             sample_view.wallpaper_luminance = Some(sample);
                             let scene =
                                 engine().build(sample_view, Size::new(1600.0, 38.0), &interaction);
+                            if !occupied && !selected {
+                                assert!(!scene.hits.iter().any(|hit| hit.id == id));
+                                continue;
+                            }
                             let expected = TagPalette::for_wallpaper(
                                 sample_view.theme,
                                 sample_view.wallpaper_luminance,
@@ -3806,7 +3830,9 @@ mod tests {
                                 .unwrap();
                             pair.push((scene.hits, label));
                         }
-                        assert_eq!(pair[0], pair[1]);
+                        if selected {
+                            assert_eq!(pair[0], pair[1]);
+                        }
                     }
                 }
             }
@@ -3822,10 +3848,16 @@ mod tests {
             }
         }
         let id = NodeId::Tag(TagId::new(0).unwrap());
-        let tags = vec![TagState {
-            occupied: true,
-            ..TagState::default()
-        }];
+        let tags = vec![
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            },
+            TagState {
+                selected: true,
+                ..TagState::default()
+            },
+        ];
         for (height, expected_marker) in [(18.0, true), (19.0, false), (30.0, false)] {
             let engine = LayoutEngine::new(PresentationConfig::default(), TallGlyph(height));
             let scene = engine.build(
@@ -3892,7 +3924,13 @@ mod tests {
 
     #[test]
     fn wallpaper_adaptation_changes_only_tag_paint_and_preserves_layout() {
-        let tags = vec![TagState::default(); 3];
+        let tags = vec![
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            };
+            3
+        ];
         let mut dark = view(&tags, "client");
         dark.wallpaper_luminance = Some(0);
         let mut bright = dark;
@@ -3921,11 +3959,18 @@ mod tests {
     }
 
     #[test]
-    fn filled_only_tag_uses_selected_palette() {
-        let tags = vec![TagState {
-            filled: true,
-            ..TagState::default()
-        }];
+    fn focused_client_flag_does_not_select_a_different_workspace() {
+        let tags = vec![
+            TagState {
+                filled: true,
+                occupied: true,
+                ..TagState::default()
+            },
+            TagState {
+                selected: true,
+                ..TagState::default()
+            },
+        ];
         let sample = view(&tags, "client");
         let scene = engine().build(
             sample,
@@ -3937,15 +3982,13 @@ mod tests {
             sample.wallpaper_luminance,
             TagContrastMode::Auto,
         )
-        .selected;
-        assert!(scene.nodes_for(NodeId::Tag(TagId::new(0).unwrap())).any(|node| matches!(node, SceneNode::RoundedRect { fill, state, .. } if *fill == expected.fill && state.selected)));
+        .occupied;
+        assert!(scene.nodes_for(NodeId::Tag(TagId::new(0).unwrap())).any(|node| matches!(node, SceneNode::RoundedRect { fill, state, .. } if *fill == expected.fill && !state.selected)));
         assert!(
             scene
                 .nodes_for(NodeId::Tag(TagId::new(0).unwrap()))
-                .all(|node| {
-                    !node.visual_state().occupied && !matches!(node, SceneNode::Polyline { .. })
-                }),
-            "filled/selected without clients must remain visibly empty"
+                .all(|node| { !node.visual_state().selected }),
+            "focused-client state must not override actual workspace selection"
         );
     }
 
@@ -4178,7 +4221,13 @@ mod tests {
 
     #[test]
     fn tag_count_and_labels_are_dynamic() {
-        let mut tags = vec![TagState::default(); 12];
+        let mut tags = vec![
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            };
+            12
+        ];
         tags[11].occupied = true;
         let config = PresentationConfig {
             tag_labels: vec!["one".to_owned(), "two".to_owned()],
@@ -4363,7 +4412,10 @@ mod tests {
         use crate::placement::BarEdge;
 
         let tags = [
-            TagState::default(),
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            },
             TagState {
                 selected: true,
                 ..TagState::default()
@@ -4374,6 +4426,7 @@ mod tests {
             },
             TagState {
                 urgent: true,
+                occupied: true,
                 ..TagState::default()
             },
         ];
@@ -4769,7 +4822,13 @@ mod tests {
     #[test]
     fn workspace_strip_compacts_every_tag_before_hiding_any() {
         use crate::placement::BarEdge;
-        let mut tags = vec![TagState::default(); 4];
+        let mut tags = vec![
+            TagState {
+                occupied: true,
+                ..TagState::default()
+            };
+            4
+        ];
         tags[3].selected = true;
         for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
             let engine = LayoutEngine::new(
@@ -4985,7 +5044,13 @@ mod tests {
                 ApproximateTextMeasurer::default(),
             );
             for active in 0..MAX_MODEL_TAGS {
-                let mut tags = vec![TagState::default(); MAX_MODEL_TAGS];
+                let mut tags = vec![
+                    TagState {
+                        occupied: true,
+                        ..TagState::default()
+                    };
+                    MAX_MODEL_TAGS
+                ];
                 tags[active].selected = true;
                 let viewport = if edge.is_vertical() {
                     Size::new(42.0, 300.0)
@@ -5000,18 +5065,16 @@ mod tests {
                     .iter()
                     .find(|hit| hit.id == NodeId::WorkspaceOverflow)
                     .expect("overflow affordance");
-                assert_eq!(
-                    overflow.primary,
-                    Some(UserAction::ViewTag(
-                        TagId::new((active + 1) % MAX_MODEL_TAGS).unwrap()
-                    ))
-                );
-                assert_eq!(
-                    overflow.scroll_up,
-                    Some(UserAction::ViewTag(
-                        TagId::new((active + MAX_MODEL_TAGS - 1) % MAX_MODEL_TAGS).unwrap()
-                    ))
-                );
+                for action in [overflow.primary, overflow.scroll_up, overflow.scroll_down] {
+                    let Some(UserAction::ViewTag(target)) = action else {
+                        panic!("overflow must preserve tag actions")
+                    };
+                    assert_ne!(
+                        target.index(),
+                        active,
+                        "overflow must advance through eligible workspaces"
+                    );
+                }
             }
         }
     }

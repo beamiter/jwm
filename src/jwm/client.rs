@@ -1782,6 +1782,19 @@ impl Jwm {
                 return;
             };
 
+        // A dock declares screen-edge geometry before MapWindow. Clamping it
+        // into the already reserved work area moves it away from its strut and
+        // can make geometric fallback reservations count the same edge twice.
+        // Window types are authoritative here: initial adoption sets is_dock
+        // later, after this placement pass.
+        if backend
+            .property_ops()
+            .get_window_types(win)
+            .contains(&WindowType::Dock)
+        {
+            return;
+        }
+
         // Most popup-like windows (menus/tooltips/etc.) should not be clamped by the WM.
         // Notifications are a special case: if they spawn at monitor y=0 they can end up
         // hidden under the status bar. Dialogs are another special case: apps sometimes

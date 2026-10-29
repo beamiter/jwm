@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Browser regression for the shared adapter against each frontend's real CSS.
 // Requires Playwright. Optional: PLAYWRIGHT_MODULE=/absolute/module/path,
-// CHROME_BIN=/path/to/chrome, BAR_SCREENSHOTS=/temporary/output/directory.
+// CHROME_BIN=/path/to/chrome, BAR_SCREENSHOTS=/temporary/output/directory,
+// BAR_FRONTENDS=react,solid (default: all seven frontends).
 import assert from 'node:assert/strict';
 import { readFile, mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -16,7 +17,7 @@ const [layout, installer] = await Promise.all([
   read('crates/xbar_core/src/web_layout.css'),
   read('crates/xbar_core/src/web_layout.js'),
 ]);
-const styles = [
+const allStyles = [
   ['react', 'bars/tauri_react_bar/src/App.css'],
   ['solid', 'bars/tauri_solid_bar/src/App.css'],
   ['svelte', 'bars/tauri_svelte_bar/src/app.css'],
@@ -25,6 +26,14 @@ const styles = [
   ['yew', 'bars/tauri_yew_bar/src/app.css'],
   ['dioxus', 'bars/dioxus_bar/assets/style.css'],
 ];
+const requestedFrontends = process.env.BAR_FRONTENDS === undefined
+  ? allStyles.map(([name]) => name)
+  : process.env.BAR_FRONTENDS.split(',').map(name => name.trim()).filter(Boolean);
+assert(requestedFrontends.length, 'BAR_FRONTENDS must select at least one frontend');
+for (const name of requestedFrontends) {
+  assert(allStyles.some(([known]) => known === name), `Unknown BAR_FRONTENDS entry: ${name}`);
+}
+const styles = allStyles.filter(([name]) => requestedFrontends.includes(name));
 
 // Runs in the page, against live layout boxes rather than stylesheet text.
 // Keep this function self-contained so it can also run in a standalone
@@ -129,6 +138,44 @@ async function assertHoverStability(page, description) {
   }
   await page.mouse.move(-10, -10);
   await page.evaluate(() => document.querySelectorAll('.buttons-container, .right-info-container').forEach(node => node.scrollTo(0, 0)));
+}
+
+async function assertLongClock(page, description) {
+  const clock = page.locator('.time-pill');
+  const original = await clock.innerHTML();
+  let readings = 0;
+  try {
+    for (const value of ['2026-10-29 13:07', '2026-10-29 13:07:43']) {
+      const measured = await clock.evaluate((node, value) => {
+        const text = [...node.childNodes].find(child => child.nodeType === Node.TEXT_NODE && child.textContent.trim());
+        text.textContent = value;
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        const glyph = range.getBoundingClientRect();
+        const pill = node.getBoundingClientRect();
+        const group = node.closest('.right-info-container');
+        const reachable = ['left', 'right'].map(edge => {
+          const viewport = group.getBoundingClientRect();
+          const left = viewport.left + group.clientLeft;
+          const right = left + group.clientWidth;
+          group.scrollLeft += node.getBoundingClientRect()[edge] - (edge === 'left' ? left : right);
+          const position = node.getBoundingClientRect()[edge];
+          return position >= left - 0.6 && position <= right + 0.6;
+        });
+        return { glyph: { left: glyph.left, right: glyph.right },
+          pill: { left: pill.left, right: pill.right },
+          overflow: getComputedStyle(group).overflowX, reachable };
+      }, value);
+      assert(measured.glyph.left >= measured.pill.left - 0.6 && measured.glyph.right <= measured.pill.right + 0.6,
+        `${description}: long clock ${value} stays inside its own pill: ${JSON.stringify(measured)}`);
+      assert.match(measured.overflow, /^(auto|scroll)$/, `${description}: long clock remains horizontally scrollable`);
+      assert.deepEqual(measured.reachable, [true, true], `${description}: both ends of the long clock are reachable`);
+      readings++;
+    }
+  } finally {
+    await clock.evaluate((node, html) => { node.innerHTML = html; }, original);
+  }
+  return readings;
 }
 
 async function assertToolbarInteraction(page, install, vertical, description) {
@@ -244,6 +291,7 @@ const browser = await chromium.launch({
 let cases = 0;
 let metricCases = 0;
 let interactionCases = 0;
+let longClockReadings = 0;
 try {
   for (const [name, path] of styles) {
     const source = await read(path);
@@ -256,7 +304,7 @@ try {
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
         const tags = Array.from({ length: 9 }, (_, i) =>
-          `<button class="emoji-button" title="Workspace ${i + 1}" aria-pressed="${i === 2 || i === 7}" aria-current="${i === 7}">${i + 1}</button>`).join('');
+          `<button class="emoji-button" title="Workspace ${i + 1}" aria-pressed="${i === 2 || i === 7}" aria-current="${i === 7}"><span class="nf-icon">${i + 1}</span></button>`).join('');
         const cards = Array.from({ length: 3 }, (_, i) => name === 'dioxus'
           ? `<div class="minimized-dock-slot"><div class="minimized-dock-card" data-window-id="${i + 1}" title="Restore window ${i + 1}">${i + 1}</div></div>`
           : `<button class="minimized-item" data-window-id="${i + 1}" title="Restore window ${i + 1}"><span class="minimized-thumbnail"><span class="minimized-initial">${i + 1}</span></span></button>`).join('');
@@ -298,6 +346,16 @@ try {
             bad: items.map(rect).filter(r => vertical
               ? r.x < -0.6 || r.x + r.width > innerWidth + 0.6
               : r.y < -0.6 || r.y + r.height > innerHeight + 0.6),
+            shortBarGlyphs: !vertical && innerHeight === 21
+              ? items.filter(node => node.matches('.pill, .emoji-button') && node.textContent.trim())
+                .map(node => {
+                  const range = document.createRange();
+                  range.selectNodeContents(node);
+                  const glyph = range.getBoundingClientRect();
+                  const control = node.getBoundingClientRect();
+                  return { control: node.className, top: glyph.top - control.top, bottom: glyph.bottom - control.bottom };
+                }).filter(glyph => glyph.top < -0.6 || glyph.bottom > 0.6)
+              : [],
             clock: rect(document.querySelector('.time-pill')),
             status: rect(document.querySelector('.right-info-container')),
             label: document.querySelector('.time-pill').dataset.sidebarLabel,
@@ -307,6 +365,7 @@ try {
         assert.equal(bounds.bar.width, viewport.width, description);
         assert.equal(bounds.bar.height, viewport.height, description);
         assert.deepEqual(bounds.bad, [], `${description}: controls overflow the short axis`);
+        assert.deepEqual(bounds.shortBarGlyphs, [], `${description}: percentage, clock and workspace glyphs fit short-bar controls`);
         assert.equal(bounds.orientation, vertical ? 'vertical' : 'horizontal', description);
         if (vertical) {
           assert.equal(bounds.label, '18\n42\n09', description);
@@ -346,6 +405,9 @@ try {
         if (length === 900) {
           await assertToolbarInteraction(page, install, vertical, description);
           interactionCases++;
+        }
+        if (name === 'leptos' && !vertical) {
+          longClockReadings += await assertLongClock(page, description);
         }
         if (process.env.BAR_SCREENSHOTS && length === 900 && (name === 'react' || name === 'dioxus')) {
           await page.locator('.time-pill').blur();
@@ -431,4 +493,4 @@ try {
 } finally {
   await browser.close();
 }
-console.log(`PASS: ${cases} browser layout/accessibility cases (7 frontends × 4 edges × 3 sizes), ${metricCases} metric transitions, ${interactionCases} toolbar interaction cases, stable hover targets, transformed/scrolling geometry, and 4 pinned core dock allocations.`);
+console.log(`PASS: ${cases} browser layout/accessibility cases (${styles.length} frontends × 4 edges × 3 sizes), ${metricCases} metric transitions, ${interactionCases} toolbar interaction cases, ${longClockReadings} long clock readings, stable hover targets, transformed/scrolling geometry, and 4 pinned core dock allocations.`);

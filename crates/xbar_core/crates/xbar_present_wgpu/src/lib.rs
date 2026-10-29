@@ -6,6 +6,62 @@
 //! endian BGRA) from `xbar_core::render::cairo` and puts them on screen.
 
 use anyhow::Result;
+use std::sync::Arc;
+
+/// Keep the same native handle owner alive for both GLES instance creation and
+/// the surface. The public surface-target API also accepts borrowed handles;
+/// this presenter deliberately requires an owned, static target.
+#[derive(Clone)]
+struct SharedSurfaceTarget(Arc<dyn wgpu::DisplayAndWindowHandle>);
+
+impl std::fmt::Debug for SharedSurfaceTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SharedSurfaceTarget")
+    }
+}
+
+impl wgpu::rwh::HasDisplayHandle for SharedSurfaceTarget {
+    fn display_handle(&self) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        self.0.display_handle()
+    }
+}
+
+impl wgpu::rwh::HasWindowHandle for SharedSurfaceTarget {
+    fn window_handle(&self) -> Result<wgpu::rwh::WindowHandle<'_>, wgpu::rwh::HandleError> {
+        self.0.window_handle()
+    }
+}
+
+fn display_aware_target(
+    target: wgpu::SurfaceTarget<'static>,
+) -> (wgpu::SurfaceTarget<'static>, wgpu::InstanceDescriptor, bool) {
+    match target {
+        wgpu::SurfaceTarget::DisplayAndWindow(window) => {
+            let native_x11 = window.window_handle().is_ok_and(|handle| {
+                matches!(
+                    handle.as_raw(),
+                    wgpu::rwh::RawWindowHandle::Xlib(_) | wgpu::rwh::RawWindowHandle::Xcb(_)
+                )
+            });
+            let window = SharedSurfaceTarget(Arc::from(window));
+            let descriptor =
+                wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
+                    .with_env();
+            // The instance is the display authority. Passing it again on the
+            // surface asks some toolkit wrappers to open another connection.
+            (
+                wgpu::SurfaceTarget::from_window_without_display(window),
+                descriptor,
+                native_x11,
+            )
+        }
+        other => (
+            other,
+            wgpu::InstanceDescriptor::new_without_display_handle().with_env(),
+            false,
+        ),
+    }
+}
 
 /// Device-pixel sub-rectangle of a frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,6 +101,9 @@ pub struct WgpuPresenter {
     texture_empty: bool,
     /// The requested window extent cannot currently be configured.
     presentation_suspended: bool,
+    /// X11 ARGB visuals preserve the written alpha even when the GLES WSI
+    /// capability list only advertises Opaque. The caller verifies the visual.
+    alpha_passthrough: bool,
 }
 
 // Fullscreen triangle sampling the upload texture; no vertex buffer needed.
@@ -114,6 +173,14 @@ const fn mode_is_transparent(mode: wgpu::CompositeAlphaMode) -> bool {
     )
 }
 
+const fn alpha_reaches_compositor(
+    mode: wgpu::CompositeAlphaMode,
+    want_alpha: bool,
+    native_x11: bool,
+) -> bool {
+    mode_is_transparent(mode) || (want_alpha && native_x11)
+}
+
 fn valid_surface_extent(width: u32, height: u32, limit: u32) -> bool {
     width != 0 && height != 0 && width <= limit && height <= limit
 }
@@ -122,17 +189,23 @@ impl WgpuPresenter {
     /// Create a presenter over any wgpu surface target (an `Arc<Window>` for
     /// winit/tao, or a raw-window-handle wrapper for XCB/x11rb).
     ///
-    /// `want_alpha` asks for a surface whose alpha bytes reach the compositor;
-    /// whether the surface actually granted one is answered by
-    /// [`WgpuPresenter::is_transparent`], and callers must fall back to opaque
-    /// painting when it says no.
+    /// `want_alpha` asks for a surface whose alpha bytes reach the compositor.
+    /// On X11 the caller must first verify an ARGB native visual and an active
+    /// compositor; the WSI may advertise only Opaque while that visual still
+    /// preserves alpha. Other platforms use the advertised surface modes.
+    /// [`WgpuPresenter::is_transparent`] reports the resulting policy; callers
+    /// must fall back to opaque painting when it returns false.
     pub async fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
         want_alpha: bool,
     ) -> Result<Self> {
-        let instance = wgpu::Instance::default();
+        // GLES needs the native display when the instance is initialized;
+        // creating a surface later cannot turn a surfaceless EGL context into
+        // an X11/Wayland presentation context.
+        let (target, descriptor, native_x11) = display_aware_target(target.into());
+        let instance = wgpu::Instance::new(descriptor);
         let surface = instance.create_surface(target)?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -169,6 +242,7 @@ impl WgpuPresenter {
             .unwrap_or(caps.formats[0]);
 
         let alpha_mode = select_alpha_mode(&caps, want_alpha);
+        let alpha_passthrough = alpha_reaches_compositor(alpha_mode, want_alpha, native_x11);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -254,7 +328,7 @@ impl WgpuPresenter {
                     // through intact: the frame is full-coverage premultiplied
                     // BGRA, so REPLACE hands it to the compositor as-is, while
                     // blending it over the clear would corrupt the coverage.
-                    blend: Some(if mode_is_transparent(alpha_mode) {
+                    blend: Some(if alpha_passthrough {
                         wgpu::BlendState::REPLACE
                     } else {
                         wgpu::BlendState::ALPHA_BLENDING
@@ -288,6 +362,7 @@ impl WgpuPresenter {
             surface_stale: false,
             texture_empty: true,
             presentation_suspended: false,
+            alpha_passthrough,
         })
     }
 
@@ -314,11 +389,12 @@ impl WgpuPresenter {
 
     /// Whether presented alpha bytes reach the compositor.
     ///
-    /// Only `PreMultiplied` and `Inherit` qualify; anything else means the
-    /// caller must paint every pixel opaque or the result is undefined.
+    /// `PreMultiplied` and `Inherit` carry alpha directly. On X11, an explicitly
+    /// requested ARGB visual also preserves alpha with the GLES Opaque mode.
+    /// Callers must request that path only after verifying the native visual.
     #[must_use]
     pub const fn is_transparent(&self) -> bool {
-        mode_is_transparent(self.config.alpha_mode)
+        self.alpha_passthrough
     }
 
     /// Reconfigure the surface and reallocate the upload texture.
@@ -617,6 +693,59 @@ fn clamp_rect(rect: PresentRect, width: u32, height: u32) -> PresentRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_gles_keeps_verified_x11_argb_alpha_without_changing_wayland_policy() {
+        use wgpu::CompositeAlphaMode::{Inherit, Opaque, PreMultiplied};
+        let mut caps = wgpu::SurfaceCapabilities {
+            alpha_modes: vec![Opaque],
+            ..Default::default()
+        };
+        assert_eq!(select_alpha_mode(&caps, true), Opaque);
+        assert!(alpha_reaches_compositor(Opaque, true, true));
+        assert!(!alpha_reaches_compositor(Opaque, false, true));
+        assert!(!alpha_reaches_compositor(Opaque, true, false));
+        caps.alpha_modes.push(PreMultiplied);
+        assert_eq!(select_alpha_mode(&caps, true), PreMultiplied);
+        assert_eq!(select_alpha_mode(&caps, false), Opaque);
+        caps.alpha_modes = vec![Opaque, Inherit];
+        assert_eq!(select_alpha_mode(&caps, true), Inherit);
+        assert!(alpha_reaches_compositor(PreMultiplied, true, false));
+        assert!(alpha_reaches_compositor(Inherit, true, false));
+    }
+
+    #[test]
+    fn instance_and_surface_retain_the_same_owned_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct Window(Arc<AtomicUsize>);
+        impl wgpu::rwh::HasDisplayHandle for Window {
+            fn display_handle(
+                &self,
+            ) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+                Err(wgpu::rwh::HandleError::Unavailable)
+            }
+        }
+        impl wgpu::rwh::HasWindowHandle for Window {
+            fn window_handle(&self) -> Result<wgpu::rwh::WindowHandle<'_>, wgpu::rwh::HandleError> {
+                Err(wgpu::rwh::HandleError::Unavailable)
+            }
+        }
+        impl Drop for Window {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (target, descriptor, _) = display_aware_target(Window(dropped.clone()).into());
+        assert!(descriptor.display.is_some());
+        drop(target);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(descriptor);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn rects_clamp_into_the_frame_and_classify_emptiness() {

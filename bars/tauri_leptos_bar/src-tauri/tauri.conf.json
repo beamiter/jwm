@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "trunk serve",
-    "beforeBuildCommand": "trunk build"
+    "beforeBuildCommand": "trunk build --release --locked"
   },
   "app": {
     "withGlobalTauri": true,

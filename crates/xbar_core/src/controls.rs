@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::ThemeMode;
 use crate::display::{MetricTone, VolumeLevel};
+#[cfg(test)]
+use crate::model::TagId;
 use crate::model::{
-    BarView, DockItemGeometry, MediaPlayback, MediaState, NetworkState, Percent, ShellRoute, TagId,
+    BarView, DockItemGeometry, MediaPlayback, MediaState, NetworkState, Percent, ShellRoute,
     UserAction,
 };
 use crate::presentation::{NodeId, PresentationConfig};
@@ -263,12 +265,7 @@ impl ControlSpec {
     #[must_use]
     pub fn compact_value(&self) -> String {
         if self.id == NodeId::Clock {
-            self.value
-                .split_whitespace()
-                .rev()
-                .find(|part| part.contains(':'))
-                .unwrap_or(self.value.as_str())
-                .to_owned()
+            compact_clock_value(&self.value)
         } else if !self.icon.is_empty() {
             self.icon.clone()
         } else if self.id == NodeId::Network {
@@ -289,6 +286,17 @@ impl ControlSpec {
         self.state.enabled = enabled && !self.bindings.is_empty();
         self
     }
+}
+
+/// Time-only form used by every narrow desktop header.
+#[must_use]
+pub fn compact_clock_value(value: &str) -> String {
+    value
+        .split_whitespace()
+        .rev()
+        .find(|part| part.contains(':'))
+        .unwrap_or(value)
+        .to_owned()
 }
 
 /// Complete geometry-free bar presentation.
@@ -321,58 +329,48 @@ pub struct PresentationProjector;
 impl PresentationProjector {
     #[must_use]
     pub fn project(view: BarView<'_>, config: &PresentationConfig) -> BarPresentation {
-        let tag_count = view.tags.len().min(crate::model::MAX_MODEL_TAGS);
-        let active_index = view
-            .active_tag
-            .map(usize::from)
-            .filter(|index| *index < tag_count)
-            .or_else(|| view.tags.iter().position(|tag| tag.selected))
+        let workspace_tags = view.workspace_tags();
+        let tag_count = workspace_tags.len();
+        let active_index = workspace_tags
+            .iter()
+            .position(|tag| tag.state.selected && Some(tag.id) == view.active_tag)
+            .or_else(|| workspace_tags.iter().position(|tag| tag.state.selected))
             .unwrap_or(0);
         let previous_tag = (tag_count > 0)
-            .then(|| (active_index + tag_count - 1) % tag_count)
-            .and_then(TagId::new)
+            .then(|| workspace_tags[(active_index + tag_count - 1) % tag_count].id)
             .map(UserAction::ViewTag);
         let next_tag = (tag_count > 0)
-            .then(|| (active_index + 1) % tag_count)
-            .and_then(TagId::new)
+            .then(|| workspace_tags[(active_index + 1) % tag_count].id)
             .map(UserAction::ViewTag);
-        let tags = view
-            .tags
-            .iter()
-            .copied()
-            .enumerate()
-            .map_while(|(index, tag)| {
-                let id = TagId::new(index)?;
+        let tags = workspace_tags
+            .into_iter()
+            .map(|workspace| {
+                let id = workspace.id;
+                let tag = workspace.state;
                 let bindings = InputBindings {
                     primary: Some(UserAction::ViewTag(id)),
                     secondary: Some(UserAction::ToggleTag(id)),
                     scroll_up: previous_tag,
                     scroll_down: next_tag,
                 };
-                Some(
-                    control(
-                        NodeId::Tag(id),
-                        config
-                            .tag_labels
-                            .get(index)
-                            .map(|label| bounded_borrowed_control_text(label))
-                            .unwrap_or_else(|| index.saturating_add(1).to_string()),
-                        String::new(),
-                        None,
-                        None,
-                        None,
-                        ControlState {
-                            selected: tag.selected || view.active_tag == Some(id),
-                            urgent: tag.urgent,
-                            filled: tag.filled,
-                            occupied: tag.occupied,
-                            ..ControlState::default()
-                        },
-                        bindings,
-                    )
-                    .with_availability(view.wm_available)
-                    .with_enabled(view.wm_available),
+                control(
+                    NodeId::Tag(id),
+                    workspace.number.to_string(),
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    ControlState {
+                        selected: tag.selected,
+                        urgent: tag.urgent,
+                        filled: tag.filled,
+                        occupied: tag.occupied,
+                        ..ControlState::default()
+                    },
+                    bindings,
                 )
+                .with_availability(view.wm_available)
+                .with_enabled(view.wm_available)
             })
             .collect();
 
@@ -901,7 +899,8 @@ fn bounded_control_text_prefix(value: &str) -> &str {
 }
 
 /// `↓rate ↑rate` with explicit unknowns; rates never display as a healthy 0.
-fn network_value(network: &NetworkState) -> String {
+#[must_use]
+pub fn network_value(network: &NetworkState) -> String {
     if !network.connected {
         return UNKNOWN_VALUE.to_owned();
     }
@@ -926,7 +925,7 @@ fn media_value(media: &MediaState) -> String {
     }
 }
 
-fn percent_value(value: Option<Percent>) -> String {
+pub fn percent_value(value: Option<Percent>) -> String {
     value.map_or_else(
         || UNKNOWN_VALUE.to_owned(),
         |percent| format!("{}%", percent.rounded()),
@@ -1052,7 +1051,6 @@ mod tests {
             .find(|choice| choice.id == NodeId::LayoutOption(LayoutId(37)))
             .expect("configured layout is projected");
         let projected_text = [
-            &projected.tags[0].icon,
             &layout.value,
             &by_id(&projected, NodeId::Clock).icon,
             &by_id(&projected, NodeId::Battery).icon,
@@ -1064,6 +1062,10 @@ mod tests {
             assert!(text.len() <= MAX_PROJECTED_CONTROL_TEXT_BYTES);
             assert!(text.capacity() <= MAX_PROJECTED_CONTROL_TEXT_BYTES);
         }
+        assert_eq!(
+            projected.tags[0].icon, "1",
+            "workspace labels retain numeric identity"
+        );
         assert_eq!(config.tag_labels[0], oversized);
         assert_eq!(config.layouts[0].label, oversized);
         assert_eq!(config.labels.clock, oversized);
@@ -1123,7 +1125,7 @@ mod tests {
                 selected: false,
                 urgent: true,
                 filled: true,
-                occupied: false,
+                occupied: true,
             },
             TagState {
                 selected: true,
@@ -1139,12 +1141,13 @@ mod tests {
         };
 
         let projected = PresentationProjector::project(snapshot.view(), &config);
-        assert_eq!(projected.tags[0].icon, "A");
+        assert_eq!(projected.tags[0].icon, "1");
         assert_eq!(projected.tags[1].icon, "2");
-        assert!(projected.tags[0].state.selected);
+        assert!(!projected.tags[0].state.selected);
         assert!(projected.tags[0].state.urgent);
         assert!(projected.tags[0].state.filled);
-        assert!(!projected.tags[0].state.occupied);
+        assert!(projected.tags[0].state.occupied);
+        assert!(projected.tags[1].state.selected);
         assert!(!projected.tags[1].state.filled);
         assert!(projected.tags[1].state.occupied);
         assert_eq!(
@@ -1343,8 +1346,8 @@ mod tests {
 
         let projected = PresentationProjector::project(snapshot.view(), &config);
 
-        assert_eq!(projected.tags.len(), snapshot.tags.len());
-        assert_eq!(projected.tags[0].icon, "tag");
+        assert_eq!(projected.tags.len(), snapshot.workspace_tags().len());
+        assert_eq!(projected.tags[0].icon, "1");
         assert_eq!(by_id(&projected, NodeId::Monitor).value, "monitor");
         assert_eq!(
             projected
@@ -1894,7 +1897,7 @@ mod tests {
 
         assert_eq!(by_id(&projected, NodeId::Audio).icon, icons.volume_medium);
         assert_eq!(by_id(&projected, NodeId::Monitor).value, "M2");
-        assert_eq!(projected.tags[0].icon, icons.tag_icon(0));
+        assert_eq!(projected.tags[0].icon, "1");
     }
 
     #[test]

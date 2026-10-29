@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # `lazy` was removed upstream on iced master; the bar never used Lazy widgets.
-iced = { git = "https://github.com/iced-rs/iced.git", branch = "master", features = ["advanced", "debug", "smol"] }
+iced = { git = "https://github.com/iced-rs/iced.git", branch = "master", features = ["advanced", "debug", "smol", "canvas", "image-without-codecs"] }
 log = "0.4.34"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
@@ -14,3 +14,6 @@ futures-lite = "2"
 raw-window-handle = "0.6"
 wgpu = "30"
 x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb"] }
+
+# Header application icons only need the two raster codecs used by the core.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

@@ -416,4 +416,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # The historical fixed four-surface ownership is now a compatibility
+    # configuration for the session-owned shared shell. Keep helpers above
+    # importable by the common fixture and exercise the migrated lifecycle.
+    import sys
+    command = [sys.executable, str(ROOT / "scripts/test-shared-sidebar-shell-x11.py"),
+               "--bar", "tao_glow_bar", "--bar-bin", str(BAR), "--backend", BACKEND,
+               "--bin-dir", str(BIN), "--shell-bin", os.environ.get("JWM_TEST_SHELL_BIN", str(ROOT / "crates/jwm_shell/target/debug/jwm-shell")),
+               "--legacy-four-edge", "--deep"]
+    second = ROOT / "bars/tao_pixels_bar/target/debug/tao_pixels_bar"
+    if second.is_file():
+        command.extend(["--second-bar-bin", str(second)])
+    subprocess.run(command, check=True)
+    if screenshot := os.environ.get("JWM_FOUR_EDGE_SCREENSHOT"):
+        source = ROOT / "artifacts/shared-shell" / f"tao_glow_bar-{BACKEND}-1280x800-light-legacy-four-edge/desktop.png"
+        shutil.copyfile(source, screenshot)

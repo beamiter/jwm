@@ -6,7 +6,7 @@ const root = document.documentElement;
 root.dataset.barEdge = edge;
 root.style.setProperty('--xbar-thickness', `${thickness}px`);
 const vertical = edge === 'left' || edge === 'right';
-const scrollPolicy = typeof configuredScroll === 'object' ? configuredScroll : { adjustment_pixels: 16, idle_ms: 250 };
+const scrollPolicy = typeof configuredScroll === 'object' ? configuredScroll : { navigation_pixels: 40, adjustment_pixels: 16, idle_ms: 250 };
 const legacyButtons = '.emoji-button, .layout-toggle, .layout-option, .volume-pill, .brightness-pill, ' +
   '.shell-pill, .shell-hub-pill, .shell-route, .screenshot-pill, .time-pill, [data-window-id]';
 const controlSelector = 'button, [role="button"]';
@@ -27,7 +27,9 @@ let focusOwner = null;
 let toolbarHadFocus = false;
 let wheelGesture = null;
 let metricWheelGesture = null;
+let workspaceWheelGesture = null;
 let adjustingMetric = false;
+let headerTagSignature = null;
 const resizeTargets = new Set();
 const available = node => {
   if (node.disabled || node.getAttribute('aria-disabled') === 'true' ||
@@ -185,10 +187,71 @@ const refresh = () => {
   frame = 0;
   const bar = document.querySelector('.button-row');
   if (bar) {
+    layoutDesktopHeader(bar);
     if (contentDirty) refreshControls(bar);
     refreshOverflow(bar);
   }
   contentDirty = false;
+};
+// Match the native desktop header's measured status budget. Frameworks own
+// the text and controls; this adapter only allocates their existing boxes.
+const layoutDesktopHeader = bar => {
+  if (vertical || bar.dataset.desktopHeader !== 'true') return;
+  const style = getComputedStyle(bar);
+  const gap = parseFloat(style.columnGap) || 8;
+  const available = Math.max(0, bar.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0));
+  const measure = node => {
+    if (!node) return 0;
+    const previous = node.style.cssText;
+    node.style.setProperty('display', node.matches('.usage-pill, .volume-pill') ? 'inline-grid' : 'inline-flex', 'important');
+    const width = Math.max(42, node.getBoundingClientRect().width);
+    node.style.cssText = previous;
+    return width;
+  };
+  const status = [
+    bar.querySelector('.time-pill'),
+    bar.querySelector('.system-info-container > .usage-pill:nth-child(3)'),
+    bar.querySelector('.volume-pill'),
+    bar.querySelector('.system-info-container > .usage-pill:nth-child(1)'),
+    bar.querySelector('.system-info-container > .usage-pill:nth-child(2)'),
+    bar.querySelector('.network-pill'),
+  ];
+  let used = 0;
+  for (const node of bar.querySelectorAll('.usage-pill, .volume-pill')) {
+    const percent = node.textContent.match(/(\d+(?:\.\d+)?)\s*%/);
+    node.style.setProperty('--xbar-header-progress', String(percent ? Math.min(100, Number(percent[1])) / 100 : 0));
+  }
+  for (const node of status) {
+    if (!node) continue;
+    const width = measure(node);
+    const required = width + (used ? gap : 0);
+    const visible = used + required <= available * 0.49;
+    setAttribute(node, 'data-xbar-header-hidden', String(!visible));
+    if (visible) used += required;
+  }
+  bar.style.setProperty('--xbar-header-status-width', `${used}px`);
+  const launcher = bar.querySelector('.buttons-container > .shell-menu');
+  const showLauncher = available >= 480;
+  if (launcher) setAttribute(launcher, 'data-xbar-header-hidden', String(!showLauncher));
+  const launcherWidth = launcher && showLauncher ? launcher.getBoundingClientRect().width + gap : 0;
+  const tags = [...bar.querySelectorAll('.buttons-container > .emoji-button')];
+  const tagNatural = tags.reduce((width, node) => width + node.getBoundingClientRect().width, 0) + Math.max(0, tags.length - 1) * gap;
+  const tagBudget = Math.min(available * 0.40, Math.max(32, available - used - launcherWidth - 80 - gap * 2));
+  const leading = launcherWidth + Math.min(tagNatural, tagBudget);
+  bar.style.setProperty('--xbar-header-leading-width', `${leading}px`);
+  const title = bar.querySelector('.client-title');
+  if (title) setAttribute(title, 'data-xbar-header-hidden', String(available - used - leading - gap * 2 < 80));
+  const signature = `${bar.clientWidth}:${tags.map(node => `${node.dataset.tagIndex}:${node.getAttribute('aria-pressed')}`).join(',')}`;
+  if (signature !== headerTagSignature) {
+    headerTagSignature = signature;
+    const selected = tags.find(node => node.getAttribute('aria-pressed') === 'true');
+    const group = selected?.closest('.buttons-container');
+    if (group) {
+      const item = selected.getBoundingClientRect(), bounds = group.getBoundingClientRect();
+      const delta = item.left < bounds.left ? item.left - bounds.left : item.right > bounds.right ? item.right - bounds.right : 0;
+      group.scrollLeft += delta;
+    }
+  }
 };
 const queue = (content = true) => {
   contentDirty ||= content;
@@ -299,7 +362,7 @@ const focusout = event => {
     if (focusedControl === target && target.isConnected && available(target) && document.activeElement !== target) toolbarHadFocus = false;
   });
 };
-const blur = () => { toolbarHadFocus = false; wheelGesture = null; metricWheelGesture = null; };
+const blur = () => { toolbarHadFocus = false; wheelGesture = null; metricWheelGesture = null; workspaceWheelGesture = null; };
 const click = event => {
   const target = event.target instanceof Element && event.target.closest(controlSelector);
   if (target?.closest('.button-row') && (target.disabled || target.getAttribute('aria-disabled') === 'true' || target.classList.contains('shell-pill-offline'))) {
@@ -311,6 +374,46 @@ const wheel = event => {
   if (adjustingMetric || !(event.target instanceof Element) || event.target.closest(editableSelector)) return;
   const bar = event.target.closest('.button-row');
   if (!bar) return;
+  const workspace = event.target.closest('.emoji-button[data-tag-index]');
+  if (workspace) {
+    // The framework owns the original ID/monitor click binding. Cycling its
+    // actual eligible DOM sequence avoids compressed indices and lets the
+    // same gesture work in Dioxus and all six Tauri implementations.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    wheelGesture = null;
+    metricWheelGesture = null;
+    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+    if (!Number.isFinite(event.deltaX) || !Number.isFinite(event.deltaY)) { workspaceWheelGesture = null; return; }
+    if (delta === 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || !available(workspace)) return;
+    const now = performance.now(), pixels = event.deltaMode === 0;
+    if (!workspaceWheelGesture || now - workspaceWheelGesture.time >= scrollPolicy.idle_ms || workspaceWheelGesture.pixels !== pixels) {
+      workspaceWheelGesture = { pixels, precise: false, fired: false, residual: 0, axis: null, time: now };
+    }
+    const gesture = workspaceWheelGesture;
+    gesture.time = now;
+    gesture.precise ||= pixels || !Number.isInteger(event.deltaX) || !Number.isInteger(event.deltaY);
+    // As in native ControlScroll, a precision swipe owns one navigation
+    // action, including momentum and snapshots that replace its tag nodes.
+    if (gesture.precise && gesture.fired) return;
+    const axis = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? 'x' : 'y';
+    if (gesture.axis !== axis) { gesture.residual = 0; gesture.axis = axis; }
+    if (vertical && axis === 'x') { gesture.residual = 0; return; }
+    const amount = delta / (pixels ? (scrollPolicy.navigation_pixels || 40) : 1);
+    if (Math.sign(gesture.residual) !== Math.sign(amount)) gesture.residual = 0;
+    gesture.residual += amount;
+    if (Math.abs(gesture.residual) + 1e-9 < 1) return;
+    const direction = Math.sign(gesture.residual);
+    gesture.residual %= 1;
+    gesture.fired = true;
+    const tags = [...bar.querySelectorAll('.buttons-container > .emoji-button[data-tag-index]')].filter(available);
+    if (!tags.length) return;
+    let active = tags.findIndex(node => node.getAttribute('aria-pressed') === 'true' && node.dataset.tagIndex === bar.dataset.activeTag);
+    if (active < 0) active = tags.findIndex(node => node.getAttribute('aria-pressed') === 'true');
+    if (active < 0) active = 0;
+    tags[(active + (direction < 0 ? -1 : 1) + tags.length) % tags.length].click();
+    return;
+  }
   const metric = event.target.closest('.volume-pill, .brightness-pill');
   const metricGesture = metric && !event.shiftKey && Math.abs(event.deltaY) > Math.abs(event.deltaX);
   if (event.ctrlKey || event.metaKey || event.altKey) {

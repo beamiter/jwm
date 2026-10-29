@@ -1,5 +1,10 @@
 # Four-edge bars
 
+The JWM default frontend is now `tauri_leptos_bar`. For the session-supervised
+three-sidebar host shared by all frontends, use [Shared desktop shell](shared-desktop-shell.md).
+The Tao-specific sections below document the legacy standalone paths; frontend
+acceptance is recorded separately in [the coverage inventory](shared-shell-coverage.json).
+
 ## Frosted four-edge desktop
 
 The official `tao_glow_bar` now combines a rounded information bar at the top

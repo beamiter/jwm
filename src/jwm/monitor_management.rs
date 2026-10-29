@@ -521,8 +521,28 @@ impl Jwm {
             }
             remove_legacy_secondary_bar_shared_memory(monitor_id);
         }
-        self.clear_minimized_dock_for_monitor(backend, monitor_id);
+        if !self.shared_shell_owns_monitor_dock(monitor_id) {
+            self.clear_minimized_dock_for_monitor(backend, monitor_id);
+        }
         self.note_secondary_bar_failure(monitor_id, now, reason);
+    }
+
+    pub(super) fn retire_disconnected_bar(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor_id: i32,
+    ) -> Option<crate::core::models::ClientKey> {
+        self.clear_minimized_dock_for_monitor(backend, monitor_id);
+        self.minimized_projection_epochs.remove(&monitor_id);
+        self.reconciled_minimized_target_generations
+            .remove(&monitor_id);
+        self.retire_secondary_bar(backend, monitor_id)
+    }
+
+    fn shared_shell_owns_monitor_dock(&self, monitor_id: i32) -> bool {
+        CONFIG.load().desktop_shell_enabled()
+            && self.desktop_shell.reserves_space()
+            && self.get_monitor_by_id(monitor_id).is_some()
     }
 
     /// Permanently retire the bar for an output that no longer exists.
@@ -536,11 +556,16 @@ impl Jwm {
         backend: &mut dyn Backend,
         monitor_id: i32,
     ) -> Option<crate::core::models::ClientKey> {
-        self.clear_minimized_dock_for_monitor(backend, monitor_id);
+        // The shared shell owns a different set of controls. Replacing only
+        // the top frontend must not retire its Dock targets, preview lease or
+        // projection generation. A disconnected output still retires all state.
+        if !self.shared_shell_owns_monitor_dock(monitor_id) {
+            self.clear_minimized_dock_for_monitor(backend, monitor_id);
+            self.minimized_projection_epochs.remove(&monitor_id);
+            self.reconciled_minimized_target_generations
+                .remove(&monitor_id);
+        }
         self.pending_bar_updates.remove(&monitor_id);
-        self.minimized_projection_epochs.remove(&monitor_id);
-        self.reconciled_minimized_target_generations
-            .remove(&monitor_id);
         self.secondary_bar_failures.remove(&monitor_id);
         self.secondary_bar_retry_after.remove(&monitor_id);
 
@@ -643,6 +668,16 @@ impl Jwm {
         let cfg = CONFIG.load();
         let mut command = secondary_bar_command(cfg.status_bar_name(), &shared_path, monitor_id);
         let launch_config = self.secondary_bar_launch_config(&cfg, monitor_id);
+        if launch_config.shell_owned {
+            command.env(
+                "JWM_DESKTOP_SHELL",
+                if cfg.desktop_shell_enabled() {
+                    "1"
+                } else {
+                    "0"
+                },
+            );
+        }
         command.env("JWM_BAR_POSITION", launch_config.edge.as_str());
         command.env("JWM_BAR_THICKNESS", launch_config.thickness.to_string());
         command.env("JWM_BAR_LAYOUT", launch_config.layout.as_str());

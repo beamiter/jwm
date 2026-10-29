@@ -177,7 +177,7 @@ impl Jwm {
         // are configured before its auxiliary surfaces map.
         if total > 0 {
             let mut bounds: Option<(i32, i32, i32, i32)> = None; // x0,y0,x1,y1
-            let shell = CONFIG.load().status_bar_four_edge();
+            let shell = CONFIG.load().desktop_shell_enabled();
             for (key, monitor) in &self.state.monitors {
                 let g = &monitor.geometry;
                 if g.w_w <= 0 || g.w_h <= 0 {

@@ -85,7 +85,7 @@ fn cell<T: ScrollOwner + 'static>(
 ) -> impl IntoElement + use<T> {
     let is_tag = matches!(spec.id, NodeId::Tag(_));
     let state = VisualState {
-        selected: spec.state.selected || spec.state.filled,
+        selected: spec.state.selected,
         urgent: spec.state.urgent,
         occupied: spec.state.occupied,
         hovered: false,

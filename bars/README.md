@@ -8,43 +8,44 @@ configuration, interaction and geometry contract is in
 
 ## Official bar
 
-The official bar includes an ice-blue frosted desktop shell: a top information
-bar and independent left, right and bottom panels. Each companion can reveal
-on edge hover, stay visible, or be disabled. See
-[Frosted four-edge desktop](../docs/bars-four-edges.md#frosted-four-edge-desktop)
-for configuration and the live interaction test.
-
-**`tao_glow_bar`** is the supported daily-drive bar. `scripts/install_jwm_scripts.sh`
-installs it by default. Release packaging and the maintainer checklist exercise
-this crate.
+**`tauri_leptos_bar`** is the JWM default. It preserves a native Tauri/WebKit
+window with a Leptos frontend. Build prerequisites include WebKitGTK 4.1,
+Trunk, the `wasm32-unknown-unknown` Rust target and Tauri CLI 2:
 
 ```bash
-scripts/install_jwm_scripts.sh                  # installs tao_glow_bar
-scripts/install_jwm_scripts.sh -b tao_glow_bar  # explicit
+bash scripts/bootstrap_deps.sh --with-tauri
+rustup target add wasm32-unknown-unknown
+cargo install trunk --version 0.22.1 --locked
+cargo install tauri-cli --version 2.12.4 --locked
+scripts/install_jwm_scripts.sh -b tauri_leptos_bar
 ```
 
-When upgrading an existing installation that names another bar, use the
-explicit `-b tao_glow_bar` form to update both JWM configuration files. A plain
-reinstall preserves the existing `status_bar.name`. `JWM_BAR_NAME` can select an
-alternative default for the installer; an explicit `-b` takes precedence.
+A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`
+updates both JWM configuration files. `JWM_BAR_NAME` selects the installer
+default and explicit `--bar` takes precedence.
 
-### Four-panel desktop shell
+### Shared three-panel desktop shell
 
-On native X11 (`xcb` / `x11rb`), `tao_glow_bar` also offers a coordinated
-four-panel layout: top status, left launchers/workspaces, right audio/display
-controls, and a bottom media/window Dock. Add `layout = "four-edge"` to JWM's
-existing `[status_bar]` table with `name = "tao_glow_bar"`. JWM and the frontend
-share the four physical panel rectangles and reserve all four workspace edges.
-This mode shows the panels together and takes precedence over xbar's
-`[edge_shell]` reveal settings.
+Every selected frontend can keep its own top bar while JWM supervises one
+independent `jwm-shell` process for the left, right and bottom panels. The host
+is installed with JWM. Enable `[desktop_shell] enabled = true` in the active
+JWM configuration and choose `always`, `hover` or `disabled` per edge.
+New enabled configurations auto-hide all three edges. **Super+Shift+B**
+switches enabled edges between auto-hide and pinned mode and saves the choice;
+disabled edges stay disabled. Existing explicit per-edge preferences survive
+upgrades.
 
-The default `layout = "single"` keeps the configured primary bar and the
-independent companion workflow described above, including per-edge hover,
-always-visible and disabled modes. For one bar without companions, use
-`layout = "single"` in JWM and `[edge_shell] enabled = false` in xbar, then
-restart the bar.
-See [Four panels at once](../docs/bars-four-edges.md#four-panels-at-once) for
-configuration, sizing, backend support and lifecycle details.
+Horizontal headers follow the `tao_glow_bar` layout while retaining each
+frontend's toolkit. Workspace buttons show this monitor's occupied and active
+tags in their original numeric order. An empty active tag remains visible:
+occupied 1, 3 and 8 with active 5 displays 1, 3, 5 and 8, highlighting 5.
+See [shared desktop shell](../docs/shared-desktop-shell.md) for the protocol,
+configuration precedence, diagnostics and rollback, and the
+[frontend coverage record](../docs/shared-shell-coverage.json) for actual
+validation status. Native Wayland has a separate acceptance gate.
+
+The old `tao_glow_bar` companion mode remains available for standalone use;
+when JWM owns the shared shell it suppresses private companions.
 
 ## Example bars
 
@@ -76,7 +77,7 @@ status_bar_height = 48 # Physical thickness: height at top/bottom, width at left
 status_bar_padding = 4
 
 [status_bar]
-name = "tao_glow_bar"
+name = "tauri_leptos_bar"
 show_bar = true
 position = "top" # top, bottom, left, right
 

@@ -33,6 +33,8 @@ const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 enum UserEvent {
+    #[cfg(target_os = "linux")]
+    GtkWheel(PointerInput),
     Tick,
     SharedUpdated(WakeAck),
 }
@@ -168,6 +170,13 @@ impl App {
                 .build(event_loop)
                 .context("failed to create tao window")?,
         );
+        #[cfg(target_os = "linux")]
+        tao_scroll::install_gtk_bridge(
+            window.as_ref(),
+            self.proxy.clone(),
+            UserEvent::GtkWheel,
+            self.bar.config().scroll,
+        );
         if let Err(error) = self.dock_hints.sync(
             window.as_ref(),
             initial_placement,
@@ -188,6 +197,7 @@ impl App {
         let build = |alpha: Option<pixels::wgpu::CompositeAlphaMode>| {
             let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
             let mut builder = PixelsBuilder::new(safe_width, safe_height, surface_texture)
+                .display_handle(Arc::clone(&window))
                 .texture_format(TextureFormat::Bgra8UnormSrgb)
                 .enable_vsync(true)
                 .request_adapter_options(pixels::wgpu::RequestAdapterOptions {
@@ -565,6 +575,8 @@ impl App {
 
     fn on_user_event(&mut self, event: UserEvent) {
         match event {
+            #[cfg(target_os = "linux")]
+            UserEvent::GtkWheel(input) => self.handle_pointer_input(input),
             UserEvent::Tick => self.tick_and_poll(),
             UserEvent::SharedUpdated(_ack) => {
                 let update = self.bar.poll_transport();
@@ -615,6 +627,7 @@ impl App {
             WindowEvent::Focused(false) => {
                 self.handle_pointer_input(PointerInput::Cancel);
             }
+            #[cfg(not(target_os = "linux"))]
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 if let Some(point) = self.last_cursor_pos {
                     let input = tao_scroll::pointer_scroll(point, delta, phase, self.scale_factor);
@@ -751,6 +764,7 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // PUA labels are safe only when the font which defines them exists. Keep
     // the portable emoji preset on a stock desktop instead of asking an
     // arbitrary fontconfig fallback to interpret Nerd Font codepoints.
@@ -766,6 +780,7 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
+    bar.renderer_mut().set_capsule(desktop_header);
     // One side connection answers the compositor question and later verifies
     // the window's depth and size; losing the display entirely just means
     // solid mode.
@@ -781,7 +796,12 @@ fn main() -> Result<()> {
     // palette background at full opacity. The window's depth and the surface
     // itself still get a veto — `init_window_and_pixels` downgrades to solid
     // if either refuses alpha.
-    bar.follow_wm_background(app_config.background_opacity, compositor_active);
+    bar.follow_wm_background(
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
+        compositor_active,
+    );
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = event_loop.create_proxy();

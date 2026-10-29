@@ -24,7 +24,10 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 cairo-rs = "0.22.9"
 pango = "0.22.9"
-pixels = "0.17.2"
+pixels = "=0.17.2"
 winit = "0.30.13"
 raw-window-handle = "0.6.2"
 x11rb = "0.14"
+
+[patch.crates-io]
+pixels = { path = "../../vendor/pixels" }

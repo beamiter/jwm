@@ -420,6 +420,7 @@ mod tests {
             system_ui_query_replace: false,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
+            desktop_shell: Default::default(),
             secondary_bar_failures: HashMap::new(),
             secondary_bar_retry_after: HashMap::new(),
             transient_children: crate::jwm::process::TransientChildSupervisor::default(),

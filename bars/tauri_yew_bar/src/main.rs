@@ -71,6 +71,13 @@ struct TagState {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+struct WorkspaceTag {
+    id: usize,
+    number: usize,
+    state: TagState,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct AudioDeviceInfo {
     name: String,
     volume: i32,
@@ -130,9 +137,20 @@ struct BarSnapshot {
     wm_session_id: u64,
     #[serde(default)]
     geometry: Option<DockGeometry>,
-    tags: Vec<TagState>,
     #[serde(default)]
     active_tag: Option<usize>,
+    #[serde(skip)]
+    workspace_tags: Vec<WorkspaceTag>,
+    #[serde(skip)]
+    header_network: String,
+    #[serde(skip)]
+    header_cpu: String,
+    #[serde(skip)]
+    header_memory: String,
+    #[serde(default)]
+    theme: String,
+    #[serde(skip)]
+    header_clock_compact: String,
     monitor: i32,
     layout_symbol: String,
     client_name: String,
@@ -151,6 +169,16 @@ struct BarSnapshot {
 
 #[derive(Deserialize)]
 struct FrontendEnvelope {
+    #[serde(default)]
+    workspace_tags: Vec<WorkspaceTag>,
+    #[serde(default)]
+    header_network: String,
+    #[serde(default)]
+    header_cpu: String,
+    #[serde(default)]
+    header_memory: String,
+    #[serde(default)]
+    header_clock_compact: String,
     revision: u64,
     snapshot: BarSnapshot,
 }
@@ -163,6 +191,10 @@ struct EventPayload<T> {
 #[derive(Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum ActionRequest {
+    ToggleTagOn {
+        tag_index: usize,
+        monitor_id: i32,
+    },
     ViewTagOn {
         tag_index: usize,
         monitor_id: i32,
@@ -240,18 +272,6 @@ struct DispatchArgs {
     request: ActionRequest,
 }
 
-const TAG_ICONS: [&str; 9] = [
-    "\u{F0A1E}",
-    "\u{F0239}",
-    "\u{F0A1B}",
-    "\u{F0B79}",
-    "\u{F024B}",
-    "\u{F0388}",
-    "\u{F0567}",
-    "\u{F01F0}",
-    "\u{F0297}",
-];
-
 const ICON_CPU: &str = "\u{F4BC}";
 const ICON_MEM: &str = "\u{F035B}";
 const ICON_BAT_FULL: &str = "\u{F0079}";
@@ -268,8 +288,6 @@ const ICON_MON: &str = "\u{F0379}";
 fn button_class(tag: &TagState) -> String {
     let state = if tag.urgent {
         "urgent"
-    } else if tag.filled {
-        "filtered"
     } else if tag.selected {
         "selected"
     } else if tag.occupied {
@@ -279,7 +297,10 @@ fn button_class(tag: &TagState) -> String {
     };
     // Selection and urgency never hide whether the workspace has clients.
     let occupancy = if tag.occupied { " has-clients" } else { "" };
-    format!("emoji-button state-{state}{occupancy}")
+    format!(
+        "emoji-button state-{state}{occupancy}{}",
+        if tag.filled { " has-focus" } else { "" }
+    )
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -810,6 +831,14 @@ impl Drop for GeometryListeners {
     }
 }
 
+fn desktop_header_enabled() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+        .and_then(|element| element.get_attribute("data-bar-edge"))
+        .is_none_or(|edge| edge != "left" && edge != "right")
+}
+
 fn geometry_tracking_current(lifetime: u64) -> bool {
     DOCK_GEOMETRY_ACTIVE.with(Cell::get) && DOCK_GEOMETRY_LIFETIME.with(Cell::get) == lifetime
 }
@@ -890,6 +919,9 @@ fn schedule_dock_geometry_retry(wm_session_id: u64) {
 }
 
 fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
+    if desktop_header_enabled() {
+        return;
+    }
     if !DOCK_GEOMETRY_ACTIVE.with(Cell::get) || wm_session_id == 0 {
         return;
     }
@@ -987,6 +1019,9 @@ fn publish_dock_geometry_later() {
 }
 
 fn install_geometry_listeners() {
+    if desktop_header_enabled() {
+        return;
+    }
     if !DOCK_GEOMETRY_ACTIVE.with(Cell::get) {
         return;
     }
@@ -1008,6 +1043,9 @@ fn dispatch_args(request: ActionRequest) -> JsValue {
 }
 
 async fn dispatch_action_result(request: ActionRequest) -> Result<(), JsValue> {
+    if desktop_header_enabled() && matches!(&request, ActionRequest::SetDockGeometry { .. }) {
+        return Ok(());
+    }
     tauri_invoke("dispatch_action", dispatch_args(request))
         .await
         .map(|_| ())
@@ -1044,7 +1082,16 @@ fn app() -> Html {
                 }
                 match serde_wasm_bindgen::from_value::<EventPayload<FrontendEnvelope>>(event) {
                     Ok(event) => {
-                        let envelope = event.payload;
+                        let mut envelope = event.payload;
+                        envelope.snapshot.workspace_tags =
+                            std::mem::take(&mut envelope.workspace_tags);
+                        envelope.snapshot.header_network =
+                            std::mem::take(&mut envelope.header_network);
+                        envelope.snapshot.header_cpu = std::mem::take(&mut envelope.header_cpu);
+                        envelope.snapshot.header_memory =
+                            std::mem::take(&mut envelope.header_memory);
+                        envelope.snapshot.header_clock_compact =
+                            std::mem::take(&mut envelope.header_clock_compact);
                         if callback_revision
                             .get()
                             .is_some_and(|revision| envelope.revision < revision)
@@ -1147,8 +1194,20 @@ fn app() -> Html {
     let wm_session_id = current.wm_session_id;
     let minimized_generation = current.wm_sequence.unwrap_or_default();
     let monitor = current.monitor;
-    let tags = current.tags;
-    let active_tag = current.active_tag;
+    let active_tag = current
+        .active_tag
+        .map(|tag| tag.to_string())
+        .unwrap_or_default();
+    let workspace_tags = current.workspace_tags;
+    let header_network = current.header_network;
+    let header_cpu = current.header_cpu;
+    let header_memory = current.header_memory;
+    let header_clock_compact = current.header_clock_compact;
+    let client_title = if current.client_name.trim().is_empty() {
+        "JWM Desktop".to_owned()
+    } else {
+        current.client_name.clone()
+    };
     let layout_symbol = current.layout_symbol;
     let layout_open = current.layout_selector_open;
     let system = current.system_details;
@@ -1286,7 +1345,7 @@ fn app() -> Html {
     let battery_label =
         battery_percent.map_or_else(|| "--".to_owned(), |percent| format!("{percent:.0}%"));
 
-    let volume_pill_class = if audio.as_ref().is_none_or(|device| device.is_muted) {
+    let volume_pill_class = if audio.as_ref().is_some_and(|device| device.is_muted) {
         "pill volume-pill muted"
     } else {
         "pill volume-pill"
@@ -1315,201 +1374,207 @@ fn app() -> Html {
         (*scale_factor).map_or_else(|| "s: --".to_owned(), |scale| format!("s: {scale:.2}"));
 
     html! {
-        <div class="button-row">
-            <div class="buttons-container">
-                {
-                    TAG_ICONS.iter().enumerate().map(|(index, icon)| {
-                        let tag = tags.get(index).cloned().unwrap_or_default();
-                        let base_class = button_class(&tag);
-                        let class = if *pressed == Some(index) {
-                            format!("{base_class} pressed")
-                        } else {
-                            base_class.to_owned()
-                        };
-                        html! {
-                            <button
-                                key={index}
-                                class={class}
-                                aria-pressed={tag.selected.to_string()}
-                                aria-current={(active_tag == Some(index)).to_string()}
-                                onmousedown={on_press(index)}
-                                onclick={on_release(index)}
-                                onmouseleave={on_leave.clone()}
-                                title={format!("Tag {}", index + 1)}
-                            >
-                                <span class="nf-icon">{*icon}</span>
-                            </button>
-                        }
-                    }).collect::<Html>()
-                }
-                <div class="layout-controls">
-                    <div class={layout_toggle_class} onclick={toggle_layout} title="切换布局">
-                        {layout_symbol.clone()}
-                    </div>
-                    if layout_open {
-                        <div class="layout-selector">
-                            <div class={option_class("[]=")} onclick={select_layout(0)}>{"[]="}</div>
-                            <div class={option_class("><>")} onclick={select_layout(1)}>{"><>"}</div>
-                            <div class={option_class("[M]")} onclick={select_layout(2)}>{"[M]"}</div>
+            <div class="button-row" data-desktop-header="true" data-active-tag={active_tag} data-battery-charging={battery.charging.to_string()} data-theme={current.theme.to_ascii_lowercase()}>
+                <div class="buttons-container">
+    <div class="shell-menu">
+                        <div
+                            class="pill shell-pill"
+                            onclick={Callback::from(|_| dispatch_action(
+                                ActionRequest::OpenShellHub { route: ShellRoute::Hub },
+                            ))}
+                            title="JWM shell"
+                        >
+                            <span class="header-launcher-glyph">{"▦"}</span>
                         </div>
-                    }
-                </div>
-            </div>
-
-            <div class="spacer"></div>
-
-            <div class="right-info-container">
-                <div
-                    class={classes!(
-                        "minimized-dock",
-                        (minimized_windows.is_empty() && !minimized_overflow).then_some("is-empty"),
-                    )}
-                    aria-label="Minimized windows"
-                >
-                    <span class="minimized-divider" aria-hidden="true"></span>
-                    { for minimized_windows.into_iter().map(|window| {
-                        let window_id = window.token;
-                        let label = minimized_label(&window);
-                        let title = format!("{label} — click to restore");
-                        let aria_label = format!("Restore {label}");
-                        let initial = minimized_initial(&window);
-                        let urgent = window.flags & 2 != 0;
-                        let preview_available = window.flags & 1 != 0;
-                        let class = classes!("minimized-item", urgent.then_some("is-urgent"));
-                        let restore = Callback::from(move |event: MouseEvent| {
-                            restore_minimized(
-                                window_id,
-                                wm_session_id,
-                                minimized_generation,
-                                event,
-                            );
-                        });
-                        let preview_enter = Callback::from(move |event: MouseEvent| {
-                            if preview_available {
-                                begin_preview(
-                                    window_id,
-                                    wm_session_id,
-                                    minimized_generation,
-                                    event,
-                                );
+                        <div class="shell-dropdown">
+                            { for SHELL_ROUTES.iter().map(|&(route, icon, label)| html! {
+                                <div
+                                    class="shell-route"
+                                    onclick={Callback::from(move |_| dispatch_action(
+                                        ActionRequest::OpenShellHub { route },
+                                    ))}
+                                >
+                                    <span class="nf-icon">{icon}</span>
+                                    <span>{label}</span>
+                                </div>
+                            }) }
+                        </div>
+                    </div>
+                    {
+                        workspace_tags.iter().map(|workspace| {
+                            let index = workspace.id;
+                            let tag = &workspace.state;
+                            let base_class = button_class(tag);
+                            let class = if *pressed == Some(index) {
+                                format!("{base_class} pressed")
+                            } else {
+                                base_class.to_owned()
+                            };
+                            html! {
+                                <button
+                                    key={index}
+                                    class={class}
+                                    aria-pressed={tag.selected.to_string()}
+                                    aria-current={tag.selected.to_string()}
+                                    data-tag-index={index.to_string()}
+                                    disabled={!wm_available}
+                                    oncontextmenu={Callback::from(move |event: MouseEvent| { event.prevent_default(); event.stop_propagation(); if wm_available { dispatch_action(ActionRequest::ToggleTagOn { tag_index: index, monitor_id: monitor }); } })}
+                                    onmousedown={on_press(index)}
+                                    onclick={on_release(index)}
+                                    onmouseleave={on_leave.clone()}
+                                    title={format!("Tag {}", workspace.number)}
+                                >
+                                    <span class="workspace-number">{workspace.number.to_string()}</span>
+                                </button>
                             }
-                        });
-                        let preview_leave = Callback::from(move |event: MouseEvent| {
-                            if preview_available {
-                                end_preview(
-                                    window_id,
-                                    wm_session_id,
-                                    minimized_generation,
-                                    event,
-                                );
-                            }
-                        });
-                        html! {
-                            <button
-                                key={format!("{wm_session_id}:{minimized_generation}:{window_id}")}
-                                class={class}
-                                data-window-id={window_id.to_string()}
-                                disabled={!wm_available}
-                                title={title}
-                                aria-label={aria_label}
-                                onclick={restore}
-                                onmouseenter={preview_enter}
-                                onmouseleave={preview_leave}
-                            >
-                                <span class="minimized-thumbnail" aria-hidden="true">
-                                    <span class="minimized-traffic-lights"></span>
-                                    <span class="minimized-initial">{initial}</span>
-                                </span>
-                                if urgent {
-                                    <span class="minimized-urgent-dot"></span>
-                                }
-                            </button>
-                        }
-                    }) }
-                    if minimized_overflow {
-                        <span class="minimized-overflow" title="More minimized windows">{"…"}</span>
+                        }).collect::<Html>()
                     }
-                </div>
-                <div class="system-info-container">
-                    <div class={cpu_class} title="CPU 平均使用率">
-                        <span class="nf-icon">{ICON_CPU}</span>{format!(" {:.0}%", system.cpu_average)}
-                    </div>
-                    <div class={memory_class} title={memory_title}>
-                        <span class="nf-icon">{ICON_MEM}</span>{format!(" {:.0}%", system.memory_usage_percent)}
-                    </div>
-                    <div class={battery_class} title={battery_title}>
-                        <span class="nf-icon">{battery_icon}</span>{format!(" {battery_label}")}
-                    </div>
-                </div>
-
-                <div
-                    class="pill brightness-pill"
-                    onclick={brightness_click}
-                    onwheel={brightness_wheel}
-                    oncontextmenu={brightness_right}
-                    title="左键加亮 / 右键减暗 / 滚轮调节"
-                >
-                    <span class="nf-icon">{ICON_BRIGHT}</span>{format!(" {brightness_label}")}
-                </div>
-
-                <div
-                    class={volume_pill_class}
-                    onclick={toggle_mute}
-                    onwheel={volume_wheel}
-                    title={volume_title}
-                >
-                    <span class="nf-icon">{volume_icon}</span>{format!(" {volume_label}")}
-                </div>
-
-                // JWM shell entry. Hovering reveals the pages; clicking the
-                // pill opens the hub, which is itself the page listing the rest.
-                <div class="shell-menu">
-                    <div
-                        class="pill shell-pill"
-                        onclick={Callback::from(|_| dispatch_action(
-                            ActionRequest::OpenShellHub { route: ShellRoute::Hub },
-                        ))}
-                        title="JWM shell"
-                    >
-                        <span class="nf-icon">{SHELL_ROUTES[0].1}</span>
-                    </div>
-                    <div class="shell-dropdown">
-                        { for SHELL_ROUTES.iter().map(|&(route, icon, label)| html! {
-                            <div
-                                class="shell-route"
-                                onclick={Callback::from(move |_| dispatch_action(
-                                    ActionRequest::OpenShellHub { route },
-                                ))}
-                            >
-                                <span class="nf-icon">{icon}</span>
-                                <span>{label}</span>
+                    <div class="layout-controls">
+                        <div class={layout_toggle_class} onclick={toggle_layout} title="切换布局">
+                            {layout_symbol.clone()}
+                        </div>
+                        if layout_open {
+                            <div class="layout-selector">
+                                <div class={option_class("[]=")} onclick={select_layout(0)}>{"[]="}</div>
+                                <div class={option_class("><>")} onclick={select_layout(1)}>{"><>"}</div>
+                                <div class={option_class("[M]")} onclick={select_layout(2)}>{"[M]"}</div>
                             </div>
-                        }) }
+                        }
                     </div>
                 </div>
 
-                <div
-                    class={if *is_taking { "pill screenshot-pill taking" } else { "pill screenshot-pill" }}
-                    onclick={take_screenshot}
-                    title="截图 (jwm)"
-                >
-                    <span class="nf-icon">{ICON_SHOT}</span>
-                </div>
+                <div class="client-title" title={client_title.clone()}>{client_title.clone()}</div>
 
-                <div class="pill time-pill" onclick={toggle_seconds} title={time_title}>
-                    <span class="nf-icon">{ICON_TIME}</span>{format!(" {}", current.time)}
-                </div>
+                <div class="right-info-container">
+    <div class="pill network-pill" title="Network"><span class="metric-label">{"NET"}</span>{header_network}</div>
+                    <div
+                        class={classes!(
+                            "minimized-dock",
+                            (minimized_windows.is_empty() && !minimized_overflow).then_some("is-empty"),
+                        )}
+                        aria-label="Minimized windows"
+                    >
+                        <span class="minimized-divider" aria-hidden="true"></span>
+                        { for minimized_windows.into_iter().map(|window| {
+                            let window_id = window.token;
+                            let label = minimized_label(&window);
+                            let title = format!("{label} — click to restore");
+                            let aria_label = format!("Restore {label}");
+                            let initial = minimized_initial(&window);
+                            let urgent = window.flags & 2 != 0;
+                            let preview_available = window.flags & 1 != 0;
+                            let class = classes!("minimized-item", urgent.then_some("is-urgent"));
+                            let restore = Callback::from(move |event: MouseEvent| {
+                                restore_minimized(
+                                    window_id,
+                                    wm_session_id,
+                                    minimized_generation,
+                                    event,
+                                );
+                            });
+                            let preview_enter = Callback::from(move |event: MouseEvent| {
+                                if preview_available {
+                                    begin_preview(
+                                        window_id,
+                                        wm_session_id,
+                                        minimized_generation,
+                                        event,
+                                    );
+                                }
+                            });
+                            let preview_leave = Callback::from(move |event: MouseEvent| {
+                                if preview_available {
+                                    end_preview(
+                                        window_id,
+                                        wm_session_id,
+                                        minimized_generation,
+                                        event,
+                                    );
+                                }
+                            });
+                            html! {
+                                <button
+                                    key={format!("{wm_session_id}:{minimized_generation}:{window_id}")}
+                                    class={class}
+                                    data-window-id={window_id.to_string()}
+                                    disabled={!wm_available}
+                                    title={title}
+                                    aria-label={aria_label}
+                                    onclick={restore}
+                                    onmouseenter={preview_enter}
+                                    onmouseleave={preview_leave}
+                                >
+                                    <span class="minimized-thumbnail" aria-hidden="true">
+                                        <span class="minimized-traffic-lights"></span>
+                                        <span class="minimized-initial">{initial}</span>
+                                    </span>
+                                    if urgent {
+                                        <span class="minimized-urgent-dot"></span>
+                                    }
+                                </button>
+                            }
+                        }) }
+                        if minimized_overflow {
+                            <span class="minimized-overflow" title="More minimized windows">{"…"}</span>
+                        }
+                    </div>
+                    <div class="system-info-container">
+                        <div class={cpu_class} title="CPU 平均使用率">
+                            <span class="nf-icon">{ICON_CPU}</span>{header_cpu}
+                        </div>
+                        <div class={memory_class} title={memory_title}>
+                            <span class="nf-icon">{ICON_MEM}</span>{header_memory}
+                        </div>
+                        <div class={battery_class} title={battery_title}>
+                            <span class="nf-icon">{battery_icon}</span>{format!(" {battery_label}")}
+                        </div>
+                    </div>
 
-                <div class="pill monitor-pill" title={monitor_title}>
-                    <span class="nf-icon">{ICON_MON}</span>{format!(" {}", monitor_icon(monitor))}
-                </div>
+                    <div
+                        class="pill brightness-pill"
+                        onclick={brightness_click}
+                        onwheel={brightness_wheel}
+                        oncontextmenu={brightness_right}
+                        title="左键加亮 / 右键减暗 / 滚轮调节"
+                    >
+                        <span class="nf-icon">{ICON_BRIGHT}</span>{format!(" {brightness_label}")}
+                    </div>
 
-                <div class="pill scale-pill" title="Scale Factor">
-                    {scale_text}
+                    <div
+                        class={volume_pill_class}
+                        onclick={toggle_mute}
+                        onwheel={volume_wheel}
+                        title={volume_title}
+                    >
+                        <span class="nf-icon">{volume_icon}</span>{format!(" {volume_label}")}
+                    </div>
+
+                    // JWM shell entry. Hovering reveals the pages; clicking the
+                    // pill opens the hub, which is itself the page listing the rest.
+
+
+                    <div
+                        class={if *is_taking { "pill screenshot-pill taking" } else { "pill screenshot-pill" }}
+                        onclick={take_screenshot}
+                        title="截图 (jwm)"
+                    >
+                        <span class="nf-icon">{ICON_SHOT}</span>
+                    </div>
+
+                    <div class="pill time-pill" data-header-clock={header_clock_compact} onclick={toggle_seconds} title={time_title}>
+                        <span class="nf-icon">{ICON_TIME}</span>{format!(" {}", current.time)}
+                    </div>
+
+                    <div class="pill monitor-pill" title={monitor_title}>
+                        <span class="nf-icon">{ICON_MON}</span>{format!(" {}", monitor_icon(monitor))}
+                    </div>
+
+                    <div class="pill scale-pill" title="Scale Factor">
+                        {scale_text}
+                    </div>
                 </div>
             </div>
-        </div>
-    }
+        }
 }
 
 fn main() {

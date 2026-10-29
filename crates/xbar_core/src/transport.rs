@@ -77,7 +77,7 @@ impl SharedTransport {
     }
 }
 
-fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
+pub fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
     let sequence = if message.minimized_generation != 0 {
         message.minimized_generation
     } else {
@@ -133,7 +133,7 @@ fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
     }
 }
 
-fn command_to_shared(command: WmCommand) -> SharedCommand {
+pub fn command_to_shared(command: WmCommand) -> SharedCommand {
     match command {
         WmCommand::ViewTag { tag, monitor } => SharedCommand::view_tag(tag.mask(), monitor.0),
         WmCommand::ToggleTag { tag, monitor } => SharedCommand::toggle_tag(tag.mask(), monitor.0),

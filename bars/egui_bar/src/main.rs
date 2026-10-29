@@ -22,9 +22,10 @@ fn main() -> anyhow::Result<()> {
     // A compositing manager means the bar can present per-pixel alpha and have
     // the desktop blurred behind it. Asking for a transparent window is what
     // gets winit to pick a 32-bit visual, which is in turn what makes JWM's
-    // compositor treat the bar as translucent — but only if the wgpu surface
-    // eframe builds can composite alpha at all, which the probe answers up
-    // front. Both facts are sampled once, here, because transparency is a
+    // compositor treat the bar as translucent. The probe checks a real ARGB
+    // surface, including GLES where an Opaque WSI advertisement can still
+    // preserve the native alpha channel; the app also verifies its own window.
+    // Both facts are sampled once, here, because transparency is a
     // creation-time decision: a compositor toggled later is not noticed until
     // the bar restarts, and the claimed selection promises compositing, not
     // that anything is blurred. When either check fails the bar paints the

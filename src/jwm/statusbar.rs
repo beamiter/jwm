@@ -37,13 +37,31 @@ impl StatusBarBuilder {
         clients: &slotmap::SlotMap<ClientKey, WMClient>,
         monitor_clients: &[ClientKey],
     ) -> (u32, u32) {
+        Self::tag_masks_for_clients(monitor_clients.iter().filter_map(|key| clients.get(*key)))
+    }
+
+    /// The client's owner is authoritative even while topology changes are
+    /// repairing their per-monitor index lists. Auxiliary desktop surfaces
+    /// are managed by JWM too, but must never populate workspace buttons.
+    pub fn calculate_tag_masks_for_monitor(
+        clients: &slotmap::SlotMap<ClientKey, WMClient>,
+        monitor: MonitorKey,
+    ) -> (u32, u32) {
+        Self::tag_masks_for_clients(
+            clients
+                .values()
+                .filter(|client| client.mon == Some(monitor)),
+        )
+    }
+
+    fn tag_masks_for_clients<'a>(clients: impl Iterator<Item = &'a WMClient>) -> (u32, u32) {
         let mut occupied_tags_mask = 0u32;
         let mut urgent_tags_mask = 0u32;
 
         let config_mask = CONFIG.load().tagmask();
 
-        for &client_key in monitor_clients {
-            if let Some(client) = clients.get(client_key) {
+        for client in clients {
+            if !client.state.is_dock && !client.state.is_desktop && !client.state.is_swallowed {
                 let effective_tags = client.state.tags & config_mask;
 
                 // 跳过 sticky 窗口（在所有标签上显示）
@@ -400,6 +418,63 @@ mod tests {
         client.state.is_urgent = is_urgent;
         client.name = name.to_string();
         client
+    }
+
+    #[test]
+    fn workspace_selection_comes_from_each_monitors_actual_tagset() {
+        let clients = slotmap::SlotMap::with_key();
+        for (num, mask, expected) in [(0, (1 << 4) | (1 << 7), vec![5, 8]), (1, 1 << 2, vec![3])] {
+            let mut monitor = WMMonitor::new();
+            monitor.num = num;
+            monitor.tag_set = [mask, 1];
+            // An unfocused monitor still publishes its own full selection;
+            // global focused-client styling must not replace these bits.
+            let message = StatusBarBuilder::build_message(&clients, &monitor, &[], false);
+            let selected: Vec<_> = (0..9)
+                .filter(|&index| {
+                    message
+                        .monitor_info
+                        .get_tag_status(index)
+                        .unwrap()
+                        .is_selected
+                })
+                .map(|index| index + 1)
+                .collect();
+            assert_eq!(selected, expected);
+        }
+    }
+
+    #[test]
+    fn workspace_occupancy_uses_managed_owner_not_stale_index_or_auxiliary_surfaces() {
+        let mut monitors = slotmap::SlotMap::<MonitorKey, WMMonitor>::with_key();
+        let local = monitors.insert(WMMonitor::new());
+        let other = monitors.insert(WMMonitor::new());
+        let mut clients = slotmap::SlotMap::with_key();
+        for (index, monitor) in [(0, local), (2, local), (7, local), (5, other)] {
+            let mut client = create_test_client(1 << index, index == 7, "application");
+            client.mon = Some(monitor);
+            client.state.is_hidden = index == 2;
+            clients.insert(client);
+        }
+        for kind in 0..3 {
+            let mut auxiliary = create_test_client(1 << 4, true, "auxiliary");
+            auxiliary.mon = Some(local);
+            auxiliary.state.is_dock = kind == 0;
+            auxiliary.state.is_desktop = kind == 1;
+            auxiliary.state.is_swallowed = kind == 2;
+            clients.insert(auxiliary);
+        }
+        let mut unassigned = create_test_client(1 << 6, true, "not yet owned");
+        unassigned.mon = None;
+        clients.insert(unassigned);
+        assert_eq!(
+            StatusBarBuilder::calculate_tag_masks_for_monitor(&clients, local),
+            ((1 << 0) | (1 << 2) | (1 << 7), 1 << 7)
+        );
+        assert_eq!(
+            StatusBarBuilder::calculate_tag_masks_for_monitor(&clients, other),
+            (1 << 5, 0)
+        );
     }
 
     #[test]

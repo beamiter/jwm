@@ -885,6 +885,15 @@ body {
   cursor: pointer;
 }
 
+/* The model can supply a full date and time. Keep that text's intrinsic
+   width inside the horizontal scroll group instead of shrinking to 32px. */
+html:is([data-bar-edge="top"], [data-bar-edge="bottom"]) .time-pill {
+  flex: 0 0 auto;
+  width: max-content;
+  padding-inline: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
 .monitor-pill {
   color: #fff;
   background: rgba(155, 89, 182, 0.90);

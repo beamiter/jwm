@@ -441,10 +441,9 @@ impl ApplicationHandler<UserEvent> for App {
                 argb,
             )
             .expect("wgpu init failed");
-            // Only when the surface really carries alpha may the background
-            // go translucent; anywhere short of that the bar paints fully
-            // opaque — a 0.55 wash over an undefined clear is never
-            // acceptable.
+            // The verified native visual and the presenter jointly determine
+            // alpha support. X11 ARGB remains valid with an Opaque GLES WSI;
+            // other native surfaces keep their advertised capability gate.
             let translucent = argb && gpu.is_transparent();
             self.bar
                 .follow_wm_background(self.background_opacity, translucent);
@@ -637,13 +636,15 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
-    let bar = CairoBar::new(
+    let mut bar = CairoBar::new(
         runtime,
         presentation,
         FontDescription::from_string(&app_config.font),
     );
+    bar.renderer_mut().set_capsule(desktop_header);
 
     // A session with no X display at all — native Wayland, say — reads as "no
     // compositor selection", which correctly lands the bar in solid mode.
@@ -669,7 +670,9 @@ fn main() -> Result<()> {
         proxy,
         compositing,
         x11_side.map(|(conn, _)| conn),
-        app_config.background_opacity,
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
     );
 
     // 运行

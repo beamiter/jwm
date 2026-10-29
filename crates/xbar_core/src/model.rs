@@ -352,6 +352,53 @@ pub struct TagState {
     pub occupied: bool,
 }
 
+/// One visible workspace, retaining its original protocol index. Filtering a
+/// sparse monitor must never turn workspace 8 into the third workspace action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceTag {
+    pub id: TagId,
+    pub number: usize,
+    pub state: TagState,
+}
+
+/// The single workspace-strip policy shared by native and web frontends.
+/// Selection flags describe this monitor's complete tag set. The legacy
+/// single active index is only a fallback when that set was not supplied.
+#[must_use]
+pub fn workspace_tags(tags: &[TagState], active_tag: Option<TagId>) -> Vec<WorkspaceTag> {
+    let tags = &tags[..tags.len().min(MAX_MODEL_TAGS)];
+    if tags.is_empty() {
+        let id = active_tag.unwrap_or_else(|| TagId::new(0).expect("first workspace exists"));
+        return vec![WorkspaceTag {
+            id,
+            number: id.index() + 1,
+            state: TagState {
+                selected: true,
+                ..TagState::default()
+            },
+        }];
+    }
+    let has_selection = tags.iter().any(|tag| tag.selected);
+    let fallback = (!has_selection).then(|| {
+        active_tag
+            .map(TagId::index)
+            .filter(|index| *index < tags.len())
+            .unwrap_or(0)
+    });
+    tags.iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, mut state)| {
+            state.selected |= fallback == Some(index);
+            (state.occupied || state.selected).then(|| WorkspaceTag {
+                id: TagId::new(index).expect("bounded workspace index"),
+                number: index + 1,
+                state,
+            })
+        })
+        .collect()
+}
+
 /// Transport-neutral snapshot received from a window manager.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WmSnapshot {
@@ -1291,6 +1338,13 @@ pub struct BarView<'a> {
     pub media: &'a MediaState,
 }
 
+impl BarView<'_> {
+    #[must_use]
+    pub fn workspace_tags(&self) -> Vec<WorkspaceTag> {
+        workspace_tags(self.tags, self.active_tag)
+    }
+}
+
 /// An owned, serializable projection of [`BarModel`].
 ///
 /// This mirrors [`BarView`] without borrowing the model, making it suitable
@@ -1341,6 +1395,11 @@ pub struct BarSnapshot {
 }
 
 impl BarSnapshot {
+    #[must_use]
+    pub fn workspace_tags(&self) -> Vec<WorkspaceTag> {
+        workspace_tags(&self.tags, self.active_tag)
+    }
+
     #[must_use]
     pub fn view(&self) -> BarView<'_> {
         BarView {
@@ -2092,6 +2151,113 @@ impl BarModel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_tags_keep_sparse_numbers_and_empty_selected_workspace() {
+        let mut tags = vec![super::TagState::default(); 9];
+        for index in [0, 2, 7] {
+            tags[index].occupied = true;
+        }
+        tags[4].selected = true;
+        let projected = super::workspace_tags(&tags, super::TagId::new(4));
+        assert_eq!(
+            projected.iter().map(|tag| tag.number).collect::<Vec<_>>(),
+            [1, 3, 5, 8]
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .map(|tag| tag.id.index())
+                .collect::<Vec<_>>(),
+            [0, 2, 4, 7]
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|tag| tag.state.selected)
+                .map(|tag| tag.number)
+                .collect::<Vec<_>>(),
+            [5]
+        );
+        assert_eq!(tags.len(), 9, "the canonical model is not compressed");
+    }
+
+    #[test]
+    fn workspace_tags_trust_all_monitor_selected_flags_over_stale_single_active() {
+        let mut tags = vec![super::TagState::default(); 9];
+        tags[2].selected = true;
+        tags[7].selected = true;
+        tags[0].filled = true;
+        tags[4].occupied = true;
+        let projected = super::workspace_tags(&tags, super::TagId::new(0));
+        assert_eq!(
+            projected.iter().map(|tag| tag.number).collect::<Vec<_>>(),
+            [3, 5, 8]
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|tag| tag.state.selected)
+                .map(|tag| tag.number)
+                .collect::<Vec<_>>(),
+            [3, 8]
+        );
+        assert!(
+            !projected[1].state.selected,
+            "occupancy/focus is not current selection"
+        );
+    }
+
+    #[test]
+    fn workspace_tags_have_a_deterministic_empty_fallback_and_bounded_ids() {
+        let tags = vec![super::TagState::default(); 9];
+        assert_eq!(
+            super::workspace_tags(&tags, super::TagId::new(7))[0].number,
+            8
+        );
+        assert_eq!(super::workspace_tags(&tags, None)[0].number, 1);
+        assert_eq!(super::workspace_tags(&[], None)[0].number, 1);
+        let oversized = vec![
+            super::TagState {
+                occupied: true,
+                ..Default::default()
+            };
+            super::MAX_MODEL_TAGS + 20
+        ];
+        let projected = super::workspace_tags(&oversized, None);
+        assert_eq!(projected.len(), super::MAX_MODEL_TAGS);
+        assert_eq!(projected.last().unwrap().number, super::MAX_MODEL_TAGS);
+    }
+
+    #[test]
+    fn typed_workspace_projection_preserves_configured_tags_above_legacy_wire_limit() {
+        for count in [16, super::MAX_MODEL_TAGS] {
+            let mut model = super::BarModel::new(super::ModelConfig {
+                tag_count: count,
+                ..Default::default()
+            })
+            .unwrap();
+            let mut tags = vec![super::TagState::default(); count];
+            tags[10].occupied = true;
+            tags[count - 1].selected = true;
+            model
+                .update(super::BarEvent::WindowManager(super::WmSnapshot {
+                    tags,
+                    ..Default::default()
+                }))
+                .unwrap();
+            let snapshot = model.snapshot();
+            assert_eq!(snapshot.tags.len(), count);
+            let projected = snapshot.workspace_tags();
+            assert_eq!(
+                projected.iter().map(|tag| tag.number).collect::<Vec<_>>(),
+                [11, count]
+            );
+            assert_eq!(projected[0].id.index(), 10);
+            assert!(projected[1].state.selected);
+            assert_eq!(model.view().workspace_tags(), projected);
+        }
+    }
+
     use super::*;
 
     fn tag(index: usize) -> TagId {

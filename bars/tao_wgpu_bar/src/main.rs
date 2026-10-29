@@ -87,6 +87,8 @@ fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
 
 #[derive(Debug)]
 enum UserEvent {
+    #[cfg(target_os = "linux")]
+    GtkWheel(PointerInput),
     Tick,
     SharedUpdated(WakeAck),
 }
@@ -211,6 +213,13 @@ impl App {
                 .build(event_loop)
                 .context("failed to create tao window")?,
         );
+        #[cfg(target_os = "linux")]
+        tao_scroll::install_gtk_bridge(
+            window.as_ref(),
+            self.proxy.clone(),
+            UserEvent::GtkWheel,
+            self.bar.config().scroll,
+        );
         if let Err(error) = self.dock_hints.sync(
             window.as_ref(),
             initial_placement,
@@ -223,16 +232,14 @@ impl App {
         let safe_width = size.width.max(1);
         let safe_height = size.height.max(1);
         // Transparency was only requested above; whether tao's GTK backend
-        // delivered a depth-32 window is checked against the server. When the
-        // X id is not out yet, ask for alpha anyway — the final opacity
-        // decision in `resolve_background_mode` re-checks before any
-        // translucent pixel is painted.
+        // delivered a depth-32 window is checked against the server. A missing
+        // X id or failed depth query is not proof of ARGB: remain opaque.
         let want_alpha = window_is_native_wayland(window.as_ref())
             || (self.compositor_active
                 && window_xid(window.as_ref())
                     .zip(self.x11_side.as_ref())
                     .map(|(xid, conn)| window_is_argb(conn, xid))
-                    .unwrap_or(true));
+                    .unwrap_or(false));
         let gpu =
             WgpuPresenter::new_blocking(Arc::clone(&window), safe_width, safe_height, want_alpha)
                 .context("failed to initialize wgpu")?;
@@ -474,6 +481,8 @@ impl App {
 
     fn on_user_event(&mut self, event: UserEvent) {
         match event {
+            #[cfg(target_os = "linux")]
+            UserEvent::GtkWheel(input) => self.handle_pointer_input(input),
             UserEvent::Tick => self.tick_and_poll(),
             UserEvent::SharedUpdated(_ack) => {
                 let update = self.bar.poll_transport();
@@ -546,6 +555,7 @@ impl App {
             WindowEvent::Focused(false) => {
                 self.handle_pointer_input(PointerInput::Cancel);
             }
+            #[cfg(not(target_os = "linux"))]
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 if let Some(point) = self.last_cursor_pos {
                     let input = tao_scroll::pointer_scroll(point, delta, phase, self.scale_factor);
@@ -596,13 +606,15 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
-    let bar = CairoBar::new(
+    let mut bar = CairoBar::new(
         runtime,
         presentation,
         FontDescription::from_string(&app_config.font),
     );
+    bar.renderer_mut().set_capsule(desktop_header);
 
     // A session with no X display at all — native Wayland, say — reads as "no
     // compositor selection", which correctly lands the bar in solid mode.
@@ -624,7 +636,9 @@ fn main() -> Result<()> {
         proxy,
         compositing,
         x11_side.map(|(conn, _)| conn),
-        app_config.background_opacity,
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
     );
     app.init_window_and_gpu(&event_loop)?;
 

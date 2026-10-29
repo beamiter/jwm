@@ -634,6 +634,7 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
+    let desktop_header = presentation.apply_desktop_header_profile();
     // The macOS-style template icons every bar renders from.
     presentation.apply_nerd_font_icons_if_stock();
     let mut bar = CairoBar::new(
@@ -641,6 +642,7 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
+    bar.renderer_mut().set_capsule(desktop_header);
     // One side connection answers the compositor question and later verifies
     // the window's depth; losing the display entirely just means solid mode.
     let (x11, compositor_active) = match x11rb::connect(None) {
@@ -653,7 +655,12 @@ fn main() -> Result<()> {
     // A translucent background only reads as a material when a compositor is
     // there to blend the desktop behind it; without one the bar keeps the
     // palette background at full opacity.
-    bar.follow_wm_background(app_config.background_opacity, compositor_active);
+    bar.follow_wm_background(
+        app_config
+            .background_opacity
+            .or(desktop_header.then_some(0.58)),
+        compositor_active,
+    );
 
     let event_loop: EventLoop<UserEvent> = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();

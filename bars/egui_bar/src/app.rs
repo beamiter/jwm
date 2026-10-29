@@ -82,7 +82,8 @@ impl EguiBarApp {
         crate::fonts::install(&cc.egui_ctx, &config.font);
 
         let mut presentation = config.presentation.clone();
-        // The macOS-style template icons every bar renders from.
+        let capsule = presentation.apply_desktop_header_profile();
+        let background_opacity = config.background_opacity.or(capsule.then_some(0.58));
         presentation.apply_nerd_font_icons_if_stock();
         let configured_height = presentation.bar_height;
 
@@ -99,6 +100,11 @@ impl EguiBarApp {
         let window = crate::platform::window_id(cc)
             .inspect_err(|error| debug!("no X11 window to mark as a dock: {error}"))
             .ok();
+        let translucent = translucent
+            && x11
+                .as_ref()
+                .zip(window)
+                .is_some_and(|(session, window)| session.window_is_argb(window));
         let default_monitor_geometry = x11
             .as_ref()
             .and_then(|x11| x11.screen_geometry().ok())
@@ -146,14 +152,15 @@ impl EguiBarApp {
                 hits: Vec::new(),
             },
             style: SceneStyle {
+                capsule,
                 family: FontFamily::Proportional,
                 background_opacity: xbar_core::background::bar_background_opacity(
                     None,
-                    config.background_opacity,
+                    background_opacity,
                     translucent,
                 ) as f32,
             },
-            background_opacity: config.background_opacity,
+            background_opacity,
             fallback: Color32::from_rgb(fallback[0], fallback[1], fallback[2]),
             translucent,
             process_actions: ProcessActionHandler::default(),

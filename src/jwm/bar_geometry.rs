@@ -47,21 +47,6 @@ impl BarGeometry {
     /// Four-panel geometry is shared with the frontend rather than inferred
     /// from transient native windows as they are created or hidden.
     pub(crate) fn reservation_depths(output: Rect, edge: BarEdge, config: &Config) -> [i32; 4] {
-        if config.status_bar_four_edge() {
-            let shell = xbar_core::placement::FourEdgeGeometry::new(
-                xbar_core::MonitorGeometry {
-                    x: output.x,
-                    y: output.y,
-                    width: output.w.max(1) as u32,
-                    height: output.h.max(1) as u32,
-                },
-                config.status_bar_height().max(1) as u32,
-                config.status_bar_padding().max(0) as u32,
-            );
-            return shell
-                .reserved
-                .map(|depth| depth.min(i32::MAX as u32) as i32);
-        }
         let bar = Self::new(
             output,
             edge,
@@ -76,6 +61,20 @@ impl BarGeometry {
             BarEdge::Bottom => 3,
         };
         depths[index] = bar.reservation;
+        if config.desktop_shell_enabled() {
+            let shell =
+                config
+                    .desktop_shell_config()
+                    .reservation_depths(xbar_core::MonitorGeometry {
+                        x: output.x,
+                        y: output.y,
+                        width: output.w.max(1) as u32,
+                        height: output.h.max(1) as u32,
+                    });
+            for (depth, shell_depth) in depths.iter_mut().zip(shell) {
+                *depth = (*depth).max(shell_depth.min(i32::MAX as u32) as i32);
+            }
+        }
         depths
     }
 
@@ -236,22 +235,24 @@ mod tests {
     }
 
     #[test]
-    fn four_panel_shell_reserves_all_edges_and_restarts_after_output_changes() {
+    fn shared_shell_reserves_actual_edges_without_restarting_top_after_output_changes() {
         let config = Config::default()
             .with_validated_value("status_bar.layout", &serde_json::json!("four-edge"))
             .unwrap();
         let output = Rect::new(-1280, 100, 1280, 800);
         assert_eq!(
             BarGeometry::reservation_depths(output, BarEdge::Top, &config),
-            [84, 84, 52, 100]
+            [90, 90, 52, 76]
         );
         let original = crate::jwm::types::BarLaunchConfig::for_output(&config, 0, output);
-        assert_eq!(original.output, Some(output));
+        assert_eq!(original.output, None);
+        assert_eq!(original.layout, crate::config::StatusBarLayout::Single);
+        assert!(original.shell_owned);
         for next in [
             Rect::new(0, 100, 1280, 800),
             Rect::new(-1280, 100, 1024, 768),
         ] {
-            assert_ne!(
+            assert_eq!(
                 original,
                 crate::jwm::types::BarLaunchConfig::for_output(&config, 0, next)
             );
@@ -259,7 +260,7 @@ mod tests {
         let next = config
             .with_validated_value("appearance.status_bar_padding", &serde_json::json!(10))
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             original,
             crate::jwm::types::BarLaunchConfig::for_output(&next, 0, output)
         );
