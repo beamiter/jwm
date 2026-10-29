@@ -205,6 +205,7 @@ wireplumber.components = [
     { name = libwireplumber-module-si-node, type = module }
     { name = libwireplumber-module-si-audio-adapter, type = module }
     { name = libwireplumber-module-si-standard-link, type = module }
+    { name = libwireplumber-module-si-audio-endpoint, type = module }
     { name = libwireplumber-module-default-nodes, type = module }
     { name = libwireplumber-module-default-nodes-api, type = module }
     { name = create-item.lua, type = script/lua }

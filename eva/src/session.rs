@@ -2596,7 +2596,9 @@ mod tests {
             json!({})
         );
         assert_eq!(
-            verified_summary(&json!({"percent":80,"muted":1,"read_back":{"percent":55,"muted":false}})),
+            verified_summary(
+                &json!({"percent":80,"muted":1,"read_back":{"percent":55,"muted":false}})
+            ),
             json!({"percent":55,"muted":false})
         );
     }
