@@ -73,10 +73,7 @@ impl EvaElement {
                 [0.0, 0.0, w as f32, h as f32],
                 [raster.width, raster.height],
             );
-            let (rw, rh) = (
-                rw.round().max(1.0) as usize,
-                rh.round().max(1.0) as usize,
-            );
+            let (rw, rh) = (rw.round().max(1.0) as usize, rh.round().max(1.0) as usize);
             let (ox, oy) = (tx.max(0.0) as usize, ty.max(0.0) as usize);
             if tw > 0 && th > 0 {
                 for yy in 0..rh.min(h.saturating_sub(oy)) {

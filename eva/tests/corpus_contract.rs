@@ -101,7 +101,10 @@ fn acceptance_case_ids_scenarios_and_dispositions_are_well_formed() {
                 .is_some_and(|text| !text.trim().is_empty()),
             "{id}: missing intent"
         );
-        match expected["disposition"].as_str().expect("expected disposition") {
+        match expected["disposition"]
+            .as_str()
+            .expect("expected disposition")
+        {
             "execute" => {
                 if let Some(actions) = expected["actions"].as_array() {
                     assert!(
@@ -138,9 +141,7 @@ fn exact_acceptance_plans_match_live_schemas_references_and_confirmation_policy(
             let spec = specs
                 .iter()
                 .find(|spec| spec.canonical_name == action.name)
-                .unwrap_or_else(|| {
-                    panic!("{id}: unsupported expected action {}", action.name)
-                });
+                .unwrap_or_else(|| panic!("{id}: unsupported expected action {}", action.name));
             validate_schema(&action.arguments, &spec.parameters_schema)
                 .unwrap_or_else(|error| panic!("{id}: {} fixture schema: {error}", action.name));
         }

@@ -523,7 +523,10 @@ impl Jwm {
                 VolumeReport::Failed(seq) => (seq, None),
             };
             self.eva_level_completion(
-                "volume", seq, actual.map(|state| state.percent), actual.map(|state| state.muted),
+                "volume",
+                seq,
+                actual.map(|state| state.percent),
+                actual.map(|state| state.muted),
             );
             match self.features.control_feedback.resolve_volume(volume, now) {
                 FeedbackAction::Adopt(state) => {

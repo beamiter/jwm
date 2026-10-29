@@ -1175,14 +1175,18 @@ fn verified_summary(value: &Value) -> Value {
         "saved",
     ] {
         if let Some(value) = value.get(key).filter(|value| {
-            value.is_boolean() || value.is_number() || (key == "layout" && value.is_string())
+            if key == "muted" {
+                value.is_boolean()
+            } else {
+                value.is_boolean() || value.is_number() || (key == "layout" && value.is_string())
+            }
         }) {
             summary.insert(key.into(), value.clone());
         }
     }
-    if let Some(percent) = value
+    if let Some(percent) = value["read_back"]
         .get("percent")
-        .or_else(|| value["read_back"].get("percent"))
+        .or_else(|| value.get("percent"))
         .filter(|percent| {
             percent
                 .as_f64()
@@ -1688,9 +1692,10 @@ fn verified_step_feedback(step: &Value) -> Option<String> {
         (mask.count_ones() == 1).then(|| mask.trailing_zeros() + 1)
     };
     match step["name"].as_str()? {
-        "switch_tag" | "switch_tags" => {
-            Some(format!("已切到第 {} 个工作区", single_tag("visible_tag_mask")?))
-        }
+        "switch_tag" | "switch_tags" => Some(format!(
+            "已切到第 {} 个工作区",
+            single_tag("visible_tag_mask")?
+        )),
         "move_window_to_tag" | "move_window_to_tags" => {
             Some(format!("窗口已移到第 {} 个工作区", single_tag("tag_mask")?))
         }
@@ -1725,11 +1730,14 @@ fn verified_step_feedback(step: &Value) -> Option<String> {
             let actual = &verified["read_back"];
             let percent = actual["percent"].as_u64().filter(|value| *value <= 100)?;
             match actual["domain"].as_str()? {
-                "volume" => Some(format!("音量 {percent}%{}", if actual["muted"] == true {
-                    "，输出仍为静音"
-                } else {
-                    ""
-                })),
+                "volume" => Some(format!(
+                    "音量 {percent}%{}",
+                    if actual["muted"] == true {
+                        "，输出仍为静音"
+                    } else {
+                        ""
+                    }
+                )),
                 "brightness" => Some(format!("屏幕亮度 {percent}%")),
                 _ => None,
             }
@@ -1777,15 +1785,25 @@ fn feedback_text(result: &Value) -> String {
         return q.to_owned();
     }
     if result["status"] == "succeeded"
-        && let Some(steps) = result["steps"].as_array().filter(|steps| (1..=3).contains(&steps.len()))
-        && let Some(lines) = steps.iter().map(verified_step_feedback).collect::<Option<Vec<_>>>()
+        && let Some(steps) = result["steps"]
+            .as_array()
+            .filter(|steps| (1..=3).contains(&steps.len()))
+        && let Some(lines) = steps
+            .iter()
+            .map(verified_step_feedback)
+            .collect::<Option<Vec<_>>>()
     {
         return format!("{}。", lines.join("；"));
     }
     if result["status"] == "partial"
-        && result["steps"].as_array().is_some_and(|steps| steps.iter().any(|step| {
-            matches!(step["status"].as_str(), Some("accepted" | "queued" | "in_flight" | "unknown"))
-        }))
+        && result["steps"].as_array().is_some_and(|steps| {
+            steps.iter().any(|step| {
+                matches!(
+                    step["status"].as_str(),
+                    Some("accepted" | "queued" | "in_flight" | "unknown")
+                )
+            })
+        })
     {
         return "部分操作已完成，另有操作尚未确认；未继续后续步骤。".into();
     }
@@ -2091,7 +2109,10 @@ mod tests {
         pending["steps"][0]["status"] = json!("accepted");
         assert_eq!(feedback_text(&pending), "已提交，正在等待完成。");
         let question = json!({"status":"clarify","question":"浏览器有两个窗口，你要文档还是视频？","steps":[]});
-        assert_eq!(feedback_text(&question), question["question"].as_str().unwrap());
+        assert_eq!(
+            feedback_text(&question),
+            question["question"].as_str().unwrap()
+        );
         let partial = json!({"status":"partial","steps":[tag["steps"][0].clone(),pending["steps"][0].clone()]});
         assert!(feedback_text(&partial).contains("尚未确认"));
     }
@@ -2552,16 +2573,32 @@ mod tests {
         };
         let result = json!({"status":"succeeded","steps":[{"name":"resize_horizontal","status":"succeeded","result":{"verified":{}}}]});
         let public = cloud_execution_result(&result, &plan, &Config::default(), &context);
-        assert_eq!(public["steps"][0]["follow_up"]["parameters"], json!({"tag_number":1,"value":-0.05}));
-        assert_eq!(public["steps"][0]["follow_up"]["targets"]["window_ref"], "w1");
+        assert_eq!(
+            public["steps"][0]["follow_up"]["parameters"],
+            json!({"tag_number":1,"value":-0.05})
+        );
+        assert_eq!(
+            public["steps"][0]["follow_up"]["targets"]["window_ref"],
+            "w1"
+        );
         assert!(!public.to_string().contains("private-"));
     }
     #[test]
     fn verified_device_feedback_projects_only_bounded_readback_scalars() {
         let value = json!({"read_back":{"percent":55,"muted":true,"device_name":"private-device","assistant_permit":"private-permit"}});
         assert_eq!(verified_summary(&value), json!({"percent":55,"muted":true}));
-        assert_eq!(verified_summary(&json!({"read_back":{"percent":101,"muted":"true"}})), json!({}));
-        assert_eq!(verified_summary(&json!({"read_back":{"percent":-1}})), json!({}));
+        assert_eq!(
+            verified_summary(&json!({"read_back":{"percent":101,"muted":"true"}})),
+            json!({})
+        );
+        assert_eq!(
+            verified_summary(&json!({"read_back":{"percent":-1}})),
+            json!({})
+        );
+        assert_eq!(
+            verified_summary(&json!({"percent":80,"muted":1,"read_back":{"percent":55,"muted":false}})),
+            json!({"percent":55,"muted":false})
+        );
     }
     #[test]
     fn feedback_cannot_leak_nested_execution_authority() {

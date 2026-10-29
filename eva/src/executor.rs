@@ -457,20 +457,26 @@ async fn settle_level_control(
     instance: &str,
     dispatch_deadline: std::time::Instant,
 ) -> Value {
-    let deadline = dispatch_deadline.min(
-        std::time::Instant::now() + std::time::Duration::from_secs(2),
-    );
+    let deadline =
+        dispatch_deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2));
     loop {
         if result["operation_id"].as_str() != Some(id) {
             return json!({"operation_id":id,"status":"unknown","error":"control_receipt_mismatch"});
         }
-        if !matches!(result["status"].as_str(), Some("accepted" | "queued" | "in_flight")) {
+        if !matches!(
+            result["status"].as_str(),
+            Some("accepted" | "queued" | "in_flight")
+        ) {
             return result;
         }
         let observed = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
-            query("get_execution_status", json!({"operation_id":id,"wm_instance_id":instance})),
-        ).await;
+            query(
+                "get_execution_status",
+                json!({"operation_id":id,"wm_instance_id":instance}),
+            ),
+        )
+        .await;
         match observed {
             Ok(Ok(receipt)) => result = receipt,
             _ => {
@@ -479,7 +485,10 @@ async fn settle_level_control(
                 return result;
             }
         }
-        if matches!(result["status"].as_str(), Some("accepted" | "queued" | "in_flight")) {
+        if matches!(
+            result["status"].as_str(),
+            Some("accepted" | "queued" | "in_flight")
+        ) {
             if std::time::Instant::now() >= deadline {
                 result["status"] = json!("unknown");
                 result["error"] = json!("control_readback_timeout");
@@ -487,7 +496,8 @@ async fn settle_level_control(
             }
             tokio::time::sleep_until(tokio::time::Instant::from_std(
                 deadline.min(std::time::Instant::now() + std::time::Duration::from_millis(40)),
-            )).await;
+            ))
+            .await;
         }
     }
 }

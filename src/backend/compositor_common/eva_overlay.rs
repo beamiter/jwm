@@ -174,15 +174,14 @@ impl EvaOverlayState {
         });
         // This is the real follow-up deadline supplied by the WM, not the
         // heartbeat/permit lease. Merely repainting never grants more time.
-        self.followup_deadline = if self.session_active
-            && matches!(self.state.as_str(), "followup" | "follow_up")
-        {
-            snapshot["followup_remaining_ms"]
-                .as_u64()
-                .map(|remaining| now + Duration::from_millis(remaining.min(600_000)))
-        } else {
-            None
-        };
+        self.followup_deadline =
+            if self.session_active && matches!(self.state.as_str(), "followup" | "follow_up") {
+                snapshot["followup_remaining_ms"]
+                    .as_u64()
+                    .map(|remaining| now + Duration::from_millis(remaining.min(600_000)))
+            } else {
+                None
+            };
         self.viewport = snapshot["monitor_rect"].as_array().and_then(|v| {
             if v.len() != 4 {
                 return None;
@@ -735,7 +734,10 @@ impl EvaOverlayState {
             (self.confirmation_layout().text.lines().count() + 1) as f32 * (size * 1.5).ceil()
                 + 32.0
         } else {
-            (self.text_raster(Instant::now(), self.text_width(width)).height as f32 + 52.0)
+            (self
+                .text_raster(Instant::now(), self.text_width(width))
+                .height as f32
+                + 52.0)
                 .max(132.0)
         };
         let height = (h - 32.0).clamp(1.0, desired_h);
@@ -874,7 +876,8 @@ mod tests {
     #[test]
     fn eva_result_keeps_its_state_header_and_wraps_unicode_message() {
         let now = Instant::now();
-        let question = "你是说正在播放视频的浏览器，还是用于查看项目文档的另一个浏览器窗口？".repeat(4);
+        let question =
+            "你是说正在播放视频的浏览器，还是用于查看项目文档的另一个浏览器窗口？".repeat(4);
         let mut state = EvaOverlayState::default();
         state.update(
             &json!({"active":true,"state":"follow_up","text":question,"microphone_active":true,"followup_remaining_ms":5000,"monitor_rect":[0,0,560,720]}),
@@ -891,14 +894,18 @@ mod tests {
             raster.pixels.len(),
             raster.width as usize * raster.height as usize * 4
         );
-        assert!(std::sync::Arc::ptr_eq(&raster, &state.text_raster(now, 480)));
+        assert!(std::sync::Arc::ptr_eq(
+            &raster,
+            &state.text_raster(now, 480)
+        ));
     }
 
     #[test]
     fn eva_audio_level_heartbeat_reuses_the_typography_cache() {
         let now = Instant::now();
         let mut state = EvaOverlayState::default();
-        let mut snapshot = json!({"active":true,"state":"listening","microphone_active":true,"level":0.1});
+        let mut snapshot =
+            json!({"active":true,"state":"listening","microphone_active":true,"level":0.1});
         state.update(&snapshot, now);
         let before = state.text_raster(now, 512);
         snapshot["level"] = json!(0.8);
@@ -937,7 +944,10 @@ mod tests {
     fn eva_absent_followup_deadline_never_invents_a_countdown() {
         let now = Instant::now();
         let mut state = EvaOverlayState::default();
-        state.update(&json!({"active":true,"state":"follow_up","microphone_active":true}), now);
+        state.update(
+            &json!({"active":true,"state":"follow_up","microphone_active":true}),
+            now,
+        );
         state.settle_motion_for_test(now);
         state.mark_drawn(now);
         assert!(!state.label(now).contains("还可说话"));

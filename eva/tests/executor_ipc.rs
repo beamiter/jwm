@@ -153,7 +153,10 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
         if scenario.starts_with("level_") {
             let records = dispatches.lock().unwrap();
             let receipts = status_queries.lock().unwrap();
-            assert!(!receipts.is_empty(), "{scenario}: acceptance needs read-back");
+            assert!(
+                !receipts.is_empty(),
+                "{scenario}: acceptance needs read-back"
+            );
             for receipt in receipts.iter() {
                 assert_eq!(receipt["args"]["wm_instance_id"], "test-wm");
                 assert!(
@@ -164,9 +167,17 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
                 );
             }
             if matches!(scenario, "level_receipt" | "level_multi_success") {
-                assert_eq!(receipts.len(), 2 * count, "must wait past accepted to a receipt");
+                assert_eq!(
+                    receipts.len(),
+                    2 * count,
+                    "must wait past accepted to a receipt"
+                );
             } else {
-                assert_eq!(receipts.len(), 1, "unknown or failure must not be polled into a retry");
+                assert_eq!(
+                    receipts.len(),
+                    1,
+                    "unknown or failure must not be polled into a retry"
+                );
             }
         }
     }

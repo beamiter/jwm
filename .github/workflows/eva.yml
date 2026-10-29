@@ -47,7 +47,7 @@ jobs:
       - name: Install audio build and shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pulseaudio pulseaudio-utils pipewire pipewire-bin wireplumber dbus-daemon mpv ffmpeg
+          sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pulseaudio pulseaudio-utils pipewire pipewire-bin wireplumber dbus-daemon mpv ffmpeg
       - name: Resolve compatible PipeWire development headers
         run: |
           bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"
@@ -147,7 +147,7 @@ jobs:
       - name: Install native audio build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build
+          sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev libpulse-dev libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build
       - name: Resolve compatible PipeWire development headers
         run: |
           bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"

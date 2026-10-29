@@ -4035,13 +4035,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), alpha);
             self.gl.active_texture(glow::TEXTURE0);
             let [tx, ty, lw, lh] = self.eva_overlay.text_rect(rect, [tw, th]);
-            self.gl.uniform_4_f32(
-                self.hud_text_uniforms.rect.as_ref(),
-                tx,
-                ty,
-                lw,
-                lh,
-            );
+            self.gl
+                .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), tx, ty, lw, lh);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);

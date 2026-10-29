@@ -143,7 +143,7 @@ fn verified(value: &Value) -> Value {
     ] {
         if let Some(value) = value
             .get(key)
-            .filter(|value| value.is_boolean() || value.is_number())
+            .filter(|value| value.is_boolean() || (key != "muted" && value.is_number()))
         {
             output.insert(key.into(), value.clone());
         }
@@ -341,7 +341,10 @@ mod tests {
         });
         let facts = public_facts(&json!({"status":"succeeded","steps":[step.clone()]}));
         assert_eq!(facts["conversation_context"]["can_repeat"], true);
-        assert_eq!(facts["conversation_context"]["last_effect"]["parameters"], json!({"value":-0.05,"tag_number":3}));
+        assert_eq!(
+            facts["conversation_context"]["last_effect"]["parameters"],
+            json!({"value":-0.05,"tag_number":3})
+        );
         assert!(!facts.to_string().contains("private-token"));
         assert!(!facts.to_string().contains("secret-caption"));
         let failed = public_facts(&json!({"status":"unknown","steps":[step]}));

@@ -666,7 +666,9 @@ impl Jwm {
                     // Repeated heartbeats may refresh the visibility lease,
                     // but cannot extend this turn's speaking window.
                     Some(if same_followup {
-                        self.eva.followup_deadline_ns.map_or(deadline, |old| old.min(deadline))
+                        self.eva
+                            .followup_deadline_ns
+                            .map_or(deadline, |old| old.min(deadline))
                     } else {
                         deadline
                     })
@@ -706,8 +708,7 @@ impl Jwm {
         };
         self.eva.state = state.into();
         self.eva.followup_deadline_ns = followup_deadline;
-        self.eva.followup_turn_epoch = in_followup
-            .then_some(followup_turn).flatten();
+        self.eva.followup_turn_epoch = in_followup.then_some(followup_turn).flatten();
         if let Some(text) = args.get("text").and_then(Value::as_str) {
             self.eva.text = text.chars().filter(|c| !c.is_control()).take(240).collect();
         }
@@ -1689,17 +1690,24 @@ impl Jwm {
                 let volume = matches!(action.name.as_str(), "set_volume" | "adjust_volume");
                 let request = match action.name.as_str() {
                     "set_volume" => ControlRequest::VolumeSet(
-                        args["percent"].as_u64().filter(|n| *n <= 100)
+                        args["percent"]
+                            .as_u64()
+                            .filter(|n| *n <= 100)
                             .ok_or("plan_invalid: volume percent")? as u8,
                     ),
                     "set_brightness" => ControlRequest::BrightnessSet(
-                        args["percent"].as_u64().filter(|n| (1..=100).contains(n))
-                            .ok_or("plan_invalid: brightness percent")? as u8,
+                        args["percent"]
+                            .as_u64()
+                            .filter(|n| (1..=100).contains(n))
+                            .ok_or("plan_invalid: brightness percent")?
+                            as u8,
                     ),
                     name => {
-                        let delta = args["delta"].as_i64()
+                        let delta = args["delta"]
+                            .as_i64()
                             .filter(|n| (-25..=25).contains(n) && *n != 0)
-                            .ok_or("plan_invalid: level delta")? as i32;
+                            .ok_or("plan_invalid: level delta")?
+                            as i32;
                         if name == "adjust_volume" {
                             ControlRequest::VolumeAdjust(delta)
                         } else {
@@ -1708,14 +1716,20 @@ impl Jwm {
                     }
                 };
                 let (domain, seq) = if volume {
-                    let (seq, _) = self.queue_volume_request(request)
+                    let (seq, _) = self
+                        .queue_volume_request(request)
                         .ok_or("volume_control_unavailable")?;
-                    self.features.control_feedback.owe_osd(ControlDomain::Volume, seq);
+                    self.features
+                        .control_feedback
+                        .owe_osd(ControlDomain::Volume, seq);
                     ("volume", seq)
                 } else {
-                    let (seq, _) = self.queue_brightness_request(request)
+                    let (seq, _) = self
+                        .queue_brightness_request(request)
                         .ok_or("backlight_control_unavailable")?;
-                    self.features.control_feedback.owe_osd(ControlDomain::Brightness, seq);
+                    self.features
+                        .control_feedback
+                        .owe_osd(ControlDomain::Brightness, seq);
                     ("brightness", seq)
                 };
                 if let Some(op) = self.eva.operations.get_mut(operation_id) {
@@ -1724,7 +1738,10 @@ impl Jwm {
                 // An optimistic slider/cache update is never completion.
                 // Only the worker's matching sequence and native read-back
                 // can settle this operation in eva_level_completion.
-                Ok(("accepted", json!({"completion":"awaiting_control_readback","domain":domain})))
+                Ok((
+                    "accepted",
+                    json!({"completion":"awaiting_control_readback","domain":domain}),
+                ))
             }
             "switch_tag" | "switch_tags" => {
                 let m = monitor()?;
@@ -2882,27 +2899,37 @@ impl Jwm {
         percent: Option<u8>,
         muted: Option<bool>,
     ) {
-        let action = self.eva.operations.values().find(|op| {
-            !op.terminal && op.control_sequence.as_ref()
-                .is_some_and(|(d, s)| d == domain && *s == seq)
-        }).map(|op| &op.request["action"]);
-        let took = action.and_then(|action| percent.map(|actual| {
-            match (domain, action["name"].as_str()) {
-                ("volume", Some("set_volume")) => {
-                    action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
-                        && muted == Some(false)
+        let action = self
+            .eva
+            .operations
+            .values()
+            .find(|op| {
+                !op.terminal
+                    && op
+                        .control_sequence
+                        .as_ref()
+                        .is_some_and(|(d, s)| d == domain && *s == seq)
+            })
+            .map(|op| &op.request["action"]);
+        let took = action.and_then(|action| {
+            percent.map(|actual| {
+                match (domain, action["name"].as_str()) {
+                    ("volume", Some("set_volume")) => {
+                        action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
+                            && muted == Some(false)
+                    }
+                    ("brightness", Some("set_brightness")) => {
+                        action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
+                    }
+                    // Applied(seq, actual) is emitted only after this worker
+                    // performs the relative request and reads the real level.
+                    ("volume", Some("adjust_volume")) => actual <= 100,
+                    // A positive minimum raw backlight step can round to 0%.
+                    ("brightness", Some("adjust_brightness")) => actual <= 100,
+                    _ => false,
                 }
-                ("brightness", Some("set_brightness")) => {
-                    action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
-                }
-                // Applied(seq, actual) is emitted only after this worker
-                // performs the relative request and reads the real level.
-                ("volume", Some("adjust_volume")) => actual <= 100,
-                // A positive minimum raw backlight step can round to 0%.
-                ("brightness", Some("adjust_brightness")) => actual <= 100,
-                _ => false,
-            }
-        }));
+            })
+        });
         self.eva_control_completion(
             domain,
             seq,
@@ -3084,7 +3111,12 @@ mod tests {
         status["followup_deadline_monotonic_ns"] = json!(deadline + 1_000_000_000);
         assert!(jwm.eva_set_status(&mut backend, &status).success);
         assert_eq!(jwm.eva.followup_deadline_ns, Some(deadline));
-        assert!(jwm.eva_overlay_snapshot()["followup_remaining_ms"].as_u64().unwrap() <= 5000);
+        assert!(
+            jwm.eva_overlay_snapshot()["followup_remaining_ms"]
+                .as_u64()
+                .unwrap()
+                <= 5000
+        );
         status["turn_epoch"] = json!(2);
         assert!(jwm.eva_set_status(&mut backend, &status).success);
         assert_eq!(jwm.eva.followup_deadline_ns, Some(deadline + 1_000_000_000));
@@ -3111,14 +3143,21 @@ mod tests {
             assert!(reply.success, "{name}: {reply:?}");
             assert_eq!(reply.data.unwrap()["status"], "accepted", "{name}");
             assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
-            assert_eq!(queue.requests().len(), 1, "{name}: duplicate must not requeue");
+            assert_eq!(
+                queue.requests().len(),
+                1,
+                "{name}: duplicate must not requeue"
+            );
             jwm.eva_level_completion(domain, 0, Some(actual), Some(false));
             assert_eq!(jwm.eva.operations[name].result["status"], "accepted");
             jwm.eva_level_completion(domain, 1, Some(actual), Some(false));
             let result = &jwm.eva.operations[name].result;
             assert_eq!(result["status"], "succeeded", "{name}: {result}");
             assert_eq!(result["verified"]["read_back"]["percent"], actual);
-            assert_eq!(result["verified"]["completion"], "native_control_readback_observed");
+            assert_eq!(
+                result["verified"]["completion"],
+                "native_control_readback_observed"
+            );
         }
     }
     #[test]
@@ -3126,7 +3165,11 @@ mod tests {
         use crate::jwm::features::system_controls::TestControlQueueGuard;
         let _queue = TestControlQueueGuard::install();
         let (mut jwm, mut backend) = setup();
-        let req = request(&jwm, "volume", json!({"name":"set_volume","arguments":{"percent":40}}));
+        let req = request(
+            &jwm,
+            "volume",
+            json!({"name":"set_volume","arguments":{"percent":40}}),
+        );
         assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
         jwm.eva_level_completion("volume", 1, None, None);
         assert_eq!(jwm.eva.operations["volume"].result["status"], "unknown");
@@ -3145,7 +3188,10 @@ mod tests {
             json!({"name":"adjust_volume","arguments":{"delta":0}}),
             json!({"name":"adjust_brightness","arguments":{"delta":26}}),
             json!({"name":"adjust_volume","arguments":{"delta":-26}}),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let req = request(&jwm, &format!("invalid-{index}"), action);
             assert!(!jwm.eva_guarded_execute(&mut backend, &req).success);
         }

@@ -594,26 +594,46 @@ fn extended_actions() -> Vec<ActionSpec> {
         "reversible",
     );
     for (name, description, minimum) in [
-        ("set_volume", "将系统输出音量设为指定百分比；与音量滑块一致，会取消输出静音", 0),
-        ("set_brightness", "将内置屏幕背光设为指定百分比；不支持没有背光控制的外接屏幕", 1),
+        (
+            "set_volume",
+            "将系统输出音量设为指定百分比；与音量滑块一致，会取消输出静音",
+            0,
+        ),
+        (
+            "set_brightness",
+            "将内置屏幕背光设为指定百分比；不支持没有背光控制的外接屏幕",
+            1,
+        ),
     ] {
         add(
             name,
             description,
-            vec![("percent", json!({"type":"integer","minimum":minimum,"maximum":100}))],
+            vec![(
+                "percent",
+                json!({"type":"integer","minimum":minimum,"maximum":100}),
+            )],
             "device",
             "native_control_sequence_and_readback",
             "ordinary",
         );
     }
     for (name, description) in [
-        ("adjust_volume", "按百分点增减系统输出音量，正数调大、负数调小；一点默认为5个百分点；不改变静音状态"),
-        ("adjust_brightness", "按百分点增减内置屏幕背光，正数调亮、负数调暗；一点默认为5个百分点"),
+        (
+            "adjust_volume",
+            "按百分点增减系统输出音量，正数调大、负数调小；一点默认为5个百分点；不改变静音状态",
+        ),
+        (
+            "adjust_brightness",
+            "按百分点增减内置屏幕背光，正数调亮、负数调暗；一点默认为5个百分点",
+        ),
     ] {
         add(
             name,
             description,
-            vec![("delta", json!({"anyOf":[{"type":"integer","minimum":-25,"maximum":-1},{"type":"integer","minimum":1,"maximum":25}]}))],
+            vec![(
+                "delta",
+                json!({"anyOf":[{"type":"integer","minimum":-25,"maximum":-1},{"type":"integer","minimum":1,"maximum":25}]}),
+            )],
             "device",
             "native_control_sequence_and_readback",
             "ordinary",
