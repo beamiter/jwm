@@ -128,6 +128,11 @@ jobs:
             libxrender-dev \
             xauth \
             xwayland \
+            xserver-xephyr \
+            xdotool \
+            x11-apps \
+            x11-utils \
+            dbus-daemon \
             xvfb
 
       - name: Install stable Rust
@@ -154,6 +159,11 @@ jobs:
         run: bash scripts/test-procedural-wallpaper-cache.sh
         env:
           JWM_REQUIRE_HEADLESS_GL: 1
+
+      - name: Native wallpaper and real X11 restart ownership regression
+        run: |
+          cargo build --locked -p jwm --bin jwm
+          python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor both --triggers hotkey,ipc --stale-published-owner foreign
 
   feature-profiles:
     name: Feature profile (${{ matrix.profile.name }})

@@ -145,6 +145,44 @@ exercises the XCB RandR 1.5 output producer, including cached enumeration and
 cache invalidation. Actual Xorg multi-monitor restarts, compositor-on/off
 behavior, and live hotplug still require hardware/session validation.
 
+## Native wallpaper resource ownership
+
+Root-window wallpaper properties can survive a restart even after the X server
+has released their pixmaps. Their numeric XIDs can then identify a new JWM
+resource or another application's resource. They are publication metadata, not
+proof of ownership: calling `KillClient` on such an ID can disconnect the new
+window manager during wallpaper initialization.
+
+Both X11 backends now release only the previous pixmap recorded as owned by
+that backend, using `FreePixmap` after publishing its replacement. They never
+terminate a client based on an old `_XROOTPMAP_ID` or `ESETROOT_PMAP_ID` value.
+The ordinary user-requested window kill command is unchanged.
+
+The native regression
+`native_root_wallpaper_does_not_kill_unproven_property_owners` uses private Xvfb
+connections to publish IDs belonging to JWM and another live client. It checks
+that both connections survive and that only the tracked previous pixmap is
+freed. The desktop regression exercises actual Alt+Shift+R and IPC restarts,
+with a real PNG wallpaper and preserved application windows:
+
+```sh
+cargo test --locked -p jwm --lib native_root_wallpaper_does_not_kill_unproven_property_owners -- --test-threads=1
+python3 scripts/test-restart-x11.py --jwm target/release/jwm --compositor both --triggers hotkey,ipc --stale-published-owner foreign
+```
+
+The script owns hidden Xvfb/Xephyr servers and private configuration and IPC
+paths. It never connects to the user's desktop. The `foreign` variant writes a
+still-live test application's XID into the wallpaper properties before restart
+to exercise stale resource ownership deterministically.
+
+Local validation on 2026-10-30 passed both native ownership tests, all-target
+Clippy, and eight real hotkey/IPC restarts across XCB/X11rb and compositor
+on/off under private software-rendered Xephyr. Each restart retained the JWM
+PID/start time, application PID/XID, tag view and layout, and initialized the
+replacement wallpaper. The old XCB binary failed the foreign-owner case by
+terminating the test application. These isolated tests do not replace an Xorg
+hardware-session check.
+
 ## External X11 panels and work areas
 
 During startup and restart, mapped override-redirect panels keep their existing

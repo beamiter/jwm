@@ -150,6 +150,40 @@ fn drag_trace_enabled() -> bool {
     *CACHE.get_or_init(|| drag_trace_flag(env::var("JWM_DEBUG_DRAG").ok().as_deref()))
 }
 
+fn commit_owned_root_pixmap(
+    conn: &RustConnection,
+    root: u32,
+    properties: [u32; 2],
+    owned: &mut Option<u32>,
+    pixmap: u32,
+) -> Result<(), BackendError> {
+    use x11rb::protocol::xproto::{AtomEnum, ChangeWindowAttributesAux, ConnectionExt, PropMode};
+    use x11rb::wrapper::ConnectionExt as _;
+    conn.change_window_attributes(
+        root,
+        &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
+    )?;
+    conn.clear_area(false, root, 0, 0, 0, 0)?;
+    for property in properties {
+        conn.change_property32(
+            PropMode::REPLACE,
+            root,
+            property,
+            AtomEnum::PIXMAP,
+            &[pixmap],
+        )?;
+    }
+    let previous = owned.replace(pixmap);
+    // Root properties may be stale or name a reused XID. They do not prove
+    // resource ownership; KillClient could terminate us or an unrelated app.
+    // Only a pixmap created and tracked by this backend is ours to release.
+    if let Some(old) = previous.filter(|old| *old != pixmap) {
+        let _ = conn.free_pixmap(old);
+    }
+    conn.flush()?;
+    Ok(())
+}
+
 impl X11rbBackend {
     fn resize_cursor_kind(edge: ResizeEdge) -> StdCursorKind {
         match edge {
@@ -192,9 +226,7 @@ impl X11rbBackend {
     ) -> Result<(), BackendError> {
         use crate::backend::x11::root_wallpaper::{put_image_rows, rgba_to_bgra_le};
         use x11rb::connection::Connection as _;
-        use x11rb::protocol::xproto::{
-            ChangeWindowAttributesAux, ConnectionExt, CreateGCAux, ImageFormat, ImageOrder,
-        };
+        use x11rb::protocol::xproto::{ConnectionExt, CreateGCAux, ImageFormat, ImageOrder};
 
         if width == 0 || height == 0 {
             return Err(BackendError::Message(
@@ -267,58 +299,13 @@ impl X11rbBackend {
         }
         self.conn.free_gc(gc)?;
 
-        let previous = self.native_root_pixmap;
-        let old_published = self.published_root_pixmap();
-        self.conn.change_window_attributes(
+        commit_owned_root_pixmap(
+            &self.conn,
             self.root_x11,
-            &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
-        )?;
-        self.conn.clear_area(false, self.root_x11, 0, 0, 0, 0)?;
-        self.publish_root_pixmap(pixmap)?;
-        self.native_root_pixmap = Some(pixmap);
-        if let Some(old) = previous.filter(|old| *old != pixmap) {
-            let _ = self.conn.free_pixmap(old);
-        } else if let Some(old) = old_published.filter(|old| *old != pixmap) {
-            // ESETROOT: a previous wallpaper tool (feh, nitrogen) owned this
-            // pixmap. Never pass a pixmap we created — KillClient of our own
-            // resource would terminate JWM.
-            let _ = self.conn.kill_client(old);
-        }
-        self.conn.flush()?;
-        Ok(())
-    }
-
-    fn published_root_pixmap(&self) -> Option<u32> {
-        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
-        let reply = self
-            .conn
-            .get_property(
-                false,
-                self.root_x11,
-                self.atoms._XROOTPMAP_ID,
-                AtomEnum::PIXMAP,
-                0,
-                1,
-            )
-            .ok()?
-            .reply()
-            .ok()?;
-        reply.value32()?.next().filter(|pixmap| *pixmap != 0)
-    }
-
-    fn publish_root_pixmap(&self, pixmap: u32) -> Result<(), BackendError> {
-        use x11rb::protocol::xproto::{AtomEnum, PropMode};
-        use x11rb::wrapper::ConnectionExt;
-        for atom in [self.atoms._XROOTPMAP_ID, self.atoms.ESETROOT_PMAP_ID] {
-            self.conn.change_property32(
-                PropMode::REPLACE,
-                self.root_x11,
-                atom,
-                AtomEnum::PIXMAP,
-                &[pixmap],
-            )?;
-        }
-        Ok(())
+            [self.atoms._XROOTPMAP_ID, self.atoms.ESETROOT_PMAP_ID],
+            &mut self.native_root_pixmap,
+            pixmap,
+        )
     }
 
     fn apply_compositor_window_metadata(
@@ -7613,6 +7600,119 @@ mod tests {
                 && !fullscreen.contains("read_net_wm_state_list("),
             "is_fullscreen must answer through has_net_wm_state_flag"
         );
+    }
+}
+
+#[cfg(test)]
+mod root_wallpaper_ownership_tests {
+    use super::*;
+    use x11rb::protocol::xproto::{
+        AtomEnum, ConnectionExt, CreateWindowAux, PropMode, WindowClass,
+    };
+    use x11rb::wrapper::ConnectionExt as _;
+
+    #[test]
+    fn native_root_wallpaper_does_not_kill_unproven_property_owners() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let (conn, screen) = x11rb::connect(Some(x11.name())).unwrap();
+        let (foreign, _) = x11rb::connect(Some(x11.name())).unwrap();
+        let root = conn.setup().roots[screen].root;
+        let depth = conn.setup().roots[screen].root_depth;
+        let atoms = Atoms::new(&conn).unwrap().reply().unwrap();
+        let own_window = conn.generate_id().unwrap();
+        let foreign_window = foreign.generate_id().unwrap();
+        for (connection, window) in [(&conn, own_window), (&foreign, foreign_window)] {
+            connection
+                .create_window(
+                    0,
+                    window,
+                    root,
+                    0,
+                    0,
+                    16,
+                    16,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new(),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+        for stale in [own_window, foreign_window] {
+            conn.change_property32(
+                PropMode::REPLACE,
+                root,
+                atoms._XROOTPMAP_ID,
+                AtomEnum::PIXMAP,
+                &[stale],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            conn.change_property32(
+                PropMode::REPLACE,
+                root,
+                atoms.ESETROOT_PMAP_ID,
+                AtomEnum::PIXMAP,
+                &[stale],
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let first = conn.generate_id().unwrap();
+            conn.create_pixmap(depth, first, root, 2, 2)
+                .unwrap()
+                .check()
+                .unwrap();
+            let mut tracked = None;
+            commit_owned_root_pixmap(
+                &conn,
+                root,
+                [atoms._XROOTPMAP_ID, atoms.ESETROOT_PMAP_ID],
+                &mut tracked,
+                first,
+            )
+            .unwrap();
+            // Publishing an old/reused window XID must leave both clients alive.
+            conn.get_geometry(own_window).unwrap().reply().unwrap();
+            foreign
+                .get_geometry(foreign_window)
+                .unwrap()
+                .reply()
+                .unwrap();
+            assert_eq!(tracked, Some(first));
+            commit_owned_root_pixmap(
+                &conn,
+                root,
+                [atoms._XROOTPMAP_ID, atoms.ESETROOT_PMAP_ID],
+                &mut tracked,
+                first,
+            )
+            .unwrap();
+            conn.get_geometry(first).unwrap().reply().unwrap();
+            let replacement = conn.generate_id().unwrap();
+            conn.create_pixmap(depth, replacement, root, 2, 2)
+                .unwrap()
+                .check()
+                .unwrap();
+            commit_owned_root_pixmap(
+                &conn,
+                root,
+                [atoms._XROOTPMAP_ID, atoms.ESETROOT_PMAP_ID],
+                &mut tracked,
+                replacement,
+            )
+            .unwrap();
+            assert!(
+                conn.get_geometry(first).unwrap().reply().is_err(),
+                "only our tracked old pixmap is freed"
+            );
+            conn.get_geometry(replacement).unwrap().reply().unwrap();
+            foreign.get_input_focus().unwrap().reply().unwrap();
+            conn.free_pixmap(replacement).unwrap().check().unwrap();
+        }
     }
 }
 

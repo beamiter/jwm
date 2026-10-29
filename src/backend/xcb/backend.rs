@@ -1089,6 +1089,49 @@ impl XcbLoopData<'_> {
     }
 }
 
+fn commit_owned_root_pixmap(
+    conn: &xcb::Connection,
+    root: x::Window,
+    properties: [x::Atom; 2],
+    owned: &mut Option<u32>,
+    pixmap: x::Pixmap,
+) -> XcbResult<()> {
+    conn.send_and_check_request(&x::ChangeWindowAttributes {
+        window: root,
+        value_list: &[x::Cw::BackPixmap(pixmap)],
+    })
+    .map_err(xcb_err)?;
+    conn.send_and_check_request(&x::ClearArea {
+        exposures: false,
+        window: root,
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    })
+    .map_err(xcb_err)?;
+    for property in properties {
+        conn.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window: root,
+            property,
+            r#type: x::ATOM_PIXMAP,
+            data: &[pixmap.resource_id()],
+        })
+        .map_err(xcb_err)?;
+    }
+    let previous = owned.replace(pixmap.resource_id());
+    // Root properties may be stale or name a reused XID. They do not prove
+    // resource ownership; KillClient could terminate us or an unrelated app.
+    // Only a pixmap created and tracked by this backend is ours to release.
+    if let Some(old) = previous.filter(|old| *old != pixmap.resource_id()) {
+        let _ = conn.send_and_check_request(&x::FreePixmap {
+            pixmap: x::Pixmap::new(old),
+        });
+    }
+    conn.flush().map_err(xcb_err)
+}
+
 impl XcbBackend {
     fn resize_cursor_kind(edge: ResizeEdge) -> StdCursorKind {
         match edge {
@@ -1246,71 +1289,13 @@ impl XcbBackend {
             .send_and_check_request(&x::FreeGc { gc })
             .map_err(xcb_err)?;
 
-        let previous = self.native_root_pixmap;
-        let old_published = self.published_root_pixmap();
-        self.conn
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: self.root,
-                value_list: &[x::Cw::BackPixmap(pixmap)],
-            })
-            .map_err(xcb_err)?;
-        self.conn
-            .send_and_check_request(&x::ClearArea {
-                exposures: false,
-                window: self.root,
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-            })
-            .map_err(xcb_err)?;
-        self.publish_root_pixmap(pixmap.resource_id())?;
-        self.native_root_pixmap = Some(pixmap.resource_id());
-        if let Some(old) = previous.filter(|old| *old != pixmap.resource_id()) {
-            let _ = self.conn.send_and_check_request(&x::FreePixmap {
-                pixmap: x::Pixmap::new(old),
-            });
-        } else if let Some(old) = old_published.filter(|old| *old != pixmap.resource_id()) {
-            let _ = self
-                .conn
-                .send_and_check_request(&x::KillClient { resource: old });
-        }
-        self.conn.flush().map_err(xcb_err)
-    }
-
-    fn published_root_pixmap(&self) -> Option<u32> {
-        let cookie = self.conn.send_request(&x::GetProperty {
-            delete: false,
-            window: self.root,
-            property: self.atoms.xrootpmap_id,
-            r#type: x::ATOM_PIXMAP,
-            long_offset: 0,
-            long_length: 1,
-        });
-        let reply = self.conn.wait_for_reply(cookie).ok()?;
-        if reply.format() != 32 {
-            return None;
-        }
-        reply
-            .value::<u32>()
-            .first()
-            .copied()
-            .filter(|pixmap| *pixmap != 0)
-    }
-
-    fn publish_root_pixmap(&self, pixmap: u32) -> XcbResult<()> {
-        for property in [self.atoms.xrootpmap_id, self.atoms.esetroot_pmap_id] {
-            self.conn
-                .send_and_check_request(&x::ChangeProperty {
-                    mode: x::PropMode::Replace,
-                    window: self.root,
-                    property,
-                    r#type: x::ATOM_PIXMAP,
-                    data: &[pixmap],
-                })
-                .map_err(xcb_err)?;
-        }
-        Ok(())
+        commit_owned_root_pixmap(
+            &self.conn,
+            self.root,
+            [self.atoms.xrootpmap_id, self.atoms.esetroot_pmap_id],
+            &mut self.native_root_pixmap,
+            pixmap,
+        )
     }
 
     pub fn new() -> XcbResult<Self> {
@@ -9100,6 +9085,129 @@ mod edid_format_tests {
         assert!(xcb_edid_bytes(&reply(8, 4)).is_none());
         assert!(xcb_edid_bytes(&reply(16, 0)).is_none());
         assert!(xcb_edid_bytes(&reply(32, 0)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod root_wallpaper_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn native_root_wallpaper_does_not_kill_unproven_property_owners() {
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let (conn, screen) = xcb::Connection::connect(Some(x11.name())).unwrap();
+        let (foreign, _) = xcb::Connection::connect(Some(x11.name())).unwrap();
+        let setup = conn.get_setup();
+        let screen = setup.roots().nth(screen as usize).unwrap();
+        let root = screen.root();
+        let depth = screen.root_depth();
+        let atoms = XcbAtoms::new(&conn).unwrap();
+        let own_window: x::Window = conn.generate_id();
+        let foreign_window: x::Window = foreign.generate_id();
+        for (connection, window) in [(&conn, own_window), (&foreign, foreign_window)] {
+            connection
+                .send_and_check_request(&x::CreateWindow {
+                    depth: 0,
+                    wid: window,
+                    parent: root,
+                    x: 0,
+                    y: 0,
+                    width: 16,
+                    height: 16,
+                    border_width: 0,
+                    class: x::WindowClass::InputOutput,
+                    visual: 0,
+                    value_list: &[],
+                })
+                .unwrap();
+        }
+        for stale in [own_window.resource_id(), foreign_window.resource_id()] {
+            for property in [atoms.xrootpmap_id, atoms.esetroot_pmap_id] {
+                conn.send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: root,
+                    property,
+                    r#type: x::ATOM_PIXMAP,
+                    data: &[stale],
+                })
+                .unwrap();
+            }
+            let first: x::Pixmap = conn.generate_id();
+            conn.send_and_check_request(&x::CreatePixmap {
+                depth,
+                pid: first,
+                drawable: x::Drawable::Window(root),
+                width: 2,
+                height: 2,
+            })
+            .unwrap();
+            let mut tracked = None;
+            commit_owned_root_pixmap(
+                &conn,
+                root,
+                [atoms.xrootpmap_id, atoms.esetroot_pmap_id],
+                &mut tracked,
+                first,
+            )
+            .unwrap();
+            conn.wait_for_reply(conn.send_request(&x::GetGeometry {
+                drawable: x::Drawable::Window(own_window),
+            }))
+            .unwrap();
+            foreign
+                .wait_for_reply(foreign.send_request(&x::GetGeometry {
+                    drawable: x::Drawable::Window(foreign_window),
+                }))
+                .unwrap();
+            assert_eq!(tracked, Some(first.resource_id()));
+            commit_owned_root_pixmap(
+                &conn,
+                root,
+                [atoms.xrootpmap_id, atoms.esetroot_pmap_id],
+                &mut tracked,
+                first,
+            )
+            .unwrap();
+            conn.wait_for_reply(conn.send_request(&x::GetGeometry {
+                drawable: x::Drawable::Pixmap(first),
+            }))
+            .unwrap();
+            let replacement: x::Pixmap = conn.generate_id();
+            conn.send_and_check_request(&x::CreatePixmap {
+                depth,
+                pid: replacement,
+                drawable: x::Drawable::Window(root),
+                width: 2,
+                height: 2,
+            })
+            .unwrap();
+            commit_owned_root_pixmap(
+                &conn,
+                root,
+                [atoms.xrootpmap_id, atoms.esetroot_pmap_id],
+                &mut tracked,
+                replacement,
+            )
+            .unwrap();
+            assert!(
+                conn.wait_for_reply(conn.send_request(&x::GetGeometry {
+                    drawable: x::Drawable::Pixmap(first)
+                }))
+                .is_err(),
+                "only our tracked old pixmap is freed"
+            );
+            conn.wait_for_reply(conn.send_request(&x::GetGeometry {
+                drawable: x::Drawable::Pixmap(replacement),
+            }))
+            .unwrap();
+            foreign
+                .wait_for_reply(foreign.send_request(&x::GetInputFocus {}))
+                .unwrap();
+            conn.send_and_check_request(&x::FreePixmap {
+                pixmap: replacement,
+            })
+            .unwrap();
+        }
     }
 }
 
