@@ -1700,6 +1700,8 @@ pub(crate) struct WaylandCompositor {
     /// The hovered action button `(toast id, button index)`, drawn brighter.
     toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
+    eva_overlay: crate::backend::compositor_common::eva_overlay::EvaOverlayState,
+    eva_texture: Option<(String, u32, u32, u32)>,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, u32, u32, u32)>,
     /// Cached REC-chip label texture keyed by its text ("REC m:ss"); redrawn
@@ -3180,6 +3182,8 @@ impl WaylandCompositor {
                 toast_button_hover: None,
                 toast_retired: Vec::new(),
                 osd_slot: Default::default(),
+                eva_overlay: Default::default(),
+                eva_texture: None,
                 osd_texture: None,
                 recording_indicator_texture: None,
                 mic_indicator_active: false,
@@ -3439,6 +3443,11 @@ impl WaylandCompositor {
                         gl.DeleteTextures(1, &texture);
                     }
                 }
+            }
+            if let Some((_, texture, _, _)) = self.eva_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
             }
             if let Some((_, texture, _, _)) = self.osd_texture.take()
                 && texture != 0
@@ -4420,6 +4429,7 @@ impl WaylandCompositor {
             // held volume key's repeats included — arrives as an input
             // event that sets the flag itself.
             || self.osd_slot.needs_frames(Instant::now())
+            || self.eva_overlay.needs_frame(Instant::now())
             // Start and stop both run inside render_frame, where the GL context
             // is current. Without this a stop requested after the encoder pipe
             // broke — which clears the active flag, and with it `frame_due` —
@@ -4473,6 +4483,7 @@ impl WaylandCompositor {
             preview_lease,
             toast_boundary,
             osd_boundary,
+            self.eva_overlay.next_wakeup(Instant::now()),
             crate::backend::compositor_common::bar_wallpaper::next_wakeup(),
         ]
         .into_iter()

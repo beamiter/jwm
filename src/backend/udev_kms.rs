@@ -3267,6 +3267,28 @@ impl KmsState {
 
     /// Whether `output_name` is a KMS output that is powered and can take
     /// frames. A DPMS-off output shows nothing and presents nothing.
+    pub(super) fn eva_visible_output_rects(
+        &self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+    ) -> Vec<[f32; 4]> {
+        self.outputs
+            .iter()
+            .filter_map(|output| {
+                let rect = [
+                    output.origin.0 as f32,
+                    output.origin.1 as f32,
+                    output.mode_size.0 as f32,
+                    output.mode_size.1 as f32,
+                ];
+                crate::backend::compositor_common::eva_overlay::eva_output_presentable(
+                    !state.soft_disabled_outputs.contains(&output.output_name),
+                    !output.dpms_off && !output.drm_mode_uncertain,
+                    rect,
+                )
+                .then_some(rect)
+            })
+            .collect()
+    }
     pub(super) fn output_is_lit(&self, output_name: &str) -> bool {
         self.outputs
             .iter()

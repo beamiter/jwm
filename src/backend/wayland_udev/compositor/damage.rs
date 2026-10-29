@@ -284,6 +284,9 @@ impl WaylandCompositor {
         if !self.toast_stack.is_empty() {
             return Some("toast notifications require composition");
         }
+        if self.eva_overlay.visible() {
+            return Some("Eva status requires composition");
+        }
         if !self.osd_slot.is_empty() {
             return Some("volume/brightness OSD requires composition");
         }

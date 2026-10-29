@@ -5245,6 +5245,47 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         self.request_render();
     }
+    fn compositor_supports_eva_overlay(&self) -> bool {
+        if self.compositor.is_none() || self.state.session_locked {
+            return false;
+        }
+        let shared = self.shared.lock_safe();
+        if !shared.session_active || shared.enabled_outputs().next().is_none() {
+            return false;
+        }
+        self.kms.as_ref().is_some_and(|kms| {
+            kms.try_borrow()
+                .ok()
+                .is_some_and(|kms| !kms.eva_visible_output_rects(&self.state).is_empty())
+        })
+    }
+    fn compositor_eva_viewport_visible(&self, viewport: [f32; 4]) -> bool {
+        if !self.compositor_supports_eva_overlay() {
+            return false;
+        }
+        self.kms.as_ref().is_some_and(|kms| {
+            kms.try_borrow().ok().is_some_and(|kms| {
+                kms.eva_visible_output_rects(&self.state)
+                    .iter()
+                    .any(|output| {
+                        crate::backend::compositor_common::eva_overlay::eva_viewport_on_output(
+                            viewport, *output,
+                        )
+                    })
+            })
+        })
+    }
+
+    fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
+        if self
+            .compositor
+            .as_mut()
+            .is_some_and(|c| c.set_eva_overlay(snapshot))
+        {
+            self.request_render();
+        }
+    }
+
     fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.show_osd(kind, percent);
@@ -5778,6 +5819,27 @@ impl Backend for UdevBackend {
 
     fn set_clipboard_text(&mut self, text: &str) -> bool {
         self.state.offer_clipboard_text(text)
+    }
+
+    fn offer_clipboard_with_receipt(
+        &mut self,
+        offer: crate::backend::clipboard_offer::CapturedClipboard,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+        use crate::backend::clipboard_offer::{
+            CapturedClipboard, ClipboardReceipt, MAX_IMAGE_HISTORY_BYTES, MAX_TEXT_BYTES,
+        };
+        let receipt = ClipboardReceipt::pending();
+        let owned = match offer {
+            CapturedClipboard::Text(text) if text.len() <= MAX_TEXT_BYTES => {
+                self.state.offer_clipboard_text(&text)
+            }
+            CapturedClipboard::Png(png) if png.len() <= MAX_IMAGE_HISTORY_BYTES => {
+                self.state.offer_clipboard_png(png)
+            }
+            _ => false,
+        };
+        receipt.complete(owned);
+        Some(receipt)
     }
 
     fn set_clipboard_png(&mut self, png: &[u8]) -> bool {

@@ -59,6 +59,7 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     Solid=SolidColorRenderElement,
     Preview=crate::backend::wayland::preview::PreviewElement<R>,
+    Eva=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>,
 }
 
 #[derive(Clone)]
@@ -667,6 +668,8 @@ pub struct WaylandX11Backend {
 
     output: Output,
     window: Window,
+    eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe,
+    host_surface_presented: bool,
     x11_surface: X11Surface,
     renderer: GlesRenderer,
     damage_tracker: OutputDamageTracker,
@@ -690,6 +693,7 @@ pub struct WaylandX11Backend {
 
     needs_render: bool,
     dock_preview: Option<crate::backend::wayland::preview::Preview>,
+    eva_overlay: crate::backend::wayland::eva::EvaElement,
     preview_edge: xbar_core::BarEdge,
     screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
     background_id: Id,
@@ -767,7 +771,7 @@ impl WaylandX11Backend {
             self.dock_preview = None;
             self.needs_render = true;
         }
-        if !self.needs_render && !self.state.needs_redraw {
+        if !self.needs_render && !self.state.needs_redraw && !self.eva_overlay.needs_frame() {
             return Ok(());
         }
 
@@ -820,6 +824,11 @@ impl WaylandX11Backend {
             .state
             .session_locked
             .then_some(self.state.session_lock_epoch);
+        if locked_epoch.is_none() {
+            if let Some(element) = self.eva_overlay.render(&mut self.renderer, (out_w, out_h)) {
+                elements.push(X11RenderElement::Eva(element));
+            }
+        }
         if locked_epoch.is_some() {
             let lock_root = self
                 .state
@@ -1202,6 +1211,7 @@ impl WaylandX11Backend {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[wayland-x11] failed to acquire X11 buffer: {e:?}");
+                self.host_surface_presented = false;
                 self.x11_surface.reset_buffers();
                 self.needs_render = false;
                 self.state.needs_redraw = false;
@@ -1218,6 +1228,7 @@ impl WaylandX11Backend {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[wayland-x11] framebuffer bind failed: {e:?}");
+                self.host_surface_presented = false;
                 self.x11_surface.reset_buffers();
                 self.needs_render = false;
                 self.state.needs_redraw = false;
@@ -1234,6 +1245,7 @@ impl WaylandX11Backend {
         ) {
             log::warn!("[wayland-x11] render_output failed: {e:?}");
             drop(fb);
+            self.host_surface_presented = false;
             self.x11_surface.reset_buffers();
             self.needs_render = false;
             self.state.needs_redraw = false;
@@ -1252,11 +1264,13 @@ impl WaylandX11Backend {
 
         if let Err(err) = self.x11_surface.submit() {
             log::warn!("[wayland-x11] submit failed: {err:?}");
+            self.host_surface_presented = false;
             self.x11_surface.reset_buffers();
             self.needs_render = true;
             return Ok(());
         }
 
+        self.host_surface_presented = true;
         // The host presents what was just submitted: a locked frame pays the
         // pending session lock its `locked` confirmation.
         if let Some(epoch) = locked_epoch {
@@ -1734,6 +1748,8 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
             exit_requested,
             output: output.clone(),
             window,
+            eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe::new(),
+            host_surface_presented: false,
             x11_surface,
             renderer,
             damage_tracker: OutputDamageTracker::from_output(&output),
@@ -1747,6 +1763,7 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
             cursor_size: crate::config::CONFIG.load().resolved_cursor().1 as i32,
             needs_render: true,
             dock_preview: None,
+            eva_overlay: Default::default(),
             preview_edge: xbar_core::BarEdge::Top,
             screenshot_requests: Default::default(),
             background_id: Id::new(),
@@ -2354,6 +2371,38 @@ impl CompositorMedia for WaylandX11Backend {
     }
 }
 impl CompositorWorkspaceEffects for WaylandX11Backend {
+    fn compositor_supports_eva_overlay(&self) -> bool {
+        let size = self.window.size();
+        !self.exit_requested.load(Ordering::SeqCst)
+            && !self.state.session_locked
+            && !self
+                .state
+                .soft_disabled_outputs
+                .contains(&self.output.name())
+            && self.host_surface_presented
+            && crate::backend::compositor_common::eva_overlay::eva_output_presentable(
+                true,
+                self.eva_output_probe.visible(Some(self.window.id())),
+                [0.0, 0.0, size.w as f32, size.h as f32],
+            )
+            && self.output.current_mode().is_some()
+    }
+    fn compositor_eva_viewport_visible(&self, viewport: [f32; 4]) -> bool {
+        let size = self.window.size();
+        self.compositor_supports_eva_overlay()
+            && crate::backend::compositor_common::eva_overlay::eva_viewport_on_output(
+                viewport,
+                [0.0, 0.0, size.w as f32, size.h as f32],
+            )
+    }
+
+    fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
+        if self.eva_overlay.update(&snapshot) {
+            self.needs_render = true;
+            self.request_flush();
+        }
+    }
+
     fn compositor_scroll_epoch(&self) -> u64 {
         self.state.scroll_routes.epoch()
     }
@@ -2431,6 +2480,27 @@ impl Backend for WaylandX11Backend {
 
     fn set_clipboard_text(&mut self, text: &str) -> bool {
         self.state.offer_clipboard_text(text)
+    }
+
+    fn offer_clipboard_with_receipt(
+        &mut self,
+        offer: crate::backend::clipboard_offer::CapturedClipboard,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+        use crate::backend::clipboard_offer::{
+            CapturedClipboard, ClipboardReceipt, MAX_IMAGE_HISTORY_BYTES, MAX_TEXT_BYTES,
+        };
+        let receipt = ClipboardReceipt::pending();
+        let owned = match offer {
+            CapturedClipboard::Text(text) if text.len() <= MAX_TEXT_BYTES => {
+                self.state.offer_clipboard_text(&text)
+            }
+            CapturedClipboard::Png(png) if png.len() <= MAX_IMAGE_HISTORY_BYTES => {
+                self.state.offer_clipboard_png(png)
+            }
+            _ => false,
+        };
+        receipt.complete(owned);
+        Some(receipt)
     }
 
     fn set_clipboard_png(&mut self, png: &[u8]) -> bool {

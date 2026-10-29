@@ -36,13 +36,32 @@ fn find_program(
 }
 
 fn prepare_player(
-    args: Vec<String>,
+    mut args: Vec<String>,
     environment: crate::child_environment::ChildEnvironment,
 ) -> Result<Command, String> {
     let helper = find_program("jwm-player", true, &environment)
         .ok_or("jwm-player is not installed; rebuild/install JWM's player helper")?;
     if find_program("mpv", false, &environment).is_none() {
         return Err("mpv is not installed; install the mpv package to play music and video".into());
+    }
+    // Filesystem work stays on this existing bounded worker. Use the same
+    // canonical UTF-8 path that the helper publishes in MPRIS xesam:url, so
+    // symlink spellings cannot make a different resource look verified.
+    let first_file = args
+        .iter()
+        .position(|arg| arg == "--")
+        .ok_or("missing player file boundary")?
+        + 1;
+    for file in &mut args[first_file..] {
+        let canonical =
+            std::fs::canonicalize(&*file).map_err(|_| "media file cannot be resolved")?;
+        if !canonical.is_file() {
+            return Err("media path is not a regular file".into());
+        }
+        *file = canonical
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "media file path is not UTF-8")?;
     }
     let mut command = Command::new(helper);
     command
@@ -51,6 +70,7 @@ fn prepare_player(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     environment.apply(&mut command);
+    command.env_remove("JWM_EVA_MEDIA_REQUEST");
     super::external_command::unblock_sigchld_in_child(&mut command);
     // Return the prepared command, not an unsupervised child: an interrupted
     // scan/restart can discard this value without leaking a process. The
@@ -167,11 +187,18 @@ impl Jwm {
         if !job.started() {
             return Err("could not start the player worker; try again shortly".into());
         }
+        self.eva_note_media_launch_sequence(job.eva_identity(), job.eva_keepalive());
         self.features.media_library.launch = Some(self.track_background_job(job));
         Ok(())
     }
 
     pub(crate) fn poll_media_launch_job(&mut self, backend: &mut dyn Backend) {
+        let completion_id = self
+            .features
+            .media_library
+            .launch
+            .as_ref()
+            .map(BackgroundJob::eva_identity);
         let Some(result) = self
             .features
             .media_library
@@ -182,13 +209,70 @@ impl Jwm {
             return;
         };
         self.features.media_library.launch = None;
+        self.eva_tick(backend);
         match result {
-            Ok(mut command) => match command.spawn() {
-                Ok(child) => self.supervise_transient_child(child),
-                Err(error) => self
-                    .media_playback_error(backend, format!("could not start JWM Player: {error}")),
-            },
-            Err(error) => self.media_playback_error(backend, error),
+            Ok(mut command) => {
+                if let Some(id) = completion_id {
+                    let mut args = command.get_args();
+                    if args.by_ref().any(|arg| arg == "--")
+                        && let Some(path) = args.next().and_then(|path| path.to_str())
+                    {
+                        let mut uri = String::from("file://");
+                        for byte in path.bytes() {
+                            if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+                                uri.push(byte as char);
+                            } else {
+                                use std::fmt::Write;
+                                let _ = write!(uri, "%{byte:02X}");
+                            }
+                        }
+                        match self.eva_media_launch_prepared(id, &uri) {
+                            Ok(Some(request)) => {
+                                command.env("JWM_EVA_MEDIA_REQUEST", request.to_string());
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                self.eva_control_completion("media_launch",id,Some(false),serde_json::json!({"error":error,"completion":"cancelled_before_player_spawn"}));
+                                return;
+                            }
+                        }
+                    }
+                }
+                match command.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        self.supervise_transient_child(child);
+                        if let Some(id) = completion_id {
+                            self.eva_control_completion("media_launch",id,Some(true),serde_json::json!({"pid":pid,"completion":"player_process_spawned","playback_verified":false}));
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(id) = completion_id {
+                            self.eva_control_completion(
+                                "media_launch",
+                                id,
+                                Some(false),
+                                serde_json::json!({"error":"player_spawn_failed"}),
+                            );
+                        }
+                        self.media_playback_error(
+                            backend,
+                            format!("could not start JWM Player: {error}"),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(id) = completion_id {
+                    self.eva_control_completion(
+                        "media_launch",
+                        id,
+                        Some(false),
+                        serde_json::json!({"error":"player_prepare_failed"}),
+                    );
+                }
+                self.media_playback_error(backend, error);
+            }
         }
     }
 

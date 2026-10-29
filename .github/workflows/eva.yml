@@ -1,0 +1,154 @@
+name: Eva voice assistant
+
+on:
+  pull_request:
+    paths:
+      - 'eva/**'
+      - 'crates/jwm_eva_core/**'
+      - 'crates/jwm_ipc_client/**'
+      - 'crates/jwm_ipc_transport/**'
+      - 'bridge/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/*eva*'
+      - 'scripts/ensure_pipewire.sh'
+      - '.github/workflows/eva.yml'
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      run_live_api:
+        description: 'Open a real Realtime API session (requires OPENAI_API_KEY secret; does not validate real voice/desktop behavior)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+concurrency:
+  group: eva-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  offline:
+    name: Offline plan, daemon, transport, and installer contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Install audio build and shell test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build ripgrep shellcheck pipewire pipewire-bin pipewire-media-session dbus-daemon mpv ffmpeg
+      - name: Resolve compatible PipeWire development headers
+        run: |
+          bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"
+          while IFS= read -r setting; do
+            case "$setting" in
+              PKG_CONFIG_PATH=*|JWM_PIPEWIRE_PREFIX=*) printf '%s\n' "$setting" >> "$GITHUB_ENV" ;;
+              '') ;;
+              *) echo 'Unexpected PipeWire environment entry' >&2; exit 1 ;;
+            esac
+          done < "$RUNNER_TEMP/eva-pipewire.env"
+      - run: cargo test --locked -p jwm_eva_core -p jwm-eva -p jwm_ipc_client
+      - name: Native capture, playback drain, and interrupted history on a private graph
+        run: bash eva/tests/native-audio.sh
+      - name: MPRIS identities and actual headless player queue readback
+        run: |
+          cargo test --locked -p jwm-bridge --bin jwm-bridge mpris::tests -- --test-threads=1
+          cargo test --locked -p jwm-bridge --bin jwm-player -- --test-threads=1
+        env:
+          JWM_REQUIRE_DBUS_DAEMON: '1'
+          RUN_JWM_MPV_TESTS: '1'
+      - run: shellcheck --enable=check-extra-masked-returns --exclude=SC2312 scripts/install-eva.sh scripts/test-install-eva.sh
+      - run: bash scripts/test-install-eva.sh
+      - name: State evidence boundary
+        run: echo 'Offline contracts passed. Ignored live API tests and unavailable real voice/desktop tests are NOT end-to-end acceptance.' >> "$GITHUB_STEP_SUMMARY"
+
+  server:
+    name: JWM protocol and cancellation (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: default
+            flags: ''
+          - profile: minimal
+            flags: '--no-default-features'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          key: eva-${{ matrix.profile }}
+      - name: Install JWM native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config python3 \
+            libglib2.0-dev libcairo2-dev libpango1.0-dev libasound2-dev libdbus-1-dev \
+            libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev libegl1-mesa-dev \
+            libgl1-mesa-dev libwayland-dev libxkbcommon-dev libx11-dev libx11-xcb-dev \
+            libxext-dev libxxf86vm-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev \
+            libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev xvfb
+      - run: cargo check --locked -p jwm --lib ${{ matrix.flags }}
+      - name: Actual JWM data model and cross-process socket faults
+        run: cargo test --locked -p jwm --lib ${{ matrix.flags }} jwm::eva::tests -- --test-threads=1
+      - name: Native X11RB and XCB clipboard ownership receipts
+        if: matrix.profile == 'default'
+        run: cargo test --locked -p jwm --lib native_owner_metadata_multiple_and_direct_round_trip -- --test-threads=1
+      - name: Input routing and mandatory off-screen GPU overlay
+        if: matrix.profile == 'default'
+        run: cargo test --locked -p jwm --lib eva_ -- --test-threads=1
+        env:
+          EGL_PLATFORM: surfaceless
+          JWM_REQUIRE_HEADLESS_GL: '1'
+          LIBGL_ALWAYS_SOFTWARE: '1'
+
+  live-api:
+    name: Opt-in real Realtime handshake (not voice acceptance)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_live_api
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      JWM_EVA_RUN_LIVE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - name: Require credentials rather than silently skipping
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo 'The requested live API gate has no credential. This gate fails; it is not accepted as passed.' >&2
+            exit 1
+          fi
+      - name: Install native audio build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev meson ninja-build
+      - name: Resolve compatible PipeWire development headers
+        run: |
+          bash scripts/ensure_pipewire.sh --env > "$RUNNER_TEMP/eva-pipewire.env"
+          while IFS= read -r setting; do
+            case "$setting" in
+              PKG_CONFIG_PATH=*|JWM_PIPEWIRE_PREFIX=*) printf '%s\n' "$setting" >> "$GITHUB_ENV" ;;
+              '') ;;
+              *) echo 'Unexpected PipeWire environment entry' >&2; exit 1 ;;
+            esac
+          done < "$RUNNER_TEMP/eva-pipewire.env"
+      - run: cargo test --locked -p jwm-eva --test live_api -- --ignored --exact realtime_configuration_handshake
+      - name: Report handshake scope
+        run: echo 'Real API session configuration verified. Real microphone, desktop operation, semantic corpus and latency acceptance remain separate.' >> "$GITHUB_STEP_SUMMARY"

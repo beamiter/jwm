@@ -1,10 +1,12 @@
 mod backend;
 mod cli;
+mod eva;
 mod model;
 mod service;
 mod ui;
 
-pub async fn run() -> Result<(), String> {
+pub async fn run(eva_request: Option<String>) -> Result<(), String> {
+    let eva_request = eva_request.map(|text| eva::parse(&text)).transpose()?;
     match cli::parse(std::env::args_os().skip(1))? {
         cli::Cli::Help => {
             println!("{}", cli::HELP);
@@ -14,7 +16,7 @@ pub async fn run() -> Result<(), String> {
             println!("jwm-player {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        cli::Cli::Open(open) => service::run(open).await,
+        cli::Cli::Open(open) => service::run(open, eva_request).await,
     }
 }
 

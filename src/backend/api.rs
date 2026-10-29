@@ -3761,6 +3761,19 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_show_osd(&mut self, _kind: OsdKind, _percent: u8) {}
     /// Show the media OSD card with a track label instead of a value bar.
     fn compositor_show_media_osd(&mut self, _label: &str) {}
+    /// Whether this backend can visibly display the microphone/session status.
+    fn compositor_supports_eva_overlay(&self) -> bool {
+        false
+    }
+    /// Whether this exact work area can show the Eva card now. Production
+    /// backends reject dark, disabled, detached or clipped outputs; mocks
+    /// retain the same explicit support opt-in as the overall capability.
+    fn compositor_eva_viewport_visible(&self, _viewport: [f32; 4]) -> bool {
+        self.compositor_supports_eva_overlay()
+    }
+
+    /// Publish JWM-owned Eva status. This overlay never owns application focus.
+    fn compositor_set_eva_overlay(&mut self, _snapshot: serde_json::Value) {}
     /// Left-click hit-test against the toast cards drawn last frame. A card
     /// hit dismisses the card; a button hit additionally reports the action
     /// so the WM can invoke it. Anything but `ToastClick::Miss` is swallowed.
@@ -4141,6 +4154,15 @@ pub trait Backend:
     /// device selection. Backends without clipboard support say so.
     fn set_clipboard_text(&mut self, _text: &str) -> bool {
         false
+    }
+
+    /// Submit one native offer and return a distinct nonblocking ownership
+    /// receipt. A queued worker wake is pending, never proof of ownership.
+    fn offer_clipboard_with_receipt(
+        &mut self,
+        _offer: crate::backend::clipboard_offer::CapturedClipboard,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+        None
     }
 
     /// Offer PNG bytes as the clipboard selection on the main loop.

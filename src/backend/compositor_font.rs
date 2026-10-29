@@ -520,6 +520,77 @@ pub(crate) fn fit_ui_text_lines(
     fitted
 }
 
+/// Wrap protected confirmation values in one glyph pass. Share one bounded
+/// fallback lookup budget across the complete value; measuring every candidate
+/// prefix separately can otherwise block the WM on large configuration values.
+pub(crate) fn wrap_ui_text_lines(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    max_width: u32,
+) -> Vec<String> {
+    let Some(primary) = load_ui_font(font_description) else {
+        let columns = (max_width / (GLYPH_W * 2)).clamp(1, 256) as usize;
+        let chars: Vec<_> = text.chars().collect();
+        return chars
+            .chunks(columns)
+            .map(|row| row.iter().collect())
+            .collect();
+    };
+    let mut budget = FontLookupBudget::new();
+    let mut fonts: Vec<FontArc> = Vec::new();
+    let mut sources = Vec::new();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut count = 0;
+    let mut width = (TEXT_PAD * 2) as f32;
+    let mut previous: Option<(usize, GlyphId)> = None;
+    for ch in text.chars() {
+        let source = source_for_char(&primary, ch, &mut budget);
+        let index = if let Some(index) = sources.iter().position(|known| *known == source) {
+            index
+        } else {
+            let font = font_for_source(&primary, source).unwrap_or_else(|| primary.clone());
+            fonts.push(font);
+            sources.push(source);
+            fonts.len() - 1
+        };
+        let id = if source == GlyphSource::Missing {
+            primary.glyph_id('?')
+        } else {
+            fonts[index].glyph_id(ch)
+        };
+        let scaled = fonts[index].as_scaled(pixel_size);
+        // Unknown glyphs may resolve on a later frame. Reserve two ems so
+        // font fallback cannot silently omit the tail of a protected value.
+        let advance = if source == GlyphSource::Missing {
+            scaled.h_advance(id).max(pixel_size * 2.0)
+        } else {
+            scaled.h_advance(id)
+        };
+        let kern = previous
+            .filter(|(old, _)| *old == index)
+            .map_or(0.0, |(_, old)| scaled.kern(old, id));
+        if !line.is_empty() && (count >= 256 || width + advance + kern > max_width as f32) {
+            lines.push(std::mem::take(&mut line));
+            count = 0;
+            width = (TEXT_PAD * 2) as f32;
+            previous = None;
+        }
+        let kern = previous
+            .filter(|(old, _)| *old == index)
+            .map_or(0.0, |(_, old)| scaled.kern(old, id));
+        line.push(ch);
+        count += 1;
+        width += advance + kern;
+        previous = Some((index, id));
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 /// Pixel-fit an already normalized line. `keep_tail` selects which side sits
 /// next to the ellipsis.
 fn fit_ui_line(

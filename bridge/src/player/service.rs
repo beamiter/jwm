@@ -9,6 +9,7 @@ use zvariant::{ObjectPath, OwnedValue, Str, Value};
 
 use super::backend::{Action, Controller};
 use super::cli::{Mode, Open, file_uri, normalize_files};
+use super::eva;
 use super::model::State;
 
 pub const NAME: &str = "org.mpris.MediaPlayer2.jwm";
@@ -303,6 +304,53 @@ impl Player {
 
 #[interface(name = "org.jwm.Player")]
 impl Native {
+    #[zbus(property)]
+    fn eva_open_receipts(&self) -> Vec<String> {
+        self.0
+            .eva_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect()
+    }
+
+    async fn open_eva(
+        &self,
+        files: Vec<String>,
+        enqueue: bool,
+        mode: String,
+        request_json: String,
+        #[zbus(connection)] connection: &Connection,
+    ) -> zbus::fdo::Result<()> {
+        let request = eva::parse(&request_json).map_err(zbus::fdo::Error::InvalidArgs)?;
+        let owner = connection
+            .unique_name()
+            .ok_or_else(|| zbus::fdo::Error::Failed("target_gone".into()))?;
+        eva::check_owner(&request, owner.as_str(), std::process::id())
+            .map_err(zbus::fdo::Error::Failed)?;
+        let open = normalized_open(files, enqueue, mode).await?;
+        eva::check_open(&request, &open).map_err(zbus::fdo::Error::InvalidArgs)?;
+        self.0.submit(Action::OpenEva { open, request }).await
+    }
+
+    /// A read-only projection of mpv's observed playlist, including forwarded
+    /// enqueue requests only after mpv has actually reported them.
+    #[zbus(property)]
+    fn queued_urls(&self) -> Vec<String> {
+        let mut bytes = 0usize;
+        self.0
+            .snapshot()
+            .playlist
+            .iter()
+            .filter_map(|track| {
+                let uri = file_uri(&track.path);
+                bytes = bytes.saturating_add(uri.len());
+                (bytes <= 128 * 1024).then_some(uri)
+            })
+            .take(512)
+            .collect()
+    }
     async fn open(&self, files: Vec<String>, enqueue: bool, mode: String) -> zbus::fdo::Result<()> {
         let open = normalized_open(files, enqueue, mode).await?;
         let raise = open.files.is_empty() || !open.enqueue;
@@ -350,11 +398,24 @@ async fn changed(
     .map_err(|e| e.to_string())
 }
 
-pub async fn run(open: Open) -> Result<(), String> {
-    run_on(open, None, false).await
+pub async fn run(open: Open, request: Option<serde_json::Value>) -> Result<(), String> {
+    run_on_with_eva(open, None, false, request).await
 }
 
+#[cfg(test)]
 async fn run_on(open: Open, address: Option<&str>, headless: bool) -> Result<(), String> {
+    run_on_with_eva(open, address, headless, None).await
+}
+
+async fn run_on_with_eva(
+    open: Open,
+    address: Option<&str>,
+    headless: bool,
+    request: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(request) = &request {
+        eva::check_open(request, &open)?;
+    }
     let (controller, worker) = Controller::new();
     let builder = match address {
         Some(address) => zbus::connection::Builder::address(address),
@@ -383,6 +444,47 @@ async fn run_on(open: Open, address: Option<&str>, headless: bool) -> Result<(),
         Err(zbus::Error::NameTaken) => {
             // Only the bus-name owner starts a decoder. Simultaneous first
             // launches therefore become one owner plus forwarded requests.
+            if let Some(request) = request {
+                return tokio::time::timeout(Duration::from_secs(15), async {
+                    let bus = zbus::fdo::DBusProxy::new(&connection)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let owner = bus
+                        .get_name_owner(NAME.try_into().map_err(|_| "invalid player name")?)
+                        .await
+                        .map_err(|_| "target_gone")?;
+                    let uid = bus
+                        .get_connection_unix_user(owner.clone().into())
+                        .await
+                        .map_err(|_| "target_gone")?;
+                    let pid = bus
+                        .get_connection_unix_process_id(owner.clone().into())
+                        .await
+                        .map_err(|_| "target_gone")?;
+                    if uid != unsafe { libc::geteuid() } {
+                        return Err("target_gone".to_string());
+                    }
+                    eva::check_owner(&request, owner.as_str(), pid)?;
+                    connection
+                        .call_method(
+                            Some(owner.as_str()),
+                            PATH,
+                            Some(NATIVE),
+                            "OpenEva",
+                            &(
+                                open.files,
+                                open.enqueue,
+                                open.mode.as_str(),
+                                request.to_string(),
+                            ),
+                        )
+                        .await
+                        .map_err(|e| format!("existing player could not open the files: {e}"))?;
+                    Ok(())
+                })
+                .await
+                .map_err(|_| "existing player did not answer".to_string())?;
+            }
             tokio::time::timeout(
                 Duration::from_secs(15),
                 connection.call_method(
@@ -400,7 +502,13 @@ async fn run_on(open: Open, address: Option<&str>, headless: bool) -> Result<(),
         }
         Err(error) => return Err(error.to_string()),
     }
-    let mut done = worker.spawn_inner(open, headless);
+    let mut done = if let Some(request) = request {
+        let owner = connection.unique_name().ok_or("target_gone")?;
+        eva::check_owner(&request, owner.as_str(), std::process::id())?;
+        worker.spawn_eva(open, headless, Some(request))
+    } else {
+        worker.spawn_inner(open, headless)
+    };
     let mut previous = controller.snapshot();
     let mut previous_properties = player_properties(&previous);
     let mut ticker = tokio::time::interval(Duration::from_millis(150));
@@ -578,8 +686,166 @@ mod tests {
             .unwrap()
             .try_into()
             .unwrap();
+        client
+            .call_method(Some(NAME), PATH, Some(PLAYER), "Play", &())
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if String::try_from(property(&client, "PlaybackStatus").await.unwrap()).unwrap()
+                == "Playing"
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "explicit Play must resume rather than toggle an already playing player"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(metadata.contains_key("mpris:trackid"));
         assert!(metadata.contains_key("mpris:length"));
+        let properties = zbus::fdo::PropertiesProxy::builder(&client)
+            .destination(NAME)
+            .unwrap()
+            .path(PATH)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let queued: Vec<String> = properties
+            .get(NATIVE.try_into().unwrap(), "QueuedUrls")
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|uri| **uri == file_uri(wave.to_str().unwrap()))
+                .count(),
+            2,
+            "queue proof must describe both actual mpv entries after the second process forwards its enqueue"
+        );
+        // Same-resource concurrent requests must each own a new native entry;
+        // a pre-existing matching URL and the other request's receipt prove
+        // nothing about this operation.
+        let bus_proxy = zbus::fdo::DBusProxy::new(&client).await.unwrap();
+        let owner = bus_proxy
+            .get_name_owner(NAME.try_into().unwrap())
+            .await
+            .unwrap();
+        let pid = bus_proxy
+            .get_connection_unix_process_id(owner.clone().into())
+            .await
+            .unwrap();
+        let request = |operation: &str, sequence: u64, enqueue: bool| {
+            serde_json::json!({
+                "operation_id":operation,"wm_instance_id":"native-test-wm","sequence":sequence,
+                "resource_uri":file_uri(wave.to_str().unwrap()),"enqueue":enqueue,
+                "target_player":"jwm","target_bus_owner":owner.as_str(),"target_pid":pid
+            })
+        };
+        let a = request("enqueue-a", 1, true);
+        let b = request("enqueue-b", 2, true);
+        let files = vec![wave.to_str().unwrap().to_owned()];
+        let call = |request: serde_json::Value| {
+            let client = client.clone();
+            let files = files.clone();
+            let owner = owner.clone();
+            async move {
+                client
+                    .call_method(
+                        Some(owner.as_str()),
+                        PATH,
+                        Some(NATIVE),
+                        "OpenEva",
+                        &(files, true, "music", request.to_string()),
+                    )
+                    .await
+            }
+        };
+        let forwarded = Open {
+            files: files.clone(),
+            enqueue: true,
+            mode: Mode::Music,
+        };
+        let (a_result, b_result) = tokio::join!(
+            run_on_with_eva(forwarded.clone(), Some(&address), true, Some(a.clone())),
+            run_on_with_eva(forwarded, Some(&address), true, Some(b.clone()))
+        );
+        a_result.unwrap();
+        b_result.unwrap();
+        let receipts: Vec<String> = properties
+            .get(NATIVE.try_into().unwrap(), "EvaOpenReceipts")
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let receipts: Vec<serde_json::Value> = receipts
+            .iter()
+            .map(|receipt| serde_json::from_str(receipt).unwrap())
+            .collect();
+        assert_eq!(receipts.len(), 2);
+        for expected in [&a, &b] {
+            let receipt = receipts
+                .iter()
+                .find(|receipt| eva::same_operation(receipt, expected))
+                .unwrap();
+            assert_eq!(receipt["verified"], true, "{receipt}");
+            assert_eq!(receipt["mpv_command_ack"], true);
+            assert!(receipt["player_request_id"].as_u64().unwrap() > 0);
+            assert!(receipt["entry_id"].as_u64().unwrap() > 0);
+            assert_eq!(receipt["resource_uri"], expected["resource_uri"]);
+            assert_eq!(receipt["completion"], "resource_queued_observed");
+        }
+        assert_ne!(receipts[0]["entry_id"], receipts[1]["entry_id"]);
+        assert_ne!(
+            receipts[0]["player_request_id"],
+            receipts[1]["player_request_id"]
+        );
+        call(a).await.unwrap();
+        let mut wrong_owner = b.clone();
+        wrong_owner["sequence"] = serde_json::json!(3);
+        wrong_owner["target_bus_owner"] = serde_json::json!(":1.999999");
+        assert!(call(wrong_owner).await.is_err());
+        let queued: Vec<String> = properties
+            .get(NATIVE.try_into().unwrap(), "QueuedUrls")
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            queued.len(),
+            4,
+            "replay and replaced-owner requests must add zero entries"
+        );
+        let replacement = request("replace-c", 4, false);
+        client
+            .call_method(
+                Some(owner.as_str()),
+                PATH,
+                Some(NATIVE),
+                "OpenEva",
+                &(files, false, "music", replacement.to_string()),
+            )
+            .await
+            .unwrap();
+        let receipts: Vec<String> = properties
+            .get(NATIVE.try_into().unwrap(), "EvaOpenReceipts")
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let replacement: serde_json::Value = receipts
+            .iter()
+            .map(|text| serde_json::from_str::<serde_json::Value>(text).unwrap())
+            .find(|receipt| receipt["operation_id"] == "replace-c")
+            .unwrap();
+        assert_eq!(replacement["verified"], true, "{replacement}");
+        assert_eq!(replacement["status"], "Playing");
+        assert_eq!(replacement["track_url"], file_uri(wave.to_str().unwrap()));
+        assert_eq!(replacement["completion"], "resource_playing_observed");
         let remote = client
             .call_method(
                 Some(NAME),
@@ -601,6 +867,53 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
+        // No previous owner: the same metadata accompanies the first native
+        // mpv load, and the new owner's receipt remains readable afterward.
+        let mut initial = request("new-player-d", 5, false);
+        initial["target_bus_owner"] = serde_json::Value::Null;
+        initial["target_pid"] = serde_json::Value::Null;
+        let new_open = Open {
+            files: vec![wave.to_str().unwrap().into()],
+            enqueue: false,
+            mode: Mode::Music,
+        };
+        let new_address = address.clone();
+        let new_player = tokio::spawn(async move {
+            run_on_with_eva(new_open, Some(&new_address), true, Some(initial)).await
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let receipt = properties
+                .get(NATIVE.try_into().unwrap(), "EvaOpenReceipts")
+                .await
+                .ok()
+                .and_then(|value| Vec::<String>::try_from(value).ok())
+                .and_then(|receipts| {
+                    receipts
+                        .into_iter()
+                        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                        .find(|receipt| receipt["operation_id"] == "new-player-d")
+                });
+            if let Some(receipt) = receipt {
+                assert_eq!(receipt["verified"], true, "{receipt}");
+                assert_eq!(receipt["status"], "Playing");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "new owner failed to expose initial causal receipt"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        client
+            .call_method(Some(NAME), PATH, Some(ROOT), "Quit", &())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), new_player)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let _ = std::fs::remove_file(wave);
     }
 

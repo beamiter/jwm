@@ -68,6 +68,14 @@ pub struct PlayerSnapshot {
     /// `mpris:trackid` object path, needed for absolute `SetPosition`. Kept
     /// bridge-side only — jwm never sees it.
     pub track_id: Option<String>,
+    /// Resource and process identity come from this exact unique bus owner,
+    /// never from the shell's requested transport command.
+    pub track_url: Option<String>,
+    pub bus_owner: Option<String>,
+    pub process_id: Option<u32>,
+    pub queued_urls: Vec<String>,
+    /// Native command receipts stay separate from ordinary media publication.
+    pub eva_open_receipts: Vec<Value>,
 }
 
 impl PlayerSnapshot {
@@ -93,6 +101,11 @@ impl PlayerSnapshot {
             "can_seek": self.can_seek,
             "position_us": self.position_us,
             "length_us": self.length_us,
+            "track_id": self.track_id,
+            "track_url": self.track_url,
+            "bus_owner": self.bus_owner,
+            "process_id": self.process_id,
+            "queued_urls": self.queued_urls,
         })
     }
 }
@@ -161,6 +174,11 @@ fn publish_args(players: &[PlayerSnapshot], pinned: Option<&str>) -> (Value, Opt
                         "player": player.player,
                         "identity": player.identity,
                         "status": player.status,
+                        "track_id": player.track_id,
+                        "track_url": player.track_url,
+                        "bus_owner": player.bus_owner,
+                        "process_id": player.process_id,
+                        "queued_urls": player.queued_urls,
                     })
                 })
                 .collect();
@@ -237,8 +255,22 @@ pub fn track_id_from_metadata(metadata: &HashMap<String, OwnedValue>) -> Option<
 /// `None` rather than failing the whole sweep.
 async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<PlayerSnapshot> {
     let suffix = name.as_str().strip_prefix(MPRIS_PREFIX)?.to_string();
+    let bus = DBusProxy::new(connection).await.ok()?;
+    let owner = bus.get_name_owner(name.clone().into()).await.ok()?;
+    let process_id = if bus
+        .get_connection_unix_user(owner.clone().into())
+        .await
+        .ok()?
+        == unsafe { libc::geteuid() }
+    {
+        bus.get_connection_unix_process_id(owner.clone().into())
+            .await
+            .ok()
+    } else {
+        None
+    };
     let properties = zbus::fdo::PropertiesProxy::builder(connection)
-        .destination(name.clone())
+        .destination(owner.clone())
         .ok()?
         .path(PLAYER_PATH)
         .ok()?
@@ -260,6 +292,32 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
         .ok()
         .map(|value| String::try_from(value).unwrap_or_default())
         .unwrap_or_default();
+    let queued_urls = if suffix == "jwm" {
+        properties
+            .get("org.jwm.Player".try_into().ok()?, "QueuedUrls")
+            .await
+            .ok()
+            .and_then(|value| Vec::<String>::try_from(value).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let eva_open_receipts = if suffix == "jwm" && process_id.is_some() {
+        properties
+            .get("org.jwm.Player".try_into().ok()?, "EvaOpenReceipts")
+            .await
+            .ok()
+            .and_then(|value| Vec::<String>::try_from(value).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .take(64)
+            .filter(|value| value.len() <= 32768)
+            .filter_map(|value| serde_json::from_str::<Value>(&value).ok())
+            .filter(Value::is_object)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Some(PlayerSnapshot {
         player: suffix,
@@ -280,6 +338,14 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
         position_us: player.get("Position").and_then(i64_of),
         length_us: length_from_metadata(&metadata),
         track_id: track_id_from_metadata(&metadata),
+        track_url: metadata
+            .get("xesam:url")
+            .map(string_of)
+            .filter(|url| !url.is_empty()),
+        bus_owner: Some(owner.to_string()),
+        process_id,
+        queued_urls,
+        eva_open_receipts,
     })
 }
 
@@ -381,15 +447,94 @@ async fn publish(connection: &Connection, ipc: &JwmIpc, pinned: Option<&str>) ->
         return pinned.map(str::to_string);
     };
     let (args, pin) = sweep.publication(pinned);
+    forward_open_receipts(ipc, &sweep.players).await;
     let ipc = ipc.clone();
     let _ = tokio::task::spawn_blocking(move || ipc.command("set_media_status", args)).await;
     pin
+}
+
+/// Forward only proofs observed on this unique owner's native interface. No
+/// current playlist or ordinary player status can stand in for an operation.
+fn open_receipt(player: &PlayerSnapshot, receipt: &Value) -> Option<(String, Value)> {
+    if player.player != "jwm" {
+        return None;
+    }
+    let owner = player.bus_owner.as_deref()?;
+    let pid = player.process_id.filter(|pid| *pid > 0)?;
+    if receipt["target_player"] != "jwm"
+        || receipt["operation_id"].as_str()?.is_empty()
+        || receipt["wm_instance_id"].as_str()?.is_empty()
+        || receipt["sequence"].as_u64()? == 0
+        || receipt["resource_uri"].as_str()?.is_empty()
+        || !receipt["enqueue"].is_boolean()
+        || !receipt["verified"].is_boolean()
+    {
+        return None;
+    }
+    if receipt["target_bus_owner"]
+        .as_str()
+        .is_some_and(|expected| expected != owner)
+        || receipt["target_pid"]
+            .as_u64()
+            .is_some_and(|expected| expected != u64::from(pid))
+    {
+        return None;
+    }
+    let mut proof = receipt.clone();
+    proof["player"] = serde_json::json!("jwm");
+    proof["bus_owner"] = serde_json::json!(owner);
+    proof["process_id"] = serde_json::json!(pid);
+    let key = serde_json::json!([
+        owner,
+        pid,
+        receipt["wm_instance_id"],
+        receipt["operation_id"],
+        receipt["sequence"]
+    ])
+    .to_string();
+    Some((
+        key,
+        serde_json::json!({"assistant_completion_only":true,"assistant_media_open_completion":proof}),
+    ))
+}
+
+async fn forward_open_receipts(ipc: &JwmIpc, players: &[PlayerSnapshot]) {
+    use std::sync::{Mutex, OnceLock};
+    static SENT: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
+    let sent = SENT.get_or_init(Mutex::default);
+    for player in players {
+        for receipt in &player.eva_open_receipts {
+            let Some((key, payload)) = open_receipt(player, receipt) else {
+                continue;
+            };
+            if sent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&key)
+            {
+                continue;
+            }
+            let ipc = ipc.clone();
+            if tokio::task::spawn_blocking(move || ipc.command("set_media_status", payload))
+                .await
+                .is_ok_and(|result| result.is_ok())
+            {
+                let mut sent = sent.lock().unwrap_or_else(|e| e.into_inner());
+                if sent.len() >= 4096 {
+                    sent.clear();
+                }
+                sent.insert(key);
+            }
+        }
+    }
 }
 
 /// Method name on `org.mpris.MediaPlayer2.Player` for a jwm media action.
 #[must_use]
 pub fn method_for(action: &str) -> Option<&'static str> {
     match action {
+        "play" => Some("Play"),
+        "pause" => Some("Pause"),
         "play_pause" => Some("PlayPause"),
         "next" => Some("Next"),
         "previous" => Some("Previous"),
@@ -401,6 +546,8 @@ pub fn method_for(action: &str) -> Option<&'static str> {
 /// What one `media/command` broadcast asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MediaRequest {
+    /// Eva freezes both the chosen suffix and its unique owner at admission.
+    TargetedTransport(TargetedTransport),
     /// Call the MPRIS method on the resolved player.
     Transport(&'static str),
     /// Pin resolution to this bus suffix; an empty name clears the pin back
@@ -408,6 +555,20 @@ enum MediaRequest {
     Select(String),
     /// Seek the resolved player to an absolute position in microseconds.
     Seek(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetedTransport {
+    operation_id: String,
+    wm_instance_id: String,
+    player: String,
+    bus_owner: String,
+    pid: u32,
+    action: &'static str,
+    method: &'static str,
+    desired_status: Option<&'static str>,
+    track_id: Option<String>,
+    position_us: Option<i64>,
 }
 
 /// Parse a command's payload. Unknown actions are `None`, which the caller
@@ -418,6 +579,69 @@ fn parse_request(payload: &Value) -> Option<MediaRequest> {
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // A malformed targeted command must never fall back to the dynamic
+    // transport path, which could mutate a different active player.
+    if [
+        "assistant_operation_id",
+        "wm_instance_id",
+        "target_player",
+        "target_bus_owner",
+        "target_pid",
+        "target_track_id",
+    ]
+    .iter()
+    .any(|key| payload.get(key).is_some())
+    {
+        let (action, method, desired_status) = match action {
+            "play" => ("play", "Play", Some("playing")),
+            "pause" => ("pause", "Pause", Some("paused")),
+            "stop" => ("stop", "Stop", Some("stopped")),
+            "next" => ("next", "Next", None),
+            "previous" => ("previous", "Previous", None),
+            "play_pause" => ("play_pause", "PlayPause", None),
+            "seek" => ("seek", "SetPosition", None),
+            _ => return None,
+        };
+        let field = |key: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 256)
+                .map(str::to_owned)
+        };
+        return Some(MediaRequest::TargetedTransport(TargetedTransport {
+            operation_id: field("assistant_operation_id")?,
+            wm_instance_id: field("wm_instance_id")?,
+            player: field("target_player")?,
+            bus_owner: field("target_bus_owner")?,
+            pid: payload["target_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0)?,
+            action,
+            method,
+            desired_status,
+            track_id: if action == "seek" {
+                Some(
+                    payload["target_track_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty() && id.len() <= 4096)?
+                        .to_owned(),
+                )
+            } else {
+                None
+            },
+            position_us: if action == "seek" {
+                Some(
+                    payload["position_us"]
+                        .as_i64()
+                        .filter(|position| (0..=86_400_000_000).contains(position))?,
+                )
+            } else {
+                None
+            },
+        }));
+    }
     if action == "select_player" {
         let player = payload
             .get("player")
@@ -454,6 +678,192 @@ async fn call_active(connection: &Connection, player: &str, method: &'static str
         Ok(Err(error)) => log::warn!("{method} on {destination} failed: {error}"),
         Err(_) => log::warn!("{method} on {destination} timed out"),
     }
+}
+
+async fn targeted_state(
+    properties: &zbus::fdo::PropertiesProxy<'_>,
+    deadline: tokio::time::Instant,
+) -> Result<Value, &'static str> {
+    let values = tokio::time::timeout_at(
+        deadline,
+        properties.get_all(PLAYER_INTERFACE.try_into().map_err(|_| "unknown")?),
+    )
+    .await
+    .map_err(|_| "unknown")?
+    .map_err(|_| "unknown")?;
+    let status = values
+        .get("PlaybackStatus")
+        .map(string_of)
+        .filter(|status| !status.is_empty())
+        .ok_or("unknown")?;
+    let metadata: HashMap<String, OwnedValue> = values
+        .get("Metadata")
+        .and_then(|value| HashMap::try_from(value.clone()).ok())
+        .unwrap_or_default();
+    Ok(
+        serde_json::json!({"status":status,"track_id":track_id_from_metadata(&metadata),"position_us":values.get("Position").and_then(i64_of)}),
+    )
+}
+
+/// One setter, followed only by reads against the same immutable bus owner.
+/// The completion bypasses the ordinary active-player row and carries its own
+/// operation/WM identity, so a prior periodic sweep cannot confirm this setter.
+async fn targeted_transport(connection: &Connection, request: &TargetedTransport) -> Value {
+    let mut completion = serde_json::json!({
+        "operation_id":request.operation_id,"wm_instance_id":request.wm_instance_id,
+        "player":request.player,"bus_owner":request.bus_owner,"process_id":request.pid,"action":request.action,
+        "status":Value::Null,"verified":false,
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let result = async {
+        let name = OwnedBusName::try_from(format!("{MPRIS_PREFIX}{}", request.player))
+            .map_err(|_| "target_gone")?;
+        let owner = zbus::names::OwnedUniqueName::try_from(request.bus_owner.clone())
+            .map_err(|_| "target_gone")?;
+        let bus = tokio::time::timeout_at(deadline, DBusProxy::new(connection))
+            .await
+            .map_err(|_| "target_gone")?
+            .map_err(|_| "target_gone")?;
+        let current = tokio::time::timeout_at(deadline, bus.get_name_owner(name.into()))
+            .await
+            .map_err(|_| "target_gone")?
+            .map_err(|_| "target_gone")?;
+        if current != owner {
+            return Err("target_gone");
+        }
+        let uid =
+            tokio::time::timeout_at(deadline, bus.get_connection_unix_user(owner.clone().into()))
+                .await
+                .map_err(|_| "target_gone")?
+                .map_err(|_| "target_gone")?;
+        let pid = tokio::time::timeout_at(
+            deadline,
+            bus.get_connection_unix_process_id(owner.clone().into()),
+        )
+        .await
+        .map_err(|_| "target_gone")?
+        .map_err(|_| "target_gone")?;
+        if uid != unsafe { libc::geteuid() } || pid != request.pid {
+            return Err("target_gone");
+        }
+        let properties = zbus::fdo::PropertiesProxy::builder(connection)
+            .destination(owner.clone())
+            .map_err(|_| "unknown")?
+            .path(PLAYER_PATH)
+            .map_err(|_| "unknown")?;
+        let properties = tokio::time::timeout_at(deadline, properties.build())
+            .await
+            .map_err(|_| "unknown")?
+            .map_err(|_| "unknown")?;
+        let before = targeted_state(&properties, deadline).await?;
+        completion["before_status"] = before["status"].clone();
+        completion["before_track_id"] = before["track_id"].clone();
+        if request.action == "seek"
+            && (before["track_id"].as_str() != request.track_id.as_deref()
+                || request.track_id.as_deref() == Some("/org/mpris/MediaPlayer2/TrackList/NoTrack"))
+        {
+            return Err("target_gone");
+        }
+        let toggle_status = if request.action == "play_pause" {
+            match before["status"].as_str() {
+                Some(status) if status.eq_ignore_ascii_case("playing") => Some("paused"),
+                Some(status)
+                    if status.eq_ignore_ascii_case("paused")
+                        || status.eq_ignore_ascii_case("stopped") =>
+                {
+                    Some("playing")
+                }
+                _ => return Err("unknown"),
+            }
+        } else {
+            None
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err("unknown");
+        }
+        let method_deadline = deadline.min(tokio::time::Instant::now() + PLAYER_CALL_TIMEOUT);
+        if request.action == "seek" {
+            let track =
+                zvariant::ObjectPath::try_from(request.track_id.as_deref().ok_or("target_gone")?)
+                    .map_err(|_| "target_gone")?;
+            tokio::time::timeout_at(
+                method_deadline,
+                connection.call_method(
+                    Some(owner.clone()),
+                    PLAYER_PATH,
+                    Some(PLAYER_INTERFACE),
+                    "SetPosition",
+                    &(track, request.position_us.ok_or("unknown")?),
+                ),
+            )
+            .await
+            .map_err(|_| "unknown")?
+            .map_err(|_| "unknown")?;
+        } else {
+            tokio::time::timeout_at(
+                method_deadline,
+                connection.call_method(
+                    Some(owner.clone()),
+                    PLAYER_PATH,
+                    Some(PLAYER_INTERFACE),
+                    request.method,
+                    &(),
+                ),
+            )
+            .await
+            .map_err(|_| "unknown")?
+            .map_err(|_| "unknown")?;
+        }
+        loop {
+            let after = targeted_state(&properties, deadline).await?;
+            if tokio::time::Instant::now() >= deadline {
+                return Err("unknown");
+            }
+            let complete = match request.action {
+                "next" | "previous" => before["track_id"]
+                    .as_str()
+                    .zip(after["track_id"].as_str())
+                    .is_some_and(|(old, new)| {
+                        old != new
+                            && old != "/org/mpris/MediaPlayer2/TrackList/NoTrack"
+                            && new != "/org/mpris/MediaPlayer2/TrackList/NoTrack"
+                            && zvariant::ObjectPath::try_from(old).is_ok()
+                            && zvariant::ObjectPath::try_from(new).is_ok()
+                    }),
+                "seek" => {
+                    after["track_id"].as_str() == request.track_id.as_deref()
+                        && after["position_us"]
+                            .as_i64()
+                            .zip(request.position_us)
+                            .is_some_and(|(actual, desired)| actual.abs_diff(desired) <= 1_000_000)
+                }
+                _ => after["status"]
+                    .as_str()
+                    .zip(request.desired_status.or(toggle_status))
+                    .is_some_and(|(actual, desired)| actual.eq_ignore_ascii_case(desired)),
+            };
+            if complete {
+                return Ok(after);
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(40)),
+            )
+            .await;
+        }
+    }
+    .await;
+    match result {
+        Ok(state) => {
+            completion["verified"] = Value::Bool(true);
+            for field in ["status", "track_id", "position_us"] {
+                completion[field] = state[field].clone();
+            }
+        }
+        Err(error) => {
+            completion["error"] = Value::String(error.into());
+        }
+    }
+    serde_json::json!({"assistant_completion_only":true,"assistant_media_completion":completion})
 }
 
 /// Absolute seek via `SetPosition` when the player published a track id,
@@ -687,6 +1097,13 @@ pub async fn run(
                     continue;
                 };
                 match request {
+                    MediaRequest::TargetedTransport(request) => {
+                        let args = targeted_transport(&connection,&request).await;
+                        let ipc=ipc.clone();
+                        // A lost completion remains unknown at JWM; never
+                        // repeat the already-issued transport mutation.
+                        let _=tokio::task::spawn_blocking(move||ipc.command("set_media_status",args)).await;
+                    }
                     MediaRequest::Select(player) => {
                         // Empty / malformed names clear the pin. The publish
                         // right after still drops a well-formed name nobody
@@ -750,7 +1167,553 @@ async fn next_owner_change(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_open_receipts_remain_scoped_and_never_become_ordinary_status() {
+        let mut player = super::PlayerSnapshot {
+            player: "jwm".into(),
+            bus_owner: Some(":1.17".into()),
+            process_id: Some(93),
+            ..Default::default()
+        };
+        let proof = serde_json::json!({"operation_id":"a","wm_instance_id":"wm-1","sequence":7,"resource_uri":"file:///song","enqueue":true,
+            "target_player":"jwm","target_bus_owner":":1.17","target_pid":93,"verified":true,"mpv_command_ack":true,"player_request_id":41,"entry_id":9});
+        let (key, args) = super::open_receipt(&player, &proof).unwrap();
+        assert_eq!(args["assistant_completion_only"], true);
+        assert_eq!(args["assistant_media_open_completion"]["process_id"], 93);
+        player.eva_open_receipts.push(proof.clone());
+        assert!(
+            player
+                .to_args()
+                .get("assistant_media_open_completion")
+                .is_none()
+        );
+        assert!(player.to_args().get("eva_open_receipts").is_none());
+        let mut other = proof.clone();
+        other["operation_id"] = serde_json::json!("b");
+        assert_ne!(key, super::open_receipt(&player, &other).unwrap().0);
+        other["wm_instance_id"] = serde_json::json!("wm-2");
+        assert_ne!(key, super::open_receipt(&player, &other).unwrap().0);
+        player.bus_owner = Some(":1.18".into());
+        assert!(super::open_receipt(&player, &proof).is_none());
+        player.bus_owner = Some(":1.17".into());
+        player.process_id = Some(94);
+        assert!(super::open_receipt(&player, &proof).is_none());
+        player.process_id = None;
+        assert!(super::open_receipt(&player, &proof).is_none());
+    }
     use super::*;
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    };
+
+    struct TargetBus {
+        child: std::process::Child,
+        address: String,
+    }
+    impl TargetBus {
+        fn start() -> Option<Self> {
+            use std::io::{BufRead, BufReader};
+            use std::process::{Command, Stdio};
+            let mut child = match Command::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    assert!(
+                        std::env::var_os("JWM_REQUIRE_DBUS_DAEMON").is_none(),
+                        "dbus-daemon required: {error}"
+                    );
+                    return None;
+                }
+            };
+            let mut address = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut address)
+                .unwrap();
+            Some(Self {
+                child,
+                address: address.trim().to_owned(),
+            })
+        }
+        async fn client(&self) -> Connection {
+            zbus::connection::Builder::address(self.address.as_str())
+                .unwrap()
+                .build()
+                .await
+                .unwrap()
+        }
+        async fn player(&self, suffix: &str, state: Arc<TargetPlayerState>) -> Connection {
+            zbus::connection::Builder::address(self.address.as_str())
+                .unwrap()
+                .name(format!("{MPRIS_PREFIX}{suffix}"))
+                .unwrap()
+                .serve_at(PLAYER_PATH, TargetPlayer(state))
+                .unwrap()
+                .serve_at(PLAYER_PATH, TestRoot)
+                .unwrap()
+                .build()
+                .await
+                .unwrap()
+        }
+    }
+    impl Drop for TargetBus {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    struct NativeOpenReceipt;
+    #[zbus::interface(name = "org.jwm.Player")]
+    impl NativeOpenReceipt {
+        #[zbus(property)]
+        fn eva_open_receipts(&self) -> Vec<String> {
+            vec![
+                "invalid old helper payload".into(),
+                serde_json::json!({
+                    "operation_id":"owned-op","wm_instance_id":"owned-wm","sequence":1,
+                    "resource_uri":"file:///song","enqueue":true,"target_player":"jwm",
+                    "target_bus_owner":null,"target_pid":null,"verified":true,
+                    "mpv_command_ack":true,"player_request_id":7,"entry_id":11
+                })
+                .to_string(),
+            ]
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_open_receipts_are_read_from_the_observed_unique_bus_owner() {
+        let Some(bus) = TargetBus::start() else {
+            return;
+        };
+        let server = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .name("org.mpris.MediaPlayer2.jwm")
+            .unwrap()
+            .serve_at(PLAYER_PATH, TargetPlayer(Arc::default()))
+            .unwrap()
+            .serve_at(PLAYER_PATH, TestRoot)
+            .unwrap()
+            .serve_at(PLAYER_PATH, NativeOpenReceipt)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = bus.client().await;
+        let snapshot = snapshot(
+            &client,
+            &OwnedBusName::try_from("org.mpris.MediaPlayer2.jwm").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot.eva_open_receipts.len(),
+            1,
+            "invalid legacy values must not become receipts"
+        );
+        let (_, args) = open_receipt(&snapshot, &snapshot.eva_open_receipts[0]).unwrap();
+        let proof = &args["assistant_media_open_completion"];
+        assert_eq!(proof["bus_owner"], server.unique_name().unwrap().as_str());
+        assert_eq!(proof["process_id"], std::process::id());
+        assert_eq!(proof["operation_id"], "owned-op");
+        assert_eq!(proof["entry_id"], 11);
+    }
+    #[derive(Default)]
+    struct TargetPlayerState {
+        paused: AtomicBool,
+        pauses: AtomicUsize,
+        plays: AtomicUsize,
+        toggles: AtomicUsize,
+        reads: AtomicUsize,
+        block_method: AtomicBool,
+        fail_readback: AtomicBool,
+        fail_after_setter: AtomicBool,
+        stopped: AtomicBool,
+        track: AtomicUsize,
+        position: std::sync::atomic::AtomicI64,
+        nexts: AtomicUsize,
+        ignore_advance: AtomicBool,
+        previouses: AtomicUsize,
+        stops: AtomicUsize,
+        seeks: AtomicUsize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    struct TargetPlayer(Arc<TargetPlayerState>);
+    #[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+    impl TargetPlayer {
+        #[zbus(property)]
+        fn playback_status(&self) -> zbus::fdo::Result<String> {
+            self.0.reads.fetch_add(1, Ordering::SeqCst);
+            if self.0.fail_readback.load(Ordering::SeqCst) {
+                return Err(zbus::fdo::Error::Failed("readback unavailable".into()));
+            }
+            Ok(if self.0.stopped.load(Ordering::SeqCst) {
+                "Stopped"
+            } else if self.0.paused.load(Ordering::SeqCst) {
+                "Paused"
+            } else {
+                "Playing"
+            }
+            .into())
+        }
+        async fn pause(&self) {
+            self.0.pauses.fetch_add(1, Ordering::SeqCst);
+            if self.0.block_method.load(Ordering::SeqCst) {
+                self.0.entered.notify_one();
+                self.0.release.notified().await;
+            }
+            self.0.paused.store(true, Ordering::SeqCst);
+            if self.0.fail_after_setter.load(Ordering::SeqCst) {
+                self.0.fail_readback.store(true, Ordering::SeqCst);
+            }
+        }
+        #[zbus(property)]
+        fn metadata(&self) -> HashMap<String, OwnedValue> {
+            HashMap::from([(
+                "mpris:trackid".into(),
+                OwnedValue::from(
+                    zvariant::ObjectPath::try_from(format!(
+                        "/track/{}",
+                        self.0.track.load(Ordering::SeqCst)
+                    ))
+                    .unwrap(),
+                ),
+            )])
+        }
+        #[zbus(property)]
+        fn position(&self) -> i64 {
+            self.0.position.load(Ordering::SeqCst)
+        }
+        fn next(&self) {
+            self.0.nexts.fetch_add(1, Ordering::SeqCst);
+            if !self.0.ignore_advance.load(Ordering::SeqCst) {
+                self.0.track.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn previous(&self) {
+            self.0.previouses.fetch_add(1, Ordering::SeqCst);
+            if !self.0.ignore_advance.load(Ordering::SeqCst) {
+                self.0.track.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        fn stop(&self) {
+            self.0.stops.fetch_add(1, Ordering::SeqCst);
+            self.0.stopped.store(true, Ordering::SeqCst);
+        }
+        fn set_position(&self, track: zvariant::ObjectPath<'_>, position: i64) {
+            self.0.seeks.fetch_add(1, Ordering::SeqCst);
+            if track.as_str() == format!("/track/{}", self.0.track.load(Ordering::SeqCst)) {
+                self.0.position.store(position, Ordering::SeqCst);
+            }
+        }
+        fn play(&self) {
+            self.0.plays.fetch_add(1, Ordering::SeqCst);
+            self.0.stopped.store(false, Ordering::SeqCst);
+            self.0.paused.store(false, Ordering::SeqCst);
+        }
+        fn play_pause(&self) {
+            self.0.toggles.fetch_add(1, Ordering::SeqCst);
+            self.0.paused.fetch_xor(true, Ordering::SeqCst);
+        }
+    }
+    fn target_request(operation: &str, connection: &Connection, play: bool) -> TargetedTransport {
+        TargetedTransport {
+            operation_id: operation.into(),
+            wm_instance_id: "frozen-wm-instance".into(),
+            player: "frozen".into(),
+            bus_owner: connection.unique_name().unwrap().to_string(),
+            pid: std::process::id(),
+            action: if play { "play" } else { "pause" },
+            track_id: None,
+            position_us: None,
+            method: if play { "Play" } else { "Pause" },
+            desired_status: Some(if play { "playing" } else { "paused" }),
+        }
+    }
+    #[test]
+    fn targeted_requests_never_fall_back_to_dynamic_or_toggle_transport() {
+        let payload = serde_json::json!({"action":"pause","assistant_operation_id":"op-1","wm_instance_id":"wm-1","target_player":"frozen","target_bus_owner":":1.99","target_pid":123});
+        let Some(MediaRequest::TargetedTransport(request)) = parse_request(&payload) else {
+            panic!("targeted pause not recognized")
+        };
+        assert_eq!(request.method, "Pause");
+        assert_eq!(request.wm_instance_id, "wm-1");
+        for field in [
+            "assistant_operation_id",
+            "wm_instance_id",
+            "target_player",
+            "target_bus_owner",
+            "target_pid",
+        ] {
+            let mut missing = payload.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(parse_request(&missing).is_none());
+        }
+        let mut toggle = payload;
+        toggle["action"] = Value::String("play_pause".into());
+        assert!(matches!(
+            parse_request(&toggle),
+            Some(MediaRequest::TargetedTransport(_))
+        ));
+        toggle["action"] = Value::String("seek".into());
+        assert!(
+            parse_request(&toggle).is_none(),
+            "seek requires a frozen track and position"
+        );
+        assert_eq!(
+            parse_request(&serde_json::json!({"action":"play"})),
+            Some(MediaRequest::Transport("Play"))
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn targeted_pause_waits_for_setter_and_reads_frozen_player_after_active_changes() {
+        let Some(bus) = TargetBus::start() else {
+            return;
+        };
+        let frozen = Arc::new(TargetPlayerState::default());
+        frozen.paused.store(true, Ordering::SeqCst);
+        let other = Arc::new(TargetPlayerState::default());
+        let frozen_connection = bus.player("frozen", frozen.clone()).await;
+        let _other_connection = bus.player("other", other.clone()).await;
+        let client = bus.client().await;
+        let reads = frozen.reads.load(Ordering::SeqCst);
+        frozen.block_method.store(true, Ordering::SeqCst);
+        let request = target_request("pause-1", &frozen_connection, false);
+        let connection = client.clone();
+        let pending = tokio::spawn(async move { targeted_transport(&connection, &request).await });
+        tokio::time::timeout(Duration::from_millis(700), frozen.entered.notified())
+            .await
+            .unwrap();
+        assert!(
+            !pending.is_finished(),
+            "a prior Paused state cannot settle a setter still in flight"
+        );
+        assert_eq!(
+            frozen.reads.load(Ordering::SeqCst),
+            reads + 1,
+            "only the baseline can be read before setter reply"
+        );
+        frozen.release.notify_one();
+        let first = pending.await.unwrap();
+        assert_eq!(first["assistant_completion_only"], true);
+        assert_eq!(
+            first["assistant_media_completion"]["operation_id"],
+            "pause-1"
+        );
+        assert_eq!(
+            first["assistant_media_completion"]["wm_instance_id"],
+            "frozen-wm-instance"
+        );
+        assert_eq!(first["assistant_media_completion"]["verified"], true);
+        frozen.block_method.store(false, Ordering::SeqCst);
+        let repeated = targeted_transport(
+            &client,
+            &target_request("pause-2", &frozen_connection, false),
+        )
+        .await;
+        assert_eq!(repeated["assistant_media_completion"]["verified"], true);
+        assert_eq!(
+            frozen.pauses.load(Ordering::SeqCst),
+            2,
+            "repeat Pause must call the idempotent setter again"
+        );
+        assert!(frozen.reads.load(Ordering::SeqCst) >= reads + 4);
+        let play =
+            targeted_transport(&client, &target_request("play", &frozen_connection, true)).await;
+        assert_eq!(play["assistant_media_completion"]["verified"], true);
+        assert_eq!(frozen.plays.load(Ordering::SeqCst), 1);
+        let paused = targeted_transport(
+            &client,
+            &target_request("pause-3", &frozen_connection, false),
+        )
+        .await;
+        assert_eq!(paused["assistant_media_completion"]["verified"], true);
+        let sweep = collect_players(&client).await.unwrap();
+        assert_eq!(
+            sweep.resolve(None).0.unwrap().player,
+            "other",
+            "active row can change independently from targeted completion"
+        );
+        assert_eq!(other.pauses.load(Ordering::SeqCst), 0);
+        assert_eq!(other.plays.load(Ordering::SeqCst), 0);
+        assert_eq!(frozen.toggles.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn targeted_transport_rejects_replaced_owner_without_touching_either_player() {
+        let Some(bus) = TargetBus::start() else {
+            return;
+        };
+        let old = Arc::new(TargetPlayerState::default());
+        let old_connection = bus.player("frozen", old.clone()).await;
+        let request = target_request("old-owner", &old_connection, false);
+        assert!(
+            old_connection
+                .release_name(format!("{MPRIS_PREFIX}frozen"))
+                .await
+                .unwrap()
+        );
+        let replacement = Arc::new(TargetPlayerState::default());
+        let _new_connection = bus.player("frozen", replacement.clone()).await;
+        let reply = targeted_transport(&bus.client().await, &request).await;
+        assert_eq!(reply["assistant_media_completion"]["verified"], false);
+        assert_eq!(reply["assistant_media_completion"]["error"], "target_gone");
+        assert_eq!(old.pauses.load(Ordering::SeqCst), 0);
+        assert_eq!(replacement.pauses.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn targeted_relative_transport_stop_and_seek_have_exact_postconditions() {
+        let Some(bus) = TargetBus::start() else {
+            return;
+        };
+        let state = Arc::new(TargetPlayerState::default());
+        state.track.store(10, Ordering::SeqCst);
+        let other = Arc::new(TargetPlayerState::default());
+        let server = bus.player("frozen", state.clone()).await;
+        let _other = bus.player("other", other.clone()).await;
+        let client = bus.client().await;
+        let mut request = target_request("next", &server, false);
+        request.action = "next";
+        request.method = "Next";
+        request.desired_status = None;
+        let next = targeted_transport(&client, &request).await;
+        let proof = &next["assistant_media_completion"];
+        assert_eq!(proof["verified"], true);
+        assert_eq!(proof["before_track_id"], "/track/10");
+        assert_eq!(proof["track_id"], "/track/11");
+        assert_eq!(proof["action"], "next");
+        assert_eq!(proof["process_id"], std::process::id());
+        request.operation_id = "previous".into();
+        request.action = "previous";
+        request.method = "Previous";
+        let previous = targeted_transport(&client, &request).await;
+        assert_eq!(
+            previous["assistant_media_completion"]["track_id"],
+            "/track/10"
+        );
+        assert_eq!(previous["assistant_media_completion"]["verified"], true);
+        for (number, before, after) in [(1, "Playing", "Paused"), (2, "Paused", "Playing")] {
+            request.operation_id = format!("toggle-{number}");
+            request.action = "play_pause";
+            request.method = "PlayPause";
+            let toggle = targeted_transport(&client, &request).await;
+            let proof = &toggle["assistant_media_completion"];
+            assert_eq!(proof["verified"], true);
+            assert_eq!(proof["before_status"], before);
+            assert_eq!(proof["status"], after);
+        }
+        for number in 1..=2 {
+            request.operation_id = format!("stop-{number}");
+            request.action = "stop";
+            request.method = "Stop";
+            request.desired_status = Some("stopped");
+            let stop = targeted_transport(&client, &request).await;
+            assert_eq!(stop["assistant_media_completion"]["verified"], true);
+            assert_eq!(stop["assistant_media_completion"]["status"], "Stopped");
+        }
+        request.operation_id = "seek".into();
+        request.action = "seek";
+        request.method = "SetPosition";
+        request.desired_status = None;
+        request.track_id = Some("/track/10".into());
+        request.position_us = Some(2_500_000);
+        let seek = targeted_transport(&client, &request).await;
+        assert_eq!(seek["assistant_media_completion"]["verified"], true);
+        assert_eq!(seek["assistant_media_completion"]["position_us"], 2_500_000);
+        request.operation_id = "stale-seek".into();
+        request.track_id = Some("/track/11".into());
+        let stale = targeted_transport(&client, &request).await;
+        assert_eq!(stale["assistant_media_completion"]["error"], "target_gone");
+        assert_eq!(
+            state.seeks.load(Ordering::SeqCst),
+            1,
+            "a changed track must stop before SetPosition"
+        );
+        request.operation_id = "wrong-pid".into();
+        request.action = "stop";
+        request.method = "Stop";
+        request.pid += 1;
+        let wrong = targeted_transport(&client, &request).await;
+        assert_eq!(wrong["assistant_media_completion"]["error"], "target_gone");
+        assert_eq!(state.nexts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.previouses.load(Ordering::SeqCst), 1);
+        assert_eq!(state.toggles.load(Ordering::SeqCst), 2);
+        assert_eq!(state.stops.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            other.nexts.load(Ordering::SeqCst)
+                + other.previouses.load(Ordering::SeqCst)
+                + other.toggles.load(Ordering::SeqCst)
+                + other.stops.load(Ordering::SeqCst)
+                + other.seeks.load(Ordering::SeqCst),
+            0
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn targeted_next_without_a_new_track_is_unknown_and_never_reissued() {
+        let Some(bus) = TargetBus::start() else {
+            return;
+        };
+        let state = Arc::new(TargetPlayerState::default());
+        state.ignore_advance.store(true, Ordering::SeqCst);
+        let server = bus.player("frozen", state.clone()).await;
+        let client = bus.client().await;
+        let mut request = target_request("no-next", &server, false);
+        request.action = "next";
+        request.method = "Next";
+        request.desired_status = None;
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            targeted_transport(&client, &request),
+        )
+        .await
+        .expect("postcondition wait must stay bounded");
+        assert_eq!(result["assistant_media_completion"]["verified"], false);
+        assert_eq!(result["assistant_media_completion"]["error"], "unknown");
+        assert_eq!(state.nexts.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn targeted_readback_errors_and_method_timeouts_remain_unknown_without_replay() {
+        let Some(bus) = TargetBus::start() else {
+            return;
+        };
+        let state = Arc::new(TargetPlayerState::default());
+        let server = bus.player("frozen", state.clone()).await;
+        let client = bus.client().await;
+        state.fail_after_setter.store(true, Ordering::SeqCst);
+        let result =
+            targeted_transport(&client, &target_request("read-failed", &server, false)).await;
+        assert_eq!(result["assistant_media_completion"]["verified"], false);
+        assert_eq!(result["assistant_media_completion"]["error"], "unknown");
+        assert_eq!(
+            state.pauses.load(Ordering::SeqCst),
+            1,
+            "an ambiguous read cannot repeat the setter"
+        );
+        state.fail_readback.store(false, Ordering::SeqCst);
+        state.fail_after_setter.store(false, Ordering::SeqCst);
+        state.block_method.store(true, Ordering::SeqCst);
+        let reads = state.reads.load(Ordering::SeqCst);
+        let result =
+            targeted_transport(&client, &target_request("method-timeout", &server, false)).await;
+        assert_eq!(result["assistant_media_completion"]["error"], "unknown");
+        assert_eq!(state.pauses.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state.reads.load(Ordering::SeqCst),
+            reads + 1,
+            "a timed-out setter has a baseline but no post-setter readback"
+        );
+        state.release.notify_one();
+    }
+
+    fn picker_details(args: &Value) -> Value {
+        Value::Array(args["player_details"].as_array().unwrap().iter().map(|row| {
+            serde_json::json!({"player":row["player"],"identity":row["identity"],"status":row["status"]})
+        }).collect())
+    }
 
     struct TestPlayer {
         stalled: bool,
@@ -906,6 +1869,7 @@ mod tests {
             position_us: None,
             length_us: None,
             track_id: None,
+            ..PlayerSnapshot::default()
         }
     }
 
@@ -919,6 +1883,26 @@ mod tests {
     fn a_playing_player_outranks_a_paused_one() {
         let players = vec![player("mpv", "Paused"), player("spotify", "Playing")];
         assert_eq!(pick_active(&players).unwrap().player, "spotify");
+    }
+    #[test]
+    fn resource_proof_survives_publication_even_when_another_player_is_active() {
+        let mut native = player("jwm", "Paused");
+        native.bus_owner = Some(":1.24".into());
+        native.process_id = Some(1234);
+        native.track_id = Some("/org/jwm/Player/track_17".into());
+        native.track_url = Some("file:///tmp/requested%20media.ogg".into());
+        native.queued_urls = vec![native.track_url.clone().unwrap()];
+        let (args, _) = publish_args(&[native, player("other", "Playing")], None);
+        assert_eq!(args["player"], "other");
+        let proof = &args["player_details"][0];
+        assert_eq!(proof["player"], "jwm");
+        assert_eq!(proof["bus_owner"], ":1.24");
+        assert_eq!(proof["process_id"], 1234);
+        assert_eq!(proof["track_url"], "file:///tmp/requested%20media.ogg");
+        assert_eq!(
+            proof["queued_urls"],
+            serde_json::json!(["file:///tmp/requested%20media.ogg"])
+        );
     }
 
     #[test]
@@ -978,6 +1962,8 @@ mod tests {
 
     #[test]
     fn jwm_actions_map_onto_mpris_methods() {
+        assert_eq!(method_for("play"), Some("Play"));
+        assert_eq!(method_for("pause"), Some("Pause"));
         assert_eq!(method_for("play_pause"), Some("PlayPause"));
         assert_eq!(method_for("next"), Some("Next"));
         assert_eq!(method_for("previous"), Some("Previous"));
@@ -1052,7 +2038,7 @@ mod tests {
         assert_eq!(args["player"], "spotify", "the active pick still leads");
         assert_eq!(args["players"], serde_json::json!(["mpv", "spotify"]));
         assert_eq!(
-            args["player_details"],
+            picker_details(&args),
             serde_json::json!([
                 {"player": "mpv", "identity": "mpv", "status": "Paused"},
                 {"player": "spotify", "identity": "spotify", "status": "Playing"},
@@ -1065,7 +2051,7 @@ mod tests {
         let (args, _) = publish_args(&players, Some("mpv"));
         assert_eq!(args["players"], serde_json::json!(["mpv", "spotify"]));
         assert_eq!(
-            args["player_details"],
+            picker_details(&args),
             serde_json::json!([
                 {"player": "mpv", "identity": "mpv", "status": "Paused"},
                 {"player": "spotify", "identity": "spotify", "status": "Playing"},
@@ -1094,7 +2080,7 @@ mod tests {
             "string list stays the cycle key"
         );
         assert_eq!(
-            args["player_details"],
+            picker_details(&args),
             serde_json::json!([
                 {"player": "spotify", "identity": "Spotify", "status": "Playing"},
                 {"player": "chromium", "identity": "Google Chrome", "status": "Paused"},

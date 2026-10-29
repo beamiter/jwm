@@ -141,6 +141,7 @@ impl From<ClipboardOffer> for OfferedData {
         match offer {
             ClipboardOffer::Text(text) => Self::Text(text.into_bytes().into()),
             ClipboardOffer::Png(png) => Self::Png(png.into()),
+            ClipboardOffer::Tracked(offer, _receipt) => (*offer).into(),
         }
     }
 }
@@ -312,6 +313,32 @@ impl Clipboard {
     }
 
     /// Offer `text` to other applications.
+    #[cfg(feature = "backend-x11rb")]
+    pub(crate) fn offer_with_receipt(
+        &self,
+        offer: crate::backend::clipboard_offer::CapturedClipboard,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+        use crate::backend::clipboard_offer::{
+            CapturedClipboard, MAX_TEXT_BYTES, X11_MAX_OFFER_BYTES,
+        };
+        let offer = match offer {
+            CapturedClipboard::Text(text) if text.len() <= MAX_TEXT_BYTES => {
+                ClipboardOffer::Text(text)
+            }
+            CapturedClipboard::Png(png) if png.len() <= X11_MAX_OFFER_BYTES => {
+                ClipboardOffer::Png(png)
+            }
+            _ => return None,
+        };
+        let (offer, receipt) = ClipboardOffer::tracked(offer);
+        if !self.worker_wake.is_healthy()
+            || self.serve.send(offer).is_err()
+            || !self.worker_wake.notify()
+        {
+            receipt.complete(false);
+        }
+        Some(receipt)
+    }
     #[cfg(feature = "backend-x11rb")]
     pub(crate) fn set_text(&self, text: &str) -> bool {
         if text.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
@@ -1322,6 +1349,7 @@ impl Watcher {
         let Some(offer) = self.pending_offer.take() else {
             return self.offered.is_some() && self.is_current_owner(self.window);
         };
+        let (offer, receipt) = offer.split_receipt();
         self.offered = Some(offer.into());
         let set = self
             .conn
@@ -1335,6 +1363,9 @@ impl Watcher {
             return false;
         }
         self.ownership_time = Some(timestamp);
+        if let Some(receipt) = receipt {
+            receipt.owned();
+        }
         let _ = self.conn.flush();
         true
     }
@@ -2178,7 +2209,20 @@ mod tests {
         .unwrap()
         .check()
         .unwrap();
-        assert!(clipboard_owner.set_text("hello π"));
+        let receipt = clipboard_owner
+            .offer_with_receipt(CapturedClipboard::Text("hello π".into()))
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while receipt.status() == crate::backend::clipboard_offer::ClipboardReceiptStatus::Pending
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            receipt.status(),
+            crate::backend::clipboard_offer::ClipboardReceiptStatus::Owned
+        );
+
         wait_for_selection_owner(&conn, clipboard);
 
         let targets_property = intern(&conn, "JWM_TEST_TARGETS").unwrap();

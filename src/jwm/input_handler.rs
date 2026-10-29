@@ -7,6 +7,7 @@ use crate::backend::api::{
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
+use crate::backend::compositor_common::eva_overlay::{EvaLocalAction, EvaOverlayState};
 use crate::backend::compositor_common::screenshot_toolbar::{
     self, ScreenshotToolbar, ToolbarButton,
 };
@@ -284,7 +285,119 @@ fn choose_system_ui_viewport(
         .unwrap_or(fullscreen)
 }
 
+fn eva_action_binding(action: EvaLocalAction) -> (Mods, u32) {
+    (
+        Mods::ALT | Mods::CONTROL,
+        match action {
+            EvaLocalAction::Retry => keys::KEY_r,
+            EvaLocalAction::Diagnostics => keys::KEY_i,
+            EvaLocalAction::Undo => keys::KEY_z,
+        },
+    )
+}
+fn eva_doctor_argv(mut terminal: Vec<String>) -> Option<Vec<String>> {
+    if terminal.is_empty() {
+        return None;
+    }
+    terminal.extend(["jwm-eva".into(), "doctor".into(), "--hold".into()]);
+    Some(terminal)
+}
+
 impl Jwm {
+    fn eva_action_grabs(&self) -> Vec<(Mods, u32)> {
+        if self.features.system_ui.is_locked() || !self.features.monitor_lock.is_empty() {
+            return Vec::new();
+        }
+        EvaOverlayState::local_actions(&self.eva_overlay_snapshot())
+            .into_iter()
+            .map(eva_action_binding)
+            .collect()
+    }
+    fn eva_open_diagnostics(&mut self, backend: &mut dyn Backend) {
+        let launched = eva_doctor_argv(crate::config::Config::get_terminal_exec_prefix())
+            .is_some_and(|argv| self.spawn(backend, &WMArgEnum::StringVec(argv)).is_ok());
+        if !launched {
+            backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                app: "Eva".into(),
+                title: "无法打开诊断终端".into(),
+                body: "请在终端运行 jwm-eva doctor；诊断不会打开麦克风或云端。".into(),
+                ..Default::default()
+            });
+        }
+    }
+    /// The only temporary passive grabs Eva requests: never the whole keyboard.
+    pub(crate) fn eva_extend_key_grabs(&self, bindings: &mut Vec<(Mods, u32)>) {
+        if self.eva_active() {
+            let mut requested = vec![
+                (Mods::empty(), keys::KEY_Escape),
+                (Mods::ALT | Mods::CONTROL, keys::KEY_Return),
+            ];
+            if self.eva_overlay_snapshot()["confirmation"].is_object()
+                && self.eva_overlay_snapshot()["confirmation"]["approved"].as_bool() != Some(true)
+            {
+                requested.extend([
+                    (Mods::ALT | Mods::CONTROL, keys::KEY_d),
+                    (Mods::empty(), keys::KEY_Page_Up),
+                    (Mods::empty(), keys::KEY_Page_Down),
+                ]);
+            }
+            for binding in requested {
+                if !bindings.contains(&binding) {
+                    bindings.push(binding);
+                }
+            }
+        }
+        for binding in self.eva_action_grabs() {
+            if !bindings.contains(&binding) {
+                bindings.push(binding);
+            }
+        }
+    }
+
+    pub(crate) fn eva_sync_ui(&mut self, backend: &mut dyn Backend) {
+        self.eva_refresh_confirmation_layout();
+        let active = self.eva_active();
+        let mut snapshot = self.eva_overlay_snapshot();
+        if self.features.system_ui.is_locked()
+            || !self.features.monitor_lock.is_empty()
+            || backend.compositor_session_locked()
+            || !self.running.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            snapshot["suppress_animation"] = serde_json::json!(true);
+        }
+        let confirming = active
+            && snapshot["confirmation"].is_object()
+            && snapshot["confirmation"]["approved"].as_bool() != Some(true);
+        let action_grabs = self.eva_action_grabs();
+        if active != self.eva.ui_grab_active
+            || confirming != self.eva.ui_confirmation_grab_active
+            || action_grabs != self.eva.ui_action_grabs
+        {
+            self.eva.ui_action_grabs = action_grabs;
+            self.eva.ui_grab_active = active;
+            self.eva.ui_confirmation_grab_active = confirming;
+            if backend.root_window().is_some() {
+                if let Err(error) = self.grabkeys(backend) {
+                    log::warn!("Eva temporary key grab failed: {error}");
+                    self.eva.ui_grab_active = false;
+                    snapshot["text"] = serde_json::json!("Esc 不可用；再次按激活键退出");
+                }
+            }
+        }
+        if snapshot.get("monitor_rect").is_none() {
+            if let Some(monitor) = self
+                .state
+                .sel_mon
+                .and_then(|key| self.state.monitors.get(key))
+            {
+                let g = &monitor.geometry;
+                // Work area excludes status bars and dock reservations.
+                snapshot["monitor_rect"] = serde_json::json!([g.w_x, g.w_y, g.w_w, g.w_h]);
+            }
+        }
+        backend.compositor_set_eva_overlay(snapshot);
+    }
+
     /// Note that a panel changed in memory. The frame tick pushes it.
     ///
     /// Callers that already have a backend may sync directly instead; this
@@ -2447,6 +2560,90 @@ impl Jwm {
             | Mods::MOD3
             | Mods::MOD5;
 
+        // Auxiliary commands carry local intent. Undo includes the exact
+        // current permit; retry creates a fresh one, and diagnostics only
+        // opens the read-only doctor command in an explicit user terminal.
+        if !self.features.system_ui.is_active()
+            && self.grab_holding_mode_on_screen().is_none()
+            && !self.features.system_ui.is_locked()
+            && self.features.monitor_lock.is_empty()
+            && !backend.compositor_session_locked()
+        {
+            let snapshot = self.eva_overlay_snapshot();
+            if let Some(action) = EvaOverlayState::local_actions(&snapshot)
+                .into_iter()
+                .find(|action| eva_action_binding(*action) == (clean_state, keysym))
+            {
+                if !repeat {
+                    match action {
+                        EvaLocalAction::Retry=>{self.eva_cancel("local_retry");self.eva_toggle(backend,&WMArgEnum::Int(0))?;},
+                        EvaLocalAction::Diagnostics=>self.eva_open_diagnostics(backend),
+                        EvaLocalAction::Undo=>self.broadcast_ipc_event("assistant/local_action",serde_json::json!({"action":"undo","assistant_permit":snapshot["assistant_permit"]})),
+                    }
+                    self.eva_sync_ui(backend);
+                }
+                return Ok(());
+            }
+        }
+        // Session controls are local and non-repeatable. Existing lock and
+        // higher-priority modal surfaces retain their input boundary.
+        if self.eva_active()
+            && !self.features.system_ui.is_active()
+            && self.grab_holding_mode_on_screen().is_none()
+        {
+            if keysym == keys::KEY_Escape && clean_state.is_empty() {
+                if !repeat {
+                    self.eva_cancel("escape");
+                    self.eva_sync_ui(backend);
+                }
+                return Ok(());
+            }
+            self.eva_refresh_confirmation_layout();
+            let confirmation = self.eva_overlay_snapshot();
+            if confirmation["confirmation"].is_object()
+                && confirmation["confirmation"]["approved"].as_bool() != Some(true)
+                && ((keysym == keys::KEY_d && clean_state == (Mods::ALT | Mods::CONTROL))
+                    || (matches!(keysym, keys::KEY_Page_Up | keys::KEY_Page_Down)
+                        && clean_state.is_empty()))
+            {
+                if !repeat {
+                    self.eva
+                        .confirmation_ui
+                        .update(&confirmation, std::time::Instant::now());
+                    let pages = self.eva.confirmation_ui.confirmation_page_count_cached();
+                    let current = self.eva.confirmation_detail_page;
+                    let next = if keysym == keys::KEY_d && current.is_some() {
+                        None
+                    } else if keysym == keys::KEY_Page_Up {
+                        Some(current.unwrap_or(0).saturating_sub(1))
+                    } else if keysym == keys::KEY_Page_Down {
+                        Some(
+                            current
+                                .map_or(0, |p| p.saturating_add(1))
+                                .min(pages.saturating_sub(1)),
+                        )
+                    } else {
+                        Some(0)
+                    };
+                    self.eva.confirmation_detail_page = next;
+                    if let Some(page) = next
+                        && !self.eva.confirmation_seen_pages.contains(&page)
+                    {
+                        self.eva.confirmation_seen_pages.push(page);
+                    }
+                    self.eva_sync_ui(backend);
+                }
+                return Ok(());
+            }
+            if keysym == keys::KEY_Return && clean_state == (Mods::ALT | Mods::CONTROL) {
+                if !repeat {
+                    self.eva_confirm();
+                    self.eva_sync_ui(backend);
+                }
+                return Ok(());
+            }
+        }
+
         // Wayland also reports forwarded presses to policy. Dropping a WM
         // action here alone would lose the key on X11, so grabkeys() releases
         // the actual grabs too. Modal shell input (especially the lock) keeps
@@ -4588,6 +4785,7 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
+    use super::eva_doctor_argv;
     use super::{
         LockEscape, choose_system_ui_viewport, direct_command_from_launcher, lock_escape,
         parse_direct_launcher_command,
@@ -5392,6 +5590,7 @@ mod tests {
         annotation_points: Vec<(f32, f32)>,
         capture_hint: Option<String>,
         compositor_enabled: bool,
+        session_locked: bool,
     }
 
     impl ConfigureReplyBackend {
@@ -5412,12 +5611,17 @@ mod tests {
                 annotation_points: Vec::new(),
                 capture_hint: None,
                 compositor_enabled: false,
+                session_locked: false,
             }
         }
     }
 
     impl CompositorBenchmark for ConfigureReplyBackend {}
-    impl BackendDiagnostics for ConfigureReplyBackend {}
+    impl BackendDiagnostics for ConfigureReplyBackend {
+        fn compositor_session_locked(&self) -> bool {
+            self.session_locked
+        }
+    }
     impl CompositorControl for ConfigureReplyBackend {}
     impl CompositorMedia for ConfigureReplyBackend {
         fn compositor_set_capture_hint(&mut self, hint: Option<String>) {
@@ -5425,6 +5629,10 @@ mod tests {
         }
     }
     impl CompositorWorkspaceEffects for ConfigureReplyBackend {
+        fn compositor_supports_eva_overlay(&self) -> bool {
+            true
+        }
+
         fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
             self.osd_log
                 .lock()
@@ -5601,6 +5809,178 @@ mod tests {
         backend.key_ops = Box::new(input.clone());
         backend.toast_log.lock().unwrap().clear();
         (jwm, backend, input)
+    }
+
+    #[test]
+    fn eva_cancel_grabs_exist_only_while_active_and_escape_revokes_first() {
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::empty(), keys::KEY_Escape))
+        );
+        jwm.eva_toggle(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.eva_active());
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::empty(), keys::KEY_Escape))
+        );
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_Return))
+        );
+        assert!(
+            input.grabs.lock().unwrap().is_empty(),
+            "Eva must not own the whole keyboard"
+        );
+        input.select(keys::KEY_Escape);
+        jwm.on_key_press_internal_with_repeat(&mut backend, 1, 0, true)
+            .unwrap();
+        assert!(jwm.eva_active(), "autorepeat cannot cancel a fresh session");
+        jwm.on_key_press_internal(&mut backend, 1, 0).unwrap();
+        assert!(!jwm.eva_active());
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::empty(), keys::KEY_Escape))
+        );
+        assert!(input.grabs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn eva_confirmation_details_keys_are_local_and_scoped_to_pending_confirmation() {
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        jwm.eva_toggle(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_d))
+        );
+        let permit = jwm.eva_overlay_snapshot()["assistant_permit"].clone();
+        let status = serde_json::json!({"assistant_permit":permit,"state":"confirming","confirmation":{"plan_hash":"ui-local-list","targets":[{"name":"clear_clipboard","arguments":{}}]}});
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_d))
+        );
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::empty(), keys::KEY_Page_Down))
+        );
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_d,
+            Mods::ALT | Mods::CONTROL,
+            true,
+        );
+        assert!(jwm.eva.confirmation_detail_page.is_none());
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_d,
+            Mods::ALT | Mods::CONTROL,
+            false,
+        );
+        assert_eq!(jwm.eva.confirmation_detail_page, Some(0));
+        assert_eq!(jwm.eva.confirmation_seen_pages, vec![0]);
+        assert!(
+            input.grabs.lock().unwrap().is_empty(),
+            "detail view cannot take keyboard ownership"
+        );
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_Escape,
+            Mods::empty(),
+            false,
+        );
+        assert!(!jwm.eva_active());
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_d))
+        );
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::empty(), keys::KEY_Page_Down))
+        );
+    }
+
+    #[test]
+    fn eva_retry_undo_and_diagnostics_are_real_local_scoped_commands() {
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        assert!(jwm.eva_action_grabs().is_empty());
+        jwm.eva_toggle(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        let permit = jwm.eva_overlay_snapshot()["assistant_permit"].clone();
+        assert!(jwm.eva_set_status(&mut backend,&serde_json::json!({"assistant_permit":permit,"state":"responding","undo_available":true})).success);
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_z))
+        );
+        assert!(jwm.eva_set_status(&mut backend,&serde_json::json!({"assistant_permit":permit,"state":"confirming","undo_available":true})).success);
+        assert!(
+            !jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_z))
+        );
+        assert!(
+            jwm.eva_set_status(
+                &mut backend,
+                &serde_json::json!({"assistant_permit":permit,"state":"error","text":"认证失败"})
+            )
+            .success
+        );
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_i))
+        );
+        assert!(
+            jwm.effective_key_grabs()
+                .contains(&(Mods::ALT | Mods::CONTROL, keys::KEY_r))
+        );
+        backend.session_locked = true;
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_r,
+            Mods::ALT | Mods::CONTROL,
+            false,
+        );
+        assert_eq!(
+            jwm.eva_overlay_snapshot()["assistant_permit"],
+            permit,
+            "backend session lock must prevent retry creating any new authority"
+        );
+        backend.session_locked = false;
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_r,
+            Mods::ALT | Mods::CONTROL,
+            true,
+        );
+        assert_eq!(jwm.eva_overlay_snapshot()["assistant_permit"], permit);
+        dispatch_shell_test_key(
+            &mut jwm,
+            &mut backend,
+            &input,
+            keys::KEY_r,
+            Mods::ALT | Mods::CONTROL,
+            false,
+        );
+        assert!(jwm.eva_active());
+        assert_ne!(
+            jwm.eva_overlay_snapshot()["assistant_permit"],
+            permit,
+            "retry must revoke the old authority before creating a new permit"
+        );
+        assert!(input.grabs.lock().unwrap().is_empty());
+        assert_eq!(
+            eva_doctor_argv(vec!["terminal".into(), "--execute".into()]).unwrap(),
+            vec!["terminal", "--execute", "jwm-eva", "doctor", "--hold"]
+        );
+        assert!(eva_doctor_argv(Vec::new()).is_none());
     }
 
     fn clipboard_dispatch_fixture() -> (Jwm, ConfigureReplyBackend, RepeatDispatchKeys) {

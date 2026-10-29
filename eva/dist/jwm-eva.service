@@ -1,0 +1,26 @@
+[Unit]
+Description=JWM Eva voice assistant
+Documentation=https://github.com/beamiter/jwm
+PartOf=graphical-session.target
+BindsTo=graphical-session.target
+After=graphical-session.target pipewire.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=5
+ExecStart=@JWM_EVA_EXECUTABLE@ --config @JWM_EVA_CONFIG@ daemon
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=full
+# The daemon checks the JWM permit each second. A lost lease always ends
+# audio/model work; restarting this process starts Idle, never an old plan.
+
+[Install]
+WantedBy=graphical-session.target

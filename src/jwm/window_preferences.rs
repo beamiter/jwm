@@ -257,6 +257,11 @@ impl WindowPreferences {
 }
 
 impl Jwm {
+    pub(crate) fn client_spawn_placement_pinned(&self, key: ClientKey) -> Option<bool> {
+        let client = self.state.clients.get(key)?;
+        let identity = PlacementIdentity::new(&client.class, &client.instance)?;
+        Some(self.window_preferences.pin(&identity).is_some())
+    }
     pub fn toggle_spawn_placement(
         &mut self,
         backend: &mut dyn Backend,

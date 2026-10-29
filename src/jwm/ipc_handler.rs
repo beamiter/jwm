@@ -2027,6 +2027,7 @@ fn unknown_subscription_topics(topics: &[String]) -> Vec<String> {
 
 impl Jwm {
     pub(crate) fn process_ipc(&mut self, backend: &mut dyn Backend) {
+        self.eva_tick(backend);
         let ipc = match self.ipc_server.as_mut() {
             Some(s) => s,
             None => return,
@@ -2098,6 +2099,15 @@ impl Jwm {
         // quit/restart. Do not admit more mutations while teardown is pending.
         if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
             return IpcResponse::err("session is shutting down");
+        }
+        if name == "assistant_control" {
+            return self.eva_control(backend, args);
+        }
+        if name == "set_assistant_status" {
+            return self.eva_set_status(backend, args);
+        }
+        if name == "guarded_execute" {
+            return self.eva_guarded_execute(backend, args);
         }
         if name == "register_desktop_shell" {
             return self.register_desktop_shell(backend, args);
@@ -2194,9 +2204,15 @@ impl Jwm {
         // Special command: set_media_status — the bridge's MPRIS push. An
         // absent/null player clears the state.
         if name == "set_media_status" {
+            if args["assistant_completion_only"] == true {
+                self.eva_media_command_completed(&args["assistant_media_completion"]);
+                self.eva_media_open_completed(&args["assistant_media_open_completion"]);
+                return IpcResponse::ok(None);
+            }
             let state = crate::jwm::features::media::parse_state_args(args);
             let active = state.is_some();
             self.set_media_status(backend, state);
+            self.eva_media_observed(args);
             return IpcResponse::ok(Some(serde_json::json!({ "active": active })));
         }
 
@@ -2527,17 +2543,16 @@ impl Jwm {
             if !fresh {
                 self.ensure_control_snapshot_refresh(now);
             }
-            if system_controls::queue_control_request(
+            let Some(seq) = system_controls::queue_control_request(
                 system_controls::ControlRequest::AudioSetDefault {
                     direction,
                     id: id.to_string(),
                 },
                 self.async_update_notifier.clone(),
-            )
-            .is_none()
-            {
+            ) else {
                 return IpcResponse::err("no working audio control (wpctl/pactl/amixer)");
-            }
+            };
+            self.eva_note_control_sequence("audio", seq);
             return IpcResponse::ok(None);
         }
 
@@ -2561,6 +2576,7 @@ impl Jwm {
                 // The key path's own answer when no audio tool works.
                 return IpcResponse::err("no working audio control (wpctl/pactl/amixer)");
             };
+            self.eva_note_control_sequence("mic", seq);
             match estimate {
                 // A set knows its target with no confirmed base, so this is
                 // always the taken arm today; the `None` shape mirrors the
@@ -2625,14 +2641,12 @@ impl Jwm {
                     available.join(", ")
                 ));
             }
-            if self
-                .queue_power_profile_request(available, profile.to_string())
-                .is_none()
-            {
+            let Some(seq) = self.queue_power_profile_request(available, profile.to_string()) else {
                 return IpcResponse::err(format!(
                     "could not switch to power profile {profile:?}: the controls worker is not running"
                 ));
-            }
+            };
+            self.eva_note_control_sequence("power", seq);
             self.refresh_open_control_center();
             // Same labeled card the Hub Left/Right path raises, so a bar or
             // script that flips the profile gets the same acknowledgement.
@@ -2671,7 +2685,7 @@ impl Jwm {
                 let Some(command) = crate::jwm::features::MediaCommand::from_name(action) else {
                     return IpcResponse::err(format!(
                         "media_control: unknown action {action:?} \
-                         (play_pause, next, previous, stop, seek)"
+                         (play, pause, play_pause, next, previous, stop, seek)"
                     ));
                 };
                 command
@@ -2907,6 +2921,10 @@ impl Jwm {
         }
         let cfg = CONFIG.load();
         match name {
+            "get_execution_context" => IpcResponse::ok(Some(self.eva_execution_context())),
+            "get_execution_status" => self.eva_execution_status(backend, args),
+            "get_assistant_status" => IpcResponse::ok(Some(self.eva_overlay_snapshot())),
+            "get_command_schema" => IpcResponse::ok(Some(self.eva_command_schema())),
             "get_status" | "get_st" => IpcResponse::ok(Some(
                 serde_json::to_value(self.query_runtime_status(backend)).unwrap_or_default(),
             )),
@@ -6906,6 +6924,7 @@ impl Jwm {
     }
 
     pub(crate) fn broadcast_ipc_event(&mut self, event_type: &str, payload: serde_json::Value) {
+        self.eva_observe_event(event_type, &payload);
         if let Some(ipc) = self.ipc_server.as_mut() {
             ipc.broadcast(&IpcEvent {
                 event: event_type.to_string(),

@@ -14,6 +14,8 @@ pub mod clipboard_x11;
 pub mod common_define;
 pub mod edid;
 pub mod error;
+#[cfg(any(feature = "x11-backends", feature = "backend-wayland-nested"))]
+pub(crate) mod eva_x11_output;
 // Currently published by the native X11 provider; the snapshot itself has no
 // dependency on platform implementation types.
 #[cfg(feature = "x11-backends")]

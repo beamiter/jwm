@@ -56,6 +56,7 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     Solid=SolidColorRenderElement,
     Preview=crate::backend::wayland::preview::PreviewElement<R>,
+    Eva=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ struct SharedState {
     /// an X11 keyboard grab would and needs to see key releases too — the
     /// held-modifier window switcher commits on nothing else.
     system_ui_grab_active: bool,
+    host_focused: bool,
     /// Cached key bindings (mods, keysym) for key event suppression.
     key_bindings: Vec<(Mods, KeySym)>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
@@ -102,6 +104,7 @@ impl Default for SharedState {
             pointer_y: 0.0,
             mods_state: 0,
             system_ui_grab_active: false,
+            host_focused: false,
             key_bindings: Vec::new(),
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
@@ -663,6 +666,8 @@ pub struct WaylandWinitBackend {
 
     output: Output,
     winit_backend: WinitGraphicsBackend<GlesRenderer>,
+    eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe,
+    host_surface_presented: bool,
     damage_tracker: OutputDamageTracker,
 
     surfaces_on_output: HashSet<wayland_server::Weak<WlSurface>>,
@@ -675,6 +680,7 @@ pub struct WaylandWinitBackend {
 
     needs_render: bool,
     dock_preview: Option<crate::backend::wayland::preview::Preview>,
+    eva_overlay: crate::backend::wayland::eva::EvaElement,
     preview_edge: xbar_core::BarEdge,
     screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
     background_id: Id,
@@ -763,7 +769,7 @@ impl WaylandWinitBackend {
             self.dock_preview = None;
             self.needs_render = true;
         }
-        if !self.needs_render && !self.state.needs_redraw {
+        if !self.needs_render && !self.state.needs_redraw && !self.eva_overlay.needs_frame() {
             return Ok(());
         }
 
@@ -816,6 +822,14 @@ impl WaylandWinitBackend {
             .state
             .session_locked
             .then_some(self.state.session_lock_epoch);
+        if locked_epoch.is_none() {
+            if let Some(element) = self
+                .eva_overlay
+                .render(self.winit_backend.renderer(), (out_w, out_h))
+            {
+                elements.push(WinitRenderElement::Eva(element));
+            }
+        }
         if locked_epoch.is_some() {
             let lock_root = self
                 .state
@@ -1176,11 +1190,13 @@ impl WaylandWinitBackend {
         }
 
         if let Err(err) = self.winit_backend.submit(submit_damage.as_deref()) {
+            self.host_surface_presented = false;
             log::warn!("[wayland-winit] submit failed: {err:?}");
             self.needs_render = true;
             return Ok(());
         }
 
+        self.host_surface_presented = true;
         // The host presents what was just submitted: a locked frame pays the
         // pending session lock its `locked` confirmation.
         if let Some(epoch) = locked_epoch {
@@ -1416,6 +1432,7 @@ impl WaylandWinitBackend {
                 .insert_source(winit_event_loop, move |event, _, state| {
                     match event {
                         WinitEvent::Focus(focused) => {
+                            shared.lock_safe().host_focused=focused;
                             let debug_keys = std::env::var("JWM_DEBUG_KEYS")
                                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                                 .unwrap_or(false);
@@ -1580,6 +1597,8 @@ impl WaylandWinitBackend {
 
             output: output.clone(),
             winit_backend,
+            eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe::new(),
+            host_surface_presented: false,
             damage_tracker: OutputDamageTracker::from_output(&output),
 
             surfaces_on_output: HashSet::new(),
@@ -1592,6 +1611,7 @@ impl WaylandWinitBackend {
 
             needs_render: true,
             dock_preview: None,
+            eva_overlay: Default::default(),
             preview_edge: xbar_core::BarEdge::Top,
             screenshot_requests: Default::default(),
             background_id: Id::new(),
@@ -2190,6 +2210,62 @@ impl CompositorMedia for WaylandWinitBackend {
     }
 }
 impl CompositorWorkspaceEffects for WaylandWinitBackend {
+    fn compositor_supports_eva_overlay(&self) -> bool {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let window = self.winit_backend.window();
+        let size = self.winit_backend.window_size();
+        let host = window
+            .window_handle()
+            .ok()
+            .is_some_and(|handle| match handle.as_raw() {
+                RawWindowHandle::Xlib(handle) => u32::try_from(handle.window)
+                    .ok()
+                    .is_some_and(|xid| self.eva_output_probe.visible(Some(xid))),
+                RawWindowHandle::Xcb(handle) => {
+                    self.eva_output_probe.visible(Some(handle.window.get()))
+                }
+                // Wayland deliberately does not expose global DPMS or minimized
+                // state. A configured, submitted and keyboard-focused host is
+                // locally presentable; loss of focus revokes this evidence.
+                RawWindowHandle::Wayland(_) => self.shared.lock_safe().host_focused,
+                _ => false,
+            });
+        !self.exit_requested.load(Ordering::SeqCst)
+            && !self.state.session_locked
+            && !self
+                .state
+                .soft_disabled_outputs
+                .contains(&self.output.name())
+            && host
+            && crate::backend::compositor_common::eva_overlay::eva_nested_host_presentable(
+                window.is_visible(),
+                window.is_minimized(),
+                self.host_surface_presented,
+                self.shared.lock_safe().host_focused,
+            )
+            && crate::backend::compositor_common::eva_overlay::eva_output_presentable(
+                true,
+                true,
+                [0.0, 0.0, size.w as f32, size.h as f32],
+            )
+            && self.output.current_mode().is_some()
+    }
+    fn compositor_eva_viewport_visible(&self, viewport: [f32; 4]) -> bool {
+        let size = self.winit_backend.window_size();
+        self.compositor_supports_eva_overlay()
+            && crate::backend::compositor_common::eva_overlay::eva_viewport_on_output(
+                viewport,
+                [0.0, 0.0, size.w as f32, size.h as f32],
+            )
+    }
+
+    fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
+        if self.eva_overlay.update(&snapshot) {
+            self.needs_render = true;
+            self.request_flush();
+        }
+    }
+
     fn compositor_scroll_epoch(&self) -> u64 {
         self.state.scroll_routes.epoch()
     }
@@ -2267,6 +2343,27 @@ impl Backend for WaylandWinitBackend {
 
     fn set_clipboard_text(&mut self, text: &str) -> bool {
         self.state.offer_clipboard_text(text)
+    }
+
+    fn offer_clipboard_with_receipt(
+        &mut self,
+        offer: crate::backend::clipboard_offer::CapturedClipboard,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+        use crate::backend::clipboard_offer::{
+            CapturedClipboard, ClipboardReceipt, MAX_IMAGE_HISTORY_BYTES, MAX_TEXT_BYTES,
+        };
+        let receipt = ClipboardReceipt::pending();
+        let owned = match offer {
+            CapturedClipboard::Text(text) if text.len() <= MAX_TEXT_BYTES => {
+                self.state.offer_clipboard_text(&text)
+            }
+            CapturedClipboard::Png(png) if png.len() <= MAX_IMAGE_HISTORY_BYTES => {
+                self.state.offer_clipboard_png(png)
+            }
+            _ => false,
+        };
+        receipt.complete(owned);
+        Some(receipt)
     }
 
     fn set_clipboard_png(&mut self, png: &[u8]) -> bool {

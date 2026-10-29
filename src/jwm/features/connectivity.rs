@@ -552,6 +552,12 @@ struct BackgroundJobState<T> {
 }
 
 impl<T: Send + 'static> BackgroundJob<T> {
+    pub(crate) fn eva_identity(&self) -> u64 {
+        std::sync::Arc::as_ptr(&self.slot) as usize as u64
+    }
+    pub(crate) fn eva_keepalive(&self) -> std::sync::Arc<dyn std::any::Any + Send + Sync> {
+        self.slot.clone()
+    }
     pub fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
         #[cfg(test)]
         let test_commands = test_commands::capture();
@@ -2014,6 +2020,7 @@ impl crate::jwm::Jwm {
                 self.features.connectivity.bluetooth.powered = enabled;
             }
         }
+        self.eva_note_radio_sequence(job.eva_identity(), job.eva_keepalive());
         // No-op when the control center is not on screen; the estimate still
         // stands in the cache for the next opening. The OSD acknowledges the
         // press from both the key-bound toggle and the Hub row before this
@@ -2067,6 +2074,11 @@ impl crate::jwm::Jwm {
             self.features.connectivity_poll = None;
             return;
         }
+        let completion_id = self
+            .features
+            .connectivity_poll
+            .as_ref()
+            .map(BackgroundJob::eva_identity);
         let Some(state) = self
             .features
             .connectivity_poll
@@ -2076,6 +2088,9 @@ impl crate::jwm::Jwm {
             return;
         };
         self.features.connectivity_poll = None;
+        if let Some(id) = completion_id {
+            self.eva_radio_completion(id, &state);
+        }
         if state == self.features.connectivity {
             return;
         }

@@ -4928,6 +4928,7 @@ impl WaylandCompositor {
             self.render_toasts(gl, &projection, tail_draws_linear);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
             self.render_osd(gl, &projection, tail_draws_linear);
+            self.render_eva_overlay(gl, &projection, tail_draws_linear);
 
             // Modal system UI (launcher, prompts, tags grid, control center,
             // lock shield) over the toasts — its scrim dims them — and under
@@ -8409,6 +8410,57 @@ impl WaylandCompositor {
 
     /// Rasterize (and cache) the OSD label texture; re-render only when the
     /// text changed (key repeat updates the percent every event).
+    unsafe fn update_eva_texture(&mut self, gl: &ffi::Gles2, text: &str, width: u32) {
+        let cache_key = format!("{width}|{text}");
+        if self
+            .eva_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == &cache_key)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.eva_texture.take() {
+            unsafe { gl.DeleteTextures(1, &tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let text = &crate::backend::compositor_common::eva_overlay::fit_eva_label(
+            text,
+            description,
+            size,
+            width,
+        );
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            let mut tex = 0;
+            gl.GenTextures(1, &mut tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            self.eva_texture = Some((cache_key, tex, w, h));
+        }
+    }
+
     unsafe fn update_osd_texture(&mut self, gl: &ffi::Gles2, text: &str) {
         if self
             .osd_texture
@@ -8456,6 +8508,96 @@ impl WaylandCompositor {
     /// Volume/brightness OSD: one replace-in-place pill card at the bottom
     /// center — icon+percent label on the left, progress bar on the right —
     /// with the hold+fade envelope shared with the X11 backend.
+    unsafe fn render_eva_overlay(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
+        if !self.eva_overlay.visible() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let alpha = self.eva_overlay.alpha(now);
+        let text = self.eva_overlay.label(now);
+        let fill = self.eva_overlay.level(now);
+        let rect = self
+            .eva_overlay
+            .rect([self.screen_w as f32, self.screen_h as f32]);
+        self.eva_overlay.mark_drawn(now);
+        unsafe { self.update_eva_texture(gl, &text, (rect[2] - 40.0).max(1.0) as u32) };
+        let Some((tex, tw, th)) = self.eva_texture.as_ref().map(|(_, t, w, h)| (*t, *w, *h)) else {
+            return;
+        };
+        let [x, y, w, h] = rect;
+        let ui = ui_theme::palette();
+        self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+            self.ui_fill_island(
+                gl,
+                projection,
+                ui,
+                x,
+                y,
+                w,
+                h,
+                ui.osd_radius,
+                ui.osd_radius,
+                ui.osd,
+                alpha,
+                scene_linear,
+            );
+            if let Some(fill) = fill {
+                self.sysui_fill_rounded(
+                    gl,
+                    x + 20.0,
+                    y + h - 12.0,
+                    w - 40.0,
+                    3.0,
+                    1.5,
+                    [
+                        ui.slider_track[0],
+                        ui.slider_track[1],
+                        ui.slider_track[2],
+                        ui.slider_track[3] * alpha,
+                    ],
+                );
+                if fill > 0.0 {
+                    let c = self.border_gradient_color_a;
+                    self.sysui_fill_rounded(
+                        gl,
+                        x + 20.0,
+                        y + h - 12.0,
+                        (w - 40.0) * fill,
+                        3.0,
+                        1.5,
+                        [c[0], c[1], c[2], alpha],
+                    );
+                }
+            }
+            self.use_sysui_text_program(gl, scene_linear);
+            let rp = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let pp = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let tp = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let op = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            gl.UniformMatrix4fv(pp, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(tp, 0);
+            gl.Uniform1f(op, alpha);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            let scale = ((w - 40.0) / tw as f32)
+                .min((h - 24.0) / th as f32)
+                .min(1.0)
+                .max(0.01);
+            let (lw, lh) = (tw as f32 * scale, th as f32 * scale);
+            gl.Uniform4f(rp, x + (w - lw) * 0.5, y + (h - lh) * 0.5 - 3.0, lw, lh);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
     unsafe fn render_osd(&mut self, gl: &ffi::Gles2, projection: &[f32; 16], scene_linear: bool) {
         let now = std::time::Instant::now();
         if self.osd_slot.prune(now) {

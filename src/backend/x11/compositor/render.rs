@@ -3858,6 +3858,60 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Rasterize (and cache) the OSD label texture; re-render only when the
     /// text changed (key repeat updates the percent every event).
+    fn update_eva_texture(&mut self, text: &str, width: u32) {
+        let cache_key = format!("{width}|{text}");
+        if self
+            .eva_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == &cache_key)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.eva_texture.take() {
+            unsafe { self.gl.delete_texture(tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let text = &crate::backend::compositor_common::eva_overlay::fit_eva_label(
+            text,
+            description,
+            size,
+            width,
+        );
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.eva_texture = Some((cache_key, tex, w, h));
+            }
+        }
+    }
+
     fn update_osd_texture(&mut self, text: &str) {
         if self
             .osd_texture
@@ -3914,6 +3968,95 @@ impl<C: CompositorConnection> Compositor<C> {
     /// new width instead of being swapped for a second card. Its top corners
     /// are square: that is what makes it read as part of the bar rather than a
     /// rectangle parked underneath one.
+    fn render_eva_overlay(&mut self, proj: &[f32; 16]) {
+        if !self.eva_overlay.visible() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let alpha = self.eva_overlay.alpha(now);
+        let text = self.eva_overlay.label(now);
+        let fill = self.eva_overlay.level(now);
+        let rect = self
+            .eva_overlay
+            .rect([self.screen_w as f32, self.screen_h as f32]);
+        self.eva_overlay.mark_drawn(now);
+        self.update_eva_texture(&text, (rect[2] - 40.0).max(1.0) as u32);
+        let Some((tex, tw, th)) = self.eva_texture.as_ref().map(|(_, t, w, h)| (*t, *w, *h)) else {
+            return;
+        };
+        let [x, y, w, h] = rect;
+        let ui = ui_theme::palette();
+        self.ensure_glass_backdrop(ui);
+        unsafe {
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.ui_fill_island(
+                proj,
+                ui,
+                x,
+                y,
+                w,
+                h,
+                ui.osd_radius,
+                ui.osd_radius,
+                ui.osd,
+                alpha,
+            );
+            if let Some(fill) = fill {
+                self.sysui_fill_rounded(
+                    x + 20.0,
+                    y + h - 12.0,
+                    w - 40.0,
+                    3.0,
+                    1.5,
+                    [
+                        ui.slider_track[0],
+                        ui.slider_track[1],
+                        ui.slider_track[2],
+                        ui.slider_track[3] * alpha,
+                    ],
+                );
+                if fill > 0.0 {
+                    let c = self.border_gradient_color_a;
+                    self.sysui_fill_rounded(
+                        x + 20.0,
+                        y + h - 12.0,
+                        (w - 40.0) * fill,
+                        3.0,
+                        1.5,
+                        [c[0], c[1], c[2], alpha],
+                    );
+                }
+            }
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), alpha);
+            self.gl.active_texture(glow::TEXTURE0);
+            let scale = ((w - 40.0) / tw as f32)
+                .min((h - 24.0) / th as f32)
+                .min(1.0)
+                .max(0.01);
+            let (lw, lh) = (tw as f32 * scale, th as f32 * scale);
+            self.gl.uniform_4_f32(
+                self.hud_text_uniforms.rect.as_ref(),
+                x + (w - lw) * 0.5,
+                y + (h - lh) * 0.5 - 3.0,
+                lw,
+                lh,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
     fn render_osd(&mut self, proj: &[f32; 16]) {
         let now = std::time::Instant::now();
         if self.osd_slot.prune(now) {
@@ -4476,6 +4619,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.screenshot_freeze_fbo.is_some(),
             )
             || self.system_ui.is_some()
+            || self.eva_overlay.visible()
             || self.debug_hud
             || self.recording_active
             || self.remote_capture_active
@@ -5433,7 +5577,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // tracker's thresholds while any card is visible. The frame pump
         // itself is narrower: `force_render` below arms only while a toast's
         // or the OSD's envelope or spring actually moves.
-        let toasts_active = !self.toast_stack.is_empty() || !self.osd_slot.is_empty();
+        let toasts_active =
+            !self.toast_stack.is_empty() || !self.osd_slot.is_empty() || self.eva_overlay.visible();
 
         // Tick Phase 5 animations
         let expose_animating = self.tick_expose();
@@ -5698,6 +5843,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // on.
             || self.toast_stack.needs_frames(std::time::Instant::now())
             || self.osd_slot.needs_frames(std::time::Instant::now())
+            || self.eva_overlay.needs_frame(std::time::Instant::now())
             || self.system_ui.is_some()
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
@@ -8613,6 +8759,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // scrim dims them; the lock screen hides them).
         self.render_toasts(&proj);
         self.render_osd(&proj);
+        self.render_eva_overlay(&proj);
 
         // The shades again, this time over the late chrome. The toast stack
         // and the OSD hang off the *virtual* screen's bar, so on a

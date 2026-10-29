@@ -2355,6 +2355,13 @@ fn next_gesture_policy_generation() -> u64 {
 }
 
 impl Config {
+    pub(crate) fn value_at(&self, key: &str) -> Option<serde_json::Value> {
+        let mut value = serde_json::to_value(&self.inner).ok()?;
+        for part in key.split('.') {
+            value = value.get(part)?.clone();
+        }
+        Some(value)
+    }
     fn default_spawn_placement_key() -> KeyConfig {
         KeyConfig {
             modifier: vec!["Mod1".into(), "Control".into()],
@@ -2688,6 +2695,15 @@ impl Config {
         }
     }
 
+    fn default_eva_toggle_key() -> KeyConfig {
+        KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into()],
+            key: "e".into(),
+            function: "eva_toggle".into(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
     fn default_restore_preview_key() -> KeyConfig {
         KeyConfig {
             modifier: vec!["Mod1".to_string(), "Control".to_string()],
@@ -2728,6 +2744,7 @@ impl Config {
 
     fn get_default_keys() -> Vec<KeyConfig> {
         let mut keys = vec![
+            Self::default_eva_toggle_key(),
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "e".to_string(),
@@ -3953,6 +3970,11 @@ impl Config {
         self.available_fallback_keys(Self::default_monitor_swap_keys())
     }
 
+    /// Install Eva only when neither an existing binding nor a chord owns its key.
+    pub fn eva_toggle_fallback_keys(&self) -> Vec<KeyConfig> {
+        self.available_fallback_keys([Self::default_eva_toggle_key()])
+    }
+
     pub fn desktop_shell_mode_fallback_keys(&self) -> Vec<KeyConfig> {
         self.available_fallback_keys([Self::default_desktop_shell_mode_key()])
     }
@@ -4208,6 +4230,11 @@ impl Config {
                 keys.push(binding);
             }
         }
+        for fallback in self.eva_toggle_fallback_keys() {
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                keys.push(binding);
+            }
+        }
         for fallback in self.desktop_shell_mode_fallback_keys() {
             if let Some(binding) = self.convert_key_config(&fallback) {
                 keys.push(binding);
@@ -4337,6 +4364,7 @@ impl Config {
     fn parse_function(&self, func_name: &str) -> Option<WMFuncType> {
         match func_name {
             "spawn" => Some(Jwm::spawn),
+            "eva_toggle" => Some(Jwm::eva_toggle),
             "app_launcher" => Some(Jwm::app_launcher),
             "monitor_layout" => Some(Jwm::monitor_layout),
             "lock_screen" => Some(Jwm::lock_screen),
@@ -10527,6 +10555,36 @@ border_px = 3
             MAX_CONFIG_FILE_BYTES + 1
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn eva_hotkey_is_native_non_repeating_and_respects_custom_keys() {
+        let mut cfg = Config::default();
+        let default = Config::default_eva_toggle_key();
+        assert!(!key_function_is_repeatable("eva_toggle"));
+        assert!(!cfg.convert_key_config(&default).unwrap().repeatable);
+        assert_eq!(
+            cfg.key_configs()
+                .iter()
+                .filter(|k| k.function == "eva_toggle")
+                .count(),
+            1
+        );
+        assert!(cfg.eva_toggle_fallback_keys().is_empty());
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|k| k.function != "eva_toggle");
+        assert_eq!(cfg.eva_toggle_fallback_keys().len(), 1);
+        let mut custom = default.clone();
+        custom.function = "minimize".into();
+        custom.modifier.reverse();
+        cfg.inner.keybindings.keys.push(custom);
+        assert!(cfg.eva_toggle_fallback_keys().is_empty());
+        cfg.inner.keybindings.keys.pop();
+        cfg.inner.keybindings.chord.leader_modifier = default.modifier;
+        cfg.inner.keybindings.chord.leader_key = default.key;
+        assert!(cfg.eva_toggle_fallback_keys().is_empty());
     }
 
     #[test]

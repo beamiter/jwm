@@ -821,6 +821,20 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_supports_eva_overlay(&self) -> bool {
+                self.compositor.as_ref().is_some_and(|c|c.eva_output_power_visible())
+                    && crate::backend::api::OutputOps::enumerate_outputs(self.output_ops.as_ref()).iter().any(|o|crate::backend::compositor_common::eva_overlay::eva_output_presentable(true,true,[o.x as f32,o.y as f32,o.width as f32,o.height as f32]))
+            }
+            fn compositor_eva_viewport_visible(&self,viewport:[f32;4])->bool {
+                self.compositor_supports_eva_overlay()&&crate::backend::api::OutputOps::enumerate_outputs(self.output_ops.as_ref()).iter().any(|o|crate::backend::compositor_common::eva_overlay::eva_viewport_on_output(viewport,[o.x as f32,o.y as f32,o.width as f32,o.height as f32]))
+            }
+
+            fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_eva_overlay(snapshot);
+                }
+            }
+
             fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.show_osd(kind, percent);

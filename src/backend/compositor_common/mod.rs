@@ -33,6 +33,7 @@ pub(crate) mod solar_ephemeris;
 pub(crate) mod solar_system;
 // Phase-one foundation: the cache is intentionally not connected to backend
 // behaviour until both X11 and Wayland can honour its pinned-iconic contract.
+pub(crate) mod eva_overlay;
 #[allow(dead_code)]
 pub(crate) mod minimized_thumbnail;
 pub(crate) mod osd;

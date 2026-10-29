@@ -1495,6 +1495,16 @@ impl Jwm {
                     }
                 }
                 Some(completion) => {
+                    match &completion {
+                        ScreenshotCompletion::Saved(path)
+                        | ScreenshotCompletion::SavedWithoutAnnotations(path) => {
+                            self.eva_capture_completed(path, true)
+                        }
+                        ScreenshotCompletion::Failed(path) => {
+                            self.eva_capture_completed(path, false)
+                        }
+                        _ => {}
+                    }
                     self.push_system_toast(backend, screenshot_completion_toast(&completion));
                 }
                 // A job the OS refused a thread for never fills; drop it so

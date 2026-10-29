@@ -883,6 +883,20 @@ impl Jwm {
             WMArgEnum::UInt(val) => *val,
             _ => return Ok(()),
         };
+        let Some(monitor) = self.state.sel_mon else {
+            return Ok(());
+        };
+        self.view_on_monitor(backend, monitor, ui)
+    }
+
+    /// Eva and directed workspace clients share the ordinary view transition.
+    /// Changing a background output does not steal the selected output's focus.
+    pub(crate) fn view_on_monitor(
+        &mut self,
+        backend: &mut dyn Backend,
+        sel_mon_key: crate::core::models::MonitorKey,
+        ui: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = CONFIG.load();
         let target_mask = ui & cfg.tagmask();
         // No configured tag in the mask: `view_tag` would keep the tagset,
@@ -892,11 +906,6 @@ impl Jwm {
         if target_mask == 0 {
             return Ok(());
         }
-
-        let sel_mon_key = match self.state.sel_mon {
-            Some(k) => k,
-            None => return Ok(()),
-        };
 
         // 1. 检查是否无需切换
         if let Some(mon) = self.state.monitors.get(sel_mon_key) {
@@ -960,7 +969,9 @@ impl Jwm {
                 motion = TagSwitchMotion::Layout;
             }
         }
-        self.focus(backend, client_to_focus)?;
+        if self.state.sel_mon == Some(sel_mon_key) {
+            self.focus(backend, client_to_focus)?;
+        }
         self.suppress_layout_animation = motion != TagSwitchMotion::Layout;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;

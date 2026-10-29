@@ -405,6 +405,7 @@ mod tests {
             state: WMState::new(),
             runtime_backend: "test".into(),
             started_at: std::time::Instant::now(),
+            eva: crate::jwm::eva::EvaRuntime::default(),
             s_w: 0,
             s_h: 0,
             running: AtomicBool::new(true),

@@ -1,0 +1,100 @@
+# ~/.config/jwm/eva.toml — unknown fields are errors.
+# This file contains no credential. Register an OpenAI API key in Secret Service:
+# secret-tool store --label='JWM Eva OpenAI API' service jwm-eva provider openai
+[service]
+enabled = true
+instance_scope = "graphical_session"
+watchdog_seconds = 5
+
+[interaction]
+trigger = "hotkey"
+mode = "toggle"
+follow_up_ms = 5000
+first_speech_timeout_ms = 8000
+max_utterance_ms = 20000
+max_session_ms = 300000
+half_duplex = true
+escape_cancel = true
+feedback = "brief" # brief: local tone for simple success, cloud voice otherwise; text/none: local text; beep: local tone
+local_start_detection = true
+start_candidate_grace_ms = 1500
+
+[audio]
+# Set a PipeWire microphone node.name (from `wpctl inspect ID`) to pin a device.
+# A playback monitor is rejected; disappearing devices end the session.
+input_device = "default"
+realtime_rate_hz = 24000
+channels = 1
+sample_format = "s16le"
+chunk_ms = 20
+connect_buffer_ms = 2000
+playback_tail_ms = 200
+
+[openai]
+model = "gpt-realtime-2.1-mini"
+transport = "websocket"
+api_key_source = "secret_service"
+# Alternative: api_key_source = "file" and an absolute api_key_file owned by
+# this user, mode 0600. Or api_key_source = "env" with OPENAI_API_KEY in the
+# user service environment. Never put the key directly in this TOML file.
+voice = "marin"
+input_transcription = false
+connect_timeout_ms = 8000
+plan_deadline_ms = 12000
+plan_max_output_tokens = 2048
+feedback_max_output_tokens = 256
+
+[turn_detection]
+type = "server_vad"
+threshold = 0.5
+prefix_padding_ms = 300
+silence_duration_ms = 600
+create_response = false
+interrupt_response = false
+
+[execution]
+max_actions_per_turn = 8
+max_planning_rounds = 3
+max_schema_repair_attempts = 1
+require_guarded_execution = true
+query_retries = 1
+stop_on_error = true
+confirmation_timeout_ms = 15000
+
+[undo]
+enabled = true
+max_plans = 20
+max_age_seconds = 600
+
+[privacy]
+save_raw_audio = false
+persist_transcripts = false
+include_clipboard_in_context = false
+
+[budget]
+enabled = true
+daily_limit_usd = 1.00
+timezone = "Asia/Shanghai"
+
+# USD per million tokens; explicitly versioned estimates, not an account limit.
+# Update all entries and the version when selecting a different model.
+[pricing]
+version = "openai-2026-10-29"
+model = "gpt-realtime-2.1-mini"
+input_text = 0.60
+input_audio = 10.0
+cached_text = 0.06
+cached_audio = 0.30
+output_text = 2.40
+output_audio = 20.0
+transcription_per_minute = 0.0045
+
+[future_wake_word]
+enabled = false
+phrase = "hi eva"
+
+# Only these local IDs can be launched; values are argv, never shell strings.
+# Adjust installed programs before asking Eva to launch one.
+[applications]
+# browser = ["firefox"]
+# terminal = ["xterm"]

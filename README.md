@@ -787,3 +787,7 @@ report security-sensitive problems through the private process described in
 jwm is distributed under the [MIT License](LICENSE). The `portal/` crate
 (the xdg-desktop-portal ScreenCast backend) is covered by the same license,
 as already declared in its manifest.
+
+### Eva 语音助手
+
+原生快捷键、独立用户服务和 API 接入步骤见 [Eva 安装与验证](eva/README.md)；实施验收证据与实机检查见 [Eva 验收账本](docs/eva-acceptance.md)。

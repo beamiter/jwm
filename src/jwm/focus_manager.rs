@@ -1217,6 +1217,7 @@ mod scratchpad_reveal_tests {
             state: WMState::new(),
             runtime_backend: "test".into(),
             started_at: std::time::Instant::now(),
+            eva: crate::jwm::eva::EvaRuntime::default(),
             s_w: 2400,
             s_h: 900,
             running: AtomicBool::new(true),

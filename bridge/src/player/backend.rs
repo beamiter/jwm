@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
 use super::cli::{MAX_FILES, MAX_INPUT_BYTES, Mode, Open};
+use super::eva;
 use super::model::State;
+use std::collections::VecDeque;
+type EvaReceipts = Arc<Mutex<VecDeque<Value>>>;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -23,6 +26,7 @@ pub type SharedState = Arc<Mutex<State>>;
 #[derive(Debug)]
 pub enum Action {
     Open(Open),
+    OpenEva { open: Open, request: Value },
     Play,
     Pause,
     Toggle,
@@ -49,23 +53,31 @@ struct Request {
 pub struct Controller {
     tx: mpsc::SyncSender<Request>,
     pub state: SharedState,
+    pub eva_receipts: EvaReceipts,
 }
 
 pub struct Worker {
     rx: mpsc::Receiver<Request>,
     state: SharedState,
+    eva_receipts: EvaReceipts,
 }
 
 impl Controller {
     pub fn new() -> (Self, Worker) {
         let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
         let state = Arc::new(Mutex::new(State::default()));
+        let eva_receipts = Arc::new(Mutex::new(VecDeque::new()));
         (
             Self {
                 tx,
                 state: state.clone(),
+                eva_receipts: eva_receipts.clone(),
             },
-            Worker { rx, state },
+            Worker {
+                rx,
+                state,
+                eva_receipts,
+            },
         )
     }
 
@@ -101,11 +113,19 @@ impl Worker {
         initial: Open,
         headless: bool,
     ) -> oneshot::Receiver<Result<(), String>> {
+        self.spawn_eva(initial, headless, None)
+    }
+    pub(super) fn spawn_eva(
+        self,
+        initial: Open,
+        headless: bool,
+        request: Option<Value>,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let (done, result) = oneshot::channel();
         let _ = std::thread::Builder::new()
             .name("jwm-player-ipc".into())
             .spawn(move || {
-                let result = self.run(initial, headless);
+                let result = self.run(initial, headless, request);
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.alive = false;
                 state.loaded = false;
@@ -118,8 +138,9 @@ impl Worker {
         result
     }
 
-    fn run(&self, initial: Open, headless: bool) -> Result<(), String> {
+    fn run(&self, initial: Open, headless: bool, request: Option<Value>) -> Result<(), String> {
         let mut mpv = Mpv::spawn(self.state.clone(), initial.mode, headless)?;
+        mpv.eva_receipts = self.eva_receipts.clone();
         for (id, property) in [
             "pause",
             "idle-active",
@@ -143,7 +164,11 @@ impl Worker {
         {
             mpv.command(json!(["observe_property", id + 1, property]))?;
         }
-        mpv.open(initial, Instant::now() + REQUEST_TIMEOUT)?;
+        if let Some(request) = request {
+            mpv.open_eva(initial, request, Instant::now() + REQUEST_TIMEOUT);
+        } else {
+            mpv.open(initial, Instant::now() + REQUEST_TIMEOUT)?;
+        }
         let mut requested_quit = false;
         loop {
             // One request per iteration keeps streaming property events and
@@ -217,6 +242,8 @@ struct Mpv {
     refresh_position: bool,
     seek_pending: bool,
     _ui: Option<super::ui::Script>,
+    eva_receipts: EvaReceipts,
+    last_open_command_id: Option<u64>,
 }
 
 impl Mpv {
@@ -232,6 +259,7 @@ impl Mpv {
         let ui =
             super::ui::Script::create().map_err(|e| format!("cannot prepare player UI: {e}"))?;
         let mut command = Command::new("mpv");
+        command.env_remove(eva::ENV);
         command.args([
             "--no-config",
             "--no-terminal",
@@ -285,6 +313,8 @@ impl Mpv {
             refresh_position: false,
             seek_pending: false,
             _ui: Some(ui),
+            eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
+            last_open_command_id: None,
         })
     }
 
@@ -411,6 +441,7 @@ impl Mpv {
     }
 
     fn open(&mut self, open: Open, deadline: Instant) -> Result<(), String> {
+        self.last_open_command_id = None;
         if open.files.is_empty() {
             return self.raise();
         }
@@ -458,6 +489,7 @@ impl Mpv {
                 "append"
             };
             self.command(json!(["loadfile", file, flag]))?;
+            self.last_open_command_id = Some(self.request_id);
         }
         if !open.enqueue {
             self.resume_index = 0;
@@ -470,6 +502,98 @@ impl Mpv {
             self.command(json!(["set_property", "pause", false]))?;
         }
         Ok(())
+    }
+
+    fn open_eva(&mut self, open: Open, request: Value, deadline: Instant) {
+        if self
+            .eva_receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|old| eva::same_operation(old, &request))
+        {
+            return;
+        }
+        self.last_open_command_id = None;
+        let mut entry_id = 0;
+        let result = (|| -> Result<Value, String> {
+            eva::check_open(&request, &open)?;
+            let before = self.get("playlist")?;
+            let before_ids = before
+                .as_array()
+                .ok_or("mpv playlist unavailable")?
+                .iter()
+                .filter_map(|entry| entry["id"].as_u64())
+                .collect::<std::collections::BTreeSet<_>>();
+            let before_count = before.as_array().unwrap().len();
+            let enqueue = open.enqueue;
+            self.open(open, deadline)?;
+            let after = self.get("playlist")?;
+            let entries = after.as_array().ok_or("mpv playlist unavailable")?;
+            let matching = entries
+                .iter()
+                .filter(|entry| {
+                    entry["id"]
+                        .as_u64()
+                        .is_some_and(|id| id > 0 && !before_ids.contains(&id))
+                        && entry["filename"].as_str().is_some_and(|path| {
+                            super::cli::file_uri(path) == request["resource_uri"]
+                        })
+                })
+                .collect::<Vec<_>>();
+            if matching.len() != 1 || entries.len() != if enqueue { before_count + 1 } else { 1 } {
+                return Err("ambiguous mpv playlist update".into());
+            }
+            entry_id = matching[0]["id"].as_u64().unwrap();
+            if enqueue {
+                return Ok(json!({"completion":"resource_queued_observed"}));
+            }
+            loop {
+                let path_ready = match self.get("path") {
+                    Ok(_) => true,
+                    // loadfile's acknowledgement precedes file-loaded. A
+                    // first player has no path until that asynchronous event.
+                    Err(error) if error == "mpv: property unavailable" => false,
+                    Err(error) => return Err(error),
+                };
+                self.get("pause")?;
+                self.get("idle-active")?;
+                let state = self.snapshot();
+                if path_ready
+                    && state.track_id == Some(entry_id)
+                    && state.status() == "Playing"
+                    && super::cli::file_uri(&state.path) == request["resource_uri"]
+                {
+                    return Ok(
+                        json!({"status":state.status(),"track_url":super::cli::file_uri(&state.path),"track_id":state.track_path(),"completion":"resource_playing_observed"}),
+                    );
+                }
+                if Instant::now() >= deadline {
+                    return Err("mpv open postcondition timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })();
+        let mut receipt = eva::receipt(
+            &request,
+            self.last_open_command_id.unwrap_or(0),
+            entry_id,
+            result.is_ok(),
+            result.as_ref().err().map(|_| "unknown"),
+        );
+        if let Ok(extra) = result {
+            for (key, value) in extra.as_object().unwrap() {
+                receipt[key] = value.clone();
+            }
+        }
+        let mut receipts = self
+            .eva_receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while receipts.len() >= eva::RECEIPT_CAPACITY {
+            receipts.pop_front();
+        }
+        receipts.push_back(receipt);
     }
 
     fn raise(&mut self) -> Result<(), String> {
@@ -500,6 +624,10 @@ impl Mpv {
     fn action(&mut self, action: Action, deadline: Instant) -> Result<(), String> {
         match action {
             Action::Open(open) => self.open(open, deadline),
+            Action::OpenEva { open, request } => {
+                self.open_eva(open, request, deadline);
+                Ok(())
+            }
             Action::Play => self.play(),
             Action::Pause => self
                 .command(json!(["set_property", "pause", true]))
@@ -646,6 +774,8 @@ mod tests {
             refresh_position: false,
             seek_pending: false,
             _ui: None,
+            eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
+            last_open_command_id: None,
         };
         let filename = "/tmp/音乐 \"q\"\n${title}.flac";
         let server = std::thread::spawn(move || {
@@ -686,11 +816,86 @@ mod tests {
             refresh_position: false,
             seek_pending: false,
             _ui: None,
+            eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
+            last_open_command_id: None,
         };
         assert_eq!(
             mpv.next_message().unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn unknown_native_open_is_recorded_once_without_replaying_loadfile() {
+        use std::io::{BufRead, BufReader};
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut mpv = Mpv {
+            socket,
+            child: Command::new("true").spawn().unwrap(),
+            buffer: Vec::new(),
+            request_id: 0,
+            state: Arc::new(Mutex::new(State::default())),
+            resume_index: 0,
+            refresh_position: false,
+            seek_pending: false,
+            _ui: None,
+            eva_receipts: Arc::new(Mutex::new(VecDeque::new())),
+            last_open_command_id: None,
+        };
+        let server = std::thread::spawn(move || {
+            let mut peer = BufReader::new(peer);
+            let mut loads = 0;
+            loop {
+                let mut line = String::new();
+                if peer.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let command = &request["command"];
+                let data = match command[1].as_str() {
+                    Some("playlist") => json!([]),
+                    Some("playlist-count") => json!(0),
+                    Some("idle-active") => json!(false),
+                    _ => Value::Null,
+                };
+                if command[0] == "loadfile" {
+                    loads += 1;
+                    // The mutation was received, then its reply disappeared.
+                    break;
+                }
+                writeln!(
+                    peer.get_mut(),
+                    "{}",
+                    json!({"request_id":request["request_id"],"error":"success","data":data})
+                )
+                .unwrap();
+            }
+            loads
+        });
+        let open = Open {
+            files: vec!["/tmp/one.wav".into()],
+            enqueue: true,
+            mode: Mode::Music,
+        };
+        let request=eva::parse(r#"{"operation_id":"a","wm_instance_id":"wm","sequence":1,"resource_uri":"file:///tmp/one.wav","enqueue":true,"target_player":"jwm","target_bus_owner":null,"target_pid":null}"#).unwrap();
+        mpv.open_eva(
+            open.clone(),
+            request.clone(),
+            Instant::now() + REQUEST_TIMEOUT,
+        );
+        let receipt = mpv.eva_receipts.lock().unwrap()[0].clone();
+        assert_eq!(receipt["verified"], false);
+        assert_eq!(receipt["error"], "unknown");
+        assert_eq!(receipt["mpv_command_ack"], false);
+        mpv.open_eva(open, request, Instant::now() + REQUEST_TIMEOUT);
+        assert_eq!(mpv.eva_receipts.lock().unwrap().len(), 1);
+        // Close the fake IPC before joining; Mpv's drop may attempt Quit but
+        // must never issue another resource load.
+        let _ = mpv.socket.shutdown(std::net::Shutdown::Both);
+        assert_eq!(server.join().unwrap(), 1);
     }
 
     #[tokio::test]

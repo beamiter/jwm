@@ -1,0 +1,2342 @@
+[
+  {
+    "name": "adjust_recording_region",
+    "canonical_name": "adjust_recording_region",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "ain",
+    "canonical_name": "audio_input_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "annotate",
+    "canonical_name": "toggle_annotation",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "aout",
+    "canonical_name": "audio_output_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "app_launcher",
+    "canonical_name": "app_launcher",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "arecord",
+    "canonical_name": "toggle_audio_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "attach",
+    "canonical_name": "scrolling_toggle_attach_mode",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "audio_input_picker",
+    "canonical_name": "audio_input_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "audio_output_picker",
+    "canonical_name": "audio_output_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "music_player",
+    "canonical_name": "music_player",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "video_player",
+    "canonical_name": "video_player",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "bar",
+    "canonical_name": "togglebar",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "bluetooth_picker",
+    "canonical_name": "bluetooth_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "bt",
+    "canonical_name": "bluetooth_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "caffeine",
+    "canonical_name": "toggle_idle_inhibit",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "cal",
+    "canonical_name": "calendar",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "calendar",
+    "canonical_name": "calendar",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "case",
+    "canonical_name": "waterlily_case",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "clayout",
+    "canonical_name": "cyclelayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "clip",
+    "canonical_name": "clipboard_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "clipboard_picker",
+    "canonical_name": "clipboard_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "comp",
+    "canonical_name": "togglecompositor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "control_center",
+    "canonical_name": "control_center",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "cycle",
+    "canonical_name": "cycle_overview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "cycle_layout",
+    "canonical_name": "cyclelayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "cycle_overview",
+    "canonical_name": "cycle_overview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "cyclelayout",
+    "canonical_name": "cyclelayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "damage",
+    "canonical_name": "togglepartialdamage",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "exit",
+    "canonical_name": "quit",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "floating",
+    "canonical_name": "togglefloating",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focus_mon",
+    "canonical_name": "focusmon",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focus_none",
+    "canonical_name": "focus_none",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focus_stack",
+    "canonical_name": "focusstack",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focus_tab",
+    "canonical_name": "focus_tab",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focus_window",
+    "canonical_name": "focus_window",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focusmon",
+    "canonical_name": "focusmon",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "focusstack",
+    "canonical_name": "focusstack",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "ftab",
+    "canonical_name": "focus_tab",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "fwin",
+    "canonical_name": "focus_window",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "hub",
+    "canonical_name": "control_center",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "inc_nmaster",
+    "canonical_name": "incnmaster",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "incnmaster",
+    "canonical_name": "incnmaster",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "kill",
+    "canonical_name": "killclient",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "kill_client",
+    "canonical_name": "killclient",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "killclient",
+    "canonical_name": "killclient",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "last",
+    "canonical_name": "lastlayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "last_layout",
+    "canonical_name": "lastlayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "lastlayout",
+    "canonical_name": "lastlayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "launcher",
+    "canonical_name": "app_launcher",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "layout_picker",
+    "canonical_name": "layout_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "layouts",
+    "canonical_name": "layout_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "lily",
+    "canonical_name": "toggle_waterlily",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "load_session",
+    "canonical_name": "restore_session",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "lock",
+    "canonical_name": "lock_screen",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "lock_monitor",
+    "canonical_name": "lock_monitor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "lock_screen",
+    "canonical_name": "lock_screen",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "loop",
+    "canonical_name": "loopview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "loop_view",
+    "canonical_name": "loopview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "loopview",
+    "canonical_name": "loopview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "mag",
+    "canonical_name": "toggle_magnifier",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "maximize",
+    "canonical_name": "togglemaximize",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "media_next",
+    "canonical_name": "media_next",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "media_play_pause",
+    "canonical_name": "media_play_pause",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "media_previous",
+    "canonical_name": "media_previous",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "media_stop",
+    "canonical_name": "media_stop",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "minimize",
+    "canonical_name": "minimize",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "minimize_window",
+    "canonical_name": "minimize",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "monitor_layout",
+    "canonical_name": "monitor_layout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "monlayout",
+    "canonical_name": "monitor_layout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "move_stack",
+    "canonical_name": "movestack",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "movestack",
+    "canonical_name": "movestack",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "next",
+    "canonical_name": "media_next",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "night",
+    "canonical_name": "toggle_night_light",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "notif_center",
+    "canonical_name": "notification_center",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "notification_center",
+    "canonical_name": "notification_center",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "overview",
+    "canonical_name": "toggle_overview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "pad",
+    "canonical_name": "togglescratchpad",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "palette",
+    "canonical_name": "waterlily_palette",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "peek",
+    "canonical_name": "toggle_peek",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "persist_session",
+    "canonical_name": "save_session",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "pip",
+    "canonical_name": "togglepip",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "play",
+    "canonical_name": "media_play_pause",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "prev",
+    "canonical_name": "media_previous",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "quit",
+    "canonical_name": "quit",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "record",
+    "canonical_name": "toggle_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "refocus",
+    "canonical_name": "refocus",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "resize_horizontal",
+    "canonical_name": "resize_horizontal",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "resize_vertical",
+    "canonical_name": "resize_vertical",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "reset_layout_size",
+    "canonical_name": "reset_layout_size",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "region",
+    "canonical_name": "adjust_recording_region",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "reload_wm",
+    "canonical_name": "restart",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "restart",
+    "canonical_name": "restart",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "restore",
+    "canonical_name": "restore_session",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "restore_preview",
+    "canonical_name": "restore_preview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_expose",
+    "canonical_name": "toggle_expose",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "restore_session",
+    "canonical_name": "restore_session",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "save",
+    "canonical_name": "save_session",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "save_session",
+    "canonical_name": "save_session",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scol",
+    "canonical_name": "scrolling_focus_column",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scons",
+    "canonical_name": "scrolling_consume",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "screenshot",
+    "canonical_name": "take_screenshot",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "screenshot_fullscreen",
+    "canonical_name": "take_screenshot_fullscreen",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scrolling_consume",
+    "canonical_name": "scrolling_consume",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scrolling_expel",
+    "canonical_name": "scrolling_expel",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scrolling_focus_column",
+    "canonical_name": "scrolling_focus_column",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scrolling_focus_window",
+    "canonical_name": "scrolling_focus_window",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scrolling_move_column",
+    "canonical_name": "scrolling_move_column",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "scrolling_toggle_attach_mode",
+    "canonical_name": "scrolling_toggle_attach_mode",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "session",
+    "canonical_name": "session_menu",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "session_menu",
+    "canonical_name": "session_menu",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_cfact",
+    "canonical_name": "setcfact",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_gaps",
+    "canonical_name": "setgaps",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_layout",
+    "canonical_name": "setlayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_mfact",
+    "canonical_name": "setmfact",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_nmaster",
+    "canonical_name": "setnmaster",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "setcfact",
+    "canonical_name": "setcfact",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "setgaps",
+    "canonical_name": "setgaps",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "setlayout",
+    "canonical_name": "setlayout",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "setmfact",
+    "canonical_name": "setmfact",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "setnmaster",
+    "canonical_name": "setnmaster",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "sexp",
+    "canonical_name": "scrolling_expel",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "smov",
+    "canonical_name": "scrolling_move_column",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "snap",
+    "canonical_name": "snap_window",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "snap_window",
+    "canonical_name": "snap_window",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "spawn",
+    "canonical_name": "spawn",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "sticky",
+    "canonical_name": "togglesticky",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "stop",
+    "canonical_name": "media_stop",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "swin",
+    "canonical_name": "scrolling_focus_window",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "switcher",
+    "canonical_name": "window_switcher",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "swapmon",
+    "canonical_name": "swapmon",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "swap_monitors",
+    "canonical_name": "swapmon",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "tag",
+    "canonical_name": "tag",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "tag_mon",
+    "canonical_name": "tagmon",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "tagmon",
+    "canonical_name": "tagmon",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "tags",
+    "canonical_name": "toggle_tags_overview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "take_screenshot",
+    "canonical_name": "take_screenshot",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "take_screenshot_fullscreen",
+    "canonical_name": "take_screenshot_fullscreen",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "tbt",
+    "canonical_name": "toggle_bluetooth",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_annotation",
+    "canonical_name": "toggle_annotation",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_audio_recording",
+    "canonical_name": "toggle_audio_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_bar",
+    "canonical_name": "togglebar",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_bluetooth",
+    "canonical_name": "toggle_bluetooth",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_compositor",
+    "canonical_name": "togglecompositor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_dnd",
+    "canonical_name": "toggle_dnd",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_do_not_disturb",
+    "canonical_name": "toggle_dnd",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_floating",
+    "canonical_name": "togglefloating",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_idle_inhibit",
+    "canonical_name": "toggle_idle_inhibit",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_magnifier",
+    "canonical_name": "toggle_magnifier",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_maximize",
+    "canonical_name": "togglemaximize",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_night_light",
+    "canonical_name": "toggle_night_light",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_overview",
+    "canonical_name": "toggle_overview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_partial_damage",
+    "canonical_name": "togglepartialdamage",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_peek",
+    "canonical_name": "toggle_peek",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_pip",
+    "canonical_name": "togglepip",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_recording",
+    "canonical_name": "toggle_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_scratchpad",
+    "canonical_name": "togglescratchpad",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_shortcut_passthrough",
+    "canonical_name": "toggle_shortcut_passthrough",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_spawn_placement",
+    "canonical_name": "toggle_spawn_placement",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_sticky",
+    "canonical_name": "togglesticky",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_tag",
+    "canonical_name": "toggletag",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_tags_overview",
+    "canonical_name": "toggle_tags_overview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_view",
+    "canonical_name": "toggleview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_waterlily",
+    "canonical_name": "toggle_waterlily",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_wifi",
+    "canonical_name": "toggle_wifi",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglebar",
+    "canonical_name": "togglebar",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggle_desktop_shell_mode",
+    "canonical_name": "toggle_desktop_shell_mode",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglecompositor",
+    "canonical_name": "togglecompositor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglefloating",
+    "canonical_name": "togglefloating",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglemaximize",
+    "canonical_name": "togglemaximize",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglepartialdamage",
+    "canonical_name": "togglepartialdamage",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglepip",
+    "canonical_name": "togglepip",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglescratchpad",
+    "canonical_name": "togglescratchpad",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "togglesticky",
+    "canonical_name": "togglesticky",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggletag",
+    "canonical_name": "toggletag",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "toggleview",
+    "canonical_name": "toggleview",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "twifi",
+    "canonical_name": "toggle_wifi",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "unfocus",
+    "canonical_name": "focus_none",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "unlock",
+    "canonical_name": "unlock_monitor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "unlock_monitor",
+    "canonical_name": "unlock_monitor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "view",
+    "canonical_name": "view",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "wall",
+    "canonical_name": "wallpaper_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "wallpaper_picker",
+    "canonical_name": "wallpaper_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "waterlily_case",
+    "canonical_name": "waterlily_case",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "waterlily_palette",
+    "canonical_name": "waterlily_palette",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "wifi",
+    "canonical_name": "wifi_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "wifi_picker",
+    "canonical_name": "wifi_picker",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "window_switcher",
+    "canonical_name": "window_switcher",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "zoom",
+    "canonical_name": "zoom",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "zoom_master",
+    "canonical_name": "zoom",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "desktop_shell_action",
+    "canonical_name": "desktop_shell_action",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "register_desktop_shell",
+    "canonical_name": "register_desktop_shell",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "batch",
+    "canonical_name": "command_batch",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "benchmark",
+    "canonical_name": "benchmark",
+    "kind": "command",
+    "role": "advanced"
+  },
+  {
+    "name": "bluetooth_pairing_done",
+    "canonical_name": "bluetooth_pairing_done",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "bluetooth_pairing_failed",
+    "canonical_name": "bluetooth_pairing_failed",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "bluetooth_pairing_prompt",
+    "canonical_name": "bluetooth_pairing_prompt",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "bluetooth_pairing_withdraw",
+    "canonical_name": "bluetooth_pairing_withdraw",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "clear_clipboard",
+    "canonical_name": "clear_clipboard",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "clear_notifications",
+    "canonical_name": "clear_notifications",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "clipboard_copy",
+    "canonical_name": "clipboard_copy",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "clipboard_record",
+    "canonical_name": "clipboard_record",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "close_notification",
+    "canonical_name": "close_notification",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "command_batch",
+    "canonical_name": "command_batch",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "media_control",
+    "canonical_name": "media_control",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "open_media",
+    "canonical_name": "open_media",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "move_window_to_monitor",
+    "canonical_name": "move_window_to_monitor",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "notify",
+    "canonical_name": "notify",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "reload_config",
+    "canonical_name": "reload_config",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_config",
+    "canonical_name": "set_config",
+    "kind": "command",
+    "role": "advanced"
+  },
+  {
+    "name": "set_config_batch",
+    "canonical_name": "set_config_batch",
+    "kind": "command",
+    "role": "advanced"
+  },
+  {
+    "name": "set_hdr_metadata",
+    "canonical_name": "set_hdr_metadata",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "set_audio_device",
+    "canonical_name": "set_audio_device",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_media_status",
+    "canonical_name": "set_media_status",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "set_mic_mute",
+    "canonical_name": "set_mic_mute",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_power_profile",
+    "canonical_name": "set_power_profile",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "set_recording_region",
+    "canonical_name": "set_recording_region",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "start_audio_recording",
+    "canonical_name": "start_audio_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "start_recording",
+    "canonical_name": "start_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "stop_audio_recording",
+    "canonical_name": "stop_audio_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "stop_recording",
+    "canonical_name": "stop_recording",
+    "kind": "command",
+    "role": "user"
+  },
+  {
+    "name": "benchmark_report",
+    "canonical_name": "benchmark_report",
+    "kind": "query",
+    "role": "advanced"
+  },
+  {
+    "name": "get_arec",
+    "canonical_name": "get_audio_recording_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_audio",
+    "canonical_name": "get_audio_devices",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_audio_devices",
+    "canonical_name": "get_audio_devices",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_audio_recording",
+    "canonical_name": "get_audio_recording_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_audio_recording_status",
+    "canonical_name": "get_audio_recording_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_bar",
+    "canonical_name": "get_show_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_bar_visible",
+    "canonical_name": "get_show_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_bench",
+    "canonical_name": "benchmark_report",
+    "kind": "query",
+    "role": "advanced"
+  },
+  {
+    "name": "get_bluetooth",
+    "canonical_name": "get_bluetooth_pairing",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_bluetooth_pairing",
+    "canonical_name": "get_bluetooth_pairing",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_blur",
+    "canonical_name": "get_blur_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_blur_status",
+    "canonical_name": "get_blur_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_bm",
+    "canonical_name": "benchmark_report",
+    "kind": "query",
+    "role": "advanced"
+  },
+  {
+    "name": "get_bt",
+    "canonical_name": "get_bluetooth_pairing",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cap",
+    "canonical_name": "get_capture_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_capabilities",
+    "canonical_name": "get_capabilities",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_caps",
+    "canonical_name": "get_capabilities",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_capture",
+    "canonical_name": "get_capture_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_capture_status",
+    "canonical_name": "get_capture_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cf",
+    "canonical_name": "get_cfact",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cfact",
+    "canonical_name": "get_cfact",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cfg",
+    "canonical_name": "get_config_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cli",
+    "canonical_name": "get_windows",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_clients",
+    "canonical_name": "get_windows",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_clip",
+    "canonical_name": "get_clipboard",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_clipboard",
+    "canonical_name": "get_clipboard",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_closed_placement",
+    "canonical_name": "get_closed_placement",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cm",
+    "canonical_name": "get_color_management_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_color_management",
+    "canonical_name": "get_color_management_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_color_management_status",
+    "canonical_name": "get_color_management_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_conf",
+    "canonical_name": "get_config",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_config",
+    "canonical_name": "get_config",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_config_status",
+    "canonical_name": "get_config_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_conn",
+    "canonical_name": "get_connectivity",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_connectivity",
+    "canonical_name": "get_connectivity",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_cp",
+    "canonical_name": "get_closed_placement",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_desktop_shell",
+    "canonical_name": "get_desktop_shell",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_desktops",
+    "canonical_name": "get_workspaces",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_devices",
+    "canonical_name": "get_audio_devices",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_dnd",
+    "canonical_name": "get_dnd",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_do_not_disturb",
+    "canonical_name": "get_dnd",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_effect_status",
+    "canonical_name": "get_effect_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_effects",
+    "canonical_name": "get_effect_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_focused_window",
+    "canonical_name": "get_focused_window",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_fw",
+    "canonical_name": "get_focused_window",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_fx",
+    "canonical_name": "get_effect_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_gap",
+    "canonical_name": "get_gaps",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_gaps",
+    "canonical_name": "get_gaps",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_gest",
+    "canonical_name": "get_gesture_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_gesture",
+    "canonical_name": "get_gesture_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_gesture_status",
+    "canonical_name": "get_gesture_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_hdr",
+    "canonical_name": "get_hdr_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_hdr_status",
+    "canonical_name": "get_hdr_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_idl",
+    "canonical_name": "get_idle_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_idle",
+    "canonical_name": "get_idle_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_idle_status",
+    "canonical_name": "get_idle_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_input_status",
+    "canonical_name": "get_inputs",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_inputs",
+    "canonical_name": "get_inputs",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_layout",
+    "canonical_name": "get_layout",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_lock",
+    "canonical_name": "get_session_lock",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_lt",
+    "canonical_name": "get_layout",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mag",
+    "canonical_name": "get_magnifier",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_magnifier",
+    "canonical_name": "get_magnifier",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_media",
+    "canonical_name": "get_media_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_media_status",
+    "canonical_name": "get_media_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_metrics",
+    "canonical_name": "get_metrics",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mf",
+    "canonical_name": "get_mfact",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mfact",
+    "canonical_name": "get_mfact",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mic",
+    "canonical_name": "get_mic_mute",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mic_mute",
+    "canonical_name": "get_mic_mute",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_monitors",
+    "canonical_name": "get_monitors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mons",
+    "canonical_name": "get_monitors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_mute",
+    "canonical_name": "get_mic_mute",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_network",
+    "canonical_name": "get_connectivity",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_night_light",
+    "canonical_name": "get_night_light",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_night_light_status",
+    "canonical_name": "get_night_light",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_nl",
+    "canonical_name": "get_night_light",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_nm",
+    "canonical_name": "get_nmaster",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_nmaster",
+    "canonical_name": "get_nmaster",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_notif",
+    "canonical_name": "get_notifications",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_notifications",
+    "canonical_name": "get_notifications",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_outputs",
+    "canonical_name": "get_monitors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_owns_output",
+    "canonical_name": "get_show_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_pads",
+    "canonical_name": "get_scratchpads",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_pair",
+    "canonical_name": "get_bluetooth_pairing",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_peek",
+    "canonical_name": "get_peek",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_perf",
+    "canonical_name": "get_metrics",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_pk",
+    "canonical_name": "get_peek",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_pl",
+    "canonical_name": "get_prev_layout",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_power",
+    "canonical_name": "get_power_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_power_status",
+    "canonical_name": "get_power_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_prev_layout",
+    "canonical_name": "get_prev_layout",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_rec",
+    "canonical_name": "get_recording_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_recording",
+    "canonical_name": "get_recording_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_recording_status",
+    "canonical_name": "get_recording_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_res",
+    "canonical_name": "get_resources",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_resources",
+    "canonical_name": "get_resources",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_scratch",
+    "canonical_name": "get_scratchpads",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_scratchpads",
+    "canonical_name": "get_scratchpads",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_scroll",
+    "canonical_name": "get_scrolling_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_scrolling",
+    "canonical_name": "get_scrolling_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_scrolling_status",
+    "canonical_name": "get_scrolling_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_sel",
+    "canonical_name": "get_selected",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_selected",
+    "canonical_name": "get_selected",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_sess",
+    "canonical_name": "get_session_lock",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_session_lock",
+    "canonical_name": "get_session_lock",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_show_bar",
+    "canonical_name": "get_show_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_st",
+    "canonical_name": "get_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_status",
+    "canonical_name": "get_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_strut",
+    "canonical_name": "get_struts",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_struts",
+    "canonical_name": "get_struts",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_system_ui",
+    "canonical_name": "get_system_ui",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tab",
+    "canonical_name": "get_tab_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tab_bar",
+    "canonical_name": "get_tab_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tabs",
+    "canonical_name": "get_tab_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tags",
+    "canonical_name": "get_workspaces",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tearing",
+    "canonical_name": "get_tearing_hints",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tearing_hints",
+    "canonical_name": "get_tearing_hints",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_th",
+    "canonical_name": "get_tearing_hints",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tr",
+    "canonical_name": "get_tree",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_tree",
+    "canonical_name": "get_tree",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_ui",
+    "canonical_name": "get_system_ui",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_ver",
+    "canonical_name": "get_version",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_version",
+    "canonical_name": "get_version",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_vf",
+    "canonical_name": "get_show_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_visible_fullscreen",
+    "canonical_name": "get_show_bar",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wall",
+    "canonical_name": "get_wallpaper_colors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wallpaper",
+    "canonical_name": "get_wallpaper_colors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wallpaper_colors",
+    "canonical_name": "get_wallpaper_colors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_waterlily",
+    "canonical_name": "get_waterlily_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_waterlily_status",
+    "canonical_name": "get_waterlily_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wayland",
+    "canonical_name": "get_wayland_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wayland_status",
+    "canonical_name": "get_wayland_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wc",
+    "canonical_name": "get_wallpaper_colors",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_win",
+    "canonical_name": "get_window",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_window",
+    "canonical_name": "get_window",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_windows",
+    "canonical_name": "get_windows",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wins",
+    "canonical_name": "get_windows",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wl",
+    "canonical_name": "get_wayland_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_wly",
+    "canonical_name": "get_waterlily_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_workspaces",
+    "canonical_name": "get_workspaces",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_ws",
+    "canonical_name": "get_workspaces",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_xw",
+    "canonical_name": "get_xwayland_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_xwayland",
+    "canonical_name": "get_xwayland_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "get_xwayland_status",
+    "canonical_name": "get_xwayland_status",
+    "kind": "query",
+    "role": "user"
+  },
+  {
+    "name": "desktop_shell",
+    "canonical_name": "desktop_shell",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "desktop_shell/state",
+    "canonical_name": "desktop_shell/state",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "*",
+    "canonical_name": "*",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "audio",
+    "canonical_name": "audio",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "audio_recording",
+    "canonical_name": "audio_recording",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "bar",
+    "canonical_name": "togglebar",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "bluetooth",
+    "canonical_name": "bluetooth",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "clipboard",
+    "canonical_name": "clipboard",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "config",
+    "canonical_name": "config",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "dnd",
+    "canonical_name": "dnd",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "idle",
+    "canonical_name": "idle",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "layout",
+    "canonical_name": "layout",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "media",
+    "canonical_name": "media",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "monitor",
+    "canonical_name": "monitor",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "network",
+    "canonical_name": "network",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "night_light",
+    "canonical_name": "night_light",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "notification",
+    "canonical_name": "notification",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "power",
+    "canonical_name": "power",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "recording",
+    "canonical_name": "recording",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "scrolling",
+    "canonical_name": "scrolling",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "tag",
+    "canonical_name": "tag",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "theme",
+    "canonical_name": "theme",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "window",
+    "canonical_name": "window",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  },
+  {
+    "name": "workspace",
+    "canonical_name": "workspace",
+    "kind": "subscription",
+    "role": "bridge_internal"
+  }
+]

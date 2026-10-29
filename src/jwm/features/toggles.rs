@@ -582,6 +582,18 @@ impl Jwm {
         }
 
         if let Some(mic) = report.mic {
+            use crate::jwm::features::system_controls::MicReport;
+            let (seq, actual) = match mic {
+                MicReport::Applied(seq, muted) => (seq, Some(muted)),
+                MicReport::Failed(seq) => (seq, None),
+            };
+            let desired = self.eva_mic_target(seq);
+            self.eva_control_completion(
+                "mic",
+                seq,
+                actual.zip(desired).map(|(a, d)| a == d),
+                serde_json::json!({"muted":actual}),
+            );
             match self.features.control_feedback.resolve_mic(mic, now) {
                 FeedbackAction::Adopt(muted) => {
                     let current = self
@@ -642,6 +654,12 @@ impl Jwm {
         use crate::jwm::features::system_controls;
 
         let verdict = system_controls::audio_switch_verdict(&report);
+        self.eva_control_completion(
+            "audio",
+            report.seq,
+            Some(verdict.took),
+            serde_json::json!({"device":verdict.in_use,"direction":report.direction.label()}),
+        );
         match (verdict.took, verdict.in_use.as_deref()) {
             (true, Some(name)) => {
                 log::info!("audio: {} is now {name}", report.direction.label());
@@ -706,6 +724,16 @@ impl Jwm {
         now: std::time::Instant,
     ) {
         use crate::jwm::features::system_controls::ProfileFeedback;
+        let took = report
+            .profiles
+            .as_ref()
+            .map(|(_, active)| active == &report.asked);
+        self.eva_control_completion(
+            "power",
+            report.seq,
+            took,
+            serde_json::json!({"profile":report.profiles.as_ref().map(|(_,active)|active)}),
+        );
 
         let cached = self
             .features

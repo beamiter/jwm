@@ -1028,6 +1028,15 @@ impl Backend for X11rbBackend {
             .is_some_and(|clipboard| clipboard.set_text(text))
     }
 
+    fn offer_clipboard_with_receipt(
+        &mut self,
+        offer: crate::backend::clipboard_offer::CapturedClipboard,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+        self.clipboard
+            .as_ref()
+            .and_then(|clipboard| clipboard.offer_with_receipt(offer))
+    }
+
     fn clipboard_image_sender(
         &self,
     ) -> Option<crate::backend::clipboard_offer::ClipboardImageSender> {
@@ -5052,6 +5061,15 @@ mod key_ops {
                                 GrabMode::ASYNC,
                             )?;
                             if let Err(e) = cookie.check() {
+                                if (*keysym == crate::backend::common_define::keys::KEY_Escape
+                                    && mods.is_empty())
+                                    || (*keysym == crate::backend::common_define::keys::KEY_Return
+                                        && *mods == (Mods::ALT | Mods::CONTROL))
+                                {
+                                    return Err(BackendError::Message(format!(
+                                        "Eva key grab failed: {e}"
+                                    )));
+                                }
                                 // If another client grabbed the same key, X11 will typically
                                 // report BadAccess asynchronously. Surface it for debugging.
                                 warn!(

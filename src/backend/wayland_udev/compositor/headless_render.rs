@@ -11103,3 +11103,174 @@ fn wayland_wallpaper_explicit_refresh_preserves_images_and_retries_same_path() {
         );
     }
 }
+
+/// Eva is a persistent compositor card, not a short-lived volume OSD. Its
+/// pixels must survive quiet frames and disappear when the WM ends the lease.
+#[test]
+fn eva_overlay_renders_persists_and_releases_without_a_window() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping Eva overlay pixel test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 640;
+    const H: i32 = 300;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        let render = |c: &mut super::WaylandCompositor| {
+            c.force_full_redraw();
+            c.render_frame(&gl, &[], None, false, false, false, None, false);
+            read_fbo_frame(&gl, c.output_fbo, W, H)
+        };
+        let baseline = render(&mut compositor);
+        compositor.set_eva_overlay(serde_json::json!({
+            "active":true,"state":"listening","text":"正在听",
+            "level":0.65,"lease_remaining_ms":3000,"monitor_rect":[0,0,W,H]
+        }));
+        compositor
+            .eva_overlay
+            .settle_motion_for_test(std::time::Instant::now());
+        let first = render(&mut compositor);
+        let pixels_changed = baseline
+            .chunks_exact(4)
+            .zip(first.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            pixels_changed > 1000,
+            "Eva card did not render: {pixels_changed} pixels changed"
+        );
+        assert!(compositor.eva_overlay.visible());
+        assert_eq!(
+            first,
+            render(&mut compositor),
+            "quiet frames changed the persistent card"
+        );
+        if let Ok(path) = std::env::var("JWM_EVA_TEST_SCREENSHOT") {
+            // GL origin is bottom-left, PNG origin is top-left.
+            let mut flipped = first.clone();
+            let stride = W as usize * 4;
+            for row in 0..H as usize {
+                flipped[row * stride..(row + 1) * stride].copy_from_slice(
+                    &first[(H as usize - 1 - row) * stride..(H as usize - row) * stride],
+                );
+            }
+            let file = std::fs::File::create(path).unwrap();
+            let mut encoder = png::Encoder::new(file, W as u32, H as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&flipped)
+                .unwrap();
+        }
+        compositor.set_eva_overlay(serde_json::json!({"active":false}));
+        compositor
+            .eva_overlay
+            .settle_motion_for_test(std::time::Instant::now());
+        assert_eq!(
+            baseline,
+            render(&mut compositor),
+            "cancelled Eva left stale pixels"
+        );
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}
+
+#[test]
+fn eva_confirmation_eight_targets_have_visible_rows_and_clear_on_cancel() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping Eva confirmation pixel test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 960;
+    const H: i32 = 720;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+        let render = |c: &mut super::WaylandCompositor| {
+            c.force_full_redraw();
+            c.render_frame(&gl, &[], None, false, false, false, None, false);
+            read_fbo_frame(&gl, c.output_fbo, W, H)
+        };
+        let baseline = render(&mut compositor);
+        let items:Vec<_>=(1..=8).map(|n|serde_json::json!({"critical":format!("w{n}@g42 close_window → tag 8 · monitor m2"),"title":format!("本地窗口 {n}")})).collect();
+        compositor.set_eva_overlay(serde_json::json!({"active":true,"state":"confirming","lease_remaining_ms":3000,"monitor_rect":[0,0,W,H],"confirmation":{"total_actions":8,"display_items":items}}));
+        compositor
+            .eva_overlay
+            .settle_motion_for_test(std::time::Instant::now());
+        let frame = render(&mut compositor);
+        let [x, y, w, h] = compositor.eva_overlay.rect([W as f32, H as f32]);
+        let (_, _, tw, th) = compositor.eva_texture.as_ref().unwrap();
+        assert!(*tw as f32 <= w - 40.0 && *th as f32 <= h - 24.0);
+        let text_top = y + (h - *th as f32) * 0.5 - 3.0;
+        let line_count = compositor
+            .eva_overlay
+            .label(std::time::Instant::now())
+            .lines()
+            .count();
+        let line_h = (*th as f32 - 4.0) / line_count as f32;
+        // Header + eight target rows. Choose the ink side of the theme's
+        // contrast so a light glass background cannot satisfy the text test.
+        let ink_color = crate::backend::compositor_common::ui_theme::palette().osd_ink;
+        let dark_ink = ink_color[..3].iter().map(|v| *v as u32).sum::<u32>() < 384;
+        for line in 0..=8 {
+            let top = (text_top + line as f32 * line_h).floor().max(0.0) as usize;
+            let bottom = (text_top + (line + 1) as f32 * line_h + 3.0)
+                .ceil()
+                .min(H as f32) as usize;
+            let mut ink = 0;
+            for yy in top..bottom {
+                for xx in (x + 20.0) as usize..(x + w - 20.0) as usize {
+                    let offset = ((H as usize - 1 - yy) * W as usize + xx) * 4;
+                    if frame[offset..offset + 3]
+                        .iter()
+                        .all(|v| if dark_ink { *v < 100 } else { *v > 170 })
+                    {
+                        ink += 1;
+                    }
+                }
+            }
+            assert!(
+                ink > 10,
+                "confirmation row {line} has no readable GPU ink: {ink}"
+            );
+        }
+        if let Ok(path) = std::env::var("JWM_EVA_CONFIRMATION_SCREENSHOT") {
+            let stride = W as usize * 4;
+            let mut flipped = frame.clone();
+            for row in 0..H as usize {
+                flipped[row * stride..(row + 1) * stride].copy_from_slice(
+                    &frame[(H as usize - 1 - row) * stride..(H as usize - row) * stride],
+                );
+            }
+            let mut encoder =
+                png::Encoder::new(std::fs::File::create(path).unwrap(), W as u32, H as u32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&flipped)
+                .unwrap();
+        }
+        compositor.set_eva_overlay(serde_json::json!({"active":false}));
+        compositor
+            .eva_overlay
+            .settle_motion_for_test(std::time::Instant::now());
+        assert_eq!(baseline, render(&mut compositor));
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}

@@ -257,6 +257,10 @@ fn open_recording_ffmpeg_log(path: &std::path::Path) -> std::io::Result<std::fs:
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    pub(crate) fn eva_output_power_visible(&self) -> bool {
+        self.eva_output_probe.visible(None)
+    }
+
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
         if overlay.is_none() || overlay.as_ref().is_some_and(|ui| ui.filmstrip.is_some()) {
             self.system_ui_hit_geometry = None;
@@ -430,6 +434,15 @@ impl<C: CompositorConnection> Compositor<C> {
             self.needs_render = true;
         }
         result
+    }
+
+    pub(crate) fn set_eva_overlay(&mut self, snapshot: serde_json::Value) {
+        if self
+            .eva_overlay
+            .update(&snapshot, std::time::Instant::now())
+        {
+            self.needs_render = true;
+        }
     }
 
     pub(crate) fn show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
@@ -2288,6 +2301,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.astronomy_wallpaper.deadline(now),
             self.solar_system_wallpaper.deadline(now),
             crate::backend::compositor_common::bar_wallpaper::next_wakeup(),
+            self.eva_overlay.next_wakeup(std::time::Instant::now()),
         ]
         .into_iter()
         .flatten()

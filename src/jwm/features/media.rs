@@ -92,6 +92,8 @@ impl PlaybackStatus {
 /// What one control request asks the active player to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaCommand {
+    Play,
+    Pause,
     PlayPause,
     Next,
     Previous,
@@ -104,6 +106,8 @@ impl MediaCommand {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "play" => Some(Self::Play),
+            "pause" => Some(Self::Pause),
             "play_pause" | "playpause" | "toggle" => Some(Self::PlayPause),
             "next" => Some(Self::Next),
             "previous" | "prev" => Some(Self::Previous),
@@ -115,6 +119,8 @@ impl MediaCommand {
     #[must_use]
     pub fn as_str(self) -> Option<&'static str> {
         match self {
+            Self::Play => Some("play"),
+            Self::Pause => Some("pause"),
             Self::PlayPause => Some("play_pause"),
             Self::Next => Some("next"),
             Self::Previous => Some("previous"),

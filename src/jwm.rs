@@ -4,6 +4,7 @@ pub mod client_stack;
 pub(crate) mod closed_placement;
 pub mod constraints;
 pub(crate) mod desktop_shell;
+pub(crate) mod eva;
 pub mod event_dispatcher;
 pub mod features;
 pub mod focus;
@@ -137,6 +138,7 @@ pub struct Jwm {
     /// from `ApplicationOptions`, rather than inferred from environment state.
     pub runtime_backend: String,
     pub started_at: std::time::Instant,
+    pub(crate) eva: eva::EvaRuntime,
 
     pub s_w: i32,
     pub s_h: i32,
@@ -1450,6 +1452,7 @@ impl Jwm {
             state: WMState::new(),
             runtime_backend,
             started_at: std::time::Instant::now(),
+            eva: eva::EvaRuntime::default(),
 
             s_w,
             s_h,
@@ -2148,7 +2151,9 @@ impl Jwm {
 
     pub(crate) fn effective_key_grabs(&self) -> Vec<(Mods, KeySym)> {
         if self.shortcut_passthrough_owner.is_some() {
-            return self.shortcut_passthrough_controls();
+            let mut controls = self.shortcut_passthrough_controls();
+            self.eva_extend_key_grabs(&mut controls);
+            return controls;
         }
         let mut bindings: Vec<(Mods, KeySym)> = self
             .key_bindings
@@ -2166,6 +2171,7 @@ impl Jwm {
                 bindings.push(chord.leader);
             }
         }
+        self.eva_extend_key_grabs(&mut bindings);
         bindings
     }
 

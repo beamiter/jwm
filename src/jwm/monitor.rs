@@ -2046,6 +2046,9 @@ pub(crate) mod test_support {
     }
 
     pub(crate) struct DisplaySpyBackend {
+        pub(crate) eva_overlay_supported: bool,
+        pub(crate) eva_visible_outputs: Option<Vec<u64>>,
+        pub(crate) clipboard_receipts: Vec<crate::backend::clipboard_offer::ClipboardReceipt>,
         window_ops: DummyWindowOps,
         input_ops: DummyInputOps,
         property_ops: DummyPropertyOps,
@@ -2060,6 +2063,9 @@ pub(crate) mod test_support {
     impl DisplaySpyBackend {
         pub(crate) fn new(outputs: Vec<OutputInfo>) -> Self {
             Self {
+                eva_overlay_supported: false,
+                eva_visible_outputs: None,
+                clipboard_receipts: Vec::new(),
                 window_ops: DummyWindowOps,
                 input_ops: DummyInputOps,
                 property_ops: DummyPropertyOps,
@@ -2077,6 +2083,26 @@ pub(crate) mod test_support {
     impl CompositorControl for DisplaySpyBackend {}
     impl CompositorMedia for DisplaySpyBackend {}
     impl CompositorWorkspaceEffects for DisplaySpyBackend {
+        fn compositor_supports_eva_overlay(&self) -> bool {
+            self.eva_overlay_supported
+        }
+        fn compositor_eva_viewport_visible(&self, rect: [f32; 4]) -> bool {
+            self.eva_overlay_supported
+                && self.output_ops.outputs.iter().any(|output| {
+                    self.eva_visible_outputs
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&output.id.0))
+                        && crate::backend::compositor_common::eva_overlay::eva_viewport_on_output(
+                            rect,
+                            [
+                                output.x as f32,
+                                output.y as f32,
+                                output.width as f32,
+                                output.height as f32,
+                            ],
+                        )
+                })
+        }
         fn compositor_set_monitor_shades(&mut self, shades: &[MonitorShade]) {
             self.shade_pushes.push(shades.to_vec());
         }
@@ -2095,6 +2121,14 @@ pub(crate) mod test_support {
             Capabilities::default()
         }
 
+        fn offer_clipboard_with_receipt(
+            &mut self,
+            _offer: crate::backend::clipboard_offer::CapturedClipboard,
+        ) -> Option<crate::backend::clipboard_offer::ClipboardReceipt> {
+            let receipt = crate::backend::clipboard_offer::ClipboardReceipt::pending();
+            self.clipboard_receipts.push(receipt.clone());
+            Some(receipt)
+        }
         fn root_window(&self) -> Option<WindowId> {
             Some(WindowId::from_raw(0))
         }

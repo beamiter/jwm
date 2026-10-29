@@ -530,6 +530,14 @@ impl WaylandCompositor {
         result
     }
 
+    pub(crate) fn set_eva_overlay(&mut self, snapshot: serde_json::Value) -> bool {
+        let changed = self
+            .eva_overlay
+            .update(&snapshot, std::time::Instant::now());
+        self.needs_render |= changed;
+        changed
+    }
+
     pub(crate) fn show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
         self.osd_slot.show(kind, percent, std::time::Instant::now());
         self.needs_render = true;

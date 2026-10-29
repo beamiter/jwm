@@ -5051,6 +5051,7 @@ fn selection_payload_for_mime<'a>(
         ClipboardOffer::Text(text) if is_text_clipboard_mime(mime_type) => Some(text.as_bytes()),
         ClipboardOffer::Png(png) if is_png_clipboard_mime(mime_type) => Some(png.as_slice()),
         ClipboardOffer::Text(_) | ClipboardOffer::Png(_) => None,
+        ClipboardOffer::Tracked(offer, _) => selection_payload_for_mime(offer, mime_type),
     }
 }
 

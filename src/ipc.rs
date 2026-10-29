@@ -173,6 +173,7 @@ pub struct IpcRegistry {
 
 pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     dispatch_commands: &[
+        "eva_toggle",
         "adjust_recording_region",
         "ain",
         "annotate",
@@ -364,6 +365,9 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "zoom_master",
     ],
     special_commands: &[
+        "assistant_control",
+        "set_assistant_status",
+        "guarded_execute",
         "desktop_shell_action",
         "register_desktop_shell",
         "batch",
@@ -397,6 +401,10 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "stop_recording",
     ],
     queries: &[
+        "get_execution_context",
+        "get_execution_status",
+        "get_assistant_status",
+        "get_command_schema",
         "benchmark_report",
         "get_arec",
         "get_audio",
@@ -545,6 +553,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_xwayland_status",
     ],
     subscription_topics: &[
+        "assistant",
         "desktop_shell",
         "desktop_shell/state",
         "*",
@@ -1529,6 +1538,7 @@ pub struct TreeNode {
 
 pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEnum), String> {
     match name {
+        "eva_toggle" => Ok((Jwm::eva_toggle as WMFuncType, WMArgEnum::Int(0))),
         // --- Window management ---
         "focusstack" | "focus_stack" => {
             Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?))

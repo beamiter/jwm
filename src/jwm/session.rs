@@ -1641,6 +1641,214 @@ pub fn plan_order_restore<K: Clone>(
 
 impl Jwm {
     /// 保存当前会话（窗口标签 / 浮动布局）到磁盘。
+    pub(crate) fn eva_load_restore_snapshot() -> Result<SessionSnapshot, String> {
+        load_session_snapshot(&session_read_path())
+            .map_err(|e| format!("session_snapshot_unavailable: {e}"))
+    }
+    pub(crate) fn eva_restore_matching_keys(&self, snapshot: &SessionSnapshot) -> Vec<ClientKey> {
+        self.eva_restore_plans(snapshot)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    }
+    fn eva_restore_plans(
+        &self,
+        snapshot: &SessionSnapshot,
+    ) -> Vec<(ClientKey, DetailedRestorePlan)> {
+        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
+        let current: Vec<_> = self
+            .state
+            .client_order
+            .iter()
+            .filter(|k| !scratchpads.contains(k))
+            .filter_map(|key| {
+                self.state
+                    .clients
+                    .get(*key)
+                    .map(|c| (*key, c.class.as_str(), c.instance.as_str()))
+            })
+            .collect();
+        plan_restore_detailed(snapshot, current)
+            .into_iter()
+            .map(|(key, mut plan)| {
+                if let Some(live) = self.state.clients.get(key) {
+                    plan.preserve_unrecorded(snapshot.recorded_version, live)
+                }
+                (key, plan)
+            })
+            .collect()
+    }
+    pub(crate) fn eva_restore_frozen_snapshot(
+        &mut self,
+        backend: &mut dyn Backend,
+        snapshot: &SessionSnapshot,
+    ) -> serde_json::Value {
+        let plans = self.eva_restore_plans(snapshot);
+        self.apply_session_snapshot(backend, snapshot);
+        let mut outcomes = Vec::new();
+        let mut verified = 0;
+        for (key, plan) in &plans {
+            let Some(c) = self.state.clients.get(*key) else {
+                outcomes.push(serde_json::json!({"status":"target_gone"}));
+                continue;
+            };
+            let mon = c.mon.and_then(|m| self.state.monitors.get(m));
+            let wanted_monitor = self.resolve_session_monitor_num(
+                backend,
+                plan.monitor_num,
+                plan.connector.as_deref(),
+            );
+            let fallback = mon
+                .map(|m| m.get_active_tags())
+                .filter(|mask| *mask != 0)
+                .unwrap_or(1);
+            let tags = if plan.is_sticky || plan.is_pip {
+                fallback
+            } else {
+                sanitize_tags(plan.restore.tags, CONFIG.load().tagmask(), fallback)
+            };
+            let mut conflicts = Vec::new();
+            macro_rules! check {
+                ($name:literal,$test:expr) => {
+                    if !$test {
+                        conflicts.push($name);
+                    }
+                };
+            }
+            check!(
+                "monitor",
+                mon.is_some_and(|m| u32::try_from(m.num) == Ok(wanted_monitor))
+            );
+            check!("tags", c.state.tags == tags);
+            check!("minimized", c.state.is_hidden == plan.is_minimized);
+            check!("fullscreen", c.state.is_fullscreen == plan.is_fullscreen);
+            check!(
+                "pip",
+                c.state.is_pip == (!plan.is_fullscreen && plan.is_pip)
+            );
+            check!(
+                "sticky",
+                c.state.is_sticky == plan.is_sticky || plan.is_pip && c.state.is_sticky
+            );
+            check!(
+                "factor",
+                (c.state.client_fact - sanitize_client_fact(plan.client_fact)).abs() < 0.0001
+            );
+            let maximize = plan
+                .maximize
+                .as_ref()
+                .map(SessionMaximize::axes)
+                .unwrap_or(MaximizeAxes::NONE);
+            check!("maximize", c.state.maximized_axes() == maximize);
+            if !plan.is_fullscreen && !plan.is_pip && !maximize.any() {
+                check!("floating", c.state.is_floating == plan.restore.is_floating);
+            }
+            check!(
+                "above_below",
+                c.state.is_above == plan.is_above
+                    && c.state.is_below == (plan.is_below && !plan.is_above)
+            );
+            check!(
+                "chrome",
+                c.state.no_decorations == plan.no_decorations
+                    && c.state.never_focus == plan.never_focus
+                    && c.state.is_fixed == plan.is_fixed
+            );
+            check!(
+                "task_flags",
+                c.state.skip_taskbar == plan.skip_taskbar
+                    && c.state.skip_pager == plan.skip_pager
+                    && c.state.remembers_closed_placement == plan.remembers_closed_placement
+            );
+            check!(
+                "attention",
+                c.state.is_urgent == plan.is_urgent
+                    && c.state.demands_attention == plan.demands_attention
+            );
+            if let Some(floating) = plan
+                .restore
+                .floating
+                .filter(|_| !plan.is_fullscreen && !plan.is_pip && !maximize.any())
+            {
+                if let Some(area) = c.mon.and_then(|m| self.monitor_work_area(m)) {
+                    let want = clamp_floating_rect(floating, area);
+                    check!(
+                        "floating_restore",
+                        (
+                            c.geometry.floating_x,
+                            c.geometry.floating_y,
+                            c.geometry.floating_w,
+                            c.geometry.floating_h
+                        ) == want
+                    );
+                }
+            }
+            if conflicts.is_empty() {
+                verified += 1;
+            }
+            outcomes.push(serde_json::json!({"window_id":c.win.raw().to_string(),"status":if conflicts.is_empty(){"succeeded"}else{"failed"},"conflicts":conflicts}));
+        }
+        // Re-running the pure ordering planner against the poststate must be
+        // a fixed point; this checks saved relative order without mutating it.
+        let mut order_verified = true;
+        for saved in &snapshot.monitor_orders {
+            let num = self.resolve_session_monitor_num(
+                backend,
+                saved.monitor_num,
+                saved.connector.as_deref(),
+            );
+            let Some(m) = self
+                .state
+                .monitors
+                .iter()
+                .find(|(_, m)| u32::try_from(m.num) == Ok(num))
+                .map(|(k, _)| k)
+            else {
+                continue;
+            };
+            let Some(keys) = self.state.monitor_clients.get(m) else {
+                continue;
+            };
+            let current: Vec<_> = keys
+                .iter()
+                .filter_map(|key| {
+                    self.state.clients.get(*key).map(|c| {
+                        (
+                            *key,
+                            SessionWindowIdentity {
+                                class: c.class.clone(),
+                                instance: c.instance.clone(),
+                            },
+                        )
+                    })
+                })
+                .collect();
+            let (held, current): (Vec<_>, Vec<_>) = current
+                .into_iter()
+                .partition(|(key, _)| self.scratchpads.values().any(|saved| saved == key));
+            let mut expected = plan_order_restore(&saved.clients, &current);
+            expected.extend(held.into_iter().map(|(key, _)| key));
+            expected.sort_by_key(|key| {
+                self.state
+                    .clients
+                    .get(*key)
+                    .is_some_and(|c| c.state.is_floating)
+            });
+            order_verified &= expected.as_slice() == keys.as_slice();
+        }
+        serde_json::json!({"status":if verified==plans.len()&&order_verified{"succeeded"}else if verified>0{"partial"}else{"failed"},"matched_windows":plans.len(),"verified_windows":verified,"order_verified":order_verified,"windows":outcomes})
+    }
+
+    pub(crate) fn saved_session_matches_live(&self, backend: &dyn Backend) -> bool {
+        let Ok(saved) = load_session_snapshot(&session_file_path()) else {
+            return false;
+        };
+        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
+        let mut expected =
+            capture_snapshot_excluding(&self.state, CONFIG.load().status_bar_name(), &scratchpads);
+        self.attach_session_connectors(backend, &mut expected);
+        saved == expected
+    }
     pub fn save_session(
         &mut self,
         backend: &mut dyn Backend,

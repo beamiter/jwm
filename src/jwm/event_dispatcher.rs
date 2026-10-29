@@ -3420,6 +3420,7 @@ mod tests {
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
             restart_state: crate::jwm::restart_state::PendingRestartState::default(),
+            eva: Default::default(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
             wallpaper_drag: None,
@@ -16267,6 +16268,7 @@ impl Jwm {
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
+        next = min_optional_duration(next, self.eva_next_wakeup(now));
         next = min_optional_duration(next, self.features.pointer_scroll.next_wakeup(now));
         if !self.features.gif_exports.is_empty() {
             next = min_optional_duration(next, Some(std::time::Duration::from_millis(100)));

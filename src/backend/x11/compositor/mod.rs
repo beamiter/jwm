@@ -531,6 +531,9 @@ where
     /// The hovered action button `(toast id, button index)`, drawn brighter.
     toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
+    eva_overlay: crate::backend::compositor_common::eva_overlay::EvaOverlayState,
+    eva_texture: Option<(String, glow::Texture, u32, u32)>,
+    eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
     /// Cached REC-chip label texture keyed by its text ("REC m:ss"); redrawn
@@ -1232,6 +1235,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     self.gl.delete_texture(slot.0);
                 }
+            }
+            if let Some((_, tex, _, _)) = self.eva_texture.take() {
+                self.gl.delete_texture(tex);
             }
             if let Some((_, tex, _, _)) = self.osd_texture.take() {
                 self.gl.delete_texture(tex);

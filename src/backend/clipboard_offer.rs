@@ -612,7 +612,6 @@ pub(crate) fn x11_handoff_poll_deadline(
 /// from paste targets.  Keeping this message backend-neutral lets both X11
 /// transports use their existing private clipboard connection instead of
 /// launching `xclip` for screenshots.
-#[derive(Debug)]
 // Only a backend's clipboard worker offers `Text`; tests, like JWM's own
 // screenshot path, only ever send `Png`. So a test build without a backend
 // has the same unconstructed `Text` a plain build without one has, and must
@@ -626,9 +625,70 @@ pub(crate) fn x11_handoff_poll_deadline(
     )),
     allow(dead_code)
 )]
+#[derive(Clone, Debug)]
+pub struct ClipboardReceipt(std::sync::Arc<std::sync::atomic::AtomicU8>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardReceiptStatus {
+    Pending,
+    Owned,
+    Failed,
+}
+impl ClipboardReceipt {
+    pub(crate) fn pending() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)))
+    }
+    pub fn status(&self) -> ClipboardReceiptStatus {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            1 => ClipboardReceiptStatus::Owned,
+            2 => ClipboardReceiptStatus::Failed,
+            _ => ClipboardReceiptStatus::Pending,
+        }
+    }
+    pub(crate) fn complete(&self, owned: bool) {
+        let _ = self.0.compare_exchange(
+            0,
+            if owned { 1 } else { 2 },
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+}
+#[derive(Debug)]
+pub(crate) struct ClipboardReceiptGuard(ClipboardReceipt);
+impl Drop for ClipboardReceiptGuard {
+    fn drop(&mut self) {
+        self.0.complete(false);
+    }
+}
+#[allow(dead_code)]
+impl ClipboardReceiptGuard {
+    pub(crate) fn owned(&self) {
+        self.0.complete(true);
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum ClipboardOffer {
     Text(String),
     Png(Vec<u8>),
+    Tracked(Box<ClipboardOffer>, ClipboardReceiptGuard),
+}
+#[allow(dead_code)]
+impl ClipboardOffer {
+    pub(crate) fn tracked(offer: Self) -> (Self, ClipboardReceipt) {
+        let receipt = ClipboardReceipt::pending();
+        (
+            Self::Tracked(Box::new(offer), ClipboardReceiptGuard(receipt.clone())),
+            receipt,
+        )
+    }
+    pub(crate) fn split_receipt(self) -> (Self, Option<ClipboardReceiptGuard>) {
+        match self {
+            Self::Tracked(offer, guard) => (*offer, Some(guard)),
+            offer => (offer, None),
+        }
+    }
 }
 
 /// Cloneable, thread-safe route into a backend's native image clipboard.
