@@ -1701,6 +1701,9 @@ pub(crate) struct WaylandCompositor {
     toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     eva_overlay: crate::backend::compositor_common::eva_overlay::EvaOverlayState,
+    companion_node:
+        Option<std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>>,
+    companion_texture: Option<(u64, u32)>,
     eva_texture: Option<(String, u32, u32, u32)>,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, u32, u32, u32)>,
@@ -3183,6 +3186,8 @@ impl WaylandCompositor {
                 toast_retired: Vec::new(),
                 osd_slot: Default::default(),
                 eva_overlay: Default::default(),
+                companion_node: None,
+                companion_texture: None,
                 eva_texture: None,
                 osd_texture: None,
                 recording_indicator_texture: None,
@@ -3443,6 +3448,9 @@ impl WaylandCompositor {
                         gl.DeleteTextures(1, &texture);
                     }
                 }
+            }
+            if let Some((_, tex)) = self.companion_texture.take() {
+                gl.DeleteTextures(1, &tex);
             }
             if let Some((_, texture, _, _)) = self.eva_texture.take()
                 && texture != 0

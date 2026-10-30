@@ -17103,6 +17103,7 @@ impl EventHandler for Jwm {
     }
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
+        self.companion_scene_tick(backend);
         self.tick_touchpad_gesture(backend);
         self.tick_pointer_scroll(backend);
         self.tick_wallpaper_drag(backend);

@@ -7,6 +7,8 @@ license = "MIT"
 description = "Native hotkey-activated Realtime voice assistant for JWM"
 
 [dependencies]
+companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
+companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 jwm_eva_core = { path = "../crates/jwm_eva_core" }
 jwm_ipc_client = { path = "../crates/jwm_ipc_client" }
 jwm_ipc_transport = { path = "../crates/jwm_ipc_transport" }

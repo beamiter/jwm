@@ -1067,6 +1067,8 @@ impl<C: CompositorConnection> Compositor<C> {
             toast_button_hover: None,
             osd_slot: Default::default(),
             eva_overlay: Default::default(),
+            companion_node: None,
+            companion_texture: None,
             eva_texture: None,
             eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe::new(),
             osd_texture: None,

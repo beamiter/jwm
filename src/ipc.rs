@@ -405,6 +405,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     ],
     queries: &[
         "get_execution_context",
+        "get_companion_desktop_state",
         "get_execution_status",
         "get_assistant_status",
         "get_command_schema",

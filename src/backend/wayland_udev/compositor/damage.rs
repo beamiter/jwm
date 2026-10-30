@@ -288,6 +288,9 @@ impl WaylandCompositor {
         if !self.toast_stack.is_empty() {
             return Some("toast notifications require composition");
         }
+        if self.companion_node.is_some() {
+            return Some("Companion node requires composition");
+        }
         if self.eva_overlay.visible() {
             return Some("Eva status requires composition");
         }

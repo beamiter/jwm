@@ -3778,6 +3778,15 @@ pub trait CompositorWorkspaceEffects: Send {
         self.compositor_supports_eva_overlay()
     }
 
+    /// One immutable, pre-rasterized body; no IPC or shaping on render paths.
+    fn compositor_set_companion_node(
+        &mut self,
+        _node: Option<
+            std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>,
+        >,
+    ) {
+    }
+
     /// Publish JWM-owned Eva status. This overlay never owns application focus.
     fn compositor_set_eva_overlay(&mut self, _snapshot: serde_json::Value) {}
     /// Left-click hit-test against the toast cards drawn last frame. A card

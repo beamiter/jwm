@@ -2925,6 +2925,7 @@ impl Jwm {
         let cfg = CONFIG.load();
         match name {
             "get_execution_context" => IpcResponse::ok(Some(self.eva_execution_context())),
+            "get_companion_desktop_state" => IpcResponse::ok(Some(self.eva_companion_context())),
             "get_execution_status" => self.eva_execution_status(backend, args),
             "get_assistant_status" => {
                 self.eva_tick(backend);

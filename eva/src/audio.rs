@@ -461,6 +461,14 @@ impl Capture {
     }
     pub async fn stop(mut self) {
         self.worker.shutdown();
+        crate::companion::capture_stopped();
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.worker.shutdown();
+        crate::companion::capture_stopped();
     }
 }
 
@@ -702,6 +710,7 @@ impl Framer {
                 pcm,
             };
 
+            crate::companion::capture_frame();
             tx.try_send(Ok(frame))
                 .map_err(|_| io::Error::other("audio_buffer_overflow"))?;
             // Every older partial chunk has now been consumed. All remaining
@@ -1122,6 +1131,7 @@ struct Output {
     segments: Vec<Segment>,
     clock: Option<(Instant, u64)>,
     telemetry: Option<serde_json::Value>,
+    companion_labels: Option<serde_json::Value>,
     first_played: bool,
 }
 /// Claim only a fresh native played position. Moving the prefiltered labels
@@ -1234,6 +1244,18 @@ fn edits(state: &Output, now: Instant) -> Vec<HistoryEdit> {
         .collect()
 }
 impl PlaybackHistory {
+    /// Nonblocking metadata only; a contended audio queue yields no evidence.
+    pub(crate) fn companion_snapshot(&self) -> Option<(u64, Option<u64>, bool)> {
+        let s = self.state.try_lock().ok()?;
+        let played = if s.drained {
+            Some(s.submitted / 2)
+        } else {
+            s.clock
+                .filter(|(at, _)| at.elapsed() <= Duration::from_millis(100))
+                .map(|(_, n)| n)
+        };
+        Some((s.received_samples, played, s.drained))
+    }
     pub fn items(&self) -> Vec<String> {
         self.state
             .lock()
@@ -1312,8 +1334,10 @@ impl Playback {
     /// can enter the stored telemetry labels or a later emitted event.
     pub fn set_telemetry(&mut self, labels: serde_json::Value) {
         let labels = crate::telemetry::fields(&labels);
+        crate::companion::playback(&labels, self.history());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !state.first_played {
+            state.companion_labels = Some(labels.clone());
             state.telemetry = Some(labels);
         }
     }
@@ -1431,6 +1455,19 @@ impl Playback {
 impl Drop for Playback {
     fn drop(&mut self) {
         self.worker.shutdown();
+        {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(labels) = s.companion_labels.as_ref() {
+                let played = if s.drained {
+                    Some(s.submitted / 2)
+                } else {
+                    s.clock
+                        .filter(|(at, _)| at.elapsed() <= Duration::from_millis(100))
+                        .map(|(_, n)| n)
+                };
+                crate::companion::playback_ended(labels, s.received_samples, played, s.drained);
+            }
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         for byte in &mut state.queue {
             *byte = 0;

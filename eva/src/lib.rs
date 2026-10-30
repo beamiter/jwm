@@ -1,5 +1,6 @@
 //! Testable daemon components; the executable owns the single session actor.
 pub mod audio;
+mod companion;
 pub mod config;
 pub mod context;
 pub mod cost_report;

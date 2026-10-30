@@ -532,6 +532,9 @@ where
     toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     eva_overlay: crate::backend::compositor_common::eva_overlay::EvaOverlayState,
+    companion_node:
+        Option<std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>>,
+    companion_texture: Option<(u64, glow::Texture)>,
     eva_texture: Option<(String, glow::Texture, u32, u32)>,
     eva_output_probe: crate::backend::eva_x11_output::EvaX11OutputProbe,
     /// Cached OSD label texture keyed by its text ("icon  label").
@@ -1235,6 +1238,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     self.gl.delete_texture(slot.0);
                 }
+            }
+            if let Some((_, tex)) = self.companion_texture.take() {
+                self.gl.delete_texture(tex);
             }
             if let Some((_, tex, _, _)) = self.eva_texture.take() {
                 self.gl.delete_texture(tex);

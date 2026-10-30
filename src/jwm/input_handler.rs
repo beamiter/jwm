@@ -355,6 +355,11 @@ impl Jwm {
     }
 
     pub(crate) fn eva_sync_ui(&mut self, backend: &mut dyn Backend) {
+        crate::backend::compositor_common::companion_desktop::publish_locked(
+            self.features.system_ui.is_locked()
+                || !self.features.monitor_lock.is_empty()
+                || backend.compositor_session_locked(),
+        );
         self.eva_refresh_confirmation_layout();
         let active = self.eva_active();
         let mut snapshot = self.eva_overlay_snapshot();

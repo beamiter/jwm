@@ -3458,6 +3458,8 @@ impl WaylandCompositor {
             // class redraws over its own retained pixels, so a settled card
             // would thicken with each partial frame.
             && !self.tail_overlay_visibility().any()
+            // Companion alpha must not be blended again over retained pixels.
+            && self.companion_node.is_none()
             && self.tilt_x.abs() <= 0.001
             && self.tilt_y.abs() <= 0.001
             && !blur_would_run;
@@ -4928,6 +4930,7 @@ impl WaylandCompositor {
             self.render_toasts(gl, &projection, tail_draws_linear);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
             self.render_osd(gl, &projection, tail_draws_linear);
+            self.render_companion_node(gl, &projection, tail_draws_linear);
             self.render_eva_overlay(gl, &projection, tail_draws_linear);
 
             // Modal system UI (launcher, prompts, tags grid, control center,
@@ -8539,8 +8542,70 @@ impl WaylandCompositor {
         }
     }
 
-    /// Persistent floating Eva card using the active glass/flat theme. The
-    /// common raster owns typography and protected confirmation row geometry.
+    /// Draw the single immutable atlas node; this is not retirement evidence.
+    unsafe fn render_companion_node(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
+        let Some(node) = self.companion_node.clone() else {
+            if let Some((_, tex)) = self.companion_texture.take() {
+                unsafe {
+                    gl.DeleteTextures(1, &tex);
+                }
+            }
+            return;
+        };
+        unsafe {
+            if self
+                .companion_texture
+                .as_ref()
+                .is_none_or(|(revision, _)| *revision != node.revision)
+            {
+                if let Some((_, tex)) = self.companion_texture.take() {
+                    gl.DeleteTextures(1, &tex);
+                }
+                let mut tex = 0;
+                gl.GenTextures(1, &mut tex);
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                gl.TexImage2D(
+                    ffi::TEXTURE_2D,
+                    0,
+                    ffi::RGBA as i32,
+                    node.width as i32,
+                    node.height as i32,
+                    0,
+                    ffi::RGBA,
+                    ffi::UNSIGNED_BYTE,
+                    node.pixels.as_ptr().cast(),
+                );
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+                self.companion_texture = Some((node.revision, tex));
+            }
+            let Some((_, tex)) = self.companion_texture else {
+                return;
+            };
+            gl.BindVertexArray(self.quad_vao);
+            self.use_sysui_text_program(gl, scene_linear);
+            let rp = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let pp = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let tp = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let op = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            gl.UniformMatrix4fv(pp, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(tp, 0);
+            gl.Uniform1f(op, 1.);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            let [x, y, w, h] = node.rect;
+            gl.Uniform4f(rp, x, y, w, h);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
     unsafe fn render_eva_overlay(
         &mut self,
         gl: &ffi::Gles2,

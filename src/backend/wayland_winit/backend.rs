@@ -681,6 +681,7 @@ pub struct WaylandWinitBackend {
     needs_render: bool,
     dock_preview: Option<crate::backend::wayland::preview::Preview>,
     eva_overlay: crate::backend::wayland::eva::EvaElement,
+    companion_node: crate::backend::wayland::eva::CompanionElement,
     preview_edge: xbar_core::BarEdge,
     screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
     background_id: Id,
@@ -823,6 +824,10 @@ impl WaylandWinitBackend {
             .session_locked
             .then_some(self.state.session_lock_epoch);
         if locked_epoch.is_none() {
+            if let Some(element) = self.companion_node.render(self.winit_backend.renderer()) {
+                elements.push(WinitRenderElement::Eva(element));
+            }
+
             if let Some(element) = self
                 .eva_overlay
                 .render(self.winit_backend.renderer(), (out_w, out_h))
@@ -1612,6 +1617,7 @@ impl WaylandWinitBackend {
             needs_render: true,
             dock_preview: None,
             eva_overlay: Default::default(),
+            companion_node: Default::default(),
             preview_edge: xbar_core::BarEdge::Top,
             screenshot_requests: Default::default(),
             background_id: Id::new(),
@@ -2259,6 +2265,17 @@ impl CompositorWorkspaceEffects for WaylandWinitBackend {
             )
     }
 
+    fn compositor_set_companion_node(
+        &mut self,
+        node: Option<
+            std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>,
+        >,
+    ) {
+        if self.companion_node.update(node) {
+            self.needs_render = true;
+            self.state.needs_redraw = true;
+        }
+    }
     fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
         if self.eva_overlay.update(&snapshot) {
             self.needs_render = true;

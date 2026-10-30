@@ -57,6 +57,7 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(record)
 }
 pub fn event(stage: &str, labels: &serde_json::Value) {
+    crate::companion::milestone(stage, labels);
     let mut record = fields(labels).as_object().cloned().unwrap_or_default();
     record.insert("component".into(), serde_json::json!("jwm-eva"));
     record.insert(

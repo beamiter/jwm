@@ -494,6 +494,7 @@ pub async fn run(c: Config) -> io::Result<()> {
         return Err(io::Error::other("Eva service disabled in configuration"));
     }
     let (listener, _guard) = listen()?;
+    crate::companion::start();
     // A restarted daemon discards old streams and plans. A still-live native
     // wake request may establish a fresh, non-authoritative standby session.
     let _ = command("assistant_control", json!({"action":"cancel"})).await;

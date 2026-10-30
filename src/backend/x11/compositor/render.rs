@@ -3974,8 +3974,71 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Persistent floating Eva card using the active glass/flat theme. The
-    /// common raster owns typography and protected confirmation row geometry.
+    /// Draw the single immutable atlas node; this is not retirement evidence.
+    fn render_companion_node(&mut self, proj: &[f32; 16]) {
+        let Some(node) = self.companion_node.clone() else {
+            if let Some((_, tex)) = self.companion_texture.take() {
+                unsafe {
+                    self.gl.delete_texture(tex);
+                }
+            }
+            return;
+        };
+        unsafe {
+            if self
+                .companion_texture
+                .as_ref()
+                .is_none_or(|(revision, _)| *revision != node.revision)
+            {
+                if let Some((_, tex)) = self.companion_texture.take() {
+                    self.gl.delete_texture(tex);
+                }
+                let Ok(tex) = self.gl.create_texture() else {
+                    return;
+                };
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    node.width as i32,
+                    node.height as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&node.pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.companion_texture = Some((node.revision, tex));
+            }
+            let Some((_, tex)) = self.companion_texture else {
+                return;
+            };
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.);
+            self.gl.active_texture(glow::TEXTURE0);
+            let [x, y, w, h] = node.rect;
+            self.gl
+                .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), x, y, w, h);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
     fn render_eva_overlay(&mut self, proj: &[f32; 16]) {
         if !self.eva_overlay.visible() {
             return;
@@ -4656,7 +4719,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.screenshot_freeze_fbo.is_some(),
             )
             || self.system_ui.is_some()
-            || self.eva_overlay.visible()
+            || self.eva_overlay.visible() || self.companion_node.is_some()
             || self.debug_hud
             || self.recording_active
             || self.remote_capture_active
@@ -5614,8 +5677,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // tracker's thresholds while any card is visible. The frame pump
         // itself is narrower: `force_render` below arms only while a toast's
         // or the OSD's envelope or spring actually moves.
-        let toasts_active =
-            !self.toast_stack.is_empty() || !self.osd_slot.is_empty() || self.eva_overlay.visible();
+        let toasts_active = !self.toast_stack.is_empty()
+            || !self.osd_slot.is_empty()
+            || self.eva_overlay.visible()
+            || self.companion_node.is_some();
 
         // Tick Phase 5 animations
         let expose_animating = self.tick_expose();
@@ -8796,6 +8861,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // scrim dims them; the lock screen hides them).
         self.render_toasts(&proj);
         self.render_osd(&proj);
+        self.render_companion_node(&proj);
         self.render_eva_overlay(&proj);
 
         // The shades again, this time over the late chrome. The toast stack

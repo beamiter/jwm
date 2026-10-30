@@ -157,6 +157,9 @@ path = "tools/jwm_remote.rs"
 required-features = ["remote-x11"]
 
 [dependencies]
+companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
+companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
+eva-character-atlas = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
 jwm_eva_core = { path = "crates/jwm_eva_core" }
 input = { version = "0.10.0", default-features = false, features = ["libinput_1_19"], optional = true }
 udev = { version = "0.9", optional = true }

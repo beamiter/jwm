@@ -5,3 +5,5 @@ pub mod protocol;
 pub mod realtime;
 pub mod session;
 pub mod usage;
+
+pub mod companion;

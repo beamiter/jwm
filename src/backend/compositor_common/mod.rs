@@ -63,3 +63,7 @@ pub mod window_tabs;
 pub mod wobbly;
 
 pub(crate) mod jelly_geometry;
+
+pub mod companion_scene;
+
+pub(crate) mod companion_desktop;

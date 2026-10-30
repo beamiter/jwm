@@ -834,6 +834,9 @@ macro_rules! delegate_compositor_capabilities {
                 self.compositor_supports_eva_overlay()&&crate::backend::api::OutputOps::enumerate_outputs(self.output_ops.as_ref()).iter().any(|o|crate::backend::compositor_common::eva_overlay::eva_viewport_on_output(viewport,[o.x as f32,o.y as f32,o.width as f32,o.height as f32]))
             }
 
+            fn compositor_set_companion_node(&mut self, node: Option<std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>>) {
+                if let Some(c)=self.compositor.as_mut() { c.set_companion_node(node); }
+            }
             fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_eva_overlay(snapshot);

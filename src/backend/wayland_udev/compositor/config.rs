@@ -530,6 +530,21 @@ impl WaylandCompositor {
         result
     }
 
+    pub(crate) fn set_companion_node(
+        &mut self,
+        node: Option<
+            std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>,
+        >,
+    ) -> bool {
+        if self.companion_node.as_ref().map(|n| n.revision) == node.as_ref().map(|n| n.revision) {
+            return false;
+        }
+        self.companion_node = node;
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+        true
+    }
+
     pub(crate) fn set_eva_overlay(&mut self, snapshot: serde_json::Value) -> bool {
         let changed = self
             .eva_overlay

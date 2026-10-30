@@ -5300,6 +5300,20 @@ impl CompositorWorkspaceEffects for UdevBackend {
         })
     }
 
+    fn compositor_set_companion_node(
+        &mut self,
+        node: Option<
+            std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>,
+        >,
+    ) {
+        if self
+            .compositor
+            .as_mut()
+            .is_some_and(|c| c.set_companion_node(node))
+        {
+            self.request_render();
+        }
+    }
     fn compositor_set_eva_overlay(&mut self, snapshot: serde_json::Value) {
         if self
             .compositor

@@ -1473,6 +1473,122 @@ impl Jwm {
             .keys()
             .find(|&k| self.eva_monitor_token(k) == token)
     }
+    pub(crate) fn companion_scene_tick(&self, backend: &mut dyn Backend) {
+        use crate::backend::compositor_common::companion_scene::{self, Desktop};
+        crate::backend::compositor_common::companion_desktop::publish_locked(
+            self.features.system_ui.is_locked()
+                || !self.features.monitor_lock.is_empty()
+                || backend.compositor_session_locked(),
+        );
+        if !companion_scene::enabled() {
+            return;
+        }
+        let monitor = self
+            .state
+            .sel_mon
+            .and_then(|key| self.state.monitors.get(key));
+        let focus = self.get_selected_client_key();
+        let viewport = monitor.map(|m| companion_protocol::Rect {
+            x: m.geometry.w_x as f64,
+            y: m.geometry.w_y as f64,
+            width: m.geometry.w_w as f64,
+            height: m.geometry.w_h as f64,
+        });
+        let occupied: Vec<companion_protocol::Rect> = self
+            .state
+            .clients
+            .iter()
+            .filter(|(_, c)| !c.state.is_hidden && !c.state.is_desktop)
+            .map(|(_, c)| {
+                let g = &c.geometry;
+                companion_protocol::Rect {
+                    x: g.x as f64,
+                    y: g.y as f64,
+                    width: g.w.max(1) as f64,
+                    height: g.h.max(1) as f64,
+                }
+            })
+            .collect();
+        let suppressed = self.features.system_ui.is_active()
+            || self.eva.confirmation.as_ref().is_some_and(|c| !c.approved)
+            || !self.features.monitor_lock.is_empty()
+            || backend.compositor_session_locked()
+            || !backend.compositor_supports_eva_overlay()
+            || focus
+                .and_then(|key| self.state.clients.get(key))
+                .is_some_and(|c| c.state.is_fullscreen);
+        let target = format!(
+            "{}:{}:{}:{}",
+            self.eva.instance,
+            self.state
+                .sel_mon
+                .map(|m| self.eva_monitor_token(m))
+                .unwrap_or_default(),
+            monitor.map_or(0, |m| m.get_active_tags()),
+            focus
+                .map(|key| self.eva_window_token(key))
+                .unwrap_or_default()
+        );
+        companion_scene::publish(Desktop {
+            target: target.clone(),
+            viewport,
+            occupied: occupied.clone(),
+            suppressed,
+            reduced_motion: !CONFIG.load().motion_enabled(),
+        });
+        let node = companion_scene::snapshot().filter(|node| {
+            !suppressed
+                && node.target == target
+                && backend.compositor_eva_viewport_visible(node.rect)
+                && {
+                    let r = companion_protocol::Rect {
+                        x: node.rect[0] as f64,
+                        y: node.rect[1] as f64,
+                        width: node.rect[2] as f64,
+                        height: node.rect[3] as f64,
+                    };
+                    viewport.is_some_and(|v| v.contains(r))
+                        && occupied.iter().all(|o| !o.overlaps(r))
+                }
+        });
+        backend.compositor_set_companion_node(node);
+    }
+
+    /// Content-free desktop observations. No titles, cwd, commands, permits or
+    /// screenshots are returned. Native-retirement capabilities stay false:
+    /// existing Eva cards do not prove terminal bodies left scanout.
+    pub(crate) fn eva_companion_context(&self) -> Value {
+        let companion_scene_enabled = crate::backend::compositor_common::companion_scene::enabled;
+        let selected = self.state.sel_mon;
+        let focus = self.get_selected_client_key();
+        let monitors: Vec<Value> = self
+            .state
+            .monitor_order
+            .iter()
+            .filter_map(|&key| {
+                self.state.monitors.get(key).map(|m| json!({
+                "monitor_token": self.eva_monitor_token(key),
+                "workspace_mask": m.get_active_tags(),
+                "locked": self.monitor_key_is_locked(key),
+                "work_area": [m.geometry.w_x, m.geometry.w_y, m.geometry.w_w, m.geometry.w_h],
+            }))
+            })
+            .collect();
+        json!({
+            "protocol_version": 1, "wm_instance_id": self.eva.instance,
+            "observed_monotonic_ns": monotonic_ns(),
+            "locked": self.features.system_ui.is_locked() || !self.features.monitor_lock.is_empty(),
+            "focus_token": focus.map(|key| self.eva_window_token(key)),
+            "monitor_token": selected.map(|key| self.eva_monitor_token(key)),
+            "fullscreen": focus.and_then(|key| self.state.clients.get(key)).is_some_and(|c| c.state.is_fullscreen),
+            "monitors": monitors,
+            "capabilities": { "metadata_only": true, "x11_native_retirement": false,
+                "wayland_native_retirement": false, "single_scene_node_implemented": cfg!(any(feature="x11-backends",feature="wayland-backends")), "scene_requested": companion_scene_enabled(), "snapshot_authorized": crate::backend::compositor_common::companion_scene::snapshot().is_some() },
+            "native_retirement_status": "unverified; no physical retirement claim",
+            "scene_scope": "opt-in compositor-only; exposed desktop pixels; no native-window anchor mapping",
+            "desktop_observer_connected": crate::backend::compositor_common::companion_desktop::connected()
+        })
+    }
     pub(crate) fn eva_execution_context(&mut self) -> Value {
         self.eva_record_focus();
         let monitors: Vec<Value> = self.state.monitor_order.iter().filter_map(|&key|self.state.monitors.get(key).map(|m|json!({

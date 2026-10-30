@@ -443,6 +443,21 @@ impl<C: CompositorConnection> Compositor<C> {
         result
     }
 
+    pub(crate) fn set_companion_node(
+        &mut self,
+        node: Option<
+            std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>,
+        >,
+    ) -> bool {
+        if self.companion_node.as_ref().map(|n| n.revision) == node.as_ref().map(|n| n.revision) {
+            return false;
+        }
+        self.companion_node = node;
+        self.force_full_redraw();
+        self.needs_render = true;
+        true
+    }
+
     pub(crate) fn set_eva_overlay(&mut self, snapshot: serde_json::Value) {
         if self
             .eva_overlay

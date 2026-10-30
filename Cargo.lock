@@ -914,6 +914,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-client"
+version = "0.1.0"
+source = "git+https://github.com/beamiter/jcompanion.git?rev=9aa569540091524d637a7115b64c587b9177a55b#9aa569540091524d637a7115b64c587b9177a55b"
+dependencies = [
+ "companion-protocol",
+ "libc 0.2.191",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "companion-protocol"
+version = "0.1.0"
+source = "git+https://github.com/beamiter/jcompanion.git?rev=9aa569540091524d637a7115b64c587b9177a55b#9aa569540091524d637a7115b64c587b9177a55b"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1414,6 +1434,11 @@ dependencies = [
  "libc 0.2.191",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "eva-character-atlas"
+version = "0.1.0"
+source = "git+https://github.com/beamiter/jcompanion.git?rev=9aa569540091524d637a7115b64c587b9177a55b#9aa569540091524d637a7115b64c587b9177a55b"
 
 [[package]]
 name = "event-listener"
@@ -2305,11 +2330,14 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "clap",
+ "companion-client",
+ "companion-protocol",
  "criterion",
  "dirs",
  "drm 0.15.0",
  "drm-ffi",
  "egl",
+ "eva-character-atlas",
  "gbm",
  "glob",
  "glow",
@@ -2368,6 +2396,8 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "companion-client",
+ "companion-protocol",
  "futures-util",
  "jwm_eva_core",
  "jwm_ipc_client",

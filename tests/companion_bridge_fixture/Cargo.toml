@@ -1,0 +1,17 @@
+[package]
+name = "eva-companion-bridge-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+companion-client = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
+companion-protocol = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+
+arc-swap = "1"
+ab_glyph = "0.2.32"
+log = "0.4"
+eva-character-atlas = { git = "https://github.com/beamiter/jcompanion.git", rev = "9aa569540091524d637a7115b64c587b9177a55b" }
+libc = "0.2"

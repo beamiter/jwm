@@ -2252,6 +2252,10 @@ impl Jwm {
     }
 
     pub fn run(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
+        crate::backend::compositor_common::companion_desktop::start();
+        crate::backend::compositor_common::companion_scene::start(
+            self.async_update_notifier.clone(),
+        );
         info!("[run] Handing over control to backend");
         Ok(backend.run(self)?)
     }

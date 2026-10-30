@@ -174,3 +174,72 @@ fn paint_box(pixels: &mut [u8], size: (usize, usize), rect: [usize; 4], color: [
         }
     }
 }
+
+/// A single immutable organism node, independent from Eva's approval card.
+/// No socket, font shaping, audio or provider work occurs in `render`.
+#[derive(Default)]
+pub(crate) struct CompanionElement {
+    node: Option<std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>>,
+    cached: Option<(u64, MemoryRenderBuffer)>,
+}
+impl CompanionElement {
+    pub(crate) fn update(
+        &mut self,
+        node: Option<
+            std::sync::Arc<crate::backend::compositor_common::companion_scene::RasterNode>,
+        >,
+    ) -> bool {
+        if self.node.as_ref().map(|n| n.revision) == node.as_ref().map(|n| n.revision) {
+            return false;
+        }
+        self.node = node;
+        true
+    }
+    pub(crate) fn render<R: ImportMem>(
+        &mut self,
+        renderer: &mut R,
+    ) -> Option<MemoryRenderBufferRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        let Some(node) = self.node.as_ref() else {
+            self.cached = None;
+            return None;
+        };
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(revision, _)| *revision != node.revision)
+        {
+            let mut pixels = node.pixels.clone();
+            for px in pixels.chunks_exact_mut(4) {
+                let a = px[3] as u32;
+                for c in &mut px[..3] {
+                    *c = (*c as u32 * a / 255) as u8;
+                }
+            }
+            self.cached = Some((
+                node.revision,
+                MemoryRenderBuffer::from_slice(
+                    &pixels,
+                    Fourcc::Abgr8888,
+                    (node.width as i32, node.height as i32),
+                    1,
+                    Transform::Normal,
+                    None,
+                ),
+            ));
+        }
+        // Atlas raster dimensions equal the safe desktop candidate dimensions.
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            Point::<f64, Physical>::from((node.rect[0] as f64, node.rect[1] as f64)),
+            &self.cached.as_ref()?.1,
+            Some(1.0),
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+}
