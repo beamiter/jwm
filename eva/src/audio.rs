@@ -1210,7 +1210,7 @@ impl Playback {
         }
     }
     pub async fn write(&mut self, pcm: &[u8]) -> io::Result<()> {
-        self.enqueue(None, pcm)
+        self.enqueue(None, pcm).await
     }
     pub async fn write_item(
         &mut self,
@@ -1221,14 +1221,36 @@ impl Playback {
         if item_id.is_empty() || item_id.len() > 256 || item_id.chars().any(char::is_control) {
             return Err(io::Error::other("invalid_audio_item"));
         }
-        self.enqueue(Some((item_id, content_index)), pcm)
+        self.enqueue(Some((item_id, content_index)), pcm).await
     }
-    fn enqueue(&mut self, item: Option<(&str, u32)>, pcm: &[u8]) -> io::Result<()> {
-        check(&self.fault)?;
+    async fn enqueue(&mut self, item: Option<(&str, u32)>, pcm: &[u8]) -> io::Result<()> {
         if !pcm.len().is_multiple_of(2) || pcm.is_empty() {
             return Err(io::Error::other("invalid_playback_frame"));
         }
+        if pcm.len() > QUEUE_BYTES {
+            return Err(io::Error::other("playback_frame_too_large"));
+        }
+        // Realtime audio can arrive faster than it is played. Apply bounded,
+        // cancellable backpressure instead of discarding a valid reply when
+        // the two-second application/native backlog is full. Missing timing
+        // or a stalled device must still fail within a finite deadline.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if self.enqueue_ready(item, pcm)? {
+                    return Ok(());
+                }
+                tokio::time::sleep(LOOP_INTERVAL).await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("playback_queue_stalled"))?
+    }
+    fn enqueue_ready(&mut self, item: Option<(&str, u32)>, pcm: &[u8]) -> io::Result<bool> {
+        check(&self.fault)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.ending {
+            return Err(io::Error::other("playback_already_ending"));
+        }
         let played = state
             .clock
             .filter(|(at, _)| at.elapsed() <= Duration::from_millis(100))
@@ -1237,11 +1259,8 @@ impl Playback {
             .received_samples
             .saturating_sub(played)
             .saturating_add((pcm.len() / 2) as u64);
-        if state.ending
-            || state.queue.len().saturating_add(pcm.len()) > QUEUE_BYTES
-            || pending > RATE as u64 * 2
-        {
-            return Err(io::Error::other("playback_queue_overflow"));
+        if state.queue.len().saturating_add(pcm.len()) > QUEUE_BYTES || pending > RATE as u64 * 2 {
+            return Ok(false);
         }
         let end = state
             .received_samples
@@ -1270,7 +1289,7 @@ impl Playback {
         state.queue.extend(pcm);
         drop(state);
         rendered_reference(pcm);
-        Ok(())
+        Ok(true)
     }
     pub fn history(&self) -> PlaybackHistory {
         PlaybackHistory {
@@ -1710,12 +1729,77 @@ mod tests {
             notify: Arc::new(Notify::new()),
         };
         p.write(&vec![0; QUEUE_BYTES]).await.unwrap();
-        assert!(p.write(&[0; 2]).await.is_err());
+        assert_eq!(
+            p.write(&[0; 2]).await.unwrap_err().to_string(),
+            "playback_queue_stalled"
+        );
         assert_eq!(p.played_samples(), None);
         p.state.lock().unwrap().submitted = 48_000;
         assert_eq!(p.played_samples(), None);
         p.state.lock().unwrap().drained = true;
         assert_eq!(p.played_samples(), Some(24_000));
+    }
+
+    #[tokio::test]
+    async fn faster_than_playback_input_waits_without_dropping_or_duplicating_samples() {
+        let state = Arc::new(Mutex::new(Output::default()));
+        let fault = Fault::default();
+        let mut p = Playback {
+            worker: Worker {
+                stop: Arc::new(AtomicBool::new(false)),
+                thread: None,
+            },
+            state: state.clone(),
+            fault: fault.clone(),
+            notify: Arc::new(Notify::new()),
+        };
+        p.write_item("reply", 0, &vec![0; QUEUE_BYTES])
+            .await
+            .unwrap();
+        // Dropping a blocked write must not append any part of its chunk.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                p.write_item("reply", 0, &[0; 960])
+            )
+            .await
+            .is_err()
+        );
+        {
+            let mut output = state.lock().unwrap();
+            assert_eq!(output.received_samples, u64::from(RATE) * 2);
+            drop(output.queue.drain(..960));
+            output.submitted = 960;
+            output.clock = Some((Instant::now(), 480));
+        }
+        p.write_item("reply", 0, &[0; 960]).await.unwrap();
+        {
+            let output = state.lock().unwrap();
+            assert_eq!(output.received_samples, u64::from(RATE) * 2 + 480);
+            assert_eq!(output.queue.len(), QUEUE_BYTES);
+            assert_eq!(output.segments.len(), 1);
+            assert_eq!(output.segments[0].end, output.received_samples);
+        }
+        // A native device failure must interrupt backpressure promptly.
+        let mut blocked = Box::pin(p.write_item("reply", 0, &[0; 960]));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut blocked)
+                .await
+                .is_err()
+        );
+        fail(&fault, "pulse_playback_unavailable");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), blocked)
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+            "pulse_playback_unavailable"
+        );
+        assert_eq!(
+            state.lock().unwrap().received_samples,
+            u64::from(RATE) * 2 + 480
+        );
     }
 }
 

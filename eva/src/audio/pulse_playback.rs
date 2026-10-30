@@ -544,5 +544,36 @@ mod tests {
             stopped.elapsed().as_millis(),
             played * 1000 / RATE as u64
         );
+        drop(state);
+
+        // Model output arrives in a burst exceeding the playback bound.
+        // Exercise the public facade: writes must wait, every source sample
+        // must drain, and interrupted history must not discard heard audio.
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut playback = super::super::Playback::start().unwrap();
+            let history = playback.history();
+            let started = Instant::now();
+            let chunk = vec![0; BYTES_PER_SECOND as usize / 10];
+            for _ in 0..40 {
+                playback.write_item("burst-reply", 0, &chunk).await.unwrap();
+                let output = playback.state.lock().unwrap();
+                assert!(output.queue.len() <= QUEUE_BYTES);
+                assert!(
+                    output
+                        .received_samples
+                        .saturating_sub(output.clock.map_or(0, |(_, p)| p))
+                        <= u64::from(RATE) * 2
+                );
+            }
+            assert!(started.elapsed() >= Duration::from_millis(1800));
+            playback.finish().await.unwrap();
+            assert_eq!(history.played_samples(), Some(u64::from(RATE) * 4));
+            assert!(history.edits().is_empty());
+            assert!(started.elapsed() >= Duration::from_millis(3800));
+            eprintln!(
+                "native PulseAudio four-second burst fully drained in {}ms",
+                started.elapsed().as_millis()
+            );
+        });
     }
 }

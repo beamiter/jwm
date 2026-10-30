@@ -183,8 +183,71 @@ pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
     }
 }
 
+/// Fixed diagnostic labels distinguish playback failures without logging
+/// provider messages, device names or other untrusted error text.
+pub fn feedback_code(error: &std::io::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "playback_queue_overflow" => "playback_queue_overflow",
+        "playback_queue_stalled" => "playback_queue_stalled",
+        "playback_frame_too_large" => "playback_frame_too_large",
+        "pulse_playback_underrun" => "pulse_playback_underrun",
+        "playback_drain_timeout" => "playback_drain_timeout",
+        "pulse_playback_device_changed" => "pulse_playback_device_changed",
+        "feedback_failed" => "feedback_failed",
+        "feedback_timeout" => "feedback_timeout",
+        _ => describe(error).0,
+    }
+}
+
+pub fn session_code(error: &std::io::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "connect_timeout" => "connect_timeout",
+        "context_timeout" => "context_timeout",
+        "session_timeout" => "session_timeout",
+        "plan_timeout" => "plan_timeout",
+        "invalid_discovery_arguments" => "invalid_discovery_arguments",
+        "invalid_discovery_categories" => "invalid_discovery_categories",
+        "input_out_of_order" => "input_out_of_order",
+        "input_audio_timestamp_overflow" => "input_audio_timestamp_overflow",
+        "realtime_write_timeout" => "realtime_write_timeout",
+        "realtime_ping_timeout" => "realtime_ping_timeout",
+        "interrupt_clear_timeout" => "interrupt_clear_timeout",
+        "pulse_capture_timeout" => "pulse_capture_timeout",
+        _ if error.kind() == std::io::ErrorKind::TimedOut => "local_io_timeout",
+        _ => feedback_code(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_diagnostics_only_expose_fixed_codes() {
+        assert_eq!(
+            super::feedback_code(&std::io::Error::other("playback_queue_overflow")),
+            "playback_queue_overflow"
+        );
+        assert_eq!(
+            super::feedback_code(&std::io::Error::other("pulse_playback_underrun")),
+            "pulse_playback_underrun"
+        );
+        assert_eq!(
+            super::feedback_code(&std::io::Error::other(
+                "playback_queue_overflow: private device and provider details"
+            )),
+            "audio_unavailable"
+        );
+        assert_eq!(
+            super::session_code(&std::io::Error::other("realtime_write_timeout")),
+            "realtime_write_timeout"
+        );
+        assert_eq!(
+            super::session_code(&std::io::Error::other(
+                "realtime_write_timeout: private transport details"
+            )),
+            "connect_timeout"
+        );
+    }
+
     #[test]
     fn execution_and_billing_errors_keep_their_public_meaning() {
         for code in [

@@ -1,0 +1,296 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-30T09:40:35+08:00",
+  "overall_result": "not_passed",
+  "environment": {
+    "backend": "X11",
+    "audio_backend": "pulseaudio",
+    "physical_microphone": true,
+    "real_api": true,
+    "model": "gpt-realtime-2.1-mini",
+    "source_revision": "03d3120d51cd89bbe5c2d6578c29967959748c60+worktree",
+    "source_files_sha256": {
+      "eva/src/audio.rs": "09af95eec032ef94336e716edd85fef81d3e8a68b33b8d5e1abad542a354e182",
+      "eva/src/audio/pulse_playback.rs": "0b55c660cecbe87634ee04c0288b5376942da77d61d9c85a95cbb308252da7aa",
+      "eva/src/errors.rs": "9a5d476c0176d3bb9a33f0fa8eac7b92064d7e7fdf7d476013ff5d969afa24c4",
+      "eva/src/providers/openai_realtime.rs": "27dcaac1912bd758aacf432d746a94f27eefbe2b2c4afc43858acdd90ea97151",
+      "eva/src/session.rs": "ad1995580a27ee0025e9920f0769435f693c8ca36970621b34721b288c50cf46"
+    },
+    "installed_eva_sha256": "80ce19390e6e7a8580a286b3155cb018ca508e9d5e95dad73f18d1f8ec6a1765",
+    "built_eva_sha256": "80ce19390e6e7a8580a286b3155cb018ca508e9d5e95dad73f18d1f8ec6a1765"
+  },
+  "configuration_changes": {
+    "feedback": {
+      "before": "brief",
+      "after": "voice"
+    },
+    "half_duplex": {
+      "before": true,
+      "after": false
+    },
+    "follow_up_ms": {
+      "before": 5000,
+      "after": 30000
+    },
+    "feedback_max_output_tokens": {
+      "before": 256,
+      "after": 1024
+    }
+  },
+  "cases": [
+    {
+      "id": "C01",
+      "generation": 3,
+      "request": "切到第三个桌面",
+      "result": "passed_for_desktop_execution",
+      "verified_visible_tag_mask": 4,
+      "feedback": "local_tone",
+      "user_report": "已切换，但没有语音回复",
+      "note": "brief configuration uses a tone for simple success; no spoken-reply pass claimed",
+      "speech_end_to_verified_ms": 2738.3,
+      "microphone_released": true
+    },
+    {
+      "id": "C02",
+      "generation": 4,
+      "request": "切到第三个桌面",
+      "result": "partial",
+      "desktop_execution": "succeeded",
+      "feedback": "text_fallback",
+      "note": "first upgraded attempt; failure retained"
+    },
+    {
+      "id": "C03",
+      "generation": 5,
+      "request": [
+        "切到第三个桌面",
+        "换成网格布局"
+      ],
+      "result": "passed_for_actions_and_followup",
+      "same_session_turns": [
+        1,
+        2
+      ],
+      "verified_tag_number": 3,
+      "verified_layout": "grid",
+      "user_report": "两步都成功，也有语音回复",
+      "spoken_reply_completeness": "not_passed; both replies fell back early"
+    },
+    {
+      "id": "C04",
+      "generation": 6,
+      "request": "撤销刚才的布局修改",
+      "result": "not_passed",
+      "error_code": "undo_conflict",
+      "verified_workspace_3_layout": "grid",
+      "user_report": "布局恢复，但是没有语音，并且马上浮层关闭",
+      "note": "workspace 1 being tile did not prove workspace 3 was restored; conflict refusal did not provide spoken feedback"
+    },
+    {
+      "id": "C05",
+      "generation": 7,
+      "request": "请从一数到十",
+      "result": "not_passed",
+      "user_report": "只回复了好的，没有数数，我说结束对话然后正常退出",
+      "feedback_failure": "playback_queue_overflow",
+      "voice_session_end_user_confirmed": true
+    },
+    {
+      "id": "C06",
+      "generations": [
+        8,
+        9,
+        10
+      ],
+      "result": "not_passed",
+      "user_report": "等待服务超时",
+      "observed_cloud_configuration": "succeeded",
+      "speech_started_observed": false,
+      "daemon_error": "connect_timeout",
+      "note": "precise timeout source was not captured; later silent probe generation 11 entered Listening and released audio normally"
+    },
+    {
+      "id": "C07",
+      "generation": 12,
+      "request": "请从一数到十",
+      "result": "not_passed",
+      "user_report": "文字提示无法理解",
+      "error_code": "plan_invalid"
+    },
+    {
+      "id": "C08",
+      "generation": 13,
+      "request": "请从一数到十",
+      "result": "partial",
+      "user_report": "数到5就停止了",
+      "invalid_discovery_categories_repaired": true,
+      "feedback_failure": "feedback_failed",
+      "configured_feedback_output_limit": 256,
+      "note": "API status_details was not retained; no claim that the server explicitly reported max_output_tokens"
+    },
+    {
+      "id": "C09",
+      "generation": 14,
+      "request": "请从一数到十",
+      "spoken_count": "passed",
+      "user_report": "完整数到十，并正常退出",
+      "native_playback": "drained",
+      "voice_end": "not_passed",
+      "session_failure": "audio_sequence_invalid",
+      "note": "overlay closing was initially mistaken for normal completion; backend failure is retained"
+    },
+    {
+      "id": "C10",
+      "generation": 15,
+      "request": [
+        "把当前桌面改成网格布局",
+        "撤销刚才的布局修改"
+      ],
+      "result": "not_passed",
+      "set_layout": "verified_succeeded",
+      "voice_undo": "clarify; no undo action dispatched",
+      "user_report": "改成网格成功，但撤销失败",
+      "local_reply": "当前没有可继续的任务，请重新描述要做的操作。",
+      "followup_failure": "audio_sequence_invalid"
+    },
+    {
+      "id": "C11",
+      "generation": 16,
+      "kind": "local_cleanup",
+      "result": "not_scored_as_voice",
+      "local_undo_request": "accepted",
+      "later_daemon_error": "undo_conflict",
+      "workspace_1_final_layout": "tile",
+      "note": "postcondition observed; cleanup request is not counted as a successful voice undo or clean executor pass"
+    },
+    {
+      "id": "C12",
+      "generation": 17,
+      "request": [
+        "请从一数到二十",
+        "别数了，关闭麦克风"
+      ],
+      "result": "not_passed_for_barge_in",
+      "user_report": "没能打断",
+      "speech_interrupted_event_observed": false,
+      "first_feedback_failure": "pulse_playback_underrun",
+      "later_turns_observed": [
+        2,
+        3
+      ],
+      "session_finally_released_resources": true,
+      "note": "playback underrun prevents treating this as a clean isolated test of barge-in; subsequent replies and session close do not prove interruption success"
+    }
+  ],
+  "implemented_fixes": [
+    {
+      "change": "cancellable playback backpressure with two-second backlog and a three-second stall deadline",
+      "evidence": "native PulseAudio four-second burst drained in 4034 ms; real count to ten fully played",
+      "remaining_issue": "real streamed reply still encountered pulse_playback_underrun in final case"
+    },
+    {
+      "change": "known undo preflight refusals become spoken conversational results; transport and authority failures remain fatal",
+      "evidence": "offline refusal and boundary regression passed",
+      "remaining_issue": "real voice undo was classified as task continuation and did not reach the executor"
+    },
+    {
+      "change": "one bounded repair for invalid read-only discovery categories, with original audio ownership and no newly loaded actions",
+      "evidence": "real generation 13 recovered invalid_discovery_categories; offline malformed-category and budget tests passed"
+    },
+    {
+      "change": "ignore unowned server commit receipts without claiming input or disturbing a different pending item",
+      "evidence": "offline ownership, duplicate, stale-prefix and subsequent fresh-input regression passed",
+      "live_regression_scope": "final session had later turns without audio_sequence_invalid; the ignored-receipt branch itself was not directly identified in that session"
+    },
+    {
+      "change": "fixed safe diagnostic codes for feedback and session failures",
+      "evidence": "privacy regression passed; no raw provider messages, audio, credentials or window titles in this report"
+    }
+  ],
+  "local_checks": {
+    "eva_lib": {
+      "passed": 188,
+      "failed": 0,
+      "ignored": 4
+    },
+    "core_lib": {
+      "passed": 40,
+      "failed": 0,
+      "ignored": 0
+    },
+    "undo_ipc": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    "native_pulse": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "burst_seconds": 4,
+      "burst_drain_ms": 4034,
+      "fixture": "synthetic private server, no hardware"
+    },
+    "native_pipewire_24k": {
+      "passed": 2,
+      "failed": 0,
+      "fixture": "synthetic private graph"
+    },
+    "native_pipewire_48k": {
+      "passed": 2,
+      "failed": 0,
+      "fixture": "synthetic private graph; 24k client PCM"
+    },
+    "rustfmt": "passed",
+    "git_diff_check": "passed",
+    "strict_clippy": {
+      "result": "failed",
+      "existing_errors": 12,
+      "categories": [
+        "collapsible_if",
+        "needless_borrow",
+        "large_enum_variant"
+      ],
+      "baseline_source_patterns_confirmed": true
+    },
+    "clippy_with_only_baseline_categories_allowed": "passed"
+  },
+  "remaining_failures": [
+    "voice undo is misclassified as continuation of an absent pending task",
+    "barge-in did not pass; final streamed reply had pulse_playback_underrun",
+    "transient pre-speech timeout source remains unproven"
+  ],
+  "not_tested": [
+    "mini wake-word standby and handoff",
+    "full semantic corpus success rate",
+    "Wayland physical device session",
+    "lock-screen and physical device unplug matrix",
+    "P50/P95 latency"
+  ],
+  "final_resources": {
+    "native": {
+      "active": false,
+      "state": "idle",
+      "microphone_active": false,
+      "wake_requested": false,
+      "wake_microphone_active": false,
+      "visible": false
+    },
+    "eva_input_streams": 0,
+    "eva_output_streams": 0,
+    "all_input_streams": 0,
+    "all_output_streams": 0
+  },
+  "local_usage_snapshot": {
+    "account_total": false,
+    "settled_microusd": 264250,
+    "unknown_reserved_microusd": 100000,
+    "note": "configured local estimates; not the account bill"
+  },
+  "privacy": {
+    "raw_audio_saved": false,
+    "transcripts_persisted": false,
+    "credentials_in_report": false,
+    "full_window_titles_in_report": false
+  }
+}
