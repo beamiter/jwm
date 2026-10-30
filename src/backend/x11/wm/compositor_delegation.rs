@@ -753,6 +753,11 @@ macro_rules! delegate_compositor_capabilities {
                 overlay: Option<crate::backend::api::SystemUiOverlay>,
             ) {
                 let mut overlay = overlay;
+                if let Some(overlay) = &mut overlay {
+                    overlay.window_preview = overlay.window_preview
+                        .and_then(|window| self.ids.x11(window).ok())
+                        .map(|xid| WindowId::from_raw(u64::from(xid)));
+                }
                 // The compositor keys its window textures by XID and never
                 // sees a WindowId — expose crosses this boundary
                 // pre-translated the same way — so the tags grid's live cell

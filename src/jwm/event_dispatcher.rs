@@ -1829,11 +1829,15 @@ impl Jwm {
                     }
                     SystemUiHitTarget::Preview => {
                         // Wallpaper side preview: apply the highlighted
-                        // candidate — the pointer twin of Enter. Other
-                        // panels never paint a preview, so the hit is a
-                        // no-op there.
+                        // candidate — the pointer twin of Enter. A minimized
+                        // window thumbnail uses the same guarded activation
+                        // as its row; unrelated panels keep this hit inert.
                         if self.features.system_ui.is_wallpaper_picker() {
                             self.apply_selected_wallpaper(backend);
+                        } else if self.features.system_ui.is_restore_preview()
+                            && let Err(error) = self.activate_launcher_selection(backend)
+                        {
+                            error!("Error restoring previewed window: {error}");
                         }
                     }
                     SystemUiHitTarget::Outside => {
@@ -2968,6 +2972,7 @@ mod tests {
         scroll_epoch: u64,
         system_ui_scroll_t: Option<f32>,
         system_ui_hover_updates: Vec<Option<usize>>,
+        system_ui_updates: Vec<Option<crate::backend::api::SystemUiOverlay>>,
         /// Every lock-shade payload pushed, newest last.
         monitor_shade_pushes: Vec<Vec<crate::backend::api::MonitorShade>>,
         x11_client_list: bool,
@@ -3036,6 +3041,7 @@ mod tests {
                 scroll_epoch: 0,
                 system_ui_scroll_t: None,
                 system_ui_hover_updates: Vec::new(),
+                system_ui_updates: Vec::new(),
                 monitor_shade_pushes: Vec::new(),
                 x11_client_list: false,
                 track_drags: false,
@@ -3224,6 +3230,12 @@ mod tests {
 
         fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
             self.system_ui_hover_updates.push(row);
+        }
+        fn compositor_set_system_ui(
+            &mut self,
+            overlay: Option<crate::backend::api::SystemUiOverlay>,
+        ) {
+            self.system_ui_updates.push(overlay);
         }
 
         fn compositor_system_ui_hit_test(&self, _x: f64, _y: f64) -> SystemUiHitTarget {
@@ -6952,7 +6964,7 @@ mod tests {
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
 
         // Positive control: this fixture really has a usable bound action.
-        let expected = jwm.calculate_next_tag(1);
+        let expected = jwm.calculate_next_tag(-1);
         assert_ne!(expected, before);
         let cfg = crate::config::CONFIG.load();
         EventHandler::handle_event(
@@ -7287,7 +7299,7 @@ mod tests {
         let cfg = crate::config::CONFIG.load();
         let id = crate::backend::gesture_swipe::next_swipe_id();
         let before = jwm.state.monitors[monitor].get_active_tags();
-        let expected = jwm.calculate_next_tag(1);
+        let expected = jwm.calculate_next_tag(-1);
         let mut destination = crate::core::models::WMClient::new(WindowId::from_raw(0x990));
         destination.mon = Some(monitor);
         destination.state.tags = expected;
@@ -7400,6 +7412,80 @@ mod tests {
             assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
             assert_eq!(backend.swipe_finishes, [(false, !capture)]);
         }
+    }
+
+    #[test]
+    fn three_finger_actions_use_left_right_tags_and_preserve_a_restore_choice() {
+        use crate::backend::gesture_swipe::{SwipeInput, next_swipe_id};
+        let (mut jwm, monitor, _, _) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let source = jwm.state.monitors[monitor].get_active_tags();
+        let left = jwm.calculate_next_tag(-1);
+        let swipe = |jwm: &mut Jwm, backend: &mut RenderSpyBackend, dx, dy| {
+            let id = next_swipe_id();
+            send_test_swipe(
+                jwm,
+                backend,
+                SwipeInput::Begin {
+                    id,
+                    fingers: 3,
+                    config_signature: crate::config::CONFIG.load().gesture_swipe_signature(),
+                },
+            );
+            send_test_swipe(
+                jwm,
+                backend,
+                SwipeInput::Update {
+                    id,
+                    dx,
+                    dy,
+                    time: 100,
+                },
+            );
+            send_test_swipe(
+                jwm,
+                backend,
+                SwipeInput::End {
+                    id,
+                    cancelled: false,
+                    time: 120,
+                },
+            );
+        };
+        swipe(&mut jwm, &mut backend, -100.0, 0.0);
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), left);
+        swipe(&mut jwm, &mut backend, 100.0, 0.0);
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), source);
+        let selected = jwm.get_selected_client_key().unwrap();
+        let window = jwm.state.clients[selected].win;
+        swipe(&mut jwm, &mut backend, 0.0, -100.0);
+        assert!(jwm.state.clients[selected].state.is_hidden);
+        swipe(&mut jwm, &mut backend, 0.0, 100.0);
+        assert!(jwm.features.system_ui.is_restore_preview());
+        assert!(
+            jwm.state.clients[selected].state.is_hidden,
+            "opening the picker cannot restore a window"
+        );
+        assert_eq!(
+            backend
+                .system_ui_updates
+                .last()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .window_preview,
+            Some(window)
+        );
+        backend.system_ui_hit = SystemUiHitTarget::Preview;
+        jwm.dispatch_pointer_press(
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(!jwm.state.clients[selected].state.is_hidden);
+        assert!(!jwm.features.system_ui.is_active());
     }
 
     #[test]

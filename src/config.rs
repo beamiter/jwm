@@ -1559,8 +1559,8 @@ pub struct GestureSwipeConfig {
 
 fn default_gesture_swipe() -> Vec<GestureSwipeConfig> {
     [
-        ("left", "loopview", 1),
-        ("right", "loopview", -1),
+        ("left", "loopview", -1),
+        ("right", "loopview", 1),
         ("up", "minimize", 0),
         ("down", "restore_preview", 0),
     ]
@@ -8875,8 +8875,8 @@ mod tests {
         let bindings = &cfg.behavior().gesture_swipe;
         assert_eq!(bindings.len(), 4);
         for (binding, (direction, function, step)) in bindings.iter().zip([
-            ("left", "loopview", 1),
-            ("right", "loopview", -1),
+            ("left", "loopview", -1),
+            ("right", "loopview", 1),
             ("up", "minimize", 0),
             ("down", "restore_preview", 0),
         ]) {

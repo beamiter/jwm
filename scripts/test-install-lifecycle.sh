@@ -97,6 +97,7 @@ awk -F '\t' '
     NR == 1 { sub("format 2", "format 1") }
     $1 == "built" && ($2 == "jwm-remote" || $2 == "jwm-player" || $2 == "jwm-shell" || $2 == "tauri_leptos_bar") { next }
     $2 == "bridge/dist/jwm-player.desktop" || $2 == "bridge/dist/jwm-video.desktop" || $2 == "scripts/jwm-toggle-sidebar-mode" { next }
+    $2 == "packaging/69-jwm-touchpad-gestures.rules" { next }
     { print }
 ' \
     "$MANIFEST" > "$LEGACY_MANIFEST"

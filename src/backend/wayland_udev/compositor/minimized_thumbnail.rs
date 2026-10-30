@@ -400,6 +400,29 @@ impl MinimizedThumbnailState {
 }
 
 impl WaylandCompositor {
+    #[cfg(test)]
+    pub(super) fn install_minimized_snapshot_for_tests(
+        &mut self,
+        window_id: u64,
+        texture: u32,
+        width: u32,
+        height: u32,
+    ) {
+        let generation = self.minimized_thumbnails.ensure_generation(window_id);
+        self.minimized_thumbnails.gpu.insert(
+            window_id,
+            MinimizedGpuSnapshot {
+                texture,
+                width,
+                height,
+                has_alpha: false,
+                generation,
+                storage: SnapshotTextureStorage::CpuTopLeftUpload,
+                last_use: 0,
+            },
+        );
+    }
+
     pub(super) fn arm_minimized_snapshot_capture(&mut self, window_id: u64) -> bool {
         self.minimized_thumbnails.arm_capture(window_id)
     }

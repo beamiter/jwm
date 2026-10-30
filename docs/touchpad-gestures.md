@@ -1,13 +1,17 @@
 # Touchpad workspace swipes
 
 In native Wayland (udev/DRM) and supported X11 sessions, three-finger swipes switch the
-selected monitor's tags by default: swipe left for the next tag and right
-for the previous tag. The ends wrap around. This uses the same `loopview`
+selected monitor's tags by default: swipe left for the previous (left) tag and
+right for the next (right) tag. The ends wrap around. This uses the same `loopview`
 action as keyboard navigation, including per-tag layout and view updates.
 These are JWM workspace/tag changes, not browser tabs or window tab groups.
 Swipe up to minimize the selected window. Swipe down to open the minimized
 window restore preview, then choose a window to restore; dismissing the preview
 does not restore anything.
+The restore picker shows the highlighted window's retained thumbnail beside
+the list. Hover or keyboard navigation changes the thumbnail; clicking a row
+or the thumbnail, or pressing Enter, restores just that window. Escape leaves
+all minimized windows untouched.
 
 With JWM compositing and animations enabled, horizontal workspace swipes
 move the outgoing and incoming workspace images with your fingers. Pull back
@@ -55,8 +59,8 @@ The following defaults apply when `behavior.gesture_swipe` is absent:
 gesture_swipe_threshold = 80.0
 
 gesture_swipe = [
-  { fingers = 3, direction = "left", function = "loopview", argument = 1 },
-  { fingers = 3, direction = "right", function = "loopview", argument = -1 },
+  { fingers = 3, direction = "left", function = "loopview", argument = -1 },
+  { fingers = 3, direction = "right", function = "loopview", argument = 1 },
   { fingers = 3, direction = "up", function = "minimize", argument = 0 },
   { fingers = 3, direction = "down", function = "restore_preview", argument = 0 },
 ]
@@ -90,13 +94,25 @@ Both the x11rb and xcb backends use a small dedicated XInput connection in
 JWM itself. The server must implement XInput 2.4 and the input driver/device
 must emit swipe gestures. Older servers or unsupported touchpads keep normal
 pointer and keyboard operation; JWM logs why the native swipe hook could not
-be enabled. No external gesture daemon or direct `/dev/input` access is used.
+be enabled. When the Xorg driver omits gesture classes, JWM can use its own
+gesture-only libinput context for the affected touchpads. The context never
+grabs a device and leaves pointer motion, clicks and scrolling with Xorg.
+Touchpads already exposed through XI2.4 are excluded from the fallback.
+
+The source/release installers ship `69-jwm-touchpad-gestures.rules`, granting
+the active local seat access only to touchpad event nodes without keyboard
+capability. The fallback monitors logind activity and udev hotplug directly;
+inactive sessions close their device handles and cancel ongoing swipes.
+It does not require membership in the `input` group or a root WM. For a manual
+installation, copy the rule to `/usr/lib/udev/rules.d`, reload udev rules, then
+trigger a change for touchpad event nodes. No external gesture daemon is used.
 
 X11 briefly holds a swipe Begin to inspect its finger count. Configured
 counts are accepted immediately; other counts are replayed to the original
 application. Two-finger scrolling and pinch gestures are not grabbed. As on
 Wayland, all swipe directions for a configured finger count belong to JWM.
-An already-active application pointer grab can prevent delivery of a swipe.
+An already-active application pointer grab can prevent delivery through XI2.4;
+the gesture-only libinput fallback is independent of application pointer grabs.
 
 The xcb build also links x11rb for this protocol connection because its xcb
 protocol bindings do not yet describe XInput 2.4 gestures. Wayland-only
@@ -119,3 +135,12 @@ workspace images and monitor clipping. These tests exercise code and render
 paths without emulating physical touchpad characteristics. Check threshold,
 flick feel, device removal, VT resume and fractional-scale multi-monitor
 behavior on the actual laptop before selecting personal sensitivity values.
+
+For the current X11 desktop, `python3 scripts/test-touchpad-gestures-x11.py --live`
+creates a temporary virtual touchpad and one fixture window on an unused tag.
+It checks all four directions, release-only commits, short/reversed/diagonal
+cancellation, and pointer positions over the desktop and each screen edge.
+It restores the original tag, focus and pointer and archives its result and
+restore-picker capture under `artifacts/touchpad/live-x11`. Only creation of
+the virtual touchpad uses the short-lived sudo helper. This exercises the
+kernel/libinput/WM path; personal finger feel still needs the physical pad.

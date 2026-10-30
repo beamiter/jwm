@@ -1208,6 +1208,9 @@ pub struct SystemUiOverlay {
     /// stay strings across this boundary — pixels never cross it. A payload
     /// without the field (any other panel, or none) retires the preview.
     pub side_preview: Option<String>,
+    /// The restore picker's highlighted minimized window. Its retained pixels
+    /// are drawn beside the list without restoring or moving the client.
+    pub window_preview: Option<WindowId>,
     /// The search field is selected for replace after a click in it.
     pub query_selected: bool,
     /// While the pointer is dragging the list scroll track, the thumb sits

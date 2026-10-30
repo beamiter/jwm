@@ -2687,7 +2687,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// means nothing was drawn and nothing is protected.
     #[allow(clippy::too_many_arguments)]
     fn render_system_ui_side_preview(
-        &self,
+        &mut self,
         proj: &[f32; 16],
         overlay: &crate::backend::api::SystemUiOverlay,
         viewport: [f32; 4],
@@ -2695,12 +2695,30 @@ impl<C: CompositorConnection> Compositor<C> {
         content_a: f32,
         ui: &UiPalette,
     ) -> Option<panel::Rect> {
-        let (tex, img_w, img_h) = match (&self.system_ui_preview, &overlay.side_preview) {
-            (Some((path, tex, w, h)), Some(want)) if path == want => (*tex, *w, *h),
-            _ => return None,
+        let (tex, img_w, img_h, uv_rect, opacity) = if let Some(window) = overlay.window_preview {
+            let source =
+                self.minimized_render_source(window.raw() as u32, ThumbnailPurpose::HoverPreview)?;
+            (
+                source.texture,
+                source.width,
+                source.height,
+                source.uv_rect,
+                if source.has_alpha {
+                    -content_a
+                } else {
+                    content_a
+                },
+            )
+        } else {
+            match (&self.system_ui_preview, &overlay.side_preview) {
+                (Some((path, tex, w, h)), Some(want)) if path == want => {
+                    (*tex, *w as f32, *h as f32, [0.0, 0.0, 1.0, 1.0], content_a)
+                }
+                _ => return None,
+            }
         };
         let frame = panel::side_preview_frame(card, viewport)?;
-        let [ix, iy, iw, ih] = panel::letterbox(frame, img_w as f32, img_h as f32)?;
+        let [ix, iy, iw, ih] = panel::letterbox(frame, img_w, img_h)?;
         unsafe {
             // The backing is a small panel-surface card; under a glass theme
             // it frosts from the same backdrop the list card samples.
@@ -2723,8 +2741,13 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, proj);
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-            self.gl
-                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl.uniform_4_f32(
+                self.win_uniforms.uv_rect.as_ref(),
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
+            );
             self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
             self.gl
                 .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), -1.0);
@@ -2732,7 +2755,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
             self.gl
-                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), content_a);
+                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
             self.gl.uniform_1_f32(
                 self.win_uniforms.radius.as_ref(),
                 panel::preview_radius(iw, ih),

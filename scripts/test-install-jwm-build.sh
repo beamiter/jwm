@@ -5,7 +5,8 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
-mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$TEST_ROOT/bin"
+mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
+cp "$ROOT/packaging/69-jwm-touchpad-gestures.rules" "$REPO/packaging/"
 cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
 cp "$ROOT/eva/dist/eva.toml" "$ROOT/eva/dist/jwm-eva.service" "$REPO/eva/dist/"
 cat > "$REPO/scripts/ensure_pipewire.sh" <<'STUB'
@@ -171,6 +172,7 @@ run_case() {
         grep -Fq '<-p> <jwm-bridge> <--bins>' "$CASE_DIR/cargo.log" || fail 'bridge/player build missing'
         grep -Fq "$resolved/$mode/jwm" "$CASE_DIR/system.log" || fail 'artifact path mismatch'
         grep -Fq "install -m755 $resolved/$mode/jwm-player /usr/local/bin/" "$CASE_DIR/system.log" || fail 'player artifact not installed'
+        grep -Fq '69-jwm-touchpad-gestures.rules /usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules' "$CASE_DIR/system.log" || fail 'touchpad access rule not installed'
         for desktop in jwm-player.desktop jwm-video.desktop; do
             grep -Fq "install -Dm644 $REPO/bridge/dist/$desktop /usr/local/share/applications/$desktop" "$CASE_DIR/system.log" || fail "player desktop entry missing: $desktop"
         done

@@ -92,9 +92,10 @@ default = [
 ]
 # Internal: shared X11 transport helpers and the GLX/EGL compositor.
 # Enabled through the per-transport features; not selected directly.
-# Both X11 transports use a separate XI2.4 connection for touchpad gestures.
+# Both X11 transports use a separate XI2.4 connection for touchpad gestures,
+# with a seat-local libinput fallback for drivers without gesture classes.
 # rust-xcb's protocol XML predates XI2.4; keep this out of Wayland-only builds.
-x11-backends = ["dep:x11", "dep:x11rb-protocol", "dep:x11rb"]
+x11-backends = ["dep:x11", "dep:x11rb-protocol", "dep:x11rb", "dep:input", "dep:udev", "dep:libloading"]
 # Internal: shared Smithay Wayland frontend. Enabled through the per-backend
 # Wayland features; not selected directly.
 wayland-backends = ["dep:smithay"]
@@ -122,7 +123,7 @@ backend-wayland-udev = [
 ]
 # Optional newer libinput API for disable-while-trackpointing. The default
 # native backend keeps Smithay's libinput 1.19 baseline.
-libinput-1-21 = ["backend-wayland-udev", "dep:input"]
+libinput-1-21 = ["backend-wayland-udev", "dep:input", "input/libinput_1_21"]
 # ALSA audio capture: standalone audio recording and the screen-recording
 # audio track. Without it recording is video-only and audio capture reports
 # that it is not compiled in.
@@ -156,7 +157,9 @@ required-features = ["remote-x11"]
 
 [dependencies]
 jwm_eva_core = { path = "crates/jwm_eva_core" }
-input = { version = "0.10.0", default-features = false, features = ["libinput_1_21"], optional = true }
+input = { version = "0.10.0", default-features = false, features = ["libinput_1_19"], optional = true }
+udev = { version = "0.9", optional = true }
+libloading = { version = "0.8.9", optional = true }
 jwm_ipc_transport = { path = "crates/jwm_ipc_transport" }
 clap = { version = "4.6.2", features = ["derive", "env"] }
 dirs = "7.0.0"

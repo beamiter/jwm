@@ -1,0 +1,3 @@
+# Give the active local seat access to touchpad gestures when an older Xorg
+# input driver does not expose XI2.4. Never grant access to keyboard devices.
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ENV{ID_INPUT_TOUCHPAD}=="1", ENV{ID_INPUT_KEYBOARD}!="1", TAG+="uaccess"

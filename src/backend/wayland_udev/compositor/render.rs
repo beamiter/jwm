@@ -7373,7 +7373,7 @@ impl WaylandCompositor {
     /// means nothing was drawn and nothing is protected.
     #[allow(clippy::too_many_arguments)]
     unsafe fn render_system_ui_side_preview(
-        &self,
+        &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         overlay: &crate::backend::api::SystemUiOverlay,
@@ -7383,12 +7383,37 @@ impl WaylandCompositor {
         ui: &UiPalette,
         scene_linear: bool,
     ) -> Option<panel::Rect> {
-        let (tex, img_w, img_h) = match (&self.system_ui_preview, &overlay.side_preview) {
-            (Some((path, tex, w, h)), Some(want)) if path == want => (*tex, *w, *h),
-            _ => return None,
-        };
+        let (tex, img_w, img_h, uv_rect, opacity, color_transform) =
+            if let Some(window) = overlay.window_preview {
+                let source =
+                    self.minimized_render_source(gl, window.raw(), ThumbnailPurpose::HoverPreview)?;
+                (
+                    source.texture,
+                    source.width,
+                    source.height,
+                    source.uv_rect,
+                    if source.has_alpha {
+                        -content_a
+                    } else {
+                        content_a
+                    },
+                    source.color_transform,
+                )
+            } else {
+                match (&self.system_ui_preview, &overlay.side_preview) {
+                    (Some((path, tex, w, h)), Some(want)) if path == want => (
+                        *tex,
+                        *w as f32,
+                        *h as f32,
+                        [0.0, 0.0, 1.0, 1.0],
+                        content_a,
+                        None,
+                    ),
+                    _ => return None,
+                }
+            };
         let frame = panel::side_preview_frame(card, viewport)?;
-        let [ix, iy, iw, ih] = panel::letterbox(frame, img_w as f32, img_h as f32)?;
+        let [ix, iy, iw, ih] = panel::letterbox(frame, img_w, img_h)?;
         unsafe {
             // The backing is a small panel-surface card; under a glass theme
             // it frosts from the same backdrop the list card samples.
@@ -7412,23 +7437,34 @@ impl WaylandCompositor {
             gl.UseProgram(self.program);
             self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
             gl.Uniform1i(self.win_uniforms.texture, 0);
-            gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+            gl.Uniform4f(
+                self.win_uniforms.uv_rect,
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
+            );
             gl.Uniform1f(self.win_uniforms.desat, 0.0);
             gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
-            gl.Uniform1f(self.win_uniforms.opacity, content_a);
+            gl.Uniform1f(self.win_uniforms.opacity, opacity);
             gl.Uniform1f(self.win_uniforms.radius, panel::preview_radius(iw, ih));
             gl.Uniform2f(self.win_uniforms.size, iw, ih);
             self.set_rect_uniform(gl, self.win_uniforms.rect, ix, iy, iw, ih);
             // A decoded sRGB image on the display-encoded overlay target: no
             // color transform, no scene-linear decode — the state the card's
             // own overlay passes use.
-            self.upload_window_color_transform(gl, None, scene_linear);
+            let color_plan = retained_color_plan(
+                RetainedTexturePass::DockPreview,
+                color_transform,
+                scene_linear,
+            );
+            self.upload_retained_color_plan(gl, color_plan);
             gl.ActiveTexture(ffi::TEXTURE0);
             self.bind_window_texture(gl, tex);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
-            self.reset_window_color_transform(gl);
+            self.reset_retained_color_plan(gl, color_plan);
             // Back to the border program the card's fills draw with.
             gl.UseProgram(self.border_program);
             self.set_projection_uniform(gl, self.border_uniforms.projection, projection);

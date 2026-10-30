@@ -499,6 +499,17 @@ impl Jwm {
         self.system_ui_dirty = false;
         let active = self.features.system_ui.is_active();
         let viewport = self.system_ui_viewport();
+        let window_preview = self
+            .features
+            .system_ui
+            .restore_preview_target()
+            .flatten()
+            .and_then(|key| self.state.clients.get(key))
+            .filter(|client| client.state.is_hidden)
+            .map(|client| client.win);
+        if let Some(window) = window_preview {
+            backend.compositor_ensure_minimized_window_visual(window);
+        }
         backend.compositor_set_system_ui(active.then(|| {
             let mut parts = self.features.system_ui.overlay_parts();
             if direct_command_from_launcher(&self.features.system_ui).is_some() {
@@ -566,6 +577,7 @@ impl Jwm {
                     .system_ui
                     .selected_wallpaper()
                     .map(str::to_string),
+                window_preview,
                 query_selected: self.system_ui_query_replace,
                 scroll_drag_t: self.system_ui_scroll_drag_t,
                 list_viewport: parts
@@ -1983,7 +1995,7 @@ impl Jwm {
 
     /// Activate the launcher's current result. Returns `true` when the panel
     /// was consumed (copied, focused, or launched).
-    fn activate_launcher_selection(
+    pub(crate) fn activate_launcher_selection(
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -2244,15 +2256,16 @@ impl Jwm {
         backend: &mut dyn Backend,
         hit: Option<(usize, f32)>,
     ) {
-        // Keep motion allocation- and I/O-free. Direct command validation can
+        // Keep ordinary row motion allocation- and I/O-free. Direct command validation can
         // stat an explicit path, so that exceptional synthetic row is checked
         // only on click; ordinary and calculator rows resolve from memory.
         //
         // Over the selected notification's action strip the row's action
         // cursor follows the chip under the pointer, so a Return or a digit
         // right after acts on what the pointer is over — the within-row
-        // counterpart of the switcher's pill following the pointer row. Only
-        // a cursor that really moved repaints, and only the strip's row ever
+        // counterpart of the switcher's pill following the pointer row. The
+        // restore picker also selects on hover to update its retained image.
+        // A cursor that really moved repaints, and only the strip's row ever
         // measures text: ordinary rows keep hover free of both.
         if let Some((row, text_x)) = hit
             && self.features.system_ui.notification_strip_visible_row() == Some(row)
@@ -2264,6 +2277,15 @@ impl Jwm {
         let row = hit
             .map(|(row, _)| row)
             .filter(|row| self.features.system_ui.visible_row_target(*row).is_some());
+        if self.features.system_ui.is_restore_preview()
+            && let Some(row) = row
+        {
+            let previous = self.features.system_ui.selected_window();
+            let _ = self.features.system_ui.select_visible_row(row);
+            if self.features.system_ui.selected_window() != previous {
+                self.sync_system_ui(backend);
+            }
+        }
         backend.compositor_set_system_ui_hover(row);
     }
 

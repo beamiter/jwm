@@ -924,6 +924,13 @@ build_and_install_jwm() {
     install_system_binary "$target_dir/jwm-support" /usr/local/bin
     install_system_binary "$target_dir/jwm-remote" /usr/local/bin
     install_system_binary "$PROJECT_ROOT/scripts/jwm-toggle-sidebar-mode" /usr/local/bin
+    sudo install -Dm644 "$PROJECT_ROOT/packaging/69-jwm-touchpad-gestures.rules" \
+        /usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules
+    if command -v udevadm >/dev/null 2>&1; then
+        sudo udevadm control --reload-rules || warn "udev 规则将在下次设备发现时生效"
+        sudo udevadm trigger --action=change --subsystem-match=input --property-match=ID_INPUT_TOUCHPAD=1 --sysname-match='event*' || \
+            warn "触摸板访问规则将在下次设备发现时生效"
+    fi
 
     # Shared data is kept outside the executable and installed for both build modes.
     sudo install -Dm644 "$PROJECT_ROOT/assets/astronomy/earth-nasa-october.jpg" \

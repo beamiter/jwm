@@ -115,6 +115,7 @@ valid_stable_path() {
         usr/local/bin/jwm-player|\
         usr/local/bin/jwm-shell|\
         usr/local/bin/jwm-toggle-sidebar-mode|\
+        usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
         usr/local/bin/tauri_leptos_bar|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\

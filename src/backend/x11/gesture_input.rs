@@ -5,7 +5,7 @@
 //! A synchronous swipe-only passive grab lets us replay unconfigured finger
 //! counts intact. Never do user work between a Begin and AllowEvents + flush.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
@@ -17,6 +17,7 @@ use x11rb::protocol::xinput::{
 use x11rb::protocol::{Event, xproto};
 use x11rb::rust_connection::RustConnection;
 
+use super::gesture_fallback::GestureFallback;
 use crate::backend::api::BackendEvent;
 use crate::backend::gesture_status::{RuntimeStatus, change_status};
 use crate::backend::gesture_swipe::{GestureSwipeTracker, SwipeInput, next_swipe_id};
@@ -56,6 +57,10 @@ pub(crate) struct GestureEventSource {
     failed: bool,
     gesture_devices: usize,
     devices_dirty: bool,
+    native_supported: bool,
+    fallback: Option<GestureFallback>,
+    fallback_error: Option<String>,
+    fallback_failed: bool,
 }
 
 impl GestureEventSource {
@@ -87,11 +92,7 @@ impl GestureEventSource {
             status.server_version = Some((version.major_version, version.minor_version));
             status.available = (version.major_version, version.minor_version) >= (2, 4);
         });
-        if (version.major_version, version.minor_version) < (2, 4) {
-            return Err(
-                io::Error::other("XInput 2.4 is unavailable; touchpad swipes disabled").into(),
-            );
-        }
+        let native_supported = (version.major_version, version.minor_version) >= (2, 4);
         // Diagnostics only: keep the AllMasterDevices grab available for
         // hotplug even when no capable physical touchpad is currently present.
         let devices = conn.xinput_xi_query_device(ALL_DEVICES)?.reply()?;
@@ -123,6 +124,14 @@ impl GestureEventSource {
             }],
         )?
         .check()?;
+        let (mut fallback, fallback_error) = match GestureFallback::new() {
+            Ok(fallback) => (Some(fallback), None),
+            Err(error) => (None, Some(error)),
+        };
+        if let Some(fallback) = &mut fallback {
+            fallback
+                .set_native_devices(native_names(&devices.infos), disabled_names(&devices.infos));
+        }
         let mut source = Self {
             conn,
             root,
@@ -134,8 +143,13 @@ impl GestureEventSource {
             failed: false,
             gesture_devices: capable,
             devices_dirty: false,
+            native_supported,
+            fallback,
+            fallback_error,
+            fallback_failed: false,
         };
         source.sync_config()?;
+        source.poll_fallback();
         Ok(source)
     }
 
@@ -149,7 +163,10 @@ impl GestureEventSource {
         self.config_signature = signature;
         self.pending.clear();
         self.cancel_active();
-        let enabled = counts.iter().any(|enabled| *enabled);
+        if let Some(fallback) = &mut self.fallback {
+            fallback.reset();
+        }
+        let enabled = self.native_supported && counts.iter().any(|enabled| *enabled);
         if enabled && !self.grabbed {
             let reply = self
                 .conn
@@ -204,14 +221,46 @@ impl GestureEventSource {
     }
 
     fn publish_status(&self) {
+        let fallback_count = if self.fallback_failed {
+            0
+        } else {
+            self.fallback
+                .as_ref()
+                .map_or(0, GestureFallback::device_count)
+        };
+        let denied = self.fallback.as_ref().map_or(0, |fallback| fallback.denied);
+        let session_active = self.fallback.as_ref().map(GestureFallback::session_active);
         change_status(|status| {
-            status.gesture_devices = self.gesture_devices;
-            status.active = self.grabbed && !self.failed;
+            status.available = self.native_supported || self.fallback.is_some();
+            status.native_gesture_devices = self.gesture_devices;
+            status.fallback_gesture_devices = fallback_count;
+            status.provider = if fallback_count > 0 && self.gesture_devices > 0 {
+                "xinput2.4+libinput"
+            } else if fallback_count > 0 {
+                "libinput"
+            } else {
+                "xinput2.4"
+            }
+            .into();
+            status.gesture_devices = self.gesture_devices + fallback_count;
+            status.session_active = session_active;
+            status.active = (self.grabbed || fallback_count > 0)
+                && !self.failed
+                && session_active != Some(false);
             status.state = if self.failed {
                 "failed"
-            } else if !self.grabbed {
+            } else if !self.grabbed
+                && fallback_count == 0
+                && configured_counts(&CONFIG.load().behavior().gesture_swipe)
+                    .iter()
+                    .all(|enabled| !*enabled)
+            {
                 "disabled"
-            } else if self.gesture_devices == 0 {
+            } else if session_active == Some(false) {
+                "suspended"
+            } else if self.gesture_devices + fallback_count == 0 && denied > 0 {
+                "permission_denied"
+            } else if self.gesture_devices + fallback_count == 0 {
                 "awaiting_device"
             } else {
                 "ready"
@@ -219,10 +268,17 @@ impl GestureEventSource {
             .into();
             status.reason = if self.failed {
                 status.reason.take()
-            } else if !self.grabbed {
+            } else if status.state == "disabled" {
                 Some("No valid swipe bindings configured".into())
-            } else if self.gesture_devices == 0 {
-                Some("No gesture-capable touchpad exposed by the X server".into())
+            } else if status.state == "suspended" {
+                Some("The local login session is inactive".into())
+            } else if self.gesture_devices + fallback_count == 0 && denied > 0 {
+                Some("Touchpad gestures require seat-local device access; install packaging/69-jwm-touchpad-gestures.rules".into())
+            } else if self.gesture_devices + fallback_count == 0 {
+                Some(self.fallback_error.clone().unwrap_or_else(|| {
+                    "No gesture-capable touchpad exposed by the X server or active local seat"
+                        .into()
+                }))
             } else {
                 None
             };
@@ -246,9 +302,37 @@ impl GestureEventSource {
                         .any(|class| matches!(&class.data, xinput::DeviceClassData::Gesture(_)))
             })
             .count();
+        if let Some(fallback) = &mut self.fallback {
+            fallback
+                .set_native_devices(native_names(&devices.infos), disabled_names(&devices.infos));
+        }
         self.devices_dirty = false;
         self.publish_status();
         Ok(())
+    }
+
+    fn poll_fallback(&mut self) {
+        if self.fallback_failed {
+            return;
+        }
+        let enabled = configured_counts(&CONFIG.load().behavior().gesture_swipe)
+            .iter()
+            .any(|enabled| *enabled);
+        if let Some(fallback) = &mut self.fallback {
+            match fallback.poll(enabled) {
+                Ok(events) => self
+                    .pending
+                    .extend(events.into_iter().map(BackendEvent::GestureSwipe)),
+                Err(error) => {
+                    self.fallback_error = Some(format!("Touchpad fallback failed: {error}"));
+                    self.fallback_failed = true;
+                    self.pending
+                        .extend(fallback.stop().into_iter().map(BackendEvent::GestureSwipe));
+                    log::warn!("Touchpad fallback failed: {error}");
+                }
+            }
+        }
+        self.publish_status();
     }
 
     fn map_event(&mut self, event: Event) -> GestureResult<Option<BackendEvent>> {
@@ -385,7 +469,12 @@ impl GestureEventSource {
                     // Recheck here before allowing the event loop to sleep.
                     continue;
                 }
-                return Ok(false);
+                self.poll_fallback();
+                return Ok(!self.pending.is_empty()
+                    || self
+                        .fallback
+                        .as_ref()
+                        .is_some_and(|fallback| fallback.needs_wake));
             };
             if let Some(event) = self.map_event(event)? {
                 self.pending.push_back(event);
@@ -459,6 +548,29 @@ fn accepts_count(counts: &[bool; 6], fingers: u32) -> bool {
     counts.get(fingers as usize).copied().unwrap_or(false)
 }
 
+fn native_names(devices: &[xinput::XIDeviceInfo]) -> HashSet<String> {
+    devices
+        .iter()
+        .filter(|device| {
+            device.enabled
+                && device.type_ == xinput::DeviceType::SLAVE_POINTER
+                && device
+                    .classes
+                    .iter()
+                    .any(|class| matches!(&class.data, xinput::DeviceClassData::Gesture(_)))
+        })
+        .map(|device| String::from_utf8_lossy(&device.name).into_owned())
+        .collect()
+}
+
+fn disabled_names(devices: &[xinput::XIDeviceInfo]) -> HashSet<String> {
+    devices
+        .iter()
+        .filter(|device| !device.enabled && device.type_ == xinput::DeviceType::SLAVE_POINTER)
+        .map(|device| String::from_utf8_lossy(&device.name).into_owned())
+        .collect()
+}
+
 fn fixed_to_f64(value: i32) -> f64 {
     f64::from(value) / 65536.0
 }
@@ -508,6 +620,10 @@ impl EventSource for GestureEventSource {
                         self.fail_open(error);
                         return Ok(PostAction::Continue);
                     }
+                    self.poll_fallback();
+                    while let Some(event) = self.pending.pop_front() {
+                        callback(event, &mut ());
+                    }
                     break;
                 }
                 Err(error) => {
@@ -550,7 +666,18 @@ impl EventSource for GestureEventSource {
         self.wake_token = Some(token);
         // SAFETY: self.conn owns the socket until after unregister/source drop.
         let fd = unsafe { BorrowedFd::borrow_raw(self.conn.stream().as_raw_fd()) };
-        unsafe { poll.register(fd, Interest::READ, Mode::Level, token) }
+        unsafe {
+            poll.register(fd, Interest::READ, Mode::Level, token)?;
+        }
+        if let Some(fallback) = &self.fallback {
+            for raw in fallback.fds() {
+                let fd = unsafe { BorrowedFd::borrow_raw(raw) };
+                unsafe {
+                    poll.register(fd, Interest::READ, Mode::Level, token_factory.token())?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn reregister(
@@ -561,12 +688,25 @@ impl EventSource for GestureEventSource {
         let token = token_factory.token();
         self.wake_token = Some(token);
         let fd = unsafe { BorrowedFd::borrow_raw(self.conn.stream().as_raw_fd()) };
-        poll.reregister(fd, Interest::READ, Mode::Level, token)
+        poll.reregister(fd, Interest::READ, Mode::Level, token)?;
+        if let Some(fallback) = &self.fallback {
+            for raw in fallback.fds() {
+                let fd = unsafe { BorrowedFd::borrow_raw(raw) };
+                poll.reregister(fd, Interest::READ, Mode::Level, token_factory.token())?;
+            }
+        }
+        Ok(())
     }
 
     fn unregister(&mut self, poll: &mut Poll) -> calloop::Result<()> {
         let fd = unsafe { BorrowedFd::borrow_raw(self.conn.stream().as_raw_fd()) };
         poll.unregister(fd)?;
+        if let Some(fallback) = &self.fallback {
+            for raw in fallback.fds() {
+                let fd = unsafe { BorrowedFd::borrow_raw(raw) };
+                poll.unregister(fd)?;
+            }
+        }
         self.wake_token = None;
         Ok(())
     }

@@ -10,6 +10,7 @@ built	jwm-bridge	bin/jwm-bridge	usr/local/bin/jwm-bridge	0755
 built	jwm-player	bin/jwm-player	usr/local/bin/jwm-player	0755
 built	jwm-shell	bin/jwm-shell	usr/local/bin/jwm-shell	0755
 repo-file	scripts/jwm-toggle-sidebar-mode	bin/jwm-toggle-sidebar-mode	usr/local/bin/jwm-toggle-sidebar-mode	0755
+repo-file	packaging/69-jwm-touchpad-gestures.rules	share/udev/rules.d/69-jwm-touchpad-gestures.rules	usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules	0644
 repo-file	vendor/pixels/LICENSE	share/licenses/pixels/LICENSE	-	0644
 repo-file	vendor/pixels/JWM-DISPLAY-PATCH.md	share/licenses/pixels/JWM-DISPLAY-PATCH.md	-	0644
 built	tauri_leptos_bar	bin/tauri_leptos_bar	usr/local/bin/tauri_leptos_bar	0755

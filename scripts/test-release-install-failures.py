@@ -16,7 +16,7 @@ def bundle(version, legacy=False):
  b=p/('bundle-'+version); payload=b/('payload/usr/local/lib/jwm/versions/'+version);payload.mkdir(parents=True)
  entries=manifest.read_text().splitlines()
  if legacy:
-  entries=[l for l in entries if not any(name in l for name in ['jwm-player','jwm-player.desktop','jwm-video.desktop'])]
+  entries=[l for l in entries if not any(name in l for name in ['jwm-player','jwm-player.desktop','jwm-video.desktop','69-jwm-touchpad-gestures.rules'])]
  shutil.copy(patch,b/'install-release.sh');(b/'release-manifest.tsv').write_text('\n'.join(entries)+'\n');(b/'VERSION').write_text(version+'\n')
  for l in entries:
   if not l or l.startswith('#'):continue

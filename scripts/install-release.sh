@@ -123,6 +123,7 @@ valid_stable_path() {
         usr/local/bin/jwm-player|\
         usr/local/bin/jwm-shell|\
         usr/local/bin/jwm-toggle-sidebar-mode|\
+        usr/lib/udev/rules.d/69-jwm-touchpad-gestures.rules|\
         usr/local/bin/tauri_leptos_bar|\
         usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
@@ -884,6 +885,11 @@ fi
 # Register Open With metadata only; never change the user's MIME defaults.
 # DESTDIR runs, including packaging tests, never touch the host's app cache.
 if [[ -z $DESTDIR ]]; then
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules || printf '%s\n' 'install-release: reload udev rules after installation' >&2
+        udevadm trigger --action=change --subsystem-match=input --property-match=ID_INPUT_TOUCHPAD=1 --sysname-match='event*' || \
+            printf '%s\n' 'install-release: touchpad access rules will apply at the next device discovery' >&2
+    fi
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database /usr/local/share/applications || \
             printf '%s\n' 'install-release: desktop application cache refresh failed' >&2

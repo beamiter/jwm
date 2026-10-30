@@ -262,6 +262,13 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        let window_preview = overlay.as_ref().and_then(|ui| ui.window_preview);
+        if window_preview != self.system_ui.as_ref().and_then(|ui| ui.window_preview)
+            && let Some(window) = window_preview
+        {
+            self.touch_minimized_snapshot(window.raw() as u32);
+            self.arm_minimized_gpu_upload(window.raw() as u32);
+        }
         if overlay.is_none() || overlay.as_ref().is_some_and(|ui| ui.filmstrip.is_some()) {
             self.system_ui_hit_geometry = None;
         }

@@ -2565,6 +2565,81 @@ fn wayland_workspace_swipe_moves_both_images_and_clips_to_the_owner_monitor() {
 }
 
 #[test]
+fn wayland_restore_preview_draws_the_selected_hidden_window_without_restoring_it() {
+    use crate::backend::{api::SystemUiOverlay, common_define::WindowId};
+    use smithay::backend::renderer::gles::ffi;
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 1024;
+    const H: i32 = 768;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false).unwrap();
+        for (id, color) in [(1, [240, 20, 30, 255]), (2, [20, 30, 240, 255])] {
+            let texture = create_element_texture(&gl, 128, 96, &color.repeat(128 * 96));
+            compositor.install_minimized_snapshot_for_tests(id, texture, 128, 96);
+            compositor.minimized_windows.insert(id);
+        }
+        for id in [1, 2] {
+            let overlay = SystemUiOverlay {
+                title: "RESTORE WINDOWS".into(),
+                items: vec!["Selected minimized window".into()],
+                selected: Some(0),
+                window_preview: Some(WindowId::from_raw(id)),
+                ..Default::default()
+            };
+            compositor.set_system_ui(Some(overlay));
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+            // Settle only the UI's opening spring. The normal full-frame path
+            // supplies all GL state used by its retained-window thumbnail.
+            compositor.system_ui_island.advance_with_motion(
+                std::time::Instant::now(),
+                400.0,
+                200.0,
+                false,
+            );
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+            let pixels = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+            let red = pixels
+                .chunks_exact(4)
+                .filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80)
+                .count();
+            let blue = pixels
+                .chunks_exact(4)
+                .filter(|p| p[2] > 180 && p[0] < 80 && p[1] < 80)
+                .count();
+            if id == 1 {
+                assert!(
+                    red > 1000 && blue < red / 2,
+                    "red preview pixels: red={red}, blue={blue}"
+                );
+            } else {
+                assert!(
+                    blue > 1000 && red < blue / 2,
+                    "blue preview pixels: red={red}, blue={blue}"
+                );
+            }
+            assert_eq!(
+                compositor.minimized_windows.len(),
+                2,
+                "preview never restores either client"
+            );
+            assert!(
+                compositor.windows.is_empty(),
+                "preview uses retained snapshots without a live surface"
+            );
+        }
+        assert!(
+            compositor
+                .release_gpu_resources(&gl, super::CompositorOutputTextureOwnership::RawCompositor)
+        );
+    }
+}
+
+#[test]
 fn wayland_transition_shader_decodes_the_encoded_snapshot_for_a_linear_target() {
     let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping transition domain test");
