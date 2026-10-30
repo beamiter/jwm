@@ -638,3 +638,62 @@ Rust 1.97.1。下文的文字探针通过已安装的 daemon 执行 `jwm-eva dry
 - 口头反馈：执行类结果应在一两句内结束并进入继续说话窗口；“请从一数到十”不被截断。
 - 真实语音轮次的响应数与句末到核验完成的延迟分位数。
 - 自然打断、同会话语音撤销等既有待实测项不变。
+
+## 2026-10-30 预热连接、离线指标报告与规划归一化补充
+
+本轮基线为 master `5d004e37`（上一节的推送结果）。环境同上：用户 X11 桌面、PulseAudio、
+`gpt-realtime-2.1-mini`、Rust 1.97.1。
+
+### 改动前的证据（`jwm-eva report --since today`，覆盖本日 45 个会话、45 个语音轮次）
+
+| 指标 | 数值 |
+|---|---|
+| 激活到 `audio_and_cloud_ready`（冷连接，n=34） | P50 1721 ms / P95 2991 ms / 最大 4917 ms |
+| 每轮模型响应数 | 1 个 15 轮、2 个 24 轮、3 个及以上 5 轮（均值 1.73）；发现 34 次、修复 8 次 |
+| 句末到规划完成 / 到核验完成 | P50 3080 / 3051 ms，P95 6382 / 6383 ms |
+| 句末到首段语音 / 到反馈结束 | P50 4167 / 5964 ms，P95 7629 / 25498 ms |
+| 回复播放时长 | P50 731 ms，P95 21441 ms |
+| 本日已结算费用 | 0.4183 美元（plan 0.1894、feedback 0.1090、discovery 0.0902、schema_repair 0.0297） |
+
+这些数字大多来自本日早些时候的旧构建，是本轮改动的对照基线，不是改动后的测量。
+
+### 改动
+
+1. **预热连接** `[openai].keep_warm = true`（默认）：daemon 空闲且无演练时，`warm` 任务保持一条
+   已完成 `session.update` 校验的标准版会话；不上传音频、上下文、工具，也不创建响应，因此无
+   token 费用。激活时先 1.5 s 内 ping/pong 探测存活，再交给会话；探测失败记录 `warm_stale` 并
+   走原冷连接路径；`cloud_ready.result = "warm"` 标记复用。每 30 s ping 保活，`session.created`
+   的 `expires_at` 前 5 分钟或 50 分钟后轮换；断开按 5 s 起、最长 5 分钟退避，凭据/权限类永久
+   错误 10 分钟一次。`status --json` 新增 `warm` 状态；日志 `warm_ready`/`warm_taken`/`warm_lost`/
+   `warm_rotated`/`warm_connect_failed`/`warm_stale`/`warm_handoff` 只含固定类别码。执行许可与
+   执行上下文仍在激活时向 JWM 获取，预热连接不携带任何授权。
+2. **`jwm-eva report`**：从 journal（或 `--input` 文件）离线汇总会话数、激活到就绪（冷/预热分开）、
+   每轮响应数分布、发现/修复/拒绝/归一化次数、句末到规划/核验/首段语音/反馈结束的 P50/P95/最大值、
+   回复播放时长、核验结果、按阶段费用与 token、待机门控与预热事件计数；`--json` 输出完整数据。
+   没有 `session_epoch` 的记录（如 `feedback_completed`）归到该会话同一 turn 的最新 epoch。
+3. 规划上下文新增 `local_time`（分钟精度），时间日期类问题可直接作为对话回答。
+4. 名为 `noop`、无参数的占位动作在校验前去除（`plan_normalized` 固定类别 `placeholder_noop_action`）；
+   只剩占位动作的 execute 计划仍按原规则拒绝并修复。
+5. `Realtime` 新增 `probe`/`ping`；探测期间收到的文本事件缓存后由 `next` 按序返回，API error
+   事件使探测失败。
+
+### 本地验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --locked --offline -p jwm_eva_core -p jwm-eva -p jwm_ipc_client` | 316 passed / 0 failed / 6 ignored；新增 warm 回环（配置、单次交接、自动重连、断开替换、退避与错误码、轮换时间）、provider probe、report 解析与分位数、占位动作归一化测试 |
+| Clippy（既有豁免）、`cargo fmt --check`、`git diff --check` | 通过 |
+| 安装 | release 与已安装二进制 sha256 `b854108f5cc0…`；服务 active，`doctor` ready |
+| 预热连接实机 | 每次服务重启后约 2.5 s 内 `warm.state = ready`，journal 记录 `warm_ready`（`expiry_known`）；三次重启均如此 |
+| `jwm-eva report` 实机 | 对本日 886 条记录输出上表；`--json` 可用 |
+
+修复过程记录：预热任务首次运行前若已被启用，`watch::changed()` 会因未读版本多重连一次，
+测试 `failed_connections_back_off_and_report_the_error_code` 捕获后改为 `borrow_and_update`。
+
+### 待实测
+
+- 真实快捷键激活：`jwm-eva report` 中 `activation→ready` 的 warm 分布应明显低于冷连接
+  （目标 P50 ≤ 300 ms），`cloud_ready.result` 为 `warm`；长时间空闲（> 50 分钟）后激活仍应复用
+  轮换后的连接；网络中断后 `warm.state = waiting` 并自动恢复。
+- 预热连接是否被服务端在空闲一段时间后关闭（`warm_lost` 频率）；若频繁，调整 ping 间隔。
+- 其余待实测项（待机门控、口头反馈时长、自然打断）不变。

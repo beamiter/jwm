@@ -46,6 +46,18 @@ enum Command {
         text: String,
     },
     Undo,
+    /// Offline latency, response-count and cost metrics from Eva's own
+    /// telemetry records (the user journal by default, or a saved file).
+    Report {
+        /// journalctl --since expression, for example "today" or "-2h".
+        #[arg(long, default_value = "today")]
+        since: String,
+        /// Read telemetry lines from a file instead of the user journal.
+        #[arg(long)]
+        input: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 #[derive(Subcommand)]
 enum ConfigCommand {
@@ -105,6 +117,7 @@ async fn run(args: Cli) -> io::Result<()> {
             }
             | Command::Status { .. }
             | Command::Capabilities { .. }
+            | Command::Report { .. }
     ) {
         Config::default()
     } else {
@@ -255,6 +268,61 @@ async fn run(args: Cli) -> io::Result<()> {
         Command::Undo => {
             daemon::ensure_running(&c).await?;
             print(daemon::control(json!({"command":"undo"})).await?);
+        }
+        Command::Report { since, input, json } => {
+            let lines: Vec<String> = match input {
+                Some(path) => std::fs::read_to_string(path)?
+                    .lines()
+                    .map(str::to_owned)
+                    .collect(),
+                None => {
+                    // `since` is passed as a separate argv item; refuse values
+                    // that journalctl would read as another option.
+                    if since.is_empty()
+                        || since.starts_with('-')
+                            && since.len() > 1
+                            && !since[1..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_digit())
+                    {
+                        return Err(io::Error::other("invalid --since expression"));
+                    }
+                    let output = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        tokio::process::Command::new("journalctl")
+                            .args([
+                                "--user",
+                                "-u",
+                                "jwm-eva.service",
+                                "-o",
+                                "cat",
+                                "--no-pager",
+                                "--since",
+                                &since,
+                            ])
+                            .kill_on_drop(true)
+                            .output(),
+                    )
+                    .await
+                    .map_err(|_| io::Error::other("journalctl timeout"))??;
+                    if !output.status.success() {
+                        return Err(io::Error::other(
+                            "journalctl failed; use --input FILE with saved telemetry lines",
+                        ));
+                    }
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .map(str::to_owned)
+                        .collect()
+                }
+            };
+            let report = jwm_eva::report::analyze(lines);
+            if json {
+                print(report);
+            } else {
+                print!("{}", jwm_eva::report::render(&report, &since));
+            }
         }
     }
     Ok(())

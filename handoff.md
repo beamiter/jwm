@@ -1,3 +1,30 @@
+## 2026-10-30 — Eva: warm Realtime session, offline report, placeholder cleanup
+
+- Baseline from the new `jwm-eva report` over today's journal (45 sessions,
+  45 turns, mostly earlier builds): activation→ready cold P50 1721 ms / P95
+  2991 ms; speech end→feedback done P50 5.96 s / P95 25.5 s; 1.73 model
+  responses per turn; $0.4183 settled.
+- Warm session: `[openai].keep_warm` (default on) keeps one configured
+  standard-model session open while idle (no audio, context, tools or
+  responses, so no token cost and no authority). Activation probes it with a
+  ping/pong inside 1.5 s, records `warm_handoff`/`cloud_ready.result=warm`, and
+  falls back to the cold path on `warm_stale`. Rotation before server expiry
+  (5 min margin) or after 50 min, 30 s keepalive pings, backoff 5 s→5 min,
+  permanent errors retried every 10 min. `status --json` exposes `warm`.
+- `jwm-eva report [--since X | --input FILE] [--json]`: per-session and
+  per-turn latencies (P50/P95/max), response-count distribution, discovery and
+  repair rounds, results, cost and tokens by phase, standby gate and warm
+  counters. Records without `session_epoch` map to the newest epoch of that
+  session's turn.
+- Planning context gains `local_time`; placeholder `noop` actions are dropped
+  (`plan_normalized`/`placeholder_noop_action`), an empty execute still
+  repairs. Provider gains `probe`/`ping` with buffered interleaved events.
+- Validation: 316 passed / 0 failed / 6 ignored; clippy (existing allowances),
+  fmt and diff --check pass. Installed release sha `b854108f…`; warm keeper
+  reaches ready within ~2.5 s of every restart (`warm_ready`, expiry known).
+  Real hotkey activation latency with the warm session is a user acceptance
+  item (docs/eva-acceptance.md).
+
 ## 2026-10-30 — Eva: one-response planning, local standby gate, bounded spoken results
 
 - Evidence first. Today's journal showed about 1.9 model responses per voice

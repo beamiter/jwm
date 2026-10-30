@@ -47,7 +47,11 @@ section!(Openai {
     plan_deadline_ms: u64 = 30000, plan_max_output_tokens: u32 = 4096, feedback_max_output_tokens: u32 = 1024,
     // Spoken feedback for a verified desktop outcome is one or two sentences;
     // open conversation (noop) keeps the full feedback_max_output_tokens.
-    feedback_result_max_output_tokens: u32 = 256
+    feedback_result_max_output_tokens: u32 = 256,
+    // Keep one configured standard-model session open while idle so the
+    // hotkey skips TCP/TLS/WebSocket and session setup. No audio or inference
+    // is sent before activation, so an idle warm session has no token cost.
+    keep_warm: bool = true
 });
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

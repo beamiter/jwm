@@ -206,6 +206,9 @@ pub async fn run(c: Config) -> io::Result<()> {
     // wake request may establish a fresh, non-authoritative standby session.
     let _ = command("assistant_control", json!({"action":"cancel"})).await;
     let store = Arc::new(Mutex::new(Store::open()?));
+    // The warm keeper is enabled from the actor loop only while nothing else
+    // owns the standard model; it never activates or uploads on its own.
+    let warm = crate::warm::Warm::spawn(c.clone());
     let (request_tx, mut requests) = mpsc::channel::<Request>(16);
     let local_request_tx = request_tx.clone();
     let accept = tokio::spawn(async move {
@@ -292,7 +295,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     }));continue;
                 }
                 let response=match request.request["command"].as_str().unwrap_or(""){
-                    "status"=>json!({"success":true,"data":status,"assistant_permit":permit,"pid":std::process::id(),"configuration_id":c.fingerprint(),"model":c.openai.model,"wake_requested":wake_requested,"wake_generation":wake_generation,"wake_model":c.wake_word.model,"wake":wake_status}),
+                    "status"=>json!({"success":true,"data":status,"assistant_permit":permit,"pid":std::process::id(),"configuration_id":c.fingerprint(),"model":c.openai.model,"wake_requested":wake_requested,"wake_generation":wake_generation,"wake_model":c.wake_word.model,"wake":wake_status,"warm":warm.status()}),
                     "undo" if permit.is_some() && request.request.get("assistant_permit").is_none_or(|requested|serde_json::to_value(permit.as_ref().unwrap()).is_ok_and(|p|p==*requested)) && ["listening","follow_up","responding"].contains(&status["state"].as_str().unwrap_or(""))=>{
                         error_until=None;
                         stop(&mut worker,&mut cancellation).await;
@@ -479,12 +482,15 @@ pub async fn run(c: Config) -> io::Result<()> {
                         status=json!({"state":"connecting","text":"正在连接","microphone_active":microphone_active});
                         if microphone_active {let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"connecting","text":"正在处理唤醒指令","microphone_active":true})).await;}
                         let (cancel_tx,cancel_rx)=watch::channel(false);cancellation=Some(cancel_tx);
-                        worker=Some(tokio::spawn(session::run_with_handoff(c.clone(),p,updates_tx.clone(),store.clone(),cancel_rx,handoff_for_next.take())));
+                        let warm_socket=if c.openai.keep_warm {warm.take().await} else {None};
+                        worker=Some(tokio::spawn(session::run_with_handoff(c.clone(),p,updates_tx.clone(),store.clone(),cancel_rx,handoff_for_next.take(),warm_socket)));
                     }
                 }
+                warm.set_enabled(c.openai.keep_warm && worker.is_none());
             }
         }
     }
+    warm.stop();
     let shutdown_source = wake_recovery
         .source()
         .cloned()

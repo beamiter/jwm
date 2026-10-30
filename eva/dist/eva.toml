@@ -49,6 +49,11 @@ feedback_max_output_tokens = 1024
 # sentences within this budget; chat/knowledge replies (noop) keep the full
 # feedback_max_output_tokens so counting or explanations are not cut off.
 feedback_result_max_output_tokens = 256
+# Keep one configured standard-model session open while Eva is idle, so the
+# hotkey skips the connection and session setup (about two seconds). Nothing is
+# uploaded before activation; an idle warm session costs no tokens. The session
+# is rotated before the server expiry and reconnected with backoff if it drops.
+keep_warm = true
 
 [turn_detection]
 # Semantic VAD waits for the meaning of a sentence rather than only a silent gap.

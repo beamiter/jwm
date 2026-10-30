@@ -2,7 +2,7 @@ use crate::config::Config;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::{io, sync::Arc, time::Duration};
+use std::{collections::VecDeque, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -17,6 +17,8 @@ pub struct Realtime {
     created: bool,
     configured: bool,
     expected_session: Option<Value>,
+    /// Text events read while probing liveness; `next` returns them in order.
+    pending: VecDeque<String>,
 }
 impl Realtime {
     #[cfg(test)]
@@ -32,7 +34,12 @@ impl Realtime {
             created: true,
             configured: true,
             expected_session: None,
+            pending: VecDeque::new(),
         })
+    }
+    /// A session whose `session.updated` matched the expected settings.
+    pub fn is_configured(&self) -> bool {
+        self.configured
     }
     pub async fn connect(config: &Config, key: &str) -> io::Result<Self> {
         let mut url =
@@ -115,6 +122,7 @@ impl Realtime {
                 created: false,
                 configured: false,
                 expected_session: None,
+                pending: VecDeque::new(),
             })
         };
         tokio::time::timeout(
@@ -137,10 +145,61 @@ impl Realtime {
         .map_err(|_| io::Error::other("realtime_write_timeout"))?
         .map_err(|_| io::Error::other("realtime_write_failed"))
     }
+    /// Send a WebSocket ping; the pong is consumed silently by `next`/`probe`.
+    pub async fn ping(&mut self) -> io::Result<()> {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.socket.send(Message::Ping(Vec::new().into())),
+        )
+        .await
+        .map_err(|_| io::Error::other("realtime_write_timeout"))?
+        .map_err(|_| io::Error::other("realtime_write_failed"))
+    }
+    /// Prove the connection is alive with a ping/pong round trip. Text events
+    /// that arrive meanwhile are kept for `next`; an API error event or a
+    /// closed socket fails the probe.
+    pub async fn probe(&mut self, timeout: Duration) -> io::Result<()> {
+        tokio::time::timeout(timeout, async {
+            self.socket
+                .send(Message::Ping(Vec::new().into()))
+                .await
+                .map_err(|_| io::Error::other("realtime_write_failed"))?;
+            loop {
+                match self.socket.next().await {
+                    Some(Ok(Message::Pong(_))) => return Ok(()),
+                    Some(Ok(Message::Text(text))) => {
+                        let event: Value = serde_json::from_str(&text)
+                            .map_err(|_| io::Error::other("invalid_realtime_json"))?;
+                        if event["type"] == "error" {
+                            return Err(api_error(&event));
+                        }
+                        self.pending.push_back(text.as_str().to_owned());
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        self.socket
+                            .send(Message::Pong(data))
+                            .await
+                            .map_err(|_| io::Error::other("realtime_ping_failed"))?;
+                    }
+                    _ => return Err(io::Error::other("realtime_disconnected")),
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("realtime_probe_timeout"))?
+    }
     pub async fn next(&mut self) -> io::Result<Value> {
         loop {
-            match self.socket.next().await {
-                Some(Ok(Message::Text(text))) => {
+            let message = if let Some(text) = self.pending.pop_front() {
+                Message::Text(text.into())
+            } else {
+                match self.socket.next().await {
+                    Some(Ok(message)) => message,
+                    _ => return Err(io::Error::other("realtime_disconnected")),
+                }
+            };
+            match message {
+                Message::Text(text) => {
                     let event: Value = serde_json::from_str(&text)
                         .map_err(|_| io::Error::other("invalid_realtime_json"))?;
                     if event["type"] == "session.created" {
@@ -164,7 +223,7 @@ impl Realtime {
                     }
                     return Ok(event);
                 }
-                Some(Ok(Message::Ping(data))) => {
+                Message::Ping(data) => {
                     tokio::time::timeout(
                         Duration::from_secs(2),
                         self.socket.send(Message::Pong(data)),
@@ -173,7 +232,7 @@ impl Realtime {
                     .map_err(|_| io::Error::other("realtime_ping_timeout"))?
                     .map_err(|_| io::Error::other("realtime_ping_failed"))?;
                 }
-                Some(Ok(Message::Pong(_))) => {}
+                Message::Pong(_) => {}
                 _ => return Err(io::Error::other("realtime_disconnected")),
             }
         }
@@ -225,6 +284,37 @@ fn native_tls_connector() -> io::Result<Connector> {
         return Err(io::Error::other("realtime_tls_native_roots_unavailable"));
     }
     Ok(Connector::Rustls(tls_config(roots)?))
+}
+/// Connect, wait for `session.created`, apply the standard session settings and
+/// confirm `session.updated` matches them. Returns the server-reported session
+/// expiry (Unix seconds) when present. Nothing else is sent: no audio, context,
+/// tools or response, so a session prepared this way has no token cost.
+pub async fn connect_configured(c: &Config, key: &str) -> io::Result<(Realtime, Option<u64>)> {
+    let mut ws = Realtime::connect(c, key).await?;
+    let expires_at = complete_handshake(&mut ws, c).await?;
+    Ok((ws, expires_at))
+}
+/// Drive `session.created` → `session.update` → verified `session.updated`
+/// on a fresh socket, within the configured connect timeout.
+pub async fn complete_handshake(ws: &mut Realtime, c: &Config) -> io::Result<Option<u64>> {
+    tokio::time::timeout(Duration::from_millis(c.openai.connect_timeout_ms), async {
+        let mut expires_at = None;
+        loop {
+            let event = ws.next().await?;
+            if event["type"] == "session.created" {
+                expires_at = event["session"]["expires_at"].as_u64();
+                ws.configure(c).await?;
+            }
+            if event["type"] == "session.updated" {
+                if !ready_with(&event, c) {
+                    return Err(io::Error::other("realtime_configuration_mismatch"));
+                }
+                return Ok(expires_at);
+            }
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("connect_timeout"))?
 }
 pub fn validate_pcm(pcm: &[u8]) -> io::Result<()> {
     if pcm.is_empty() || !pcm.len().is_multiple_of(2) || pcm.len() > 96_000 {
@@ -392,6 +482,71 @@ pub const INSTRUCTIONS: &str = r#"你是 Eva，JWM 原生桌面助手。理解�
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    #[tokio::test]
+    async fn probe_round_trips_a_pong_and_keeps_interleaved_events_for_next() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            // An idle server event arrives before the pong; probe must keep it.
+            ws.send(Message::Text(
+                json!({"type":"rate_limits.updated"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            // Reading answers pings with pongs automatically.
+            while let Some(Ok(message)) = ws.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        });
+        let mut ws = Realtime::connect_loopback(address).await.unwrap();
+        ws.probe(Duration::from_secs(3)).await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["type"], "rate_limits.updated");
+        drop(ws);
+        let _ = tokio::time::timeout(Duration::from_secs(3), server).await;
+    }
+    #[tokio::test]
+    async fn probe_fails_on_an_api_error_or_a_closed_socket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            ws.send(Message::Text(
+                json!({"type":"error","error":{"code":"invalid_api_key"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            while let Some(Ok(_)) = ws.next().await {}
+            let (socket, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            drop(ws);
+        });
+        let mut ws = Realtime::connect_loopback(address).await.unwrap();
+        assert_eq!(
+            ws.probe(Duration::from_secs(3))
+                .await
+                .unwrap_err()
+                .to_string(),
+            "auth_failed"
+        );
+        drop(ws);
+        let mut closed = Realtime::connect_loopback(address).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(closed.probe(Duration::from_secs(3)).await.is_err());
+        drop(closed);
+        let _ = tokio::time::timeout(Duration::from_secs(3), server).await;
+    }
     #[test]
     fn rate_limits_and_billing_failures_have_distinct_sanitized_recovery_codes() {
         for (kind, expected) in [
