@@ -544,7 +544,11 @@ impl Host {
             panel.layer.wl_surface().set_input_region(Some(&region));
             region.destroy();
             let sensor = self.compositor.wl_compositor().create_region(qh, ());
-            if shown && config.mode(panel.scene.edge) == RevealMode::Hover {
+            if shown
+                && config.mode(panel.scene.edge) != RevealMode::Disabled
+                && (config.mode(panel.scene.edge) == RevealMode::Hover
+                    || !panel.scene.reveal.visible())
+            {
                 let p = panel.scene.sensor_rect;
                 let (x, y) = content_offset(self.state.output, p, panel.scene.edge);
                 sensor.add(
@@ -674,11 +678,7 @@ impl Host {
                 ctx.save()?;
                 ctx.rectangle(x, y, w, h);
                 ctx.clip();
-                match painter.panel.edge {
-                    BarEdge::Left => painter.left(x, y, w, h)?,
-                    BarEdge::Right => painter.right(x, y, w, h)?,
-                    _ => painter.bottom(x, y, w, h)?,
-                };
+                painter.draw(x, y, w, h)?;
                 ctx.restore()?;
             } else {
                 panel.scene.hits.clear();
@@ -1010,7 +1010,15 @@ impl Host {
                     if hit.slider.is_some() {
                         self.slider(&hit, y);
                     } else if hit.contains(x, y) {
-                        if hit.action == Action::CycleTasks {
+                        if hit.action == Action::HidePanel {
+                            let panel = &mut self.panels[index];
+                            panel.scene.reveal.dismiss();
+                            panel.scene.hovered = None;
+                            if panel.scene.edge == BarEdge::Bottom {
+                                self.set_preview(None);
+                                self.withdraw_geometry();
+                            }
+                        } else if hit.action == Action::CycleTasks {
                             self.panels[index].scene.task_offset += 1;
                         } else {
                             self.send(hit.action);

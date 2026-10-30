@@ -1,0 +1,45 @@
+From 645ce1764ad44d709b8ddfdcfd564fd06d1d8dc6 Mon Sep 17 00:00:00 2001
+From: Nic <162764842+Nic-Polumeyv@users.noreply.github.com>
+Date: Tue, 21 Jul 2026 01:02:50 -0700
+Subject: [PATCH] [GTK][Skia] ShareableBitmap::paint ignores
+ CompositeOperator::Copy https://bugs.webkit.org/show_bug.cgi?id=319864
+
+Reviewed by Carlos Garcia Campos.
+
+BackingStore::incorporateUpdate sets CompositeOperator::Copy on the
+GraphicsContext before painting update rects into the persistent backing
+store, so that transparent webviews overwrite the previous frame instead of
+blending over it. The Skia ShareableBitmap::paint implementation calls the
+raw SkCanvas with a null SkPaint, which defaults to SrcOver and silently
+discards the requested operator.
+
+On a transparent webview every partial update therefore blends over the
+previous frame's pixels: opaque content that shrinks or moves leaves
+permanent trails, and semi-transparent content accumulates opacity on every
+repaint, until the backing store is reallocated. Map CompositeOperator::Copy
+to SkBlendMode::kSrc; all other callers keep the default SrcOver.
+
+* Source/WebCore/platform/graphics/skia/ShareableBitmapSkia.cpp:
+(WebCore::ShareableBitmap::paint): Honor CompositeOperator::Copy.
+
+Canonical link: https://commits.webkit.org/317608@main
+---
+ .../WebCore/platform/graphics/skia/ShareableBitmapSkia.cpp   | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WebCore/platform/graphics/skia/ShareableBitmapSkia.cpp b/Source/WebCore/platform/graphics/skia/ShareableBitmapSkia.cpp
+index 70e59977b27af..b1587c3e3fc77 100644
+--- a/Source/WebCore/platform/graphics/skia/ShareableBitmapSkia.cpp
++++ b/Source/WebCore/platform/graphics/skia/ShareableBitmapSkia.cpp
+@@ -95,7 +95,10 @@ void ShareableBitmap::paint(GraphicsContext& context, float scaleFactor, const I
+     FloatRect scaledDestRect(dstPoint, srcRect.size());
+     scaledDestRect.scale(scaleFactor);
+     auto image = createPlatformImage(BackingStoreCopy::DontCopyBackingStore);
+-    context.platformContext()->drawImageRect(image.get(), scaledSrcRect, scaledDestRect, { }, nullptr, { });
++    SkPaint paint;
++    if (context.compositeMode().operation == CompositeOperator::Copy)
++        paint.setBlendMode(SkBlendMode::kSrc);
++    context.platformContext()->drawImageRect(image.get(), scaledSrcRect, scaledDestRect, { }, &paint, { });
+ }
+ 
+ RefPtr<Image> ShareableBitmap::createImage()

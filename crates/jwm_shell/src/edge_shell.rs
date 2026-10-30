@@ -51,6 +51,8 @@ pub enum Action {
         incarnation: u64,
     },
     CycleTasks,
+    /// Local to the clicked panel; never sent over the WM action channel.
+    HidePanel,
     Files,
     Terminal,
     Browser,
@@ -311,6 +313,7 @@ impl Hit {
                 value["index"] = tag.index().into();
             }
             Action::CycleTasks => value["kind"] = "task_overflow".into(),
+            Action::HidePanel => value["kind"] = "hide_panel".into(),
             Action::MediaPrevious => value["kind"] = "media_previous".into(),
             Action::MediaNext => value["kind"] = "media_next".into(),
             Action::Model(UserAction::MediaPlayPause) => value["kind"] = "media_play_pause".into(),
@@ -957,7 +960,9 @@ impl Host {
     fn place(&mut self, index: usize) -> Result<()> {
         let panel = &mut self.panels[index];
         let mode = self.config.mode(panel.edge);
-        let show_sensor = self.shown && mode == RevealMode::Hover;
+        let show_sensor = self.shown
+            && mode != RevealMode::Disabled
+            && (mode == RevealMode::Hover || !panel.reveal.visible());
         let show_panel = self.shown && mode != RevealMode::Disabled && panel.reveal.visible();
         let sensor_rect = trigger_geometry(self.output, panel.edge, self.config.trigger_pixels);
         if panel.sensor_rect != sensor_rect {
@@ -1295,7 +1300,16 @@ impl Host {
                             .find(|hit| hit.contains(f64::from(e.event_x), f64::from(e.event_y)))
                         && hit.action == pressed.action
                     {
-                        if pressed.action == Action::CycleTasks {
+                        if pressed.action == Action::HidePanel {
+                            let panel = &mut self.panels[index];
+                            panel.reveal.dismiss();
+                            panel.hovered = None;
+                            if panel.edge == BarEdge::Bottom {
+                                self.set_preview(None);
+                                self.withdraw_dock();
+                            }
+                            self.place(index)?;
+                        } else if pressed.action == Action::CycleTasks {
                             self.panels[index].task_offset =
                                 (self.panels[index].task_offset + 1) % self.tasks.len().max(1);
                             self.paint(index)?;
@@ -1533,11 +1547,7 @@ impl Host {
             ctx.save()?;
             ctx.rectangle(x, y, w, h);
             ctx.clip();
-            match painter.panel.edge {
-                BarEdge::Left => painter.left(x, y, w, h)?,
-                BarEdge::Right => painter.right(x, y, w, h)?,
-                _ => painter.bottom(x, y, w, h)?,
-            }
+            painter.draw(x, y, w, h)?;
             ctx.restore()?;
         } else if self.depth != 32 {
             // A 24-bit sensor stays subtle when no compositor is present.
@@ -1734,11 +1744,7 @@ pub fn inspect_controls(state: &ShellState, edge: BarEdge) -> Result<Vec<serde_j
         tasks: state.tasks.as_deref().unwrap_or_default(),
         dark: state.snapshot.theme == ThemeMode::Dark,
     };
-    match edge {
-        BarEdge::Left => painter.left(x, y, w, h)?,
-        BarEdge::Right => painter.right(x, y, w, h)?,
-        _ => painter.bottom(x, y, w, h)?,
-    };
+    painter.draw(x, y, w, h)?;
     Ok(panel
         .hits
         .iter()

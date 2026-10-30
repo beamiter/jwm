@@ -27,7 +27,8 @@ reveal_delay_ms = 80
 hide_delay_ms = 400
 ```
 
-The new table is opt-in. Its explicit settings take precedence over legacy
+Without this table or legacy settings, the shared host is enabled with all
+three panels in `hover` mode. Explicit settings take precedence over legacy
 `status_bar.layout = "four-edge"` and the old Tao `[edge_shell]` configuration.
 Coordinated mode places the primary bar at the top and retains saved single-edge
 positions for rollback. Set `[desktop_shell] enabled = false` to disable the
@@ -40,6 +41,13 @@ configuration without restarting JWM. Disabled edges stay disabled. A mixed
 configuration first pins all enabled edges; the next press auto-hides them.
 Existing explicit modes and legacy four-edge pinned layouts remain respected.
 The IPC equivalent is `jwm-tool msg toggle_desktop_shell_mode --raw`.
+
+Each panel also has an outward-arrow hide button: at the foot of the left and
+right panels, and at the right end of the bottom panel. A click immediately
+hides only that panel on that output. Move back to its screen edge to reveal it
+again. This does not change the saved mode; a pinned panel retains its workspace
+reservation while temporarily hidden. Dock previews and restore anchors are
+withdrawn when the bottom panel is dismissed.
 
 The default Glass and GlassDark menus share the edge panels' cool glass palette,
 blue accent and ink hierarchy. Text-heavy menus use a denser veil for contrast;

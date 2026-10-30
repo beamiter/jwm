@@ -752,6 +752,32 @@ def main():
                       "name": "focus_window", "args": {"window": 0}}, require_success=False)
             assert bad.get("success") is False, bad
             record("old-session actions rejected")
+            for mode in ("hover", "always"):
+                run("xdotool", "mousemove", width // 2, height // 2)
+                for edge in ("left", "right", "bottom"):
+                    set_config("desktop_shell." + edge, mode)
+                if mode == "hover":
+                    wait_for(lambda: all(not visible(p["window"]) for p in state()["host"]["panels"]), "hide before dismissal tests")
+                else:
+                    wait_for(panels_ready, "pin before dismissal tests")
+                for edge, sensor in (("left", (0, height // 2)), ("right", (width - 1, height // 2)), ("bottom", (width // 2, height - 1))):
+                    window = next(p["window"] for p in state()["host"]["panels"] if p["role"] == edge)
+                    run("xdotool", "mousemove", *sensor)
+                    wait_for(lambda: visible(window), edge + " revealed")
+                    target = wait_for(lambda: panel_control(edge, "hide_panel"), edge + " hide button")
+                    run("xdotool", "mousemove", target[0], target[1])
+                    run("xdotool", "click", "1")
+                    wait_for(lambda: not visible(window), edge + " single click hides", timeout=1)
+                    time.sleep(0.5)
+                    assert not visible(window), edge + " reopened beneath stationary pointer"
+                    assert state()["config"][edge] == mode, "dismiss must not change configured mode"
+                    run("xdotool", "mousemove", width // 2, height // 2)
+                    run("xdotool", "mousemove", *sensor)
+                    wait_for(lambda: visible(window), edge + " fresh hover reveals again")
+                    run("xdotool", "mousemove", width // 2, height // 2)
+                    if mode == "hover":
+                        wait_for(lambda: not visible(window), edge + " hover exit hides")
+                record(mode + " panels dismiss individually and reveal again on fresh hover")
             if args.topology_only:
                 exercise_topology()
             if args.workarea_only:

@@ -40,9 +40,9 @@ For module checks, persistent activation and reboot verification, see
 
 Every selected frontend can keep its own top bar while JWM supervises one
 independent `jwm-shell` process for the left, right and bottom panels. The host
-is installed with JWM. Enable `[desktop_shell] enabled = true` in the active
-JWM configuration and choose `always`, `hover` or `disabled` per edge.
-New enabled configurations auto-hide all three edges. **Super+Shift+B**
+is installed with JWM and enabled by default. In `[desktop_shell]`, choose
+`always`, `hover` or `disabled` per edge, or set `enabled = false` to turn it off.
+All three edges default to auto-hide (`hover`). **Super+Shift+B**
 switches enabled edges between auto-hide and pinned mode and saves the choice;
 disabled edges stay disabled. Existing explicit per-edge preferences survive
 upgrades.

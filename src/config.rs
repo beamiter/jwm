@@ -11639,7 +11639,7 @@ border_px = 3
     #[test]
     fn explicit_shared_shell_overrides_legacy_and_restores_saved_edge_when_disabled() {
         let mut config = validated_value_fixture(42);
-        assert!(!config.desktop_shell_enabled());
+        assert!(config.desktop_shell_enabled());
         config
             .set_values(&[
                 ("status_bar.position".into(), serde_json::json!("right")),

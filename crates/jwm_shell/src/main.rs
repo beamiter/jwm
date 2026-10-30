@@ -583,7 +583,7 @@ fn dispatch(
             launch_or_picker("x-www-browser", &[])?;
             return Ok(());
         }
-        Action::CycleTasks => return Ok(()),
+        Action::CycleTasks | Action::HidePanel => return Ok(()),
         Action::Bound { .. } => bail!("nested action binding"),
     };
     if let Some(command) = wm_command(action, view) {

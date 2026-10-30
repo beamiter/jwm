@@ -159,9 +159,14 @@ the updated JWM session after installing if your current session lacks it.
 scripts/install-jwm.sh --help
 ```
 
+If a transparent Tauri bar develops old glyph trails or pale rectangles during
+metric updates with WebKitGTK 2.50.4, see the [upstream bitmap-copy fix and native
+regression test](vendor/webkitgtk/README.md). This is a WebKit backing-store bug;
+changing CSS opacity or clearing the GTK window does not fix its source pixels.
+
 All 28 status-bar frontends can keep their own top bar while JWM supervises one
-`jwm-shell` process for the shared left, right and bottom panels. Enable this
-explicitly with `[desktop_shell] enabled = true`; changing `status_bar.name`
+`jwm-shell` process for the shared left, right and bottom panels. These panels
+are enabled by default in hover mode; changing `status_bar.name`
 then replaces only the top bar. See the [configuration and rollback guide](docs/shared-desktop-shell.md)
 and [implementation acceptance record](docs/shared-shell-delivery.md). Native
 Wayland physical-output acceptance is tracked separately from nested tests.

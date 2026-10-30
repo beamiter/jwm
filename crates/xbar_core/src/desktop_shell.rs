@@ -25,7 +25,7 @@ pub struct DesktopShellConfig {
 impl Default for DesktopShellConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             left: RevealMode::Hover,
             right: RevealMode::Hover,
             bottom: RevealMode::Hover,
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn default_edges_auto_hide_but_legacy_four_edge_stays_pinned() {
         let config = DesktopShellConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(
             [config.left, config.right, config.bottom],
             [RevealMode::Hover; 3]
@@ -357,7 +357,10 @@ mod tests {
 
     #[test]
     fn explicit_disable_suppresses_both_legacy_owners() {
-        let explicit = DesktopShellConfig::default();
+        let explicit = DesktopShellConfig {
+            enabled: false,
+            ..DesktopShellConfig::default()
+        };
         let legacy = EdgeShellConfig::default();
         let (effective, source) = DesktopShellConfig::resolve(Some(&explicit), true, Some(&legacy));
         assert!(!effective.enabled);
@@ -369,7 +372,7 @@ mod tests {
         let (effective, source) = DesktopShellConfig::resolve(None, false, Some(&legacy));
         assert_eq!(effective.mode(BarEdge::Left), RevealMode::Hover);
         assert_eq!(source, DesktopShellSource::LegacyEdgeShell);
-        assert!(!DesktopShellConfig::resolve(None, false, None).0.enabled);
+        assert!(DesktopShellConfig::resolve(None, false, None).0.enabled);
     }
 
     #[test]

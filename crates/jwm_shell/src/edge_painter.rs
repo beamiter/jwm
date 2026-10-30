@@ -12,6 +12,48 @@ pub(crate) struct Painter<'a> {
 }
 
 impl Painter<'_> {
+    /// Reserve a separate end cap for dismissal instead of overlaying an
+    /// existing task, slider, or launcher hit target.
+    pub(crate) fn draw(&mut self, x: f64, y: f64, w: f64, h: f64) -> Result<()> {
+        let size = (w.min(h) - 12.0).clamp(1.0, 28.0);
+        let reserve = size + 12.0;
+        let (rect, arrow) = if self.panel.edge.is_vertical() {
+            if h > reserve + 60.0 {
+                match self.panel.edge {
+                    xbar_core::BarEdge::Left => self.left(x, y, w, h - reserve)?,
+                    _ => self.right(x, y, w, h - reserve)?,
+                }
+            }
+            (
+                [
+                    x + (w - size) / 2.0,
+                    y + h - size - ((h - size) / 2.0).min(6.0),
+                    size,
+                    size,
+                ],
+                if self.panel.edge == xbar_core::BarEdge::Left {
+                    "←"
+                } else {
+                    "→"
+                },
+            )
+        } else {
+            if w > reserve + 60.0 {
+                self.bottom(x, y, w - reserve, h)?;
+            }
+            (
+                [
+                    x + w - size - ((w - size) / 2.0).min(6.0),
+                    y + (h - size) / 2.0,
+                    size,
+                    size,
+                ],
+                "↓",
+            )
+        };
+        self.button(rect, arrow, Action::HidePanel, false)
+    }
+
     fn ink(&self) {
         color(self.ctx, ShellPalette::for_dark(self.dark).ink);
     }
@@ -1113,6 +1155,51 @@ mod tests {
             hits: vec![],
             hovered: None,
             pressed: None,
+        }
+    }
+
+    #[test]
+    fn hide_control_has_its_own_space_on_every_edge() {
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 1400, 800).unwrap();
+        let ctx = Context::new(&surface).unwrap();
+        let snapshot = xbar_core::model::BarModel::default().snapshot();
+        for (edge, w, h) in [
+            (BarEdge::Left, 66.0, 680.0),
+            (BarEdge::Right, 66.0, 720.0),
+            (BarEdge::Bottom, 1344.0, 64.0),
+            (BarEdge::Left, 20.0, 50.0),
+            (BarEdge::Bottom, 50.0, 20.0),
+        ] {
+            let mut panel = panel(edge, 0);
+            Painter {
+                ctx: &ctx,
+                panel: &mut panel,
+                snapshot: &snapshot,
+                tasks: &[],
+                dark: false,
+            }
+            .draw(0.0, 0.0, w, h)
+            .unwrap();
+            let hides: Vec<_> = panel
+                .hits
+                .iter()
+                .filter(|hit| hit.action == Action::HidePanel)
+                .collect();
+            assert_eq!(hides.len(), 1);
+            let [x, y, width, height] = hides[0].rect;
+            assert!(x >= 0.0 && y >= 0.0 && x + width <= w && y + height <= h);
+            assert!(hides[0].contains(x + width / 2.0, y + height / 2.0));
+            for hit in &panel.hits {
+                if hit.action == Action::HidePanel {
+                    continue;
+                }
+                let [hx, hy, hw, hh] = hit.rect;
+                assert!(
+                    x + width <= hx || hx + hw <= x || y + height <= hy || hy + hh <= y,
+                    "hide control overlaps {:?} on {edge:?}",
+                    hit.action
+                );
+            }
         }
     }
 
