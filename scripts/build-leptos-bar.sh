@@ -4,11 +4,8 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TARGET=${1:-"$ROOT/bars/tauri_leptos_bar/src-tauri/target"}
 [[ "$TARGET" == /* ]] || TARGET="$PWD/$TARGET"
+bash "$ROOT/scripts/check-webkitgtk-version.sh"
 command -v trunk >/dev/null || { echo 'Trunk is required: cargo install trunk --locked' >&2; exit 1; }
-pkg-config --exists webkit2gtk-4.1 || {
-    echo 'Install Tauri prerequisites: bash scripts/bootstrap_deps.sh --with-tauri' >&2
-    exit 1
-}
 (
     cd "$ROOT/bars/tauri_leptos_bar"
     trunk build --release --locked

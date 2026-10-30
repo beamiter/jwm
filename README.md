@@ -160,9 +160,11 @@ scripts/install-jwm.sh --help
 ```
 
 If a transparent Tauri bar develops old glyph trails or pale rectangles during
-metric updates with WebKitGTK 2.50.4, see the [upstream bitmap-copy fix and native
+metric updates with WebKitGTK 2.50.4 or 2.52.3, see the [upstream bitmap-copy fix and native
 regression test](vendor/webkitgtk/README.md). This is a WebKit backing-store bug;
 changing CSS opacity or clearing the GTK window does not fix its source pixels.
+WebKitGTK 2.52.6 includes the fix. The bar installer preserves an installed
+private runtime through its launcher when rebuilding a Tauri frontend.
 
 All 28 status-bar frontends can keep their own top bar while JWM supervises one
 `jwm-shell` process for the shared left, right and bottom panels. These panels

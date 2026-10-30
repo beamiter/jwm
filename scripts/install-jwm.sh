@@ -506,11 +506,7 @@ build_tauri_bar() {
         err "$bar 缺少完整的 src-tauri 构建入口"
         exit 1
     fi
-    if ! command -v pkg-config &>/dev/null || ! pkg-config --exists webkit2gtk-4.1; then
-        err "缺少 Tauri 2 Linux 系统依赖（WebKitGTK 4.1）"
-        err "Debian/Ubuntu 安装：bash $PROJECT_ROOT/scripts/bootstrap_deps.sh --with-tauri --no-rust"
-        exit 1
-    fi
+    bash "$PROJECT_ROOT/scripts/check-webkitgtk-version.sh"
 
     if [[ "$BUILD_MODE" == "debug" ]]; then
         profile="debug"
@@ -582,7 +578,17 @@ build_tauri_bar() {
         exit 1
     fi
 
-    install -m755 "$output" "$(cargo_bin_dir)/$bar"
+    local webkit_prefix="${WEBKIT_INSTALL_PREFIX:-$(target_user_home)/.local/opt/jwm-webkitgtk}"
+    if [[ ! -d "$webkit_prefix" && ! -v WEBKIT_INSTALL_PREFIX ]]; then
+        webkit_prefix="$(target_user_home)/.local/opt/jwm-webkitgtk-2.50.4"
+    fi
+    if [[ -f "$webkit_prefix/lib/libwebkit2gtk-4.1.so.0" &&
+          -f "$webkit_prefix/lib/libjavascriptcoregtk-4.1.so.0" ]]; then
+        WEBKIT_INSTALL_PREFIX="$webkit_prefix" bash "$PROJECT_ROOT/scripts/install-webkit-bar-launcher.sh" \
+            "$output" "$(cargo_bin_dir)/$bar"
+    else
+        install -m755 "$output" "$(cargo_bin_dir)/$bar"
+    fi
     ok "$bar 安装完成: $(cargo_bin_dir)/$bar"
 }
 

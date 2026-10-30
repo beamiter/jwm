@@ -8,6 +8,8 @@ REPO="$TEST_ROOT/project space"
 mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
 cp "$ROOT/packaging/69-jwm-touchpad-gestures.rules" "$REPO/packaging/"
 cp "$ROOT/scripts/install-jwm.sh" "$ROOT/scripts/install-wallpapers.sh" "$ROOT/scripts/jwm-toggle-sidebar-mode" "$ROOT/scripts/install-eva.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/install-webkit-bar-launcher.sh" "$ROOT/scripts/run-with-webkit-transparent.sh" "$REPO/scripts/"
+cp "$ROOT/scripts/check-webkitgtk-version.sh" "$REPO/scripts/"
 cp "$ROOT/eva/dist/eva.toml" "$ROOT/eva/dist/jwm-eva.service" "$REPO/eva/dist/"
 cat > "$REPO/scripts/ensure_pipewire.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -88,6 +90,12 @@ STUB
 cat > "$TEST_ROOT/bin/pkg-config" <<'STUB'
 #!/usr/bin/env bash
 if [[ $SCENARIO == eva-deps-failure || $SCENARIO == eva-skip ]]; then exit 1; fi
+if [[ $SCENARIO == tauri-webkit-old ]]; then
+    case "$*" in
+        '--atleast-version=2.52.6 webkit2gtk-4.1') exit 1 ;;
+        '--modversion webkit2gtk-4.1') printf '2.52.3\n' ;;
+    esac
+fi
 exit 0
 STUB
 cat > "$TEST_ROOT/bin/systemctl" <<'STUB'
@@ -392,4 +400,74 @@ check_tauri_color false false
 check_tauri_color '' false
 check_tauri_color unset unset
 check_tauri_color 1 true tauri-failure
+
+# A bar upgrade must keep selecting a previously installed private runtime.
+check_tauri_private_runtime() (
+    local CASE_DIR="$TEST_ROOT/tauri private runtime" SCENARIO=success
+    export CASE_DIR SCENARIO
+    export HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config"
+    export PATH="$TEST_ROOT/bin:$PATH"
+    unset NO_COLOR WEBKIT_INSTALL_PREFIX
+    prefix="$HOME/.local/opt/jwm-webkitgtk"
+    mkdir -p "$prefix/lib" "$CARGO_HOME/bin" "$XDG_CONFIG_HOME/jwm"
+    touch "$prefix/lib/libwebkit2gtk-4.1.so.0" "$prefix/lib/libjavascriptcoregtk-4.1.so.0"
+    destination="$CARGO_HOME/bin/tauri_leptos_bar"
+    printf '#!/bin/sh\nprintf "original bar\\n"\n' > "$destination"
+    chmod +x "$destination"
+    for generation in 1 2; do
+        JWM_BAR_NAME='' bash "$REPO/scripts/install-jwm.sh" --skip-jwm --skip-eva > "$CASE_DIR/install-$generation.log" 2>&1
+        grep -Fq JWM_PRIVATE_WEBKIT_LAUNCHER "$destination" || fail 'Tauri upgrade dropped private runtime launcher'
+        [[ -x $prefix/libexec/jwm/tauri_leptos_bar ]] || fail 'private bar executable missing'
+        [[ -x $prefix/bin/run-with-webkit-transparent.sh ]] || fail 'launcher depends on the source checkout'
+        "$destination" 'argument with spaces'
+        [[ $generation != 1 ]] || printf '#!/bin/sh\nexit 49\n' > "$prefix/libexec/jwm/tauri_leptos_bar"
+    done
+    grep -Fq 'original bar' "$destination.before-webkit" || fail 'original executable backup was overwritten'
+    cat > "$prefix/libexec/jwm/tauri_leptos_bar" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$LD_LIBRARY_PATH" "$@"
+STUB
+    # Extracted distro packages must use matching helpers at their compiled
+    # absolute path, while preserving the caller's library path and arguments.
+    mkdir -p "$prefix/usr/lib/fixture/webkit2gtk-4.1"
+    for process in WebKitWebProcess WebKitNetworkProcess; do
+        touch "$prefix/usr/lib/fixture/webkit2gtk-4.1/$process"
+        chmod +x "$prefix/usr/lib/fixture/webkit2gtk-4.1/$process"
+    done
+    cat > "$TEST_ROOT/bin/bwrap" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $1 == --die-with-parent && $2 == --dev-bind && $3 == / && $4 == / &&
+   $5 == --ro-bind && $6 == "$WEBKIT_INSTALL_PREFIX/usr/lib/fixture/webkit2gtk-4.1" &&
+   $7 == /usr/lib/fixture/webkit2gtk-4.1 && $8 == -- ]] || exit 91
+shift 8
+exec "$@"
+STUB
+    chmod +x "$TEST_ROOT/bin/bwrap"
+    LD_LIBRARY_PATH=/inherited "$destination" 'argument with spaces' "\$HOME" '' > "$CASE_DIR/launch-output"
+    mapfile -t forwarded < "$CASE_DIR/launch-output"
+    [[ ${forwarded[0]} == "$prefix/lib:/inherited" && ${forwarded[1]} == 'argument with spaces' &&
+       ${forwarded[2]} == "\$HOME" && ${#forwarded[@]} == 4 && -z ${forwarded[3]} ]] || fail 'private runtime changed library path or arguments'
+    if WEBKIT_INSTALL_PREFIX="$prefix" bash "$REPO/scripts/install-webkit-bar-launcher.sh" "$destination" "$destination" 2>/dev/null; then
+        fail 'launcher was accepted as the real bar executable'
+    fi
+)
+check_tauri_private_runtime
+
+check_tauri_old_webkit() (
+    local bar=$1 CASE_DIR="$TEST_ROOT/old-webkit-$1" SCENARIO=tauri-webkit-old status=0
+    export CASE_DIR SCENARIO
+    mkdir -p "$REPO/bars/$bar/src-tauri" "$CASE_DIR/home/.cargo" "$CASE_DIR/config/jwm"
+    touch "$REPO/bars/$bar/src-tauri/Cargo.toml" "$REPO/bars/$bar/src-tauri/tauri.conf.json"
+    HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" \
+        PATH="$TEST_ROOT/bin:$PATH" bash "$REPO/scripts/install-jwm.sh" --bar "$bar" --skip-jwm --skip-eva \
+        > "$CASE_DIR/output.log" 2>&1 || status=$?
+    [[ $status == 1 ]] || fail "$bar accepted old WebKitGTK"
+    grep -Fq 'WebKitGTK >= 2.52.6' "$CASE_DIR/output.log" || fail "$bar omitted required WebKitGTK version"
+    grep -Fq 'detected: 2.52.3' "$CASE_DIR/output.log" || fail "$bar omitted detected WebKitGTK version"
+    [[ ! -e $CASE_DIR/frontend-color && ! -e $CASE_DIR/home/.cargo/bin/$bar ]] || fail "$bar built or installed despite old WebKitGTK"
+)
+for host in leptos react solid svelte vue yew; do
+    check_tauri_old_webkit "tauri_${host}_bar"
+done
 printf 'test-install-jwm-build: PASS\n'
