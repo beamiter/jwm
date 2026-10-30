@@ -250,8 +250,11 @@ stderr 通道。
 
 普通 daemon 日志同时记录被管理 PID 的真实 `exit_code`，或终止 `signal`
 及 core-dump 标记。`ECHILD` 单独标为状态不可得，不推断退出码或崩溃信号。
-这不改变原有意外退出/会话生命周期策略。日志可能含应用诊断信息，请仅分享
-与故障相关的片段。
+明确选择 XCB/X11RB 时，非正常子进程退出保留 daemon 和控制入口，避免把
+WM 故障直接升级为登录会话结束；修复或回滚后可用 `jwm-tool start` 恢复。
+正常退出和显式 `quit` 仍结束会话。已运行的旧 daemon 不会因 WM exec 自动
+获得此修复；详见[生命周期回归与验收边界](../docs/x11-session-lifetime.md)。
+日志可能含应用诊断信息，请仅分享与故障相关的片段。
 
 长期部署建议改用 journald 管理日志——由 systemd 用户服务或
 `systemd-run` 启动守护进程即可，标准输出会进入 journal，并由

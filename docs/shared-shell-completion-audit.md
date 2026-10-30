@@ -108,3 +108,9 @@
 原驻留会话升级导致登录会话退出、五个窗口未保留，见[原始故障](../artifacts/shared-shell/release-final/local-install.json)。[隔离daemon成功](../artifacts/shared-shell/daemon-final/env-x11rb-exact/result.json)、[旧文件私有升级成功](../artifacts/shared-shell/incident-upgrade-private/summary.json)及新日志诊断都不足以证明同一故障已解决。
 
 当前原生Wayland结果属于nested winit、内层scale1，使用当前正式Leptos、host和WM，不证明其他顶栏的原生Wayland或实体GPU。音量/背光无设备路径不等于真实硬件调节。物理矩阵仍开放；原驻留会话升级故障未被隔离成功替代。
+
+## X11 会话退出后续调查
+
+[生命周期调查与回归](x11-session-lifetime.md)记录了当前 daemon 在 WM 非正常退出后
+连带退出的确认路径，以及保留 X11 恢复控制入口的最小修复。此为故障传播防护，
+不确认原事件首因、不热替换旧驻留 daemon，也不改变 P5.5 的 contradicted 结论。
