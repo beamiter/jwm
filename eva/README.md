@@ -18,13 +18,15 @@ Eva 是 JWM 的独立语音服务。默认 Alt+Ctrl+E 直接启动 `gpt-realtime
 
 ## 安装
 
-先按仓库的 [JWM 构建与安装说明](../README.md#build-and-verify) 准备依赖，再使用 [现有安装器](../scripts/install_jwm_scripts.sh) 安装本次修改后的 JWM、bridge 和 player。仅运行 `cargo build` 不会替换已安装或正在运行的旧版本；旧版本没有执行许可和受条件保护的接口。
+先按仓库的 [JWM 构建与安装说明](../README.md#build-and-verify) 准备依赖，再使用 [主安装器](../scripts/install-jwm.sh) 同时编译安装 JWM、bridge、player 和 Eva。Eva 沿用主安装器的 debug/release 模式、并行任务数和构建目录；已有语音配置保留。`--skip-eva` 可跳过 Eva，`--skip-jwm` 的仅面板安装也不会更新 Eva。仅运行 `cargo build` 不会替换已安装或正在运行的旧版本。
 
 ```bash
-bash scripts/install_jwm_scripts.sh
+bash scripts/install-jwm.sh
 ```
 
-安装完成后注销，在登录界面选择本次安装的 JWM 会话重新登录。已经运行本次构建的用户可跳过这一步。以下命令在新会话的仓库根目录执行。Eva 单独构建，不把云端连接放进窗口管理器：
+安装完成后注销，在登录界面选择本次安装的 JWM 会话重新登录。已经运行本次构建的用户可跳过这一步。主安装器会在当前用户服务和图形会话可用时启用并重启 Eva；否则先安装文件，并提示登录后启用服务的命令。Eva 仍是独立进程，不把云端连接放进窗口管理器。
+
+如果只需要更新 Eva，可以单独运行：
 
 ```bash
 bash scripts/install-eva.sh

@@ -121,7 +121,7 @@ a symlink to an image is listed, one to a folder or a dangling one is not.
 
 The source tree contains 14 ordinary images directly under
 `assets/wallpapers/`, without a nested collection folder. A successful full
-`scripts/install_jwm_scripts.sh` install copies them to:
+`scripts/install-jwm.sh` install copies them to:
 
 ```text
 ~/.config/jwm/wallpapers/01-alpine-dawn.png

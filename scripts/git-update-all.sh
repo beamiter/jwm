@@ -186,7 +186,7 @@ usage() {
                     四个终端默认都装到 ~/.local/bin。
   ember,frost       scripts/install.sh —— 默认用 cargo 构建，也可用 --binary 安装
                     预构建产物；默认装到 ~/.local/bin。这四个目标都不需要 sudo。
-  jwm              scripts/install_jwm_scripts.sh —— 默认安装完整组件：
+  jwm              scripts/install-jwm.sh —— 默认安装完整组件：
                    裸 cargo build 只出根 package 的四个二进制，不编 bar 和
                    jwm-bridge/jwm-player，也不同步到 /usr/local/bin，更新完跑的还是旧的
                    那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
@@ -206,7 +206,7 @@ LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在
   EMBER_INSTALL_ARGS 追加给 ember/scripts/install.sh，如 '--no-desktop'
   FORGE_INSTALL_ARGS 追加给 forge/scripts/install.sh，如 '--backend nix'
   FROST_INSTALL_ARGS 追加给 frost/scripts/install.sh，如 '--binary /path/to/frost'
-  JWM_INSTALL_ARGS   追加给 install_jwm_scripts.sh 的参数，如 '-b xcb_bar'
+  JWM_INSTALL_ARGS   追加给 install-jwm.sh 的参数，如 '-b xcb_bar'
   JSH_INSTALL_ARGS   追加给 jsh/scripts/install-jsh.sh，如 '--bin-dir /path/bin'
   JSH_INSTALL_TARGET 覆盖 jsh 的 target 三元组，例如 x86_64-unknown-linux-gnu
                      (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
@@ -835,7 +835,7 @@ build_cmd() {
         # 它自带构建（装 bar、bridge、desktop 文件，要 sudo）。
         jwm)
             [ -z "$JWM_INSTALL_ARGS" ] || read -r -a extra_args <<<"$JWM_INSTALL_ARGS"
-            printf '%s\n' ./scripts/install_jwm_scripts.sh
+            printf '%s\n' ./scripts/install-jwm.sh
             [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
             ;;
         jsh)

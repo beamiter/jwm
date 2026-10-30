@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 
-source = (Path(__file__).resolve().parent / "install_jwm_scripts.sh").read_text()
+source = (Path(__file__).resolve().parent / "install-jwm.sh").read_text()
 
 def function(name):
     start = source.index(name + "() {")

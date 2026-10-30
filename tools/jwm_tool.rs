@@ -455,7 +455,7 @@ enum Commands {
         jwm_dir: String,
     },
 
-    /// 安装 JWM 与桌面入口（参考 install_jwm_scripts.sh）
+    /// 安装 JWM 与桌面入口（参考 install-jwm.sh）
     Install {
         /// JWM 源码目录（默认 $HOME/jwm，可用 env JWM_DIR 覆盖）
         #[arg(long, env = "JWM_DIR", default_value_t = default_jwm_dir())]

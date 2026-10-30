@@ -15,7 +15,7 @@
 #   JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh     # use rsproxy.cn (China) for rustup + cargo
 #
 # After this succeeds, build/install JWM with:
-#   bash scripts/install_jwm_scripts.sh
+#   bash scripts/install-jwm.sh
 set -euo pipefail
 
 # ------------------------------------------------------------------
@@ -109,6 +109,12 @@ APT_MISC=(
     libssl-dev
 )
 
+# Eva is included in the full source installation. Its native PulseAudio and
+# PipeWire clients need these headers; an older PipeWire gets a private prefix.
+APT_EVA=(
+    libpulse-dev libpipewire-0.3-dev libspa-0.2-dev meson
+)
+
 # Status-bar rendering stack. The selectable bars (xcb_bar, gtk_bar, egui_bar,
 # …) draw through glib/cairo/pango; cairo needs its XCB surface backend.
 APT_BAR=(
@@ -157,6 +163,7 @@ if [[ "$DO_APT" == true ]]; then
         warn "  x11:       libx11 libxcb + extensions libxkbcommon"
         warn "  wayland:   libwayland libdrm libgbm libEGL libGLES libinput libseat libudev pixman"
         warn "  misc:      libasound2 libdbus-1 fontconfig freetype openssl"
+        warn "  eva:       libpulse PipeWire/SPA development headers meson"
         warn "  runtime:   ffmpeg mpv xwayland"
         if [[ "$WITH_TAURI" == "1" ]]; then
             warn "  tauri:     WebKitGTK 4.1 libxdo Ayatana AppIndicator librsvg"
@@ -172,6 +179,7 @@ if [[ "$DO_APT" == true ]]; then
         "${APT_X11[@]}"
         "${APT_WAYLAND[@]}"
         "${APT_MISC[@]}"
+        "${APT_EVA[@]}"
         "${APT_BAR[@]}"
         "${APT_RUNTIME[@]}"
     )
@@ -269,5 +277,5 @@ fi
 
 echo ""
 ok "Bootstrap complete. Next:"
-echo "    bash scripts/install_jwm_scripts.sh          # build + install jwm and a status bar"
+echo "    bash scripts/install-jwm.sh          # build + install jwm, Eva and a status bar"
 echo "    cargo build --locked --release               # or just build in-tree"

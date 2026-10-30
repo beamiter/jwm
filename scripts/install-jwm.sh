@@ -1,5 +1,5 @@
 #!/bin/bash
-# install_jwm_scripts.sh - 安装 JWM，并按需安装 status bar
+# install-jwm.sh - 安装 JWM、Eva，并按需安装 status bar
 set -euo pipefail
 
 # ============================================================
@@ -116,6 +116,7 @@ JWM_BAR_SET_BY_ARGS=false
 UPDATED_CONFIG_PATHS=()
 SKIP_BAR=false
 SKIP_JWM=false
+SKIP_EVA=false
 REGEN_CONFIG=false
 JOBS=""
 
@@ -136,7 +137,8 @@ usage() {
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --gen-config                比较新旧默认模板字段，仅字段变化时备份并更新配置
   --skip-bar                  跳过 bar 安装
-  --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
+  --skip-jwm                  跳过 jwm 和 Eva 编译安装（仅处理 bar）
+  --skip-eva                  跳过 Eva 语音助手编译安装
   单独安装/更新内置壁纸（无需编译）: bash scripts/install-wallpapers.sh
   -h, --help                  显示此帮助信息
 
@@ -148,6 +150,8 @@ usage() {
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
     dioxus_bar 使用 dx；Tauri bar 会同时构建前端与 src-tauri 后端，再把可执行文件安装到同一目录。
   - jwm / jwm-tool / jwm-support / jwm-remote / jwm-player 通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
+  - 完整安装默认同时构建 Eva，沿用 --mode、--jobs 和 CARGO_TARGET_DIR，安装到登录用户的 ~/.local/bin。
+    保留已有 eva.toml；图形用户会话可用时启用并重启，否则仅安装文件并提示后续启用命令。
   - 音乐和视频播放运行时需要 mpv；缺少它不影响 JWM 的构建与安装。
   - 通过用户配置目录中的 jwm-mimeapps.list 设置 JWM 会话的默认音视频播放器；Ubuntu/GNOME 的默认设置不变。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
@@ -267,6 +271,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-jwm)
             SKIP_JWM=true
+            shift
+            ;;
+        --skip-eva)
+            SKIP_EVA=true
             shift
             ;;
         -h|--help)
@@ -624,6 +632,61 @@ build_and_install_shell() {
     local profile=release
     [[ "$BUILD_MODE" == release ]] || profile=debug
     install_system_binary "$JWM_TARGET_DIR/shell-host/$profile/jwm-shell" /usr/local/bin
+}
+
+# Build with the main installer's profile/cache, then delegate user files and
+# service handling to the standalone installer. A sudo invocation must not
+# install Eva or its private PipeWire runtime in root's home.
+build_and_install_eva() {
+    local user_home config_dir user_uid variable setting pipewire_environment
+    user_home=$(target_user_home)
+    config_dir=$(jwm_config_dir)
+    local -a user_command=()
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        user_uid=$(id -u "$SUDO_USER")
+        user_command=(sudo -u "$SUDO_USER" env "HOME=$user_home"
+            "XDG_RUNTIME_DIR=/run/user/$user_uid"
+            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$user_uid/bus"
+            "XDG_CONFIG_HOME=${config_dir%/jwm}")
+        for variable in DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
+            PKG_CONFIG_PATH JWM_PIPEWIRE_PREFIX; do
+            if [[ -v $variable ]]; then user_command+=("$variable=${!variable}"); fi
+        done
+    fi
+
+    info "编译 Eva 语音助手（$BUILD_MODE 模式）..."
+    if ! command -v pkg-config >/dev/null || ! pkg-config --exists libpulse; then
+        err "Eva 需要 PulseAudio 开发头文件（Debian/Ubuntu: libpulse-dev）；可运行依赖引导脚本，或用 --skip-eva 跳过"
+        return 1
+    fi
+    pipewire_environment=$("${user_command[@]}" bash "$PROJECT_ROOT/scripts/ensure_pipewire.sh" --env)
+    (
+        while IFS= read -r setting; do
+            case "$setting" in
+                PKG_CONFIG_PATH=*|JWM_PIPEWIRE_PREFIX=*) export "${setting?}" ;;
+                '') ;;
+                *) err "Eva 收到非预期的 PipeWire 构建环境变量"; exit 1 ;;
+            esac
+        done <<< "$pipewire_environment"
+        cd "$PROJECT_ROOT"
+        build_workspace -p jwm-eva --bin jwm-eva
+    )
+
+    local -a arguments=(--binary "$JWM_TARGET_DIR/$BUILD_MODE/jwm-eva"
+        --prefix "${JWM_EVA_PREFIX:-$user_home/.local}"
+        --config-dir "$config_dir" --unit-dir "${config_dir%/jwm}/systemd/user")
+    local enable_service=true
+    if ! "${user_command[@]}" systemctl --user show --property=Version >/dev/null 2>&1 ||
+        ! "${user_command[@]}" systemctl --user is-active --quiet graphical-session.target; then
+        arguments+=(--no-enable)
+        enable_service=false
+    fi
+    "${user_command[@]}" bash "$PROJECT_ROOT/scripts/install-eva.sh" "${arguments[@]}"
+    if [[ $enable_service == false ]]; then
+        warn "Eva 文件已安装，当前没有可用的图形用户会话；登录图形会话后运行："
+        info "  systemctl --user daemon-reload"
+        info "  systemctl --user enable --now jwm-eva.service"
+    fi
 }
 
 # ============================================================
@@ -1004,6 +1067,7 @@ fi
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
     install_bundled_wallpapers
+    if [[ "$SKIP_EVA" == false ]]; then build_and_install_eva; fi
     # Only migrate the legacy cargo installation after every replacement and
     # its session/bridge integration succeeded. A skipped or failed install
     # must leave the user's previously working commands available.

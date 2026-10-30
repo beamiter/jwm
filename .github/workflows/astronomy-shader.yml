@@ -23,7 +23,7 @@ on:
       - scripts/test-astronomy-catalog.py
       - scripts/test-deep-sky.py
       - scripts/prepare-astronomy-*.py
-      - scripts/install_jwm_scripts.sh
+      - scripts/install-jwm.sh
       - packaging/release-manifest.tsv
       - rust-toolchain.toml
       - .github/workflows/astronomy-shader.yml
@@ -49,7 +49,7 @@ on:
       - scripts/test-astronomy-catalog.py
       - scripts/test-deep-sky.py
       - scripts/prepare-astronomy-*.py
-      - scripts/install_jwm_scripts.sh
+      - scripts/install-jwm.sh
       - packaging/release-manifest.tsv
       - rust-toolchain.toml
       - .github/workflows/astronomy-shader.yml

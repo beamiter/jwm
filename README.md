@@ -124,8 +124,9 @@ fails if an unrelated validation error would remain. Use a batch for correlated
 hot-tunable changes that must become valid together; non-hot-tunable values must
 be edited in the configuration file.
 
-The installation helper builds JWM, the independent `jwm-shell` host, and the
-selected status bar (`tauri_leptos_bar` by default; use `--bar` to choose another crate under `bars/`), installs
+The installation helper builds JWM, the Eva voice service, the independent
+`jwm-shell` host, and the selected status bar (`tauri_leptos_bar` by default;
+use `--bar` to choose another crate under `bars/`), installs
 the session files (Wayland session recommended), and checks both configuration
 templates against their last installed versions. The records are stored beside
 each config as `.config_x11.toml.installed-defaults` and
@@ -138,6 +139,14 @@ same policy. To explicitly reset both files, run `jwm --gen-config`.
 An ordinary reinstall keeps a customized `status_bar.name`; an explicit
 `--bar NAME` also updates that setting in both files.
 
+Eva follows the selected debug/release profile, jobs and build cache, and is
+installed to the login user's `~/.local/bin/jwm-eva`. Existing `eva.toml` is
+preserved. The installer enables and restarts the user service when the user
+service manager and graphical session are active; otherwise it installs the
+files and prints the commands to enable the service after login. Use `--skip-eva` to omit Eva, or
+`--skip-jwm` for a bar-only installation. Eva can also be updated independently
+with `bash scripts/install-eva.sh`; see [Eva setup](eva/README.md).
+
 The source installer makes JWM Music and JWM Video the default audio/video
 players only in JWM sessions. It writes `~/.config/jwm-mimeapps.list` (or
 `$XDG_CONFIG_HOME/jwm-mimeapps.list`), leaving the shared `mimeapps.list` and
@@ -147,7 +156,7 @@ and Wayland session entries set `XDG_CURRENT_DESKTOP=jwm`; log out and select
 the updated JWM session after installing if your current session lacks it.
 
 ```bash
-scripts/install_jwm_scripts.sh --help
+scripts/install-jwm.sh --help
 ```
 
 All 28 status-bar frontends can keep their own top bar while JWM supervises one

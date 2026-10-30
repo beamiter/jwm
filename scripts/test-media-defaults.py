@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "scripts/install_jwm_scripts.sh").read_text()
+SOURCE = (ROOT / "scripts/install-jwm.sh").read_text()
 START = SOURCE.index("install_jwm_media_defaults() {")
 END = SOURCE.index("\ninstall_bundled_wallpapers() {", START)
 PROGRAM = """set -euo pipefail

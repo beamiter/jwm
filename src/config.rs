@@ -492,7 +492,7 @@ pub fn get_backend_family() -> BackendFamily {
     *ACTIVE_BACKEND.get().unwrap_or(&BackendFamily::X11)
 }
 
-/// Matches the bar installed by `scripts/install_jwm_scripts.sh` when the user
+/// Matches the bar installed by `scripts/install-jwm.sh` when the user
 /// does not select another implementation explicitly.
 pub const STATUS_BAR_NAME: &str = "tauri_leptos_bar";
 
@@ -8676,7 +8676,7 @@ mod tests {
 
     #[test]
     fn built_in_and_installer_status_bars_are_supported_independent_choices() {
-        let installer = include_str!("../scripts/install_jwm_scripts.sh");
+        let installer = include_str!("../scripts/install-jwm.sh");
         let (_, bars) = installer
             .split_once("ALL_BARS=(")
             .expect("installer declares its supported bars");

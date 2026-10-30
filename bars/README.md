@@ -17,7 +17,7 @@ bash scripts/bootstrap_deps.sh --with-tauri
 rustup target add wasm32-unknown-unknown
 cargo install trunk --version 0.22.1 --locked
 cargo install tauri-cli --version 2.12.4 --locked
-scripts/install_jwm_scripts.sh -b tauri_leptos_bar
+scripts/install-jwm.sh -b tauri_leptos_bar
 ```
 
 A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`

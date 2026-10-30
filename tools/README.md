@@ -6,7 +6,7 @@ JWM 管理工具（单二进制多子命令）。
 
 ```bash
 # 通过安装脚本（推荐）
-./scripts/install_jwm_scripts.sh
+./scripts/install-jwm.sh
 
 # 手动构建
 cargo build --release

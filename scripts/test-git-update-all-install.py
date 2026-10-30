@@ -48,7 +48,7 @@ class UpdateInstallTests(unittest.TestCase):
         (seed / '.gitignore').write_text('/target/\n')
         scripts = seed / 'scripts'
         scripts.mkdir()
-        installer = 'install-jsh.sh' if name == 'jsh' else 'install_jwm_scripts.sh' if name == 'jwm' else 'install.sh'
+        installer = 'install-jsh.sh' if name == 'jsh' else 'install-jwm.sh' if name == 'jwm' else 'install.sh'
         self.executable(scripts / installer,
                         '#!/bin/sh\nprintf "installer:%s\\n" "' + name + '" >> "$TEST_CALLS"\n'
                         'if [ "${TEST_RECORD_ARGS:-}" = 1 ]; then printf "args:%s:%s\\n" "' + name + '" "$*" >> "$TEST_CALLS"; fi\n'

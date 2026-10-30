@@ -20,8 +20,7 @@ fn bar_directories() -> BTreeSet<String> {
 }
 
 fn installer_bars() -> BTreeSet<String> {
-    let installer =
-        fs::read_to_string(repository_root().join("scripts/install_jwm_scripts.sh")).unwrap();
+    let installer = fs::read_to_string(repository_root().join("scripts/install-jwm.sh")).unwrap();
     let (_, array) = installer
         .split_once("ALL_BARS=(")
         .expect("installer must define ALL_BARS");
@@ -90,7 +89,7 @@ fn every_bar_is_selectable_by_the_installer() {
     assert_eq!(
         installer_bars(),
         bar_directories(),
-        "bars/ and scripts/install_jwm_scripts.sh::ALL_BARS must evolve together"
+        "bars/ and scripts/install-jwm.sh::ALL_BARS must evolve together"
     );
 }
 
@@ -150,7 +149,7 @@ fn every_selectable_bar_has_an_installable_executable_entrypoint() {
 fn tauri_install_path_declares_and_checks_its_linux_prerequisites() {
     let root = repository_root();
     let bootstrap = fs::read_to_string(root.join("scripts/bootstrap_deps.sh")).unwrap();
-    let installer = fs::read_to_string(root.join("scripts/install_jwm_scripts.sh")).unwrap();
+    let installer = fs::read_to_string(root.join("scripts/install-jwm.sh")).unwrap();
     let readme = fs::read_to_string(root.join("README.md")).unwrap();
 
     assert!(
@@ -394,7 +393,7 @@ fn release_bundle_and_source_install_include_the_shared_host_and_default_fronten
             "release bundle omits required executable {name}"
         );
     }
-    let installer = fs::read_to_string(root.join("scripts/install_jwm_scripts.sh")).unwrap();
+    let installer = fs::read_to_string(root.join("scripts/install-jwm.sh")).unwrap();
     assert!(installer.contains("JWM_BAR_NAME=\"${JWM_BAR_NAME:-tauri_leptos_bar}\""));
     assert!(installer.contains("build_and_install_shell"));
 }

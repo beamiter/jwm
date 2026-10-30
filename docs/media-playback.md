@@ -147,7 +147,7 @@ The source installer builds and installs `jwm-player` together with
 `jwm-bridge`, including debug builds and custom Cargo target directories:
 
 ```bash
-bash scripts/install_jwm_scripts.sh
+bash scripts/install-jwm.sh
 ```
 
 `scripts/package-release.sh` includes the helper and both desktop entries in

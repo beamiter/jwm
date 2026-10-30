@@ -51,7 +51,7 @@ status_bar_padding = 12
 
 Existing JWM thickness/margin settings remain authoritative. The installer
 also preserves an existing `status_bar.name`; upgrade an older pixels-bar
-installation explicitly with `scripts/install_jwm_scripts.sh -b tao_glow_bar`.
+installation explicitly with `scripts/install-jwm.sh -b tao_glow_bar`.
 
 Each edge accepts `hover`, `always` or `disabled`. For example, changing only
 `bottom = "always"` pins the dock while the side panels continue to auto-hide.
@@ -230,7 +230,7 @@ apply to `layout = "single"`; coordinated mode keeps its primary surface at
 the top and retains the single-edge preference for a later switch back.
 
 `tao_glow_bar` remains the supported daily-drive bar installed by
-`scripts/install_jwm_scripts.sh`. The other bundled bars are examples for
+`scripts/install-jwm.sh`. The other bundled bars are examples for
 different toolkits and rendering backends. They share the placement contract,
 but retain their own native widget behavior and rendering capabilities. See
 [Status bars](../bars/README.md) for installation and

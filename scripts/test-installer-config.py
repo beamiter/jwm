@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-source = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / 'scripts/install_jwm_scripts.sh'
+source = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / 'scripts/install-jwm.sh'
 s = source.read_text()
 a = s.index('update_toml_status_bar_name() ')
 b = s.index('\nsync_selected_bar_config() {', a)
