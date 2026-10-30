@@ -122,7 +122,10 @@ fn daemon_retains_private_child_stderr_and_actual_exit_code() {
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &home)
             .env("XDG_RUNTIME_DIR", runtime.path())
-            .env("JWM_BACKEND", "x11rb")
+            // X11 intentionally retains the supervisor after an abnormal
+            // child exit. This diagnostics test exercises normal teardown;
+            // X11 recovery is covered by the daemon's dedicated tests.
+            .env("JWM_BACKEND", "wayland-winit")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
