@@ -37,7 +37,8 @@ section!(Audio {
     sample_format: String = "s16le".into(),
     chunk_ms: u64 = 20,
     connect_buffer_ms: u64 = 2000,
-    playback_tail_ms: u64 = 200
+    playback_tail_ms: u64 = 200,
+    noise_reduction: String = "near_field".into()
 });
 section!(Openai {
     model: String = "gpt-realtime".into(), transport: String = "websocket".into(),
@@ -50,6 +51,7 @@ section!(Openai {
 pub struct TurnDetection {
     #[serde(rename = "type")]
     pub kind: String,
+    pub eagerness: String,
     pub threshold: f64,
     pub prefix_padding_ms: u64,
     pub silence_duration_ms: u64,
@@ -59,7 +61,8 @@ pub struct TurnDetection {
 impl Default for TurnDetection {
     fn default() -> Self {
         Self {
-            kind: "server_vad".into(),
+            kind: "semantic_vad".into(),
+            eagerness: "auto".into(),
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 600,
@@ -167,6 +170,9 @@ impl Config {
         config.openai.model = self.wake_word.model.clone();
         config.openai.input_transcription = false;
         config.pricing = self.wake_pricing.clone();
+        // Short wake phrases benefit from predictable acoustic boundaries;
+        // semantic endpointing is reserved for the full conversation.
+        config.turn_detection.kind = "server_vad".into();
         config
     }
     pub fn path() -> PathBuf {
@@ -215,6 +221,7 @@ impl Config {
             && self.audio.channels == 1
             && self.audio.sample_format == "s16le"
             && self.audio.chunk_ms == 20
+            && ["near_field", "far_field", "off"].contains(&self.audio.noise_reduction.as_str())
             && self.audio.playback_tail_ms <= 2000
             && self.undo.max_plans <= 20
             && self.undo.max_age_seconds <= 600
@@ -230,7 +237,8 @@ impl Config {
             && self.audio.connect_buffer_ms >= 20
             && self.openai.transport == "websocket"
             && !self.openai.model.is_empty()
-            && self.turn_detection.kind == "server_vad"
+            && ["server_vad", "semantic_vad"].contains(&self.turn_detection.kind.as_str())
+            && ["auto", "low", "medium", "high"].contains(&self.turn_detection.eagerness.as_str())
             && !self.turn_detection.create_response
             && !self.turn_detection.interrupt_response
             && (0.0..=1.0).contains(&self.turn_detection.threshold)
@@ -356,6 +364,24 @@ fn valid_pricing(p: &Pricing) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn endpointing_and_denoising_support_legacy_settings_without_auto_responses() {
+        let mut c = Config::default();
+        assert_eq!(c.turn_detection.kind, "semantic_vad");
+        assert_eq!(c.turn_detection.eagerness, "auto");
+        assert!(c.validate().is_ok());
+        c.turn_detection.kind = "server_vad".into();
+        c.audio.noise_reduction = "off".into();
+        assert!(c.validate().is_ok());
+        c.turn_detection.create_response = true;
+        assert!(c.validate().is_err());
+        c.turn_detection.create_response = false;
+        c.turn_detection.eagerness = "extreme".into();
+        assert!(c.validate().is_err());
+        c.turn_detection.eagerness = "auto".into();
+        c.audio.noise_reduction = "unknown".into();
+        assert!(c.validate().is_err());
+    }
     #[test]
     fn rejects_unknown_and_unsupported() {
         assert!(toml::from_str::<Config>("[openai]\nmodle='oops'").is_err());

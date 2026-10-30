@@ -23,6 +23,8 @@ start_candidate_grace_ms = 1500
 # Set a PipeWire microphone node.name (from `wpctl inspect ID`) to pin a device.
 # A playback monitor is rejected; disappearing devices end the session.
 input_device = "default"
+# near_field: headset/close microphone; far_field: room microphone; off: disable API denoising.
+noise_reduction = "near_field"
 realtime_rate_hz = 24000
 channels = 1
 sample_format = "s16le"
@@ -45,7 +47,11 @@ plan_max_output_tokens = 4096
 feedback_max_output_tokens = 1024
 
 [turn_detection]
-type = "server_vad"
+# Semantic VAD waits for the meaning of a sentence rather than only a silent gap.
+# Use server_vad to retain threshold/padding/silence-based turn detection.
+type = "semantic_vad"
+eagerness = "auto" # auto, low, medium, high; used only by semantic_vad
+# The following three settings apply to server_vad, including mini wake standby.
 threshold = 0.5
 prefix_padding_ms = 300
 silence_duration_ms = 600

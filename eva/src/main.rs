@@ -150,6 +150,17 @@ async fn run(args: Cli) -> io::Result<()> {
                 .is_some_and(|a| a.input_available && a.output_available);
             let context = executor::query("get_execution_context", json!({})).await;
             let schema = executor::query("get_command_schema", json!({})).await;
+            let assistant = executor::query("get_assistant_status", json!({})).await;
+            let wake_protocol_ready = assistant.as_ref().is_ok_and(|v| {
+                v["wm_instance_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+                    && v["wake_generation"].is_u64()
+                    && v["assistant_generation"].is_u64()
+                    && v["standby_allowed"].is_boolean()
+            }) && context
+                .as_ref()
+                .is_ok_and(|v| v["selected_monitor_history"].is_array());
             let protocol_ready = context.as_ref().is_ok_and(|v| v["protocol_version"] == 1)
                 && schema.as_ref().is_ok_and(|v| {
                     v["protocol_version"] == 1
@@ -157,9 +168,13 @@ async fn run(args: Cli) -> io::Result<()> {
                         && v["context_tokens"] == true
                 });
             print(
-                json!({"configuration":"valid","config_path":args.config.unwrap_or_else(Config::path),"model":c.openai.model,"credential_source":c.openai.api_key_source,"credential_available":key.is_ok(),"audio_backend":audio.as_ref().map(|a|a.backend),"audio_input_available":audio.as_ref().is_some_and(|a|a.input_available),"audio_output_available":audio.as_ref().is_some_and(|a|a.output_available),"native_audio_connected":audio.is_some(),"native_pipewire_connected":audio.as_ref().filter(|a|a.backend=="pipewire").map(|_|true),"ipc_connected":cap.is_ok(),"execution_protocol":context.as_ref().ok().map(|v|v["protocol_version"].clone()),"protocol_ready":protocol_ready,"microphone_opened":false,"cloud_connected":false,"local_costs":costs}),
+                json!({"configuration":"valid","config_path":args.config.unwrap_or_else(Config::path),"model":c.openai.model,"wake_model":c.wake_word.model,"turn_detection":c.turn_detection.kind,"endpoint_eagerness":c.turn_detection.eagerness,"noise_reduction":c.audio.noise_reduction,"wake_protocol_ready":wake_protocol_ready,"credential_source":c.openai.api_key_source,"credential_available":key.is_ok(),"audio_backend":audio.as_ref().map(|a|a.backend),"audio_input_available":audio.as_ref().is_some_and(|a|a.input_available),"audio_output_available":audio.as_ref().is_some_and(|a|a.output_available),"native_audio_connected":audio.is_some(),"native_pipewire_connected":audio.as_ref().filter(|a|a.backend=="pipewire").map(|_|true),"ipc_connected":cap.is_ok(),"execution_protocol":context.as_ref().ok().map(|v|v["protocol_version"].clone()),"protocol_ready":protocol_ready,"microphone_opened":false,"cloud_connected":false,"local_costs":costs}),
             );
-            if key.is_err() || !audio_ready || !protocol_ready {
+            if key.is_err()
+                || !audio_ready
+                || !protocol_ready
+                || (c.wake_word.enabled && !wake_protocol_ready)
+            {
                 return Err(io::Error::other(
                     "doctor found missing dependencies, credentials or JWM protocol; no audio or cloud session was opened",
                 ));

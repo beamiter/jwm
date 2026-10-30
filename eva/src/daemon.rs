@@ -213,6 +213,7 @@ pub async fn run(c: Config) -> io::Result<()> {
     let mut wake_worker = None;
     let mut wake_cancel = None;
     let mut wake_generation = 0;
+    let mut active_wake_source: Option<crate::handoff::Source> = None;
     let mut wake_status = json!({"state":"disabled","microphone_active":false});
     let mut wake_requested = false;
     let mut wake_retry = std::time::Instant::now();
@@ -284,7 +285,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                 };let _=request.reply.send(response);
             },
             Some(update)=wake_updates.recv()=>{
-                if update.generation==wake_generation && wake_worker.is_some() { wake_status=update.state; }
+                if Some(&update.source)==active_wake_source.as_ref() && wake_worker.is_some() { wake_status=update.state; }
             },
             Some(update)=updates.recv()=>{if permit.as_ref().is_some_and(|p|update.apply(p,&mut status)){last_heartbeat=std::time::Instant::now()-Duration::from_secs(1);}},
             Some(event)=events.recv()=>{
@@ -322,23 +323,42 @@ pub async fn run(c: Config) -> io::Result<()> {
                 let native_generation=observed.as_ref().ok().and_then(|s|s["wake_generation"].as_u64()).unwrap_or(0);
                 wake_requested=observed.as_ref().is_ok_and(|s|s["wake_requested"]==true);
                 let standby_allowed=observed.as_ref().is_ok_and(|s|s["standby_allowed"]==true);
-                if native_generation!=wake_generation {
+                let current_source=observed.as_ref().ok().and_then(wake_source);
+                if native_generation!=wake_generation || active_wake_source.as_ref().is_some_and(|source|Some(source)!=current_source.as_ref()) {
                     stop_wake(&mut wake_worker,&mut wake_cancel).await;
                     while wake_updates.try_recv().is_ok(){}
-                    wake_generation=native_generation;
+                    wake_generation=native_generation;active_wake_source=None;
                     wake_retry=std::time::Instant::now();
                     wake_status=json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false});
                 }
+                let mut handoff_for_next=None;
                 if wake_worker.as_ref().is_some_and(|w|w.is_finished()) {
                     let finished=wake_worker.take().unwrap().await;wake_cancel=None;
                     while wake_updates.try_recv().is_ok(){}
                     wake_status=json!({"state":"paused","microphone_active":false});
                     match finished {
-                        Ok(Ok(crate::wake::Outcome::Detected)) if wake_requested && standby_allowed && worker.is_none() && observed.as_ref().is_ok_and(|s|s["active"]!=true) => {
-                            // The mini stream has been joined and released. A
-                            // new native activation supplies all desktop authority.
-                            if command("assistant_control",json!({"action":"wake_activate","wake_generation":wake_generation})).await.is_ok() {
-                                observed=query("get_assistant_status",json!({})).await;
+                        Ok(Ok(crate::wake::Outcome::Detected(mut handoff))) if wake_requested && standby_allowed && worker.is_none() && observed.as_ref().is_ok_and(|s|s["active"]!=true) => {
+                            // Preserve the one native microphone owner while
+                            // fresh native authority fences the original source.
+                            let current=observed.as_ref().ok().and_then(wake_source);
+                            if current.as_ref().is_some_and(|source|handoff.current(source)) {
+                                let source=&handoff.source;
+                                let mut activation=json!({"action":"wake_activate","wake_generation":source.wake_generation,"wm_instance_id":source.wm_instance_id,"assistant_generation":source.assistant_generation});
+                                if let Some(seed)=handoff.seed.as_ref() {activation["source_monitor_token"]=json!(seed.monitor_token);activation["source_onset_monotonic_ns"]=json!(seed.binding.onset_monotonic_ns);}
+                                let mut activated=command("assistant_control",activation.clone()).await.is_ok();
+                                if !activated && handoff.seed.is_some() {
+                                    // A gone/changed source may still wake a
+                                    // fresh listening session, never replay it.
+                                    handoff.discard_seed();
+                                    activation.as_object_mut().unwrap().remove("source_monitor_token");
+                                    activation.as_object_mut().unwrap().remove("source_onset_monotonic_ns");
+                                    activated=command("assistant_control",activation).await.is_ok();
+                                }
+                                if activated {
+                                    observed=query("get_assistant_status",json!({})).await;
+                                    wake_status=json!({"state":"paused","microphone_active":false});
+                                    handoff_for_next=Some(handoff);
+                                }
                             }
                         },
                         Ok(Err(error))=>{
@@ -365,10 +385,13 @@ pub async fn run(c: Config) -> io::Result<()> {
                 } else if wake_worker.is_none() && std::time::Instant::now()>=wake_retry {
                     let (cancel_tx,cancel_rx)=watch::channel(false);wake_cancel=Some(cancel_tx);
                     wake_status=json!({"state":"connecting","text":"正在连接语音唤醒","microphone_active":false});
-                    wake_worker=Some(tokio::spawn(crate::wake::run(c.clone(),wake_generation,wake_tx.clone(),store.clone(),cancel_rx)));
+                    if let Some(source)=observed.as_ref().ok().and_then(wake_source) {
+                        active_wake_source=Some(source.clone());
+                        wake_worker=Some(tokio::spawn(crate::wake::run(c.clone(),source,wake_tx.clone(),store.clone(),cancel_rx)));
+                    }
                 }
                 if wake_heartbeat.elapsed()>=Duration::from_secs(1) {
-                    let mut update=wake_status.clone();update["wake_generation"]=json!(wake_generation);update["enabled"]=json!(wake_requested);
+                    let mut update=wake_status.clone();update["wake_generation"]=json!(wake_generation);update["enabled"]=json!(wake_requested);update["wm_instance_id"]=observed.as_ref().ok().map(|s|s["wm_instance_id"].clone()).unwrap_or(Value::Null);
                     if command("set_assistant_wake_status",update).await.is_err() {
                         stop_wake(&mut wake_worker,&mut wake_cancel).await;
                         wake_status=json!({"state":"paused","microphone_active":false});
@@ -382,9 +405,11 @@ pub async fn run(c: Config) -> io::Result<()> {
                     status=json!({"state":"idle","text":"","microphone_active":false});
                     if let Some(p)=permit.clone(){
                         crate::telemetry::event("activation_received",&json!({"generation":p.generation,"source_activation_ns":observed.as_ref().ok().map(|s|s["activated_monotonic_ns"].clone()),"model":c.openai.model}));
-                        status=json!({"state":"connecting","text":"正在连接","microphone_active":false});
+                        let microphone_active=handoff_for_next.as_ref().is_some_and(|handoff|handoff.capture.is_some());
+                        status=json!({"state":"connecting","text":"正在连接","microphone_active":microphone_active});
+                        if microphone_active {let _=command("set_assistant_status",json!({"assistant_permit":p,"state":"connecting","text":"正在处理唤醒指令","microphone_active":true})).await;}
                         let (cancel_tx,cancel_rx)=watch::channel(false);cancellation=Some(cancel_tx);
-                        worker=Some(tokio::spawn(session::run(c.clone(),p,updates_tx.clone(),store.clone(),cancel_rx)));
+                        worker=Some(tokio::spawn(session::run_with_handoff(c.clone(),p,updates_tx.clone(),store.clone(),cancel_rx,handoff_for_next.take())));
                     }
                 }
             }
@@ -392,7 +417,7 @@ pub async fn run(c: Config) -> io::Result<()> {
     }
     stop_wake(&mut wake_worker, &mut wake_cancel).await;
     if let Ok(native) = command("assistant_control", json!({"action":"wake_disable"})).await {
-        let _=command("set_assistant_wake_status",json!({"wake_generation":native["wake_generation"],"enabled":false,"microphone_active":false,"state":"disabled"})).await;
+        let _=command("set_assistant_wake_status",json!({"wake_generation":native["wake_generation"],"wm_instance_id":native["wm_instance_id"],"enabled":false,"microphone_active":false,"state":"disabled"})).await;
     }
     stop(&mut worker, &mut cancellation).await;
     if let Some(p) = permit {
@@ -408,6 +433,14 @@ pub async fn run(c: Config) -> io::Result<()> {
     }
     Ok(())
 }
+fn wake_source(snapshot: &Value) -> Option<crate::handoff::Source> {
+    Some(crate::handoff::Source {
+        wm_instance_id: snapshot["wm_instance_id"].as_str()?.to_owned(),
+        wake_generation: snapshot["wake_generation"].as_u64()?,
+        assistant_generation: snapshot["assistant_generation"].as_u64()?,
+    })
+}
+
 async fn stop_wake(
     worker: &mut Option<tokio::task::JoinHandle<io::Result<crate::wake::Outcome>>>,
     cancel: &mut Option<watch::Sender<bool>>,

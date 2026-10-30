@@ -91,6 +91,7 @@ pub(crate) struct EvaRuntime {
     presentation_monitor: Option<MonitorKey>,
     error_visible_until: Option<Instant>,
     focus_history: VecDeque<(u64, Option<String>)>,
+    selected_monitor_history: VecDeque<(u64, Option<String>)>,
     permit: Option<AssistantPermit>,
     lease_until: Option<Instant>,
     state: String,
@@ -132,6 +133,7 @@ impl Default for EvaRuntime {
             presentation_monitor: None,
             error_visible_until: None,
             focus_history: VecDeque::new(),
+            selected_monitor_history: VecDeque::new(),
             permit: None,
             lease_until: None,
             state: "idle".into(),
@@ -214,6 +216,7 @@ fn parse_layout(name: &str) -> Option<&'static LayoutEnum> {
 
 impl Jwm {
     fn eva_record_focus(&mut self) {
+        let at = monotonic_ns();
         let token = self
             .get_selected_client_key()
             .map(|k| self.eva_window_token(k));
@@ -226,7 +229,19 @@ impl Jwm {
             if self.eva.focus_history.len() >= 128 {
                 self.eva.focus_history.pop_front();
             }
-            self.eva.focus_history.push_back((monotonic_ns(), token));
+            self.eva.focus_history.push_back((at, token));
+        }
+        let monitor = self.state.sel_mon.map(|m| self.eva_monitor_token(m));
+        if self
+            .eva
+            .selected_monitor_history
+            .back()
+            .is_none_or(|(_, old)| *old != monitor)
+        {
+            if self.eva.selected_monitor_history.len() >= 128 {
+                self.eva.selected_monitor_history.pop_front();
+            }
+            self.eva.selected_monitor_history.push_back((at, monitor));
         }
     }
     fn eva_presentable_monitor(
@@ -324,6 +339,12 @@ impl Jwm {
             && self.running.load(std::sync::atomic::Ordering::SeqCst);
         if self.eva.wake_requested && !self.eva.standby_allowed {
             self.eva_set_wake_requested(false);
+        }
+        if self.eva.wake_requested && !self.eva_active() {
+            self.eva.presentation_monitor = self.eva_presentable_monitor(
+                backend,
+                self.eva.presentation_monitor.or(self.state.sel_mon),
+            );
         }
         if self
             .eva
@@ -556,6 +577,9 @@ impl Jwm {
         args: &Value,
     ) -> IpcResponse {
         self.eva_tick(backend);
+        if args["wm_instance_id"].as_str() != Some(self.eva.instance.as_str()) {
+            return failure("wm_instance_mismatch");
+        }
         if args["wake_generation"].as_u64() != Some(self.eva.wake_generation) {
             return failure("assistant_wake_generation_mismatch");
         }
@@ -695,7 +719,7 @@ impl Jwm {
         let standby =
             !self.eva_active() && (self.eva.wake_requested || self.eva.wake_microphone_active);
         json!({"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some(){None}else{Some(self.eva.microphone_active)},
-            "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,
+            "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"assistant_generation":self.eva.generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,
             "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
             "followup_remaining_ms":self.eva.followup_deadline_ns.filter(|_|self.eva_active()&&matches!(self.eva.state.as_str(),"follow_up"|"followup")).map(|deadline|deadline.saturating_sub(monotonic_ns())/1_000_000),
             "lease_remaining_ms":self.eva.lease_until.map(|t|t.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0)})
@@ -704,14 +728,51 @@ impl Jwm {
         let Some(mut action) = args.get("action").and_then(Value::as_str) else {
             return failure("plan_invalid: missing assistant action");
         };
+        let mut wake_source_monitor = None;
         if action == "wake_activate" {
             self.eva_tick(backend);
             if !self.eva.wake_requested
                 || !self.eva.standby_allowed
                 || self.eva_active()
                 || args["wake_generation"].as_u64() != Some(self.eva.wake_generation)
+                || args["assistant_generation"].as_u64() != Some(self.eva.generation)
+                || args["wm_instance_id"].as_str() != Some(self.eva.instance.as_str())
             {
                 return failure("assistant_wake_activation_stale");
+            }
+            if args.get("source_monitor_token").is_some()
+                || args.get("source_onset_monotonic_ns").is_some()
+            {
+                let Some(source_token) = args["source_monitor_token"].as_str() else {
+                    return failure("assistant_wake_source_monitor_missing");
+                };
+                let Some(onset) = args["source_onset_monotonic_ns"]
+                    .as_u64()
+                    .filter(|at| *at <= monotonic_ns())
+                else {
+                    return failure("assistant_wake_source_onset_invalid");
+                };
+                let history = &self.eva.selected_monitor_history;
+                let source_at_onset = history
+                    .iter()
+                    .rev()
+                    .find(|(at, _)| *at <= onset)
+                    .and_then(|(_, token)| token.as_deref());
+                let ambiguous = history.iter().any(|(at, _)| {
+                    *at > onset.saturating_sub(1_000_000) && *at <= onset.saturating_add(1_000_000)
+                });
+                if source_at_onset != Some(source_token) || ambiguous {
+                    return failure("assistant_wake_source_monitor_unproven");
+                }
+                let Some(monitor) = self.eva_resolve_monitor(source_token) else {
+                    return failure("assistant_wake_source_monitor_gone");
+                };
+                if self.monitor_key_is_locked(monitor)
+                    || self.eva_presentable_monitor(backend, Some(monitor)) != Some(monitor)
+                {
+                    return failure("assistant_wake_source_monitor_unavailable");
+                }
+                wake_source_monitor = Some(monitor);
             }
             action = "activate";
         }
@@ -723,6 +784,12 @@ impl Jwm {
                 return failure("assistant_standby_unavailable");
             }
             self.eva_set_wake_requested(enabled);
+            if enabled && !self.eva_active() {
+                self.eva.presentation_monitor = self.eva_presentable_monitor(
+                    backend,
+                    self.eva.presentation_monitor.or(self.state.sel_mon),
+                );
+            }
             self.eva_sync_ui(backend);
             return IpcResponse::ok(Some(self.eva_overlay_snapshot()));
         }
@@ -752,11 +819,12 @@ impl Jwm {
             self.eva.generation = generation;
             self.eva.activated_monotonic_ns = Some(monotonic_ns());
             let presentation = self.eva_presentable_monitor(backend, self.state.sel_mon);
-            self.eva.activation_monitor = self
-                .state
-                .sel_mon
-                .filter(|m| self.state.monitors.contains_key(*m))
-                .or(presentation);
+            self.eva.activation_monitor = wake_source_monitor.or_else(|| {
+                self.state
+                    .sel_mon
+                    .filter(|m| self.state.monitors.contains_key(*m))
+                    .or(presentation)
+            });
             self.eva.presentation_monitor = presentation;
             self.eva.permit = Some(AssistantPermit {
                 assistant_session_id: format!("{}-{generation}", self.eva.instance),
@@ -1168,7 +1236,7 @@ impl Jwm {
                 }
             }
         }
-        json!({"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
+        json!({"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
     }
     pub(crate) fn eva_command_schema(&self) -> Value {
         let mut actions = serde_json::to_value(jwm_eva_core::actions::full_registry())
@@ -3256,6 +3324,10 @@ mod tests {
             generation: 1,
         });
         jwm.eva.lease_until = Some(Instant::now() + LEASE);
+        jwm.eva.selected_monitor_history.push_back((
+            monotonic_ns().saturating_sub(10_000_000),
+            jwm.state.sel_mon.map(|m| jwm.eva_monitor_token(m)),
+        ));
         (jwm, backend)
     }
     fn request(jwm: &Jwm, id: &str, action: Value) -> Value {
@@ -3373,7 +3445,7 @@ mod tests {
                 .success
         );
         let generation = jwm.eva.wake_generation;
-        let heartbeat = json!({"wake_generation":generation,"enabled":true,"microphone_active":true,"state":"standby","level":0.2});
+        let heartbeat = json!({"wm_instance_id":jwm.eva.instance,"wake_generation":generation,"enabled":true,"microphone_active":true,"state":"standby","level":0.2});
         assert!(jwm.eva_set_wake_status(&mut backend, &heartbeat).success);
         let status = jwm.eva_overlay_snapshot();
         assert_eq!(status["visible"], true);
@@ -3388,7 +3460,7 @@ mod tests {
         assert!(!jwm.eva_set_wake_status(&mut backend, &heartbeat).success);
         // Keep the physical mic indicator until the daemon confirms cleanup.
         assert!(jwm.eva.wake_microphone_active);
-        let disabled = json!({"wake_generation":jwm.eva.wake_generation,"enabled":false,"microphone_active":false,"state":"disabled"});
+        let disabled = json!({"wm_instance_id":jwm.eva.instance,"wake_generation":jwm.eva.wake_generation,"enabled":false,"microphone_active":false,"state":"disabled"});
         assert!(jwm.eva_set_wake_status(&mut backend, &disabled).success);
         assert!(!jwm.eva.wake_microphone_active);
         assert!(!jwm.eva.wake_requested);
@@ -3422,7 +3494,7 @@ mod tests {
             jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
                 .success
         );
-        let request = json!({"action":"wake_activate","wake_generation":jwm.eva.wake_generation});
+        let request = json!({"action":"wake_activate","wm_instance_id":jwm.eva.instance,"wake_generation":jwm.eva.wake_generation,"assistant_generation":jwm.eva.generation,"source_monitor_token":jwm.state.sel_mon.map(|m|jwm.eva_monitor_token(m)),"source_onset_monotonic_ns":monotonic_ns().saturating_sub(2_000_000)});
         assert!(
             jwm.eva_control(&mut backend, &json!({"action":"activate"}))
                 .success
@@ -3441,9 +3513,208 @@ mod tests {
             jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
                 .success
         );
-        let request = json!({"action":"wake_activate","wake_generation":jwm.eva.wake_generation});
+        let request = json!({"action":"wake_activate","wm_instance_id":jwm.eva.instance,"wake_generation":jwm.eva.wake_generation,"assistant_generation":jwm.eva.generation,"source_monitor_token":jwm.state.sel_mon.map(|m|jwm.eva_monitor_token(m)),"source_onset_monotonic_ns":monotonic_ns().saturating_sub(2_000_000)});
         assert!(jwm.eva_control(&mut backend, &request).success);
         assert!(jwm.eva_active());
+    }
+    #[test]
+    fn wake_handoff_is_fenced_by_wm_instance_and_the_last_manual_session() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let source = jwm.eva_overlay_snapshot();
+        let mut handoff = json!({"action":"wake_activate","wm_instance_id":source["wm_instance_id"],
+            "wake_generation":source["wake_generation"],"assistant_generation":source["assistant_generation"],"source_monitor_token":jwm.state.sel_mon.map(|m|jwm.eva_monitor_token(m)),"source_onset_monotonic_ns":monotonic_ns().saturating_sub(2_000_000)});
+        handoff["wm_instance_id"] = json!("previous-wm");
+        assert!(!jwm.eva_control(&mut backend, &handoff).success);
+        let old_heartbeat = json!({"wm_instance_id":"previous-wm","wake_generation":source["wake_generation"],
+            "enabled":true,"microphone_active":true,"state":"standby"});
+        assert!(
+            !jwm.eva_set_wake_status(&mut backend, &old_heartbeat)
+                .success
+        );
+        assert!(!jwm.eva.wake_microphone_active);
+        handoff["wm_instance_id"] = source["wm_instance_id"].clone();
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"activate"}))
+                .success
+        );
+        jwm.eva_cancel("manual_session_finished");
+        assert_eq!(
+            jwm.eva.wake_generation,
+            source["wake_generation"].as_u64().unwrap()
+        );
+        assert!(!jwm.eva_control(&mut backend, &handoff).success);
+        assert!(jwm.eva.permit.is_none());
+        handoff["assistant_generation"] = json!(jwm.eva.generation);
+        assert!(jwm.eva_control(&mut backend, &handoff).success);
+    }
+    #[test]
+    fn locking_revokes_a_pending_wake_even_after_the_desktop_is_unlocked() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let handoff = json!({"action":"wake_activate","wm_instance_id":jwm.eva.instance,
+            "wake_generation":jwm.eva.wake_generation,"assistant_generation":jwm.eva.generation,"source_monitor_token":jwm.state.sel_mon.map(|m|jwm.eva_monitor_token(m)),"source_onset_monotonic_ns":monotonic_ns().saturating_sub(2_000_000)});
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        jwm.eva_tick(&mut backend);
+        assert!(!jwm.eva.wake_requested);
+        jwm.features.system_ui = Default::default();
+        assert!(!jwm.eva_control(&mut backend, &handoff).success);
+        assert!(jwm.eva.permit.is_none());
+    }
+    #[test]
+    fn wake_microphone_indicator_migrates_to_a_presentable_output() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        backend.eva_overlay_supported = true;
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let first = jwm.state.monitor_order[0];
+        let second = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(first);
+        backend.eva_visible_outputs = Some(vec![2]);
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        assert_eq!(jwm.eva.presentation_monitor, Some(second));
+        assert_eq!(jwm.eva_overlay_snapshot()["monitor_rect"][0], 1920);
+        backend.eva_visible_outputs = Some(vec![1]);
+        jwm.eva_tick(&mut backend);
+        assert_eq!(jwm.eva.presentation_monitor, Some(first));
+        assert!(jwm.eva.wake_requested);
+        assert!(jwm.eva.permit.is_none());
+    }
+    #[test]
+    fn wake_handoff_pins_the_proven_onset_monitor_after_selection_changes() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        backend.eva_overlay_supported = true;
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let first = jwm.state.monitor_order[0];
+        let second = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(second);
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let first_token = jwm.eva_monitor_token(first);
+        let second_token = jwm.eva_monitor_token(second);
+        let base = monotonic_ns() - 100_000_000;
+        jwm.eva.selected_monitor_history = VecDeque::from([
+            (base, Some(first_token.clone())),
+            (base + 40_000_000, Some(second_token)),
+        ]);
+        let handoff = json!({"action":"wake_activate","wm_instance_id":jwm.eva.instance,
+            "wake_generation":jwm.eva.wake_generation,"assistant_generation":jwm.eva.generation,
+            "source_monitor_token":first_token,"source_onset_monotonic_ns":base+20_000_000});
+        assert!(jwm.eva_control(&mut backend, &handoff).success);
+        assert_eq!(jwm.eva.activation_monitor, Some(first));
+        assert_eq!(jwm.state.sel_mon, Some(second));
+        assert_eq!(
+            jwm.eva_execution_context()["activation_monitor_token"],
+            handoff["source_monitor_token"]
+        );
+    }
+    #[test]
+    fn wake_handoff_rejects_unproven_dark_or_removed_source_monitors() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        backend.eva_overlay_supported = true;
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let first = jwm.state.monitor_order[0];
+        let second = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(second);
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let first_token = jwm.eva_monitor_token(first);
+        let second_token = jwm.eva_monitor_token(second);
+        let base = monotonic_ns() - 100_000_000;
+        jwm.eva.selected_monitor_history = VecDeque::from([
+            (base, Some(first_token.clone())),
+            (base + 40_000_000, Some(second_token.clone())),
+        ]);
+        let handoff = json!({"action":"wake_activate","wm_instance_id":jwm.eva.instance,
+            "wake_generation":jwm.eva.wake_generation,"assistant_generation":jwm.eva.generation,
+            "source_monitor_token":first_token,"source_onset_monotonic_ns":base+20_000_000});
+        for (field, value) in [
+            ("source_monitor_token", Value::Null),
+            ("source_monitor_token", json!(second_token)),
+            ("source_onset_monotonic_ns", json!(base - 1)),
+            ("source_onset_monotonic_ns", json!(base + 40_000_000)),
+            (
+                "source_onset_monotonic_ns",
+                json!(monotonic_ns() + 1_000_000_000),
+            ),
+        ] {
+            let mut invalid = handoff.clone();
+            invalid[field] = value;
+            assert!(
+                !jwm.eva_control(&mut backend, &invalid).success,
+                "{invalid}"
+            );
+            assert!(jwm.eva.permit.is_none());
+        }
+        backend.eva_visible_outputs = Some(vec![2]);
+        assert!(!jwm.eva_control(&mut backend, &handoff).success);
+        assert!(jwm.eva.permit.is_none());
+        backend.eva_visible_outputs = None;
+        jwm.state.monitors.remove(first);
+        jwm.state.monitor_order.retain(|m| *m != first);
+        assert!(!jwm.eva_control(&mut backend, &handoff).success);
+        assert!(jwm.eva.permit.is_none());
+        let mut wake_only = handoff;
+        wake_only
+            .as_object_mut()
+            .unwrap()
+            .remove("source_monitor_token");
+        wake_only
+            .as_object_mut()
+            .unwrap()
+            .remove("source_onset_monotonic_ns");
+        assert!(jwm.eva_control(&mut backend, &wake_only).success);
+        assert_eq!(
+            jwm.eva.activation_monitor,
+            Some(second),
+            "wake-only fallback requests fresh speech on the current output"
+        );
+    }
+    #[test]
+    fn selected_monitor_history_records_empty_focus_and_retains_a_bounded_timeline() {
+        let (mut jwm, _backend) = setup();
+        let monitor = jwm.state.sel_mon;
+        for index in 0..140 {
+            jwm.state.sel_mon = if index % 2 == 0 { None } else { monitor };
+            jwm.eva_record_focus();
+        }
+        let context = jwm.eva_execution_context();
+        let history = context["selected_monitor_history"].as_array().unwrap();
+        assert_eq!(history.len(), 128);
+        assert!(history.iter().any(|entry| entry["monitor_token"].is_null()));
+        assert!(
+            history
+                .iter()
+                .all(|entry| entry["at_monotonic_ns"].as_u64().unwrap()
+                    <= context["observed_monotonic_ns"].as_u64().unwrap())
+        );
+        assert!(
+            jwm.eva.focus_history.len() < 128,
+            "monitor-only transitions must be recorded even when focus does not change"
+        );
     }
     #[test]
     fn activation_requires_visible_overlay_and_never_issues_permit_headlessly() {

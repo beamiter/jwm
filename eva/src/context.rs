@@ -21,6 +21,8 @@ pub struct UtteranceBinding {
 pub struct Observation {
     pub received_at: Instant,
     pub focus_token: Option<String>,
+    pub monitor_token: Option<String>,
+    pub observed_monotonic_ns: Option<u64>,
 }
 #[derive(Debug, Default)]
 pub struct ContextStore {
@@ -52,14 +54,19 @@ impl ContextStore {
             self.connected_since = Some(received_at);
         }
         let focus = context["focus_token"].as_str().map(str::to_owned);
+        let monitor = context["selected_monitor_token"]
+            .as_str()
+            .map(str::to_owned);
         if self
             .observations
             .back()
-            .is_none_or(|old| old.focus_token != focus)
+            .is_none_or(|old| old.focus_token != focus || old.monitor_token != monitor)
         {
             self.observations.push_back(Observation {
                 received_at,
                 focus_token: focus,
+                monitor_token: monitor,
+                observed_monotonic_ns: context["observed_monotonic_ns"].as_u64(),
             });
         }
         while self.observations.len() > 128 {
@@ -91,6 +98,26 @@ impl ContextStore {
                 .ok_or_else(|| io::Error::other("missing_wm_instance_id"))?
                 .into(),
         })
+    }
+    /// A wake handoff must retain the output observed before speech, rather
+    /// than whichever output is selected after cloud wake detection finishes.
+    pub fn monitor_at(&self, captured: Instant) -> io::Result<String> {
+        self.bind_onset(captured)?;
+        monitor_at_onset(
+            self.snapshot
+                .as_ref()
+                .ok_or_else(|| io::Error::other("context_not_ready"))?,
+            instant_to_monotonic_ns(captured)?,
+        )
+    }
+
+    pub fn binding_current(&self, binding: &UtteranceBinding) -> bool {
+        self.connected
+            && self.connection_epoch == binding.connection_epoch
+            && self.snapshot.as_ref().is_some_and(|context| {
+                context["wm_instance_id"].as_str() == Some(binding.wm_instance_id.as_str())
+                    && context["session_unlocked"] == true
+            })
     }
     pub fn validate_commit(
         &self,
@@ -219,6 +246,36 @@ pub fn focus_during_utterance(
         .ok_or_else(|| io::Error::other("speech_has_no_focused_window"))
 }
 
+pub fn monitor_at_onset(context: &Value, onset: u64) -> io::Result<String> {
+    if context["observed_monotonic_ns"]
+        .as_u64()
+        .is_none_or(|observed| observed < onset)
+    {
+        return Err(io::Error::other("speech_monitor_unavailable"));
+    }
+    let history = context["selected_monitor_history"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("speech_monitor_unavailable"))?;
+    let mut previous = None;
+    let mut selected = None;
+    for entry in history {
+        let at = entry["at_monotonic_ns"]
+            .as_u64()
+            .ok_or_else(|| io::Error::other("speech_monitor_unavailable"))?;
+        if previous.is_some_and(|old| at < old) {
+            return Err(io::Error::other("speech_monitor_unavailable"));
+        }
+        previous = Some(at);
+        if at <= onset {
+            selected = entry["monitor_token"].as_str().map(str::to_owned);
+        }
+        if at > onset.saturating_sub(1_000_000) && at <= onset.saturating_add(1_000_000) {
+            return Err(io::Error::other("speech_monitor_ambiguous"));
+        }
+    }
+    selected.ok_or_else(|| io::Error::other("speech_monitor_unavailable"))
+}
+
 pub fn monotonic_ns() -> io::Result<u64> {
     let mut time = libc::timespec {
         tv_sec: 0,
@@ -296,6 +353,21 @@ impl ContextMonitor {
     pub fn bind_onset(&self, captured: Instant) -> io::Result<UtteranceBinding> {
         self.store.lock().unwrap().bind_onset(captured)
     }
+    pub async fn monitor_at(&self, captured: Instant) -> io::Result<String> {
+        let binding = self.bind_onset(captured)?;
+        let context = crate::executor::query("get_execution_context", json!({})).await?;
+        if !self.binding_current(&binding)
+            || context["wm_instance_id"].as_str() != Some(binding.wm_instance_id.as_str())
+            || context["session_unlocked"] != true
+        {
+            return Err(io::Error::other("context_reconnected"));
+        }
+        monitor_at_onset(&context, binding.onset_monotonic_ns)
+    }
+
+    pub fn binding_current(&self, binding: &UtteranceBinding) -> bool {
+        self.store.lock().unwrap().binding_current(binding)
+    }
     pub async fn verify_commit(
         &self,
         binding: &UtteranceBinding,
@@ -320,6 +392,22 @@ mod tests {
     use super::*;
     fn snapshot(history: Value) -> Value {
         json!({"observed_monotonic_ns":100_000_000,"focus_history":history})
+    }
+    #[test]
+    fn wake_monitor_scope_uses_native_history_even_when_event_receipt_is_late() {
+        let context = json!({"observed_monotonic_ns":120_000_000,"selected_monitor_history":[
+            {"at_monotonic_ns":1,"monitor_token":"old"},
+            {"at_monotonic_ns":95_000_000,"monitor_token":"actual-at-onset"},
+            {"at_monotonic_ns":110_000_000,"monitor_token":"later"}
+        ]});
+        assert_eq!(
+            monitor_at_onset(&context, 100_000_000).unwrap(),
+            "actual-at-onset"
+        );
+        assert!(monitor_at_onset(&context, 95_000_000).is_err());
+        assert!(monitor_at_onset(&context, 130_000_000).is_err());
+        let missing = json!({"observed_monotonic_ns":120_000_000,"selected_monitor_token":"guess"});
+        assert!(monitor_at_onset(&missing, 100_000_000).is_err());
     }
     #[test]
     fn delayed_receipt_does_not_rebind_speech_to_a_later_window() {

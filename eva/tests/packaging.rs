@@ -12,6 +12,10 @@ fn shipped_configuration_is_accepted_by_the_actual_strict_loader() {
     assert_eq!(config.pricing.model, config.openai.model);
     assert!(!config.interaction.half_duplex);
     assert_eq!(config.interaction.feedback, "voice");
+    assert_eq!(config.turn_detection.kind, "semantic_vad");
+    assert_eq!(config.turn_detection.eagerness, "auto");
+    assert_eq!(config.audio.noise_reduction, "near_field");
+    assert_eq!(config.wake_config().turn_detection.kind, "server_vad");
     assert_eq!(config.execution.max_actions_per_turn, 32);
     assert!(!config.privacy.save_raw_audio);
     assert!(!config.privacy.include_clipboard_in_context);
