@@ -205,6 +205,61 @@ the old D-Bus owner running and can make applications wait 25 seconds during
 notification discovery. Other notification servers and an already-current
 bridge are left alone; staged release installs never touch the live session.
 
+### NVIDIA DRM KMS and blank Tauri bars
+
+Enable NVIDIA DRM kernel modesetting before using the physical Wayland backend.
+The setting also matters under X11: WebKit's DMA-BUF renderer needs working GBM
+buffer allocation. With NVIDIA DRM KMS disabled, a Tauri bar can start, map its
+transparent window and initialize its frontend, yet display no contents. A
+verified NVIDIA 570 / WebKitGTK 2.50.4 case fell back to Mesa's `kms_swrast`
+allocator and logged:
+
+```text
+KMS: DRM_IOCTL_MODE_CREATE_DUMB failed: Permission denied
+Failed to create GBM buffer of size 2550x42: Permission denied
+```
+
+This error alone does not establish missing user/group permissions: it can occur
+even when the login user already has read/write ACLs on the DRM devices. Check
+the **loaded** NVIDIA module setting:
+
+```bash
+sudo cat /sys/module/nvidia_drm/parameters/modeset
+```
+
+`Y` means enabled; `N` means disabled. If the path is absent, first check that
+the NVIDIA DRM module and driver are installed and loaded. NVIDIA documents the
+[GBM requirement for DRM KMS](https://bugs.webkit.org/show_bug.cgi?id=261874#c66)
+and the [persistent activation steps](https://nvidia.custhelp.com/app/answers/detail/a_id/5737).
+
+On Debian/Ubuntu with `initramfs-tools`, first resolve any conflicting NVIDIA
+`modeset=0` module option or `nvidia-drm.modeset=0` / `nomodeset` kernel argument.
+Then add the module option and rebuild the initramfs for installed kernels:
+
+```bash
+echo 'options nvidia-drm modeset=1' | sudo tee /etc/modprobe.d/nvidia-drm-modeset.conf
+sudo update-initramfs -u -k all
+```
+
+If you edited GRUB's kernel arguments, also run `sudo update-grub`. Save your
+work and reboot the machine to load the new module setting:
+
+```bash
+sudo reboot
+```
+
+After reboot, repeat the `sudo cat` check above and confirm `Y`. Restarting JWM
+or logging out alone does not reload the NVIDIA module. Recheck WebKit rendering
+after enabling KMS; this setting does not rule out other driver/GBM problems.
+
+For compatibility, JWM defaults to `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` for
+managed Tauri bars in NVIDIA X11 sessions. This retains WebKit's accelerated
+compositor and transfers frames through shared memory. Enabling KMS does not
+automatically remove this compatibility default. To test the DMA-BUF hardware
+transport after confirming `Y`, set `WEBKIT_DMABUF_RENDERER_FORCE_SHM=0` in the
+environment used to launch a future JWM X11 session. See the
+[bar transport and override notes](bars/README.md#official-bar).
+
 ## Control JWM
 
 Native Wayland touchpad settings and per-device diagnostics are documented in

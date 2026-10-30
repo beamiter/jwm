@@ -24,6 +24,18 @@ A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`
 updates both JWM configuration files. `JWM_BAR_NAME` selects the installer
 default and explicit `--bar` takes precedence.
 
+On NVIDIA X11 sessions, JWM launches Tauri bars with
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` by default. This retains WebKit's
+accelerated compositor but transfers frames through shared memory, avoiding
+blank bars when the GBM allocator fails with
+`DRM_IOCTL_MODE_CREATE_DUMB: Permission denied` (for example, with NVIDIA DRM
+KMS disabled). Native Wayland and other bar toolkits keep their existing
+transport. Explicit `WEBKIT_DMABUF_RENDERER_FORCE_SHM`,
+`WEBKIT_DISABLE_DMABUF_RENDERER` and `WEBKIT_DISABLE_COMPOSITING_MODE` choices
+take precedence, including `0` and empty values.
+For module checks, persistent activation and reboot verification, see
+[NVIDIA DRM KMS troubleshooting](../README.md#nvidia-drm-kms-and-blank-tauri-bars).
+
 ### Shared three-panel desktop shell
 
 Every selected frontend can keep its own top bar while JWM supervises one

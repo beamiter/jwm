@@ -204,6 +204,43 @@ fn secondary_bar_command_with_environment(
     command
 }
 
+fn configure_tauri_buffer_transport(command: &mut Command, x11: bool, nvidia_drm: bool) {
+    let tauri_bar = std::path::Path::new(command.get_program())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "tauri_leptos_bar"
+                    | "tauri_react_bar"
+                    | "tauri_solid_bar"
+                    | "tauri_svelte_bar"
+                    | "tauri_vue_bar"
+                    | "tauri_yew_bar"
+            )
+        });
+    if !x11 || !nvidia_drm || !tauri_bar {
+        return;
+    }
+    let overrides = [
+        "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+        "WEBKIT_DISABLE_DMABUF_RENDERER",
+        "WEBKIT_DISABLE_COMPOSITING_MODE",
+    ];
+    if overrides.iter().any(|name| {
+        command.get_envs().any(|(key, _)| key == *name) || std::env::var_os(name).is_some()
+    }) {
+        return;
+    }
+
+    // WebKit's GBM allocator can fall back to kms_swrast on NVIDIA X11
+    // sessions without DRM KMS. CREATE_DUMB then fails on the render node,
+    // leaving an initialized but blank WebView. Shared-memory transport
+    // avoids that allocator while retaining WebKit's accelerated compositor.
+    command.env("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
+    info!("Using WebKit shared-memory buffer transport for NVIDIA X11 status bar");
+}
+
 impl Jwm {
     pub(crate) fn secondary_bar_next_wakeup(&self, now: Instant) -> Option<Duration> {
         let monitor_ids: HashSet<i32> = self
@@ -667,6 +704,11 @@ impl Jwm {
 
         let cfg = CONFIG.load();
         let mut command = secondary_bar_command(cfg.status_bar_name(), &shared_path, monitor_id);
+        configure_tauri_buffer_transport(
+            &mut command,
+            matches!(self.runtime_backend.as_str(), "x11rb" | "xcb"),
+            std::path::Path::new("/sys/module/nvidia_drm").is_dir(),
+        );
         let launch_config = self.secondary_bar_launch_config(&cfg, monitor_id);
         if launch_config.shell_owned {
             command.env(
@@ -887,6 +929,69 @@ mod secondary_bar_shared_path_tests {
 
 #[cfg(test)]
 mod secondary_bar_child_tests {
+    #[test]
+    fn tauri_bars_use_shm_on_nvidia_x11_only() {
+        use std::ffi::OsStr;
+
+        for bar in [
+            "tauri_leptos_bar",
+            "tauri_react_bar",
+            "tauri_solid_bar",
+            "tauri_svelte_bar",
+            "tauri_vue_bar",
+            "tauri_yew_bar",
+            "/opt/jwm/tauri_leptos_bar",
+            "tao_glow_bar",
+        ] {
+            for (x11, nvidia) in [(true, true), (true, false), (false, true)] {
+                let mut command = std::process::Command::new(bar);
+                super::configure_tauri_buffer_transport(&mut command, x11, nvidia);
+                let value = command
+                    .get_envs()
+                    .find(|(name, _)| *name == "WEBKIT_DMABUF_RENDERER_FORCE_SHM");
+                if x11 && nvidia && bar != "tao_glow_bar" {
+                    assert_eq!(value.unwrap().1, Some(OsStr::new("1")), "{bar}");
+                } else {
+                    assert!(value.is_none(), "{bar}: x11={x11}, nvidia={nvidia}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tauri_buffer_transport_preserves_explicit_webkit_choices() {
+        for name in [
+            "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+            "WEBKIT_DISABLE_DMABUF_RENDERER",
+            "WEBKIT_DISABLE_COMPOSITING_MODE",
+        ] {
+            for value in [Some("0"), Some("1"), Some(""), None] {
+                let environment = crate::child_environment::ChildEnvironment::default();
+                if let Some(value) = value {
+                    environment.set(name, value);
+                } else {
+                    environment.remove(name);
+                }
+                let mut command = super::secondary_bar_command_with_environment(
+                    "tauri_leptos_bar",
+                    "/tmp/probe",
+                    0,
+                    &environment,
+                );
+                let before: Vec<_> = command
+                    .get_envs()
+                    .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+                    .collect();
+                super::configure_tauri_buffer_transport(&mut command, true, true);
+                let after: Vec<_> = command
+                    .get_envs()
+                    .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+                    .collect();
+                assert_eq!(after, before, "{name}={value:?}");
+            }
+        }
+    }
+
     #[test]
     fn bar_uses_session_xwayland_display_without_overwriting_toolkit_choices() {
         use std::ffi::OsStr;
