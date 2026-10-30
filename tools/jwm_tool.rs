@@ -1259,6 +1259,22 @@ fn handle_unexpected_child_exit(
     // ownership fields. Its final reply still belongs to the waiting client.
     let _ = manager.is_running();
     if manager.unexpected_exit {
+        // The X11 desktop entry runs this daemon as the login session's
+        // lifetime owner. Returning here on a WM crash asks the display
+        // manager/xinit to tear down the X server and every application.
+        // Keep the control FIFO alive for `start` after repairing/rolling
+        // back the executable. Do not repeatedly launch a broken upgrade.
+        // A clean child exit still means logout; Wayland owns its display
+        // connections and deliberately retains its existing policy.
+        if matches!(manager.backend.as_deref(), Some("xcb" | "x11rb"))
+            && !matches!(manager.last_exit, Some(ManagedChildExit::Code(0)))
+        {
+            manager.unexpected_exit = false;
+            log_line(
+                "X11 JWM异常退出；保留登录会话与daemon控制入口。修复或回滚程序后运行 jwm-tool start；显式 jwm-tool quit 结束会话。",
+            );
+            return false;
+        }
         cleanup(response_published);
         true
     } else {
@@ -5681,6 +5697,79 @@ mod tests {
         manager.jwm_pid = Some(pid);
         manager.jwm_child = Some(child);
         manager
+    }
+
+    #[test]
+    fn x11_abnormal_exit_keeps_recovery_control_and_can_start_again() {
+        for backend in ["xcb", "x11rb"] {
+            let mut manager = exited_manager();
+            manager.backend = Some(backend.into());
+            assert!(!super::handle_unexpected_child_exit(
+                &mut manager,
+                false,
+                |_| { panic!("a WM failure must not end the X11 login session") }
+            ));
+            assert_eq!(manager.last_exit, Some(super::ManagedChildExit::Code(17)));
+            assert!(!manager.unexpected_exit);
+            assert!(manager.jwm_child.is_none());
+            // Further polls must neither exit nor repeatedly report the crash.
+            assert!(!super::handle_unexpected_child_exit(
+                &mut manager,
+                false,
+                |_| { panic!("idle recovery state must retain the daemon") }
+            ));
+            // Use the existing manager with a real replacement child; /bin/cat
+            // exits cleanly on the daemon's null stdin, so no process leaks.
+            manager.jwm_binary = PathBuf::from("/bin/cat");
+            manager.start().unwrap();
+            assert!(manager.wait_for_exit(std::time::Duration::from_secs(2)));
+            assert!(super::handle_unexpected_child_exit(
+                &mut manager,
+                false,
+                |_| {}
+            ));
+        }
+    }
+
+    #[test]
+    fn x11_signal_or_unknown_status_is_not_logout_but_clean_exit_is() {
+        for outcome in [
+            super::ManagedChildExit::Code(0),
+            super::ManagedChildExit::Code(1),
+            super::ManagedChildExit::Signal {
+                number: libc::SIGSEGV,
+                core_dumped: false,
+            },
+            super::ManagedChildExit::UnavailableEchild,
+        ] {
+            let mut manager = JwmManager::new(PathBuf::from("unused"), Some("xcb".into()));
+            manager.unexpected_exit = true;
+            manager.last_exit = Some(outcome);
+            let mut cleaned = false;
+            let exited = super::handle_unexpected_child_exit(&mut manager, true, |preserve| {
+                assert!(preserve);
+                cleaned = true;
+            });
+            assert_eq!(exited, outcome == super::ManagedChildExit::Code(0));
+            assert_eq!(cleaned, exited);
+        }
+    }
+
+    #[test]
+    fn non_x11_abnormal_exit_keeps_existing_session_policy() {
+        for backend in [None, Some("wayland-udev"), Some("wayland-winit")] {
+            let mut manager = exited_manager();
+            manager.backend = backend.map(str::to_owned);
+            let mut cleaned = false;
+            assert!(super::handle_unexpected_child_exit(
+                &mut manager,
+                false,
+                |_| {
+                    cleaned = true;
+                }
+            ));
+            assert!(cleaned);
+        }
     }
 
     #[test]
