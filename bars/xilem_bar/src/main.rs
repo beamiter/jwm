@@ -1304,7 +1304,7 @@ fn handle_control_scroll(
                 .hover(hovered.then_some(id), state.presentation.edge, now)
         }
         HoverInteraction::Reset => state.scroll.reset(),
-        HoverInteraction::Cancel => state.scroll.cancel(now),
+        HoverInteraction::Cancel => state.scroll.interrupt(now),
         HoverInteraction::Scroll(delta) => {
             let scale_factor = state.geometry_bridge.snapshot().scale_factor;
             if state.scroll_scale_factor != Some(scale_factor) {

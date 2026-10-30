@@ -164,3 +164,46 @@ and a fresh scroll. Test an external touchpad next to the built-in one, unplug
 and reconnect it, reload a rule, remove an override, and suspend/resume. Confirm
 that an external mouse's settings remain unchanged. Gesture actions are
 configured separately in [touchpad workspace swipes](touchpad-gestures.md).
+
+### Preview scanout and scroll ownership regressions (PR #76 follow-up)
+
+Native Wayland keeps direct scanout blocked for both an interactive workspace
+preview and its release/cancel animation. A stationary finger does not require
+continuous animation ticks, but the retained preview still requires composition.
+Once `finish_transition` clears the transition and swipe state, the ordinary
+fullscreen direct-scanout optimization is available again.
+
+A bar hover change discards partial distance and fences further actions without
+ending an explicitly started physical scroll. Crossing from audio to brightness,
+leaving the bar, passing over empty space, or pausing longer than the implicit
+250 ms idle timeout cannot transfer that gesture. End/Cancelled packets over
+empty space still release its lifetime. Source-less toolkit streams also ignore
+interleaved changes between pixel and line units while an explicit owner is
+active; these packets cannot identify a different physical device reliably.
+Backends with no explicit phases retain the idle-boundary fallback for X11 wheels.
+
+Regression coverage lives in `xbar_core::input`, the Cairo pointer dispatch tests,
+the native Wayland composition gate tests, and the WM's interleaved swipe-ID test.
+For hardware validation, use a scanout-eligible fullscreen client: begin a
+three-finger preview, pause while holding, reverse, then release or cancel. Check
+that the preview remains visible and that direct scanout resumes after settling.
+Also hold a scroll across audio/brightness, pause for one second, and resume;
+brightness must remain unchanged until a new gesture begins.
+
+Validation for this follow-up (2026-10-30):
+
+- `cargo fmt --all -- --check`, changed standalone Bar files' rustfmt checks,
+  `git diff --check`, and `cargo check --locked --all-targets` passed. The root
+  default features include X11RB, XCB, native Wayland and nested Wayland.
+- Shared core: 265/265 tests passed. With `render-cairo`: 297 passed and one
+  existing text-color raster test failed; that exact failure was reproduced on
+  unmodified master `9c8da887` in the same environment. All added input tests pass.
+- JWM library: 7242 passed, 70 failed, 2 ignored. The full suite is not green:
+  failures include missing Xvfb, denied Unix socket/FIFO operations and process
+  inspection assumptions in this managed environment. Focused touchpad tests
+  passed 8/8; native Wayland damage/composition tests passed 22/22, including
+  the new fullscreen preview guard and extended interleaved-device regression.
+- Physical DRM/KMS direct scanout and live touchpad acceptance were not run.
+  Standalone toolkit builds and web bundle tests were not completed here (the
+  web runner lacked its Playwright browser). Do not treat shared-core coverage
+  as a full 28-Bar or real-device acceptance result.

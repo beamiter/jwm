@@ -6,6 +6,12 @@ fn inactive_window_styling_requires_composition(opacity: f32, dim: f32) -> bool 
     (opacity - 1.0).abs() > EPSILON || (dim - 1.0).abs() > EPSILON
 }
 
+// Interactive previews need composition even while stationary. Frame scheduling
+// may sleep while fingers pause, but KMS must never bypass the retained preview.
+fn workspace_transition_requires_composition(transition_active: bool, swipe_present: bool) -> bool {
+    transition_active || swipe_present
+}
+
 fn border_requires_composition(enabled: bool, width: f32) -> bool {
     enabled && width > 0.0001
 }
@@ -193,12 +199,10 @@ impl WaylandCompositor {
         if self.blur_enabled && self.windows.values().any(|win| win.is_frosted) {
             return Some("window blur requires composition");
         }
-        if self.transition_active
-            && self
-                .workspace_swipe
-                .as_ref()
-                .is_none_or(|swipe| swipe.is_settling())
-        {
+        if workspace_transition_requires_composition(
+            self.transition_active,
+            self.workspace_swipe.is_some(),
+        ) {
             return Some("workspace transition requires composition");
         }
 
@@ -528,7 +532,7 @@ mod tests {
         expose_animation_pending, glass_backdrop_needs_invalidate,
         inactive_window_styling_requires_composition, minimized_dock_requires_composition,
         overview_animation_pending, peek_animation_pending, privacy_cue_block_reason,
-        rect_animation_pending,
+        rect_animation_pending, workspace_transition_requires_composition,
     };
 
     #[test]
@@ -577,6 +581,35 @@ mod tests {
         assert!(!inactive_window_styling_requires_composition(1.0, 1.0));
         assert!(inactive_window_styling_requires_composition(0.9, 1.0));
         assert!(inactive_window_styling_requires_composition(1.0, 0.8));
+    }
+
+    #[test]
+    fn fullscreen_swipe_blocks_scanout_from_begin_through_release_and_cancel() {
+        use crate::backend::compositor_common::transitions::{
+            WORKSPACE_SWIPE_SETTLE, WorkspaceSwipeAnimation,
+        };
+        let now = std::time::Instant::now();
+        assert!(!workspace_transition_requires_composition(false, false));
+        assert!(workspace_transition_requires_composition(true, false));
+        for commit in [true, false] {
+            let mut swipe = WorkspaceSwipeAnimation::default();
+            assert!(!swipe.is_settling());
+            assert!(workspace_transition_requires_composition(true, true));
+            // Defensive: a retained preview must not depend on the timer flag.
+            assert!(workspace_transition_requires_composition(false, true));
+            swipe.update(0.45);
+            assert_eq!(
+                swipe.sample(now + std::time::Duration::from_secs(2)),
+                Some(0.45)
+            );
+            assert!(workspace_transition_requires_composition(true, true));
+            swipe.release(commit, now);
+            assert!(swipe.is_settling());
+            assert!(workspace_transition_requires_composition(true, true));
+            assert!(swipe.sample(now + WORKSPACE_SWIPE_SETTLE).is_none());
+            // finish_transition clears both fields, including immediate cancel.
+            assert!(!workspace_transition_requires_composition(false, false));
+        }
     }
 
     #[test]

@@ -347,6 +347,14 @@ impl ControlScroll {
         self.explicit_active = false;
     }
 
+    /// Fence UI actions without ending a physical gesture. Hover, focus and
+    /// popup changes are not End/Cancelled events, even after a long pause.
+    pub fn interrupt(&mut self, now: Instant) {
+        self.accumulator.cancel(now);
+        self.last_update = Some(now);
+    }
+
+    /// A real End/Cancelled event releases the explicit physical lifetime.
     pub fn cancel(&mut self, now: Instant) {
         self.accumulator.cancel(now);
         self.explicit_active = false;
@@ -366,9 +374,22 @@ impl ControlScroll {
         if self.hovered != next || next.is_none() {
             self.accumulator.discard_partial();
             if self.precise && next.map(|(id, edge)| (scroll_group(id), edge)) != self.owner {
-                self.cancel(now);
+                self.interrupt(now);
             }
             self.hovered = next;
+        }
+    }
+
+    /// Keep tracking lifecycle packets delivered over a gap or outside the bar.
+    pub fn outside(&mut self, edge: BarEdge, phase: ScrollPhase, now: Instant) {
+        if phase == ScrollPhase::Started {
+            self.reset();
+            self.explicit_active = true;
+            self.precise = true;
+        }
+        self.hover(None, edge, now);
+        if matches!(phase, ScrollPhase::Ended | ScrollPhase::Cancelled) {
+            self.cancel(now);
         }
     }
 
@@ -386,7 +407,19 @@ impl ControlScroll {
             ScrollDelta::Lines { x, y } => (x, y, false),
         };
         if !x.is_finite() || !y.is_finite() {
-            self.reset();
+            self.interrupt(now);
+            if matches!(phase, ScrollPhase::Ended | ScrollPhase::Cancelled) {
+                self.cancel(now);
+            }
+            return None;
+        }
+        // Toolkits may merge mouse-wheel and touchpad packets into one seat
+        // stream. A unit change must not steal a still-active touchpad owner.
+        if self.explicit_active && self.pixel_units != Some(pixels) && phase != ScrollPhase::Started
+        {
+            if matches!(phase, ScrollPhase::Ended | ScrollPhase::Cancelled) {
+                self.cancel(now);
+            }
             return None;
         }
         let expired = !self.explicit_active
@@ -449,6 +482,169 @@ fn scroll_group(id: NodeId) -> NodeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_owner_survives_hover_leave_pause_and_return_until_terminal_event() {
+        let now = Instant::now();
+        let paused = now + Duration::from_secs(1);
+        let delta = ScrollDelta::Pixels { x: 0.0, y: 16.0 };
+        for terminal in [ScrollPhase::Ended, ScrollPhase::Cancelled] {
+            for edge in [BarEdge::Top, BarEdge::Bottom, BarEdge::Left, BarEdge::Right] {
+                let mut scroll = ControlScroll::default();
+                scroll.hover(Some(NodeId::Audio), edge, now);
+                assert_eq!(
+                    scroll.step(NodeId::Audio, edge, delta, ScrollPhase::Started, now),
+                    Some(PointerAction::ScrollUp)
+                );
+                scroll.hover(Some(NodeId::Brightness), edge, now);
+                assert!(scroll.explicit_active);
+                assert_eq!(
+                    scroll.step(NodeId::Brightness, edge, delta, ScrollPhase::Moved, paused),
+                    None
+                );
+                scroll.hover(None, edge, paused);
+                scroll.hover(Some(NodeId::Audio), edge, paused);
+                assert_eq!(
+                    scroll.step(NodeId::Audio, edge, delta, ScrollPhase::Moved, paused),
+                    None
+                );
+                scroll.outside(edge, terminal, paused);
+                assert!(!scroll.explicit_active);
+                assert_eq!(
+                    scroll.step(NodeId::Brightness, edge, delta, ScrollPhase::Moved, paused),
+                    None
+                );
+                assert_eq!(
+                    scroll.step(
+                        NodeId::Brightness,
+                        edge,
+                        delta,
+                        ScrollPhase::Started,
+                        paused
+                    ),
+                    Some(PointerAction::ScrollUp)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_wheel_packets_cannot_release_a_paused_touchpad_owner() {
+        let now = Instant::now();
+        let paused = now + Duration::from_secs(1);
+        let touchpad = ScrollDelta::Pixels { x: 0.0, y: 16.0 };
+        let wheel = ScrollDelta::Lines { x: 0.0, y: 1.0 };
+        let mut scroll = ControlScroll::default();
+        assert!(
+            scroll
+                .step(
+                    NodeId::Audio,
+                    BarEdge::Top,
+                    touchpad,
+                    ScrollPhase::Started,
+                    now
+                )
+                .is_some()
+        );
+        scroll.hover(Some(NodeId::Brightness), BarEdge::Top, now);
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Top,
+                wheel,
+                ScrollPhase::Moved,
+                paused
+            ),
+            None
+        );
+        assert!(scroll.explicit_active);
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Top,
+                touchpad,
+                ScrollPhase::Moved,
+                paused
+            ),
+            None
+        );
+        scroll.cancel(paused);
+        assert!(
+            scroll
+                .step(
+                    NodeId::Brightness,
+                    BarEdge::Top,
+                    wheel,
+                    ScrollPhase::Moved,
+                    paused
+                )
+                .is_some()
+        );
+        // Device/seat teardown explicitly resets all ownership and residuals.
+        scroll.reset();
+        assert!(
+            scroll
+                .step(
+                    NodeId::Audio,
+                    BarEdge::Top,
+                    touchpad,
+                    ScrollPhase::Started,
+                    paused
+                )
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn invalid_packets_and_empty_space_do_not_end_an_explicit_gesture() {
+        let now = Instant::now();
+        let delta = ScrollDelta::Pixels { x: 0.0, y: 16.0 };
+        let mut scroll = ControlScroll::default();
+        scroll.outside(BarEdge::Top, ScrollPhase::Started, now);
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Top,
+                delta,
+                ScrollPhase::Moved,
+                now + Duration::from_secs(1)
+            ),
+            None
+        );
+        scroll.step(
+            NodeId::Audio,
+            BarEdge::Top,
+            delta,
+            ScrollPhase::Started,
+            now,
+        );
+        assert_eq!(
+            scroll.step(
+                NodeId::Audio,
+                BarEdge::Top,
+                ScrollDelta::Pixels {
+                    x: f64::NAN,
+                    y: 0.0
+                },
+                ScrollPhase::Moved,
+                now
+            ),
+            None
+        );
+        assert!(scroll.explicit_active);
+        assert_eq!(
+            scroll.step(
+                NodeId::Brightness,
+                BarEdge::Top,
+                delta,
+                ScrollPhase::Moved,
+                now + Duration::from_secs(1)
+            ),
+            None
+        );
+        scroll.outside(BarEdge::Top, ScrollPhase::Cancelled, now);
+        assert!(!scroll.explicit_active);
+    }
 
     #[test]
     fn toolkit_navigation_survives_reflow_without_momentum_changing_another_control() {

@@ -642,7 +642,7 @@ impl IcedBar {
             }
 
             Message::WindowEvent(_, window::Event::Unfocused) => {
-                self.scroll.cancel(Instant::now());
+                self.scroll.interrupt(Instant::now());
                 Task::none()
             }
             Message::WindowEvent(_, _) => Task::none(),

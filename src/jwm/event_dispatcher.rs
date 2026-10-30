@@ -7914,6 +7914,27 @@ mod tests {
         );
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), before);
         assert!(backend.swipe_active);
+        // Another device's delayed update/cancel must neither alter the
+        // active fullscreen preview nor end its scanout exclusion lifetime.
+        let progress = backend.swipe_progress.clone();
+        for event in [
+            SwipeInput::Update {
+                id: u64::MAX,
+                dx: 300.0,
+                dy: 0.0,
+                time: 20,
+            },
+            SwipeInput::End {
+                id: u64::MAX,
+                cancelled: true,
+                time: 20,
+            },
+        ] {
+            send_test_swipe(&mut jwm, &mut backend, event);
+            assert!(backend.swipe_active);
+            assert_eq!(backend.swipe_progress, progress);
+            assert!(backend.swipe_finishes.is_empty());
+        }
         let alternate = if jwm.get_selected_client_key() == Some(first) {
             second
         } else {

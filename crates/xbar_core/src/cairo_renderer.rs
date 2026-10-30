@@ -1140,12 +1140,8 @@ impl CairoBar {
         self.last_pointer = Some(point);
         let transition = self.interaction.update_hover_transition(&self.scene, point);
         if transition.target_changed() {
-            if transition.previous.map(scroll_group) == transition.current.map(scroll_group) {
-                self.scroll
-                    .hover(transition.current, self.config.edge, Instant::now());
-            } else {
-                self.scroll.reset();
-            }
+            self.scroll
+                .hover(transition.current, self.config.edge, Instant::now());
         }
         self.synchronize_dock_model();
         self.flush_dock_commands(Instant::now());
@@ -1156,7 +1152,7 @@ impl CairoBar {
     pub fn pointer_leave(&mut self) -> bool {
         self.last_pointer = None;
         self.pressed_button = None;
-        self.scroll.reset();
+        self.scroll.hover(None, self.config.edge, Instant::now());
         let changed = self.interaction.clear_hover();
         self.synchronize_dock_model();
         self.flush_dock_commands(Instant::now());
@@ -1191,7 +1187,7 @@ impl CairoBar {
                 let redraw = self.interaction.pressed().is_some();
                 self.interaction.cancel_press();
                 self.pressed_button = None;
-                self.scroll.cancel(Instant::now());
+                self.scroll.interrupt(Instant::now());
                 PointerUpdate {
                     redraw,
                     runtime: std::mem::take(&mut self.pending_runtime),
@@ -1272,7 +1268,7 @@ impl CairoBar {
                 .step(hit.id, self.config.edge, delta, phase, Instant::now())
                 .and_then(|input| hit.action(input)),
             None => {
-                self.scroll.reset();
+                self.scroll.outside(self.config.edge, phase, Instant::now());
                 None
             }
         };
@@ -1302,17 +1298,6 @@ impl CairoBar {
     pub fn poll_transport(&mut self) -> RuntimeUpdate {
         let update = self.runtime.poll_transport();
         self.finish_runtime_turn(update)
-    }
-}
-
-fn scroll_group(id: crate::presentation::NodeId) -> crate::presentation::NodeId {
-    use crate::presentation::NodeId;
-    match id {
-        // Adaptive workspace strips can replace the active tag underneath a
-        // stationary pointer after a WM snapshot. They are one gesture target,
-        // so the new tag's identity must not rearm the same swipe's momentum.
-        NodeId::Tag(_) | NodeId::WorkspaceOverflow => NodeId::WorkspaceOverflow,
-        id => id,
     }
 }
 
@@ -3189,6 +3174,75 @@ mod tests {
     }
 
     #[test]
+    fn cairo_hover_and_gap_events_preserve_explicit_scroll_ownership() {
+        use crate::presentation::HitRegion;
+        for terminal in [ScrollPhase::Ended, ScrollPhase::Cancelled] {
+            let mut bar = CairoBar::new(
+                BarRuntime::default(),
+                Default::default(),
+                FontDescription::from_string("Sans"),
+            );
+            bar.scene = Scene {
+                viewport: Size::new(100.0, 40.0),
+                clip: Rect::new(0.0, 0.0, 100.0, 40.0),
+                nodes: Vec::new(),
+                hits: [NodeId::Audio, NodeId::Brightness]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, id)| HitRegion {
+                        id,
+                        bounds: Rect::new(index as f32 * 50.0, 0.0, 40.0, 40.0),
+                        primary: None,
+                        secondary: None,
+                        scroll_up: Some(UserAction::ToggleTheme),
+                        scroll_down: Some(UserAction::ToggleTheme),
+                    })
+                    .collect(),
+            };
+            let audio = Point::new(20.0, 20.0);
+            let brightness = Point::new(70.0, 20.0);
+            let gap = Point::new(45.0, 20.0);
+            let packet = |point, phase| PointerInput::Wheel {
+                point,
+                phase,
+                delta: ScrollDelta::Pixels { x: 0.0, y: 16.0 },
+            };
+            let _ = bar.handle_pointer(PointerInput::Move(audio));
+            assert!(
+                bar.handle_pointer(packet(audio, ScrollPhase::Started))
+                    .runtime
+                    .changes
+                    .contains(DirtyBits::THEME_CHANGED)
+            );
+            let _ = bar.handle_pointer(PointerInput::Move(brightness));
+            assert!(
+                bar.handle_pointer(packet(brightness, ScrollPhase::Moved))
+                    .runtime
+                    .is_empty()
+            );
+            let _ = bar.handle_pointer(PointerInput::Leave);
+            assert!(
+                bar.handle_pointer(packet(gap, ScrollPhase::Moved))
+                    .runtime
+                    .is_empty()
+            );
+            let _ = bar.handle_pointer(PointerInput::Move(brightness));
+            assert!(
+                bar.handle_pointer(packet(brightness, ScrollPhase::Moved))
+                    .runtime
+                    .is_empty()
+            );
+            assert!(bar.handle_pointer(packet(gap, terminal)).runtime.is_empty());
+            assert!(
+                bar.handle_pointer(packet(brightness, ScrollPhase::Started))
+                    .runtime
+                    .changes
+                    .contains(DirtyBits::THEME_CHANGED)
+            );
+        }
+    }
+
+    #[test]
     fn cairo_bar_precision_scroll_isolates_targets_and_respects_all_four_edges() {
         use crate::presentation::HitRegion;
 
@@ -3227,6 +3281,12 @@ mod tests {
             let _ = bar.handle_pointer(PointerInput::Move(Point::new(80.0, 80.0)));
             let _ = bar.handle_pointer(PointerInput::Move(point));
             assert!(bar.handle_pointer(packet).runtime.is_empty());
+            // Returning to a control cannot resume an interrupted gesture.
+            let _ = bar.handle_pointer(PointerInput::Wheel {
+                point,
+                delta: ScrollDelta::Pixels { x: 0.0, y: 20.0 },
+                phase: ScrollPhase::Started,
+            });
             assert!(
                 bar.handle_pointer(packet)
                     .runtime
@@ -3258,7 +3318,7 @@ mod tests {
             let horizontal = bar.handle_pointer(PointerInput::Wheel {
                 point,
                 delta: ScrollDelta::Pixels { x: 40.0, y: 2.0 },
-                phase: ScrollPhase::Moved,
+                phase: ScrollPhase::Started,
             });
             assert_eq!(
                 horizontal

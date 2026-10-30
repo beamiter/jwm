@@ -269,7 +269,7 @@ impl EguiBarApp {
                     );
                 }
                 egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
-                    self.scroll.cancel(Instant::now());
+                    self.scroll.interrupt(Instant::now());
                 }
                 egui::Event::MouseWheel { unit, delta, .. } => {
                     if let Some(hit) = logical
@@ -300,7 +300,7 @@ impl EguiBarApp {
                             actions.extend(hit.action(input));
                         }
                     } else {
-                        self.scroll.cancel(Instant::now());
+                        self.scroll.interrupt(Instant::now());
                     }
                 }
                 _ => {}
