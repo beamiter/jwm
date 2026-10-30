@@ -104,7 +104,10 @@ class Children:
         else:
             raise RuntimeError('no conservatively free private X display')
         read, write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
-        argv = [executable, f':{number}', '-displayfd', str(write), '-nolisten', 'tcp', '-ac']
+        # The readiness fd is deliberately closed after the first report.
+        # Keep private X servers alive across a last-client disconnect and avoid
+        # a reset attempting another readiness report through that closed fd.
+        argv = [executable, f':{number}', '-displayfd', str(write), '-noreset', '-nolisten', 'tcp', '-ac']
         argv.extend(['-screen', '0', '1280x800x24', '+extension', 'GLX', '+extension', 'RENDER']
                     if executable == 'Xvfb' else ['-screen', '1280x800'])
         child = self.spawn(argv, env, directory / (executable.lower() + '.log'), (write,))

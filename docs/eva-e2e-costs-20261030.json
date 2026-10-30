@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-30T09:29:49.195729+00:00",
+  "currency": "USD",
+  "microusd_per_usd": 1000000,
+  "basis": "Local configured price estimates, not the remote account invoice.",
+  "budget_enabled": false,
+  "current_e2e": {
+    "started_at": "2026-10-30T07:55:40.673912+00:00",
+    "journal_since": "2026-10-30 07:55:40 UTC",
+    "settlement_events_including_opt_in_probe_logs": {
+      "settled_microusd": 209804,
+      "settled_records": 51,
+      "conflicting_duplicate_events": 0,
+      "by_model_phase_price": [
+        {
+          "model": "gpt-realtime-2.1-mini",
+          "phase": "discovery",
+          "price_version": "openai-2026-10-29",
+          "settled_records": 4,
+          "settled_microusd": 10572,
+          "settled_usd": 0.010572
+        },
+        {
+          "model": "gpt-realtime-2.1-mini",
+          "phase": "feedback",
+          "price_version": "openai-2026-10-29",
+          "settled_records": 17,
+          "settled_microusd": 91875,
+          "settled_usd": 0.091875
+        },
+        {
+          "model": "gpt-realtime-2.1-mini",
+          "phase": "plan",
+          "price_version": "openai-2026-10-29",
+          "settled_records": 28,
+          "settled_microusd": 101707,
+          "settled_usd": 0.101707
+        },
+        {
+          "model": "gpt-realtime-2.1-mini",
+          "phase": "schema_repair",
+          "price_version": "openai-2026-10-29",
+          "settled_records": 2,
+          "settled_microusd": 5650,
+          "settled_usd": 0.00565
+        }
+      ]
+    },
+    "today_ledger_net_change_since_baseline": {
+      "settled_microusd": 209804,
+      "settled_records": 51,
+      "unknown_records": 1,
+      "unknown_reserved_microusd": 50000,
+      "pending_records": 0,
+      "pending_reserved_microusd": 0
+    },
+    "ledger_minus_known_settlement_events_microusd": 0,
+    "reconciliation": "matches",
+    "journal_only_cost_report_usd": {
+      "by_phase": {
+        "discovery": 0.010572,
+        "feedback": 0.091875,
+        "plan": 0.092998,
+        "schema_repair": 0.003676
+      },
+      "tokens_by_phase": {
+        "discovery": {
+          "cached_audio": 0,
+          "cached_text": 13504,
+          "input_audio": 230,
+          "input_text": 8891,
+          "output_audio": 0,
+          "output_text": 886
+        },
+        "feedback": {
+          "cached_audio": 3328,
+          "cached_text": 17664,
+          "input_audio": 929,
+          "input_text": 3818,
+          "output_audio": 3641,
+          "output_text": 2254
+        },
+        "plan": {
+          "cached_audio": 0,
+          "cached_text": 59520,
+          "input_audio": 1298,
+          "input_text": 98331,
+          "output_audio": 0,
+          "output_text": 7266
+        },
+        "schema_repair": {
+          "cached_audio": 0,
+          "cached_text": 4160,
+          "input_audio": 125,
+          "input_text": 2386,
+          "output_audio": 0,
+          "output_text": 310
+        }
+      },
+      "total": 0.199121
+    }
+  },
+  "today": {
+    "day": "2026-10-30",
+    "timezone": "Asia/Shanghai",
+    "totals": {
+      "consumed_and_reserved_microusd": 943655,
+      "pending_records": 0,
+      "pending_reserved_microusd": 0,
+      "reserved_microusd": 300000,
+      "settled_microusd": 643655,
+      "settled_records": 193,
+      "unknown_records": 6,
+      "unknown_reserved_microusd": 300000
+    },
+    "by_model_price_version": [
+      {
+        "model": "gpt-realtime-2.1-mini",
+        "price_version": "openai-2026-10-29",
+        "totals": {
+          "consumed_and_reserved_microusd": 943655,
+          "pending_records": 0,
+          "pending_reserved_microusd": 0,
+          "reserved_microusd": 300000,
+          "settled_microusd": 643655,
+          "settled_records": 193,
+          "unknown_records": 6,
+          "unknown_reserved_microusd": 300000
+        }
+      }
+    ],
+    "journal_only_cost_report_usd": {
+      "by_phase": {
+        "discovery": 0.100772,
+        "feedback": 0.200852,
+        "plan": 0.28239,
+        "schema_repair": 0.033363
+      },
+      "tokens_by_phase": {
+        "discovery": {
+          "cached_audio": 0,
+          "cached_text": 71936,
+          "input_audio": 1910,
+          "input_text": 93219,
+          "output_audio": 0,
+          "output_text": 8920
+        },
+        "feedback": {
+          "cached_audio": 6208,
+          "cached_text": 32832,
+          "input_audio": 2525,
+          "input_text": 12067,
+          "output_audio": 7644,
+          "output_text": 4848
+        },
+        "plan": {
+          "cached_audio": 0,
+          "cached_text": 159360,
+          "input_audio": 2891,
+          "input_text": 327635,
+          "output_audio": 0,
+          "output_text": 19706
+        },
+        "schema_repair": {
+          "cached_audio": 192,
+          "cached_text": 56128,
+          "input_audio": 418,
+          "input_text": 25297,
+          "output_audio": 0,
+          "output_text": 4405
+        }
+      },
+      "total": 0.617377
+    }
+  },
+  "probe_log_sources": [
+    "/tmp/eva-e2e-current/live-session-control-probe.log",
+    "/tmp/eva-e2e-current/live-session-task-control-probe.log"
+  ],
+  "limitations": [
+    "Unknown and pending reserves are not settled spend or guaranteed charges.",
+    "Journal-only phase reports omit standalone probes whose stderr is stored separately.",
+    "The current-test settlement list merges known probe logs and deduplicates response IDs.",
+    "Concurrent settlement can make the ledger and event snapshots briefly disagree.",
+    "Daily ledger totals include earlier sessions outside this test window."
+  ]
+}

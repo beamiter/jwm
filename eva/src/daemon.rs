@@ -27,6 +27,298 @@ struct ErrorExpiry {
     permit: AssistantPermit,
     deadline: std::time::Instant,
 }
+
+const NATIVE_SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(750);
+const WAKE_HEARTBEAT_PERIOD: Duration = Duration::from_millis(500);
+const WAKE_LEASE: Duration = Duration::from_secs(3);
+
+struct NativeRead {
+    issued: std::time::Instant,
+    epoch: u64,
+    task: tokio::task::JoinHandle<io::Result<Value>>,
+}
+#[derive(Default)]
+struct NativeStatusPoll {
+    epoch: u64,
+    pending: Option<NativeRead>,
+    cached: Option<(std::time::Instant, Value)>,
+}
+impl NativeStatusPoll {
+    fn invalidate(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.cached = None;
+    }
+    fn start(&mut self) {
+        self.start_with(async { query("get_assistant_status", json!({})).await });
+    }
+    fn start_with(
+        &mut self,
+        future: impl std::future::Future<Output = io::Result<Value>> + Send + 'static,
+    ) {
+        if self.pending.is_none() {
+            self.pending = Some(NativeRead {
+                issued: std::time::Instant::now(),
+                epoch: self.epoch,
+                task: tokio::spawn(future),
+            });
+        }
+    }
+    async fn take_ready(&mut self) -> Option<io::Result<Value>> {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|read| read.task.is_finished())
+        {
+            return None;
+        }
+        let read = self.pending.take().unwrap();
+        let result = read
+            .task
+            .await
+            .map_err(io::Error::other)
+            .and_then(|result| result);
+        if read.epoch != self.epoch {
+            return None;
+        }
+        if read.issued.elapsed() > NATIVE_SNAPSHOT_MAX_AGE {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native_snapshot_expired",
+            )));
+        }
+        Some(result.and_then(|value| {
+            if jwm_eva_core::protocol::validate_assistant_protocol(&value).is_err() {
+                self.invalidate();
+                return Err(io::Error::other("version_incompatible"));
+            }
+            if !valid_native_snapshot(&value) {
+                return Err(io::Error::other("native_snapshot_invalid"));
+            }
+            self.cached = Some((read.issued, value.clone()));
+            Ok(value)
+        }))
+    }
+    fn cached(&self) -> Option<&Value> {
+        self.cached
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() <= NATIVE_SNAPSHOT_MAX_AGE)
+            .map(|(_, value)| value)
+    }
+    fn activated(&mut self, value: &Value) -> bool {
+        if !valid_native_snapshot(value) || value["active"] != true {
+            return false;
+        }
+        // A successful wake_activate response is the native, atomically
+        // created permit. Ordinary heartbeat responses never call this path.
+        self.invalidate();
+        self.cached = Some((std::time::Instant::now(), value.clone()));
+        true
+    }
+}
+impl Drop for NativeStatusPoll {
+    fn drop(&mut self) {
+        if let Some(read) = self.pending.take() {
+            read.task.abort();
+        }
+    }
+}
+fn valid_native_snapshot(value: &Value) -> bool {
+    let Some(source) = wake_source(value) else {
+        return false;
+    };
+    if !["active", "wake_requested", "standby_allowed"]
+        .iter()
+        .all(|field| value[*field].is_boolean())
+    {
+        return false;
+    }
+    if value["active"] == true {
+        serde_json::from_value::<AssistantPermit>(value["assistant_permit"].clone())
+            .is_ok_and(|permit| permit.generation == source.assistant_generation)
+    } else {
+        value["assistant_permit"].is_null()
+    }
+}
+fn invalidates_wake_observation(event: &Value) -> bool {
+    matches!(
+        event["event"].as_str(),
+        Some("assistant/activated" | "assistant/cancelled" | "assistant/wake_action")
+    )
+}
+fn wake_heartbeat_matches(source: &crate::handoff::Source, ack: &Value) -> bool {
+    valid_native_snapshot(ack)
+        && wake_source(ack).as_ref() == Some(source)
+        && ack["active"] == false
+        && ack["wake_requested"] == true
+        && ack["standby_allowed"] == true
+}
+
+struct WakeLeaseProof {
+    source: crate::handoff::Source,
+    epoch: u64,
+    owner: u64,
+    deadline: std::time::Instant,
+}
+struct WakeHeartbeatFlight {
+    source: crate::handoff::Source,
+    epoch: u64,
+    owner: u64,
+    sent: std::time::Instant,
+    eligible: bool,
+    task: tokio::task::JoinHandle<io::Result<Value>>,
+}
+struct WakeHeartbeats {
+    pending: Option<WakeHeartbeatFlight>,
+    proof: Option<WakeLeaseProof>,
+    owner: u64,
+    last_sent: std::time::Instant,
+}
+#[derive(Debug, PartialEq)]
+enum WakeHeartbeatResult {
+    Renewed,
+    Observed,
+    Ignored,
+    Unavailable,
+    Rejected,
+}
+impl Default for WakeHeartbeats {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            proof: None,
+            owner: 0,
+            last_sent: std::time::Instant::now() - WAKE_HEARTBEAT_PERIOD,
+        }
+    }
+}
+impl WakeHeartbeats {
+    fn invalidate(&mut self) {
+        self.owner = self.owner.wrapping_add(1);
+        self.proof = None;
+        // Retain the single pending write until it settles: aborting its async
+        // handle cannot cancel the underlying blocking IPC mutation.
+    }
+    fn valid(&self, source: &crate::handoff::Source, epoch: u64) -> bool {
+        self.proof.as_ref().is_some_and(|p| {
+            p.source == *source
+                && p.epoch == epoch
+                && p.owner == self.owner
+                && std::time::Instant::now() < p.deadline
+        })
+    }
+    fn deadline(&self) -> Option<std::time::Instant> {
+        self.proof.as_ref().map(|p| p.deadline)
+    }
+    fn start(
+        &mut self,
+        source: crate::handoff::Source,
+        epoch: u64,
+        eligible: bool,
+        future: impl std::future::Future<Output = io::Result<Value>> + Send + 'static,
+    ) {
+        assert!(self.pending.is_none());
+        let sent = std::time::Instant::now();
+        self.last_sent = sent;
+        self.pending = Some(WakeHeartbeatFlight {
+            source,
+            epoch,
+            owner: self.owner,
+            sent,
+            eligible,
+            task: tokio::spawn(future),
+        });
+    }
+    async fn ready(&mut self) -> io::Result<Value> {
+        match self.pending.as_mut() {
+            Some(flight) => (&mut flight.task)
+                .await
+                .map_err(io::Error::other)
+                .and_then(|r| r),
+            None => std::future::pending().await,
+        }
+    }
+    fn complete(&mut self, result: io::Result<Value>, epoch: u64) -> WakeHeartbeatResult {
+        let flight = self.pending.take().unwrap();
+        if flight.epoch != epoch || flight.owner != self.owner {
+            return WakeHeartbeatResult::Ignored;
+        }
+        match result {
+            Ok(ack) => {
+                if !valid_native_snapshot(&ack)
+                    || wake_source(&ack).as_ref() != Some(&flight.source)
+                    || (flight.eligible && !wake_heartbeat_matches(&flight.source, &ack))
+                {
+                    return WakeHeartbeatResult::Rejected;
+                }
+                // ACK arrival never extends trust. Reads do not renew leases.
+                // This proof alone cannot authorize a new worker or handoff.
+                let deadline = flight.sent + WAKE_LEASE;
+                if flight.eligible && std::time::Instant::now() < deadline {
+                    self.proof = Some(WakeLeaseProof {
+                        source: flight.source,
+                        epoch: flight.epoch,
+                        owner: flight.owner,
+                        deadline,
+                    });
+                    WakeHeartbeatResult::Renewed
+                } else {
+                    WakeHeartbeatResult::Observed
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                WakeHeartbeatResult::Rejected
+            }
+            Err(_) => WakeHeartbeatResult::Unavailable,
+        }
+    }
+}
+fn wake_start_authorized(
+    poll: &NativeStatusPoll,
+    heartbeats: &WakeHeartbeats,
+    source: &crate::handoff::Source,
+) -> bool {
+    // Recheck age at the actual start boundary: a preceding cleanup may have
+    // consumed time since this tick first received the observation.
+    heartbeats.pending.is_none()
+        && heartbeats.valid(source, poll.epoch)
+        && poll
+            .cached()
+            .is_some_and(|snapshot| wake_heartbeat_matches(source, snapshot))
+}
+fn signal_cancel(cancel: &Option<watch::Sender<bool>>) {
+    if let Some(cancel) = cancel {
+        let _ = cancel.send(true);
+    }
+}
+async fn wake_deadline(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
+}
+async fn within_wake_lease(
+    deadline: Option<std::time::Instant>,
+    future: impl std::future::Future<Output = io::Result<Value>>,
+) -> io::Result<Value> {
+    let deadline = deadline.ok_or_else(|| io::Error::other("wake_lease_expired"))?;
+    if std::time::Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "wake_lease_expired",
+        ));
+    }
+    tokio::time::timeout_at(deadline.into(), future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "wake_lease_expired"))?
+}
+async fn wake_activation_before(
+    deadline: Option<std::time::Instant>,
+    activation: Value,
+) -> io::Result<Value> {
+    // The old capture is retained only until this deadline. A late native
+    // activation may be observed afresh, but never receives the old handoff.
+    within_wake_lease(deadline, command("assistant_control", activation)).await
+}
 impl ErrorExpiry {
     fn closes(&self, now: std::time::Instant, current: Option<&AssistantPermit>) -> bool {
         now >= self.deadline && current == Some(&self.permit)
@@ -251,7 +543,6 @@ pub async fn run(c: Config) -> io::Result<()> {
         c.wake_word.reconnect_ms,
         crate::store::wall_ms() ^ ((std::process::id() as u64) << 32),
     );
-    let mut wake_heartbeat = std::time::Instant::now() - Duration::from_secs(1);
     let (events_tx, mut events) = mpsc::channel(64);
     jwm_ipc_client::subscribe(jwm_ipc_client::JwmIpc::new(), &["assistant"], events_tx);
     let watchdog = Watchdog::start(c.service.watchdog_seconds)?;
@@ -277,14 +568,82 @@ pub async fn run(c: Config) -> io::Result<()> {
     {
         let _ = command("assistant_control", json!({"action":"wake_enable"})).await;
     }
+    let mut native_poll = NativeStatusPoll::default();
+    let mut wake_heartbeats = WakeHeartbeats::default();
+    native_poll.start();
     loop {
+        let lease_deadline = wake_heartbeats.deadline();
+        // Fresh reads authorize preflight/start; an existing owner may publish
+        // from its lease proof while a read stalls. Neither permits new actions.
+        let heartbeat_target = native_poll
+            .cached()
+            .and_then(|snapshot| {
+                let source = wake_source(snapshot)?;
+                Some((
+                    source,
+                    snapshot["wake_requested"] == true,
+                    snapshot["active"] == false
+                        && snapshot["wake_requested"] == true
+                        && snapshot["standby_allowed"] == true,
+                ))
+            })
+            .or_else(|| {
+                active_wake_source
+                    .as_ref()
+                    .filter(|source| {
+                        wake_worker.is_some() && wake_heartbeats.valid(source, native_poll.epoch)
+                    })
+                    .map(|source| (source.clone(), true, true))
+            });
+        let heartbeat_due = if wake_heartbeats.pending.is_none() && heartbeat_target.is_some() {
+            Some(wake_heartbeats.last_sent + WAKE_HEARTBEAT_PERIOD)
+        } else {
+            None
+        };
         tokio::select! {
+            biased;
+            _=wake_deadline(lease_deadline)=>{
+                signal_cancel(&wake_cancel);
+                wake_event("wake_lease_expired","proof_expired",active_wake_source.as_ref());
+                wake_heartbeats.invalidate();native_poll.invalidate();
+                stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                while wake_updates.try_recv().is_ok(){}
+                active_wake_source=None;wake_recovery.pause();
+                wake_status=json!({"state":"paused","microphone_active":false});
+            },
+            result=wake_heartbeats.ready()=>{
+                let source=wake_heartbeats.pending.as_ref().map(|f|f.source.clone());
+                let outcome=wake_heartbeats.complete(result,native_poll.epoch);
+                let label=match outcome {WakeHeartbeatResult::Renewed=>"lease_confirmed",WakeHeartbeatResult::Observed=>"observed",WakeHeartbeatResult::Ignored=>"stale_result_discarded",WakeHeartbeatResult::Unavailable=>"transport_unavailable",WakeHeartbeatResult::Rejected=>"source_rejected"};
+                if wake_requested || wake_worker.is_some(){wake_event("wake_heartbeat_completed",label,source.as_ref());}
+                if outcome==WakeHeartbeatResult::Rejected {
+                    signal_cancel(&wake_cancel);wake_heartbeats.invalidate();native_poll.invalidate();
+                    stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                    while wake_updates.try_recv().is_ok(){}
+                    active_wake_source=None;wake_recovery.pause();
+                    wake_status=json!({"state":"paused","microphone_active":false});
+                }
+                // Transport loss consumes only the previously confirmed proof.
+                // A late write cannot start capture: it must still match the
+                // frozen epoch/owner and a separate fresh read is required.
+                tick.reset_immediately();
+            },
+            _=wake_deadline(heartbeat_due)=>{
+                if let Some((source,enabled,eligible))=heartbeat_target {
+                    let mut update=wake_status.clone();
+                    if wake_worker.is_none() && eligible {update=json!({"state":"connecting","microphone_active":false,"text":"正在连接语音唤醒"});}
+                    update["wake_generation"]=json!(source.wake_generation);update["enabled"]=json!(enabled);update["wm_instance_id"]=json!(source.wm_instance_id);
+                    if enabled || wake_worker.is_some(){wake_event("wake_heartbeat_started","sending",Some(&source));}
+                    wake_heartbeats.start(source,native_poll.epoch,eligible,command("set_assistant_wake_status",update));
+                }
+            },
             _=tokio::signal::ctrl_c()=>break,
             _=terminate.recv()=>break,
             Some(request)=requests.recv()=>{
                 if request.request["command"]=="dry_run" {
                     if worker.is_some()||permit.is_some(){let _=request.reply.send(json!({"success":false,"error":"Eva is busy; finish the active session before dry-run"}));continue;}
                     let Some(text)=request.request["text"].as_str().filter(|s|!s.is_empty()&&s.len()<=4096).map(str::to_owned)else{let _=request.reply.send(json!({"success":false,"error":"dry_run text must be 1..4096 bytes"}));continue;};
+                    signal_cancel(&wake_cancel);wake_heartbeats.invalidate();native_poll.invalidate();
                     stop_wake(&mut wake_worker,&mut wake_cancel).await;
                     wake_status=json!({"state":"paused","microphone_active":false,"text":"正在演练"});
                     let config=c.clone();let storage=store.clone();status=json!({"state":"planning","text":"正在生成演练计划","microphone_active":false,"execution_enabled":false});
@@ -313,6 +672,9 @@ pub async fn run(c: Config) -> io::Result<()> {
                     },
                     "undo"=>json!({"success":false,"error":"activate Eva and wait for Listening before undo"}),
                     "cancel"=>{
+                        signal_cancel(&wake_cancel);signal_cancel(&cancellation);
+                        wake_heartbeats.invalidate();native_poll.invalidate();
+                        wake_event("wake_stop_requested","local_cancel",active_wake_source.as_ref());
                         let _=command("assistant_control",json!({"action":"wake_disable"})).await;
                         stop_wake(&mut wake_worker,&mut wake_cancel).await;
                         wake_recovery.disable();
@@ -340,6 +702,14 @@ pub async fn run(c: Config) -> io::Result<()> {
             },
             Some(update)=updates.recv()=>{if permit.as_ref().is_some_and(|p|update.apply(p,&mut status)){last_heartbeat=std::time::Instant::now()-Duration::from_secs(1);}},
             Some(event)=events.recv()=>{
+                if invalidates_wake_observation(&event) {
+                    signal_cancel(&wake_cancel);wake_heartbeats.invalidate();native_poll.invalidate();
+                    stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                    while wake_updates.try_recv().is_ok(){}
+                    active_wake_source=None;
+                    wake_recovery.pause();
+                    wake_status=json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false});
+                }
                 if let Some(request)=local_undo_request(&event,permit.as_ref()){
                     let (reply,_)=oneshot::channel();
                     let _=local_request_tx.try_send(Request{request,reply});
@@ -380,21 +750,45 @@ pub async fn run(c: Config) -> io::Result<()> {
                     if command("set_assistant_status",update).await.is_err(){stop(&mut worker,&mut cancellation).await;permit=None;status=json!({"state":"idle","microphone_active":false});}
                     last_heartbeat=std::time::Instant::now();
                 }
-                let mut observed=query("get_assistant_status",json!({})).await;
-                let native_generation=observed.as_ref().ok().and_then(|s|s["wake_generation"].as_u64()).unwrap_or(0);
-                wake_requested=observed.as_ref().is_ok_and(|s|s["wake_requested"]==true);
-                let standby_allowed=observed.as_ref().is_ok_and(|s|s["standby_allowed"]==true);
+                // Never let a retried, read-only query block lease renewal or
+                // turn an absent observation into a native disable request.
+                let sample=native_poll.take_ready().await;
+                if let Some(Err(error))=sample.as_ref() {
+                    wake_event("wake_snapshot_failed",wake_diagnostic_error_code(error),active_wake_source.as_ref());
+                }
+                let mut observed=sample.unwrap_or_else(||Err(io::Error::other("native_snapshot_pending")));
+                native_poll.start();
+                let fresh_observation=observed.is_ok();
+                let cached=native_poll.cached().cloned();
+                let standby_allowed=observed.as_ref().ok().or(cached.as_ref()).is_some_and(|s|s["standby_allowed"]==true);
                 let current_source=observed.as_ref().ok().and_then(wake_source);
                 let wake_protocol_ready=current_source.is_some();
-                let recovery_changed=wake_recovery.observe(current_source.clone(),wake_requested);
-                if native_generation!=wake_generation || recovery_changed || active_wake_source.as_ref().is_some_and(|source|Some(source)!=current_source.as_ref()) {
-                    stop_wake(&mut wake_worker,&mut wake_cancel).await;
-                    while wake_updates.try_recv().is_ok(){}
-                    wake_generation=native_generation;active_wake_source=None;
-                    wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false}));
+                if fresh_observation {
+                    let native_generation=current_source.as_ref().unwrap().wake_generation;
+                    let previous_wake_requested=wake_requested;
+                    wake_requested=observed.as_ref().unwrap()["wake_requested"]==true;
+                    if previous_wake_requested && !wake_requested {
+                        let reason=match observed.as_ref().ok().and_then(|s|s["standby_blocked_reason"].as_str()) {
+                            Some("session_locked")=>"session_locked",
+                            Some("overlay_unavailable")=>"overlay_unavailable",
+                            Some("session_exiting")=>"session_exiting",
+                            _=>"native_disabled",
+                        };
+                        wake_event("wake_disabled_observed",reason,current_source.as_ref());
+                    }
+                    let recovery_changed=wake_recovery.observe(current_source.clone(),wake_requested);
+                    if native_generation!=wake_generation || recovery_changed || active_wake_source.as_ref().is_some_and(|source|Some(source)!=current_source.as_ref()) {
+                        signal_cancel(&wake_cancel);wake_heartbeats.invalidate();
+                        stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                        while wake_updates.try_recv().is_ok(){}
+                        wake_generation=native_generation;active_wake_source=None;
+                        wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false}));
+                    }
                 }
                 let mut handoff_for_next=None;
-                if wake_worker.as_ref().is_some_and(|w|w.is_finished()) {
+                if fresh_observation && wake_worker.as_ref().is_some_and(|w|w.is_finished()) {
+                    let handoff_deadline=wake_heartbeats.deadline();
+                    wake_heartbeats.invalidate();
                     let finished=match wake_worker.take().unwrap().await {Ok(result)=>result,Err(_)=>Err(io::Error::other("wake_worker_failed"))};wake_cancel=None;
                     while wake_updates.try_recv().is_ok(){}
                     wake_status=json!({"state":"paused","microphone_active":false});
@@ -408,17 +802,17 @@ pub async fn run(c: Config) -> io::Result<()> {
                                 let source=&handoff.source;
                                 let mut activation=json!({"action":"wake_activate","wake_generation":source.wake_generation,"wm_instance_id":source.wm_instance_id,"assistant_generation":source.assistant_generation});
                                 if let Some(seed)=handoff.seed.as_ref() {activation["source_monitor_token"]=json!(seed.monitor_token);activation["source_onset_monotonic_ns"]=json!(seed.binding.onset_monotonic_ns);}
-                                let mut activated=command("assistant_control",activation.clone()).await.is_ok();
-                                if !activated && handoff.seed.is_some() {
+                                let mut activated=wake_activation_before(handoff_deadline,activation.clone()).await;
+                                if activated.as_ref().is_err_and(|error|error.kind()==io::ErrorKind::InvalidInput) && handoff.seed.is_some() {
                                     // A gone/changed source may still wake a
                                     // fresh listening session, never replay it.
                                     handoff.discard_seed();
                                     activation.as_object_mut().unwrap().remove("source_monitor_token");
                                     activation.as_object_mut().unwrap().remove("source_onset_monotonic_ns");
-                                    activated=command("assistant_control",activation).await.is_ok();
+                                    activated=wake_activation_before(handoff_deadline,activation).await;
                                 }
-                                if activated {
-                                    observed=query("get_assistant_status",json!({})).await;
+                                if let Ok(native)=activated && native_poll.activated(&native) {
+                                    observed=Ok(native);
                                     wake_status=json!({"state":"paused","microphone_active":false});
                                     handoff_for_next=Some(handoff);
                                 }
@@ -438,13 +832,14 @@ pub async fn run(c: Config) -> io::Result<()> {
                         _=>{},
                     }
                 }
-                let active=observed.as_ref().is_ok_and(|s|s["active"]==true);
-                if !wake_requested || !standby_allowed || active || worker.is_some() {
+                let active=observed.as_ref().ok().or(cached.as_ref()).is_some_and(|s|s["active"]==true);
+                if fresh_observation && (!wake_requested || !standby_allowed || active || worker.is_some()) {
+                    if wake_worker.is_some() || wake_heartbeats.proof.is_some() {signal_cancel(&wake_cancel);wake_heartbeats.invalidate();}
                     stop_wake(&mut wake_worker,&mut wake_cancel).await;
                     while wake_updates.try_recv().is_ok(){}
                     wake_recovery.pause();
                     wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":if wake_requested{"paused"}else{"disabled"},"text":if wake_requested{"对话期间暂停唤醒监听"}else{"语音唤醒已关闭"},"microphone_active":false}));
-                } else if wake_protocol_ready && wake_worker.is_none() && wake_recovery.ready(recovery_ms(recovery_clock)) {
+                } else if wake_protocol_ready && wake_requested && standby_allowed && !active && worker.is_none() && current_source.as_ref().is_some_and(|source|wake_start_authorized(&native_poll,&wake_heartbeats,source)) && wake_worker.is_none() && wake_recovery.ready(recovery_ms(recovery_clock)) {
                     let (cancel_tx,cancel_rx)=watch::channel(false);wake_cancel=Some(cancel_tx);
                     wake_status=json!({"state":"connecting","text":"正在连接语音唤醒","microphone_active":false});
                     if let Some(source)=observed.as_ref().ok().and_then(wake_source) {
@@ -452,27 +847,13 @@ pub async fn run(c: Config) -> io::Result<()> {
                         wake_worker=Some(tokio::spawn(crate::wake::run(c.clone(),source,wake_tx.clone(),store.clone(),cancel_rx)));
                     }
                 } else if wake_worker.is_none() && let Some(waiting)=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()) {wake_status=waiting;}
-                if !wake_protocol_ready && (wake_requested || c.wake_word.enabled) {
+                if observed.as_ref().is_err_and(|error|error.to_string()=="version_incompatible") {
                     wake_status=json!({"state":"error","text":"当前 JWM 缺少新版唤醒协议，请更新 JWM 并重新登录，再运行 jwm-eva doctor。","error_code":"version_incompatible","microphone_active":false,"retryable":false});
                 }
-                if wake_protocol_ready && wake_heartbeat.elapsed()>=Duration::from_secs(1) {
-                    let mut update=wake_status.clone();update["wake_generation"]=json!(wake_generation);update["enabled"]=json!(wake_requested);update["wm_instance_id"]=observed.as_ref().ok().map(|s|s["wm_instance_id"].clone()).unwrap_or(Value::Null);
-                    if command("set_assistant_wake_status",update).await.is_err() {
-                        let had_wake_worker=wake_worker.is_some();let failed_source=active_wake_source.clone();
-                        stop_wake(&mut wake_worker,&mut wake_cancel).await;
-                        if wake_requested && had_wake_worker {
-                            if let Some(native)=recover_wake_failure(&mut wake_recovery,&io::Error::other("wake_status_unavailable"),recovery_ms(recovery_clock),failed_source.as_ref()).await {
-                                wake_generation=native["wake_generation"].as_u64().unwrap_or(wake_generation);wake_requested=false;
-                                wake_recovery.observe(wake_source(&native),false);active_wake_source=None;observed=Ok(native);
-                            }
-                        }
-                        wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":"paused","microphone_active":false}));
-                    }
-                    wake_heartbeat=std::time::Instant::now();
-                }
-                wm_instance=observed.as_ref().ok().and_then(|s|s["wm_instance_id"].as_str()).map(str::to_owned);
-                let next=observed.as_ref().ok().filter(|s|s["active"]==true).and_then(|s|serde_json::from_value::<AssistantPermit>(s["assistant_permit"].clone()).ok());
-                if next!=permit {
+                if observed.is_ok() {
+                  wm_instance=observed.as_ref().ok().and_then(|s|s["wm_instance_id"].as_str()).map(str::to_owned);
+                  let next=observed.as_ref().ok().filter(|s|s["active"]==true).and_then(|s|serde_json::from_value::<AssistantPermit>(s["assistant_permit"].clone()).ok());
+                  if next!=permit {
                     error_until=None;
                     stop(&mut worker,&mut cancellation).await;permit=next;
                     status=json!({"state":"idle","text":"","microphone_active":false});
@@ -485,12 +866,16 @@ pub async fn run(c: Config) -> io::Result<()> {
                         let warm_socket=if c.openai.keep_warm {warm.take().await} else {None};
                         worker=Some(tokio::spawn(session::run_with_handoff(c.clone(),p,updates_tx.clone(),store.clone(),cancel_rx,handoff_for_next.take(),warm_socket)));
                     }
+                  }
                 }
                 warm.set_enabled(c.openai.keep_warm && worker.is_none());
             }
         }
     }
     warm.stop();
+    if let Some(flight) = wake_heartbeats.pending.take() {
+        flight.task.abort();
+    }
     let shutdown_source = wake_recovery
         .source()
         .cloned()
@@ -524,13 +909,59 @@ async fn recover_wake_failure(
     now_ms: u64,
     source: Option<&crate::handoff::Source>,
 ) -> Option<Value> {
-    if recovery.failed(error, now_ms) != crate::retry::Decision::Stop {
+    let decision = recovery.failed(error, now_ms);
+    wake_event("wake_failed", wake_diagnostic_error_code(error), source);
+    if decision != crate::retry::Decision::Stop {
         return None;
     }
+    let reason = if crate::errors::recovery(error) == crate::errors::Recovery::Permanent {
+        "permanent_error"
+    } else {
+        "retry_exhausted"
+    };
+    wake_event("wake_stop_requested", reason, source);
     let source = source?;
-    command("assistant_control", guarded_wake_disable(source))
-        .await
-        .ok()
+    match command("assistant_control", guarded_wake_disable(source)).await {
+        Ok(native) => {
+            wake_event("wake_stopped", "disabled", Some(source));
+            Some(native)
+        }
+        Err(error) => {
+            wake_event(
+                "wake_stop_failed",
+                wake_diagnostic_error_code(&error),
+                Some(source),
+            );
+            None
+        }
+    }
+}
+fn wake_diagnostic_error_code(error: &io::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "native_snapshot_pending" => "native_snapshot_pending",
+        "native_snapshot_expired" => "native_snapshot_expired",
+        "native_snapshot_invalid" => "native_snapshot_invalid",
+        "version_incompatible" => "version_incompatible",
+        "wake_status_timeout" => "wake_status_timeout",
+        "wake_status_unavailable" => "wake_status_unavailable",
+        "wake_response_missing" => "wake_response_missing",
+        "wake_response_invalid" => "wake_response_invalid",
+        "wake_response_timeout" => "wake_response_timeout",
+        "wake_configuration_mismatch" => "wake_configuration_mismatch",
+        "wake_input_queue_full" => "wake_input_queue_full",
+        _ => crate::errors::session_code(error),
+    }
+}
+fn wake_diagnostic_labels(result: &'static str, source: Option<&crate::handoff::Source>) -> Value {
+    let mut labels = json!({"phase":"wake","result":result});
+    if let Some(source) = source {
+        labels["generation"] = json!(source.assistant_generation);
+        labels["wake_generation"] = json!(source.wake_generation);
+    }
+    labels
+}
+fn wake_event(stage: &'static str, result: &'static str, source: Option<&crate::handoff::Source>) {
+    crate::telemetry::event(stage, &wake_diagnostic_labels(result, source));
 }
 fn guarded_wake_disable(source: &crate::handoff::Source) -> Value {
     json!({"action":"wake_disable","wm_instance_id":source.wm_instance_id,"wake_generation":source.wake_generation,"assistant_generation":source.assistant_generation})
@@ -708,6 +1139,472 @@ impl Drop for Watchdog {
 
 #[cfg(test)]
 mod tests {
+    fn native_fixture(wake: u64, assistant: u64, active: bool) -> serde_json::Value {
+        serde_json::json!({
+            "assistant_protocol":jwm_eva_core::protocol::assistant_protocol(),
+            "wm_instance_id":"fixture-wm", "wake_generation":wake,
+            "assistant_generation":assistant, "wake_requested":true,
+            "standby_allowed":true, "active":active,
+            "assistant_permit":if active {serde_json::json!({"assistant_session_id":"fixture-session","generation":assistant})}else{serde_json::Value::Null}
+        })
+    }
+
+    #[test]
+    fn cached_wake_heartbeats_reject_new_authority_and_incomplete_snapshots() {
+        let snapshot = native_fixture(7, 9, false);
+        let source = super::wake_source(&snapshot).unwrap();
+        assert!(super::wake_heartbeat_matches(&source, &snapshot));
+        for field in [
+            "active",
+            "wake_requested",
+            "standby_allowed",
+            "assistant_generation",
+            "wake_generation",
+            "assistant_protocol",
+        ] {
+            let mut missing = snapshot.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(!super::valid_native_snapshot(&missing), "{field}");
+            assert!(!super::wake_heartbeat_matches(&source, &missing));
+        }
+        for (field, value) in [
+            ("wm_instance_id", serde_json::json!("new-wm")),
+            ("wake_generation", serde_json::json!(8)),
+            ("assistant_generation", serde_json::json!(10)),
+            ("wake_requested", serde_json::json!(false)),
+            ("standby_allowed", serde_json::json!(false)),
+        ] {
+            let mut changed = snapshot.clone();
+            changed[field] = value;
+            assert!(!super::wake_heartbeat_matches(&source, &changed), "{field}");
+        }
+        assert!(!super::wake_heartbeat_matches(
+            &source,
+            &native_fixture(7, 10, true)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_replaced_observation_cannot_revive_old_wake_request() {
+        for event in [
+            "assistant/activated",
+            "assistant/cancelled",
+            "assistant/wake_action",
+        ] {
+            let mut poll = super::NativeStatusPoll::default();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            poll.start_with(async { Ok(receive.await.unwrap()) });
+            assert!(super::invalidates_wake_observation(
+                &serde_json::json!({"event":event})
+            ));
+            poll.invalidate();
+            send.send(native_fixture(7, 9, false)).unwrap();
+            tokio::task::yield_now().await;
+            assert!(poll.take_ready().await.is_none());
+            assert!(poll.cached().is_none());
+        }
+        assert!(!super::invalidates_wake_observation(
+            &serde_json::json!({"event":"assistant/execution"})
+        ));
+    }
+
+    async fn lease_fixture() -> (
+        super::WakeHeartbeats,
+        super::NativeStatusPoll,
+        crate::handoff::Source,
+    ) {
+        let snapshot = native_fixture(7, 9, false);
+        let source = super::wake_source(&snapshot).unwrap();
+        let mut poll = super::NativeStatusPoll::default();
+        poll.start_with({
+            let snapshot = snapshot.clone();
+            async move { Ok(snapshot) }
+        });
+        tokio::task::yield_now().await;
+        assert!(poll.take_ready().await.unwrap().is_ok());
+        let mut beats = super::WakeHeartbeats::default();
+        beats.start(
+            source.clone(),
+            poll.epoch,
+            true,
+            async move { Ok(snapshot) },
+        );
+        let result = beats.ready().await;
+        assert_eq!(
+            beats.complete(result, poll.epoch),
+            super::WakeHeartbeatResult::Renewed
+        );
+        (beats, poll, source)
+    }
+
+    #[tokio::test]
+    async fn slow_heartbeat_keeps_capture_until_confirmed_deadline_and_actor_cancel_reachable() {
+        use std::time::{Duration, Instant};
+        let (mut beats, poll, source) = lease_fixture().await;
+        tokio::time::sleep(super::WAKE_HEARTBEAT_PERIOD).await;
+        let sent = Instant::now();
+        beats.start(source.clone(), poll.epoch, true, async {
+            tokio::time::sleep(Duration::from_millis(2160)).await;
+            Ok(native_fixture(7, 9, false))
+        });
+        let mut ticks = 0;
+        let mut pulse = tokio::time::interval(Duration::from_millis(20));
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            super::signal_cancel(&Some(cancel));
+        });
+        let mut cancel_seen = false;
+        let result = loop {
+            let deadline = beats.deadline();
+            tokio::select! {
+                result=beats.ready()=>break result,
+                _=cancelled.changed(),if !cancel_seen=>{cancel_seen=true;assert!(sent.elapsed()<Duration::from_millis(900));},
+                _=pulse.tick()=>{ticks+=1;assert!(beats.valid(&source,poll.epoch));},
+                _=super::wake_deadline(deadline)=>panic!("2.16s heartbeat consumed the confirmed lease"),
+            }
+        };
+        cancel_task.await.unwrap();
+        assert!(cancel_seen && ticks > 80);
+        assert_eq!(
+            beats.complete(result, poll.epoch),
+            super::WakeHeartbeatResult::Renewed
+        );
+        assert!(
+            beats
+                .deadline()
+                .unwrap()
+                .duration_since(sent + super::WAKE_LEASE)
+                < Duration::from_millis(20)
+        );
+        assert!(
+            beats.last_sent.elapsed() > super::WAKE_HEARTBEAT_PERIOD,
+            "next write is immediately due, without waiting after ACK"
+        );
+        beats.start(source.clone(), poll.epoch, true, async {
+            Ok(native_fixture(7, 9, false))
+        });
+        let result = beats.ready().await;
+        assert_eq!(
+            beats.complete(result, poll.epoch),
+            super::WakeHeartbeatResult::Renewed
+        );
+        assert!(beats.valid(&source, poll.epoch));
+    }
+
+    #[tokio::test]
+    async fn four_second_read_does_not_block_lease_renewals_or_spawn_more_reads() {
+        use std::time::Duration;
+        let (mut beats, mut poll, source) = lease_fixture().await;
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = reads.clone();
+        poll.start_with(async move {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            Ok(native_fixture(7, 9, false))
+        });
+        let mut pulse = tokio::time::interval(super::WAKE_HEARTBEAT_PERIOD);
+        let mut renewals = 0;
+        loop {
+            pulse.tick().await;
+            assert!(beats.valid(&source, poll.epoch));
+            if let Some(result) = poll.take_ready().await {
+                assert_eq!(
+                    super::wake_diagnostic_error_code(&result.unwrap_err()),
+                    "native_snapshot_expired"
+                );
+                break;
+            }
+            let count = reads.clone();
+            poll.start_with(async move {
+                count.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
+                Ok(native_fixture(7, 9, false))
+            });
+            beats.start(source.clone(), poll.epoch, true, async {
+                Ok(native_fixture(7, 9, false))
+            });
+            let result = beats.ready().await;
+            assert_eq!(
+                beats.complete(result, poll.epoch),
+                super::WakeHeartbeatResult::Renewed
+            );
+            renewals += 1;
+        }
+        assert!(renewals >= 7);
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(
+            poll.cached().is_none(),
+            "read ACKs never refresh authorization"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_lease_and_old_epoch_or_owner_ack_cannot_revive_capture() {
+        use std::time::{Duration, Instant};
+        for invalidation in ["epoch", "owner", "late"] {
+            let (mut beats, mut poll, source) = lease_fixture().await;
+            let (send, receive) = tokio::sync::oneshot::channel();
+            beats.start(source.clone(), poll.epoch, true, async {
+                Ok(receive.await.unwrap())
+            });
+            match invalidation {
+                "epoch" => poll.invalidate(),
+                "owner" => beats.invalidate(),
+                _ => {
+                    beats.proof.as_mut().unwrap().deadline =
+                        Instant::now() - Duration::from_millis(1);
+                    beats.pending.as_mut().unwrap().sent = Instant::now() - Duration::from_secs(4);
+                    assert!(!beats.valid(&source, poll.epoch));
+                    // The expiry branch revokes the owner before awaiting IPC.
+                    super::wake_deadline(beats.deadline()).await;
+                }
+            }
+            send.send(native_fixture(7, 9, false)).unwrap();
+            let result = beats.ready().await;
+            let outcome = beats.complete(result, poll.epoch);
+            assert!(matches!(
+                outcome,
+                super::WakeHeartbeatResult::Ignored | super::WakeHeartbeatResult::Observed
+            ));
+            assert!(!beats.valid(&source, poll.epoch));
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_read_and_lease_proof_are_separate_start_requirements() {
+        use std::time::{Duration, Instant};
+        let (mut beats, mut poll, source) = lease_fixture().await;
+        assert!(super::wake_start_authorized(&poll, &beats, &source));
+        poll.cached.as_mut().unwrap().0 = Instant::now() - Duration::from_millis(751);
+        assert!(poll.cached().is_none());
+        assert!(!super::wake_start_authorized(&poll, &beats, &source));
+        assert!(
+            beats.valid(&source, poll.epoch),
+            "proof alone supplies no fresh snapshot"
+        );
+        poll.cached.as_mut().unwrap().0 = Instant::now();
+        beats.proof.as_mut().unwrap().deadline = Instant::now() - Duration::from_millis(1);
+        assert!(poll.cached().is_some());
+        assert!(!super::wake_start_authorized(&poll, &beats, &source));
+        assert!(
+            !beats.valid(&source, poll.epoch),
+            "fresh reads cannot extend native lease"
+        );
+        beats.invalidate();
+        beats.start(source.clone(), poll.epoch, true, async {
+            Ok(native_fixture(7, 9, false))
+        });
+        beats.pending.as_mut().unwrap().sent = Instant::now() - Duration::from_millis(2160);
+        poll.cached.as_mut().unwrap().0 = Instant::now() - Duration::from_millis(2160);
+        let result = beats.ready().await;
+        assert_eq!(
+            beats.complete(result, poll.epoch),
+            super::WakeHeartbeatResult::Renewed
+        );
+        assert!(
+            poll.cached().is_none(),
+            "slow preflight must wait for a new fresh query"
+        );
+        assert!(!super::wake_start_authorized(&poll, &beats, &source));
+    }
+
+    #[tokio::test]
+    async fn transport_loss_preserves_only_old_proof_but_native_rejection_does_not_authorize() {
+        let (mut beats, poll, source) = lease_fixture().await;
+        let deadline = beats.deadline();
+        beats.start(source.clone(), poll.epoch, true, async {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "private"))
+        });
+        let result = beats.ready().await;
+        assert_eq!(
+            beats.complete(result, poll.epoch),
+            super::WakeHeartbeatResult::Unavailable
+        );
+        assert_eq!(beats.deadline(), deadline);
+        for ack in [native_fixture(8, 9, false), native_fixture(7, 10, true)] {
+            beats.start(source.clone(), poll.epoch, true, async move { Ok(ack) });
+            let result = beats.ready().await;
+            assert_eq!(
+                beats.complete(result, poll.epoch),
+                super::WakeHeartbeatResult::Rejected
+            );
+            beats.invalidate(); // actor signals capture and invalidates on rejection
+            assert!(!beats.valid(&source, poll.epoch));
+        }
+    }
+
+    #[tokio::test]
+    async fn local_cancel_reaches_both_owners_before_slow_native_revoke() {
+        let (wake, wake_rx) = tokio::sync::watch::channel(false);
+        let (session, session_rx) = tokio::sync::watch::channel(false);
+        super::signal_cancel(&Some(wake));
+        super::signal_cancel(&Some(session));
+        let native_revoke = async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        };
+        tokio::pin!(native_revoke);
+        assert!(*wake_rx.borrow() && *session_rx.borrow());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut native_revoke)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_deadline_drops_old_capture_and_late_mutation_has_no_handoff() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::{Duration, Instant},
+        };
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let flag = dispatched.clone();
+        let result = super::within_wake_lease(
+            Some(Instant::now() - Duration::from_millis(1)),
+            async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(native_fixture(7, 10, true))
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!dispatched.load(Ordering::SeqCst));
+        struct CaptureOwner(Arc<AtomicBool>);
+        impl Drop for CaptureOwner {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let released = Arc::new(AtomicBool::new(false));
+        let mutated = Arc::new(AtomicBool::new(false));
+        let flag = mutated.clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let mutation = tokio::spawn(async move {
+            receive.await.unwrap();
+            flag.store(true, Ordering::SeqCst);
+            Ok(native_fixture(7, 10, true))
+        });
+        let outcome = {
+            let _capture = CaptureOwner(released.clone());
+            super::within_wake_lease(
+                Some(Instant::now() + Duration::from_millis(10)),
+                async move { mutation.await.unwrap() },
+            )
+            .await
+        };
+        assert_eq!(outcome.unwrap_err().to_string(), "wake_lease_expired");
+        assert!(released.load(Ordering::SeqCst));
+        send.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            mutated.load(Ordering::SeqCst),
+            "underlying native mutation may finish late"
+        );
+        let poll = super::NativeStatusPoll::default();
+        assert!(
+            poll.cached().is_none(),
+            "late mutation cannot attach capture or create fresh query authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_complete_activation_ack_can_replace_old_pending_observation() {
+        let mut poll = super::NativeStatusPoll::default();
+        assert!(!poll.activated(&native_fixture(7, 9, false)));
+        let (send, receive) = tokio::sync::oneshot::channel();
+        poll.start_with(async { Ok(receive.await.unwrap()) });
+        let activated = native_fixture(7, 10, true);
+        assert!(poll.activated(&activated));
+        send.send(native_fixture(7, 9, false)).unwrap();
+        tokio::task::yield_now().await;
+        assert!(poll.take_ready().await.is_none());
+        assert_eq!(poll.cached(), Some(&activated));
+    }
+
+    #[tokio::test]
+    async fn incompatible_snapshot_is_diagnostic_without_cached_authority() {
+        let mut poll = super::NativeStatusPoll::default();
+        let mut old = native_fixture(7, 9, false);
+        old.as_object_mut().unwrap().remove("assistant_protocol");
+        poll.start_with(async move { Ok(old) });
+        tokio::task::yield_now().await;
+        let error = poll.take_ready().await.unwrap().unwrap_err();
+        assert_eq!(
+            super::wake_diagnostic_error_code(&error),
+            "version_incompatible"
+        );
+        assert!(poll.cached().is_none());
+        for code in [
+            "native_snapshot_expired",
+            "native_snapshot_invalid",
+            "wake_status_timeout",
+        ] {
+            assert_eq!(
+                super::wake_diagnostic_error_code(&std::io::Error::other(code)),
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn wake_diagnostics_keep_only_category_and_numeric_source() {
+        let source = crate::handoff::Source {
+            wm_instance_id: "private-window-title-or-token".into(),
+            wake_generation: 7,
+            assistant_generation: 9,
+        };
+        let error = std::io::Error::other("budget_exceeded private detail");
+        let labels =
+            super::wake_diagnostic_labels(crate::errors::session_code(&error), Some(&source));
+        assert_eq!(
+            crate::telemetry::fields(&labels),
+            serde_json::json!({"phase":"wake","result":"budget_exceeded","generation":9,"wake_generation":7})
+        );
+        assert_eq!(
+            super::wake_diagnostic_labels("native_disabled", None),
+            serde_json::json!({"phase":"wake","result":"native_disabled"})
+        );
+        assert!(!labels.to_string().contains("private"));
+    }
+
+    #[tokio::test]
+    async fn wake_failure_diagnostics_preserve_retry_and_stop_decisions() {
+        for (error, expected) in [
+            ("temporary failure private detail", "waiting"),
+            ("rate_limited private detail", "waiting"),
+            ("budget_exceeded private detail", "stopped"),
+            ("realtime_request_rejected private detail", "stopped"),
+        ] {
+            let mut recovery = crate::retry::WakeRecovery::new(3000, 1);
+            recovery.observe(
+                Some(crate::handoff::Source {
+                    wm_instance_id: "fixture".into(),
+                    wake_generation: 7,
+                    assistant_generation: 9,
+                }),
+                true,
+            );
+            // No source is supplied to the native disable path: this tests
+            // local classification and emits no IPC or desktop request.
+            assert!(
+                super::recover_wake_failure(
+                    &mut recovery,
+                    &std::io::Error::other(error),
+                    100,
+                    None,
+                )
+                .await
+                .is_none()
+            );
+            let status = recovery.status(100, 1000).unwrap();
+            assert_eq!(status["retry_state"], expected);
+            assert_eq!(status["retry_attempt"], 1);
+        }
+    }
+
     #[test]
     fn failed_voice_delivery_preserves_only_an_already_published_verified_outcome() {
         let mut status = serde_json::json!({"state":"responding","result_status":"succeeded","voice_fallback":true,"text":"已切到第3个工作区"});

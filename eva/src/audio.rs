@@ -185,6 +185,9 @@ struct RenderReference {
     queued_at: Option<Instant>,
 }
 const ECHO_REFERENCE_SAMPLES: usize = RATE as usize * 3;
+// Five native frames give a continuous 100 ms echo observation before the
+// sixth voiced frame could trigger barge-in. This buffer never leaves memory.
+const ECHO_PROBE_BYTES: usize = FRAME_BYTES * 5;
 static RENDER_REFERENCE: OnceLock<Mutex<RenderReference>> = OnceLock::new();
 fn rendered_reference(pcm: &[u8]) {
     let mut reference = RENDER_REFERENCE
@@ -229,6 +232,8 @@ fn echo_matches(pcm: &[u8], reference: &[i16]) -> bool {
     };
     let complete_stats = stats(&samples);
     let coarse_stats = stats(&coarse);
+    let tail = &samples[samples.len().saturating_sub(FRAME_BYTES / 8)..];
+    let tail_stats = stats(tail);
     if complete_stats.2 <= 1.0 {
         return false;
     }
@@ -252,10 +257,18 @@ fn echo_matches(pcm: &[u8], reference: &[i16]) -> bool {
             && covariance * covariance >= threshold * threshold * energy * other_energy
     };
     for offset in (0..=reference.len() - pcm.len() / 2).step_by(16) {
-        // Reject most offsets using only 30 points before evaluating all 120.
-        // This keeps the voice gate inexpensive even across a full render tail.
+        // Reject most offsets using a quarter of the decimated samples first.
+        // The current frame must also match at this same offset: an earlier
+        // echoed prefix cannot hide new speech at the end of the probe.
         if matches(&coarse, coarse_stats, offset, 16, 0.45)
             && matches(&samples, complete_stats, offset, 4, 0.72)
+            && matches(
+                tail,
+                tail_stats,
+                offset + (samples.len() - tail.len()) * 4,
+                4,
+                0.72,
+            )
         {
             return true;
         }
@@ -295,7 +308,11 @@ impl InputNoise {
         }
         let mut levels = self.levels;
         levels[..self.count].sort_unstable_by(f32::total_cmp);
-        (levels[self.count / 5] * 3.0).max(0.004)
+        // Keep the 3x measured-noise margin on noisy inputs, but do not impose
+        // a 0.004 floor on a calibrated quiet microphone: real low-gain speech
+        // can remain below it for nearly every frame. The 0.001 floor still
+        // excludes tiny PCM/noise fluctuations (about 33 S16 sample units).
+        (levels[self.count / 5] * 3.0).max(0.001)
     }
 }
 
@@ -303,6 +320,7 @@ impl InputNoise {
 /// a model response. PCM is used only for echo comparison and never persisted.
 pub struct BargeInGate {
     speech_window: u16,
+    echo_probe: Vec<u8>,
     threshold: f32,
     noise_frames: usize,
     echo_detected: bool,
@@ -321,6 +339,7 @@ impl BargeInGate {
     pub fn with_noise(noise: &InputNoise) -> Self {
         Self {
             speech_window: 0,
+            echo_probe: Vec::with_capacity(ECHO_PROBE_BYTES),
             threshold: noise.threshold(),
             noise_frames: noise.count,
             echo_detected: false,
@@ -333,6 +352,7 @@ impl BargeInGate {
     }
     pub fn reset(&mut self) {
         self.speech_window = 0;
+        self.echo_probe.clear();
         self.echo_detected = false;
     }
     pub fn echo_detected(&self) -> bool {
@@ -364,7 +384,20 @@ impl BargeInGate {
         }
         let candidate = frame.level.is_finite() && frame.level > self.threshold;
         self.above_threshold = self.above_threshold.saturating_add(u64::from(candidate));
-        self.echo_detected = candidate && echo_matches(&frame.pcm, reference);
+        // Native framing supplies consecutive 20 ms PCM. A matching pitch in
+        // one short frame somewhere in three seconds of output is not proof
+        // of echo; require one contiguous render segment for the entire probe.
+        if frame.pcm.len() == FRAME_BYTES {
+            if self.echo_probe.len() == ECHO_PROBE_BYTES {
+                self.echo_probe.drain(..FRAME_BYTES);
+            }
+            self.echo_probe.extend_from_slice(&frame.pcm);
+        } else {
+            self.echo_probe.clear();
+        }
+        self.echo_detected = candidate
+            && self.echo_probe.len() == ECHO_PROBE_BYTES
+            && echo_matches(&self.echo_probe, reference);
         if self.echo_detected {
             self.echo_frames = self.echo_frames.saturating_add(1);
             self.speech_window = 0;
@@ -2027,6 +2060,232 @@ mod barge_in_tests {
             })
             .collect()
     }
+
+    fn signal_at_level(seed: u32, target: f32) -> Frame {
+        let source = voice(seed);
+        let source_level = frame(&source).level;
+        frame(
+            &source
+                .iter()
+                .map(|sample| (f32::from(*sample) * target / source_level).round() as i16)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn calibrated_noise(level: f32) -> InputNoise {
+        let mut noise = InputNoise::default();
+        // A changing quiet baseline, rather than an exactly repeated frame.
+        for index in 0..50 {
+            noise.observe(
+                signal_at_level(index + 100, level * (0.9 + (index % 5) as f32 * 0.05)).level,
+            );
+        }
+        noise
+    }
+
+    fn harmonic_frame(harmonics: [f64; 3], amplitude: f64) -> Vec<i16> {
+        (0..480)
+            .map(|index| {
+                let phase = std::f64::consts::TAU * 150.0 * index as f64 / RATE as f64;
+                (amplitude
+                    * (harmonics[0] * phase.sin()
+                        + harmonics[1] * (phase * 2.0).sin()
+                        + harmonics[2] * (phase * 3.0).sin())) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reordered_same_pitch_harmonics_are_not_contiguous_echo() {
+        let vowels = [
+            [1.0, 0.9, 0.7],
+            [1.0, -0.9, 0.7],
+            [1.0, 0.9, -0.7],
+            [1.0, -0.9, -0.7],
+        ];
+        let mut reference = vec![0; 64];
+        for index in 0..100 {
+            reference.extend(harmonic_frame(vowels[index % 4], 2500.0));
+        }
+        let mut gate = BargeInGate::with_noise(&calibrated_noise(0.0003));
+        let mut interrupted = false;
+        for index in 0..12 {
+            let input = frame(&harmonic_frame(vowels[[0, 2, 1, 3][index % 4]], 100.0));
+            // Every short frame matches somewhere in the output, yet this
+            // reordered, continuous voiced sequence was never rendered.
+            assert!(echo_matches(&input.pcm, &reference));
+            interrupted |= gate.observe_with_reference(&input, &reference);
+        }
+        assert!(
+            interrupted,
+            "independent short-frame matches hid new speech"
+        );
+        assert_eq!(gate.statistics()["echo_frames"], 0);
+    }
+
+    #[test]
+    fn nearby_voiced_pitch_cannot_match_each_frame_at_unrelated_render_offsets() {
+        let voiced = |hz: f64, harmonics: [f64; 3], phase: f64, samples: usize, gain: f64| {
+            (0..samples)
+                .map(|index| {
+                    let angle = phase + std::f64::consts::TAU * hz * index as f64 / RATE as f64;
+                    (gain
+                        * (harmonics[0] * angle.sin()
+                            + harmonics[1] * (2.0 * angle).sin()
+                            + harmonics[2] * (3.0 * angle).sin())) as i16
+                })
+                .collect::<Vec<_>>()
+        };
+        let reference = voiced(160.0, [1.0, 0.3, 0.1], 0.0, RATE as usize * 3, 2500.0);
+        let input = voiced(170.0, [1.0, -0.25, 0.2], 0.7, 480 * 12, 100.0);
+        let mut gate = BargeInGate::with_noise(&calibrated_noise(0.0003));
+        let mut interrupted = false;
+        for samples in input.chunks_exact(480) {
+            let input = frame(samples);
+            assert!(echo_matches(&input.pcm, &reference));
+            interrupted |= gate.observe_with_reference(&input, &reference);
+        }
+        assert!(interrupted);
+        assert_eq!(gate.statistics()["echo_frames"], 0);
+    }
+
+    #[test]
+    fn continuous_delayed_noisy_echo_is_rejected_before_the_sixth_voiced_frame() {
+        let mut phase = 0.0_f64;
+        let output = (0..480 * 20)
+            .map(|index| {
+                phase += std::f64::consts::TAU * (120.0 + index as f64 / 100.0) / RATE as f64;
+                (5000.0 * (phase.sin() + 0.25 * (2.0 * phase).sin())) as i16
+            })
+            .collect::<Vec<_>>();
+        let mut reference = vec![0; 64];
+        reference.extend_from_slice(&output);
+        reference.extend_from_slice(&[0; 96]);
+        let mut gate = BargeInGate::with_noise(&calibrated_noise(0.0003));
+        for (index, chunk) in output.chunks_exact(480).enumerate() {
+            let echoed = frame(
+                &chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(sample_index, sample)| -sample / 64 + (sample_index % 3) as i16 - 1)
+                    .collect::<Vec<_>>(),
+            );
+            assert!(!gate.observe_with_reference(&echoed, &reference));
+            assert_eq!(gate.echo_detected(), index >= 4);
+        }
+        assert_eq!(gate.statistics()["max_voiced_frames"], 4);
+        // A new voice must not be masked by the preceding 80 ms of true echo.
+        for index in 0..6 {
+            let new_voice = signal_at_level(300 + index, 0.003);
+            assert_eq!(
+                gate.observe_with_reference(&new_voice, &reference),
+                index == 5
+            );
+            assert!(!gate.echo_detected());
+        }
+    }
+
+    #[test]
+    fn calibrated_low_gain_syllables_interrupt_where_the_previous_floor_cannot() {
+        let noise = calibrated_noise(0.0003);
+        let mut gate = BargeInGate::with_noise(&noise);
+        let mut previous = BargeInGate::with_noise(&noise);
+        previous.threshold = previous.threshold.max(0.004);
+        assert!((gate.threshold - 0.001).abs() < f32::EPSILON);
+        // An aperiodic, amplitude-shaped PCM segment with two syllables and
+        // 40 ms between them. These are synthetic levels spanning the observed
+        // low-gain range, not a recording or a claim to reproduce the utterance.
+        let envelope = [
+            0.0013, 0.0021, 0.0032, 0.0007, 0.0006, 0.0028, 0.0049, 0.0015,
+        ];
+        for (index, level) in envelope.into_iter().enumerate() {
+            let frame = signal_at_level(index as u32 + 1, level);
+            assert!((frame.level - level).abs() < 0.00002);
+            assert!(!previous.observe_with_reference(&frame, &[]));
+            assert_eq!(gate.observe_with_reference(&frame, &[]), index == 7);
+        }
+        assert_eq!(previous.statistics()["above_threshold_frames"], 1);
+        assert_eq!(gate.statistics()["max_voiced_frames"], 6);
+    }
+
+    #[test]
+    fn calibrated_noise_floor_still_rejects_background_and_isolated_clicks() {
+        // Quiet and loud microphones must retain the same relative noise
+        // rejection; reducing the absolute floor must not flatten this margin.
+        for floor in [0.0002, 0.0006, 0.002, 0.02] {
+            let noise = calibrated_noise(floor);
+            let mut gate = BargeInGate::with_noise(&noise);
+            assert!(gate.threshold >= floor * 2.6);
+            for index in 0..100 {
+                let background =
+                    signal_at_level(index + 500, floor * (1.0 + (index % 4) as f32 * 0.15));
+                assert!(!gate.observe_with_reference(&background, &[]));
+            }
+            for index in 0..30 {
+                let level = if index % 7 == 0 {
+                    gate.threshold * 4.0
+                } else {
+                    floor
+                };
+                assert!(!gate.observe_with_reference(&signal_at_level(index + 700, level), &[]));
+            }
+            assert!(gate.statistics()["max_voiced_frames"].as_u64().unwrap() <= 2);
+            gate.reset();
+            for index in 0..6 {
+                let voice = signal_at_level(index + 800, gate.threshold * 1.5);
+                assert_eq!(gate.observe_with_reference(&voice, &[]), index == 5);
+            }
+        }
+    }
+
+    #[test]
+    fn insufficient_noise_calibration_keeps_the_conservative_fallback() {
+        let low_voice = signal_at_level(5, 0.003);
+        let mut noise = InputNoise::default();
+        for _ in 0..9 {
+            noise.observe(0.0003);
+        }
+        let mut gate = BargeInGate::with_noise(&noise);
+        assert_eq!(gate.threshold, 0.006);
+        for _ in 0..20 {
+            assert!(!gate.observe_with_reference(&low_voice, &[]));
+        }
+        noise.observe(0.0003);
+        let mut calibrated = BargeInGate::with_noise(&noise);
+        assert_eq!(calibrated.threshold, 0.001);
+        for index in 0..6 {
+            assert_eq!(
+                calibrated.observe_with_reference(&low_voice, &[]),
+                index == 5
+            );
+        }
+    }
+
+    #[test]
+    fn calibrated_low_gain_echo_stays_rejected_below_the_previous_floor() {
+        let noise = calibrated_noise(0.0003);
+        let mut gate = BargeInGate::with_noise(&noise);
+        let output = voice(27);
+        let mut reference = vec![0; 64];
+        reference.extend_from_slice(&output.repeat(20));
+        reference.extend_from_slice(&[0; 96]);
+        let echoed = signal_at_level(27, 0.002);
+        assert!(echoed.level > gate.threshold && echoed.level < 0.004);
+        assert!(echo_matches(&echoed.pcm, &reference));
+        for index in 0..20 {
+            assert!(!gate.observe_with_reference(&echoed, &reference));
+            assert_eq!(gate.echo_detected(), index >= 4);
+        }
+        assert_eq!(gate.statistics()["echo_frames"], 16);
+        assert_eq!(gate.statistics()["max_voiced_frames"], 4);
+        let new_voice = signal_at_level(42, 0.002);
+        for index in 0..6 {
+            assert_eq!(
+                gate.observe_with_reference(&new_voice, &reference),
+                index == 5
+            );
+        }
+    }
     #[test]
     fn sustained_new_voice_interrupts_but_clicks_and_silence_do_not() {
         let voice = frame(&voice(1));
@@ -2130,14 +2389,14 @@ mod barge_in_tests {
     fn echoed_output_with_delay_and_gain_does_not_interrupt() {
         let output = voice(7);
         let mut reference = vec![0; 64];
-        reference.extend_from_slice(&output);
+        reference.extend_from_slice(&output.repeat(20));
         reference.extend_from_slice(&[0; 96]);
         let echoed = frame(&output.iter().map(|sample| -sample / 3).collect::<Vec<_>>());
         assert!(echo_matches(&echoed.pcm, &reference));
         let mut gate = BargeInGate::default();
-        for _ in 0..20 {
+        for index in 0..20 {
             assert!(!gate.observe_with_reference(&echoed, &reference));
-            assert!(gate.echo_detected());
+            assert_eq!(gate.echo_detected(), index >= 4);
         }
         let new_voice = frame(&voice(42));
         for _ in 0..5 {
@@ -2150,9 +2409,9 @@ mod barge_in_tests {
         // is made sensitive enough to hear a quiet interruption.
         let echoed = frame(&output.iter().map(|sample| -sample / 32).collect::<Vec<_>>());
         let mut gate = BargeInGate::default();
-        for _ in 0..20 {
+        for index in 0..20 {
             assert!(!gate.observe_with_reference(&echoed, &reference));
-            assert!(gate.echo_detected());
+            assert_eq!(gate.echo_detected(), index >= 4);
         }
         let new_voice = frame(
             &voice(42)

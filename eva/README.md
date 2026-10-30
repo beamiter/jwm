@@ -83,6 +83,8 @@ function = "eva_wake_toggle"
 
 本地起声检测必须开启，用于跟进窗口的截止判断；执行前还会用实际成功上传的 PCM 区间核对服务端音频 item 的归属。无法证明输入时序或窗口起声上下文时，会停止或要求重新说，不改用新焦点猜测。连续对话与打断使用 `half_duplex = false`；配置 `feedback = "voice"` 时，成功、澄清和普通聊天均使用标准版语音反馈。执行结果的口头反馈限定为一两句话，并以 `[openai].feedback_result_max_output_tokens`（默认 256）为上限，说完即进入继续说话窗口；澄清只说出那一个问题；闲聊、数数和知识问答仍使用完整的 `feedback_max_output_tokens`，不会被截断。
 
+本地打断检测按监听阶段测得的背景电平校准灵敏度，支持低输入音量；仍要求持续语音并排除已识别的播放回声。诊断日志 `barge_in_progress` 与 `barge_in_window` 仅含累计帧数、电平峰值、检测门限和回声计数，不保存录音或转写。
+
 在理解、确认、执行或回复期间开口，可中止尚未派发的步骤和当前播放，直接接着说修正内容。Eva 保留打断起声的音频，取消旧响应并清理输入后交给新一轮；已经提交的操作仍以真实回执为准，打断不会撤销已经完成的步骤，也不会自动重发结果未知的步骤。回复历史按实际听到的音频截断。用 `jwm-eva cancel` 同时关闭对话和唤醒待机；活动会话中的 Esc 只取消当前对话，已开启的唤醒监听随后恢复。
 
 中断多步任务后，可以说“继续剩下的”“后面的改成第四个桌面”或“只移动，别切过去”。Eva 在本次会话内保留最近一件待续任务，按本地执行回执排除已完成步骤，再用当前目标引用重新规划；修改后的计划重新经过校验和必要的本地确认。结果未知、仍在执行或执行失败的步骤会阻止自动续做，需要先核清结果；目标消失或身份变化时，普通续做会要求澄清；用户明确改为另一个有效目标时，可重新规划修改后的步骤。旧执行许可和批准不会沿用。
@@ -151,7 +153,9 @@ journalctl --user -u jwm-eva.service -f
 ```bash
 jwm-eva report
 jwm-eva report --since -2h --json
-````capabilities` 同时报告名字登记和用户语义能力，不能把别名数当作独立功能数。设备和媒体的 `accepted` 表示已提交；只有真实后置条件或带关联标识的完成回执才能变成 `succeeded`。超时的 `unknown` 不会自动重发。
+```
+
+`capabilities` 同时报告名字登记和用户语义能力，不能把别名数当作独立功能数。设备和媒体的 `accepted` 表示已提交；只有真实后置条件或带关联标识的完成回执才能变成 `succeeded`。超时的 `unknown` 不会自动重发。
 
 `doctor` 默认只读显示本机当日已结算、在途预留和未知费用，按模型与价格版本汇总，并给出官方账户用量/额度入口。本地估算不代表整个账户的总账。用 `jwm-eva --config /absolute/path/eva.toml doctor --live` 可显式检查该配置及凭据来源对应的对话模型和 mini 模型的云端连接与配置回执；只建立会话，不采集或上传声音、不请求模型回答、不操作桌面。普通 doctor 中的“凭据可读取”不等于云端认证或模型权限已通过；live 握手通过也不等于语音理解、播放、打断或功能执行已通过。
 
@@ -187,6 +191,22 @@ cargo test --locked --offline -p jwm_eva_core -p jwm-eva -p jwm_ipc_client
 cargo test --locked --offline -p jwm --lib jwm::eva::tests -- --test-threads=1
 bash scripts/test-install-eva.sh
 ```
+
+真实模型语料入口默认忽略，需要明确启用；先停止 Eva daemon 以释放真实费用账本的独占锁。入口在独立子进程中把 `JWM_SOCKET` 固定为私有只读测试服务，桌面发现只读取虚构场景，任何命令都会拒绝。它复用生产规划、参数校验与真实费用预留/结算，不采集声音、不执行动作，也不验证真实桌面后置状态。
+
+```bash
+install -d -m 0700 /tmp/eva-corpus-results
+JWM_EVA_RUN_LIVE_CORPUS=1 \
+JWM_EVA_CORPUS_OUTPUT=/tmp/eva-corpus-results/result.json \
+JWM_EVA_CORPUS_CASES=eva-001,eva-090 \
+cargo test --locked --offline -p jwm-eva \
+  session::corpus_runner::live_model_acceptance_corpus \
+  -- --ignored --exact --nocapture
+```
+
+省略 `JWM_EVA_CORPUS_CASES` 可遍历全语料；`JWM_EVA_CORPUS_LIMIT` 可限制本次新增记录数。重复使用同一输出路径会跳过已有案例，只有语料、配置、规划代码和 fixture 指纹完全一致才接受断点。每项先持久化 `in_progress`，再记录结果；中断、错误、待人工复核和 fixture 缺失均不自动重跑或算通过，需要复跑时另开结果文件。费用以本地配置费率估算保存，未知预留与已结算分开统计，不等于账户账单。中断项的费用仍在真实账本中，但报告无法完整归属到案例：会标记 `cost_complete=false`、列出 `unfinished_cost_case_ids`，将已归属金额明确显示为下界、总金额留空；恢复也不会把缺失金额默认为零。
+
+当前静态 fixture 可覆盖 225 项，其余 16 项依赖多轮已核验执行历史或窗口实例销毁时序，记录为 `blocked_fixture`，仍保留在 241 项总数中。精确动作和 noop 可自动判分；澄清措辞及只有意图描述的预期记录为 `manual_review`。每项明确标记 `grade_scope=plan_structure_only`，并保留尚未核验的 `unevaluated_invariants`；计划结构通过不代表 UI、回执、防重放或桌面后置条件也通过。`session_intent` 只记录、不参与当前评分，因此也不代表会话结束或关麦语义通过；模型收到的本地时间仍取每项执行时的真实时钟。输出不会计算完整语义或语音成功率；`tests/corpus.json` 的状态也不会被改成已通过。追加的离线测试仅验证隔离、断点和评分边界，不代表实际模型测过。
 
 有凭据时可显式执行仅连接和配置的实时契约检查。开发测试与 `doctor --live` 复用握手逻辑，分别检查对话与唤醒模型；开发测试默认读取正常配置路径（文件不存在时使用内置默认值），也可通过 `JWM_EVA_LIVE_CONFIG=/absolute/path/eva.toml` 选择文件；测试凭据始终由当前进程的 `OPENAI_API_KEY` 提供。日常检查已安装配置及 Secret Service、文件或环境凭据来源时，使用 `doctor --live`。两者都不采集声音、不上传音频、不请求模型回答、不操作桌面，也不替代使用实际安装配置的语音演示。
 

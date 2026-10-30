@@ -1,0 +1,663 @@
+{
+  "schema_version": 1,
+  "source_revision": "ddd1438668dd25967c902edd330cbbdb11ff4f62",
+  "overall_result": "testing_stopped_by_user_incomplete_coverage",
+  "environment": {
+    "backend": "xcb",
+    "audio_backend": "pulseaudio",
+    "model": "gpt-realtime-2.1-mini",
+    "wake_model": "gpt-realtime-mini",
+    "turn_detection": "server_vad",
+    "noise_reduction": "near_field"
+  },
+  "cases": [
+    {
+      "id": "V01",
+      "generation": 3,
+      "result": "failed",
+      "user_report": "没有停播",
+      "cleanup": "explicit local cancel; native streams subsequently zero",
+      "warm_activation_to_ready_ms": 354
+    },
+    {
+      "id": "V01-control",
+      "generation": 4,
+      "result": "passed",
+      "scenario": "stop_listening_while_listening",
+      "user_report": "自动结束并关麦",
+      "resources_released": true
+    },
+    {
+      "id": "V02",
+      "generation": 5,
+      "result": "incomplete_first_step_failed",
+      "user_report": "第一步好像就卡住了",
+      "error_code": "plan_timeout",
+      "layout_change": false,
+      "undo_exercised": false
+    },
+    {
+      "id": "V02-additional-attempt",
+      "generation": 6,
+      "result": "failed",
+      "error_code": "plan_timeout",
+      "note": "Additional voice attempt observed after first timeout; exact utterance not recorded.",
+      "desktop_action_observed": false
+    },
+    {
+      "id": "V02-text-control",
+      "result": "passed",
+      "scenario": "same_utterance_dry_run",
+      "planning_ms": 2401,
+      "desktop_execution": false
+    },
+    {
+      "id": "V01-diagnostic-retest",
+      "generation": 7,
+      "result": "failed",
+      "user_report": "仍然没有停播",
+      "output": "headphones",
+      "input_frames": 888,
+      "peak_level": 0.005219641607254744,
+      "threshold_level": 0.004,
+      "above_threshold_frames": 4,
+      "echo_frames": 0,
+      "max_voiced_frames": 2,
+      "playback_result": "drained_without_speech_interrupted"
+    },
+    {
+      "id": "V01-diagnostic-retest",
+      "generation": 8,
+      "result": "failed",
+      "user_report": "additional_observed_attempt",
+      "output": "headphones",
+      "input_frames": 909,
+      "peak_level": 0.004752831533551216,
+      "threshold_level": 0.004,
+      "above_threshold_frames": 3,
+      "echo_frames": 1,
+      "max_voiced_frames": 1,
+      "playback_result": "drained_without_speech_interrupted"
+    },
+    {
+      "id": "V01-low-gain-retest",
+      "generation": 9,
+      "result": "failed",
+      "user_report": "仍未停播",
+      "output": "headphones",
+      "threshold_level": 0.0031817457638680935,
+      "peak_level": 0.006184625439345837,
+      "above_threshold_frames": 59,
+      "echo_frames": 27,
+      "max_voiced_frames": 5,
+      "speech_interrupted": false,
+      "input_frames": 1141,
+      "later_turn_observation": {
+        "turn_id": 2,
+        "speech_interrupted": true,
+        "input_frames": 632,
+        "above_threshold_frames": 6,
+        "echo_frames": 0,
+        "max_voiced_frames": 6,
+        "acceptance": "does_not_override_first_turn_failure"
+      }
+    },
+    {
+      "id": "V01-echo-fixed-retest",
+      "generation": 10,
+      "result": "partial",
+      "user_report": "停播并关麦",
+      "barge_in": {
+        "speech_interrupted": true,
+        "above_threshold_frames": 6,
+        "echo_frames": 0,
+        "max_voiced_frames": 6,
+        "threshold_level": 0.0018163761124014854
+      },
+      "intermediate_turn": {
+        "turn_id": 2,
+        "result": "clarify",
+        "feedback_text_fallback": true
+      },
+      "ended_in_turn": 3,
+      "final_state": "idle",
+      "wake_requested": false,
+      "native_input_streams": 0,
+      "native_output_streams": 0,
+      "evidence": "/tmp/eva-e2e-current/echo-fixed-retest.json",
+      "user_clarification": "Assistant claimed it lacked permission to stop the microphone; a subsequent request to exit ended the session.",
+      "single_utterance_stop_listening": "failed"
+    },
+    {
+      "id": "V01-session-control-fixed-retest",
+      "generation": 11,
+      "result": "playback_interruption_and_eventual_close_confirmed",
+      "user_report": "一次就停播并关麦",
+      "speech_interrupted": true,
+      "final_state": "idle",
+      "wake_requested": false,
+      "native_input_streams": 0,
+      "native_output_streams": 0,
+      "observed_turns": 3,
+      "initial_plan_disposition": "clarify",
+      "note": "User reports no repeated exit request; extra input turns remain unattributed. Quiet-playback control scheduled before claiming the complete single-utterance count scenario.",
+      "evidence": "/tmp/eva-e2e-current/session-fixed-retest.json"
+    },
+    {
+      "id": "V03-quiet-playback-control",
+      "generation": 12,
+      "result": "passed",
+      "user_report": "完整数到十，没有异常",
+      "plan_disposition": "noop",
+      "playback": "native_drained",
+      "input_frames": 880,
+      "above_threshold_frames": 0,
+      "echo_frames": 0,
+      "max_voiced_frames": 0,
+      "speech_interrupted": false,
+      "test_cleanup": "local cancel after playback to start independent layout case"
+    },
+    {
+      "id": "V02-retest",
+      "generation": 13,
+      "result": "passed_for_layout_and_undo",
+      "user_report": "修改、撤销、关麦都成功",
+      "verified_sequence": [
+        "grid",
+        "monocle",
+        "grid"
+      ],
+      "same_generation": true,
+      "undo_provenance": {
+        "canonical_digest_matches": true,
+        "undo_plan_hash": "463c2a4e013a05e895d282092f7f552bc415751ab9aa58044b75dd3add74aeb5",
+        "original_plan_hash": "2f632f2a9436ca76ad14ba33d6ad172a94592e4ca9f3ff6441478a20e76c4e82"
+      },
+      "stop_listening_result": "failed_plan_repair_timeout_then_error_cleanup",
+      "first_stop_rejection": "session_control_task_conflict",
+      "note": "User-observed microphone release was timeout cleanup, not successful native session-control completion."
+    },
+    {
+      "id": "multi_step_roundtrip_before_retry",
+      "generation": 14,
+      "result": "partial",
+      "task_execution": "two switch_tag operations succeeded",
+      "stop_listening": "invalid_task_intent twice then error cleanup",
+      "first_turn": "clarify"
+    },
+    {
+      "id": "multi_step_roundtrip_and_stop",
+      "generation": 15,
+      "result": "passed",
+      "user_report": "正常",
+      "task_execution": "two switch_tag operations succeeded in order",
+      "stop_listening": "native session completion after session_closing_task_metadata normalization",
+      "final_state": "idle",
+      "wake_requested": false,
+      "native_input_streams": 0,
+      "native_output_streams": 0,
+      "service_restarts": 0,
+      "current_workspace": 3,
+      "current_layout": "grid",
+      "evidence": "/tmp/eva-e2e-current/task-stop-retest-telemetry.json"
+    },
+    {
+      "id": "W01-first-attempt",
+      "wake_generation": 4,
+      "result": "failed",
+      "user_report": "未唤醒；没有手动关闭监听",
+      "native_cause": "wake_lease_expired",
+      "cause_evidence": "Native get_assistant_status text exactly matched wake-lease-expired message from src/jwm/eva.rs",
+      "activation_received": false,
+      "uploaded_ms": 2540,
+      "suppressed_ms": 45740,
+      "wake_generation_after": 5,
+      "native_input_streams_after": 0,
+      "native_output_streams_after": 0,
+      "telemetry": "/tmp/eva-e2e-current/wake-first-telemetry.json"
+    }
+  ],
+  "live_handshake": {
+    "standard": {
+      "ready": true,
+      "elapsed_ms": 1420
+    },
+    "wake": {
+      "ready": true,
+      "elapsed_ms": 1535
+    },
+    "microphone_opened": false,
+    "audio_uploaded": false,
+    "inference_requested": false
+  },
+  "automatic_baseline": {
+    "source_revision": "ddd1438668dd25967c902edd330cbbdb11ff4f62",
+    "regression": {
+      "passed": 316,
+      "failed": 0,
+      "ignored": 6,
+      "log": "/tmp/eva-coverage-regression.log",
+      "toolchain": "1.89.0",
+      "command": "cargo +1.89.0 test --locked --offline --target-dir target/eva-msrv -p jwm-eva -p jwm_eva_core -p jwm_ipc_client"
+    },
+    "installer": {
+      "result": "passed",
+      "log": "/tmp/eva-coverage-install.log"
+    },
+    "native_pulse": {
+      "passed": 2,
+      "failed": 0,
+      "log": "/tmp/eva-coverage-native-pulse.log",
+      "artifact_dir": "/tmp/jwm-eva-pulse-hgqhrsjs",
+      "physical_microphone": false,
+      "cloud": false
+    },
+    "native_pipewire": {
+      "24khz": {
+        "passed": 2,
+        "failed": 0,
+        "log": "/tmp/eva-coverage-native-pipewire.log"
+      },
+      "48khz": {
+        "passed": 2,
+        "failed": 0,
+        "log": "/tmp/eva-coverage-native-pipewire-48k.log"
+      },
+      "physical_microphone": false,
+      "cloud": false
+    },
+    "desktop_ipc": {
+      "first_report": "/tmp/eva-coverage-desktop.json",
+      "x11rb_retry_report": "/tmp/eva-coverage-desktop-x11rb-retry.json",
+      "fixed_report": "/tmp/eva-coverage-desktop-fixed.json",
+      "backends_passed": [
+        "x11rb",
+        "xcb",
+        "wayland-winit"
+      ],
+      "tests_per_backend": 7,
+      "initial_failure": "Xvfb logged Cannot write display number to fd 5; Xephyr could not open its host display. Inference: reset retried the closed readiness descriptor. Added -noreset to private test servers.",
+      "jwm_binary_sha256": "4671f9468c0cc8a10e3c97101c36eaf0eca1e12120fe269eecb274d54509d1ab",
+      "jwm_binary_rebuilt": false,
+      "eva_binary_sha256": "6cead3f9e133f2e6b276ee22c18c0a3eed78b4b6359b081965ac31c00f8de249",
+      "reset_probe": {
+        "log": "/tmp/eva-coverage-xvfb-reset.log",
+        "result": "did_not_reproduce",
+        "note": "Two xdpyinfo connections left Xvfb alive with and without -noreset; original startup failure root cause is not proven."
+      },
+      "wayland_x11_report": "/tmp/eva-coverage-desktop-wayland-x11.json",
+      "wayland_x11_result": "failed before any test step; JWM startup exited 1"
+    },
+    "jwm_server": {
+      "result": "passed",
+      "passed": 57,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/tmp/eva-coverage-jwm-server.log"
+    },
+    "jwm_ui": {
+      "result": "passed",
+      "passed": 40,
+      "failed": 0,
+      "ignored": 1,
+      "log": "/tmp/eva-coverage-jwm-ui.log",
+      "headless_gl_required": true,
+      "gallery": {
+        "passed": 1,
+        "failed": 0,
+        "cases": 24,
+        "log": "/tmp/eva-coverage-gallery.log",
+        "directory": "/tmp/eva-coverage-gallery",
+        "visual_inspection": [
+          "16-state contact sheet",
+          "small-glass-dark-confirmation.png",
+          "small-glass-clarify.png"
+        ],
+        "inspection_result": "Chinese text, microphone state, shortcuts, confirmation review prompt visible; inspected small cards within frame"
+      }
+    },
+    "changes": [
+      "eva/tests/desktop-ipc.py"
+    ],
+    "limitations": [
+      "Two real-cloud ignored tests not run",
+      "Native audio uses private synthetic devices",
+      "Desktop IPC uses existing JWM binary, not a fresh build"
+    ],
+    "modified_test_script_sha256": "ff2126391bd748a7332c8ea6cd743c2682adf22eb1a6b0e71b2a2d8c6d34ec21",
+    "jwm_test_binary_sha256": "45218c5484cc59415d55a5cf50202960317b1a47c2d5ec888fe69ff8b6a3804d",
+    "fixture_validation": {
+      "py_compile": "passed",
+      "git_diff_check": "passed"
+    }
+  },
+  "privacy": {
+    "raw_audio_persisted": false,
+    "input_transcription_enabled": false,
+    "credentials_or_window_titles_persisted": false
+  },
+  "evidence_directory": "/tmp/eva-e2e-current",
+  "diagnostics_change": {
+    "purpose": "Retain aggregate barge-in evidence during work and external cancellation",
+    "detection_threshold_changed": false,
+    "deployed": true,
+    "regression": {
+      "passed": 318,
+      "failed": 0,
+      "ignored": 6,
+      "log": "/tmp/eva-barge-diagnostics-full.log"
+    },
+    "installed_sha256": "407e8ddb9eea595e653d24c1c5c892a740f77d51a606c73bf00859f27be9dd83",
+    "configuration_preserved": true,
+    "user_output": "headphones",
+    "service_start": "2026-10-30T16:03:00+08:00"
+  },
+  "active_work": {
+    "status": "stopped_by_user",
+    "next_requested_action": "push_to_master_via_api",
+    "no_more_live_tests": true
+  },
+  "low_gain_fix": {
+    "change": "calibrated absolute threshold floor 0.004 -> 0.001",
+    "preserved": [
+      "uncalibrated threshold 0.006",
+      "three-times background percentile",
+      "six voiced frames in ten",
+      "echo rejection"
+    ],
+    "targeted_tests": {
+      "passed": 10,
+      "failed": 0,
+      "log": "/tmp/eva-low-gain-targeted.log"
+    },
+    "physical_retest": "failed; echo classification and reset now under investigation",
+    "deployed": true,
+    "regression": {
+      "passed": 322,
+      "failed": 0,
+      "ignored": 6,
+      "log": "/tmp/eva-low-gain-full.log"
+    },
+    "installed_sha256": "3ab886dd17e0c4b4d91a8f3dbcff330899b98da71f8d56aa42c91eb2512af870",
+    "native_pulse": {
+      "passed": 2,
+      "failed": 0,
+      "streams_remaining": 0,
+      "synthetic": true,
+      "low_gain_fixture_rms": 0.012,
+      "stop_ms": 4,
+      "burst_drain_ms": 4013
+    },
+    "clippy": "passed_with_existing_three_lint_allowances",
+    "source_sha256": {
+      "eva/src/audio.rs": "c83b8eab634654afe2e87b7d22074354562fc468cbe24ac4a0beba5c91f5fe73",
+      "eva/src/session.rs": "26df51299039150c7058446529dab6d1db6fb03d7949c56bb4de901f5b6ddcd4"
+    }
+  },
+  "echo_investigation": {
+    "status": "reproduced_false_echo_on_distinct_similar_pitch_signals",
+    "audit_log": "/tmp/eva-echo-audit.log",
+    "fix_under_test": true,
+    "fix": "100ms continuous PCM correlation plus current 20ms at same reference offset",
+    "targeted_tests": 13,
+    "regression": {
+      "passed": 325,
+      "failed": 0,
+      "ignored": 6,
+      "log": "/tmp/eva-echo-full.log"
+    },
+    "physical_retest": "barge-in passed; follow-up session-intent selection failed",
+    "deployed": true,
+    "benchmark_ms": {
+      "random_scan_p95": 0.827,
+      "prefix_new_tail_p95": 2.914,
+      "coarse_pass_full_reject_p95": 2.701,
+      "hard_realtime_bound_claimed": false
+    },
+    "installed_sha256": "12dd311148be0b8ba108ba61bda234fd2f89e1ce3966570f394cf9d2aa8ddcdd",
+    "native_pulse": {
+      "passed": 2,
+      "failed": 0,
+      "streams_remaining": 0,
+      "stop_ms": 3
+    },
+    "quality_checks": "fmt, diff, clippy with existing three lint allowances passed"
+  },
+  "session_control_fix": {
+    "scope": "explicit eva_only native session controls independent of desktop action catalog",
+    "bypasses_authorization": false,
+    "deployed": true,
+    "live_text_probe": {
+      "result": "passed",
+      "elapsed_ms": 8088,
+      "microphone_opened": false,
+      "desktop_execution": false,
+      "execution_ledger_unchanged": true,
+      "log": "/tmp/eva-e2e-current/live-session-control-probe.log"
+    },
+    "regression": {
+      "passed": 326,
+      "failed": 0,
+      "ignored": 7,
+      "log": "/tmp/eva-session-controls-final-tests.log"
+    },
+    "installed_sha256": "d7877f02c15c672fb9ee567f064dc264e1b99a425d88e78953419906ea567f6d",
+    "source_sha256": {
+      "eva/src/audio.rs": "fe9c2d185d5d00685c8d6e58ef89be7bd13f6620049671d6a32d134edffaa7f7",
+      "eva/src/session.rs": "ea46244884330355a454638175879f34b212ac9d673157c8a72c4d38ace8a2bb",
+      "eva/src/voice_control.rs": "eb4c86425bebd0daf4384912335a0c96afa59600a75c600ba0971af21572064f",
+      "eva/src/providers/openai_realtime.rs": "03d6c4f1e64947bb2d9083381162f1c12b0fc4676ab45e08eb2acd3fc94e8530"
+    },
+    "physical_retest": "user confirms one request stopped playback and closed; quiet-playback control pending due extra observed turns"
+  },
+  "session_task_metadata_fix": {
+    "semantics": "For fully decoded Standby/StopListening and original pure Noop, canonicalize known task_intent to pause; keep all validation and permit checks",
+    "deployed": true,
+    "negative_guards": [
+      "unknown or missing required task intent",
+      "actions or question in original plan",
+      "Continue branch unchanged",
+      "unknown execution ledger unchanged"
+    ],
+    "live_text_probe": {
+      "passed": true,
+      "scenarios": [
+        "interrupted_count",
+        "completed_layout_and_undo"
+      ],
+      "elapsed_ms": 8800,
+      "microphone_opened": false,
+      "desktop_execution": false,
+      "log": "/tmp/eva-e2e-current/live-session-task-control-probe.log"
+    },
+    "regression": {
+      "passed": 328,
+      "failed": 0,
+      "ignored": 7,
+      "log": "/tmp/eva-session-task-final-tests.log"
+    },
+    "installed_sha256": "1ab97ffc9ae8f239571fddf63cc2d270affdb47ff8b4c66f92e3c18697e00bee",
+    "physical_retest": "generation15 passed; generation14 invalid enum failure retained"
+  },
+  "remaining": [
+    "Wake standby, handoff, confirmation/cancel and hardware failure matrix",
+    "Full real-model corpus 241 cases, evaluation runner and incomplete intent grading",
+    "Physical Wayland and hardware combinations not available in current XCB/PulseAudio session"
+  ],
+  "budget_gate": {
+    "enabled": false,
+    "authorized_by_user": "不要卡预算，你帮我统计好费用就行",
+    "daily_limit_value_preserved_usd": 1.0,
+    "accounting_preserved": true,
+    "before_change": {
+      "settled_estimate_usd": 0.643655,
+      "unknown_reserved_usd": 0.3,
+      "session_increment_settled_estimate_usd": 0.209804
+    },
+    "automatic_restore_requested": false
+  },
+  "installed_sha256": "a895b25e8feff5f351b400d98b2f1809955ea3e2248bbe803ade225e77a959fc",
+  "wake_current": {
+    "state": "disabled_after_user_stopped_testing",
+    "silence_samples": [
+      {
+        "utc_ms": 1793349750819,
+        "wake_requested": true,
+        "wake": {
+          "level": 0.0006667104316875339,
+          "microphone_active": true,
+          "state": "standby",
+          "suppressed_ms": 14220,
+          "upload_gate": "closed",
+          "uploaded_ms": 0
+        },
+        "data_state": "idle"
+      },
+      {
+        "utc_ms": 1793349772908,
+        "wake_requested": true,
+        "wake": {
+          "level": 0.0004362875479273498,
+          "microphone_active": true,
+          "state": "standby",
+          "suppressed_ms": 33860,
+          "upload_gate": "closed",
+          "uploaded_ms": 2540
+        },
+        "data_state": "idle"
+      }
+    ],
+    "note": "First sampled 14.22 seconds had zero uploaded PCM; later 2.54 seconds uploaded without observed activation. Do not claim whole standby had zero upload.",
+    "latest_revision_observation": {
+      "wake_generation": 3,
+      "uploaded_ms": 2080,
+      "speech_started_observed": false,
+      "commit_observed": false,
+      "detection_request_observed": false,
+      "activation_observed": false,
+      "lease_failure_observed": false,
+      "heartbeat_result": "lease_confirmed",
+      "user_result": "not_confirmed_before_testing_stopped",
+      "result": "inconclusive_not_passed"
+    }
+  },
+  "wake_lease_fix": {
+    "status": "first_fix_failed_physical_retest_async_heartbeat_revision_in_progress",
+    "observed_failure": "native wake lease expired",
+    "snapshot_max_age_ms": 750,
+    "cache_grace_ms": 2500,
+    "heartbeat_deadline_ms": 500,
+    "safety": [
+      "single in-flight status read",
+      "old epochs discarded after cancellation or native action",
+      "cache can renew only existing listener",
+      "late heartbeat retained until settled and never used as new authority",
+      "fresh snapshot or validated wake activation reply required to start session"
+    ],
+    "native_lease_changed": false,
+    "targeted_tests": 18,
+    "private_daemon_ipc_tests": 1,
+    "physical_retest": "long standby survived stale read, but 500ms heartbeat timeout still stopped listener; further heartbeat fix required",
+    "regression": {
+      "passed": 337,
+      "failed": 0,
+      "ignored": 7,
+      "log": "/tmp/eva-wake-poll-final-tests.log"
+    },
+    "idle_status_latency": {
+      "samples": 50,
+      "errors": 0,
+      "p50_ms": 0.5921129995840602,
+      "p95_ms": 1.3017040000704583,
+      "max_ms": 3.077503999520559,
+      "scope": "read-only native assistant status, idle baseline; not voice latency"
+    },
+    "installed_sha256": "5176dda7a65575fe4910d9d76a2f184577a5c79b2973fa2bfd5a155f82ad4b7b",
+    "physical_standby_retest": {
+      "result": "passed_for_sustained_standby",
+      "wake_generation": 6,
+      "duration_at_observation_ms": 68180,
+      "suppressed_ms": 64820,
+      "uploaded_ms": 3360,
+      "unexpected_activation": false,
+      "native_snapshot_expired_observed": true,
+      "remained_enabled_after_expired_read": true,
+      "no_auto_restart": true
+    }
+  },
+  "jwm_runtime_alignment": {
+    "old_running_sha256": "05e2521b2829b9b0c43989fb87224e69947196506f1673bb139c2d8ed3cef286",
+    "new_running_sha256": "1821061fe2d33ca5386014781d0366e05343debfcfa9a5a4d957e3ab6badad79",
+    "matches_installed": true,
+    "restart": "native IPC restart",
+    "pid_preserved": true,
+    "ordinary_app_processes_and_placement_preserved": true,
+    "internal_client_ids_renumbered": true,
+    "tags_and_monitor_views_preserved": true,
+    "native_xids_compared": false,
+    "evidence": "/tmp/eva-e2e-current/jwm-reexec-verification.json"
+  },
+  "wake_async_heartbeat_revision": {
+    "status": "installed_physical_wake_success_unconfirmed_testing_stopped",
+    "heartbeat_period_ms": 500,
+    "native_lease_ms": 3000,
+    "source_of_lease_deadline": "request_send_monotonic_time_plus_native_lease",
+    "startup_requires": [
+      "fresh native query issued within 750ms",
+      "matching full heartbeat ACK with active=false/wake_requested=true/standby_allowed=true",
+      "same source/epoch/owner and unexpired proof"
+    ],
+    "inflight_heartbeat_limit": 1,
+    "no_500ms_timeout_stop": true,
+    "handoff": "activation bounded by existing wake proof deadline; timeout discards old capture; late native reply grants no old-audio handoff",
+    "local_cancel": "signals both capture owners before awaiting IPC",
+    "new_wake_diagnostics": [
+      "speech_started",
+      "speech_stopped",
+      "input_committed",
+      "reserve_started",
+      "reserve_completed",
+      "detection_requested",
+      "detection_created",
+      "detection_completed"
+    ],
+    "targeted_daemon": {
+      "passed": 23,
+      "failed": 0
+    },
+    "peer_review": "read-only independent review no blocking findings",
+    "physical_retest": "heartbeat_stable_but_upload_followed_by_no_vad_commit_or_detection_not_passed",
+    "regression": {
+      "passed": 349,
+      "failed": 0,
+      "ignored": 8,
+      "log": "/tmp/eva-wake-async-final-source-tests.log"
+    }
+  },
+  "real_model_corpus_entry": {
+    "status": "implemented_offline_validated_real_model_not_run",
+    "test": "session::corpus_runner::live_model_acceptance_corpus",
+    "corpus_cases": 241,
+    "static_fixture_cases": 225,
+    "blocked_fixture_cases": 16,
+    "execution_enabled": false,
+    "microphone_enabled": false,
+    "real_desktop_access": false,
+    "grading_scope": "plan_structure_only_with_unevaluated_runtime_invariants",
+    "manual_review_required": [
+      "clarification wording",
+      "intent-only expected actions"
+    ],
+    "physical_voice_acceptance_rate": null
+  },
+  "cleanup": {
+    "requested_by_user": true,
+    "state": "idle",
+    "microphone_active": false,
+    "wake_microphone_active": false,
+    "wake_requested": false,
+    "eva_native_input_streams": 0,
+    "eva_native_output_streams": 0,
+    "observers_stopped": true
+  }
+}

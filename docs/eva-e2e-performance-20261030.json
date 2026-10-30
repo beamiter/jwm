@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "scope": "mixed_builds_physical_voice_diagnostic_session_journal_only",
+  "since": "2026-10-30 07:55:40 UTC",
+  "snapshot_utc": "2026-10-30 09:13 UTC",
+  "limitations": [
+    "Includes failed and successful physical runs across successive diagnostic binaries; not final acceptance measurements.",
+    "Missing or unpaired timing events are not samples.",
+    "Costs are tracked separately including standalone live probes; journal-only cost is deliberately omitted.",
+    "No directly measured acoustic cancellation-to-silence or device-release latency."
+  ],
+  "records": 961,
+  "sessions": {
+    "activation_to_ready_ms": {
+      "cold": {
+        "count": 0,
+        "max": 0,
+        "p50": 0,
+        "p95": 0
+      },
+      "warm": {
+        "count": 13,
+        "max": 500,
+        "p50": 416,
+        "p95": 500
+      }
+    },
+    "count": 13,
+    "failed": {
+      "plan_timeout": 3,
+      "service_unavailable": 1
+    }
+  },
+  "turns": {
+    "count": 25,
+    "discovery_rounds": 4,
+    "mean_responses": 1.12,
+    "normalized": 1,
+    "rejections": 3,
+    "repair_rounds": 1,
+    "responses_per_turn": {
+      "0": 2,
+      "1": 18,
+      "2": 5,
+      "3+": 0
+    },
+    "results": {
+      "clarify": 3,
+      "noop": 10,
+      "succeeded": 4
+    }
+  },
+  "latency_ms": {
+    "reply_playback": {
+      "count": 5,
+      "max": 16391,
+      "p50": 14840,
+      "p95": 16391
+    },
+    "speech_end_to_feedback_completed": {
+      "count": 7,
+      "max": 22805,
+      "p50": 17596,
+      "p95": 22805
+    },
+    "speech_end_to_first_audio": {
+      "count": 17,
+      "max": 11259,
+      "p50": 4556,
+      "p95": 11259
+    },
+    "speech_end_to_plan": {
+      "count": 17,
+      "max": 9986,
+      "p50": 3066,
+      "p95": 9986
+    },
+    "speech_end_to_verified": {
+      "count": 17,
+      "max": 9987,
+      "p50": 3313,
+      "p95": 9987
+    }
+  },
+  "standby_gate": {
+    "openings": 4,
+    "summaries": 5,
+    "suppressed_ms": 139200,
+    "uploaded_ms": 10460
+  }
+}

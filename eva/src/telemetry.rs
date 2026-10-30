@@ -2,6 +2,7 @@
 pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
     const FIELDS: &[&str] = &[
         "generation",
+        "wake_generation",
         "session_epoch",
         "turn_id",
         "response_id",
@@ -34,7 +35,8 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
     if let Some(fields) = fields.as_object() {
         for (name, value) in fields {
             let signal_scalar = match name.as_str() {
-                "input_frames"
+                "wake_generation"
+                | "input_frames"
                 | "noise_frames"
                 | "above_threshold_frames"
                 | "echo_frames"
@@ -92,6 +94,20 @@ mod tests {
         assert_eq!(
             filtered,
             serde_json::json!({"input_frames":100,"noise_frames":50,"threshold_level":0.006})
+        );
+    }
+
+    #[test]
+    fn wake_generation_diagnostics_reject_text_and_negative_values() {
+        for value in [serde_json::json!("private"), serde_json::json!(-1)] {
+            assert_eq!(
+                super::fields(&serde_json::json!({"wake_generation":value})),
+                serde_json::json!({})
+            );
+        }
+        assert_eq!(
+            super::fields(&serde_json::json!({"wake_generation":7})),
+            serde_json::json!({"wake_generation":7})
         );
     }
 }

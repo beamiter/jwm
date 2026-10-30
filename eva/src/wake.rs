@@ -369,6 +369,7 @@ async fn listen(
 }
 
 struct Owned {
+    turn: u64,
     item: String,
     start_ms: u64,
     end_ms: u64,
@@ -379,6 +380,14 @@ enum DetectionAudio {
         tail: VecDeque<Frame>,
     },
     Rotate,
+}
+
+fn diagnostic_labels(source: &Source, turn: u64, result: &'static str) -> Value {
+    json!({"phase":"wake","generation":source.assistant_generation,
+        "wake_generation":source.wake_generation,"turn_id":turn,"result":result})
+}
+fn diagnostic(stage: &'static str, source: &Source, turn: u64, result: &'static str) {
+    crate::telemetry::event(stage, &diagnostic_labels(source, turn, result));
 }
 
 async fn detect_audio(
@@ -412,8 +421,11 @@ async fn detect_audio(
             );
             // create_response=false means uploading alone cannot start an
             // inference. Admission precedes the explicit detector response.
+            diagnostic("wake_reserve_started", source, item.turn, "reserving");
             crate::store::reserve(store, &request, "wake", c).await?;
+            diagnostic("wake_reserve_completed", source, item.turn, "reserved");
             ws.send(detection_request(c, &item.item, &request)).await?;
+            diagnostic("wake_detection_requested", source, item.turn, "sent");
             active = Some(Active {
                 request,
                 response: None,
@@ -453,33 +465,35 @@ async fn detect_audio(
                     let id=event["response"]["id"].as_str().filter(|id|!id.is_empty()&&id.len()<=128)
                         .ok_or_else(||io::Error::other("response_id_missing"))?.to_owned();
                     if a.response.as_ref().is_some_and(|old|*old!=id) { return Err(io::Error::other("multiple_responses_for_request")); }
-                    if a.response.is_none() { crate::store::associate(store,&a.request,&id).await?;a.response=Some(id); }
+                    if a.response.is_none() { crate::store::associate(store,&a.request,&id).await?;a.response=Some(id);diagnostic("wake_detection_created",source,a.item.turn,"associated"); }
                 }
                 crate::store::receipt(store,&event).await?;
                 if event["type"]=="input_audio_buffer.speech_started" {
                     let item=event["item_id"].as_str().ok_or_else(||io::Error::other("invalid_input_item"))?;
                     let at=event["audio_start_ms"].as_u64().ok_or_else(||io::Error::other("invalid_input_onset"))?;
-                    if input.start_at(item,turn,at)?.is_some() { onset=Some((item.to_owned(),at));stopped=None; }
+                    if input.start_at(item,turn,at)?.is_some() { diagnostic("wake_speech_started",source,turn,"owned");onset=Some((item.to_owned(),at));stopped=None; } else { diagnostic("wake_speech_started",source,turn,"unowned"); }
                 }
                 if event["type"]=="input_audio_buffer.speech_stopped" {
                     let item=event["item_id"].as_str().ok_or_else(||io::Error::other("invalid_input_item"))?;
                     let end=event["audio_end_ms"].as_u64().ok_or_else(||io::Error::other("invalid_input_onset"))?;
-                    if onset.as_ref().is_some_and(|(owned,_)|owned==item) { stopped=Some((item.to_owned(),end)); }
+                    if onset.as_ref().is_some_and(|(owned,_)|owned==item) { diagnostic("wake_speech_stopped",source,turn,"owned");stopped=Some((item.to_owned(),end)); } else { diagnostic("wake_speech_stopped",source,turn,"unowned"); }
                 }
                 if event["type"]=="input_audio_buffer.committed" {
                     let item=event["item_id"].as_str().ok_or_else(||io::Error::other("invalid_input_item"))?;
                     if input.commit(item,turn)? {
-                        turn+=1;
+                        diagnostic("wake_input_committed",source,turn,"owned");
+                        let owned_turn=turn;turn+=1;
                         if pending.len()>=4 { return Err(io::Error::other("wake_input_queue_full")); }
                         let (owned,start_ms)=onset.take().ok_or_else(||io::Error::other("input_out_of_order"))?;
                         let (ended,end_ms)=stopped.take().ok_or_else(||io::Error::other("input_out_of_order"))?;
                         if owned!=item || ended!=item { return Err(io::Error::other("input_out_of_order")); }
-                        pending.push_back(Owned{item:item.to_owned(),start_ms,end_ms});
-                    }
+                        pending.push_back(Owned{turn:owned_turn,item:item.to_owned(),start_ms,end_ms});
+                    } else { diagnostic("wake_input_committed",source,turn,"unowned"); }
                 }
                 if event["type"]=="response.done" && let Some(a)=active.as_ref()
                     && event["response"]["id"].as_str()==a.response.as_deref() {
                     let detected=detection(&event,a.response.as_deref().ok_or_else(||io::Error::other("response_id_missing"))?)?;
+                    diagnostic("wake_detection_completed",source,a.item.turn,if detected {"detected"}else{"not_detected"});
                     if detected {
                         let frames=history.replay(a.item.start_ms,a.item.end_ms).unwrap_or_default();
                         let tail=history.tail_after(a.item.end_ms);
@@ -498,6 +512,20 @@ async fn detect_audio(
 mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
+    #[test]
+    fn detector_diagnostics_contain_only_fixed_stage_and_numeric_ownership() {
+        let source = Source {
+            wm_instance_id: "private-token".into(),
+            wake_generation: 7,
+            assistant_generation: 9,
+        };
+        let labels = diagnostic_labels(&source, 3, "owned");
+        assert_eq!(
+            crate::telemetry::fields(&labels),
+            json!({"phase":"wake","generation":9,"wake_generation":7,"turn_id":3,"result":"owned"})
+        );
+        assert!(!labels.to_string().contains("private"));
+    }
     #[tokio::test]
     async fn loopback_detector_uses_only_owned_audio_and_settles_mini_usage() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

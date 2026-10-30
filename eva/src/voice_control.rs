@@ -19,6 +19,22 @@ pub enum SessionIntent {
     StopListening,
 }
 
+/// Model-visible session capabilities, separate from the desktop action catalog.
+/// This describes supported behavior; local permit and generation checks still
+/// decide whether the eventual request may finish the active session.
+pub fn capabilities() -> Value {
+    json!({
+        "scope":"eva_only",
+        "standby":{"session_intent":"standby","ends_current_conversation":true,"preserves_wake_setting":true},
+        "stop_listening":{"session_intent":"stop_listening","stops_eva_capture":true,"stops_eva_playback":true,"disables_eva_wake":true},
+        "submission":{"tool":"eva_submit_plan","disposition":"noop","actions":[],"question":null},
+        "desktop_action_required":false,
+        "changes_system_microphone_mute":false,
+        "controls_other_apps":false,
+        "exits_jwm":false
+    })
+}
+
 pub fn add_schema(tool: &mut Value) {
     if tool["name"] != "eva_submit_plan" {
         return;
@@ -34,7 +50,7 @@ pub fn add_schema(tool: &mut Value) {
     };
     properties.insert("session_intent".into(), json!({
         "type":"string","enum":["continue","standby","stop_listening"],
-        "description":"continue继续对话；standby结束当前对话回到唤醒待机；stop_listening结束对话并关闭全时监听。结束只可提交noop，不包含桌面动作。"
+        "description":"EVA自身的本机会话控制，独立于loaded_actions桌面动作目录，当前会话支持关停自己的采集和播放。continue继续对话；standby结束当前对话并保留唤醒开关；stop_listening停止EVA采集/播放并关闭EVA唤醒监听。未指定系统或其他应用的‘关闭麦克风/停止监听’用stop_listening，不因桌面目录缺少关麦动作而声称无权限。结束只可提交noop、actions=[]、question=null；不改变系统麦克风静音，不退出JWM。否定关麦、仅取消任务仍用continue。"
     }));
     if let Some(required) = parameters.get_mut("required").and_then(Value::as_array_mut)
         && !required.iter().any(|field| field == "session_intent")
