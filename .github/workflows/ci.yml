@@ -39,7 +39,7 @@ jobs:
       - name: Install shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jq shellcheck libglib2.0-bin xdg-utils
+          sudo apt-get install -y --no-install-recommends jq shellcheck libglib2.0-bin xdg-utils pkg-config
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -58,6 +58,7 @@ jobs:
       - name: Exercise source installer build recovery
         run: |
           bash scripts/test-install-jwm-build.sh
+          bash scripts/test-tauri-webkit-version.sh
           python3 scripts/test-media-defaults.py
           bash scripts/test-wallpaper-install.sh
           bash scripts/test-install-portal.sh

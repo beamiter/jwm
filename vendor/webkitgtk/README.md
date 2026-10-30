@@ -19,6 +19,15 @@ Extract both packages into the same prefix with `dpkg-deb --extract` and create
 `apt-get download` verifies the packages against the configured APT repository
 metadata. Do not mix packages built for different Ubuntu releases or versions.
 
+All six Linux Tauri bar builds require a `webkit2gtk-4.1` development SDK at
+version **2.52.6 or newer**. Their `build.rs` files and the source installer use
+`scripts/check-webkitgtk-version.sh`, which checks the version selected by
+`pkg-config` and reports both the minimum and detected versions on failure.
+For a private SDK, install the matching WebKitGTK and JavaScriptCore development
+files as well as the runtime, and point `PKG_CONFIG_PATH` at its `.pc` files.
+The older 2.50.4 backport below remains a runtime option for existing binaries;
+it does not satisfy this minimum for new bar builds.
+
 The backport retains transparency and changes bitmap copy semantics only. Build
 it into an application-specific prefix; do not overwrite system WebKit libraries.
 Use the matching JavaScriptCore library and WebKit helper executables from the

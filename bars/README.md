@@ -9,7 +9,8 @@ configuration, interaction and geometry contract is in
 ## Official bar
 
 **`tauri_leptos_bar`** is the JWM default. It preserves a native Tauri/WebKit
-window with a Leptos frontend. Build prerequisites include WebKitGTK 4.1,
+window with a Leptos frontend. Linux builds require WebKitGTK **2.52.6 or newer**
+(the `webkit2gtk-4.1` API),
 Trunk, the `wasm32-unknown-unknown` Rust target and Tauri CLI 2:
 
 ```bash
@@ -19,6 +20,14 @@ cargo install trunk --version 0.22.1 --locked
 cargo install tauri-cli --version 2.12.4 --locked
 scripts/install-jwm.sh -b tauri_leptos_bar
 ```
+
+All six `tauri_*_bar` hosts enforce this minimum in `build.rs`, including direct
+Cargo and Tauri CLI builds. The installer and `build-leptos-bar.sh` check it
+before building the frontend. The check uses the SDK selected by `pkg-config`;
+set `PKG_CONFIG_PATH` for a private SDK. A private runtime alone does not supply
+development metadata or bypass the minimum. Older or missing SDKs stop the
+build with the required and detected versions. See the
+[WebKitGTK fix and SDK notes](../vendor/webkitgtk/README.md).
 
 A plain reinstall preserves the existing `status_bar.name`; explicit `--bar`
 updates both JWM configuration files. `JWM_BAR_NAME` selects the installer

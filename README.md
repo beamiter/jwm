@@ -165,6 +165,9 @@ regression test](vendor/webkitgtk/README.md). This is a WebKit backing-store bug
 changing CSS opacity or clearing the GTK window does not fix its source pixels.
 WebKitGTK 2.52.6 includes the fix. The bar installer preserves an installed
 private runtime through its launcher when rebuilding a Tauri frontend.
+All six Linux `tauri_*_bar` builds require the `pkg-config` WebKitGTK development
+SDK to be version 2.52.6 or newer; older or missing SDKs fail before the Tauri
+build proceeds.
 
 All 28 status-bar frontends can keep their own top bar while JWM supervises one
 `jwm-shell` process for the shared left, right and bottom panels. These panels

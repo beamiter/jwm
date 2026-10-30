@@ -467,16 +467,16 @@ jobs:
         with:
           components: rustfmt
 
-      # Five generated Tauri templates have pre-existing two-space formatting
-      # in build.rs/lib.rs. The repository-owned xbar bridge entry points are
-      # all rustfmt-clean, so gate that precise surface until the baseline is
-      # normalized separately.
+      # Generated lib.rs templates retain their baseline formatting; check the
+      # shared build requirements and repository-owned bridge entry points.
       - name: Check host bridge formatting
         shell: bash
         run: |
           set -euo pipefail
+          rustfmt --edition 2024 --check bars/tauri_build.rs
           hosts=(leptos react solid svelte vue yew)
           for host in "${hosts[@]}"; do
+            rustfmt --edition 2024 --check "bars/tauri_${host}_bar/src-tauri/build.rs"
             rustfmt --edition 2024 --check "bars/tauri_${host}_bar/src-tauri/src/main.rs"
           done
 

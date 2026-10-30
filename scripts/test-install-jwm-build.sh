@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jwm-build-test.XXXXXXXX")
+TEST_HOST_PATH=$PATH
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/project space"
 mkdir -p "$REPO/scripts" "$REPO/bars/tao_glow_bar" "$REPO/bars/tao_pixels_bar" "$REPO/bars/tauri_leptos_bar" "$REPO/crates/jwm_shell" "$REPO/bridge/dist" "$REPO/eva/dist" "$REPO/assets/wallpapers" "$REPO/packaging" "$TEST_ROOT/bin"
@@ -404,9 +405,10 @@ check_tauri_color 1 true tauri-failure
 # A bar upgrade must keep selecting a previously installed private runtime.
 check_tauri_private_runtime() (
     local CASE_DIR="$TEST_ROOT/tauri private runtime" SCENARIO=success
+    local PATH="$TEST_ROOT/bin:$PATH"
     export CASE_DIR SCENARIO
     export HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config"
-    export PATH="$TEST_ROOT/bin:$PATH"
+    export PATH
     unset NO_COLOR WEBKIT_INSTALL_PREFIX
     prefix="$HOME/.local/opt/jwm-webkitgtk"
     mkdir -p "$prefix/lib" "$CARGO_HOME/bin" "$XDG_CONFIG_HOME/jwm"
@@ -460,7 +462,7 @@ check_tauri_old_webkit() (
     mkdir -p "$REPO/bars/$bar/src-tauri" "$CASE_DIR/home/.cargo" "$CASE_DIR/config/jwm"
     touch "$REPO/bars/$bar/src-tauri/Cargo.toml" "$REPO/bars/$bar/src-tauri/tauri.conf.json"
     HOME="$CASE_DIR/home" CARGO_HOME="$CASE_DIR/home/.cargo" XDG_CONFIG_HOME="$CASE_DIR/config" \
-        PATH="$TEST_ROOT/bin:$PATH" bash "$REPO/scripts/install-jwm.sh" --bar "$bar" --skip-jwm --skip-eva \
+        PATH="$TEST_ROOT/bin:$TEST_HOST_PATH" bash "$REPO/scripts/install-jwm.sh" --bar "$bar" --skip-jwm --skip-eva \
         > "$CASE_DIR/output.log" 2>&1 || status=$?
     [[ $status == 1 ]] || fail "$bar accepted old WebKitGTK"
     grep -Fq 'WebKitGTK >= 2.52.6' "$CASE_DIR/output.log" || fail "$bar omitted required WebKitGTK version"
