@@ -289,7 +289,7 @@ impl InputNoise {
         self.next = (self.next + 1) % self.levels.len();
         self.count = (self.count + 1).min(self.levels.len());
     }
-    fn threshold(&self) -> f32 {
+    pub fn threshold(&self) -> f32 {
         if self.count < 10 {
             return 0.006;
         }

@@ -1,7 +1,7 @@
 //! A separate, non-authoritative mini session. It can only report a wake word;
 //! it never receives desktop context, plans, application tools or a permit.
 use crate::{
-    audio::{Capture, Frame},
+    audio::{Capture, Frame, InputNoise},
     config::Config,
     context::ContextMonitor,
     handoff::{self, Handoff, History, Seed, Source},
@@ -77,6 +77,152 @@ fn publish(
         source: source.clone(),
         state: json!({"state":state,"text":text,"microphone_active":microphone,"level":level}),
     });
+}
+/// Standby status carries the real microphone level plus the local upload
+/// gate position and its millisecond counters. These are counters, not audio.
+fn publish_standby(
+    tx: &mpsc::Sender<Update>,
+    source: &Source,
+    c: &Config,
+    gate: &StandbyGate,
+    level: f32,
+) {
+    let phrase = &c.wake_word.phrase;
+    let text = if !gate.enabled {
+        format!("正在监听「{phrase}」")
+    } else if gate.open {
+        format!("正在监听「{phrase}」，正在上传语音")
+    } else {
+        format!("正在监听「{phrase}」，静音不上传")
+    };
+    let mut state = json!({"state":"standby","text":text,"microphone_active":true,"level":level});
+    if gate.enabled {
+        state["upload_gate"] = json!(if gate.open { "open" } else { "closed" });
+        state["uploaded_ms"] = json!(gate.uploaded_frames.saturating_mul(FRAME_MS));
+        state["suppressed_ms"] = json!(gate.suppressed_frames().saturating_mul(FRAME_MS));
+    }
+    let _ = tx.try_send(Update {
+        source: source.clone(),
+        state,
+    });
+}
+
+/// Each native frame is 20 ms of 24 kHz mono PCM.
+const FRAME_MS: u64 = 20;
+
+/// Local upload gate for cloud standby. Silence and background noise never
+/// leave this machine; sustained speech-like audio is uploaded together with a
+/// short pre-roll so the server VAD still sees the phrase onset. The server's
+/// own speech item remains the turn boundary: uploading continues while that
+/// item is open, so the gate can never strand a server-side utterance. Wake
+/// authority is unchanged; only the mini detector decides, on uploaded audio.
+struct StandbyGate {
+    enabled: bool,
+    noise: InputNoise,
+    speech_window: u16,
+    preroll: VecDeque<Frame>,
+    preroll_samples: u64,
+    preroll_limit: u64,
+    open: bool,
+    quiet_ms: u64,
+    hangover_ms: u64,
+    total_frames: u64,
+    uploaded_frames: u64,
+    openings: u64,
+}
+impl StandbyGate {
+    fn new(c: &Config) -> Self {
+        Self {
+            enabled: c.wake_word.local_speech_gate,
+            noise: InputNoise::default(),
+            speech_window: 0,
+            preroll: VecDeque::new(),
+            preroll_samples: 0,
+            // Server prefix padding plus local detection latency and margin,
+            // so the server's padded item start still lies inside uploaded,
+            // timestamp-contiguous audio.
+            preroll_limit: (c.turn_detection.prefix_padding_ms + 500) * 24,
+            open: false,
+            quiet_ms: 0,
+            // Longer than the server silence window: the server closes its
+            // item on uploaded silence before local uploading stops.
+            hangover_ms: c.turn_detection.silence_duration_ms + 400,
+            total_frames: 0,
+            uploaded_frames: 0,
+            openings: 0,
+        }
+    }
+    fn suppressed_frames(&self) -> u64 {
+        self.total_frames.saturating_sub(self.uploaded_frames)
+    }
+    /// Returns the frames to upload now, in capture order. A closed gate
+    /// retains a bounded pre-roll in memory and reports nothing to upload.
+    fn admit(&mut self, frame: Frame, server_item_open: bool) -> Vec<Frame> {
+        self.total_frames = self.total_frames.saturating_add(1);
+        if !self.enabled {
+            self.uploaded_frames = self.uploaded_frames.saturating_add(1);
+            return vec![frame];
+        }
+        let level = frame.level;
+        let voiced = level.is_finite() && level > self.noise.threshold();
+        if self.open {
+            self.quiet_ms = if voiced {
+                0
+            } else {
+                self.quiet_ms.saturating_add(FRAME_MS)
+            };
+            self.uploaded_frames = self.uploaded_frames.saturating_add(1);
+            if !server_item_open && self.quiet_ms >= self.hangover_ms {
+                self.open = false;
+                self.speech_window = 0;
+                self.quiet_ms = 0;
+            }
+            return vec![frame];
+        }
+        // Calibrate the background only while closed: a low percentile of
+        // recent levels, so speech itself cannot raise the gate against it.
+        self.noise.observe(level);
+        // Six voiced frames within 200 ms, as for local interruption.
+        self.speech_window = ((self.speech_window << 1) | u16::from(voiced)) & 0x03ff;
+        if self.speech_window.count_ones() >= 6 || server_item_open {
+            self.open = true;
+            self.openings = self.openings.saturating_add(1);
+            self.quiet_ms = 0;
+            let mut frames: Vec<Frame> = self.preroll.drain(..).collect();
+            self.preroll_samples = 0;
+            frames.push(frame);
+            self.uploaded_frames = self.uploaded_frames.saturating_add(frames.len() as u64);
+            return frames;
+        }
+        self.preroll_samples = self
+            .preroll_samples
+            .saturating_add((frame.pcm.len() / 2) as u64);
+        self.preroll.push_back(frame);
+        while self.preroll_samples > self.preroll_limit {
+            let Some(mut old) = self.preroll.pop_front() else {
+                break;
+            };
+            self.preroll_samples = self
+                .preroll_samples
+                .saturating_sub((old.pcm.len() / 2) as u64);
+            handoff::wipe_frames(std::slice::from_mut(&mut old));
+        }
+        vec![]
+    }
+}
+impl Drop for StandbyGate {
+    fn drop(&mut self) {
+        for frame in self.preroll.iter_mut() {
+            handoff::wipe_frames(std::slice::from_mut(frame));
+        }
+        if self.enabled && self.total_frames > 0 {
+            crate::telemetry::event(
+                "standby_gate_summary",
+                &json!({"phase":"wake","uploaded_frames":self.uploaded_frames,
+                    "suppressed_frames":self.suppressed_frames(),"gate_openings":self.openings}),
+            );
+        }
+    }
 }
 
 /// The mini socket is dropped before returning; the single native capture
@@ -245,6 +391,7 @@ async fn detect_audio(
     capture: Option<&Capture>,
 ) -> io::Result<DetectionAudio> {
     let mut input = InputGate::default();
+    let mut gate = StandbyGate::new(c);
     let mut history = History::new(handoff::MAX_REPLAY_MS + c.openai.plan_deadline_ms + 2000);
     let mut onset: Option<(String, u64)> = None;
     let mut stopped: Option<(String, u64)> = None;
@@ -283,14 +430,19 @@ async fn detect_audio(
             frame=audio_rx.recv()=>{
                 let frame=frame.ok_or_else(||io::Error::other("audio_unavailable"))??;
                 if let Some(capture)=capture { capture.check()?; }
-                // Wake detection needs only a short phrase. A stuck VAD or a
-                // continuously speaking room must not create unbounded input.
-                input.ensure_utterance_limit(frame.pcm.len()/2,15_000)?;
-                ws.append(&frame.pcm).await?;
-                input.uploaded(frame.pcm.len()/2,frame.captured,frame.timestamp_verified)?;
-                let level=frame.level;history.push(frame)?;
+                let level=frame.level;
+                // The server item is the boundary authority: while it reports
+                // an open speech item, uploading continues so it can close it.
+                for frame in gate.admit(frame,onset.is_some()) {
+                    // Wake detection needs only a short phrase. A stuck VAD or a
+                    // continuously speaking room must not create unbounded input.
+                    input.ensure_utterance_limit(frame.pcm.len()/2,15_000)?;
+                    ws.append(&frame.pcm).await?;
+                    input.uploaded(frame.pcm.len()/2,frame.captured,frame.timestamp_verified)?;
+                    history.push(frame)?;
+                }
                 if last_update.elapsed()>=Duration::from_millis(200) {
-                    publish(tx,source,"standby",&format!("正在监听「{}」",c.wake_word.phrase),true,level);
+                    publish_standby(tx,source,c,&gate,level);
                     last_update=Instant::now();
                 }
             },
@@ -417,7 +569,10 @@ mod tests {
             crate::store::wall_ms()
         ));
         let store = Arc::new(Mutex::new(Store::open_at(dir.clone()).unwrap()));
-        let c = Config::default().wake_config();
+        let mut c = Config::default().wake_config();
+        // This test covers item ownership and billing with continuous upload;
+        // the local gate has its own tests below.
+        c.wake_word.local_speech_gate = false;
         let (updates, _) = mpsc::channel(16);
         let (audio_tx, mut audio_rx) = mpsc::channel(16);
         for _ in 0..1 {
@@ -460,6 +615,275 @@ mod tests {
             assert!(record.settled_microusd.is_some());
             assert!(!record.unknown);
         }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    fn gate_frame(level: f32, fill: u8, at: Instant) -> Frame {
+        Frame {
+            captured: at,
+            timestamp_verified: true,
+            pcm: vec![fill; 960],
+            level,
+        }
+    }
+    #[test]
+    fn standby_gate_keeps_silence_local_and_uploads_preroll_before_sustained_speech() {
+        let c = Config::default().wake_config();
+        let mut gate = StandbyGate::new(&c);
+        assert!(gate.enabled);
+        // Default server padding 300 ms + 500 ms margin = 40 frames of pre-roll;
+        // hangover 600 ms + 400 ms = 50 quiet frames.
+        let start = Instant::now();
+        let at = |index: u64| start + Duration::from_millis(index * FRAME_MS);
+        let mut index = 0;
+        let mut uploaded = Vec::new();
+        for _ in 0..100 {
+            uploaded.extend(gate.admit(gate_frame(0.002, 1, at(index)), false));
+            index += 1;
+        }
+        assert!(uploaded.is_empty());
+        assert!(!gate.open);
+        assert_eq!(gate.preroll.len(), 40);
+        assert_eq!(gate.suppressed_frames(), 100);
+        // Five voiced frames are not yet sustained speech.
+        for _ in 0..5 {
+            uploaded.extend(gate.admit(gate_frame(0.2, 2, at(index)), false));
+            index += 1;
+        }
+        assert!(uploaded.is_empty());
+        // The sixth opens the gate: the pre-roll (35 quiet + 5 voiced frames)
+        // precedes the current frame, all in capture order.
+        uploaded.extend(gate.admit(gate_frame(0.2, 2, at(index)), false));
+        index += 1;
+        assert!(gate.open);
+        assert_eq!(gate.openings, 1);
+        assert_eq!(uploaded.len(), 41);
+        assert!(uploaded[..35].iter().all(|frame| frame.pcm[0] == 1));
+        assert!(uploaded[35..].iter().all(|frame| frame.pcm[0] == 2));
+        for pair in uploaded.windows(2) {
+            assert_eq!(
+                pair[1].captured - pair[0].captured,
+                Duration::from_millis(20)
+            );
+        }
+        assert_eq!(gate.suppressed_frames(), 100 + 5 - 40);
+        // Quiet frames keep uploading through the hangover, then stop.
+        for _ in 0..49 {
+            assert_eq!(gate.admit(gate_frame(0.002, 1, at(index)), false).len(), 1);
+            index += 1;
+        }
+        assert!(gate.open);
+        assert_eq!(gate.admit(gate_frame(0.002, 1, at(index)), false).len(), 1);
+        index += 1;
+        assert!(!gate.open);
+        assert!(
+            gate.admit(gate_frame(0.002, 1, at(index)), false)
+                .is_empty()
+        );
+        index += 1;
+        // Speech within the hangover resets the quiet counter.
+        for _ in 0..6 {
+            gate.admit(gate_frame(0.2, 2, at(index)), false);
+            index += 1;
+        }
+        assert!(gate.open);
+        for _ in 0..40 {
+            gate.admit(gate_frame(0.002, 1, at(index)), false);
+            index += 1;
+        }
+        gate.admit(gate_frame(0.2, 2, at(index)), false);
+        index += 1;
+        for _ in 0..49 {
+            gate.admit(gate_frame(0.002, 1, at(index)), false);
+            index += 1;
+        }
+        assert!(gate.open);
+        gate.admit(gate_frame(0.002, 1, at(index)), false);
+        index += 1;
+        assert!(!gate.open);
+        // An open server item keeps uploading regardless of local quiet, and
+        // reopens a closed gate so the server can finish its own item.
+        let reopened = gate.admit(gate_frame(0.002, 1, at(index)), true);
+        index += 1;
+        assert_eq!(reopened.len(), 1);
+        assert!(gate.open);
+        for _ in 0..200 {
+            assert_eq!(gate.admit(gate_frame(0.002, 1, at(index)), true).len(), 1);
+            index += 1;
+        }
+        assert!(gate.open);
+        assert_eq!(gate.openings, 3);
+        assert_eq!(
+            gate.total_frames,
+            gate.uploaded_frames + gate.suppressed_frames()
+        );
+    }
+    #[test]
+    fn disabled_standby_gate_uploads_every_frame_and_reports_no_summary_fields() {
+        let mut c = Config::default().wake_config();
+        c.wake_word.local_speech_gate = false;
+        let mut gate = StandbyGate::new(&c);
+        let start = Instant::now();
+        for index in 0..30 {
+            let frames = gate.admit(
+                gate_frame(0.0, 1, start + Duration::from_millis(index * FRAME_MS)),
+                false,
+            );
+            assert_eq!(frames.len(), 1);
+        }
+        assert_eq!(gate.uploaded_frames, 30);
+        assert_eq!(gate.suppressed_frames(), 0);
+        assert!(gate.preroll.is_empty());
+        let (tx, mut rx) = mpsc::channel(4);
+        let source = Source {
+            wm_instance_id: "wm".into(),
+            wake_generation: 1,
+            assistant_generation: 0,
+        };
+        publish_standby(&tx, &source, &c, &gate, 0.0);
+        let update = rx.try_recv().unwrap();
+        assert_eq!(update.state["state"], "standby");
+        assert!(update.state.get("upload_gate").is_none());
+        c.wake_word.local_speech_gate = true;
+        let gate = StandbyGate::new(&c);
+        publish_standby(&tx, &source, &c, &gate, 0.0);
+        let update = rx.try_recv().unwrap();
+        assert_eq!(update.state["upload_gate"], "closed");
+        assert_eq!(update.state["uploaded_ms"], 0);
+        assert!(
+            update.state["text"]
+                .as_str()
+                .unwrap()
+                .contains("静音不上传")
+        );
+    }
+    #[tokio::test]
+    async fn gated_loopback_uploads_only_after_sustained_speech_with_preroll_first() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let mut uploads = 0;
+            let mut requested = false;
+            // Keep reading until the client disconnects: frames queued behind
+            // the detector response may still be uploaded afterwards.
+            while let Some(Ok(message)) = ws.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(message) = message else {
+                    continue;
+                };
+                let event: Value = serde_json::from_str(&message).unwrap();
+                if event["type"] == "input_audio_buffer.append" {
+                    uploads += 1;
+                    use base64::Engine;
+                    let pcm = base64::engine::general_purpose::STANDARD
+                        .decode(event["audio"].as_str().unwrap())
+                        .unwrap();
+                    if uploads == 1 {
+                        // The first uploaded frame is the oldest pre-roll frame,
+                        // not the frame that opened the gate.
+                        assert!(
+                            pcm.iter().all(|byte| *byte == 1),
+                            "pre-roll must be uploaded first"
+                        );
+                        for value in [
+                            json!({"type":"input_audio_buffer.speech_started","item_id":"owned","audio_start_ms":0}),
+                            json!({"type":"input_audio_buffer.speech_stopped","item_id":"owned","audio_end_ms":20}),
+                            json!({"type":"input_audio_buffer.committed","item_id":"owned"}),
+                        ] {
+                            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                                value.to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
+                        }
+                    }
+                }
+                if event["type"] == "response.create" {
+                    requested = true;
+                    let metadata = event["response"]["metadata"].clone();
+                    for value in [
+                        json!({"type":"response.created","response":{"id":"wake-response","metadata":metadata}}),
+                        json!({"type":"response.done","response":{"id":"wake-response","status":"completed","output":[{"type":"function_call","name":"eva_detect_wake_word","call_id":"detector","arguments":"{\"wake\":true}"}],"usage":{"input_token_details":{"audio_tokens":20,"text_tokens":10},"output_token_details":{"text_tokens":5}}}}),
+                    ] {
+                        if ws
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                value.to_string().into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            assert!(requested, "detector request missing");
+            uploads
+        });
+        let mut ws = Realtime::connect_loopback(address).await.unwrap();
+        let base = if std::path::Path::new("/dev/shm").is_dir() {
+            std::path::PathBuf::from("/dev/shm")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base.join(format!(
+            "eva-wake-gated-{}-{}",
+            std::process::id(),
+            crate::store::wall_ms()
+        ));
+        let store = Arc::new(Mutex::new(Store::open_at(dir.clone()).unwrap()));
+        let c = Config::default().wake_config();
+        assert!(c.wake_word.local_speech_gate);
+        let (updates, _) = mpsc::channel(16);
+        let (audio_tx, mut audio_rx) = mpsc::channel(64);
+        let start = Instant::now();
+        // 30 quiet frames stay local; sustained speech then uploads the
+        // pre-roll first. Frame timing stays contiguous for handoff replay.
+        for index in 0..38u64 {
+            let (level, fill) = if index < 30 { (0.002, 1) } else { (0.2, 2) };
+            audio_tx
+                .send(Ok(gate_frame(
+                    level,
+                    fill,
+                    start + Duration::from_millis(index * FRAME_MS),
+                )))
+                .await
+                .unwrap();
+        }
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            detect_audio(
+                &c,
+                &Source {
+                    wm_instance_id: "wm".into(),
+                    wake_generation: 7,
+                    assistant_generation: 0,
+                },
+                &updates,
+                &store,
+                &mut ws,
+                &mut audio_rx,
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let DetectionAudio::Detected { frames, .. } = outcome else {
+            panic!("sustained speech must reach the detector");
+        };
+        // The owned item (0..20 ms of uploaded audio) is the first pre-roll frame.
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].pcm.iter().all(|byte| *byte == 1));
+        drop(ws);
+        let uploads = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        // 30 quiet + 5 voiced pre-roll frames and the opening frame are the
+        // minimum; the remaining voiced frames may follow before disconnect.
+        assert!((36..=38).contains(&uploads), "uploads={uploads}");
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

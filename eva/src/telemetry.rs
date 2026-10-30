@@ -25,6 +25,10 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
         "peak_level",
         "threshold_level",
         "max_voiced_frames",
+        // Standby upload gate counters: frame counts only, never audio.
+        "uploaded_frames",
+        "suppressed_frames",
+        "gate_openings",
     ];
     let mut record = serde_json::Map::new();
     if let Some(fields) = fields.as_object() {
@@ -34,7 +38,10 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
                 | "noise_frames"
                 | "above_threshold_frames"
                 | "echo_frames"
-                | "max_voiced_frames" => value.is_u64(),
+                | "max_voiced_frames"
+                | "uploaded_frames"
+                | "suppressed_frames"
+                | "gate_openings" => value.is_u64(),
                 "peak_level" | "threshold_level" => value
                     .as_f64()
                     .is_some_and(|level| level.is_finite() && level >= 0.0),

@@ -45,6 +45,10 @@ connect_timeout_ms = 8000
 plan_deadline_ms = 30000
 plan_max_output_tokens = 4096
 feedback_max_output_tokens = 1024
+# Spoken feedback for a verified desktop result is limited to one or two
+# sentences within this budget; chat/knowledge replies (noop) keep the full
+# feedback_max_output_tokens so counting or explanations are not cut off.
+feedback_result_max_output_tokens = 256
 
 [turn_detection]
 # Semantic VAD waits for the meaning of a sentence rather than only a silent gap.
@@ -104,6 +108,11 @@ model = "gpt-realtime-mini"
 # Initial retry delay; exponential backoff with jitter caps at 60s, stops after 8 consecutive failures.
 reconnect_ms = 3000
 max_session_ms = 600000
+# Local speech gate: silence and background noise are never uploaded during
+# standby. Only sustained speech-like audio, with a short pre-roll, is sent to
+# the mini model for wake-phrase detection. Standby cost then follows speech
+# time rather than wall-clock time. Set false to upload continuously.
+local_speech_gate = true
 
 # Independent mini-model estimates; both models share the daily budget.
 [wake_pricing]

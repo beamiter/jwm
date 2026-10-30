@@ -1,3 +1,35 @@
+## 2026-10-30 — Eva: one-response planning, local standby gate, bounded spoken results
+
+- Evidence first. Today's journal showed about 1.9 model responses per voice
+  turn (discovery → plan → schema_repair even for a plain `set_layout`, about
+  5 s from speech end to verified) and a 16.8 s spoken reply for a one-action
+  result; mini standby appended every frame, so silence was billed (~$0.36/h).
+- Planning: the context item now lists `loaded_actions`; the preload set grew
+  from 13 to 18 (window maximize/float/snap/resize, still no confirmation-class
+  action); a `session_intent`/`task_intent` copy inside an action's arguments is
+  dropped before validation when it equals the decoded top-level value
+  (`plan_normalized` telemetry, fixed category), differing values still reject
+  and take the existing one-attempt repair. `dry-run` returns
+  `planning.rounds` (phase, outcome, validation error, bounded rejected
+  arguments) to the local caller only; live traces keep `rounds = None`.
+- Feedback: outcome-aware instructions plus `feedback_result_max_output_tokens`
+  (256) for verified results and clarifications; noop conversation keeps the
+  full `feedback_max_output_tokens`.
+- Standby: `[wake_word].local_speech_gate` (default on) keeps silence local.
+  Noise floor calibrated while closed, six voiced frames in ten open the gate,
+  pre-roll `prefix_padding_ms + 500 ms`, hangover `silence_duration_ms +
+  400 ms`, and a server-open speech item always keeps uploading. Status carries
+  `upload_gate`/`uploaded_ms`/`suppressed_ms`; `standby_gate_summary` logs frame
+  counts only.
+- Validation: 307 passed / 0 failed / 6 ignored across core, Eva and IPC
+  client; clippy with the existing allowances, fmt and `git diff --check` pass;
+  `scripts/test-install-eva.sh` could not run locally (no `rg`). Installed
+  release sha `0a01a57b…`, service active, doctor ready. 24 real-model text
+  probes through the installed daemon: 17 single-response, 2 legitimate
+  discoveries, 5 model structure errors all recovered by the bounded repair, no
+  failed turn. Physical standby behaviour, spoken-reply length and voice-turn
+  response counts remain user acceptance items (docs/eva-acceptance.md).
+
 ## 2026-10-27 — Player queue, subtitles and decoder controls
 
 - Continued from `bfd71cfe` rather than duplicating the newly merged player.

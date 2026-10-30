@@ -554,3 +554,87 @@ base64，若被接受即失败，测试无需打开音频设备。恢复旧过�
 具备原生 Unix socket 和音频依赖的环境应继续执行 `eva/tests/native-pulse.sh`，
 然后在授权实体设备上复测“修改布局→撤销”及播放期间“别数了，关闭麦克风”，
 结合 `speech_interrupted`、响应取消、实际停止听感和资源释放共同验收。
+
+## 2026-10-30 规划效率、待机本地门控与结果反馈收敛
+
+本轮基线为 master `e08c41b4`。环境：用户 X11 桌面、PulseAudio、`gpt-realtime-2.1-mini`、
+Rust 1.97.1。下文的文字探针通过已安装的 daemon 执行 `jwm-eva dry-run --text`，使用真实模型和
+真实日预算（每次约 0.5 美分，本轮合计约 0.06 美元）；文字探针只证明规划结构，不等于语音、
+麦克风或桌面验收。
+
+### 改动前的证据
+
+- 当日 journal：45 个语音轮次产生 86 次 `plan_completed`（约 1.9 个模型响应/轮）。典型的
+  单步 `set_layout` 轮次为 discovery → plan → schema_repair 三个响应，`input_committed` 到
+  `action_verified` 约 4.95 s（utc_ms 1793328875742 → 1793328880690）；随后的口头反馈输出
+  336 个音频 token，`first_feedback_playback` 到 `playback_ended` 约 16.8 s，期间无法进入
+  继续说话窗口。
+- `wake::detect_audio` 对每一帧无条件 `input_audio_buffer.append`；mini 按上传音频时长计费
+  （约每小时 0.36 美元），默认 1 美元日预算最多支撑不到 3 小时待机。
+- `plan_rejected` 只记录固定类别码（设计如此），现场无法看到首次计划为何被拒。
+
+### 改动
+
+1. 规划上下文列出已预载的 `loaded_actions`，并把 `set_window_maximized`、`set_window_floating`、
+   `snap_window`、`resize_horizontal`、`resize_vertical` 加入预载集合（13 → 18；测试断言其中
+   没有确认类动作）；提示闲聊、数数、介绍能力直接 noop，`eva_describe_actions` 每次最多 4 个分类。
+2. 动作参数中与顶层已解码值相同的 `session_intent`/`task_intent` 副本在 schema 校验前去除，
+   并记录固定类别的 `plan_normalized`；值不同的副本仍按 `unknown_argument` 拒绝并走原有的
+   一次有界修复。`session_intent` 缺失仍按既有测试要求拒绝，不设隐式默认。
+3. `dry-run` 返回 `planning.responses`、`planning.elapsed_ms` 和 `planning.rounds`（阶段、结果、
+   本地校验错误、被拒参数原文 ≤ 4 KiB，最多 16 条），只返回本地控制 socket 的调用者；语音会话
+   的 `Trace.rounds` 恒为 `None`，journal 与账本仍只有固定类别码。
+4. 口头反馈按本地结果类型收敛：执行结果限一两句话、不超过 40 字，`max_output_tokens` 取
+   `[openai].feedback_result_max_output_tokens`（默认 256）与总预算的较小值；clarify 只说一个
+   问题；noop 闲聊保持 `feedback_max_output_tokens`，数数不被截断。
+5. 待机本地语音门控 `[wake_word].local_speech_gate = true`（默认）：关闭时以近期电平的低分位
+   校准底噪（与打断检测同一 `InputNoise`），10 帧内 6 帧有声即开启并先上传前置音频
+   （`prefix_padding_ms + 500 ms`，默认 0.8 s）；本地安静 `silence_duration_ms + 400 ms`
+   且服务端没有打开的语音段时关闭；服务端语音段打开期间持续上传，关闭状态下收到服务端
+   起声也会重新开启。待机状态含 `upload_gate`、`uploaded_ms`、`suppressed_ms`；待机结束
+   记录只含帧计数的 `standby_gate_summary`。唤醒仍只由 mini 的检测结果决定。
+6. 新增配置字段均有默认值，`eva/dist/eva.toml` 与 `eva/README.md` 已更新；旧配置文件无需修改。
+
+### 本地验证
+
+| 检查 | 结果 |
+|---|---|
+| `cargo test --locked --offline -p jwm_eva_core -p jwm-eva -p jwm_ipc_client` | 307 passed / 0 failed / 6 ignored；新增门控单元、门控回环、反馈预算、dry-run 轮次、副本归一化（同值去除、异值仍修复）测试 |
+| Clippy `--all-targets -D warnings`（沿用既有 `collapsible_if`/`needless_borrow`/`large_enum_variant`/`deprecated` 豁免） | 通过 |
+| `cargo fmt --check`、`git diff --check` | 通过 |
+| `bash scripts/test-install-eva.sh` | 本机没有 `rg`，脚本在断言前退出（CI 会安装 ripgrep）；不计为通过 |
+| 安装 | release 构建与已安装二进制 sha256 均为 `0a01a57bc5dd…`，`jwm-eva.service` active，`doctor` ready；安装前的二进制已另存备份 |
+
+### 真实模型文字探针
+
+共 24 次 `dry-run`，分五批对应五个构建（提示、修复、归一化、预载）。17 次一个响应完成规划；
+7 次多响应中 2 次是合理的能力发现（“切到火狐浏览器” 发现 windows 后澄清；“这个窗口宽一点” 在
+预载前发现 layout），5 次是模型结构错误后由既有的一次修复完成，没有失败轮次。
+
+| 指令 | 响应数 | 规划耗时 ms | 说明 |
+|---|---:|---:|---|
+| 切到第三个桌面 | 1 / 1 | 2064 / 1680 | 两次均单响应 |
+| 把当前桌面改成网格布局 | 1 | 2068 | |
+| 声音小一点 / 屏幕亮一点 / 这个窗口先收起来 | 1 / 1 / 1 | 1854 / 3190 / 2420 | |
+| 把这个窗口移到第八个桌面，然后切过去 | 1 / 1 | 2384 / 2422 | 模型附加了一个多余的 focus_window，本地校验通过 |
+| 切到第三个桌面，再用网格排一下 | 1 | 2034 | 两步同一显示器 |
+| 不要切换，取消 / 先这样，再见 | 1 / 1 | 1963 / 1761 | noop；后者 `session_intent = standby` |
+| 请从一数到十 | 2 / 1 | — / 1866 | 第一次发出无效分类的发现后修复为 noop |
+| 暂停播放 | 1 | 3923 | clarify（当前无播放） |
+| 撤销刚才的布局修改 | 2 / 1 / 2 | 2985 / 2371 / 4182 | 第一次把 `session_intent` 复制进动作参数（已由归一化消除）；第三次模型额外提交两个名为 noop 的动作，按 `action_schema_not_loaded` 修复 |
+| 你能做什么 | 2 / 2 | 4721 / 11814 | 一次请求 11–12 个分类并带多余字段，修复后分别为 clarify 和 noop |
+| 切到火狐浏览器 | 2 | 4935 | 发现 windows 后澄清 |
+| 这个窗口宽一点 | 2 / 1 | 3175 / 1963 | 预载后单响应 |
+| 这个贴到右半边 / 把这个窗口最大化 | 1 / 1 | 1911 / 1569 | 预载后单响应 |
+
+模型输出存在明显随机性（同一指令不同批次结果不同），上表不是成功率统计；语音输入的轮次
+响应数仍需在 journal 中按 `plan_completed` 与 `usage_settled.phase` 核对。
+
+### 待实测
+
+- 待机门控：开启唤醒监听后在安静环境观察 `wake.suppressed_ms` 增长而 `uploaded_ms` 基本不变；
+  说出“hi eva”后 `upload_gate` 变为 open 并正常唤醒与同句交接；journal 中的
+  `standby_gate_summary` 帧计数；不同麦克风底噪下的误开与漏开率，以及音乐/电视环境的上传比例。
+- 口头反馈：执行类结果应在一两句内结束并进入继续说话窗口；“请从一数到十”不被截断。
+- 真实语音轮次的响应数与句末到核验完成的延迟分位数。
+- 自然打断、同会话语音撤销等既有待实测项不变。

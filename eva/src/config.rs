@@ -44,7 +44,10 @@ section!(Openai {
     model: String = "gpt-realtime".into(), transport: String = "websocket".into(),
     api_key_source: String = "secret_service".into(), api_key_file: Option<PathBuf> = None,
     voice: String = "marin".into(), input_transcription: bool = false, connect_timeout_ms: u64 = 8000,
-    plan_deadline_ms: u64 = 30000, plan_max_output_tokens: u32 = 4096, feedback_max_output_tokens: u32 = 1024
+    plan_deadline_ms: u64 = 30000, plan_max_output_tokens: u32 = 4096, feedback_max_output_tokens: u32 = 1024,
+    // Spoken feedback for a verified desktop outcome is one or two sentences;
+    // open conversation (noop) keeps the full feedback_max_output_tokens.
+    feedback_result_max_output_tokens: u32 = 256
 });
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -111,7 +114,10 @@ section!(WakeWord {
     phrase: String = "hi eva".into(),
     model: String = "gpt-realtime-mini".into(),
     reconnect_ms: u64 = 3000,
-    max_session_ms: u64 = 600000
+    max_session_ms: u64 = 600000,
+    // Keep silence and background noise local during cloud standby; only
+    // sustained speech-like audio (plus a short pre-roll) reaches the mini model.
+    local_speech_gate: bool = true
 });
 fn mini_pricing() -> Pricing {
     Pricing {
@@ -233,6 +239,7 @@ impl Config {
             && self.openai.plan_max_output_tokens <= 4096
             && self.openai.feedback_max_output_tokens >= 16
             && self.openai.feedback_max_output_tokens <= 1024
+            && (16..=1024).contains(&self.openai.feedback_result_max_output_tokens)
             && self.audio.connect_buffer_ms <= 2000
             && self.audio.connect_buffer_ms >= 20
             && self.openai.transport == "websocket"
