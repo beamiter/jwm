@@ -54,6 +54,9 @@ HOME="$TEST_ROOT/home" CARGO_HOME="$TEST_ROOT/home/.cargo" JWM_CN_MIRROR=0 \
     bash "$ROOT/scripts/bootstrap_deps.sh" --no-rust > "$TEST_ROOT/apt-output.log" 2>&1
 grep -Fxq mpv "$TEST_ROOT/apt.log" || fail 'player runtime omitted from bootstrap'
 grep -Fxq ffmpeg "$TEST_ROOT/apt.log" || fail 'recording runtime omitted from bootstrap'
+for package in brightnessctl brightness-udev; do
+    grep -Fxq "$package" "$TEST_ROOT/apt.log" || fail "backlight runtime omitted from bootstrap: $package"
+done
 for package in libpulse-dev libpipewire-0.3-dev libspa-0.2-dev meson; do
     grep -Fxq "$package" "$TEST_ROOT/apt.log" || fail "Eva build dependency omitted from bootstrap: $package"
 done

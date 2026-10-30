@@ -263,7 +263,7 @@ if let Some(envelope) = cursor.update_frame(&frame) {
 | `logging-flexi` | `logging::init` with rotation |
 | `provider-alsa` | ALSA audio manager/runtime adapter |
 | `provider-system` | sysinfo CPU/memory provider (no battery dependency) |
-| `provider-brightnessctl` | brightnessctl provider |
+| `provider-brightnessctl` | panel backlight provider with brightnessctl and sysfs/logind fallback |
 | `provider-network-sysfs` | dependency-free primary-interface throughput provider |
 | `provider-battery-sysfs` | independent deterministic multi-battery sysfs provider |
 | `transport-shared` | typed JWM transport plus core-managed bounded recovery |

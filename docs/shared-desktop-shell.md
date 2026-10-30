@@ -72,6 +72,17 @@ The host's GUI dependencies have an independent Cargo boundary at
 Legacy Tao entry points reuse the extracted implementation, and a JWM-managed
 Tao top bar cannot create private companions while the shared host owns them.
 
+The right brightness slider controls panel backlights, never keyboard or network
+LEDs. Debian/Ubuntu bootstrap installs `brightnessctl` and `brightness-udev`.
+When the tool is absent, the host can read `/sys/class/backlight`; when a write
+is denied, it uses `busctl` and the current logind session's
+[`SetBrightness`](https://www.freedesktop.org/software/systemd/man/252/org.freedesktop.login1.html)
+method. This works in an active local systemd session without adding the user
+to the `video` group or running the host as root. Systems without logind still
+need ordinary backlight write permissions. External displays without a kernel
+backlight device remain unavailable. Check the detected hardware with
+`jwm-shell --inspect-providers` and slider targets with `--inspect-controls`.
+
 For an explicit legacy rollback on X11, disable `[desktop_shell]` and launch
 JWM with `XBAR_LEGACY_PRIVATE_SHELL=1` plus `status_bar.name = "tao_glow_bar"`.
 This opt-in re-enables the original independent Tao companion adapter only when

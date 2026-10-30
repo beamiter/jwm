@@ -125,6 +125,10 @@ APT_BAR=(
 # Runtime helpers useful for nested testing / running a session.
 APT_RUNTIME=(
     xwayland xserver-xephyr
+    # Shared sidebars and brightness keys use brightnessctl. Ubuntu splits
+    # its device permission rules into brightness-udev; install them explicitly
+    # because this bootstrap disables apt recommendations.
+    brightnessctl brightness-udev
     # Built-in screen recording encodes and validates MP4 files through these
     # two executables (both are shipped by Debian/Ubuntu's ffmpeg package).
     ffmpeg
@@ -164,7 +168,7 @@ if [[ "$DO_APT" == true ]]; then
         warn "  wayland:   libwayland libdrm libgbm libEGL libGLES libinput libseat libudev pixman"
         warn "  misc:      libasound2 libdbus-1 fontconfig freetype openssl"
         warn "  eva:       libpulse PipeWire/SPA development headers meson"
-        warn "  runtime:   ffmpeg mpv xwayland"
+        warn "  runtime:   brightnessctl (+ device permission rules) ffmpeg mpv xwayland"
         if [[ "$WITH_TAURI" == "1" ]]; then
             warn "  tauri:     WebKitGTK 4.1 libxdo Ayatana AppIndicator librsvg"
         fi
