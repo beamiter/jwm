@@ -24,6 +24,11 @@ use crate::backend::update_notifier::AsyncUpdateNotifier;
 
 use super::sysfs::{bounded_paths, read_attribute};
 
+#[path = "brightness_control.rs"]
+mod brightness_control;
+pub(crate) use brightness_control::{BacklightReading, BrightnessReceipt};
+use brightness_control::{parse_reading, set_with};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioState {
     /// 0..=150 (PipeWire allows >100%; the OSD clamps its bar at 100).
@@ -847,16 +852,46 @@ fn brightness_adjust(delta: i32) -> Option<u8> {
     }
 }
 
-/// Set the backlight to an absolute percent. Runs on the controls worker.
-fn brightness_set(percent: u8) -> Option<u8> {
+/// Read a fixed sysfs device rather than selecting a possibly different panel.
+fn sysfs_reading(dir: &Path) -> Option<BacklightReading> {
+    let reading = BacklightReading {
+        device: std::fs::canonicalize(dir).ok()?.to_str()?.to_string(),
+        raw: read_attribute(dir.join("brightness"))?
+            .trim()
+            .parse()
+            .ok()?,
+        max: read_attribute(dir.join("max_brightness"))?
+            .trim()
+            .parse()
+            .ok()?,
+    };
+    reading.percent()?;
+    Some(reading)
+}
+
+fn sysfs_set_receipt(dir: &Path, percent: u8) -> Option<BrightnessReceipt> {
+    set_with(
+        sysfs_reading(dir)?,
+        percent,
+        |device, raw| std::fs::write(Path::new(device).join("brightness"), raw.to_string()).is_ok(),
+        |device| sysfs_reading(Path::new(device)),
+    )
+}
+
+/// Resolve the device and raw target once, write that exact integer, then
+/// independently read the same device. Helper rounding is not part of success.
+fn brightness_set(percent: u8) -> Option<BrightnessReceipt> {
     match detect_brightness_tool()? {
         BrightnessTool::Brightnessctl => {
-            if !run_brightnessctl_ok(&["-n1", "set", &format!("{}%", percent.min(100))]) {
-                return None;
-            }
-            brightness_percent()
+            let before = parse_reading(&run_brightnessctl(&["-m"])?)?;
+            set_with(
+                before,
+                percent,
+                |device, raw| run_brightnessctl_ok(&["-d", device, "-n1", "set", &raw.to_string()]),
+                |device| parse_reading(&run_brightnessctl(&["-d", device, "-m"])?),
+            )
         }
-        BrightnessTool::Sysfs => sysfs_set_percent(percent.max(1)),
+        BrightnessTool::Sysfs => sysfs_set_receipt(&sysfs_backlight()?, percent),
     }
 }
 
@@ -1190,9 +1225,10 @@ impl VolumeReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BrightnessReport {
     Applied(u64, u8),
+    SetApplied(u64, BrightnessReceipt),
     Failed(u64),
 }
 
@@ -1200,6 +1236,14 @@ impl BrightnessReport {
     fn split(self) -> (u64, Option<u8>) {
         match self {
             Self::Applied(seq, percent) => (seq, Some(percent)),
+            Self::SetApplied(seq, receipt) => (
+                seq,
+                if receipt.verified(receipt.requested) == Some(true) {
+                    receipt.percent()
+                } else {
+                    None
+                },
+            ),
             Self::Failed(seq) => (seq, None),
         }
     }
@@ -1379,8 +1423,8 @@ fn run_control_queue(
                 ControlRequest::BrightnessSet(percent) => {
                     outcome.brightness = Some(
                         brightness_set(percent)
-                            .map_or(BrightnessReport::Failed(queued.seq), |percent| {
-                                BrightnessReport::Applied(queued.seq, percent)
+                            .map_or(BrightnessReport::Failed(queued.seq), |receipt| {
+                                BrightnessReport::SetApplied(queued.seq, receipt)
                             }),
                     );
                 }
@@ -2541,6 +2585,68 @@ Source #51
         assert_eq!(sysfs_set_percent_in(&first, 50), None);
 
         std::fs::remove_dir_all(root).expect("remove temporary backlights");
+    }
+
+    #[test]
+    fn brightness_receipt_feedback_adopts_real_percent_and_rejects_failed_write() {
+        let now = Instant::now();
+        let mut feedback = ControlFeedback::default();
+        let receipt = set_with(
+            BacklightReading {
+                device: "panel".into(),
+                raw: 3,
+                max: 15,
+            },
+            50,
+            |_, _| true,
+            |_| {
+                Some(BacklightReading {
+                    device: "panel".into(),
+                    raw: 8,
+                    max: 15,
+                })
+            },
+        )
+        .unwrap();
+        feedback.note_brightness_estimate(2, 50, Some(20));
+        assert_eq!(
+            feedback.resolve_brightness(BrightnessReport::SetApplied(1, receipt.clone()), now),
+            FeedbackAction::KeepEstimate
+        );
+        assert_eq!(
+            feedback.resolve_brightness(BrightnessReport::SetApplied(2, receipt.clone()), now),
+            FeedbackAction::Adopt(53)
+        );
+        feedback.note_brightness_estimate(3, 50, Some(53));
+        let mut failed = receipt;
+        failed.write_ok = false;
+        assert_eq!(
+            feedback.resolve_brightness(BrightnessReport::SetApplied(3, failed), now),
+            FeedbackAction::Revert(Some(53))
+        );
+    }
+
+    #[test]
+    fn sysfs_absolute_receipt_reads_quantized_raw_target_and_preserves_minimum() {
+        let dir = std::env::temp_dir().join(format!(
+            "eva-raw-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("max_brightness"), "15").unwrap();
+        std::fs::write(dir.join("brightness"), "3").unwrap();
+        for (requested, raw, percent) in [(50, 8, 53), (49, 7, 47), (1, 1, 7), (100, 15, 100)] {
+            let receipt = sysfs_set_receipt(&dir, requested).unwrap();
+            assert_eq!(receipt.target_raw, raw);
+            assert_eq!(receipt.after.as_ref().unwrap().raw, raw);
+            assert_eq!(receipt.percent(), Some(percent));
+            assert_eq!(receipt.verified(requested), Some(true));
+        }
+        // A vanished/read-inaccessible attribute cannot yield a receipt.
+        std::fs::remove_file(dir.join("brightness")).unwrap();
+        assert!(sysfs_set_receipt(&dir, 50).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

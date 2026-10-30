@@ -24,6 +24,8 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
         "level_wrong_receipt",
         "level_multi_stop",
         "level_multi_success",
+        "level_brightness_quantized",
+        "level_brightness_failed",
     ] {
         let base = if std::path::Path::new("/dev/shm").is_dir() {
             std::path::PathBuf::from("/dev/shm")
@@ -97,7 +99,7 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
                                 let status = match mode.as_str() {
                                     "level_unknown" => "unknown",
                                     "level_wrong_receipt" => "succeeded",
-                                    "level_multi_stop" => "failed",
+                                    "level_multi_stop" | "level_brightness_failed" => "failed",
                                     _ if receipt_count == 1 => "accepted",
                                     _ => "succeeded",
                                 };
@@ -106,7 +108,12 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
                                 } else {
                                     request["args"]["operation_id"].clone()
                                 };
-                                json!({"success":true,"data":{"operation_id":operation_id,"status":status,"verified":{"read_back":{"domain":"volume","percent":45,"muted":false}}}})
+                                let read_back = if mode.starts_with("level_brightness_") {
+                                    json!({"domain":"brightness","percent":53,"device":"panel","max_brightness":15,"target_raw":8,"actual_raw":8,"write_ok":mode != "level_brightness_failed"})
+                                } else {
+                                    json!({"domain":"volume","percent":45,"muted":false})
+                                };
+                                json!({"success":true,"data":{"operation_id":operation_id,"status":status,"verified":{"read_back":read_back}}})
                             } else {
                                 json!({"success":true,"data":{"status":if mode=="late_receipt"{"succeeded"}else{"unknown"},"verified":{"minimized":true}}})
                             }
@@ -132,7 +139,10 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
         stop.store(true, Ordering::Release);
         server.join().unwrap();
         let count = dispatches.lock().unwrap().len();
-        let expected = if matches!(scenario, "second_failed" | "level_multi_success") {
+        let expected = if matches!(
+            scenario,
+            "second_failed" | "level_multi_success" | "level_brightness_quantized"
+        ) {
             2
         } else if scenario == "late_receipt" {
             0
@@ -166,7 +176,10 @@ fn serial_executor_retains_partial_truth_and_never_replays_unknown_mutations() {
                     "{scenario}: status query must address an already dispatched operation"
                 );
             }
-            if matches!(scenario, "level_receipt" | "level_multi_success") {
+            if matches!(
+                scenario,
+                "level_receipt" | "level_multi_success" | "level_brightness_quantized"
+            ) {
                 assert_eq!(
                     receipts.len(),
                     2 * count,
@@ -218,7 +231,9 @@ fn executor_child() {
             return;
         }
         let level = scenario.starts_with("level_");
-        let action = if level {
+        let action = if scenario.starts_with("level_brightness_") {
+            Action { name:"set_brightness".into(), arguments:json!({"percent":50}) }
+        } else if level {
             Action {
                 name: "adjust_volume".into(),
                 arguments: json!({"delta":-5}),
@@ -229,7 +244,7 @@ fn executor_child() {
                 arguments: json!({"window_token":"original-window","enabled":true}),
             }
         };
-        let actions = if matches!(scenario.as_str(), "level_multi_stop" | "level_multi_success") {
+        let actions = if matches!(scenario.as_str(), "level_multi_stop" | "level_multi_success" | "level_brightness_quantized" | "level_brightness_failed") {
             vec![action.clone(), action]
         } else if level {
             vec![action]
@@ -287,16 +302,16 @@ fn executor_child() {
         };
         if level {
             let expected_status = match scenario.as_str() {
-                "level_receipt" | "level_multi_success" => "succeeded",
-                "level_multi_stop" => "failed",
+                "level_receipt" | "level_multi_success" | "level_brightness_quantized" => "succeeded",
+                "level_multi_stop" | "level_brightness_failed" => "failed",
                 _ => "unknown",
             };
             assert_eq!(result["status"], expected_status, "{scenario}");
-            let expected_steps = usize::from(scenario == "level_multi_success") + 1;
+            let expected_steps = usize::from(matches!(scenario.as_str(), "level_multi_success" | "level_brightness_quantized")) + 1;
             assert_eq!(result["steps"].as_array().unwrap().len(), expected_steps);
             assert_eq!(
                 result["unexecuted_steps"],
-                usize::from(scenario == "level_multi_stop"),
+                usize::from(matches!(scenario.as_str(), "level_multi_stop" | "level_brightness_failed")),
                 "the remaining plan must stop without a verified receipt"
             );
             let storage = store.lock().unwrap();
@@ -305,7 +320,7 @@ fn executor_child() {
                 assert!(storage.ledger.operations.values().all(|record| {
                     record.state == jwm_eva_core::ledger::OperationState::Succeeded
                 }));
-                assert_eq!(result["steps"][0]["result"]["verified"]["read_back"]["percent"], 45);
+                assert_eq!(result["steps"][0]["result"]["verified"]["read_back"]["percent"], if scenario == "level_brightness_quantized" {53} else {45});
             }
         } else if scenario == "reply_lost" {
             assert_eq!(result["status"], "unknown");
