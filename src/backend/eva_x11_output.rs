@@ -18,7 +18,7 @@ impl EvaX11OutputProbe {
         Self::for_display(None)
     }
     fn for_display(display: Option<&str>) -> Self {
-        let connection = x11rb::connect(display)
+        let connection = xbar_core::x11_connection::connect(display)
             .ok()
             .map(|(connection, _)| connection);
         let dpms_extension = connection.as_ref().and_then(|connection| {

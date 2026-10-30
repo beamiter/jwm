@@ -9,7 +9,73 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
+    sync::{Arc, Mutex},
 };
+
+/// Acquire the store and perform durable I/O outside the async runtime. The
+/// closure sees current state under the same exclusive lock as synchronous
+/// callers; no stale snapshot can overwrite a newer receipt. Cancellation may
+/// leave bookkeeping running, but it never dispatches desktop/provider work.
+pub async fn access<T: Send + 'static>(
+    store: &Arc<Mutex<Store>>,
+    work: impl FnOnce(&mut Store) -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut store = store
+            .lock()
+            .map_err(|_| io::Error::other("store_unavailable"))?;
+        work(&mut store)
+    })
+    .await
+    .map_err(|_| io::Error::other("store_worker_failed"))?
+}
+
+pub async fn reserve(
+    store: &Arc<Mutex<Store>>,
+    id: &str,
+    phase: &str,
+    c: &Config,
+) -> io::Result<()> {
+    let (id, phase, c) = (id.to_owned(), phase.to_owned(), c.clone());
+    access(store, move |store| store.reserve(&id, &phase, &c)).await
+}
+pub async fn reserve_transcription(
+    store: &Arc<Mutex<Store>>,
+    id: &str,
+    c: &Config,
+) -> io::Result<()> {
+    if !c.openai.input_transcription {
+        return Ok(());
+    }
+    let (id, c) = (id.to_owned(), c.clone());
+    access(store, move |store| store.reserve_transcription(&id, &c)).await
+}
+pub async fn associate(store: &Arc<Mutex<Store>>, request: &str, response: &str) -> io::Result<()> {
+    let (request, response) = (request.to_owned(), response.to_owned());
+    access(store, move |store| store.associate(&request, &response)).await
+}
+pub async fn receipt(store: &Arc<Mutex<Store>>, event: &serde_json::Value) -> io::Result<()> {
+    if !matches!(
+        event["type"].as_str(),
+        Some(
+            "response.created"
+                | "response.done"
+                | "conversation.item.input_audio_transcription.completed"
+                | "conversation.item.input_audio_transcription.failed"
+        )
+    ) {
+        return Ok(());
+    }
+    let event = event.clone();
+    access(store, move |store| store.receipt(&event)).await
+}
+pub async fn unknown_pending(store: &Arc<Mutex<Store>>) -> io::Result<()> {
+    access(store, Store::unknown_pending).await
+}
+pub async fn ledger(store: &Arc<Mutex<Store>>) -> io::Result<Ledger> {
+    access(store, |store| Ok(store.ledger.clone())).await
+}
 
 pub struct Store {
     pub dir: PathBuf,
@@ -362,6 +428,98 @@ pub fn wall_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn async_test_store() -> (PathBuf, Arc<Mutex<Store>>) {
+        let dir = [PathBuf::from("/dev/shm"), std::env::temp_dir()]
+            .into_iter()
+            .find_map(|base| {
+                let p = base.join(format!(
+                    "eva-async-store-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                private_dir(&p).ok().map(|()| p)
+            })
+            .unwrap();
+        let store = Arc::new(Mutex::new(Store::open_at(dir.clone()).unwrap()));
+        (dir, store)
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_store_work_does_not_block_runtime_heartbeat() {
+        let (dir, store) = async_test_store();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let job_store = store.clone();
+        let job = tokio::spawn(async move {
+            access(&job_store, move |storage| {
+                let _ = started.send(());
+                std::thread::sleep(std::time::Duration::from_millis(180));
+                storage.reserve("slow-reservation", "plan", &Config::default())
+            })
+            .await
+        });
+        ready.await.unwrap();
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(10));
+        let mut beats = 0;
+        while !job.is_finished() {
+            heartbeat.tick().await;
+            beats += 1;
+        }
+        job.await.unwrap().unwrap();
+        assert!(
+            beats >= 5,
+            "durable bookkeeping blocked the async heartbeat"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .usage
+                .records
+                .contains_key("slow-reservation")
+        );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_a_store_waiter_retains_bookkeeping_but_never_admits_the_next_step() {
+        let (dir, store) = async_test_store();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (finished, saved) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (job_store, next_step) = (store.clone(), admitted.clone());
+        let job = tokio::spawn(async move {
+            access(&job_store, move |storage| {
+                let _ = started.send(());
+                wait.recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+                let result = storage.reserve("cancelled-reservation", "plan", &Config::default());
+                let _ = finished.send(result.is_ok());
+                result
+            })
+            .await
+            .unwrap();
+            next_step.store(true, std::sync::atomic::Ordering::Release);
+        });
+        ready.await.unwrap();
+        job.abort();
+        let _ = job.await;
+        release.send(()).unwrap();
+        assert!(saved.await.unwrap());
+        assert!(!admitted.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            access(&store, |storage| Ok(storage
+                .usage
+                .records
+                .contains_key("cancelled-reservation")))
+            .await
+            .unwrap()
+        );
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn interrupted_response_can_settle_from_late_correlated_receipts() {
         let dir = std::env::temp_dir().join(format!(

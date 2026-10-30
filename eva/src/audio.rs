@@ -263,26 +263,90 @@ fn echo_matches(pcm: &[u8], reference: &[i16]) -> bool {
     false
 }
 
+/// Calibrated only while listening, never from Eva's own playback. A low
+/// percentile tolerates the delayed server VAD marking a few onset frames as
+/// background; a loud click cannot set the sensitivity for an entire reply.
+pub struct InputNoise {
+    levels: [f32; 50],
+    next: usize,
+    count: usize,
+}
+impl Default for InputNoise {
+    fn default() -> Self {
+        Self {
+            levels: [0.0; 50],
+            next: 0,
+            count: 0,
+        }
+    }
+}
+impl InputNoise {
+    pub fn observe(&mut self, level: f32) {
+        if !level.is_finite() || !(0.0..=1.0).contains(&level) {
+            return;
+        }
+        self.levels[self.next] = level;
+        self.next = (self.next + 1) % self.levels.len();
+        self.count = (self.count + 1).min(self.levels.len());
+    }
+    fn threshold(&self) -> f32 {
+        if self.count < 10 {
+            return 0.006;
+        }
+        let mut levels = self.levels;
+        levels[..self.count].sort_unstable_by(f32::total_cmp);
+        (levels[self.count / 5] * 3.0).max(0.004)
+    }
+}
+
 /// Sustained local speech interrupts pending work without waiting for ASR or
 /// a model response. PCM is used only for echo comparison and never persisted.
-#[derive(Default)]
 pub struct BargeInGate {
-    speech_frames: u8,
+    speech_window: u16,
+    threshold: f32,
+    noise_frames: usize,
     echo_detected: bool,
+    frames: u64,
+    above_threshold: u64,
+    echo_frames: u64,
+    peak: f32,
+    max_voiced: u32,
+}
+impl Default for BargeInGate {
+    fn default() -> Self {
+        Self::with_noise(&InputNoise::default())
+    }
 }
 impl BargeInGate {
+    pub fn with_noise(noise: &InputNoise) -> Self {
+        Self {
+            speech_window: 0,
+            threshold: noise.threshold(),
+            noise_frames: noise.count,
+            echo_detected: false,
+            frames: 0,
+            above_threshold: 0,
+            echo_frames: 0,
+            peak: 0.0,
+            max_voiced: 0,
+        }
+    }
     pub fn reset(&mut self) {
-        self.speech_frames = 0;
+        self.speech_window = 0;
         self.echo_detected = false;
     }
     pub fn echo_detected(&self) -> bool {
         self.echo_detected
     }
+    /// Aggregate signal diagnostics only; never PCM, reference samples or ASR.
+    pub fn statistics(&self) -> serde_json::Value {
+        serde_json::json!({"input_frames":self.frames,"noise_frames":self.noise_frames,"above_threshold_frames":self.above_threshold,
+            "echo_frames":self.echo_frames,"peak_level":self.peak,"threshold_level":self.threshold,
+            "max_voiced_frames":self.max_voiced})
+    }
     pub fn observe(&mut self, frame: &Frame) -> bool {
-        if !frame.level.is_finite() || frame.level <= 0.025 {
-            self.echo_detected = false;
-            self.speech_frames = self.speech_frames.saturating_sub(2);
-            return false;
+        if !frame.level.is_finite() || frame.level <= self.threshold {
+            return self.observe_with_reference(frame, &[]);
         }
         let reference = RENDER_REFERENCE.get().and_then(|reference| {
             let reference = reference.lock().unwrap_or_else(|error| error.into_inner());
@@ -294,14 +358,25 @@ impl BargeInGate {
         self.observe_with_reference(frame, reference.as_deref().unwrap_or(&[]))
     }
     fn observe_with_reference(&mut self, frame: &Frame, reference: &[i16]) -> bool {
-        self.echo_detected =
-            frame.level.is_finite() && frame.level > 0.025 && echo_matches(&frame.pcm, reference);
-        if !frame.level.is_finite() || frame.level <= 0.025 || self.echo_detected {
-            self.speech_frames = self.speech_frames.saturating_sub(2);
+        self.frames = self.frames.saturating_add(1);
+        if frame.level.is_finite() {
+            self.peak = self.peak.max(frame.level.clamp(0.0, 1.0));
+        }
+        let candidate = frame.level.is_finite() && frame.level > self.threshold;
+        self.above_threshold = self.above_threshold.saturating_add(u64::from(candidate));
+        self.echo_detected = candidate && echo_matches(&frame.pcm, reference);
+        if self.echo_detected {
+            self.echo_frames = self.echo_frames.saturating_add(1);
+            self.speech_window = 0;
             return false;
         }
-        self.speech_frames = self.speech_frames.saturating_add(1);
-        self.speech_frames >= 6 // six 20 ms frames reject clicks and short noise.
+        // Six voiced frames within 200 ms tolerate consonants and short
+        // syllable gaps while isolated clicks remain insufficient. Each Frame
+        // is exactly 20 ms; the native framer rejects dropped/discontinuous PCM.
+        self.speech_window = ((self.speech_window << 1) | u16::from(candidate)) & 0x03ff;
+        let voiced = self.speech_window.count_ones();
+        self.max_voiced = self.max_voiced.max(voiced);
+        voiced >= 6
     }
 }
 
@@ -1969,6 +2044,89 @@ mod barge_in_tests {
         assert!(!gate.observe_with_reference(&voice, &[]));
     }
     #[test]
+    fn low_gain_speech_can_interrupt_without_raising_the_microphone_volume() {
+        let voice = frame(
+            &voice(1)
+                .iter()
+                .map(|sample| sample / 32)
+                .collect::<Vec<_>>(),
+        );
+        assert!(voice.level > 0.006 && voice.level < 0.025);
+        let mut gate = BargeInGate::default();
+        for _ in 0..5 {
+            assert!(!gate.observe_with_reference(&voice, &[]));
+        }
+        assert!(gate.observe_with_reference(&voice, &[]));
+    }
+    #[test]
+    fn syllable_gaps_do_not_erase_a_sustained_interruption() {
+        let voice = frame(&voice(1));
+        let quiet = frame(&[0; 480]);
+        let mut gate = BargeInGate::default();
+        for _ in 0..3 {
+            assert!(!gate.observe_with_reference(&voice, &[]));
+        }
+        for _ in 0..2 {
+            assert!(!gate.observe_with_reference(&quiet, &[]));
+        }
+        for _ in 0..2 {
+            assert!(!gate.observe_with_reference(&voice, &[]));
+        }
+        assert!(gate.observe_with_reference(&voice, &[]));
+    }
+    #[test]
+    fn calibration_rejects_background_and_outliers_without_losing_quiet_speech() {
+        let background = frame(
+            &voice(19)
+                .iter()
+                .map(|sample| sample / 256)
+                .collect::<Vec<_>>(),
+        );
+        let speech = frame(
+            &voice(1)
+                .iter()
+                .map(|sample| sample / 32)
+                .collect::<Vec<_>>(),
+        );
+        let mut noise = InputNoise::default();
+        for _ in 0..49 {
+            noise.observe(background.level);
+        }
+        noise.observe(0.9); // A click must not desensitize the next reply.
+        for invalid in [f32::NAN, f32::INFINITY, -1.0] {
+            noise.observe(invalid);
+        }
+        let mut gate = BargeInGate::with_noise(&noise);
+        for _ in 0..50 {
+            assert!(!gate.observe_with_reference(&background, &[]));
+        }
+        for _ in 0..5 {
+            assert!(!gate.observe_with_reference(&speech, &[]));
+        }
+        assert!(gate.observe_with_reference(&speech, &[]));
+
+        // The same quiet absolute threshold cannot be used in a louder room.
+        let background = frame(
+            &voice(19)
+                .iter()
+                .map(|sample| sample / 8)
+                .collect::<Vec<_>>(),
+        );
+        let mut noise = InputNoise::default();
+        for _ in 0..50 {
+            noise.observe(background.level);
+        }
+        let mut gate = BargeInGate::with_noise(&noise);
+        for _ in 0..50 {
+            assert!(!gate.observe_with_reference(&background, &[]));
+        }
+        let speech = frame(&voice(1));
+        for _ in 0..5 {
+            assert!(!gate.observe_with_reference(&speech, &[]));
+        }
+        assert!(gate.observe_with_reference(&speech, &[]));
+    }
+    #[test]
     fn echoed_output_with_delay_and_gain_does_not_interrupt() {
         let output = voice(7);
         let mut reference = vec![0; 64];
@@ -1987,6 +2145,25 @@ mod barge_in_tests {
         }
         assert!(gate.observe_with_reference(&new_voice, &reference));
         assert!(!gate.echo_detected());
+
+        // Lower microphone gain must not bypass echo rejection when the gate
+        // is made sensitive enough to hear a quiet interruption.
+        let echoed = frame(&output.iter().map(|sample| -sample / 32).collect::<Vec<_>>());
+        let mut gate = BargeInGate::default();
+        for _ in 0..20 {
+            assert!(!gate.observe_with_reference(&echoed, &reference));
+            assert!(gate.echo_detected());
+        }
+        let new_voice = frame(
+            &voice(42)
+                .iter()
+                .map(|sample| sample / 32)
+                .collect::<Vec<_>>(),
+        );
+        for _ in 0..5 {
+            assert!(!gate.observe_with_reference(&new_voice, &reference));
+        }
+        assert!(gate.observe_with_reference(&new_voice, &reference));
     }
     #[test]
     fn native_streams_request_echo_treatment_without_changing_device_pin() {

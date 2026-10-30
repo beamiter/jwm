@@ -17,11 +17,30 @@ pub fn fields(fields: &serde_json::Value) -> serde_json::Value {
         "cost_microusd",
         "source_activation_ns",
         "played_samples",
+        // Per-turn aggregate signal levels/counts, never sample arrays.
+        "input_frames",
+        "noise_frames",
+        "above_threshold_frames",
+        "echo_frames",
+        "peak_level",
+        "threshold_level",
+        "max_voiced_frames",
     ];
     let mut record = serde_json::Map::new();
     if let Some(fields) = fields.as_object() {
         for (name, value) in fields {
-            if FIELDS.contains(&name.as_str()) {
+            let signal_scalar = match name.as_str() {
+                "input_frames"
+                | "noise_frames"
+                | "above_threshold_frames"
+                | "echo_frames"
+                | "max_voiced_frames" => value.is_u64(),
+                "peak_level" | "threshold_level" => value
+                    .as_f64()
+                    .is_some_and(|level| level.is_finite() && level >= 0.0),
+                _ => true,
+            };
+            if FIELDS.contains(&name.as_str()) && signal_scalar {
                 record.insert(name.clone(), value.clone());
             }
         }
@@ -52,4 +71,20 @@ pub fn mark(stage: &str, generation: u64, turn: u64) {
         stage,
         &serde_json::json!({"generation":generation,"turn_id":turn}),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn signal_diagnostics_accept_only_aggregate_numbers() {
+        let filtered = super::fields(&serde_json::json!({
+            "input_frames":100,"noise_frames":50,"threshold_level":0.006,
+            "peak_level":"private speech","echo_frames":[123,456],
+            "pcm":[1,2,3],"transcript":"private speech","reference":[4,5,6]
+        }));
+        assert_eq!(
+            filtered,
+            serde_json::json!({"input_frames":100,"noise_frames":50,"threshold_level":0.006})
+        );
+    }
 }

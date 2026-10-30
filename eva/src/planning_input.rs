@@ -147,6 +147,16 @@ impl FrozenInput {
                 Err("missing_task_intent".into())
             };
         };
+        // Undo targets completed execution history, never the remaining
+        // actions of a pending task. A conflicting model classification must
+        // be repaired from the original owned input before any admission.
+        if plan.disposition == Disposition::Execute
+            && plan.actions.len() == 1
+            && plan.actions[0].name == "undo_last_plan"
+            && intent != "new"
+        {
+            return Err("undo_plan_requires_new_task".into());
+        }
         self.unsettled_tasks
             .retain(|task| task.refresh_view(context, ledger)["status"] == "blocked_unknown");
         if plan.disposition == Disposition::Execute {

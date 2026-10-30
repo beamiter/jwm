@@ -43,7 +43,7 @@ pub struct UndoPlan {
     pub created_ms: u64,
     pub steps: Vec<UndoStep>,
 }
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Ledger {
     /// Durable frontier: ordinary undo cannot cross a newer admitted mutation.
     #[serde(default)]

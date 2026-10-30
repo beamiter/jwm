@@ -218,8 +218,91 @@ pub fn session_code(error: &std::io::Error) -> &'static str {
     }
 }
 
+/// Model arguments can appear in schema errors (for example an unknown key).
+/// Keep only a known local validation category, never the supplied key/value.
+pub fn plan_code(error: &std::io::Error) -> &'static str {
+    const CODES: &[&str] = &[
+        "plan_invalid_json",
+        "plan_invalid_structure",
+        "plan_not_object",
+        "missing_plan_field",
+        "plan_missing",
+        "missing_session_intent",
+        "invalid_session_intent",
+        "session_control_requires_noop",
+        "session_control_task_conflict",
+        "missing_task_intent",
+        "invalid_task_intent",
+        "undo_plan_requires_new_task",
+        "action_schema_not_loaded",
+        "unsupported_action",
+        "unknown_argument",
+        "missing_required_argument",
+        "expected_object",
+        "expected_string",
+        "expected_integer",
+        "expected_number",
+        "expected_null",
+        "expected_boolean",
+        "expected_array",
+        "no_schema_alternative_matches",
+        "constant_mismatch",
+        "value_not_in_enum",
+        "string_length_out_of_range",
+        "integer_out_of_range",
+        "number_out_of_range",
+        "array_length_out_of_range",
+        "duplicate_array_item",
+        "execute_requires_actions_without_question",
+        "clarify_requires_question_without_actions",
+        "noop_cannot_contain_actions_or_question",
+        "undo_must_be_only_action",
+        "too_many_actions",
+        "plan_text_too_long",
+        "target_window_gone",
+        "target_monitor_gone",
+        "session_locked",
+        "expected_exactly_one_tool_call",
+        "unexpected_tool_output",
+        "missing_final_tool_call",
+        "response_not_completed",
+        "reused_tool_call_id",
+        "invalid_call_id",
+        "invalid_tool_arguments",
+    ];
+    let text = error.to_string();
+    let code = text.split(':').next().unwrap_or_default();
+    CODES
+        .iter()
+        .copied()
+        .find(|known| *known == code)
+        .unwrap_or("plan_invalid")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn planning_diagnostics_never_include_untrusted_fields_or_error_bodies() {
+        for (message, expected) in [
+            (
+                "unknown_argument:private-credential-and-window-title",
+                "unknown_argument",
+            ),
+            (
+                "execute_requires_actions_without_question: actions=1 question_present=true",
+                "execute_requires_actions_without_question",
+            ),
+            ("undo_plan_requires_new_task", "undo_plan_requires_new_task"),
+            (
+                "private error body containing unknown_argument",
+                "plan_invalid",
+            ),
+            ("unrecognized_private_code:private-value", "plan_invalid"),
+        ] {
+            assert_eq!(super::plan_code(&std::io::Error::other(message)), expected);
+        }
+    }
+
     #[test]
     fn feedback_diagnostics_only_expose_fixed_codes() {
         assert_eq!(

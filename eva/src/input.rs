@@ -52,6 +52,9 @@ pub struct InputGate {
     frames: VecDeque<UploadedFrame>,
 }
 impl InputGate {
+    pub fn speech_pending(&self) -> bool {
+        self.pending.is_some()
+    }
     pub fn cleared(&mut self) {
         self.awaiting_clear = false;
     }

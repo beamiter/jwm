@@ -1,0 +1,638 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-30T12:50:15+08:00",
+  "overall_result": "not_passed",
+  "previous_report": "eva-live-e2e-20261030.json",
+  "environment": {
+    "backend": "X11",
+    "audio_backend": "pulseaudio",
+    "source_revision": "1f06083c7d2959f9202f95531c9d30997d30dae8+worktree",
+    "source_files_sha256": {
+      "eva/src/audio.rs": "99c1c9e3471309aca108aba78c88ef2601852cc068278e84e7aa21cf15a2e6b0",
+      "eva/src/audio/pulse_playback.rs": "360e305e4228b3c935f3258accb459242dac91bc1e299755c4fd529c0b4493be",
+      "eva/src/errors.rs": "e3989d5b4038acb1b793d9ad0ee9c8915c118716a687c8734fd0b277db95e5a4",
+      "eva/src/input.rs": "0768250e77eb96b4ce67afde48ee81b9b7106db0cde12500b452e2041fc88086",
+      "eva/src/planning_input.rs": "2a36c2cdf56643ddb0e71ec7684aead728e7f2a07e0de1d76ec04d5afb8463ed",
+      "eva/src/session.rs": "3048f40208b98955e3a0285a01184ab9d772f28c089b79f7f14fa781f09901e1",
+      "eva/src/telemetry.rs": "80eb99a4ac8f45a8d8370d028d89f011b0d0e46182f9a09a58be5cf6bb1ace5b",
+      "eva/src/store.rs": "3c0c0a51b1e8652d878eff39addfaf875c45971eb8dfa4fe964d56e4c476bc19",
+      "eva/src/daemon.rs": "389955566caf40893b608cf9588e49903534ffb52c19bddb7a3f04a8b62e6584",
+      "eva/src/executor.rs": "d7c58142e30db8966f0ef58d165593e8e1acabe068eb083cb73e7330c0c7858b",
+      "eva/src/wake.rs": "72bb988eaf759c5bb831ac7e02b3e68b72e727587c7f9e2cde624cfe7ee6a99c",
+      "crates/jwm_eva_core/src/ledger.rs": "3ae0a127dc4e3e92431b5042997d9b60a4d55e320dc8725c1ddb5b05a7dc2a1b"
+    },
+    "installed_eva_sha256": "3310785e7cd17e2dd53ae29e29a5a93cd4f0d8c8a94fc73f31bb414189df5231",
+    "built_eva_sha256": "3310785e7cd17e2dd53ae29e29a5a93cd4f0d8c8a94fc73f31bb414189df5231",
+    "model": "gpt-realtime-2.1-mini",
+    "configuration_preserved": true,
+    "native_presentation": {
+      "source_revision": "16ffa9997cac429d486d5e8cc68125acfb22e574",
+      "source_files_sha256": {
+        "Cargo.toml": "3a8c276fa3de0367c1280ef8bae86adf0c4de8d7c08a86f5badb855bca7f1d55",
+        "Cargo.lock": "453924f7d336da037c1222961658aea06b0cc6e2cc800f31e681da001e9f2f4a",
+        "src/backend/eva_x11_output.rs": "be84910b8137ba8d9da6752c9fe67d1c6ba0bf44c4cecdfc7d419ead6e844f01",
+        "crates/xbar_core/src/x11_connection.rs": "54eeb227229b011b0190f2e7014ae68656ac9beb3cc065e4160d62ebbbc1d394"
+      },
+      "built_sha256": "05e2521b2829b9b0c43989fb87224e69947196506f1673bb139c2d8ed3cef286",
+      "installed_sha256": "05e2521b2829b9b0c43989fb87224e69947196506f1673bb139c2d8ed3cef286",
+      "restarted": true,
+      "windows_preserved": true,
+      "workspaces_preserved": true,
+      "view_preserved": true,
+      "presentation_after": {
+        "active": false,
+        "microphone_active": false,
+        "visible": false,
+        "standby_allowed": true,
+        "standby_blocked_reason": null
+      },
+      "compositor_active": true
+    }
+  },
+  "fixes": [
+    {
+      "id": "streamed_audio_rebuffer",
+      "baseline_reproduction": "650 ms between 100 ms and 300 ms chunks failed with pulse_playback_underrun",
+      "implementation": "Require a negotiated nonzero PulseAudio prebuffer, allow native rebuffering, explicitly trigger a final short tail before drain; retain bounded queues and native-only history evidence."
+    },
+    {
+      "id": "completed_operation_undo",
+      "baseline_reproduction": "continue/revise classification admitted a local clarification instead of requesting a corrected undo plan",
+      "implementation": "Prompt completed-operation undo as a new task. Reject inconsistent undo task classification and use the existing one-attempt bounded plan repair with the original owned audio. No automatic classification override or desktop execution during repair."
+    },
+    {
+      "id": "task_choices_follow_local_state",
+      "implementation": "Only advertise continue for a locally ready pending task, and revise for ready or target-unavailable pending tasks. Completed/absent/unknown tasks do not advertise continuation. Local task checks and bounded repair still reject invalid model output."
+    },
+    {
+      "id": "private_plan_rejection_diagnostics",
+      "implementation": "Emit only fixed, allowlisted local validation categories for plan_rejected/tool_output_rejected; unknown model keys, values, transcripts and error bodies are excluded."
+    },
+    {
+      "id": "quiet_and_syllabic_local_interruption",
+      "baseline_reproduction": [
+        "RMS between 0.006 and 0.025 never crossed the old fixed gate",
+        "three voiced frames, two quiet frames, then three voiced frames never reached the old sustained counter"
+      ],
+      "implementation": "Learn a bounded low-percentile noise floor only while listening without a server-owned speech item; freeze sensitivity during work/playback. Require six non-echo voiced frames within ten 20 ms frames. Echo matches still reset the onset window. Local cancellation does not bypass input ownership, plan admission, session intent or execution checks.",
+      "uncalibrated_threshold": 0.006,
+      "calibrated_minimum_threshold": 0.004,
+      "noise_multiplier": 3,
+      "background_history_frames": 50,
+      "telemetry": "Only one per-turn aggregate summary of finite levels and numeric counts; PCM, reference waveforms and transcripts are rejected by the telemetry filter."
+    },
+    {
+      "id": "durable_store_off_runtime",
+      "baseline_reproduction": "A real-model, no-microphone dry-run exited after 6637 ms while a runtime worker was blocked in filesystem journal commit; one fsync took 3.300104 s.",
+      "implementation": "Run exclusive durable Store transactions on blocking workers; retain sync-before-dispatch, current-state mutation, bounded watchdog, cancellation and no-replay checks. Cancel releases audio and native authority before asynchronous usage bookkeeping. Late undo cleanup cannot restore an obsolete frontier."
+    },
+    {
+      "id": "x11_overlay_abstract_socket",
+      "baseline_reproduction": "The real desktop on DISPLAY=:0 is reachable over the authenticated Linux abstract socket but its filesystem X0 entry is absent. x11rb 0.14 normal connect fails, causing overlay_unavailable despite an active compositor and powered monitor.",
+      "implementation": "Use the shared authenticated same-display X11 connector for the read-only Eva output probe; enable its feature for nested Wayland builds too. Preserve DPMS, mapped-window and monitor-geometry checks.",
+      "deployment": "Native release build and two isolated presentation tests passed; installed hash matches built binary. Seamless restart preserved windows, workspaces and view. standby_allowed=true; doctor ready=true."
+    }
+  ],
+  "local_validation": {
+    "regression": {
+      "command": "cargo +1.89.0 test --locked --offline --target-dir target/eva-msrv -p jwm-eva -p jwm_eva_core -p jwm_ipc_client",
+      "passed": 300,
+      "failed": 0,
+      "ignored": 6,
+      "scope": "final source including pre-push review fixes"
+    },
+    "native_pulse": {
+      "passed": 2,
+      "failed": 0,
+      "private_synthetic_server": true,
+      "uses_hardware": false,
+      "streams_remaining": 0,
+      "four_second_burst_drain_ms": 4033,
+      "streamed_gap_ms": 650,
+      "short_final_tail_ms": 20,
+      "interrupted_after_rebuffer_source_ms": 431,
+      "stop_assertion_bound_ms": 200,
+      "native_capture_with_controlled_pcm_barge_in": {
+        "result": "passed",
+        "synthetic_pcm_rms": 0.012,
+        "native_output_stop_ms": 11,
+        "source": "private native sine capture, gain normalized in memory after framing",
+        "history": "heard prefix truncated; unheard tail excluded",
+        "wall_clock_speech_onset_latency_claimed": false,
+        "concurrent_store_write_sleep_ms": 1500,
+        "interruption_completed_before_store_write": true
+      },
+      "fixture_setup_retries": [
+        {
+          "result": "failed",
+          "reason": "fixed synthetic-source volume did not trigger the intended low-gain test"
+        },
+        {
+          "result": "failed",
+          "reason": "native source volume calibration produced clipping instead of the intended low-gain signal"
+        }
+      ],
+      "fixture_correction": "The synthetic module delivers two-second bursts. The final test warms native capture and normalizes only its in-memory test PCM; no device-volume timing claim is made and no real audio server is touched.",
+      "artifacts": "/tmp/jwm-eva-pulse-epyd98d9"
+    },
+    "format": "passed (jwm-eva and jwm_eva_core)",
+    "diff_check": "passed",
+    "clippy": {
+      "result": "passed_with_existing_lint_allowances",
+      "allowed_existing_categories": [
+        "collapsible_if",
+        "needless_borrow",
+        "large_enum_variant"
+      ],
+      "strict_zero_warning_pass_claimed": false,
+      "scope": "final source including pre-push review fixes"
+    },
+    "live_text_planning": {
+      "microphone_opened": false,
+      "audio_uploaded": false,
+      "desktop_execution": false,
+      "uses_configured_model": true,
+      "uses_real_budget_and_exclusive_store_lock": true,
+      "execution_ledger_unchanged": true,
+      "attempts": [
+        {
+          "version": "before_task_choice_restriction",
+          "result": "passed_after_bounded_repair",
+          "elapsed_ms": 8780,
+          "planning_responses": 3,
+          "initial_rejection": "undo_plan_requires_new_task"
+        },
+        {
+          "version": "after_task_choice_restriction",
+          "result": "failed_without_final_plan",
+          "elapsed_ms": 13860,
+          "completed_planning_responses": 1,
+          "inference": "Elapsed time is consistent with the configured planning deadline, but the probe initially collapsed the original error to plan_invalid; exact cause was not preserved."
+        },
+        {
+          "version": "task_choices_and_private_diagnostics_build",
+          "result": "passed",
+          "elapsed_ms": 5130,
+          "planning_responses": 2,
+          "schema_repair_needed": false,
+          "action": "undo_last_plan"
+        }
+      ],
+      "setup_correction": "An initial probe fixture omitted required set_layout.tag_number and failed before inference; the fixture was corrected before the attempts listed here."
+    },
+    "core_inventory_run": {
+      "scope": "joint Eva/core/IPC command before the final focused run",
+      "core_passed": 41,
+      "core_failed": 2,
+      "failed_tests": [
+        "actions::registry::tests::catalog_tracks_every_current_ipc_registration",
+        "actions::registry::tests::current_registration_and_capability_inventory_report"
+      ],
+      "reason": "Concurrent root IPC registration show_desktop is absent from the Eva action inventory. This is recorded as a failure; no joint all-green claim is made.",
+      "resolved_by_pre_push_review": true
+    },
+    "runtime_io": {
+      "before": {
+        "microphone_opened": false,
+        "desktop_execution": false,
+        "elapsed_ms": 6637,
+        "daemon_exited": true,
+        "observed_fsync_s": 3.300104
+      },
+      "after": {
+        "microphone_opened": false,
+        "desktop_execution": false,
+        "elapsed_ms": 4240,
+        "daemon_exited": false,
+        "disposition": "noop",
+        "fsync_count": 20,
+        "slowest_fsync_ms": 68.9
+      },
+      "same_disk_pressure_after_claimed": false,
+      "deterministic_regressions": [
+        "Current-thread runtime keeps heartbeat while Store work sleeps 180 ms",
+        "One-second real child watchdog stays alive during 1500 ms blocking Store work; actually stalled actor still exits 70",
+        "Canceled Store waiter cannot advance subsequent admission",
+        "Interruption does not wait for the Store mutex",
+        "Late undo cleanup preserves newer or cleared frontier"
+      ]
+    },
+    "native_presentation": {
+      "passed": 2,
+      "failed": 0,
+      "isolated_xvfb": true,
+      "keeps_dpms_and_host_visibility_gates": true,
+      "actual_desktop_read_only_probe": {
+        "normal_x11rb_014_connect": false,
+        "shared_authenticated_connector": true,
+        "dpms_capable": true,
+        "dpms_state": "ON"
+      },
+      "doctor_after_install": {
+        "ready": true,
+        "microphone_opened": false
+      },
+      "service_after_install": {
+        "active": true,
+        "restarts_since_v4_install": 0
+      }
+    }
+  },
+  "live_cases": [
+    {
+      "id": "R01",
+      "scenario": "same-desktop layout change followed by spoken undo and spoken session exit",
+      "result": "partial_observed",
+      "user_report": "正常",
+      "observed_generations": [
+        1,
+        2
+      ],
+      "evidence_source": "user feedback and service journal; original 20-minute observer had expired before the voice test",
+      "verified_facts": [
+        "generation 1 turn 1: set_layout verified succeeded; speech output drained",
+        "generation 1 turn 2: discovery, plan and schema repair followed by session_failed/plan_invalid; no undo dispatch",
+        "generation 2 turn 1: set_layout verified succeeded; speech output drained",
+        "generation 2 turn 2: resources released without a session failure event",
+        "after user report: current workspace 1 layout monocle; native microphone and output streams empty"
+      ],
+      "acceptance_note": "User reports normal behavior, but same-session undo cannot be marked passed because the first follow-up failed validation and restoration used set_layout in a new session.",
+      "installation": "first_rebuffer_and_undo_repair_build"
+    },
+    {
+      "id": "R02",
+      "scenario": "interrupt spoken count to twenty with stop-listening request",
+      "result": "failed",
+      "user_report": "没有停止数数以及关闭",
+      "observed_generation": 1,
+      "evidence_source": "Eva-only observer and service journal after second installation",
+      "verified_facts": [
+        "native microphone remained active throughout responding",
+        "spoken count playback drained completely without a speech_interrupted event",
+        "session entered follow_up instead of closing",
+        "session later failed with realtime_write_timeout and released resources"
+      ],
+      "cleanup_note": "Local cancel was sent after failure and resource release; this does not count as voice stop-listening success.",
+      "installation": "task_choices_and_private_diagnostics_build"
+    },
+    {
+      "id": "R03",
+      "scenario": "repeat natural interruption after noise calibration and syllable-window fix",
+      "installation": "noise_calibrated_barge_in_build",
+      "result": "blocked_by_service_watchdog",
+      "user_report": "麦克风状态异常",
+      "verified_facts": [
+        "generation 2 reached discovery and planning usage settlement, but no playback or interruption acceptance was observed",
+        "the five-second internal watchdog exited the daemon; systemd then restarted it",
+        "a subsequent activation overlapped daemon restart"
+      ],
+      "acceptance_note": "Neither natural interruption nor voice-requested microphone close passed in this case."
+    },
+    {
+      "id": "R04",
+      "scenario": "count to twenty, naturally interrupt at two or three with a request to close the microphone",
+      "installation": "nonblocking_durable_store_build + authenticated X11 presentation probe",
+      "result": "awaiting_user",
+      "observer": "/tmp/eva-retest-v4-20261030.jsonl",
+      "pre_test_state": "doctor ready; daemon active with no v4 restarts; no active microphone"
+    }
+  ],
+  "limitations": [
+    "Local and synthetic results do not establish physical-microphone or cloud end-to-end success.",
+    "No live retest pass claimed until user hearing and observed native state/receipts agree.",
+    "The current real-model text probe passed without repair; physical same-session undo and natural interruption still require a matching live observation.",
+    "The watchdog cause was reproduced and fixed locally; physical microphone and speaker behavior still require another matching live observation."
+  ],
+  "privacy": {
+    "raw_audio_persisted": false,
+    "input_transcription_enabled": false,
+    "credentials_or_window_titles_persisted": false
+  },
+  "installations": [
+    {
+      "version": "first_rebuffer_and_undo_repair_build",
+      "environment": {
+        "backend": "X11",
+        "audio_backend": "pulseaudio",
+        "source_revision": "d7efc6cfe2adf645436099816c0da00995117bf2+worktree",
+        "source_files_sha256": {
+          "eva/src/audio/pulse_playback.rs": "df5bdc37df30c3cf103c41e8847b33293a8c44d6fe7f5c7262419c7296911956",
+          "eva/src/planning_input.rs": "2a36c2cdf56643ddb0e71ec7684aead728e7f2a07e0de1d76ec04d5afb8463ed",
+          "eva/src/session.rs": "2b11e124269a904fc77ff27a3dcdd0bb736dec6d2d579e1eef383e703c094b20"
+        },
+        "installed_eva_sha256": "4d1059fc97b230fc7f2127fff168d20ea8c7a4167072ad7ba409c7f36e6261f7",
+        "built_eva_sha256": "4d1059fc97b230fc7f2127fff168d20ea8c7a4167072ad7ba409c7f36e6261f7",
+        "model": "gpt-realtime-2.1-mini",
+        "configuration_preserved": true
+      }
+    },
+    {
+      "version": "task_choices_and_private_diagnostics_build",
+      "environment": {
+        "backend": "X11",
+        "audio_backend": "pulseaudio",
+        "source_revision": "778a63b3c12b1965fba265716dae49480cdc6c1d+worktree",
+        "source_files_sha256": {
+          "eva/src/audio/pulse_playback.rs": "df5bdc37df30c3cf103c41e8847b33293a8c44d6fe7f5c7262419c7296911956",
+          "eva/src/planning_input.rs": "2a36c2cdf56643ddb0e71ec7684aead728e7f2a07e0de1d76ec04d5afb8463ed",
+          "eva/src/session.rs": "be4814b7aab5c54178561cae6a5a75a045e0fb6d48161742bf7107928a7d52ce",
+          "eva/src/errors.rs": "e3989d5b4038acb1b793d9ad0ee9c8915c118716a687c8734fd0b277db95e5a4"
+        },
+        "installed_eva_sha256": "4679363a52fe35a9ea2565a509c4f9f787f066d6291e50a3d3890e37fe7466db",
+        "built_eva_sha256": "4679363a52fe35a9ea2565a509c4f9f787f066d6291e50a3d3890e37fe7466db",
+        "model": "gpt-realtime-2.1-mini",
+        "configuration_preserved": true
+      }
+    },
+    {
+      "version": "noise_calibrated_barge_in_build",
+      "environment": {
+        "backend": "X11",
+        "audio_backend": "pulseaudio",
+        "source_revision": "1f06083c7d2959f9202f95531c9d30997d30dae8+worktree",
+        "source_files_sha256": {
+          "eva/src/audio.rs": "99c1c9e3471309aca108aba78c88ef2601852cc068278e84e7aa21cf15a2e6b0",
+          "eva/src/audio/pulse_playback.rs": "776d09e832a753d2de5fb1af43ce9308a787bb6024fc9c49d628a83e99f3f419",
+          "eva/src/errors.rs": "e3989d5b4038acb1b793d9ad0ee9c8915c118716a687c8734fd0b277db95e5a4",
+          "eva/src/input.rs": "0768250e77eb96b4ce67afde48ee81b9b7106db0cde12500b452e2041fc88086",
+          "eva/src/planning_input.rs": "2a36c2cdf56643ddb0e71ec7684aead728e7f2a07e0de1d76ec04d5afb8463ed",
+          "eva/src/session.rs": "ff9704586b57e600a099f71752e50b7dbfc6982bcff580d1d591556c41434a62",
+          "eva/src/telemetry.rs": "80eb99a4ac8f45a8d8370d028d89f011b0d0e46182f9a09a58be5cf6bb1ace5b"
+        },
+        "installed_eva_sha256": "a8de32484ac0bab6a22ea9e73fcf04659666895b715eab39863fc817d76c7ef8",
+        "built_eva_sha256": "a8de32484ac0bab6a22ea9e73fcf04659666895b715eab39863fc817d76c7ef8",
+        "model": "gpt-realtime-2.1-mini",
+        "configuration_preserved": true
+      }
+    },
+    {
+      "version": "nonblocking_durable_store_build",
+      "installed_at": "2026-10-30T11:50:22+08:00",
+      "environment": {
+        "backend": "X11",
+        "audio_backend": "pulseaudio",
+        "source_revision": "1f06083c7d2959f9202f95531c9d30997d30dae8+worktree",
+        "source_files_sha256": {
+          "eva/src/audio.rs": "99c1c9e3471309aca108aba78c88ef2601852cc068278e84e7aa21cf15a2e6b0",
+          "eva/src/audio/pulse_playback.rs": "360e305e4228b3c935f3258accb459242dac91bc1e299755c4fd529c0b4493be",
+          "eva/src/errors.rs": "e3989d5b4038acb1b793d9ad0ee9c8915c118716a687c8734fd0b277db95e5a4",
+          "eva/src/input.rs": "0768250e77eb96b4ce67afde48ee81b9b7106db0cde12500b452e2041fc88086",
+          "eva/src/planning_input.rs": "2a36c2cdf56643ddb0e71ec7684aead728e7f2a07e0de1d76ec04d5afb8463ed",
+          "eva/src/session.rs": "3048f40208b98955e3a0285a01184ab9d772f28c089b79f7f14fa781f09901e1",
+          "eva/src/telemetry.rs": "80eb99a4ac8f45a8d8370d028d89f011b0d0e46182f9a09a58be5cf6bb1ace5b",
+          "eva/src/store.rs": "3c0c0a51b1e8652d878eff39addfaf875c45971eb8dfa4fe964d56e4c476bc19",
+          "eva/src/daemon.rs": "389955566caf40893b608cf9588e49903534ffb52c19bddb7a3f04a8b62e6584",
+          "eva/src/executor.rs": "d7c58142e30db8966f0ef58d165593e8e1acabe068eb083cb73e7330c0c7858b",
+          "eva/src/wake.rs": "72bb988eaf759c5bb831ac7e02b3e68b72e727587c7f9e2cde624cfe7ee6a99c",
+          "crates/jwm_eva_core/src/ledger.rs": "3ae0a127dc4e3e92431b5042997d9b60a4d55e320dc8725c1ddb5b05a7dc2a1b"
+        },
+        "installed_eva_sha256": "3310785e7cd17e2dd53ae29e29a5a93cd4f0d8c8a94fc73f31bb414189df5231",
+        "built_eva_sha256": "3310785e7cd17e2dd53ae29e29a5a93cd4f0d8c8a94fc73f31bb414189df5231",
+        "model": "gpt-realtime-2.1-mini",
+        "configuration_preserved": true
+      }
+    }
+  ],
+  "validation_history": [
+    {
+      "version": "noise_calibrated_barge_in_build",
+      "validation": {
+        "regression": {
+          "command": "cargo +1.89.0 test --locked --offline --target-dir target/eva-msrv -p jwm-eva -p jwm_eva_core -p jwm_ipc_client",
+          "passed": 296,
+          "failed": 0,
+          "ignored": 6
+        },
+        "native_pulse": {
+          "passed": 2,
+          "failed": 0,
+          "private_synthetic_server": true,
+          "uses_hardware": false,
+          "streams_remaining": 0,
+          "four_second_burst_drain_ms": 4025,
+          "streamed_gap_ms": 650,
+          "short_final_tail_ms": 20,
+          "interrupted_after_rebuffer_source_ms": 441,
+          "stop_assertion_bound_ms": 200,
+          "native_capture_with_controlled_pcm_barge_in": {
+            "result": "passed",
+            "synthetic_pcm_rms": 0.012,
+            "native_output_stop_ms": 1,
+            "source": "private native sine capture, gain normalized in memory after framing",
+            "history": "heard prefix truncated; unheard tail excluded",
+            "wall_clock_speech_onset_latency_claimed": false
+          },
+          "fixture_setup_retries": [
+            {
+              "result": "failed",
+              "reason": "fixed synthetic-source volume did not trigger the intended low-gain test"
+            },
+            {
+              "result": "failed",
+              "reason": "native source volume calibration produced clipping instead of the intended low-gain signal"
+            }
+          ],
+          "fixture_correction": "The synthetic module delivers two-second bursts. The final test warms native capture and normalizes only its in-memory test PCM; no device-volume timing claim is made and no real audio server is touched."
+        },
+        "format": "passed (jwm-eva package)",
+        "diff_check": "passed (Eva files)",
+        "clippy": {
+          "result": "passed_with_existing_lint_allowances",
+          "allowed_existing_categories": [
+            "collapsible_if",
+            "needless_borrow",
+            "large_enum_variant"
+          ],
+          "strict_zero_warning_pass_claimed": false
+        },
+        "live_text_planning": {
+          "microphone_opened": false,
+          "audio_uploaded": false,
+          "desktop_execution": false,
+          "uses_configured_model": true,
+          "uses_real_budget_and_exclusive_store_lock": true,
+          "execution_ledger_unchanged": true,
+          "attempts": [
+            {
+              "version": "before_task_choice_restriction",
+              "result": "passed_after_bounded_repair",
+              "elapsed_ms": 8780,
+              "planning_responses": 3,
+              "initial_rejection": "undo_plan_requires_new_task"
+            },
+            {
+              "version": "after_task_choice_restriction",
+              "result": "failed_without_final_plan",
+              "elapsed_ms": 13860,
+              "completed_planning_responses": 1,
+              "inference": "Elapsed time is consistent with the configured planning deadline, but the probe initially collapsed the original error to plan_invalid; exact cause was not preserved."
+            },
+            {
+              "version": "task_choices_and_private_diagnostics_build",
+              "result": "passed",
+              "elapsed_ms": 5130,
+              "planning_responses": 2,
+              "schema_repair_needed": false,
+              "action": "undo_last_plan"
+            }
+          ],
+          "setup_correction": "An initial probe fixture omitted required set_layout.tag_number and failed before inference; the fixture was corrected before the attempts listed here."
+        }
+      }
+    },
+    {
+      "version": "nonblocking_durable_store_build_before_review",
+      "validation": {
+        "regression": {
+          "command": "cargo +1.89.0 test --locked --offline --target-dir target/eva-msrv -p jwm-eva -p jwm_ipc_client",
+          "passed": 257,
+          "failed": 0,
+          "ignored": 6,
+          "scope": "final v4 Eva and IPC suite"
+        },
+        "native_pulse": {
+          "passed": 2,
+          "failed": 0,
+          "private_synthetic_server": true,
+          "uses_hardware": false,
+          "streams_remaining": 0,
+          "four_second_burst_drain_ms": 4033,
+          "streamed_gap_ms": 650,
+          "short_final_tail_ms": 20,
+          "interrupted_after_rebuffer_source_ms": 431,
+          "stop_assertion_bound_ms": 200,
+          "native_capture_with_controlled_pcm_barge_in": {
+            "result": "passed",
+            "synthetic_pcm_rms": 0.012,
+            "native_output_stop_ms": 11,
+            "source": "private native sine capture, gain normalized in memory after framing",
+            "history": "heard prefix truncated; unheard tail excluded",
+            "wall_clock_speech_onset_latency_claimed": false,
+            "concurrent_store_write_sleep_ms": 1500,
+            "interruption_completed_before_store_write": true
+          },
+          "fixture_setup_retries": [
+            {
+              "result": "failed",
+              "reason": "fixed synthetic-source volume did not trigger the intended low-gain test"
+            },
+            {
+              "result": "failed",
+              "reason": "native source volume calibration produced clipping instead of the intended low-gain signal"
+            }
+          ],
+          "fixture_correction": "The synthetic module delivers two-second bursts. The final test warms native capture and normalizes only its in-memory test PCM; no device-volume timing claim is made and no real audio server is touched.",
+          "artifacts": "/tmp/jwm-eva-pulse-epyd98d9"
+        },
+        "format": "passed (jwm-eva and jwm_eva_core)",
+        "diff_check": "passed (all current worktree changes)",
+        "clippy": {
+          "result": "passed_with_existing_lint_allowances",
+          "allowed_existing_categories": [
+            "collapsible_if",
+            "needless_borrow",
+            "large_enum_variant"
+          ],
+          "strict_zero_warning_pass_claimed": false
+        },
+        "live_text_planning": {
+          "microphone_opened": false,
+          "audio_uploaded": false,
+          "desktop_execution": false,
+          "uses_configured_model": true,
+          "uses_real_budget_and_exclusive_store_lock": true,
+          "execution_ledger_unchanged": true,
+          "attempts": [
+            {
+              "version": "before_task_choice_restriction",
+              "result": "passed_after_bounded_repair",
+              "elapsed_ms": 8780,
+              "planning_responses": 3,
+              "initial_rejection": "undo_plan_requires_new_task"
+            },
+            {
+              "version": "after_task_choice_restriction",
+              "result": "failed_without_final_plan",
+              "elapsed_ms": 13860,
+              "completed_planning_responses": 1,
+              "inference": "Elapsed time is consistent with the configured planning deadline, but the probe initially collapsed the original error to plan_invalid; exact cause was not preserved."
+            },
+            {
+              "version": "task_choices_and_private_diagnostics_build",
+              "result": "passed",
+              "elapsed_ms": 5130,
+              "planning_responses": 2,
+              "schema_repair_needed": false,
+              "action": "undo_last_plan"
+            }
+          ],
+          "setup_correction": "An initial probe fixture omitted required set_layout.tag_number and failed before inference; the fixture was corrected before the attempts listed here."
+        },
+        "core_inventory_run": {
+          "scope": "joint Eva/core/IPC command before the final focused run",
+          "core_passed": 41,
+          "core_failed": 2,
+          "failed_tests": [
+            "actions::registry::tests::catalog_tracks_every_current_ipc_registration",
+            "actions::registry::tests::current_registration_and_capability_inventory_report"
+          ],
+          "reason": "Concurrent root IPC registration show_desktop is absent from the Eva action inventory. This is recorded as a failure; no joint all-green claim is made."
+        },
+        "runtime_io": {
+          "before": {
+            "microphone_opened": false,
+            "desktop_execution": false,
+            "elapsed_ms": 6637,
+            "daemon_exited": true,
+            "observed_fsync_s": 3.300104
+          },
+          "after": {
+            "microphone_opened": false,
+            "desktop_execution": false,
+            "elapsed_ms": 4240,
+            "daemon_exited": false,
+            "disposition": "noop",
+            "fsync_count": 20,
+            "slowest_fsync_ms": 68.9
+          },
+          "same_disk_pressure_after_claimed": false,
+          "deterministic_regressions": [
+            "Current-thread runtime keeps heartbeat while Store work sleeps 180 ms",
+            "One-second real child watchdog stays alive during 1500 ms blocking Store work; actually stalled actor still exits 70",
+            "Canceled Store waiter cannot advance subsequent admission",
+            "Interruption does not wait for the Store mutex",
+            "Late undo cleanup preserves newer or cleared frontier"
+          ]
+        },
+        "native_presentation": {
+          "passed": 2,
+          "failed": 0,
+          "isolated_xvfb": true,
+          "keeps_dpms_and_host_visibility_gates": true,
+          "actual_desktop_read_only_probe": {
+            "normal_x11rb_014_connect": false,
+            "shared_authenticated_connector": true,
+            "dpms_capable": true,
+            "dpms_state": "ON"
+          },
+          "doctor_after_install": {
+            "ready": true,
+            "microphone_opened": false
+          },
+          "service_after_install": {
+            "active": true,
+            "restarts_since_v4_install": 0
+          }
+        }
+      }
+    }
+  ],
+  "pre_push_review": {
+    "changes": [
+      "Route the caption-enabled wake handoff association through the blocking Store worker as well.",
+      "Register show_desktop as a native workflow (bridge_internal) and assert that model tools do not expose it; native CLI/gesture behavior is unchanged."
+    ],
+    "installed_on_desktop": false,
+    "installed_version_note": "The environment and installation hashes above describe the already installed v4 binaries. The two review follow-ups are source changes awaiting a later install."
+  }
+}

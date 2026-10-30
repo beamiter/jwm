@@ -135,6 +135,7 @@ alloc-counter = []
 # Nested Wayland development backends (wayland-x11 and wayland-winit).
 backend-wayland-nested = [
     "wayland-backends",
+    "xbar_core/x11-connection",
     "dep:gbm",
     "dep:winit",
     "dep:x11rb",

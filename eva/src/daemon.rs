@@ -288,7 +288,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     worker=Some(tokio::spawn(async move{
                         let result=crate::session::dry_run(&config,&text,storage.clone()).await;
                         let value=match &result{Ok(v)=>json!({"success":true,"data":v}),Err(e)=>json!({"success":false,"error":e.to_string()})};
-                        let _=request.reply.send(value);storage.lock().unwrap().unknown_pending()?;result.map(|_|())
+                        let _=request.reply.send(value);crate::store::unknown_pending(&storage).await?;result.map(|_|())
                     }));continue;
                 }
                 let response=match request.request["command"].as_str().unwrap_or(""){
@@ -315,7 +315,15 @@ pub async fn run(c: Config) -> io::Result<()> {
                         wake_recovery.disable();
                         wake_status=json!({"state":"disabled","microphone_active":false});
                         let result=command("assistant_control",json!({"action":"cancel"})).await;
-                        stop(&mut worker,&mut cancellation).await;store.lock().unwrap().unknown_pending()?;
+                        stop(&mut worker,&mut cancellation).await;
+                        // Audio and native authority are already stopped. Cost
+                        // cleanup may wait on disk; it cannot delay control or
+                        // watchdog progress and grants no execution authority.
+                        let storage=store.clone();tokio::spawn(async move {
+                            if let Err(error)=crate::store::unknown_pending(&storage).await {
+                                crate::telemetry::event("usage_cleanup_failed",&json!({"result":crate::errors::session_code(&error)}));
+                            }
+                        });
                         match result{Ok(v)=>json!({"success":true,"data":v}),Err(e)=>json!({"success":false,"error":e.to_string()})}
                     },
                     _=>json!({"success":false,"error":"unsupported_control_command"}),
@@ -902,7 +910,11 @@ mod tests {
     }
     #[test]
     fn watchdog_stalled_actor_exits_and_live_actor_does_not() {
-        for (mode, expected) in [("stalled", Some(70)), ("alive", Some(0))] {
+        for (mode, expected) in [
+            ("stalled", Some(70)),
+            ("alive", Some(0)),
+            ("slow_store", Some(0)),
+        ] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "daemon::tests::watchdog_child", "--nocapture"])
                 .env("EVA_WATCHDOG_TEST", mode)
@@ -921,6 +933,45 @@ mod tests {
         let Ok(mode) = std::env::var("EVA_WATCHDOG_TEST") else {
             return;
         };
+        if mode == "slow_store" {
+            use crate::{config::Config, store::Store};
+            use std::{
+                sync::{Arc, Mutex},
+                time::Duration,
+            };
+            let dir = [std::path::PathBuf::from("/dev/shm"), std::env::temp_dir()]
+                .into_iter()
+                .find_map(|base| {
+                    let p = base.join(format!("eva-watchdog-io-{}", std::process::id()));
+                    crate::store::private_dir(&p).ok().map(|()| p)
+                })
+                .unwrap();
+            let store = Arc::new(Mutex::new(Store::open_at(dir.clone()).unwrap()));
+            let watchdog = super::Watchdog::start(1).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let storage = store.clone();
+                    let write = tokio::spawn(async move {
+                        crate::store::access(&storage, |storage| {
+                            std::thread::sleep(Duration::from_millis(1500));
+                            storage.reserve("slow-watchdog-write", "plan", &Config::default())
+                        })
+                        .await
+                    });
+                    while !write.is_finished() {
+                        watchdog.beat();
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    write.await.unwrap().unwrap();
+                });
+            drop(watchdog);
+            drop(store);
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
         let watchdog = super::Watchdog::start(1).unwrap();
         if mode == "stalled" {
             std::thread::sleep(std::time::Duration::from_secs(3));

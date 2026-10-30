@@ -94,7 +94,7 @@ pub async fn run(
         _=cancel.changed()=>Ok(Outcome::Cancelled),
     };
     publish(&tx, &source, "paused", "唤醒监听已暂停", false, 0.0);
-    store.lock().unwrap().unknown_pending()?;
+    crate::store::unknown_pending(&store).await?;
     result
 }
 
@@ -265,7 +265,7 @@ async fn detect_audio(
             );
             // create_response=false means uploading alone cannot start an
             // inference. Admission precedes the explicit detector response.
-            store.lock().unwrap().reserve(&request, "wake", c)?;
+            crate::store::reserve(store, &request, "wake", c).await?;
             ws.send(detection_request(c, &item.item, &request)).await?;
             active = Some(Active {
                 request,
@@ -301,9 +301,9 @@ async fn detect_audio(
                     let id=event["response"]["id"].as_str().filter(|id|!id.is_empty()&&id.len()<=128)
                         .ok_or_else(||io::Error::other("response_id_missing"))?.to_owned();
                     if a.response.as_ref().is_some_and(|old|*old!=id) { return Err(io::Error::other("multiple_responses_for_request")); }
-                    if a.response.is_none() { store.lock().unwrap().associate(&a.request,&id)?;a.response=Some(id); }
+                    if a.response.is_none() { crate::store::associate(store,&a.request,&id).await?;a.response=Some(id); }
                 }
-                store.lock().unwrap().receipt(&event)?;
+                crate::store::receipt(store,&event).await?;
                 if event["type"]=="input_audio_buffer.speech_started" {
                     let item=event["item_id"].as_str().ok_or_else(||io::Error::other("invalid_input_item"))?;
                     let at=event["audio_start_ms"].as_u64().ok_or_else(||io::Error::other("invalid_input_onset"))?;

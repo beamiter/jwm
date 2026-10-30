@@ -214,9 +214,6 @@ pub(super) fn playback_loop(
         &mut properties,
     )
     .ok_or_else(|| io::Error::other("pulse_playback_stream_creation_failed"))?;
-    let underflow = Rc::new(Cell::new(false));
-    let flag = underflow.clone();
-    stream.set_underflow_callback(Some(Box::new(move || flag.set(true))));
     let moved = Rc::new(Cell::new(false));
     let flag = moved.clone();
     stream.set_moved_callback(Some(Box::new(move || flag.set(true))));
@@ -260,6 +257,14 @@ pub(super) fn playback_loop(
         let _ = stream.disconnect();
         return Err(io::Error::other("pulse_playback_format_mismatch"));
     }
+    // A nonzero native prebuffer pauses on starvation and resumes at the same
+    // source cursor. With prebuf=0 the read cursor instead advances through
+    // silence, making relative writes and item-history offsets unsafe.
+    // Check the negotiated value, not only the value we requested.
+    if stream.get_buffer_attr().is_none_or(|attr| attr.prebuf == 0) {
+        let _ = stream.disconnect();
+        return Err(io::Error::other("pulse_playback_prebuffer_unavailable"));
+    }
 
     let result = (|| {
         let mut timing: Option<Pending> = None;
@@ -275,13 +280,10 @@ pub(super) fn playback_loop(
             if moved.get() {
                 return Err(io::Error::other("pulse_playback_device_changed"));
             }
-            if underflow.replace(false) && started && drain.is_none() {
-                // Only an already requested drain has submitted every source
-                // byte. Merely setting ending can leave bytes in our queue.
-                // Never append those bytes behind native underrun silence:
-                // that would destroy the mapping from source items to samples.
-                return Err(io::Error::other("pulse_playback_underrun"));
-            }
+            // Network gaps are expected in streamed speech. The nonzero
+            // prebuffer handles rebuffering without consuming source samples.
+            // Keep the stream and its native clock; never pad source silence
+            // or flush bytes which are still waiting to become audible.
             for operation in &start_operations {
                 if operation.completed()? == Some(false) {
                     return Err(io::Error::other("pulse_playback_start_failed"));
@@ -346,6 +348,10 @@ pub(super) fn playback_loop(
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .drain_started = true;
+                // After an underrun, a final chunk may be smaller than prebuf.
+                // No more source bytes can arrive after ending && empty, so
+                // explicitly release that short tail before requesting drain.
+                start_operations.push(Pending::start(|callback| stream.trigger(Some(callback))));
                 drain = Some(Pending::start(|callback| stream.drain(Some(callback))));
             }
             if let Some(operation) = &drain
@@ -574,6 +580,114 @@ mod tests {
                 "native PulseAudio four-second burst fully drained in {}ms",
                 started.elapsed().as_millis()
             );
+
+            // Realtime output can stall longer than the native prebuffer.
+            // Silence between chunks is not source audio, and a final chunk
+            // below prebuf must still play once the response is complete.
+            let mut playback = super::super::Playback::start().unwrap();
+            let history = playback.history();
+            playback.write_item("before-gap", 0, &chunk).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(650)).await;
+            assert!(history.played_samples().unwrap_or(0) <= u64::from(RATE) / 10);
+            playback
+                .write_item("after-gap", 0, &vec![0; chunk.len() * 3])
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(650)).await;
+            assert!(history.played_samples().unwrap_or(0) <= u64::from(RATE) * 4 / 10);
+            playback
+                .write_item("short-tail", 0, &vec![0; BYTES_PER_SECOND as usize / 50])
+                .await
+                .unwrap();
+            playback.finish().await.unwrap();
+            assert_eq!(history.played_samples(), Some(u64::from(RATE) * 42 / 100));
+            assert!(history.edits().is_empty());
+            eprintln!("native PulseAudio streamed gaps and short final tail fully drained");
+
+            // Interrupt after rebuffering: the long network pause cannot move
+            // the source cursor into later items or turn unheard audio into
+            // conversation history.
+            let mut playback = super::super::Playback::start().unwrap();
+            let history = playback.history();
+            playback.write_item("heard-before-gap", 0, &chunk).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(650)).await;
+            playback
+                .write_item("partial-after-gap", 0, &vec![0; BYTES_PER_SECOND as usize])
+                .await
+                .unwrap();
+            playback.write_item("unheard-tail", 0, &chunk).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let stopped = Instant::now();
+            drop(playback);
+            assert!(stopped.elapsed() < Duration::from_millis(200));
+            let played = history.played_samples().expect("fresh stop timing required");
+            assert!(played > u64::from(RATE) / 4 && played < u64::from(RATE) * 9 / 10);
+            let edits = history.edits();
+            assert_eq!(edits.len(), 2);
+            assert!(edits.iter().any(|edit| matches!(edit,
+                super::super::HistoryEdit::Truncate { item_id, .. } if item_id == "partial-after-gap")));
+            assert!(edits.iter().any(|edit| matches!(edit,
+                super::super::HistoryEdit::Delete { item_id } if item_id == "unheard-tail")));
+            eprintln!("native PulseAudio interrupted after rebuffering at {} source ms", played * 1000 / u64::from(RATE));
+
+            // Native capture plus controlled low-gain synthetic PCM must drive
+            // interruption of active output, not only exercise manual stop.
+            // This fixture's sine source delivers two-second bursts, so warm
+            // capture first and apply gain to its PCM after native framing.
+            // No real device or source volume is changed.
+            let store = Arc::new(Mutex::new(crate::store::Store::open_at(
+                socket.parent().unwrap().join("eva-barge-state")).unwrap()));
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+            let capture = super::super::Capture::start("default", sender).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap().unwrap();
+            let mut playback = super::super::Playback::start().unwrap();
+            let history = playback.history();
+            playback.write_item("interruptible-reply", 0, &vec![0; BYTES_PER_SECOND as usize]).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while history.played_samples().unwrap_or(0) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.unwrap();
+            let mut gate = super::super::BargeInGate::default();
+            let mut peak = 0.0f32;
+            let slow_write = crate::store::access(&store, |storage| {
+                thread::sleep(Duration::from_millis(1500));
+                storage.reserve("native-barge-slow-write", "plan", &crate::config::Config::default())
+            });
+            tokio::pin!(slow_write);
+            {
+            let onset = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let mut frame = receiver.recv().await.unwrap().unwrap();
+                    if frame.level <= 0.0001 { continue; }
+                    let gain = 0.012 / frame.level;
+                    for sample in frame.pcm.chunks_exact_mut(2) {
+                        let value = (f32::from(i16::from_le_bytes([sample[0], sample[1]])) * gain)
+                            .round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+                        sample.copy_from_slice(&value.to_le_bytes());
+                    }
+                    frame.level = super::super::rms(&frame.pcm);
+                    peak = peak.max(frame.level);
+                    if gate.observe(&frame) { break; }
+                }
+            });
+            tokio::pin!(onset);
+            tokio::select! { biased;
+                result = &mut slow_write => panic!("slow bookkeeping blocked native barge-in: {result:?}"),
+                result = &mut onset => result.expect("low-gain native input did not interrupt during store I/O"),
+            }
+            }
+            let stopped = Instant::now();
+            drop(playback);
+            assert!(stopped.elapsed() < Duration::from_millis(200));
+            let stop_ms = stopped.elapsed().as_millis();
+            capture.stop().await;
+            assert!(peak > 0.006 && peak < 0.025, "fixture level {peak} did not reproduce the old gate's blind spot");
+            assert!(history.edits().iter().any(|edit| matches!(edit,
+                super::super::HistoryEdit::Truncate { item_id, audio_end_ms, .. }
+                    if item_id == "interruptible-reply" && *audio_end_ms > 0 && *audio_end_ms < 1000)));
+            eprintln!("native capture with low-gain test PCM interrupted playback: peak={peak:.5}, stop={stop_ms}ms");
+            slow_write.await.unwrap();
         });
     }
 }

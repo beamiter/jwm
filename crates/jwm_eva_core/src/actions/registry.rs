@@ -1289,6 +1289,11 @@ mod tests {
             .unwrap();
         assert_eq!(variants.len(), semantic_actions().len());
         assert!(!tool.to_string().contains("clipboard_record"));
+        // Native gesture/CLI workflow; no guarded voice adapter is implemented.
+        assert!(!tool.to_string().contains("show_desktop"));
+        assert!(full_registry().iter().any(|entry| {
+            entry.canonical_name == "show_desktop" && entry.role == "bridge_internal"
+        }));
         assert!(
             !variants
                 .iter()

@@ -726,6 +726,12 @@
     "role": "user"
   },
   {
+    "name": "show_desktop",
+    "canonical_name": "show_desktop",
+    "kind": "command",
+    "role": "bridge_internal"
+  },
+  {
     "name": "smov",
     "canonical_name": "scrolling_move_column",
     "kind": "command",

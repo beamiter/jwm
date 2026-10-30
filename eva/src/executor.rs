@@ -143,7 +143,10 @@ async fn execute_with_step_budget(
     let mut ledger_error = None;
     // The first budget includes waiting for the shared persistent store too.
     let mut dispatch_deadline = std::time::Instant::now() + step_budget;
-    let previous_mutating_plan_hash = store.lock().unwrap().ledger.last_mutating_plan_hash.clone();
+    let previous_mutating_plan_hash = crate::store::access(&store, |storage| {
+        Ok(storage.ledger.last_mutating_plan_hash.clone())
+    })
+    .await?;
     for (index, action) in plan.actions.iter().enumerate() {
         let completed = steps
             .iter()
@@ -232,14 +235,26 @@ async fn execute_with_step_budget(
             None
         };
         let intent = {
-            let mut storage = store.lock().unwrap();
-            storage
+            let (id, plan_hash, wm_instance_id, action, lifecycle_evidence, cancelled) = (
+                id.clone(),
+                plan.plan_hash.clone(),
+                plan.wm_instance_id.clone(),
+                action.clone(),
+                lifecycle_evidence.clone(),
+                dispatch_cancelled.clone(),
+            );
+            crate::store::access(&store, move |storage| {
+                if cancelled.load(Ordering::Acquire) {
+                    crate::lifecycle::forget(&id);
+                    return Err(io::Error::other("cancelled"));
+                }
+                storage
                 .ledger
                 .record_intent(OperationRecord {
                     operation_id: id.clone(),
-                    plan_hash: plan.plan_hash.clone(),
-                    wm_instance_id: plan.wm_instance_id.clone(),
-                    action: action.clone(),
+                    plan_hash,
+                    wm_instance_id,
+                    action,
                     state: OperationState::Dispatched,
                     result: lifecycle_evidence.as_ref().map(
                         |evidence| json!({"status":"dispatched","verified":{"lifecycle":evidence}}),
@@ -248,6 +263,8 @@ async fn execute_with_step_budget(
                 })
                 .map_err(io::Error::other)
                 .and_then(|()| storage.save())
+            })
+            .await
         };
         if let Err(error) = intent {
             crate::lifecycle::forget(&id);
@@ -256,23 +273,29 @@ async fn execute_with_step_budget(
             let failure = json!({"status":"failed","error":"ledger_write_failed_before_dispatch","dispatched":false});
             // No desktop request has been sent. Even if a partial disk write
             // retained the intent, recovery must never infer it is replayable.
-            let _ = store.lock().unwrap().ledger.record_result(
-                &id,
-                OperationState::Failed,
-                failure.clone(),
-            );
+            let (failed_id, failed_result) = (id.clone(), failure.clone());
+            let _ = crate::store::access(&store, move |storage| {
+                storage
+                    .ledger
+                    .record_result(&failed_id, OperationState::Failed, failed_result)
+                    .map_err(io::Error::other)
+            })
+            .await;
             steps.push(json!({"name":action.name,"operation_id":id,"status":"failed","dispatched":false,"ledger_error":detail,"result":failure}));
             break;
         }
         if std::time::Instant::now() >= dispatch_deadline {
             crate::lifecycle::forget(&id);
             let failure = json!({"status":"cancelled","error":"execution_deadline_expired","dispatched":false});
-            let mut storage = store.lock().unwrap();
-            let saved = storage
-                .ledger
-                .record_result(&id, OperationState::Cancelled, failure.clone())
-                .map_err(io::Error::other)
-                .and_then(|()| storage.save());
+            let (saved_id, saved_failure) = (id.clone(), failure.clone());
+            let saved = crate::store::access(&store, move |storage| {
+                storage
+                    .ledger
+                    .record_result(&saved_id, OperationState::Cancelled, saved_failure)
+                    .map_err(io::Error::other)
+                    .and_then(|()| storage.save())
+            })
+            .await;
             if let Err(error) = saved {
                 ledger_error = Some(error.to_string());
             }
@@ -319,33 +342,8 @@ async fn execute_with_step_budget(
                 } else {
                     crate::lifecycle::forget(&id);
                 }
-                let mut store = storage.lock().unwrap();
-                let current = store.ledger.operations.get(&id);
-                if current.is_some_and(|record| {
-                    matches!(
-                        record.state,
-                        OperationState::Succeeded
-                            | OperationState::Failed
-                            | OperationState::Cancelled
-                    )
-                }) && let Some(known) = current.and_then(|record| record.result.clone())
-                {
-                    return (known, dispatched);
-                }
-                let status = operation_state(&result);
-                let saved = store
-                    .ledger
-                    .record_result(
-                        &id,
-                        status,
-                        crate::result_projection::for_ledger(&result, &record_action, &Value::Null),
-                    )
-                    .map_err(io::Error::other)
-                    .and_then(|()| store.save());
-                if let Err(error) = saved {
-                    result["ledger_error"] = json!(error.to_string());
-                }
-                (result, dispatched)
+                persist_settlement(storage, id, record_action, Value::Null, result, dispatched)
+                    .await
             });
             match current.await {
                 Ok(result) => result,
@@ -366,35 +364,10 @@ async fn execute_with_step_budget(
             // operation so a late IPC receipt settles its ledger intent; this
             // task has neither the remaining steps nor authority to replay it.
             let current = tokio::spawn(async move {
-                let (mut result, dispatched) =
+                let (result, dispatched) =
                     dispatch_once_cancellable(wire, &id, &instance, dispatch_deadline, cancelled)
                         .await;
-                let mut store = storage.lock().unwrap();
-                let current = store.ledger.operations.get(&id);
-                if current.is_some_and(|record| {
-                    matches!(
-                        record.state,
-                        OperationState::Succeeded
-                            | OperationState::Failed
-                            | OperationState::Cancelled
-                    )
-                }) && let Some(known) = current.and_then(|record| record.result.clone())
-                {
-                    return (known, dispatched);
-                }
-                let saved = store
-                    .ledger
-                    .record_result(
-                        &id,
-                        operation_state(&result),
-                        crate::result_projection::for_ledger(&result, &action, &before),
-                    )
-                    .map_err(io::Error::other)
-                    .and_then(|()| store.save());
-                if let Err(error) = saved {
-                    result["ledger_error"] = json!(error.to_string());
-                }
-                (result, dispatched)
+                persist_settlement(storage, id, action, before, result, dispatched).await
             });
             match current.await {
                 Ok(result) => result,
@@ -435,16 +408,18 @@ async fn execute_with_step_budget(
             _ => OperationState::Unknown,
         };
         let persisted = {
-            let mut storage = store.lock().unwrap();
-            storage
-                .ledger
-                .record_result(
-                    &id,
-                    operation_state,
-                    crate::result_projection::for_ledger(&result, action, &before),
-                )
-                .map_err(io::Error::other)
-                .and_then(|()| storage.save())
+            let (saved_id, saved_result) = (
+                id.clone(),
+                crate::result_projection::for_ledger(&result, action, &before),
+            );
+            crate::store::access(&store, move |storage| {
+                storage
+                    .ledger
+                    .record_result(&saved_id, operation_state, saved_result)
+                    .map_err(io::Error::other)
+                    .and_then(|()| storage.save())
+            })
+            .await
         };
         if let Err(error) = persisted {
             let detail = error.to_string();
@@ -480,24 +455,39 @@ async fn execute_with_step_budget(
         }
     }
     if !undo.is_empty() && c.undo.enabled && ledger_error.is_none() {
-        let mut storage = store.lock().unwrap();
-        storage.ledger.remember_undo(
-            UndoPlan {
-                plan_hash: plan.plan_hash.clone(),
-                previous_mutating_plan_hash,
-                wm_instance_id: plan.wm_instance_id.clone(),
-                created_ms: wall_ms(),
-                steps: undo,
-            },
-            wall_ms(),
+        let (plan_hash, instance, max_age, max_plans, cancelled) = (
+            plan.plan_hash.clone(),
+            plan.wm_instance_id.clone(),
+            c.undo.max_age_seconds,
+            c.undo.max_plans,
+            dispatch_cancelled.clone(),
         );
-        storage.ledger.undo.retain(|plan| {
-            wall_ms().saturating_sub(plan.created_ms) <= c.undo.max_age_seconds.saturating_mul(1000)
-        });
-        while storage.ledger.undo.len() > c.undo.max_plans {
-            storage.ledger.undo.remove(0);
-        }
-        if let Err(error) = storage.save() {
+        let saved = crate::store::access(&store, move |storage| {
+            if cancelled.load(Ordering::Acquire)
+                || storage.ledger.last_mutating_plan_hash.as_deref() != Some(plan_hash.as_str())
+            {
+                return Ok(());
+            }
+            storage.ledger.remember_undo(
+                UndoPlan {
+                    plan_hash,
+                    previous_mutating_plan_hash,
+                    wm_instance_id: instance,
+                    created_ms: wall_ms(),
+                    steps: undo,
+                },
+                wall_ms(),
+            );
+            storage.ledger.undo.retain(|plan| {
+                wall_ms().saturating_sub(plan.created_ms) <= max_age.saturating_mul(1000)
+            });
+            while storage.ledger.undo.len() > max_plans {
+                storage.ledger.undo.remove(0);
+            }
+            storage.save()
+        })
+        .await;
+        if let Err(error) = saved {
             ledger_error = Some(error.to_string());
         }
     }
@@ -635,6 +625,48 @@ async fn settle_level_control(
         }
     }
 }
+async fn persist_settlement(
+    storage: Arc<Mutex<Store>>,
+    id: String,
+    action: Action,
+    before: Value,
+    mut result: Value,
+    dispatched: bool,
+) -> (Value, bool) {
+    crate::store::access(&storage, move |store| {
+        let current = store.ledger.operations.get(&id);
+        if current.is_some_and(|record| {
+            matches!(
+                record.state,
+                OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+            )
+        }) && let Some(known) = current.and_then(|record| record.result.clone())
+        {
+            return Ok((known, dispatched));
+        }
+        let saved = store
+            .ledger
+            .record_result(
+                &id,
+                operation_state(&result),
+                crate::result_projection::for_ledger(&result, &action, &before),
+            )
+            .map_err(io::Error::other)
+            .and_then(|()| store.save());
+        if let Err(error) = saved {
+            result["ledger_error"] = json!(error.to_string());
+        }
+        Ok((result, dispatched))
+    })
+    .await
+    .unwrap_or_else(|_| {
+        (
+            json!({"status":"unknown","error":"ledger_write_failed"}),
+            dispatched,
+        )
+    })
+}
+
 fn operation_state(result: &Value) -> OperationState {
     match result["status"].as_str().unwrap_or("unknown") {
         "succeeded" => OperationState::Succeeded,
@@ -825,12 +857,8 @@ pub async fn undo(
         return Err(io::Error::other("assistant_permit_mismatch"));
     }
     let (original, mut actions) = {
-        let s = store.lock().unwrap();
-        let original = s
-            .ledger
-            .latest_undo_plan()
-            .map_err(io::Error::other)?
-            .clone();
+        let ledger = crate::store::ledger(&store).await?;
+        let original = ledger.latest_undo_plan().map_err(io::Error::other)?.clone();
         if wall_ms().saturating_sub(original.created_ms)
             > c.undo.max_age_seconds.saturating_mul(1000)
         {
@@ -841,8 +869,7 @@ pub async fn undo(
             .iter()
             .map(|step| undo_projection(&context, &step.after))
             .collect::<io::Result<Vec<_>>>()?;
-        let actions = s
-            .ledger
+        let actions = ledger
             .undo_candidate(instance, wall_ms(), &current)
             .map_err(io::Error::other)?;
         (original, actions)
@@ -882,7 +909,39 @@ pub async fn undo(
         })
     });
     {
-        let mut s = store.lock().unwrap();
+        let saved = persist_undo_cleanup(
+            &store,
+            original,
+            plan.plan_hash.clone(),
+            completed,
+            uncertain,
+        )
+        .await;
+        if let Err(error) = saved {
+            result["ledger_error"] = json!(error.to_string());
+        }
+    }
+    Ok(result)
+}
+
+async fn persist_undo_cleanup(
+    store: &Arc<Mutex<Store>>,
+    original: UndoPlan,
+    compensation_hash: String,
+    completed: usize,
+    uncertain: bool,
+) -> io::Result<()> {
+    crate::store::access(store, move |s| {
+        // A cancelled caller can leave this bookkeeping queued behind disk
+        // I/O. It must never rewind a newer mutation admitted in the meantime.
+        if !s
+            .ledger
+            .last_mutating_plan_hash
+            .as_ref()
+            .is_some_and(|hash| hash == &original.plan_hash || hash == &compensation_hash)
+        {
+            return Ok(());
+        }
         if let Some(latest) = s
             .ledger
             .undo
@@ -908,17 +967,15 @@ pub async fn undo(
                 original.previous_mutating_plan_hash.clone().or_else(|| {
                     // Legacy compensation records have no trustworthy
                     // predecessor. Refuse to skip across an older plan.
-                    (!s.ledger.undo.is_empty()).then(|| plan.plan_hash.clone())
+                    (!s.ledger.undo.is_empty()).then(|| compensation_hash.clone())
                 })
             } else {
                 Some(original.plan_hash.clone())
             };
         }
-        if let Err(error) = s.save() {
-            result["ledger_error"] = json!(error.to_string());
-        }
-    }
-    Ok(result)
+        s.save()
+    })
+    .await
 }
 
 fn undo_projection(context: &Value, template: &Value) -> io::Result<Value> {
@@ -1098,6 +1155,60 @@ pub async fn reconcile(store: Arc<Mutex<Store>>) -> io::Result<()> {
 #[cfg(test)]
 mod undo_tests {
     use super::*;
+    #[tokio::test]
+    async fn late_undo_bookkeeping_cannot_rewind_a_newer_or_already_cleared_frontier() {
+        let dir = [std::path::PathBuf::from("/dev/shm"), std::env::temp_dir()]
+            .into_iter()
+            .find_map(|base| {
+                let p = base.join(format!(
+                    "eva-undo-bookkeeping-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
+                crate::store::private_dir(&p).ok().map(|()| p)
+            })
+            .unwrap();
+        let store = Arc::new(Mutex::new(Store::open_at(dir.clone()).unwrap()));
+        let original = UndoPlan {
+            plan_hash: "original".into(),
+            previous_mutating_plan_hash: Some("previous".into()),
+            wm_instance_id: "wm".into(),
+            created_ms: wall_ms(),
+            steps: vec![UndoStep {
+                inverse: Action {
+                    name: "set_layout".into(),
+                    arguments: json!({}),
+                },
+                after: json!({}),
+            }],
+        };
+        for frontier in [Some("newer"), None, Some("compensation")] {
+            {
+                let mut storage = store.lock().unwrap();
+                storage.ledger.undo = vec![original.clone()];
+                storage.ledger.last_mutating_plan_hash = frontier.map(str::to_owned);
+            }
+            persist_undo_cleanup(&store, original.clone(), "compensation".into(), 1, false)
+                .await
+                .unwrap();
+            let storage = store.lock().unwrap();
+            if frontier == Some("compensation") {
+                assert!(storage.ledger.undo.is_empty());
+                assert_eq!(
+                    storage.ledger.last_mutating_plan_hash.as_deref(),
+                    Some("previous")
+                );
+            } else {
+                assert_eq!(storage.ledger.undo.len(), 1);
+                assert_eq!(storage.ledger.last_mutating_plan_hash.as_deref(), frontier);
+            }
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn reconciliation_rotates_beyond_sixteen_and_keeps_old_unknown_receipts_eligible() {
         use jwm_eva_core::ledger::Ledger;
