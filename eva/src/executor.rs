@@ -94,9 +94,38 @@ pub async fn execute(
         store,
         c,
         std::time::Duration::from_secs(22),
+        None,
     )
     .await
 }
+pub async fn execute_with_progress(
+    plan: &FrozenPlan,
+    permit: &AssistantPermit,
+    confirmation: Option<String>,
+    store: Arc<Mutex<Store>>,
+    c: &Config,
+    progress: &tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>,
+) -> io::Result<Value> {
+    execute_with_step_budget(
+        plan,
+        permit,
+        confirmation,
+        store,
+        c,
+        std::time::Duration::from_secs(22),
+        Some(progress),
+    )
+    .await
+}
+fn emit_progress(
+    sender: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
+    value: Option<crate::progress::ExecutionProgress>,
+) {
+    if let Some(sender) = sender {
+        sender.send_replace(value);
+    }
+}
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_step_budget(
     plan: &FrozenPlan,
     permit: &AssistantPermit,
@@ -104,7 +133,9 @@ async fn execute_with_step_budget(
     store: Arc<Mutex<Store>>,
     c: &Config,
     step_budget: std::time::Duration,
+    progress: Option<&tokio::sync::watch::Sender<Option<crate::progress::ExecutionProgress>>>,
 ) -> io::Result<Value> {
+    use crate::progress::{ExecutionProgress, Stage};
     let dispatch_cancelled = Arc::new(AtomicBool::new(false));
     let _lifetime = DispatchLifetime(dispatch_cancelled.clone());
     let mut steps = Vec::new();
@@ -114,6 +145,10 @@ async fn execute_with_step_budget(
     let mut dispatch_deadline = std::time::Instant::now() + step_budget;
     let previous_mutating_plan_hash = store.lock().unwrap().ledger.last_mutating_plan_hash.clone();
     for (index, action) in plan.actions.iter().enumerate() {
+        emit_progress(
+            progress,
+            ExecutionProgress::at(plan, index, index, Stage::Preparing),
+        );
         if index > 0 {
             dispatch_deadline = std::time::Instant::now() + step_budget;
         }
@@ -240,6 +275,10 @@ async fn execute_with_step_budget(
             steps.push(json!({"name":action.name,"operation_id":id,"status":"cancelled","dispatched":false,"result":failure}));
             break;
         }
+        emit_progress(
+            progress,
+            ExecutionProgress::at(plan, index, index, Stage::Executing),
+        );
         crate::telemetry::event(
             "action_dispatched",
             &json!({"generation":permit.generation,"plan_hash":plan.plan_hash,"operation_id":id,"action":action.name,"model":c.openai.model,"phase":"desktop"}),
@@ -361,6 +400,10 @@ async fn execute_with_step_budget(
                 ),
             }
         };
+        emit_progress(
+            progress,
+            ExecutionProgress::at(plan, index, index, Stage::Verifying),
+        );
         let result = if matches!(
             action.name.as_str(),
             "set_volume" | "adjust_volume" | "set_brightness" | "adjust_brightness"
@@ -454,7 +497,9 @@ async fn execute_with_step_budget(
             ledger_error = Some(error.to_string());
         }
     }
-    Ok(execution_report(plan.actions.len(), steps, ledger_error))
+    let report = execution_report(plan.actions.len(), steps, ledger_error);
+    emit_progress(progress, ExecutionProgress::finished(plan, &report));
+    Ok(report)
 }
 #[cfg(test)]
 async fn dispatch_once(

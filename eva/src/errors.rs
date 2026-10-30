@@ -1,8 +1,108 @@
 //! Public errors carry stable codes and short user text, never transport bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    Transient,
+    RateLimited,
+    Permanent,
+}
+
+/// Decisions use local error categories; remote messages are never rendered.
+/// Unknown/device failures are bounded by the retry controller rather than
+/// spinning forever or assuming an unavailable microphone will repair itself.
+pub fn recovery(error: &std::io::Error) -> Recovery {
+    let s = error.to_string();
+    if ["rate_limited", "rate_limit_exceeded", "rate_limit_error"]
+        .iter()
+        .any(|code| s.contains(code))
+    {
+        return Recovery::RateLimited;
+    }
+    if [
+        "auth_failed",
+        "credential",
+        "api_key",
+        "Secret Service",
+        "OPENAI_API_KEY",
+        "model_access_denied",
+        "model_not_found",
+        "model_not_available",
+        "quota_exceeded",
+        "insufficient_quota",
+        "budget_exceeded",
+        "budget_limit",
+        "configuration",
+        "invalid Eva configuration",
+        "invalid_proxy_url",
+        "proxy_host_missing",
+        "only HTTP CONNECT",
+        "invalid_realtime_url",
+        "invalid_header_param",
+        "invalid_input_device",
+        "realtime_tls_native_roots_unavailable",
+        "realtime_tls_configuration_failed",
+        "pipewire_client_runtime_requires",
+        "realtime_request_rejected",
+        "version_incompatible",
+    ]
+    .iter()
+    .any(|code| s.contains(code))
+        || matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::InvalidInput
+                | std::io::ErrorKind::NotFound
+        )
+    {
+        Recovery::Permanent
+    } else {
+        Recovery::Transient
+    }
+}
+
 pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
     let s = error.to_string();
-    if s.contains("auth_failed")
+    if s.contains("wake_setting_changed_after_stop") {
+        (
+            "wake_setting_changed_after_stop",
+            "对话已结束；语音唤醒设置刚刚被本机更改，已保留新设置。",
+        )
+    } else if s.contains("model_access_denied")
+        || s.contains("model_not_found")
+        || s.contains("model_not_available")
+    {
+        (
+            "model_access_denied",
+            "当前账户无法使用所配置的语音模型，请检查模型名称和 API 权限。",
+        )
+    } else if s.contains("configuration")
+        || s.contains("invalid Eva configuration")
+        || s.contains("invalid_proxy_url")
+        || s.contains("proxy_host_missing")
+        || s.contains("only HTTP CONNECT")
+        || s.contains("invalid_realtime_url")
+        || s.contains("invalid_header_param")
+        || s.contains("invalid_input_device")
+        || s.contains("version_incompatible")
+    {
+        (
+            "configuration_invalid",
+            "语音配置或服务版本不兼容，请运行 jwm-eva doctor 检查。",
+        )
+    } else if s.contains("realtime_tls_native_roots_unavailable")
+        || s.contains("realtime_tls_configuration_failed")
+    {
+        (
+            "tls_configuration_invalid",
+            "系统证书或加密配置不可用，请检查环境后重新开启语音唤醒。",
+        )
+    } else if s.contains("realtime_request_rejected") {
+        (
+            "realtime_request_rejected",
+            "语音服务拒绝了当前会话配置，请检查模型和服务版本。",
+        )
+    } else if s.contains("auth_failed")
         || s.contains("credential")
+        || s.contains("api_key")
         || s.contains("Secret Service")
         || s.contains("OPENAI_API_KEY")
     {
@@ -33,7 +133,10 @@ pub fn describe(error: &std::io::Error) -> (&'static str, &'static str) {
             "quota_exceeded",
             "API 额度不足。按 Alt+Ctrl+I 查看本地费用与官方账户入口。",
         )
-    } else if s.contains("rate_limited") {
+    } else if s.contains("rate_limited")
+        || s.contains("rate_limit_exceeded")
+        || s.contains("rate_limit_error")
+    {
         ("rate_limited", "API 请求过于频繁，请稍后重试。")
     } else if s.contains("budget") {
         (
@@ -109,5 +212,47 @@ mod tests {
                 "audio_unavailable"
             );
         }
+    }
+    #[test]
+    fn retry_categories_and_public_errors_never_echo_sensitive_details() {
+        use super::{Recovery, recovery};
+        for code in [
+            "auth_failed",
+            "invalid_credential",
+            "api_key_file required",
+            "OPENAI_API_KEY is not configured",
+            "model_access_denied",
+            "quota_exceeded",
+            "budget_exceeded",
+            "wake_configuration_mismatch",
+            "invalid_proxy_url",
+            "realtime_request_rejected",
+        ] {
+            let error = std::io::Error::other(format!("{code}: secret-key https://private/path"));
+            assert_eq!(recovery(&error), Recovery::Permanent);
+            let (public, text) = super::describe(&error);
+            assert!(!public.contains("private"));
+            assert!(!text.contains("secret-key"));
+            assert!(!text.contains("https://"));
+        }
+        for code in ["rate_limited", "rate_limit_exceeded"] {
+            assert_eq!(
+                recovery(&std::io::Error::other(code)),
+                Recovery::RateLimited
+            );
+        }
+        for code in [
+            "realtime_connection_failed",
+            "connect_timeout",
+            "realtime_service_unavailable",
+            "audio_capture_device_unavailable",
+            "unclassified-private-message",
+        ] {
+            assert_eq!(recovery(&std::io::Error::other(code)), Recovery::Transient);
+        }
+        assert_eq!(
+            super::describe(&std::io::Error::other("wake_setting_changed_after_stop")).0,
+            "wake_setting_changed_after_stop"
+        );
     }
 }

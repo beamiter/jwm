@@ -101,6 +101,7 @@ transcription_per_minute = 0.0045
 enabled = false
 phrase = "hi eva"
 model = "gpt-realtime-mini"
+# Initial retry delay; exponential backoff with jitter caps at 60s, stops after 8 consecutive failures.
 reconnect_ms = 3000
 max_session_ms = 600000
 

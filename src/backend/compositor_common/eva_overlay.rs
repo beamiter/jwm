@@ -41,6 +41,7 @@ pub(crate) struct EvaOverlayState {
     session_active: bool,
     undo_available: bool,
     caption: String,
+    progress: Option<String>,
     state: String,
     text: String,
     level: f32,
@@ -73,6 +74,7 @@ impl EvaOverlayState {
             self.undo_available,
             self.caption.clone(),
             self.followup_seconds(now),
+            self.progress.clone(),
         );
         let previous = (
             self.active,
@@ -121,6 +123,7 @@ impl EvaOverlayState {
             .unwrap_or("idle")
             .to_ascii_lowercase();
         self.text = clean(snapshot["text"].as_str().unwrap_or(""), 256);
+        self.progress = progress_label(&snapshot["task_progress"]);
         self.level = snapshot["level"]
             .as_f64()
             .filter(|x| x.is_finite())
@@ -207,6 +210,7 @@ impl EvaOverlayState {
                 self.undo_available,
                 self.caption.clone(),
                 self.followup_seconds(now),
+                self.progress.clone(),
             )
             || previous.0 != self.active
             || (self.active
@@ -396,6 +400,13 @@ impl EvaOverlayState {
                 text: text.into(),
                 heading: false,
                 rows: if compact { 2 } else { 5 },
+            });
+        }
+        if let Some(progress) = &self.progress {
+            sections.push(TextSection {
+                text: progress.clone(),
+                heading: false,
+                rows: 2,
             });
         }
         if !self.caption.is_empty() {
@@ -764,6 +775,27 @@ impl EvaOverlayState {
     }
 }
 
+fn progress_label(value: &Value) -> Option<String> {
+    let completed = value["completed"].as_u64()?;
+    let total = value["total"].as_u64()?;
+    let current = value["current_step"].as_u64()?;
+    if !(1..=32).contains(&total) || completed > total || !(1..=total).contains(&current) {
+        return None;
+    }
+    let prefix = format!("已确认完成 {completed}/{total} 步");
+    Some(match value["stage"].as_str()? {
+        "preparing" => format!("{prefix} · 正在准备第 {current} 步"),
+        "executing" => format!("{prefix} · 正在执行第 {current} 步"),
+        "verifying" => format!("{prefix} · 正在核验第 {current} 步"),
+        "succeeded" if completed == total => prefix,
+        "partial" => format!("{prefix} · 其余步骤待处理"),
+        "unknown" => format!("{prefix} · 第 {current} 步结果待确认"),
+        "failed" => format!("{prefix} · 第 {current} 步未完成"),
+        "cancelled" => format!("已停止 · {prefix}"),
+        _ => return None,
+    })
+}
+
 fn rasterize_sections(
     sections: Vec<TextSection>,
     font: &str,
@@ -885,6 +917,28 @@ fn clean(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn task_progress_displays_verified_counts_and_changes_the_typography_cache() {
+        let now = Instant::now();
+        let mut state = EvaOverlayState::default();
+        let mut snapshot = json!({"active":true,"state":"executing","microphone_active":false,
+            "task_progress":{"completed":1,"total":5,"current_step":2,"stage":"verifying","action":"switch_tag"}});
+        state.update(&snapshot, now);
+        let label = state.label(now);
+        assert!(label.contains("已确认完成 1/5 步"));
+        assert!(label.contains("正在核验第 2 步"));
+        let before = state.text_raster(now, 480);
+        snapshot["task_progress"]["stage"] = json!("unknown");
+        assert!(state.update(&snapshot, now));
+        assert!(state.label(now).contains("第 2 步结果待确认"));
+        assert!(!std::sync::Arc::ptr_eq(
+            &before,
+            &state.text_raster(now, 480)
+        ));
+        snapshot["task_progress"] = Value::Null;
+        state.update(&snapshot, now);
+        assert!(!state.label(now).contains("已确认完成"));
+    }
     #[test]
     fn wake_standby_uses_adaptive_status_sections_and_its_own_exit_hint() {
         let now = Instant::now();

@@ -245,18 +245,46 @@ fn executor_child() {
             reason: None,
             requires_confirmation: false,
         };
-        let result = jwm_eva::executor::execute(
-            &plan,
-            &AssistantPermit {
+        let permit=AssistantPermit {
                 assistant_session_id: "test-session".into(),
                 generation: 1,
-            },
-            None,
-            store.clone(),
-            &config,
-        )
-        .await
-        .unwrap();
+        };
+        let result = if level {
+            use jwm_eva::progress::Stage;
+            let (progress_tx,mut progress_rx)=tokio::sync::watch::channel(None);
+            let execution=jwm_eva::executor::execute_with_progress(&plan,&permit,None,store.clone(),&config,&progress_tx);
+            tokio::pin!(execution);
+            let mut observed=Vec::new();
+            let result=loop {
+                tokio::select! {biased;
+                    result=&mut execution=>{
+                        if let Some(progress)=progress_rx.borrow_and_update().clone(){observed.push(progress);}
+                        break result.unwrap();
+                    },
+                    changed=progress_rx.changed()=>{
+                        changed.unwrap();
+                        if let Some(progress)=progress_rx.borrow_and_update().clone(){observed.push(progress);}
+                    },
+                }
+            };
+            assert!(!observed.is_empty());
+            for progress in &observed {
+                assert!(progress.completed<=progress.current_step);
+                if matches!(progress.stage,Stage::Preparing|Stage::Executing|Stage::Verifying) {
+                    assert_eq!(progress.completed,progress.current_step-1,"accepted is not completed");
+                }
+            }
+            let final_progress=observed.last().unwrap();
+            let successes=result["steps"].as_array().unwrap().iter().filter(|step|step["status"]=="succeeded").count();
+            assert_eq!(final_progress.completed,successes);
+            if matches!(scenario.as_str(),"level_unknown"|"level_wrong_receipt") {
+                assert_eq!(final_progress.stage,Stage::Unknown);
+                assert_eq!(final_progress.completed,0);
+            }
+            result
+        } else {
+            jwm_eva::executor::execute(&plan,&permit,None,store.clone(),&config).await.unwrap()
+        };
         if level {
             let expected_status = match scenario.as_str() {
                 "level_receipt" | "level_multi_success" => "succeeded",

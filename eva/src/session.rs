@@ -46,11 +46,33 @@ impl Update {
             }
             status["input_caption"] = caption.clone();
         } else {
+            let epochs = |value: &Value| {
+                value["session_epoch"]
+                    .as_u64()
+                    .zip(value["turn_epoch"].as_u64())
+            };
+            if epochs(&self.state)
+                .zip(epochs(status))
+                .is_some_and(|(incoming, current)| incoming < current)
+            {
+                return false;
+            }
             let caption = (processing(&self.state)
                 && self.state["turn_epoch"] == status["turn_epoch"])
                 .then(|| status.get("input_caption").cloned())
                 .flatten();
+            let progress = (matches!(
+                self.state["state"].as_str(),
+                Some("executing" | "responding")
+            ) && self.state["session_epoch"] == status["session_epoch"]
+                && self.state["turn_epoch"] == status["turn_epoch"]
+                && self.state.get("task_progress").is_none())
+            .then(|| status.get("task_progress").cloned())
+            .flatten();
             *status = self.state.clone();
+            if let Some(progress) = progress {
+                status["task_progress"] = progress;
+            }
             if let Some(caption) = caption {
                 status["input_caption"] = caption;
             }
@@ -80,6 +102,7 @@ struct Trace {
     history_repair_failed: bool,
     caption: Option<CaptionSink>,
     spoken_reply: Option<String>,
+    session_end: Option<crate::voice_control::SessionEnd>,
 }
 fn observe_receipt(
     c: &Config,
@@ -401,6 +424,7 @@ pub async fn run_with_handoff(
     let mut trace = Trace {
         input: crate::planning_input::FrozenInput::default(),
         spoken_reply: None,
+        session_end: None,
         response: None,
         audio_items: Vec::new(),
         playback_history: None,
@@ -413,14 +437,22 @@ pub async fn run_with_handoff(
         }),
     };
     trace.labels = json!({"generation":p.generation,"session_epoch":local_epoch,"turn_id":1,"model":c.openai.model});
-    let result = tokio::select! {
-        v=conversation(&c,&p,&tx,store.clone(),&mut ws,&mut trace,input)=>v,
-        _=cancel.changed()=>Ok(()),
-    };
+    let result = run_scoped(
+        conversation(&c, &p, &tx, store.clone(), &mut ws, &mut trace, input),
+        &mut cancel,
+    )
+    .await;
     // Local capture/playback have already been dropped, regardless of remote ACK.
     // Freeze the last trustworthy device-clock snapshot before any remote
     // cancellation wait can make it stale. Local audio is already stopped.
     let history_events = history_events(&mut trace);
+    // run_scoped has dropped the conversation future and every local audio
+    // owner. Only now may native authority/overlay be retired or wake disabled.
+    let finish_result = if let Some(end) = completed_session_end(&mut trace, &result, &cancel) {
+        finish_session_with(&end, &p, |args| command("assistant_control", args)).await
+    } else {
+        Ok(())
+    };
     if let Some(id) = trace.response.as_ref() {
         let _ = ws
             .send(json!({"type":"response.cancel","response_id":id}))
@@ -441,7 +473,71 @@ pub async fn run_with_handoff(
     };
     let _ = tokio::time::timeout(Duration::from_millis(300), drain).await;
     store.lock().unwrap().unknown_pending()?;
-    result
+    finish_result?;
+    result.map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeCompletion {
+    Completed,
+    Cancelled,
+}
+
+fn completed_session_end(
+    trace: &mut Trace,
+    completion: &io::Result<ScopeCompletion>,
+    cancel: &watch::Receiver<bool>,
+) -> Option<crate::voice_control::SessionEnd> {
+    let end = trace.session_end.take();
+    if matches!(completion, Ok(ScopeCompletion::Completed)) && !*cancel.borrow() {
+        end
+    } else {
+        None
+    }
+}
+
+async fn run_scoped<F>(work: F, cancel: &mut watch::Receiver<bool>) -> io::Result<ScopeCompletion>
+where
+    F: std::future::Future<Output = io::Result<()>>,
+{
+    if *cancel.borrow() {
+        return Ok(ScopeCompletion::Cancelled);
+    }
+    tokio::pin!(work);
+    tokio::select! {biased;
+        _=cancel.changed()=>Ok(ScopeCompletion::Cancelled),
+        result=&mut work=>result.map(|_|if *cancel.borrow(){ScopeCompletion::Cancelled}else{ScopeCompletion::Completed}),
+    }
+}
+
+async fn finish_session_with<C, F>(
+    end: &crate::voice_control::SessionEnd,
+    permit: &AssistantPermit,
+    mut send: C,
+) -> io::Result<()>
+where
+    C: FnMut(Value) -> F,
+    F: std::future::Future<Output = io::Result<Value>>,
+{
+    let request = end.finish_request(permit)?;
+    match send(request.clone()).await {
+        Ok(_) => Ok(()),
+        Err(error)
+            if end.intent == crate::voice_control::SessionIntent::StopListening
+                && error
+                    .to_string()
+                    .contains("assistant_wake_generation_mismatch") =>
+        {
+            // A newer local wake toggle supersedes this frozen request.
+            // End only the same active permit, never disable the new setting.
+            let mut fallback = request;
+            fallback["disable_wake"] = json!(false);
+            fallback.as_object_mut().unwrap().remove("wake_generation");
+            send(fallback).await?;
+            Err(io::Error::other("wake_setting_changed_after_stop"))
+        }
+        Err(error) => Err(error),
+    }
 }
 struct Input {
     start: Instant,
@@ -779,6 +875,15 @@ async fn conversation(
                             store.lock().unwrap().reserve_transcription(&transcription_request(p,state.turn_epoch),c)?;
                             continue;
                         }
+                        if trace.session_end.is_some() {
+                            // A privacy/session request does not wait for
+                            // feedback playback. Stop the native input owner
+                            // before returning to run's fenced native finish.
+                            if let Some(input)=capture.take(){input.stop().await;}
+                            pending_frames.clear();
+                            while audio_rx.try_recv().is_ok(){}
+                            return Ok(());
+                        }
                         if state.state==State::Closing {return Ok(());}
                         let next_context=query("get_execution_context",json!({})).await?;
                         if next_context["assistant_permit"]!=serde_json::to_value(p)?||next_context["session_unlocked"]!=true{return Err(io::Error::other("assistant_permit_mismatch"));}
@@ -977,6 +1082,9 @@ async fn complete_turn(
         state.turn_epoch,
     )
     .await?;
+    if trace.session_end.is_some() {
+        return Ok(());
+    }
     executor::prepare_applications(&mut plan, c)?;
     trace.labels["plan_hash"] = json!(plan.plan_hash);
     trace.labels["plan_action_count"] = json!(plan.actions.len());
@@ -1013,7 +1121,7 @@ async fn complete_turn(
                 0.0,
                 elapsed(start),
             );
-            command("set_assistant_status",json!({"assistant_permit":p,"state":"confirming","text":confirmation_summary(&plan,&context),"microphone_active":!c.interaction.half_duplex,"confirmation":{"plan_hash":plan.plan_hash,"targets":plan.actions,"timeout_ms":c.execution.confirmation_timeout_ms}})).await?;
+            command("set_assistant_status",json!({"assistant_permit":p,"state":"confirming","turn_epoch":state.turn_epoch,"session_epoch":state.session_epoch,"text":confirmation_summary(&plan,&context),"microphone_active":!c.interaction.half_duplex,"confirmation":{"plan_hash":plan.plan_hash,"targets":plan.actions,"timeout_ms":c.execution.confirmation_timeout_ms}})).await?;
             let token = tokio::time::timeout(
                 Duration::from_millis(c.execution.confirmation_timeout_ms),
                 async {
@@ -1046,7 +1154,7 @@ async fn complete_turn(
         if plan.actions.len() == 1 && plan.actions[0].name == "undo_last_plan" {
             executor::undo(p, store.clone(), c).await?
         } else {
-            executor::execute(&plan, p, confirmation, store.clone(), c).await?
+            execute_plan_observed(c, p, tx, &state, &plan, confirmation, store.clone()).await?
         }
     };
     state.respond(epoch, state.turn_epoch, elapsed(start));
@@ -1058,7 +1166,7 @@ async fn complete_turn(
     publish(tx, p, &state, &text, 0.0, elapsed(start));
     *followup_text = text.clone();
     let public_result = cloud_execution_result(&result, &plan, c, &context);
-    command("set_assistant_status",json!({"assistant_permit":p,"state":"responding","text":text,"level":0.0,"microphone_active":!c.interaction.half_duplex})).await?;
+    command("set_assistant_status",json!({"assistant_permit":p,"state":"responding","turn_epoch":state.turn_epoch,"session_epoch":state.session_epoch,"text":text,"level":0.0,"microphone_active":!c.interaction.half_duplex})).await?;
     ws.send(function_output(&call_id, &public_result)).await?;
     if c.interaction.feedback == "voice"
         || (c.interaction.feedback == "brief" && !simple_success(&result))
@@ -1095,6 +1203,64 @@ async fn complete_turn(
         return Ok(());
     }
     Ok(())
+}
+
+fn publish_execution_progress(
+    tx: &mpsc::Sender<Update>,
+    p: &AssistantPermit,
+    state: &Session,
+    progress: &crate::progress::ExecutionProgress,
+) {
+    let _ = tx.try_send(execution_progress_update(p, state, progress));
+}
+fn execution_progress_update(
+    p: &AssistantPermit,
+    state: &Session,
+    progress: &crate::progress::ExecutionProgress,
+) -> Update {
+    Update {
+        permit: p.clone(),
+        state: json!({
+            "state":state.state,"text":progress.text(),"level":0.0,
+            "session_epoch":state.session_epoch,"turn_epoch":state.turn_epoch,
+            "microphone_active":state.capture_allowed(),"task_progress":progress,
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_plan_observed(
+    c: &Config,
+    p: &AssistantPermit,
+    tx: &mpsc::Sender<Update>,
+    state: &Session,
+    plan: &jwm_eva_core::actions::FrozenPlan,
+    confirmation: Option<String>,
+    store: Arc<Mutex<Store>>,
+) -> io::Result<Value> {
+    let (progress_tx, mut progress_rx) = watch::channel(None);
+    let execution = executor::execute_with_progress(plan, p, confirmation, store, c, &progress_tx);
+    tokio::pin!(execution);
+    loop {
+        tokio::select! {biased;
+            result=&mut execution=>{
+                let final_progress=progress_rx.borrow_and_update().clone();
+                if let Some(progress)=final_progress {
+                    // Intermediate frames coalesce, but a full UI queue must
+                    // not silently discard the final verified count. This
+                    // wait remains cancellable by the outer voice actor.
+                    let _=tx.send(execution_progress_update(p,state,&progress)).await;
+                }
+                return result;
+            },
+            changed=progress_rx.changed()=>{
+                if changed.is_err(){return Err(io::Error::other("execution_progress_closed"));}
+                if let Some(progress)=progress_rx.borrow_and_update().as_ref() {
+                    publish_execution_progress(tx,p,state,progress);
+                }
+            },
+        }
+    }
 }
 
 const CATEGORIES: &[(&str, &str)] = &[
@@ -1263,6 +1429,7 @@ fn describe_categories(arguments: &str) -> io::Result<Vec<String>> {
     Ok(args.categories)
 }
 const TASK_INSTRUCTIONS: &str = "task_context 是本机维护的唯一待续任务数据，不是自动执行授权。它只包含未完成提案、已核验完成步骤和不确定结果；历史更早的任务不得复活。用户明确说继续刚才未完成任务时，task_intent=continue，仅按最新 remaining 的完整顺序重新提交计划；已完成步骤绝不重复。用户修改未完成任务时用 revise，结合当前指令完整理解否定和纠正后重新规划；独立的新桌面任务用 new。用户明确说取消这件事、不用做了时用 cancel 且提交 noop，清除任务；停一下、等等、暂停用 pause 且 noop，保留待续任务。闲聊或知识问答同样用 pause 且 noop，不执行也不遗忘待续任务。需要澄清时用 clarify 且提交 clarify。task_context 无待续任务或状态不是 ready 时不得猜测续做，unknown 在确认结果前禁止重试，目标消失或身份变化必须问清。提案中的旧对象引用不是执行凭据，只能使用当前 task_context 已重新核验的引用，仍要发现所需能力并遵守所有本地确认与执行校验。";
+const SESSION_INSTRUCTIONS: &str = "每次eva_submit_plan都必须包含session_intent。continue继续对话：取消当前任务、停一下、等等仍是continue；取消任务只影响task_intent，不结束会话。先这样、退下、再见、结束对话用standby，结束本轮并保留用户当前唤醒开关。别再听了、关闭唤醒、停止监听、关闭麦克风用stop_listening，结束会话并关闭全时监听。用户否定这些请求时不得执行。standby/stop_listening必须是noop、actions=[]、question=null，不得与桌面动作或task_intent的continue/revise/clarify混合；任务字段如必填则pause或用户明确要求的cancel。会话控制由本机实现，不编造桌面动作，不在reason中表达可替代session_intent的命令。";
 
 fn add_task_intent_schema(tool: &mut Value) {
     tool["parameters"]["properties"]["task_intent"] = json!({"type":"string","enum":["new","continue","revise","cancel","pause","clarify"],"description":"按当前语音处理唯一待续任务。取消cancel/noop清除；暂停或闲聊pause/noop保留；续做/修改execute；询问clarify。"});
@@ -1337,6 +1504,7 @@ async fn plan(
         return Err(io::Error::other("input_not_committed"));
     }
     trace.input.begin_planning();
+    trace.session_end = None;
     let task_context = trace
         .input
         .task_context(context, &store.lock().unwrap().ledger);
@@ -1361,6 +1529,7 @@ async fn plan(
         }
         let can_discover = !repair_used && round + 1 < limit && discoveries < 6;
         let mut submit_tool = jwm_eva_core::actions::tool_schema_for(&selected);
+        crate::voice_control::add_schema(&mut submit_tool);
         if task_context.is_some() {
             add_task_intent_schema(&mut submit_tool);
         }
@@ -1386,13 +1555,16 @@ async fn plan(
             return Err(io::Error::other("plan_timeout"));
         }
         let mut response = json!({"output_modalities":["text"],"input":frozen_input,"tools":tools,"tool_choice":choice,"max_output_tokens":c.openai.plan_max_output_tokens,"metadata":{"eva_phase":"plan","eva_request_id":request,"eva_turn_id":turn.to_string()}});
-        if task_context.is_some() {
-            response["instructions"] = json!(format!(
-                "{}\n{}",
-                crate::providers::openai_realtime::INSTRUCTIONS,
+        response["instructions"] = json!(format!(
+            "{}\n{}\n{}",
+            crate::providers::openai_realtime::INSTRUCTIONS,
+            SESSION_INSTRUCTIONS,
+            if task_context.is_some() {
                 TASK_INSTRUCTIONS
-            ));
-        }
+            } else {
+                ""
+            }
+        ));
         ws.send(json!({"type":"response.create","response":response}))
             .await?;
         let (event, id) = tokio::time::timeout_at(deadline, async {
@@ -1500,18 +1672,23 @@ async fn plan(
             ));
             continue;
         }
-        let validated = task_plan_event(&event, task_context.is_some())
-            .and_then(|(cleaned, intent)| {
+        let validated = crate::voice_control::decode_event(&event)
+            .and_then(|(cleaned, session_intent)| {
+                task_plan_event(&cleaned, task_context.is_some())
+                    .map(|(cleaned, intent)| (cleaned, intent, session_intent))
+            })
+            .and_then(|(cleaned, intent, session_intent)| {
                 completed_plan(&cleaned, &id)
                     .map_err(io::Error::other)
-                    .map(|plan| (plan, intent))
+                    .map(|plan| (plan, intent, session_intent))
             })
             .map_err(io::Error::other)
-            .and_then(|(done, intent)| {
-                done.map(|done| (done, intent))
+            .and_then(|(done, intent, session_intent)| {
+                done.map(|done| (done, intent, session_intent))
                     .ok_or_else(|| io::Error::other("plan_missing"))
             })
-            .and_then(|(mut done, intent)| {
+            .and_then(|(mut done, intent, session_intent)| {
+                crate::voice_control::validate(session_intent, &done.plan, intent.as_deref())?;
                 for action in &done.plan.actions {
                     let spec = selected
                         .iter()
@@ -1550,10 +1727,19 @@ async fn plan(
                     };
                     frozen = validate_plan(&done.plan, context).map_err(io::Error::other)?;
                 }
-                Ok((done, frozen))
+                crate::voice_control::validate(session_intent, &done.plan, intent.as_deref())?;
+                let end = if session_intent != crate::voice_control::SessionIntent::Continue {
+                    Some(crate::voice_control::SessionEnd::from_context(
+                        session_intent,
+                        context,
+                    )?)
+                } else {
+                    None
+                };
+                Ok((done, frozen, end))
             });
         match validated {
-            Ok((done, frozen)) => {
+            Ok((done, frozen, end)) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(io::Error::other("plan_timeout"));
                 }
@@ -1561,6 +1747,7 @@ async fn plan(
                     .claim(epoch, turn, &done)
                     .map_err(io::Error::other)?;
                 trace.input.remember_proposal(&done.plan);
+                trace.session_end = end;
                 return Ok((done.call_id, frozen));
             }
             Err(error)
@@ -2400,6 +2587,7 @@ pub async fn dry_run(c: &Config, text: &str, store: Arc<Mutex<Store>>) -> io::Re
         labels: Value::Null,
         caption: None,
         spoken_reply: None,
+        session_end: None,
     };
     let mut admission = PlanAdmission::default();
     let (_, mut plan) = plan(
@@ -2414,7 +2602,9 @@ pub async fn dry_run(c: &Config, text: &str, store: Arc<Mutex<Store>>) -> io::Re
     )
     .await?;
     executor::prepare_applications(&mut plan, c)?;
-    Ok(json!({"execution_enabled":false,"model":c.openai.model,"plan":plan}))
+    Ok(
+        json!({"execution_enabled":false,"model":c.openai.model,"plan":plan,"session_intent":trace.session_end.as_ref().map(|end|end.intent).unwrap_or_default()}),
+    )
 }
 
 #[cfg(test)]
@@ -2662,10 +2852,17 @@ mod tests {
         json!({"available_actions":jwm_eva_core::actions::semantic_actions().iter().map(|spec|spec.canonical_name.clone()).collect::<Vec<_>>(),"wm_instance_id":"private-instance","session_unlocked":true,"tag_count":9,"focus_token":"private-window-1","selected_monitor_token":"private-monitor","speech_focus_ref":"w1","monitors":[{"monitor_token":"private-monitor","monitor_ref":"m1","visible_tag_mask":1,"layout":"tile","locked":false,"tab_tokens":["private-window-1","private-window-2"]}],"windows":[{"target_token":"private-window-1","window_ref":"w1","id":"9007199254740993","title":"Current title should not be sent by default","class":"editor","monitor_token":"private-monitor","tag_mask":1,"focused":true},{"target_token":"private-window-2","window_ref":"w2","title":"Other browser private title","class":"browser","monitor_token":"private-monitor","tag_mask":1,"focused":false}],"workspaces":[{"monitor_token":"private-monitor","tag_number":1,"tag_mask":1,"layout":"tile"}]})
     }
     fn tool(name: &str, call_id: &str, arguments: Value) -> Value {
+        let mut arguments = arguments;
+        if name == "eva_submit_plan"
+            && arguments.is_object()
+            && arguments.get("session_intent").is_none()
+        {
+            arguments["session_intent"] = json!("continue");
+        }
         json!({"name":name,"call_id":call_id,"arguments":arguments})
     }
     fn valid_plan() -> Value {
-        json!({"disposition":"execute","actions":[{"name":"switch_tag","arguments":{"monitor_ref":"m1","tag_number":3}}],"question":null,"reason":null})
+        json!({"session_intent":"continue","disposition":"execute","actions":[{"name":"switch_tag","arguments":{"monitor_ref":"m1","tag_number":3}}],"question":null,"reason":null})
     }
     async fn replay(replies: Vec<Value>) -> (Realtime, tokio::task::JoinHandle<Vec<Value>>) {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -2743,7 +2940,311 @@ mod tests {
             labels: Value::Null,
             caption: None,
             spoken_reply: None,
+            session_end: None,
         }
+    }
+
+    #[tokio::test]
+    async fn typed_session_exit_requires_no_task_metadata_or_desktop_action() {
+        for intent in ["standby", "stop_listening"] {
+            let data = TestStore::new();
+            let reply = tool(
+                "eva_submit_plan",
+                "end",
+                json!({"session_intent":intent,"disposition":"noop","actions":[],"question":null,"reason":null}),
+            );
+            let (mut ws, server) = replay(vec![reply]).await;
+            let mut actor = trace();
+            let mut context = desktop();
+            context["wake_generation"] = json!(7);
+            let p = AssistantPermit {
+                assistant_session_id: "session-control".into(),
+                generation: 1,
+            };
+            let mut state = configured(&Config::default());
+            let epoch = state.activate(p.clone(), 0).unwrap();
+            state.ready(epoch, 1);
+            state.speech_started(epoch, 2);
+            state.input_committed(epoch, state.turn_epoch, 3);
+            let (tx, _rx) = mpsc::channel(4);
+            complete_turn(
+                &Config::default(),
+                &p,
+                &tx,
+                data.store.clone(),
+                &mut ws,
+                &mut actor,
+                &mut state,
+                &context,
+                false,
+                &mut PlanAdmission::default(),
+                epoch,
+                Instant::now(),
+                &mut String::new(),
+            )
+            .await
+            .unwrap();
+            let end = actor
+                .session_end
+                .as_ref()
+                .expect("admitted local lifecycle request");
+            assert_eq!(serde_json::to_value(end.intent).unwrap(), json!(intent));
+            assert_eq!(
+                state.state,
+                State::Planning,
+                "the live capture owner has not yet stopped; do not hide its overlay here"
+            );
+            assert!(data.store.lock().unwrap().ledger.operations.is_empty());
+            let messages = finish(ws, server).await;
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message["type"] == "response.create")
+                    .count(),
+                1,
+                "no feedback or further model response before releasing the microphone"
+            );
+            let request = messages
+                .iter()
+                .find(|message| message["type"] == "response.create")
+                .unwrap();
+            assert!(
+                request["response"]["tools"][0]["parameters"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("session_intent"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_cancel_stays_active_and_late_exit_cannot_close_a_new_turn() {
+        let data = TestStore::new();
+        let (mut actor, context) =
+            pending_trace(&data, jwm_eva_core::ledger::OperationState::Succeeded);
+        let mut reply = tool(
+            "eva_submit_plan",
+            "task-cancel",
+            json!({"session_intent":"continue","task_intent":"cancel","disposition":"noop","actions":[],"question":null,"reason":"取消当前任务"}),
+        );
+        reply["prefix"] = json!([{"type":"response.done","response":{"id":"old-session-response","status":"completed","output":[{"type":"function_call","status":"completed","name":"eva_submit_plan","call_id":"late-exit","arguments":"{\"session_intent\":\"stop_listening\",\"disposition\":\"noop\",\"actions\":[],\"question\":null,\"reason\":null}"}]}}]);
+        let (mut ws, server) = replay(vec![reply]).await;
+        let (_, frozen) = plan(
+            &Config::default(),
+            &mut ws,
+            &mut actor,
+            data.store.clone(),
+            &context,
+            &mut PlanAdmission::default(),
+            2,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(frozen.disposition, Disposition::Noop);
+        assert!(actor.session_end.is_none());
+        assert_eq!(
+            actor
+                .input
+                .task_context(&context, &data.store.lock().unwrap().ledger)
+                .unwrap()["status"],
+            "none"
+        );
+        finish(ws, server).await;
+    }
+
+    #[tokio::test]
+    async fn session_exit_mixed_with_execution_never_admits_either_operation() {
+        let data = TestStore::new();
+        let mut config = Config::default();
+        config.execution.max_schema_repair_attempts = 0;
+        let mut arguments = valid_plan();
+        arguments["session_intent"] = json!("stop_listening");
+        let (mut ws, server) = replay(vec![tool("eva_submit_plan", "mixed", arguments)]).await;
+        let mut actor = trace();
+        assert!(
+            plan(
+                &config,
+                &mut ws,
+                &mut actor,
+                data.store.clone(),
+                &desktop(),
+                &mut PlanAdmission::default(),
+                1,
+                1
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session_control_requires_noop")
+        );
+        assert!(actor.session_end.is_none());
+        assert!(data.store.lock().unwrap().ledger.operations.is_empty());
+        finish(ws, server).await;
+    }
+
+    #[tokio::test]
+    async fn session_work_drops_local_owners_before_native_authority_is_retired() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Owner(Arc<AtomicBool>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        for cancelled in [false, true] {
+            let released = Arc::new(AtomicBool::new(false));
+            let owner = Owner(released.clone());
+            let (cancel_tx, mut cancel_rx) = watch::channel(false);
+            let work = async move {
+                let _owner = owner;
+                if cancelled {
+                    std::future::pending::<()>().await;
+                }
+                io::Result::Ok(())
+            };
+            if cancelled {
+                cancel_tx.send(true).unwrap();
+            }
+            let completion = run_scoped(work, &mut cancel_rx).await.unwrap();
+            assert_eq!(
+                completion,
+                if cancelled {
+                    ScopeCompletion::Cancelled
+                } else {
+                    ScopeCompletion::Completed
+                }
+            );
+            let end = crate::voice_control::SessionEnd::from_context(
+                crate::voice_control::SessionIntent::Standby,
+                &json!({"wm_instance_id":"source-wm"}),
+            )
+            .unwrap();
+            let p = AssistantPermit {
+                assistant_session_id: "same-permit".into(),
+                generation: 5,
+            };
+            finish_session_with(&end, &p, |request| {
+                assert!(released.load(Ordering::SeqCst));
+                assert_eq!(request["assistant_permit"], json!(p));
+                std::future::ready(Ok(json!({})))
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_fallback_preserves_new_wake_toggle_and_never_targets_new_permit() {
+        let end = crate::voice_control::SessionEnd::from_context(
+            crate::voice_control::SessionIntent::StopListening,
+            &json!({"wm_instance_id":"source-wm","wake_generation":7}),
+        )
+        .unwrap();
+        let p = AssistantPermit {
+            assistant_session_id: "old-permit".into(),
+            generation: 5,
+        };
+        let mut requests = Vec::new();
+        let result = finish_session_with(&end, &p, |request| {
+            requests.push(request);
+            std::future::ready(if requests.len() == 1 {
+                Err(io::Error::other("assistant_wake_generation_mismatch"))
+            } else {
+                Ok(json!({}))
+            })
+        })
+        .await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "wake_setting_changed_after_stop"
+        );
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["wake_generation"], 7);
+        assert_eq!(requests[0]["disable_wake"], true);
+        assert_eq!(requests[1]["disable_wake"], false);
+        assert!(requests[1].get("wake_generation").is_none());
+        assert!(
+            requests
+                .iter()
+                .all(|request| request["assistant_permit"] == json!(p)
+                    && request["wm_instance_id"] == "source-wm")
+        );
+        let mut count = 0;
+        let stale = finish_session_with(&end, &p, |_| {
+            count += 1;
+            std::future::ready(Err(io::Error::other("assistant_permit_expired")))
+        })
+        .await;
+        assert!(stale.is_err());
+        assert_eq!(
+            count, 1,
+            "a replaced native session is never targeted by fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_control_admission_never_finishes_even_the_same_native_permit() {
+        let p = AssistantPermit {
+            assistant_session_id: "still-valid-permit".into(),
+            generation: 5,
+        };
+        for pre_cancelled in [false, true] {
+            let mut actor = trace();
+            let end = crate::voice_control::SessionEnd::from_context(
+                crate::voice_control::SessionIntent::StopListening,
+                &json!({"wm_instance_id":"same-wm","wake_generation":7}),
+            )
+            .unwrap();
+            let (cancel_tx, mut cancel_rx) = watch::channel(false);
+            let completion = if pre_cancelled {
+                actor.session_end = Some(end);
+                cancel_tx.send(true).unwrap();
+                // Cancellation wins even if work and cancellation are both ready.
+                run_scoped(std::future::ready(Ok(())), &mut cancel_rx).await
+            } else {
+                run_scoped(
+                    async {
+                        actor.session_end = Some(end); // plan was admitted
+                        cancel_tx.send(true).unwrap(); // e.g. local Undo during Capture.stop
+                        std::future::pending::<()>().await;
+                        Ok(())
+                    },
+                    &mut cancel_rx,
+                )
+                .await
+            };
+            assert_eq!(completion.as_ref().unwrap(), &ScopeCompletion::Cancelled);
+            let mut native_requests = 0;
+            if let Some(end) = completed_session_end(&mut actor, &completion, &cancel_rx) {
+                finish_session_with(&end, &p, |_| {
+                    native_requests += 1;
+                    std::future::ready(Ok(json!({})))
+                })
+                .await
+                .unwrap();
+            }
+            assert_eq!(
+                native_requests, 0,
+                "neither finish_session nor disablewake may run after local cancellation"
+            );
+            assert!(actor.session_end.is_none());
+        }
+        let mut actor = trace();
+        actor.session_end = Some(
+            crate::voice_control::SessionEnd::from_context(
+                crate::voice_control::SessionIntent::Standby,
+                &json!({"wm_instance_id":"same-wm"}),
+            )
+            .unwrap(),
+        );
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        cancel_tx.send(true).unwrap();
+        assert!(
+            completed_session_end(&mut actor, &Ok(ScopeCompletion::Completed), &cancel_rx)
+                .is_none(),
+            "a cancellation observed after work completion still wins before dispatch"
+        );
     }
 
     fn pending_trace(
@@ -3021,6 +3522,41 @@ mod tests {
         state.cancel("cancelled", 1);
         publish(&tx, &permit, &state, "结束", 0.0, 1);
         assert_eq!(rx.try_recv().unwrap().state["microphone_active"], false);
+    }
+
+    #[test]
+    fn queued_old_progress_cannot_rewind_a_new_turn_or_reopen_its_microphone() {
+        let permit = AssistantPermit {
+            assistant_session_id: "epoch-test".into(),
+            generation: 1,
+        };
+        let mut status =
+            json!({"state":"listening","session_epoch":10,"turn_epoch":3,"microphone_active":true});
+        for (session, turn) in [(10, 2), (9, 100)] {
+            let update = Update {
+                permit: permit.clone(),
+                state: json!({"state":"executing","session_epoch":session,"turn_epoch":turn,"microphone_active":false,"task_progress":{"completed":1,"total":3}}),
+            };
+            assert!(!update.apply(&permit, &mut status));
+            assert_eq!(status["state"], "listening");
+            assert_eq!(status["microphone_active"], true);
+            assert!(status.get("task_progress").is_none());
+        }
+        let progress = json!({"completed":3,"total":3,"current_step":3,"action":"switch_tag","stage":"succeeded"});
+        status =
+            json!({"state":"executing","session_epoch":10,"turn_epoch":3,"task_progress":progress});
+        let response = Update {
+            permit: permit.clone(),
+            state: json!({"state":"responding","session_epoch":10,"turn_epoch":3}),
+        };
+        assert!(response.apply(&permit, &mut status));
+        assert_eq!(status["task_progress"], progress);
+        let listening = Update {
+            permit: permit.clone(),
+            state: json!({"state":"follow_up","session_epoch":10,"turn_epoch":3}),
+        };
+        assert!(listening.apply(&permit, &mut status));
+        assert!(status.get("task_progress").is_none());
     }
 
     #[test]
@@ -3476,14 +4012,13 @@ mod tests {
         assert_eq!(frozen.actions[0].arguments["tag_mask"], 4);
         assert!(!frozen.requires_confirmation);
         assert!(data.store.lock().unwrap().ledger.operations.is_empty());
-        let done = jwm_eva_core::realtime::completed_plan(
-            &json!({"type":"response.done","response":{
-                "id":"replay-response-1","status":"completed","output":output
-            }}),
-            "replay-response-1",
-        )
-        .unwrap()
-        .unwrap();
+        let event = json!({"type":"response.done","response":{
+            "id":"replay-response-1","status":"completed","output":output
+        }});
+        let (cleaned, _) = crate::voice_control::decode_event(&event).unwrap();
+        let done = jwm_eva_core::realtime::completed_plan(&cleaned, "replay-response-1")
+            .unwrap()
+            .unwrap();
         assert!(admission.claim(1, 1, &done).is_err());
         let log = finish(ws, server).await;
         assert_eq!(

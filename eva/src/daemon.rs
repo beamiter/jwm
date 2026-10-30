@@ -216,7 +216,11 @@ pub async fn run(c: Config) -> io::Result<()> {
     let mut active_wake_source: Option<crate::handoff::Source> = None;
     let mut wake_status = json!({"state":"disabled","microphone_active":false});
     let mut wake_requested = false;
-    let mut wake_retry = std::time::Instant::now();
+    let recovery_clock = std::time::Instant::now();
+    let mut wake_recovery = crate::retry::WakeRecovery::new(
+        c.wake_word.reconnect_ms,
+        crate::store::wall_ms() ^ ((std::process::id() as u64) << 32),
+    );
     let mut wake_heartbeat = std::time::Instant::now() - Duration::from_secs(1);
     let (events_tx, mut events) = mpsc::channel(64);
     jwm_ipc_client::subscribe(jwm_ipc_client::JwmIpc::new(), &["assistant"], events_tx);
@@ -276,6 +280,7 @@ pub async fn run(c: Config) -> io::Result<()> {
                     "cancel"=>{
                         let _=command("assistant_control",json!({"action":"wake_disable"})).await;
                         stop_wake(&mut wake_worker,&mut wake_cancel).await;
+                        wake_recovery.disable();
                         wake_status=json!({"state":"disabled","microphone_active":false});
                         let result=command("assistant_control",json!({"action":"cancel"})).await;
                         stop(&mut worker,&mut cancellation).await;store.lock().unwrap().unknown_pending()?;
@@ -285,7 +290,10 @@ pub async fn run(c: Config) -> io::Result<()> {
                 };let _=request.reply.send(response);
             },
             Some(update)=wake_updates.recv()=>{
-                if Some(&update.source)==active_wake_source.as_ref() && wake_worker.is_some() { wake_status=update.state; }
+                if Some(&update.source)==active_wake_source.as_ref() && wake_worker.is_some() {
+                    if update.state["state"]=="standby" && update.state["microphone_active"]==true {wake_recovery.standby(recovery_ms(recovery_clock));}
+                    wake_status=update.state;
+                }
             },
             Some(update)=updates.recv()=>{if permit.as_ref().is_some_and(|p|update.apply(p,&mut status)){last_heartbeat=std::time::Instant::now()-Duration::from_secs(1);}},
             Some(event)=events.recv()=>{
@@ -324,20 +332,21 @@ pub async fn run(c: Config) -> io::Result<()> {
                 wake_requested=observed.as_ref().is_ok_and(|s|s["wake_requested"]==true);
                 let standby_allowed=observed.as_ref().is_ok_and(|s|s["standby_allowed"]==true);
                 let current_source=observed.as_ref().ok().and_then(wake_source);
-                if native_generation!=wake_generation || active_wake_source.as_ref().is_some_and(|source|Some(source)!=current_source.as_ref()) {
+                let recovery_changed=wake_recovery.observe(current_source.clone(),wake_requested);
+                if native_generation!=wake_generation || recovery_changed || active_wake_source.as_ref().is_some_and(|source|Some(source)!=current_source.as_ref()) {
                     stop_wake(&mut wake_worker,&mut wake_cancel).await;
                     while wake_updates.try_recv().is_ok(){}
                     wake_generation=native_generation;active_wake_source=None;
-                    wake_retry=std::time::Instant::now();
-                    wake_status=json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false});
+                    wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":if wake_requested{"paused"}else{"disabled"},"microphone_active":false}));
                 }
                 let mut handoff_for_next=None;
                 if wake_worker.as_ref().is_some_and(|w|w.is_finished()) {
-                    let finished=wake_worker.take().unwrap().await;wake_cancel=None;
+                    let finished=match wake_worker.take().unwrap().await {Ok(result)=>result,Err(_)=>Err(io::Error::other("wake_worker_failed"))};wake_cancel=None;
                     while wake_updates.try_recv().is_ok(){}
                     wake_status=json!({"state":"paused","microphone_active":false});
                     match finished {
-                        Ok(Ok(crate::wake::Outcome::Detected(mut handoff))) if wake_requested && standby_allowed && worker.is_none() && observed.as_ref().is_ok_and(|s|s["active"]!=true) => {
+                        Ok(crate::wake::Outcome::Detected(mut handoff)) if wake_requested && standby_allowed && worker.is_none() && observed.as_ref().is_ok_and(|s|s["active"]!=true) => {
+                            wake_recovery.successful();
                             // Preserve the one native microphone owner while
                             // fresh native authority fences the original source.
                             let current=observed.as_ref().ok().and_then(wake_source);
@@ -361,19 +370,17 @@ pub async fn run(c: Config) -> io::Result<()> {
                                 }
                             }
                         },
-                        Ok(Err(error))=>{
-                            let (code,text)=crate::errors::describe(&error);
-                            wake_status=json!({"state":"error","text":text,"error_code":code,"microphone_active":false});
-                            wake_retry=std::time::Instant::now()+Duration::from_millis(c.wake_word.reconnect_ms);
-                            if error.to_string().contains("budget_exceeded") {
-                                let _=command("assistant_control",json!({"action":"wake_disable"})).await;
+                        Err(error)=>{
+                            let failed_source=active_wake_source.clone();
+                            if let Some(native)=recover_wake_failure(&mut wake_recovery,&error,recovery_ms(recovery_clock),failed_source.as_ref()).await {
+                                wake_generation=native["wake_generation"].as_u64().unwrap_or(wake_generation);
                                 wake_requested=false;
+                                wake_recovery.observe(wake_source(&native),false);active_wake_source=None;observed=Ok(native);
                             }
+                            wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":"paused","microphone_active":false}));
                         },
-                        Err(_)=>{
-                            wake_status=json!({"state":"error","text":"语音唤醒已停止，正在重连","microphone_active":false});
-                            wake_retry=std::time::Instant::now()+Duration::from_millis(c.wake_word.reconnect_ms);
-                        },
+                        Ok(crate::wake::Outcome::Rotate)=>wake_recovery.successful(),
+                        Ok(crate::wake::Outcome::Cancelled)=>wake_recovery.pause(),
                         _=>{},
                     }
                 }
@@ -381,20 +388,28 @@ pub async fn run(c: Config) -> io::Result<()> {
                 if !wake_requested || !standby_allowed || active || worker.is_some() {
                     stop_wake(&mut wake_worker,&mut wake_cancel).await;
                     while wake_updates.try_recv().is_ok(){}
-                    wake_status=json!({"state":if wake_requested{"paused"}else{"disabled"},"text":if wake_requested{"对话期间暂停唤醒监听"}else{"语音唤醒已关闭"},"microphone_active":false});
-                } else if wake_worker.is_none() && std::time::Instant::now()>=wake_retry {
+                    wake_recovery.pause();
+                    wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":if wake_requested{"paused"}else{"disabled"},"text":if wake_requested{"对话期间暂停唤醒监听"}else{"语音唤醒已关闭"},"microphone_active":false}));
+                } else if wake_worker.is_none() && wake_recovery.ready(recovery_ms(recovery_clock)) {
                     let (cancel_tx,cancel_rx)=watch::channel(false);wake_cancel=Some(cancel_tx);
                     wake_status=json!({"state":"connecting","text":"正在连接语音唤醒","microphone_active":false});
                     if let Some(source)=observed.as_ref().ok().and_then(wake_source) {
-                        active_wake_source=Some(source.clone());
+                        active_wake_source=Some(source.clone());wake_recovery.started();
                         wake_worker=Some(tokio::spawn(crate::wake::run(c.clone(),source,wake_tx.clone(),store.clone(),cancel_rx)));
                     }
-                }
+                } else if wake_worker.is_none() && let Some(waiting)=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()) {wake_status=waiting;}
                 if wake_heartbeat.elapsed()>=Duration::from_secs(1) {
                     let mut update=wake_status.clone();update["wake_generation"]=json!(wake_generation);update["enabled"]=json!(wake_requested);update["wm_instance_id"]=observed.as_ref().ok().map(|s|s["wm_instance_id"].clone()).unwrap_or(Value::Null);
                     if command("set_assistant_wake_status",update).await.is_err() {
+                        let had_wake_worker=wake_worker.is_some();let failed_source=active_wake_source.clone();
                         stop_wake(&mut wake_worker,&mut wake_cancel).await;
-                        wake_status=json!({"state":"paused","microphone_active":false});
+                        if wake_requested && had_wake_worker {
+                            if let Some(native)=recover_wake_failure(&mut wake_recovery,&io::Error::other("wake_status_unavailable"),recovery_ms(recovery_clock),failed_source.as_ref()).await {
+                                wake_generation=native["wake_generation"].as_u64().unwrap_or(wake_generation);wake_requested=false;
+                                wake_recovery.observe(wake_source(&native),false);active_wake_source=None;observed=Ok(native);
+                            }
+                        }
+                        wake_status=wake_recovery.status(recovery_ms(recovery_clock),crate::store::wall_ms()).unwrap_or_else(||json!({"state":"paused","microphone_active":false}));
                     }
                     wake_heartbeat=std::time::Instant::now();
                 }
@@ -415,8 +430,14 @@ pub async fn run(c: Config) -> io::Result<()> {
             }
         }
     }
+    let shutdown_source = wake_recovery
+        .source()
+        .cloned()
+        .or_else(|| active_wake_source.clone());
     stop_wake(&mut wake_worker, &mut wake_cancel).await;
-    if let Ok(native) = command("assistant_control", json!({"action":"wake_disable"})).await {
+    if let Some(source) = shutdown_source
+        && let Ok(native) = command("assistant_control", guarded_wake_disable(&source)).await
+    {
         let _=command("set_assistant_wake_status",json!({"wake_generation":native["wake_generation"],"wm_instance_id":native["wm_instance_id"],"enabled":false,"microphone_active":false,"state":"disabled"})).await;
     }
     stop(&mut worker, &mut cancellation).await;
@@ -432,6 +453,26 @@ pub async fn run(c: Config) -> io::Result<()> {
         t.abort();
     }
     Ok(())
+}
+fn recovery_ms(start: std::time::Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+async fn recover_wake_failure(
+    recovery: &mut crate::retry::WakeRecovery,
+    error: &io::Error,
+    now_ms: u64,
+    source: Option<&crate::handoff::Source>,
+) -> Option<Value> {
+    if recovery.failed(error, now_ms) != crate::retry::Decision::Stop {
+        return None;
+    }
+    let source = source?;
+    command("assistant_control", guarded_wake_disable(source))
+        .await
+        .ok()
+}
+fn guarded_wake_disable(source: &crate::handoff::Source) -> Value {
+    json!({"action":"wake_disable","wm_instance_id":source.wm_instance_id,"wake_generation":source.wake_generation,"assistant_generation":source.assistant_generation})
 }
 fn wake_source(snapshot: &Value) -> Option<crate::handoff::Source> {
     Some(crate::handoff::Source {
@@ -602,6 +643,64 @@ impl Drop for Watchdog {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_wake_stop_uses_the_failed_workers_complete_source() {
+        let old = serde_json::json!({"wm_instance_id":"old-wm","wake_generation":3,"assistant_generation":7});
+        let frozen = super::wake_source(&old).unwrap();
+        let newer = serde_json::json!({"wm_instance_id":"restarted-wm","wake_generation":3,"assistant_generation":7});
+        assert_ne!(super::wake_source(&newer).unwrap(), frozen);
+        let command = super::guarded_wake_disable(&frozen);
+        assert_eq!(
+            command,
+            serde_json::json!({"action":"wake_disable","wm_instance_id":"old-wm","wake_generation":3,"assistant_generation":7})
+        );
+        assert!(
+            super::wake_source(&serde_json::json!({"wm_instance_id":"old-wm","wake_generation":3}))
+                .is_none()
+        );
+    }
+    #[test]
+    fn stopped_worker_cannot_retry_after_cancel_or_a_source_change_until_authorized() {
+        let source=super::wake_source(&serde_json::json!({"wm_instance_id":"wm","wake_generation":3,"assistant_generation":7})).unwrap();
+        let mut recovery = crate::retry::WakeRecovery::new(3000, 99);
+        recovery.observe(Some(source.clone()), true);
+        recovery.failed(&std::io::Error::other("connect_timeout"), 0);
+        recovery.observe(
+            Some(crate::handoff::Source {
+                wake_generation: 4,
+                ..source.clone()
+            }),
+            false,
+        );
+        assert!(!recovery.ready(u64::MAX));
+        recovery.disable();
+        assert!(!recovery.ready(u64::MAX));
+        recovery.observe(
+            Some(crate::handoff::Source {
+                wake_generation: 5,
+                ..source.clone()
+            }),
+            true,
+        );
+        assert!(recovery.ready(0));
+        recovery.failed(&std::io::Error::other("auth_failed"), 0);
+        recovery.observe(
+            Some(crate::handoff::Source {
+                wake_generation: 5,
+                ..source.clone()
+            }),
+            true,
+        );
+        assert!(!recovery.ready(u64::MAX));
+        recovery.observe(
+            Some(crate::handoff::Source {
+                wm_instance_id: "new-wm".into(),
+                ..source
+            }),
+            false,
+        );
+        assert!(!recovery.ready(u64::MAX));
+    }
     #[test]
     fn busy_store_does_not_block_undo_heartbeat() {
         let base = if std::path::Path::new("/dev/shm").is_dir() {

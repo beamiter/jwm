@@ -13,10 +13,13 @@ pub mod language;
 pub mod lifecycle;
 pub mod pending_task;
 pub mod planning_input;
+pub mod progress;
 pub mod providers;
 pub mod result_projection;
+pub mod retry;
 pub mod session;
 pub mod store;
 pub mod telemetry;
 
+pub mod voice_control;
 pub mod wake;

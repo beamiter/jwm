@@ -81,6 +81,40 @@ struct Confirmation {
     restore_monitors: Vec<String>,
     display_items: Vec<Value>,
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TaskProgress {
+    completed: u8,
+    total: u8,
+    current_step: u8,
+    action: String,
+    stage: String,
+}
+impl TaskProgress {
+    fn valid(&self) -> bool {
+        (1..=jwm_eva_core::actions::MAX_ACTIONS_PER_PLAN as u8).contains(&self.total)
+            && self.completed <= self.total
+            && (1..=self.total).contains(&self.current_step)
+            && self.completed <= self.current_step
+            && (!matches!(self.stage.as_str(), "preparing" | "executing" | "verifying")
+                || self.completed + 1 == self.current_step)
+            && (self.stage != "succeeded" || self.completed == self.total)
+            && matches!(
+                self.stage.as_str(),
+                "preparing"
+                    | "executing"
+                    | "verifying"
+                    | "succeeded"
+                    | "partial"
+                    | "unknown"
+                    | "failed"
+                    | "cancelled"
+            )
+            && jwm_eva_core::actions::semantic_actions()
+                .iter()
+                .any(|spec| spec.canonical_name == self.action)
+    }
+}
 pub(crate) struct EvaRuntime {
     instance: String,
     generation: u64,
@@ -90,6 +124,7 @@ pub(crate) struct EvaRuntime {
     activation_monitor: Option<MonitorKey>,
     presentation_monitor: Option<MonitorKey>,
     error_visible_until: Option<Instant>,
+    error_microphone_off_confirmed: bool,
     focus_history: VecDeque<(u64, Option<String>)>,
     selected_monitor_history: VecDeque<(u64, Option<String>)>,
     permit: Option<AssistantPermit>,
@@ -108,6 +143,8 @@ pub(crate) struct EvaRuntime {
     standby_allowed: bool,
     undo_available: bool,
     input_caption: Option<Value>,
+    task_progress: Option<TaskProgress>,
+    status_turn_epoch: Option<u64>,
     followup_deadline_ns: Option<u64>,
     followup_turn_epoch: Option<u64>,
     pub(crate) ui_action_grabs: Vec<(crate::backend::common_define::Mods, u32)>,
@@ -132,6 +169,7 @@ impl Default for EvaRuntime {
             activation_monitor: None,
             presentation_monitor: None,
             error_visible_until: None,
+            error_microphone_off_confirmed: false,
             focus_history: VecDeque::new(),
             selected_monitor_history: VecDeque::new(),
             permit: None,
@@ -150,6 +188,8 @@ impl Default for EvaRuntime {
             standby_allowed: false,
             undo_available: false,
             input_caption: None,
+            task_progress: None,
+            status_turn_epoch: None,
             followup_deadline_ns: None,
             followup_turn_epoch: None,
             ui_action_grabs: Vec::new(),
@@ -284,10 +324,13 @@ impl Jwm {
         self.eva.confirmation_ui = Default::default();
         self.eva.confirmation_layout_signature = None;
         self.eva.error_visible_until = None;
+        self.eva.error_microphone_off_confirmed = false;
         self.eva.state = "idle".into();
         self.eva.text.clear();
         self.eva.level = 0.;
         self.eva.microphone_active = false;
+        self.eva.task_progress = None;
+        self.eva.status_turn_epoch = None;
         self.eva.undo_available = false;
         self.eva.input_caption = None;
         self.eva.followup_deadline_ns = None;
@@ -356,6 +399,7 @@ impl Jwm {
             self.eva.wake_microphone_active = false;
             self.eva.wake_state = "error".into();
             self.eva.wake_text = "唤醒服务连接已中断，麦克风状态待确认".into();
+            self.eva.error_microphone_off_confirmed = false;
             if !self.eva_active() {
                 self.eva.state = "error".into();
                 self.eva.text = self.eva.wake_text.clone();
@@ -547,10 +591,16 @@ impl Jwm {
         Ok(())
     }
     fn eva_set_wake_requested(&mut self, enabled: bool) {
-        if self.eva.wake_requested == enabled {
+        self.eva_update_wake_requested(enabled, false);
+    }
+    fn eva_update_wake_requested(&mut self, enabled: bool, retire_generation: bool) {
+        if self.eva.wake_requested == enabled && !retire_generation {
             return;
         }
         self.eva.wake_requested = enabled;
+        if enabled {
+            self.eva.error_microphone_off_confirmed = false;
+        }
         self.eva.wake_generation = self.eva.wake_generation.saturating_add(1);
         self.eva.wake_lease_until = if enabled {
             Some(Instant::now() + Duration::from_secs(10))
@@ -600,14 +650,25 @@ impl Jwm {
         }) else {
             return failure("invalid_wake_state");
         };
-        self.eva.wake_state = state.into();
-        self.eva.wake_text = args["text"]
+        let text: String = args["text"]
             .as_str()
             .unwrap_or("")
             .chars()
             .filter(|c| !c.is_control())
             .take(160)
             .collect();
+        let terminal_error = !enabled
+            && state == "error"
+            && !self.eva_active()
+            && (self.eva.wake_state != state || self.eva.wake_text != text);
+        self.eva.wake_state = state.into();
+        self.eva.wake_text = text;
+        if terminal_error {
+            self.eva.state = "error".into();
+            self.eva.text = self.eva.wake_text.clone();
+            self.eva.error_visible_until = Some(Instant::now() + Duration::from_secs(2));
+            self.eva.error_microphone_off_confirmed = !microphone;
+        }
         self.eva.wake_microphone_active = microphone;
         self.eva.wake_level = args["level"]
             .as_f64()
@@ -718,9 +779,9 @@ impl Jwm {
         };
         let standby =
             !self.eva_active() && (self.eva.wake_requested || self.eva.wake_microphone_active);
-        json!({"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some(){None}else{Some(self.eva.microphone_active)},
+        json!({"active":self.eva_active(),"visible":self.eva_active() || standby || self.eva.error_visible_until.is_some_and(|t| t > Instant::now()),"monitor_rect":rect,"state":if standby {self.eva.wake_state.as_str()} else {self.eva.state.as_str()},"text":if standby {self.eva.wake_text.clone()} else {text},"level":if standby {self.eva.wake_level} else {self.eva.level},"microphone_active":if standby {Some(self.eva.wake_microphone_active)} else if self.eva.state=="error"&&self.eva.error_visible_until.is_some()&&!self.eva.error_microphone_off_confirmed{None}else{Some(self.eva.microphone_active)},
             "wake_requested":self.eva.wake_requested,"wake_generation":self.eva.wake_generation,"assistant_generation":self.eva.generation,"wake_enabled":self.eva.wake_requested,"wake_microphone_active":self.eva.wake_microphone_active,"standby_allowed":self.eva.standby_allowed,
-            "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
+            "undo_available":self.eva.undo_available,"input_caption":self.eva.input_caption,"task_progress":self.eva.task_progress,"turn_epoch":self.eva.status_turn_epoch,"confirmation":confirmation,"assistant_permit":self.eva.permit,"wm_instance_id":self.eva.instance,"activated_monotonic_ns":self.eva.activated_monotonic_ns,
             "followup_remaining_ms":self.eva.followup_deadline_ns.filter(|_|self.eva_active()&&matches!(self.eva.state.as_str(),"follow_up"|"followup")).map(|deadline|deadline.saturating_sub(monotonic_ns())/1_000_000),
             "lease_remaining_ms":self.eva.lease_until.map(|t|t.saturating_duration_since(Instant::now()).as_millis() as u64).unwrap_or(0)})
     }
@@ -728,6 +789,32 @@ impl Jwm {
         let Some(mut action) = args.get("action").and_then(Value::as_str) else {
             return failure("plan_invalid: missing assistant action");
         };
+        if action == "finish_session" {
+            self.eva_tick(backend);
+            let permit = args
+                .get("assistant_permit")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<AssistantPermit>(value).ok());
+            if !self.eva_active()
+                || permit.is_none()
+                || permit != self.eva.permit
+                || args["wm_instance_id"].as_str() != Some(self.eva.instance.as_str())
+            {
+                return failure("assistant_finish_session_stale");
+            }
+            let Some(disable_wake) = args["disable_wake"].as_bool() else {
+                return failure("plan_invalid: disable_wake must be boolean");
+            };
+            if disable_wake && args["wake_generation"].as_u64() != Some(self.eva.wake_generation) {
+                return failure("assistant_wake_generation_mismatch");
+            }
+            if disable_wake {
+                self.eva_update_wake_requested(false, true);
+            }
+            self.eva_cancel("voice_session_finished");
+            self.eva_sync_ui(backend);
+            return IpcResponse::ok(Some(self.eva_overlay_snapshot()));
+        }
         let mut wake_source_monitor = None;
         if action == "wake_activate" {
             self.eva_tick(backend);
@@ -778,12 +865,22 @@ impl Jwm {
         }
         if matches!(action, "wake_toggle" | "wake_enable" | "wake_disable") {
             self.eva_tick(backend);
+            if action == "wake_disable"
+                && ["wm_instance_id", "wake_generation", "assistant_generation"]
+                    .iter()
+                    .any(|field| args.get(*field).is_some())
+                && (args["wm_instance_id"].as_str() != Some(self.eva.instance.as_str())
+                    || args["wake_generation"].as_u64() != Some(self.eva.wake_generation)
+                    || args["assistant_generation"].as_u64() != Some(self.eva.generation))
+            {
+                return failure("assistant_wake_control_stale");
+            }
             let enabled =
                 action == "wake_enable" || (action == "wake_toggle" && !self.eva.wake_requested);
             if enabled && !self.eva.standby_allowed {
                 return failure("assistant_standby_unavailable");
             }
-            self.eva_set_wake_requested(enabled);
+            self.eva_update_wake_requested(enabled, action == "wake_enable");
             if enabled && !self.eva_active() {
                 self.eva.presentation_monitor = self.eva_presentable_monitor(
                     backend,
@@ -873,6 +970,46 @@ impl Jwm {
                 | "idle"
         ) {
             return failure("plan_invalid: invalid assistant state");
+        }
+        let incoming_turn = args["turn_epoch"].as_u64();
+        if incoming_turn
+            .zip(self.eva.status_turn_epoch)
+            .is_some_and(|(new, old)| new < old)
+        {
+            return failure("assistant_status_turn_stale");
+        }
+        let supplied_progress = match args.get("task_progress") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(value) => {
+                let Ok(progress) = serde_json::from_value::<TaskProgress>(value.clone()) else {
+                    return failure("plan_invalid: task progress");
+                };
+                if incoming_turn.is_none() || !progress.valid() {
+                    return failure("plan_invalid: task progress");
+                }
+                Some(Some(progress))
+            }
+        };
+        if supplied_progress
+            .as_ref()
+            .is_some_and(|progress| progress.is_some())
+            && !matches!(state, "planning" | "executing" | "responding" | "error")
+        {
+            return failure("plan_invalid: task progress state");
+        }
+        if incoming_turn.is_some() && incoming_turn != self.eva.status_turn_epoch {
+            self.eva.task_progress = None;
+            self.eva.status_turn_epoch = incoming_turn;
+        }
+        if matches!(
+            state,
+            "connecting" | "listening" | "confirming" | "follow_up" | "followup" | "error"
+        ) {
+            self.eva.task_progress = None;
+        }
+        if let Some(progress) = supplied_progress {
+            self.eva.task_progress = progress;
         }
         if state == "idle" || state == "closing" {
             self.eva_cancel("daemon_closed");
@@ -1236,7 +1373,7 @@ impl Jwm {
                 }
             }
         }
-        json!({"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
+        json!({"wm_pid":std::process::id(),"wm_start_ticks":process_start_ticks(),"observed_monotonic_ns":monotonic_ns(),"focus_history":self.eva.focus_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"focus_token":token})).collect::<Vec<_>>(),"selected_monitor_history":self.eva.selected_monitor_history.iter().map(|(at,token)|json!({"at_monotonic_ns":at,"monitor_token":token})).collect::<Vec<_>>(),"protocol_version":1,"wm_instance_id":self.eva.instance,"wake_generation":self.eva.wake_generation,"assistant_permit":self.eva.permit,"session_unlocked":!self.features.system_ui.is_locked()&&self.features.monitor_lock.is_empty(),"activation_monitor_token":self.eva.activation_monitor.filter(|_|self.eva_active()).map(|m|self.eva_monitor_token(m)),"selected_monitor_token":self.state.sel_mon.map(|m|self.eva_monitor_token(m)),"focus_token":self.get_selected_client_key().map(|k|self.eva_window_token(k)),"tag_count":CONFIG.load().tags_length().min(32),"monitors":monitors,"windows":windows,"workspaces":workspaces})
     }
     pub(crate) fn eva_command_schema(&self) -> Value {
         let mut actions = serde_json::to_value(jwm_eva_core::actions::full_registry())
@@ -3336,6 +3473,239 @@ mod tests {
         payload.as_object_mut().unwrap().remove("request_digest");
         value["request_digest"] = json!(jwm_eva_core::protocol::digest(&payload));
         value
+    }
+    #[test]
+    fn finish_session_uses_only_the_bound_permit_and_preserves_a_newer_wake_toggle() {
+        let (mut jwm, mut backend) = setup();
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let finish = json!({"action":"finish_session","wm_instance_id":jwm.eva.instance,
+            "assistant_permit":jwm.eva.permit,"disable_wake":true,"wake_generation":jwm.eva.wake_generation});
+        let original_permit = jwm.eva.permit.clone();
+        for (field, value) in [
+            ("wm_instance_id", json!("previous-wm")),
+            (
+                "assistant_permit",
+                json!({"assistant_session_id":"future","generation":u64::MAX}),
+            ),
+            ("disable_wake", Value::Null),
+        ] {
+            let mut invalid = finish.clone();
+            invalid[field] = value;
+            assert!(!jwm.eva_control(&mut backend, &invalid).success);
+            assert_eq!(jwm.eva.permit, original_permit);
+            assert!(jwm.eva.wake_requested);
+        }
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_disable"}))
+                .success
+        );
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let newer_wake = jwm.eva.wake_generation;
+        assert!(!jwm.eva_control(&mut backend, &finish).success);
+        assert_eq!(jwm.eva.permit, original_permit);
+        assert!(jwm.eva.wake_requested);
+        let mut end_only = finish.clone();
+        end_only["disable_wake"] = json!(false);
+        assert!(jwm.eva_control(&mut backend, &end_only).success);
+        assert!(jwm.eva.permit.is_none());
+        assert!(jwm.eva.wake_requested);
+        assert_eq!(jwm.eva.wake_generation, newer_wake);
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"activate"}))
+                .success
+        );
+        let current_permit = jwm.eva.permit.clone();
+        assert!(!jwm.eva_control(&mut backend, &finish).success);
+        assert_eq!(jwm.eva.permit, current_permit);
+        assert!(jwm.eva.wake_requested);
+    }
+    #[test]
+    fn finish_session_privacy_mode_retires_wake_generation_even_when_already_disabled() {
+        for enabled in [false, true] {
+            let (mut jwm, mut backend) = setup();
+            if enabled {
+                assert!(
+                    jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                        .success
+                );
+            }
+            let generation = jwm.eva.wake_generation;
+            let finish = json!({"action":"finish_session","wm_instance_id":jwm.eva.instance,
+            "assistant_permit":jwm.eva.permit,"disable_wake":true,"wake_generation":generation});
+            assert!(jwm.eva_control(&mut backend, &finish).success);
+            assert!(jwm.eva.permit.is_none());
+            assert!(!jwm.eva.wake_requested);
+            assert_eq!(jwm.eva.wake_generation, generation + 1);
+            assert!(
+                jwm.eva_execution_context()["wake_generation"]
+                    .as_u64()
+                    .is_some()
+            );
+        }
+    }
+    #[test]
+    fn automatic_wake_disable_cannot_disable_a_new_local_request_or_manual_session() {
+        let (mut jwm, mut backend) = setup();
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let old = json!({"action":"wake_disable","wm_instance_id":jwm.eva.instance,
+            "wake_generation":jwm.eva.wake_generation,"assistant_generation":jwm.eva.generation});
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_disable"}))
+                .success
+        );
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        assert!(!jwm.eva_control(&mut backend, &old).success);
+        assert!(jwm.eva.wake_requested);
+        let mut current = old.clone();
+        current["wake_generation"] = json!(jwm.eva.wake_generation);
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"activate"}))
+                .success
+        );
+        let permit = jwm.eva.permit.clone();
+        assert!(!jwm.eva_control(&mut backend, &current).success);
+        assert_eq!(jwm.eva.permit, permit);
+        assert!(jwm.eva.wake_requested);
+        assert!(
+            !jwm.eva_control(
+                &mut backend,
+                &json!({"action":"wake_disable","wm_instance_id":jwm.eva.instance})
+            )
+            .success
+        );
+        assert!(jwm.eva.wake_requested);
+        current["assistant_generation"] = json!(jwm.eva.generation);
+        assert!(jwm.eva_control(&mut backend, &current).success);
+        assert!(!jwm.eva.wake_requested);
+        assert_eq!(jwm.eva.permit, permit);
+    }
+    #[test]
+    fn explicit_wake_enable_retires_a_failed_request_without_hiding_the_live_microphone() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        let old_generation = jwm.eva.wake_generation;
+        let old_status = json!({"wm_instance_id":jwm.eva.instance,"wake_generation":old_generation,
+            "enabled":true,"microphone_active":true,"state":"standby"});
+        assert!(jwm.eva_set_wake_status(&mut backend, &old_status).success);
+        let old_handoff = json!({"action":"wake_activate","wm_instance_id":jwm.eva.instance,
+            "wake_generation":old_generation,"assistant_generation":jwm.eva.generation});
+        assert!(
+            jwm.eva_control(&mut backend, &json!({"action":"wake_enable"}))
+                .success
+        );
+        assert_eq!(jwm.eva.wake_generation, old_generation + 1);
+        assert!(jwm.eva.wake_requested);
+        assert!(
+            jwm.eva.wake_microphone_active,
+            "explicit restart must await actual stream cleanup acknowledgment"
+        );
+        assert_eq!(jwm.eva.wake_state, "connecting");
+        assert!(
+            jwm.eva
+                .wake_lease_until
+                .unwrap()
+                .saturating_duration_since(Instant::now())
+                > Duration::from_secs(9)
+        );
+        assert!(!jwm.eva_set_wake_status(&mut backend, &old_status).success);
+        assert!(!jwm.eva_control(&mut backend, &old_handoff).success);
+        assert!(jwm.eva.permit.is_none());
+        let mut cleanup = old_status;
+        cleanup["wake_generation"] = json!(jwm.eva.wake_generation);
+        cleanup["microphone_active"] = json!(false);
+        cleanup["state"] = json!("connecting");
+        assert!(jwm.eva_set_wake_status(&mut backend, &cleanup).success);
+        assert!(!jwm.eva.wake_microphone_active);
+    }
+    #[test]
+    fn disabled_wake_error_is_shown_once_without_heartbeat_extending_the_card() {
+        let (mut jwm, mut backend) = setup();
+        jwm.eva_cancel("test");
+        let error = json!({"wm_instance_id":jwm.eva.instance,"wake_generation":jwm.eva.wake_generation,
+            "enabled":false,"microphone_active":false,"state":"error","text":"语音唤醒已暂停，请检查凭据"});
+        assert!(jwm.eva_set_wake_status(&mut backend, &error).success);
+        let first_expiry = jwm.eva.error_visible_until;
+        assert_eq!(jwm.eva_overlay_snapshot()["visible"], true);
+        assert_eq!(jwm.eva_overlay_snapshot()["microphone_active"], false);
+        assert!(
+            jwm.eva_overlay_snapshot()["text"]
+                .as_str()
+                .unwrap()
+                .contains("检查凭据")
+        );
+        assert!(jwm.eva_set_wake_status(&mut backend, &error).success);
+        assert_eq!(jwm.eva.error_visible_until, first_expiry);
+        jwm.eva.error_visible_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(jwm.eva_set_wake_status(&mut backend, &error).success);
+        assert!(jwm.eva.error_visible_until.is_none());
+        assert_eq!(jwm.eva_overlay_snapshot()["visible"], false);
+        assert!(!jwm.eva.wake_requested);
+        assert!(jwm.eva.permit.is_none());
+    }
+    #[test]
+    fn task_progress_is_strict_and_fenced_by_the_local_turn_epoch() {
+        let (mut jwm, mut backend) = setup();
+        let progress = json!({"completed":1,"total":3,"current_step":2,"action":"switch_tag","stage":"verifying"});
+        let status = json!({"assistant_permit":jwm.eva.permit,"state":"executing","turn_epoch":4,"task_progress":progress});
+        assert!(jwm.eva_set_status(&mut backend, &status).success);
+        assert_eq!(jwm.eva_overlay_snapshot()["task_progress"]["completed"], 1);
+        for (field, value) in [
+            ("completed", json!(4)),
+            ("completed", json!(2)),
+            ("total", json!(33)),
+            ("current_step", json!(0)),
+            ("current_step", json!(3)),
+            ("operation_id", json!("secret")),
+            ("action", json!("raw_shell")),
+            ("stage", json!("succeeded")),
+        ] {
+            let mut invalid = status.clone();
+            invalid["task_progress"][field] = value;
+            assert!(
+                !jwm.eva_set_status(&mut backend, &invalid).success,
+                "{invalid}"
+            );
+            assert_eq!(jwm.eva_overlay_snapshot()["task_progress"]["completed"], 1);
+        }
+        assert!(
+            jwm.eva_set_status(
+                &mut backend,
+                &json!({"assistant_permit":jwm.eva.permit,"state":"listening","turn_epoch":5})
+            )
+            .success
+        );
+        assert!(jwm.eva_overlay_snapshot()["task_progress"].is_null());
+        assert!(!jwm.eva_set_status(&mut backend, &status).success);
+        assert_eq!(jwm.eva_overlay_snapshot()["state"], "listening");
+        let mut latest = status.clone();
+        latest["turn_epoch"] = json!(5);
+        assert!(jwm.eva_set_status(&mut backend, &latest).success);
+        assert!(
+            jwm.eva_set_status(
+                &mut backend,
+                &json!({"assistant_permit":jwm.eva.permit,"state":"error","turn_epoch":5})
+            )
+            .success
+        );
+        assert!(jwm.eva_overlay_snapshot()["task_progress"].is_null());
+        jwm.eva_cancel("test");
+        assert!(jwm.eva_overlay_snapshot()["task_progress"].is_null());
     }
     #[test]
     fn eva_followup_heartbeat_cannot_extend_or_erase_the_same_turn_deadline() {

@@ -4,6 +4,28 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../.git/HEAD");
+    // On a normal branch, commits update the ref rather than HEAD itself.
+    // Resolve paths through Git so linked worktrees and packed refs also
+    // invalidate the diagnostic revision after a commit or ref update.
+    let mut git_paths = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    if let Ok(output) = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        && output.status.success()
+        && let Ok(reference) = String::from_utf8(output.stdout)
+    {
+        git_paths.push(reference.trim().to_string());
+    }
+    for git_path in git_paths {
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--git-path", &git_path])
+            .output()
+            && output.status.success()
+            && let Ok(path) = String::from_utf8(output.stdout)
+        {
+            println!("cargo:rerun-if-changed={}", path.trim());
+        }
+    }
     if let Ok(output) = Command::new("git").args(["rev-parse", "HEAD"]).output()
         && output.status.success()
         && let Ok(revision) = String::from_utf8(output.stdout)
