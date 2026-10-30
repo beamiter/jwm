@@ -3385,6 +3385,51 @@ impl Jwm {
             })
             .and_then(|op| op.request["action"]["arguments"]["muted"].as_bool())
     }
+    pub(crate) fn eva_brightness_completion(
+        &mut self,
+        seq: u64,
+        receipt: &crate::jwm::features::system_controls::BrightnessReceipt,
+    ) {
+        let requested = self
+            .eva
+            .operations
+            .values()
+            .find(|op| {
+                !op.terminal
+                    && op
+                        .control_sequence
+                        .as_ref()
+                        .is_some_and(|(domain, id)| domain == "brightness" && *id == seq)
+            })
+            .and_then(|op| {
+                match op.request["action"]["name"].as_str() {
+                    Some("set_brightness") => op.request["action"]["arguments"]["percent"]
+                        .as_u64()
+                        .and_then(|n| u8::try_from(n).ok()),
+                    // The queue can fold a relative step after an absolute
+                    // slider request into one set under the relative step's
+                    // sequence. Validate that worker's raw target as well.
+                    Some("adjust_brightness") => Some(receipt.requested),
+                    _ => None,
+                }
+            });
+        let Some(requested) = requested else {
+            return;
+        };
+        self.eva_control_completion(
+            "brightness",
+            seq,
+            receipt.verified(requested),
+            json!({
+                "domain":"brightness", "percent":receipt.percent(),
+                "device":receipt.before.device, "max_brightness":receipt.before.max,
+                "target_raw":receipt.target_raw, "write_ok":receipt.write_ok,
+                "actual_device":receipt.after.as_ref().map(|r| &r.device),
+                "actual_raw":receipt.after.as_ref().map(|r| r.raw),
+                "actual_max_brightness":receipt.after.as_ref().map(|r| r.max),
+            }),
+        );
+    }
     pub(crate) fn eva_level_completion(
         &mut self,
         domain: &str,
@@ -3404,6 +3449,12 @@ impl Jwm {
                         .is_some_and(|(d, s)| d == domain && *s == seq)
             })
             .map(|op| &op.request["action"]);
+        if domain == "brightness"
+            && percent.is_some()
+            && action.is_some_and(|action| action["name"] == "set_brightness")
+        {
+            return;
+        }
         let took = action.and_then(|action| {
             percent.map(|actual| {
                 match (domain, action["name"].as_str()) {
@@ -3411,9 +3462,9 @@ impl Jwm {
                         action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
                             && muted == Some(false)
                     }
-                    ("brightness", Some("set_brightness")) => {
-                        action["arguments"]["percent"].as_u64() == Some(u64::from(actual))
-                    }
+                    // Absolute backlight sets require a raw/device receipt.
+                    // A percentage-only result must never settle them.
+                    ("brightness", Some("set_brightness")) => false,
                     // Applied(seq, actual) is emitted only after this worker
                     // performs the relative request and reads the real level.
                     ("volume", Some("adjust_volume")) => actual <= 100,
@@ -3983,7 +4034,6 @@ mod tests {
         for (name, args, domain, actual) in [
             ("set_volume", json!({"percent":35}), "volume", 35),
             ("adjust_volume", json!({"delta":-5}), "volume", 30),
-            ("set_brightness", json!({"percent":60}), "brightness", 60),
             ("adjust_brightness", json!({"delta":-5}), "brightness", 0),
         ] {
             let queue = TestControlQueueGuard::install();
@@ -4011,6 +4061,128 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn eva_quantized_brightness_requires_matching_sequence_device_and_raw_readback() {
+        use crate::jwm::features::system_controls::{
+            BacklightReading, BrightnessReceipt, TestControlQueueGuard,
+        };
+        for failure in [
+            "none",
+            "write",
+            "device",
+            "range",
+            "raw",
+            "requested",
+            "missing",
+        ] {
+            let queue = TestControlQueueGuard::install();
+            let (mut jwm, mut backend) = setup();
+            let req = request(
+                &jwm,
+                "brightness",
+                json!({"name":"set_brightness","arguments":{"percent":50}}),
+            );
+            assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+            assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+            assert_eq!(queue.requests().len(), 1);
+            let before = BacklightReading {
+                device: "panel".into(),
+                raw: 3,
+                max: 15,
+            };
+            let mut receipt = BrightnessReceipt {
+                requested: 50,
+                target_raw: 8,
+                write_ok: true,
+                after: Some(BacklightReading {
+                    raw: 8,
+                    ..before.clone()
+                }),
+                before,
+            };
+            // Percent-only evidence, wrong domains and old/new sequence IDs
+            // cannot settle this operation, even if their number looks exact.
+            jwm.eva_level_completion("brightness", 1, Some(50), None);
+            jwm.eva_level_completion("volume", 1, Some(50), Some(false));
+            jwm.eva_brightness_completion(0, &receipt);
+            jwm.eva_brightness_completion(2, &receipt);
+            assert_eq!(
+                jwm.eva.operations["brightness"].result["status"],
+                "accepted"
+            );
+            match failure {
+                "write" => receipt.write_ok = false,
+                "device" => receipt.after.as_mut().unwrap().device = "other-panel".into(),
+                "range" => receipt.after.as_mut().unwrap().max = 16,
+                "raw" => receipt.after.as_mut().unwrap().raw = 7,
+                "requested" => receipt.requested = 49,
+                "missing" => receipt.after = None,
+                _ => (),
+            }
+            jwm.eva_brightness_completion(1, &receipt);
+            let result = &jwm.eva.operations["brightness"].result;
+            assert_eq!(
+                result["status"],
+                match failure {
+                    "none" => "succeeded",
+                    "missing" => "unknown",
+                    _ => "failed",
+                }
+            );
+            if failure == "none" {
+                assert_eq!(result["verified"]["read_back"]["percent"], 53);
+                assert_eq!(result["verified"]["read_back"]["actual_raw"], 8);
+                assert_eq!(
+                    result["verified"]["completion"],
+                    "native_control_readback_observed"
+                );
+                // A late failure cannot overwrite the completed operation.
+                receipt.write_ok = false;
+                jwm.eva_brightness_completion(1, &receipt);
+                assert_eq!(
+                    jwm.eva.operations["brightness"].result["status"],
+                    "succeeded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eva_relative_brightness_accepts_a_verified_coalesced_set_receipt() {
+        use crate::jwm::features::system_controls::{
+            BacklightReading, BrightnessReceipt, TestControlQueueGuard,
+        };
+        let _queue = TestControlQueueGuard::install();
+        let (mut jwm, mut backend) = setup();
+        let req = request(
+            &jwm,
+            "relative",
+            json!({"name":"adjust_brightness","arguments":{"delta":5}}),
+        );
+        assert!(jwm.eva_guarded_execute(&mut backend, &req).success);
+        let before = BacklightReading {
+            device: "panel".into(),
+            raw: 3,
+            max: 15,
+        };
+        let receipt = BrightnessReceipt {
+            requested: 50,
+            target_raw: 8,
+            write_ok: true,
+            after: Some(BacklightReading {
+                raw: 8,
+                ..before.clone()
+            }),
+            before,
+        };
+        jwm.eva_brightness_completion(1, &receipt);
+        assert_eq!(jwm.eva.operations["relative"].result["status"], "succeeded");
+        assert_eq!(
+            jwm.eva.operations["relative"].result["verified"]["read_back"]["percent"],
+            53
+        );
+    }
+
     #[test]
     fn eva_level_readback_failure_and_unreached_targets_are_not_success() {
         use crate::jwm::features::system_controls::TestControlQueueGuard;

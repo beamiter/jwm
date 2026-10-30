@@ -561,11 +561,17 @@ impl Jwm {
 
         if let Some(brightness) = report.brightness {
             use crate::jwm::features::system_controls::BrightnessReport;
-            let (seq, actual) = match brightness {
-                BrightnessReport::Applied(seq, percent) => (seq, Some(percent)),
-                BrightnessReport::Failed(seq) => (seq, None),
-            };
-            self.eva_level_completion("brightness", seq, actual, None);
+            match &brightness {
+                BrightnessReport::SetApplied(seq, receipt) => {
+                    self.eva_brightness_completion(*seq, receipt)
+                }
+                BrightnessReport::Applied(seq, percent) => {
+                    self.eva_level_completion("brightness", *seq, Some(*percent), None)
+                }
+                BrightnessReport::Failed(seq) => {
+                    self.eva_level_completion("brightness", *seq, None, None)
+                }
+            }
             match self
                 .features
                 .control_feedback
